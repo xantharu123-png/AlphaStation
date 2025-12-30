@@ -4,3 +4,4 @@ requests
 plotly
 pytz
 streamlit-autorefresh
+supabase

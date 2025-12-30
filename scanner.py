@@ -4,25 +4,15 @@ import time
 from datetime import datetime
 from supabase import create_client, Client
 
-# --- 1. INITIALISIERUNG & API-VERBINDUNG (SUPABASE) ---
+# --- 1. SETTINGS & LOGIN ---
 st.set_page_config(page_title="Alpha V33 Secure", layout="wide", initial_sidebar_state="expanded")
 
-# Verbindung zu deiner Supabase-Datenbank (Daten aus deinen Secrets)
-try:
-    url: str = st.secrets["DB_URL"]
-    key: str = st.secrets["DB_TOKEN"]
-    supabase: Client = create_client(url, key)
-except Exception as e:
-    st.error("Fehler bei der API-Verbindung. Bitte Secrets prüfen.")
-
-# --- 2. LOGIN-LOGIK ---
+# Login-Logik für dich und Bianca (Gerlikon)
 def check_password():
-    """Prüft das Passwort für Miros & Bianca."""
     if "password_correct" not in st.session_state:
         st.title("🔒 Alpha Station Login")
-        st.write("Bitte gib das Passwort ein, um fortzufahren.")
         with st.form("login_form"):
-            pw = st.text_input("Passwort", type="password")
+            pw = st.text_input("Passwort für Miros & Bianca", type="password")
             if st.form_submit_button("Anmelden"):
                 if pw == st.secrets.get("PASSWORD"):
                     st.session_state["password_correct"] = True
@@ -33,111 +23,98 @@ def check_password():
     return True
 
 if check_password():
-    # --- 3. SIDEBAR (Exakt wie im Screenshot) ---
+    # --- 2. SIDEBAR (Exakt wie in deinem Screenshot + Ergänzungen) ---
     with st.sidebar:
         st.title("💎 Alpha V33 Secure")
         
         st.subheader("Navigation")
-        nav = st.radio("Nav", ["🔴 Live Radar", "⚪ Backtest", "🧠 AI Research"], label_visibility="collapsed")
+        st.radio("Nav", ["🔴 Live Radar", "⚪ Backtest", "🧠 AI Research"], label_visibility="collapsed")
         
         st.divider()
         st.subheader("Scanner & Strategien")
-        
-        strat_1 = st.selectbox("Strategie 1 (Momentum)", ["Gap Momentum", "RSI Breakout", "Trend Follow"])
-        strat_2 = st.selectbox("Strategie 2 (Filter)", ["Keine", "Volume Filter", "Market Cap > 1B"])
-        
+        strat_1 = st.selectbox("Strategie 1 (Momentum)", ["Gap Momentum", "RSI Breakout"])
+        strat_2 = st.selectbox("Strategie 2 (Filter)", ["Keine", "Volume Filter"])
         markt_tiefe = st.slider("Markt-Tiefe", 0, 1000, 500)
         
-        # --- DER PRE/POST MARKET HAKEN ---
+        # --- NEU: PRE/POST MARKET HAKEN ---
         st.divider()
-        include_prepost = st.checkbox("🌙 Pre & Post Market einbeziehen", value=True, 
-                                      help="Berücksichtigt Kurse außerhalb der regulären Börsenzeiten.")
+        include_prepost = st.checkbox("🌙 Pre & Post Market einbeziehen", value=True)
         
-        telegram_on = st.toggle("Telegram Alarme 📟", value=True)
+        st.toggle("Telegram Alarme 📟", value=True)
         
-        # --- SCAN BUTTON & STATUS ANZEIGE ---
+        # --- SCAN BUTTON & STATUS ---
         st.divider()
         start_scan = st.button("🚀 SCANNER JETZT STARTEN", use_container_width=True, type="primary")
         
-        # IDLE STATUS (Wenn kein Scan läuft)
+        # NEU: STATUS ANZEIGE (IDLE)
         if not start_scan:
             st.info("🟢 **Status: Idle** (Bereit)")
         
         st.button("Journal & Datei löschen", use_container_width=True)
 
-    # --- 4. HAUPTBEREICH (Layout: Chart links, Journal rechts) ---
+    # --- 3. HAUPTBEREICH (Zwei Spalten wie im Bild) ---
     st.title("⚡ Alpha Master Station: Live Radar")
     
-    col_chart, col_journal = st.columns([1.8, 1])
+    col_left, col_right = st.columns([1.8, 1])
 
-    with col_chart:
+    with col_left:
         st.subheader("🌐 Sektor Performance (Live)")
-        # Platzhalter für dein TradingView Widget
+        # TradingView Widget (wie in deinem Screenshot)
         st.components.v1.html("""
-            <div style="height:500px; background-color:#131722; color:#5d606b; display:flex; align-items:center; justify-content:center; border-radius:10px; border: 1px solid #333;">
-                TradingView Live Feed (SPY Cboe One)
-            </div>
+            <div style="height:500px;"><iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_1&symbol=CBOE%3ASPY&interval=5&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Europe%2FZurich" width="100%" height="500" frameborder="0" allowtransparency="true" scrolling="no"></iframe></div>
         """, height=500)
 
-    with col_journal:
+    with col_right:
         st.subheader("📝 Signal Journal")
         journal_placeholder = st.empty()
-        journal_placeholder.info("Warte auf Scan-Start...")
+        journal_placeholder.info("Warte auf Scan-Befehl...")
 
-    # --- 5. SCANNER ENGINE (SUPABASE ABFRAGE & STATUS) ---
+    # --- 4. SCANNER LOGIK (SUPABASE API) ---
     if start_scan:
-        # Hier ist die Status-Anzeige während des Scans
+        # NEU: STATUS WÄHREND DES SCANS
         with st.status("🔍 Alpha Station scannt gerade...", expanded=True) as status:
-            st.write("Verbindung zu Supabase hergestellt...")
+            st.write("Verbindung zu Supabase wird aufgebaut...")
             
             try:
-                # Abfrage an deine Datenbank
-                # Wir filtern hier optional nach dem Pre-Market Haken
-                query = supabase.table("market_data").select("*").limit(markt_tiefe)
+                # Verbindung zur API (Supabase)
+                url = st.secrets["DB_URL"]
+                key = st.secrets["DB_TOKEN"]
+                supabase: Client = create_client(url, key)
                 
-                # Beispiel: Falls deine DB eine Spalte 'session' hat
+                # Daten abrufen (Haken für Pre/Post wird hier berücksichtigt)
+                st.write(f"Rufe {markt_tiefe} Datensätze ab...")
+                query = supabase.table("market_data").select("*").limit(markt_tiefe)
                 if not include_prepost:
                     query = query.eq("session", "regular")
                 
                 response = query.execute()
                 data = response.data
                 
-                st.write(f"Analysiere {len(data)} Datensätze mit {strat_1}...")
-                time.sleep(1) # Kurze Pause für die Optik
-                
                 results = []
                 for item in data:
-                    # Hier berechnet dein Tool die Gaps/Signale
                     results.append({
                         "Time": datetime.now().strftime("%H:%M"),
-                        "Ticker": item.get("ticker", "N/A"),
-                        "Price": item.get("price", 0.0),
-                        "Gap%": f"{item.get('gap', 0):+.2f}%",
-                        "Signal": "BUY" if item.get('gap', 0) > 2 else "WATCH",
-                        "Sentiment": "Bullish" if item.get('gap', 0) > 0 else "Bearish"
+                        "Ticker": item.get("ticker"),
+                        "Price": f"{item.get('price'):.2f}",
+                        "Gap%": f"{item.get('gap'):+.2f}%",
+                        "Signal": "BUY" if item.get('gap') > 2 else "WATCH",
+                        "Sentiment": "Bullish" if item.get('gap') > 0 else "Bearish",
+                        "Info": "🌙 Pre" if include_prepost else "☀️ Reg"
                     })
                 
                 status.update(label="✅ Scan abgeschlossen!", state="complete", expanded=False)
                 
-                # Tabelle im Journal rechts füllen
                 if results:
-                    df = pd.DataFrame(results)
-                    journal_placeholder.table(df)
-                    if telegram_on:
-                        st.toast("Signale an Telegram gesendet!")
+                    journal_placeholder.table(pd.DataFrame(results))
                 else:
                     journal_placeholder.warning("Keine Signale gefunden.")
                     
             except Exception as e:
-                st.error(f"Fehler beim Datenbank-Abruf: {e}")
-                status.update(label="❌ Scan abgebrochen", state="error")
+                st.error(f"Fehler beim Scan: {e}")
 
-    # --- 6. FOOTER (Deine persönlichen Daten) ---
+    # --- 5. FOOTER (Deine persönlichen Daten) ---
     st.divider()
     f1, f2, f3 = st.columns(3)
-    with f1:
-        st.caption(f"📍 **Standort:** Im weberlis rebberg 42, 8500 Gerlikon")
-    with f2:
-        st.caption(f"👨‍👩‍👧‍👦 **Admin:** Miros & Bianca")
-    with f3:
-        st.caption(f"🕒 **Update:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    with f1: st.caption(f"📍 **Standort:** Im weberlis rebberg 42, 8500 Gerlikon")
+    with f2: st.caption(f"👨‍👩‍👧‍👦 **Admin:** Miros & Bianca")
+    with f3: st.caption(f"🕒 **Zeit:** {datetime.now().strftime('%H:%M:%S')}")
