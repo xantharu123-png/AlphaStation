@@ -11,7 +11,7 @@ if "watchlist" not in st.session_state: st.session_state.watchlist = []
 if "active_filters" not in st.session_state: st.session_state.active_filters = {}
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
-# --- 2. SMART PRESETS (Rahmenwerte setzen) ---
+# --- 2. STRATEGIE-LOGIK (Mathematisch definiert) ---
 def apply_presets(strat_name):
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (1.0, 30.0)},
@@ -31,10 +31,11 @@ def apply_presets(strat_name):
     if strat_name in presets:
         st.session_state.active_filters = presets[strat_name].copy()
 
-# --- 3. HELPER (NEWS, KI, LOGIN) ---
+# --- 3. HELPER ---
 def get_gemini_response(prompt):
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        # Wir nutzen das stabilste Modell für 2025
         model = genai.GenerativeModel('gemini-1.5-flash')
         return model.generate_content(prompt).text
     except: return "KI momentan im Standby."
@@ -51,33 +52,37 @@ def check_password():
         return False
     return True
 
-# --- 4. SCANNER LOGIK (MATHEMATISCHE PRÄZISION) ---
+# --- 4. SCANNER KERN ---
 if check_password():
     st.set_page_config(page_title="Alpha V33 Master", layout="wide")
 
     with st.sidebar:
         st.title("💎 Alpha V33 Master")
+        strat_list = list(pd.DataFrame([
+            "Volume Surge", "Gap Momentum", "Penny Stock Breakout", "Bull Flag Breakout", "Unusual Volume", 
+            "High of Day (HOD)", "Short Squeeze Candidate", "Low Float Flyer", "Blue Chip Pullback", 
+            "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Proxy"
+        ])[0])
         
-        strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock Breakout", "Bull Flag Breakout", "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", "Low Float Flyer", "Blue Chip Pullback", "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Proxy"]
-        main_strat = st.selectbox("Wähle Strategie", strat_list)
-        
+        main_strat = st.selectbox("Strategie-Rezept", strat_list)
         if main_strat != st.session_state.last_strat:
             apply_presets(main_strat)
             st.session_state.last_strat = main_strat
 
-        # Aktive Filter
+        # Aktive Rezept-Filter
         if st.session_state.active_filters:
             st.caption("Aktive Parameter:")
             for n, v in st.session_state.active_filters.items():
                 c1, c2 = st.columns([5, 1])
-                c1.write(f"**{n}:** {v[0]} - {v[1]}")
+                c1.write(f"**{n}:** {v[0]}-{v[1]}")
                 if c2.button("×", key=f"d_{n}"):
                     del st.session_state.active_filters[n]
                     st.rerun()
 
         st.divider()
-        f_type = st.selectbox("Feinjustierung", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "Gap %"])
-        if f_type == "RVOL": val = st.slider("RVOL Bereich", 0.0, 20.0, (1.5, 5.0))
+        st.subheader("⚙️ Feinjustierung")
+        f_type = st.selectbox("Zusatz-Filter", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "Gap %"])
+        if f_type == "RVOL": val = st.slider("RVOL", 0.0, 20.0, (1.5, 5.0))
         elif f_type == "Volumen": val = st.slider("Volumen", 0, 100000000, (500000, 5000000))
         else: val = st.slider("Bereich", -50.0, 100.0, (0.0, 10.0))
         
@@ -85,34 +90,26 @@ if check_password():
             st.session_state.active_filters[f_type] = val
             st.rerun()
 
+        st.divider()
         if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-            with st.status("Berechne Markt-Modelle...") as status:
+            with st.status("Analysiere mathematische Modelle...") as status:
                 poly_key = st.secrets["POLYGON_KEY"]
                 url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
                 try:
                     resp = requests.get(url).json()
                     res = []
                     for t in resp.get("tickers", []):
-                        # --- Daten holen ---
-                        sym = t.get("ticker")
-                        price = t.get("min", {}).get("c", 0)
-                        chg = t.get("todaysChangePerc", 0)
-                        vol = t.get("day", {}).get("v", 1)
-                        high = t.get("day", {}).get("h", 1)
-                        open_p = t.get("day", {}).get("o", 1)
-                        
+                        sym, price, chg, vol = t.get("ticker"), t.get("min", {}).get("c", 0), t.get("todaysChangePerc", 0), t.get("day", {}).get("v", 1)
+                        high, open_p = t.get("day", {}).get("h", 1), t.get("day", {}).get("o", 1)
                         prev = t.get("prevDay", {})
-                        p_close = prev.get("c", 1)
-                        p_vol = prev.get("v", 1)
-                        p_open = prev.get("o", 1)
+                        p_close, p_vol, p_open = prev.get("c", 1), prev.get("v", 1), prev.get("o", 1)
 
-                        # --- Mathematik ---
+                        # Formeln
                         rvol = round(vol / p_vol, 2) if p_vol > 0 else 0
                         gap = round(((open_p - p_close) / p_close) * 100, 2)
                         p_perf = round(((p_close - p_open) / p_open) * 100, 2)
                         dist_hod = ((high - price) / high) * 100 if high > 0 else 100
 
-                        # --- Spezifische Strategie-Validierung ---
                         match = True
                         if main_strat == "High of Day (HOD)" and dist_hod > 0.3: match = False
                         elif main_strat == "Dead Cat Bounce" and not (p_perf < -8 and chg > 1.5): match = False
@@ -120,7 +117,6 @@ if check_password():
                         elif main_strat == "Bull Flag Breakout" and not (p_perf > 4 and 0 <= chg <= 2): match = False
                         elif main_strat == "Gap Momentum" and gap < 3: match = False
 
-                        # --- Filter-Prüfung ---
                         f = st.session_state.active_filters
                         if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                         if "Gap %" in f and not (f["Gap %"][0] <= gap <= f["Gap %"][1]): match = False
@@ -129,8 +125,7 @@ if check_password():
                         if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
                         if "Volumen" in f and not (f["Volumen"][0] <= vol <= f["Volumen"][1]): match = False
 
-                        if match:
-                            res.append({"Ticker": sym, "Price": price, "Chg%": chg, "RVOL": rvol, "Gap%": gap, "Vol": vol})
+                        if match: res.append({"Ticker": sym, "Price": price, "Chg%": chg, "RVOL": rvol, "Gap%": gap, "Vol": vol})
                     
                     st.session_state.scan_results = sorted(res, key=lambda x: x['Chg%'], reverse=True)
                     if len(st.session_state.scan_results) < 30:
@@ -138,35 +133,39 @@ if check_password():
                     status.update(label=f"Analyse fertig: {len(res)} Signale", state="complete")
                 except: st.error("API Fehler")
 
-    # --- HAUPTBEREICH ---
-    c_chart, c_journal = st.columns([1.5, 1])
-    with c_chart:
-        st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
-        st.components.v1.html(f'<iframe src="https://s.tradingview.com/widgetembed/?symbol={st.session_state.selected_symbol}&interval=5&theme=dark" width="100%" height="520"></iframe>', height=520)
-
+    # --- HAUPTBEREICH (Journal & Chart) ---
+    c_chart, c_journal = st.columns([1.6, 1])
+    
     with c_journal:
         st.subheader("📝 Signal Journal")
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
-            sel = st.dataframe(df, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
-            if sel.selection and sel.selection.rows:
-                st.session_state.selected_symbol = df.iloc[sel.selection.rows[0]]["Ticker"]
-        else: st.info("Starte einen Scan...")
+            # NEU: on_select="rerun" erlaubt Navigation mit Pfeiltasten + Enter
+            selection = st.dataframe(
+                df, 
+                on_select="rerun", 
+                selection_mode="single-row", 
+                hide_index=True, 
+                use_container_width=True
+            )
+            # Logik für die Auswahl
+            if selection.selection and selection.selection.rows:
+                selected_index = selection.selection.rows[0]
+                st.session_state.selected_symbol = df.iloc[selected_index]["Ticker"]
+        else:
+            st.info("Scanner bereit für Miroslav.")
 
-    # KI & TÄGLICHE ANALYSE
+    with c_chart:
+        st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
+        # Wir nutzen ein iFrame für TradingView
+        chart_url = f"https://s.tradingview.com/widgetembed/?symbol={st.session_state.selected_symbol}&interval=5&theme=dark"
+        st.components.v1.html(f'<iframe src="{chart_url}" width="100%" height="550" frameborder="0"></iframe>', height=550)
+
+    # --- KI ANALYSE ---
     st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button(f"🤖 KI ANALYSE: {st.session_state.selected_symbol}"):
-            with st.spinner("Gemini wertet Sektoren-Rotation aus..."):
-                prompt = f"Analysiere {st.session_state.selected_symbol}. Fokus auf Sektoren-Rotation und News-Sentiment."
-                st.info(get_gemini_response(prompt))
-    with c2:
-        if st.button("📊 TÄGLICHER MARKT-REPORT"):
-            st.write(f"### 📅 Marktanalyse {datetime.now().strftime('%d.%m.%Y')}")
-            if st.session_state.scan_results:
-                top = st.session_state.scan_results[0]
-                st.success(f"Top RVOL-Signal: {top['Ticker']} (RVOL: {top['RVOL']})")
-            st.markdown("* **Sektoren-Rotation:** Fokus liegt auf relativer Stärke.\n* **News-Sentiment:** Analyse der Top-Gapper läuft.")
+    if st.button(f"🤖 GEMINI ANALYSE: {st.session_state.selected_symbol}"):
+        with st.spinner("KI wertet aus..."):
+            prompt = f"Daytrading Analyse für {st.session_state.selected_symbol}. Daten: {st.session_state.scan_results}. Berücksichtige Sektoren-Rotation und News-Sentiment."
+            st.info(get_gemini_response(prompt))
 
     st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
