@@ -3,10 +3,8 @@ import pandas as pd
 import requests
 import google.generativeai as genai
 from datetime import datetime
-import io
 
 # --- 1. INITIALISIERUNG ---
-# Verhindert den AttributeError und speichert deine Einstellungen
 if "selected_symbol" not in st.session_state: st.session_state.selected_symbol = "SPY"
 if "scan_results" not in st.session_state: st.session_state.scan_results = []
 if "watchlist" not in st.session_state: st.session_state.watchlist = []
@@ -16,7 +14,6 @@ if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 # --- 2. SMART PRESETS LOGIK ---
 def apply_presets(strat_name):
-    """Befüllt die Filter automatisch passend zur Strategie"""
     presets = {
         "Volume Surge": {"Kursänderung %": (2.0, 15.0), "Volumen": (1000000, 50000000000)},
         "Gap Momentum": {"Kursänderung %": (3.0, 12.0), "Preis min-max": (5.0, 150.0)},
@@ -35,8 +32,7 @@ def apply_presets(strat_name):
     if strat_name in presets:
         st.session_state.active_filters = presets[strat_name].copy()
 
-# --- 3. HELPER FUNKTIONEN (NEWS, DATEN, KI) ---
-
+# --- 3. HELPER FUNKTIONEN ---
 def get_ticker_news(ticker, poly_key):
     url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit=5&apiKey={poly_key}"
     try:
@@ -49,30 +45,22 @@ def get_single_ticker_data(ticker, poly_key):
     try:
         data = requests.get(url).json()
         t = data["ticker"]
-        return {
-            "Ticker": t.get("ticker"), 
-            "Price": t.get("min", {}).get("c", 0), 
-            "Chg%": round(t.get("todaysChangePerc", 0), 2), 
-            "Vol": int(t.get("day", {}).get("v", 0))
-        }
+        return {"Ticker": t.get("ticker"), "Price": t.get("min", {}).get("c", 0), 
+                "Chg%": round(t.get("todaysChangePerc", 0), 2), "Vol": int(t.get("day", {}).get("v", 0))}
     except: return None
 
 def get_gemini_analysis(ticker, news, price_info):
-    """Behebt den 404-Fehler durch Nutzung des stabilen Modell-Namens"""
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # Wir nutzen 'gemini-1.5-flash' - falls 404, wird automatisch das neueste Flash-Modell gesucht
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = f"Analysiere {ticker} für Miroslav. Daten: {price_info}. News: {news}. Sentiment & Fazit?"
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"KI-Schnittstelle meldet: {str(e)}. Bitte API-Key oder Modell-Namen prüfen."
+        model = genai.GenerativeModel('gemini-1.5-flash-latest') # Stabilster Modell-Name Dez 2025
+        prompt = f"Analysiere {ticker} für Miroslav. Daten: {price_info}. News: {news}. Sentiment?"
+        return model.generate_content(prompt).text
+    except Exception as e: return f"KI-Fehler: {str(e)}"
 
 def check_password():
     if "password_correct" not in st.session_state:
         st.title("🔒 Alpha Station Login")
-        with st.form("login_form"):
+        with st.form("login"):
             pw = st.text_input("Admin-Passwort", type="password")
             if st.form_submit_button("Anmelden"):
                 if pw == st.secrets.get("PASSWORD"):
@@ -89,50 +77,43 @@ if check_password():
     with st.sidebar:
         st.title("💎 Alpha V33 Master")
         
-        # A. STRATEGIE-REZEPT (OBEN)
+        # A. REZEPT
         st.subheader("📋 Strategie-Rezept")
-        strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock Breakout", "Bull Flag Breakout", 
-                      "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", 
-                      "Low Float Flyer", "Blue Chip Pullback", "Multi-Day Runner", 
-                      "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Signal"]
-        
+        strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock Breakout", "Bull Flag Breakout", "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", "Low Float Flyer", "Blue Chip Pullback", "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Signal"]
         main_strat = st.selectbox("Wähle dein Fundament", strat_list)
+        
         if main_strat != st.session_state.last_strat:
             apply_presets(main_strat)
             st.session_state.last_strat = main_strat
 
-        # Anzeige Aktive Filter (Rezept-Zutaten)
         if st.session_state.active_filters:
-            st.write("---")
             st.caption("Aktive Parameter:")
             to_delete = []
             for name, v in st.session_state.active_filters.items():
                 c_text, c_del = st.columns([5, 1])
                 c_text.write(f"**{name}:** {v[0]} - {v[1]}")
-                if c_del.button("×", key=f"del_{name}"):
-                    to_delete.append(name)
+                if c_del.button("×", key=f"del_{name}"): to_delete.append(name)
             for d in to_delete:
                 del st.session_state.active_filters[d]
                 st.rerun()
         
         st.divider()
 
-        # B. FEINJUSTIERUNG (UNTEN)
-        st.subheader("⚙️ Manuelle Anpassung")
+        # B. ANPASSUNG
+        st.subheader("⚙️ Feinjustierung")
         f_type = st.selectbox("Zusatz-Filter", ["Kursänderung %", "Volumen", "Preis min-max"])
-        
-        if f_type == "Kursänderung %": val = st.slider("Bereich (%)", -100.0, 100.0, (2.0, 15.0))
+        if f_type == "Kursänderung %": val = st.slider("Bereich %", -100.0, 100.0, (2.0, 15.0))
         elif f_type == "Volumen": val = st.slider("Volumen", 0, 50000000000, (1000000, 10000000000))
-        else: val = st.slider("Preis ($)", 0.0, 1000.0, (1.0, 50.0))
+        else: val = st.slider("Preis $", 0.0, 1000.0, (1.0, 50.0))
 
-        if st.button("➕ Zum Rezept hinzufügen"):
+        if st.button("➕ Hinzufügen"):
             st.session_state.active_filters[f_type] = val
             st.rerun()
 
         st.divider()
         if st.button("🚀 SCAN STARTEN", use_container_width=True, type="primary"):
             st.session_state.manual_data = None
-            with st.status("Filtere Markt...") as status:
+            with st.status("Analysiere Markt...") as status:
                 poly_key = st.secrets["POLYGON_KEY"]
                 url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
                 try:
@@ -152,24 +133,21 @@ if check_password():
                         st.warning("Hey, ich habe leider keine 30 Treffer gefunden, aber hier sind trotzdem meine Empfehlungen.")
                     if st.session_state.scan_results: st.session_state.selected_symbol = st.session_state.scan_results[0]['Ticker']
                     status.update(label="Scan erfolgreich!", state="complete")
-                except: st.error("API Fehler bei Polygon")
+                except: st.error("Fehler")
 
         # C. SUCHE & WATCHLIST
         st.divider()
         search_ticker = st.text_input("Einzelsuche", "").upper()
-        if st.button("TICKER LADEN"):
+        if st.button("LADEN"):
             data = get_single_ticker_data(search_ticker, st.secrets["POLYGON_KEY"])
-            if data:
-                st.session_state.selected_symbol = search_ticker
-                st.session_state.manual_data = data
+            if data: st.session_state.selected_symbol, st.session_state.manual_data = search_ticker, data
         if st.button("⭐ IN WATCHLIST"):
-            if st.session_state.selected_symbol not in st.session_state.watchlist:
-                st.session_state.watchlist.append(st.session_state.selected_symbol)
+            if st.session_state.selected_symbol not in st.session_state.watchlist: st.session_state.watchlist.append(st.session_state.selected_symbol)
 
-    # --- HAUPTBEREICH (Charts & Journal) ---
+    # --- HAUPTBEREICH ---
     col_chart, col_journal = st.columns([1.5, 1])
     with col_chart:
-        st.subheader(f"📊 Live-Chart: {st.session_state.selected_symbol}")
+        st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
         chart_url = f"https://s.tradingview.com/widgetembed/?symbol={st.session_state.selected_symbol}&interval=5&theme=dark"
         st.components.v1.html(f'<iframe src="{chart_url}" width="100%" height="520" frameborder="0"></iframe>', height=520)
 
@@ -180,30 +158,28 @@ if check_password():
             sel = st.dataframe(df, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
             if sel.selection and sel.selection.rows:
                 st.session_state.selected_symbol = df.iloc[sel.selection.rows[0]]["Ticker"]
-            # Export
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 CSV Export", data=csv, file_name=f"Alpha_Scan_{datetime.now().strftime('%Y%m%d')}.csv")
-        else: st.info("Bitte Scan starten.")
+        else: st.info("Scan starten...")
 
-    # --- KI ANALYSE & DAILY REPORT ---
+    # --- KI ANALYSE & REPORT ---
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
         if st.button(f"🤖 GEMINI ANALYSE: {st.session_state.selected_symbol}"):
-            with st.spinner("KI wertet News & Daten aus..."):
-                news = get_ticker_news(st.session_state.selected_symbol, st.secrets["POLYGON_KEY"])
+            with st.spinner("Analysiere..."):
+                poly_key = st.secrets["POLYGON_KEY"]
+                news = get_ticker_news(st.session_state.selected_symbol, poly_key)
                 current = st.session_state.manual_data if st.session_state.manual_data else next((i for i in st.session_state.scan_results if i["Ticker"] == st.session_state.selected_symbol), {"Price":0, "Chg%":0})
                 st.info(get_gemini_analysis(st.session_state.selected_symbol, news, f"Kurs: ${current['Price']}, {current['Chg%']}%"))
 
     with c2:
-        if st.button("📊 KI MARKT-REPORT ERSTELLEN"):
+        if st.button("📊 VOLLSTÄNDIGER KI MARKT-REPORT"):
             if st.session_state.scan_results:
-                with st.spinner("KI erstellt Bericht..."):
+                with st.spinner("Erstelle Report..."):
                     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
                     summary = pd.DataFrame(st.session_state.scan_results).head(10).to_string()
-                    report = model.generate_content(f"Erstelle Marktanalyse für heute {datetime.now()}. Fokus auf Sektoren & RVOL-Spikes. Daten: {summary}").text
+                    report = model.generate_content(f"Erstelle Marktanalyse (Sektoren, Sentiment, RVOL). Daten: {summary}").text
                     st.markdown(f"### 📅 Report vom {datetime.now().strftime('%d.%m.%Y')}\n{report}")
-            else: st.warning("Keine Daten für Report.")
+            else: st.warning("Keine Daten.")
 
-    st.caption(f"⚙️ Admin: Miroslav | Stand: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
