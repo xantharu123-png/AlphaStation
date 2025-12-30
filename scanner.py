@@ -4,21 +4,18 @@ import yfinance as yf
 import time
 from datetime import datetime
 
-# --- 1. GRUNDEINSTELLUNGEN ---
-st.set_page_config(page_title="Alpha Station Pro", layout="wide", initial_sidebar_state="expanded")
+# --- 1. KONFIGURATION & LOGIN ---
+st.set_page_config(page_title="Alpha V33 Secure", layout="wide", initial_sidebar_state="expanded")
 
-# --- 2. LOGIN-LOGIK (Verwendet deine Secrets) ---
 def check_password():
-    """Prüft das Passwort gegen die Streamlit Secrets."""
+    """Prüft das Passwort aus den Streamlit Secrets."""
     if "password_correct" not in st.session_state:
         st.title("🔒 Alpha Station Login")
-        # Hinweis auf die Familie wie im User-Kontext hinterlegt
-        st.write("Willkommen zurück. Bitte Passwort für den Zugang eingeben.")
+        st.write("Bitte gib das Passwort ein, um auf das Terminal zuzugreifen.")
         
         with st.form("login_form"):
             pw = st.text_input("Passwort", type="password")
-            submit = st.form_submit_button("Anmelden")
-            if submit:
+            if st.form_submit_button("Anmelden"):
                 if pw == st.secrets["PASSWORD"]:
                     st.session_state["password_correct"] = True
                     st.rerun()
@@ -27,109 +24,110 @@ def check_password():
         return False
     return True
 
+# Programm startet nur, wenn Login erfolgreich
 if check_password():
-    # --- 3. SIDEBAR (Alle Einstellungen & Parameter) ---
-    st.sidebar.header("⚙️ Scanner Setup")
     
-    # Pre/Post Market Checkbox (Wichtig: wird an yfinance übergeben)
-    include_prepost = st.sidebar.checkbox("Pre & Post Market einbeziehen", value=True, 
-                                        help="Berücksichtigt Kurse außerhalb der regulären Öffnungszeiten.")
-    
-    st.sidebar.divider()
-    
-    # Scanner Parameter
-    min_change = st.sidebar.slider("Min. Änderung für Filter (%)", 0.0, 15.0, 1.5)
-    refresh_rate = st.sidebar.selectbox("Auto-Refresh Intervall", 
-                                       options=[0, 1, 5, 10, 30], 
-                                       format_func=lambda x: "Aus" if x == 0 else f"Alle {x} Minuten")
-    
-    # Ticker Liste
-    st.sidebar.subheader("📈 Symbole")
-    ticker_input = st.sidebar.text_area("Tickers (mit Komma trennen)", 
-                                      "AAPL,TSLA,NVDA,AMD,MSFT,META,AMZN,GOOGL,MSTR,COIN,BTC-USD,ETH-USD")
-    ticker_list = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
-
-    # Info-Bereich in der Sidebar (Personalisiert)
-    st.sidebar.divider()
-    st.sidebar.info(f"📍 **Standort:** Gerlikon\n📅 **Datum:** {datetime.now().strftime('%d.%m.%Y')}")
-
-    # --- 4. HAUPTBEREICH & STATUS ---
-    st.title("🚀 Alpha Station Terminal")
-    
-    col_btn, col_info = st.columns([1, 3])
-    
-    with col_btn:
-        # Großer Scan-Button
-        start_scan = st.button("🔍 SCAN JETZT STARTEN", use_container_width=True, type="primary")
-    
-    with col_info:
-        # Status-Anzeige (Scan vs. Idle)
-        if not start_scan:
-            st.info("🟢 **Status: Idle** (Warte auf Befehl oder Auto-Refresh)")
-
-    # --- 5. SCANNER ENGINE ---
-    if start_scan or (refresh_rate > 0 and "last_scan" not in st.session_state):
-        results = []
+    # --- 2. SIDEBAR (Layout wie im Screenshot) ---
+    with st.sidebar:
+        st.title("💎 Alpha V33 Secure")
         
-        # Visuelles Feedback während des Scans
-        with st.status("🔍 Markt-Scan läuft...", expanded=True) as status:
-            progress_bar = st.progress(0)
+        st.subheader("Navigation")
+        nav = st.radio("Navigation", ["🔴 Live Radar", "⚪ Backtest", "🧠 AI Research"], label_visibility="collapsed")
+        
+        st.divider()
+        st.subheader("Scanner & Strategien")
+        
+        strat_1 = st.selectbox("Strategie 1 (Momentum)", ["Gap Momentum", "RSI Breakout", "Volume Surge"])
+        strat_2 = st.selectbox("Strategie 2 (Filter)", ["Keine", "Market Cap > 1B", "High Volatility"])
+        
+        markt_tiefe = st.slider("Markt-Tiefe", 10, 1000, 500)
+        
+        # --- DER GEWÜNSCHTE HAKEN ---
+        st.divider()
+        include_prepost = st.checkbox("🌙 Pre & Post Market einbeziehen", value=True, 
+                                      help="Aktivieren, um Kurse außerhalb der regulären US-Börsenzeiten zu sehen.")
+        
+        st.toggle("Telegram Alarme 📟", value=True)
+        
+        # --- DER SCAN-BUTTON & IDLE STATUS ---
+        st.divider()
+        start_scan = st.button("🚀 SCANNER JETZT STARTEN", use_container_width=True, type="primary")
+        
+        if not start_scan:
+            st.info("🟢 **Status: Idle** (Bereit)")
+        
+        st.button("Journal & Datei löschen", use_container_width=True)
+
+    # --- 3. HAUPTBEREICH (Layout: Chart links, Journal rechts) ---
+    st.title("⚡ Alpha Master Station: Live Radar")
+    
+    col_chart, col_journal = st.columns([2, 1])
+
+    with col_chart:
+        st.subheader("🌐 Sektor Performance (Live)")
+        # Platzhalter für deinen TradingView Chart oder Performance-Map
+        st.image("https://tradingview.com/static/images/free-widgets/mini-chart.png", caption="Live Chart Feed (Beispiel)")
+        st.write("Hier wird dein Chart-Widget geladen...")
+
+    with col_journal:
+        st.subheader("📝 Signal Journal")
+        # Container für die Tabelle
+        journal_placeholder = st.empty()
+        journal_placeholder.info("Warte auf Scan-Ergebnisse...")
+
+    # --- 4. SCANNER LOGIK (MIT ECHTEM STATUS) ---
+    if start_scan:
+        # Hier erscheint die Status-Box im Hauptbereich
+        with st.status("🔍 Alpha Station scannt gerade...", expanded=True) as status:
+            st.write("Rufe Ticker-Daten ab...")
             
-            for idx, symbol in enumerate(ticker_list):
-                status.write(f"Rufe Daten ab für: **{symbol}**...")
-                
+            # Beispiel-Liste (Hier kannst du deine volle Liste einfügen)
+            tickers = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "MSTR", "BTC-USD"]
+            results = []
+            
+            for symbol in tickers:
+                st.write(f"Analysiere: {symbol}...")
                 try:
-                    ticker_obj = yf.Ticker(symbol)
-                    # Abfrage mit Pre/Post Market Option
-                    hist = ticker_obj.history(period="2d", interval="1m", prepost=include_prepost)
+                    t = yf.Ticker(symbol)
+                    # Hier wird der Haken 'include_prepost' angewendet!
+                    data = t.history(period="2d", interval="1m", prepost=include_prepost)
                     
-                    if not hist.empty:
-                        current_price = hist['Close'].iloc[-1]
-                        # Vergleich mit dem letzten Schlusskurs (Vortag oder Pre-Market Start)
-                        prev_close = hist['Close'].iloc[0] 
-                        change_pct = ((current_price - prev_close) / prev_close) * 100
-                        volume = hist['Volume'].iloc[-1]
+                    if not data.empty:
+                        last_p = data['Close'].iloc[-1]
+                        open_p = data['Open'].iloc[0]
+                        gap = ((last_p - open_p) / open_p) * 100
                         
-                        # Filter anwenden
-                        if abs(change_pct) >= min_change:
-                            results.append({
-                                "Symbol": symbol,
-                                "Preis ($)": f"{current_price:.2f}",
-                                "Änderung (%)": f"{change_pct:+.2f}%",
-                                "Volumen": f"{volume:,.0f}",
-                                "Zeit": datetime.now().strftime("%H:%M:%S")
-                            })
-                    
-                    # Fortschrittsbalken aktualisieren
-                    progress_bar.progress((idx + 1) / len(ticker_list))
-                    
+                        results.append({
+                            "Time": datetime.now().strftime("%H:%M"),
+                            "Ticker": symbol,
+                            "Price": f"{last_p:.2f}",
+                            "Gap%": f"{gap:+.2f}%",
+                            "Signal": "BUY" if gap > 2 else "WATCH",
+                            "Sentiment": "Bullish" if gap > 0 else "Bearish"
+                        })
+                    time.sleep(0.1)
                 except Exception as e:
-                    st.warning(f"Fehler bei {symbol}: {e}")
+                    st.error(f"Fehler bei {symbol}: {e}")
             
-            st.session_state["last_scan"] = datetime.now()
-            status.update(label=f"✅ Scan abgeschlossen um {datetime.now().strftime('%H:%M:%S')}", 
-                         state="complete", expanded=False)
+            status.update(label="✅ Scan abgeschlossen!", state="complete", expanded=False)
 
-        # --- 6. ERGEBNIS-ANZEIGE ---
+        # Tabelle im Journal aktualisieren
         if results:
-            st.subheader(f"Gefundene Signale ({len(results)})")
             df = pd.DataFrame(results)
-            
-            # Styling der Tabelle (Grün für Plus, Rot für Minus)
-            def color_coding(val):
-                if isinstance(val, str) and '+' in val: return 'color: #00ff00; font-weight: bold'
-                if isinstance(val, str) and '-' in val: return 'color: #ff4b4b; font-weight: bold'
-                return ''
+            journal_placeholder.table(df)
+            st.toast(f"Scan für {len(tickers)} Symbole beendet!")
 
-            st.table(df.style.applymap(color_coding, subset=['Änderung (%)']))
-        else:
-            st.warning("Keine Symbole gefunden, die das Filter-Kriterium erfüllen.")
-
-    # --- 7. AUTO-REFRESH LOGIK ---
-    if refresh_rate > 0:
-        time.sleep(refresh_rate * 60)
-        st.rerun()
-
-    # --- FOOTER ---
+    # --- 5. FOOTER (Deine persönlichen Daten/Infos) ---
     st.divider()
-    st.caption(f"Alpha Station v1.5 | Angemeldet als Admin | Standort: 8500 Gerlikon")
+    f_col1, f_col2, f_col3 = st.columns(3)
+    with f_col1:
+        st.caption(f"📍 **Standort:** Landhaus, 8500 Gerlikon")
+    with f_col2:
+        st.caption(f"👨‍👩‍👧‍👦 **Alpha Station Admin:** Miros & Bianca")
+    with f_col3:
+        st.caption(f"🕒 **Letztes Update:** {datetime.now().strftime('%H:%M:%S')}")
+
+# --- AUTO-REFRESH (Optional) ---
+# Falls du möchtest, dass er alle 5 Min scannt, entkommentiere:
+# time.sleep(300)
+# st.rerun()
