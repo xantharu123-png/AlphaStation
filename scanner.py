@@ -24,32 +24,39 @@ if check_password():
     if "selected_symbol" not in st.session_state: st.session_state.selected_symbol = "SPY"
     if "scan_results" not in st.session_state: st.session_state.scan_results = []
 
-    # --- 2. SIDEBAR: STRATEGIEN + SCHIEBEREGLER ---
+    # --- 2. SIDEBAR: STRATEGIEN + RANGE-SLIDER ---
     with st.sidebar:
         st.title("💎 Alpha V33 Secure")
         
-        st.subheader("📋 Strategie-Auswahl")
+        st.subheader("📋 Strategien")
         main_strat = st.selectbox("Hauptstrategie", ["Volume Surge", "Gap Momentum", "Penny Stock Breakout"])
         extra_strat = st.selectbox("Zusatzfilter", ["Keine", "Price < $10", "Price > $10"])
         
         st.divider()
         
-        st.subheader("⚙️ Manuelle Feinjustierung")
+        st.subheader("⚙️ Feinjustierung")
         min_vol_slider = st.number_input("Min. Volumen heute", value=300000, step=50000)
-        min_chg_slider = st.slider("Min. Kursänderung %", 0.0, 50.0, 3.0, step=0.5)
+        
+        # HIER IST DER NEUE RANGE-SLIDER (Zwei Schieber auf einem Regler)
+        # Er gibt ein Tupel zurück, z.B. (3.0, 20.0)
+        chg_range = st.slider(
+            "Kursänderung % (Min bis Max)", 
+            0.0, 100.0, (3.0, 25.0), step=0.5
+        )
+        
         max_price_slider = st.number_input("Max. Preis ($)", value=30.0, step=1.0)
         
         st.divider()
-        start_scan = st.button("🚀 STRATEGIE-SCAN STARTEN", use_container_width=True, type="primary")
+        start_scan = st.button("🚀 SCAN STARTEN", use_container_width=True, type="primary")
 
     # --- 3. HAUPTBEREICH ---
     st.title("⚡ Alpha Master Station: Live Radar")
     col_chart, col_journal = st.columns([1.5, 1])
 
-    # --- 4. SCANNER LOGIK ---
+    # --- 4. SCANNER LOGIK (POLYGON SNAPSHOT) ---
     if start_scan:
         with st.status(f"🔍 Scanne Markt nach {main_strat}...", expanded=False) as status:
-            poly_key = st.secrets.get("POLYGON_KEY")
+            poly_key = st.secrets.get("POLYGON_KEY") # Nutzt POLYGON_KEY aus deinen Secrets
             url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
             
             try:
@@ -69,68 +76,71 @@ if check_password():
                         elif main_strat == "Penny Stock Breakout" and last_price < 5: match = True
                             
                         if match:
-                            if vol < min_vol_slider or chg < min_chg_slider or last_price > max_price_slider:
-                                match = False
+                            # FILTER MIT RANGE-SLIDER: Prüfe ob chg zwischen Min und Max liegt
+                            if not (chg_range[0] <= chg <= chg_range[1]): match = False
+                            if vol < min_vol_slider or last_price > max_price_slider: match = False
                         
                         if match:
-                            results.append({
-                                "Ticker": sym,
-                                "Price": last_price,
-                                "Chg%": round(chg, 2),
-                                "Vol": int(vol)
-                            })
+                            if extra_strat == "Price < $10" and last_price >= 10: match = False
+                            if extra_strat == "Price > $10" and last_price <= 10: match = False
+
+                        if match:
+                            results.append({"Ticker": sym, "Price": last_price, "Chg%": round(chg, 2), "Vol": int(vol)})
                     
                     if results:
                         st.session_state.scan_results = sorted(results, key=lambda x: x['Chg%'], reverse=True)
                         st.session_state.selected_symbol = st.session_state.scan_results[0]['Ticker']
-                        status.update(label="✅ Scan abgeschlossen!", state="complete")
+                        status.update(label=f"✅ {len(results)} Treffer gefunden!", state="complete")
                     else:
-                        st.warning("Keine Treffer.")
+                        # Hinweis gemäß deinen Anforderungen, falls keine 30 Spiele/Aktien gefunden werden
+                        st.warning("Hey, ich habe leider keine 30 Treffer gefunden, aber hier sind trotzdem meine Empfehlungen.")
             except Exception as e:
                 st.error(f"Fehler: {e}")
 
-    # --- 5. SIGNAL JOURNAL (INTERAKTIV) ---
+    # --- 5. SIGNAL JOURNAL (INTERAKTIV MIT KLICK-FUNKTION) ---
     with col_journal:
         st.subheader("📝 Signal Journal")
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
-            
-            # KORREKTUR: selection_mode="single-row" (mit Bindestrich!)
+            # Nutzt selection_mode="single-row" für die Klick-Funktionalität
             event = st.dataframe(
                 df,
                 on_select="rerun",
-                selection_mode="single-row", 
+                selection_mode="single-row",
                 use_container_width=True,
                 hide_index=True
             )
             
-            # Logik für den Klick
             if event.selection and event.selection.rows:
-                selected_row_index = event.selection.rows[0]
-                st.session_state.selected_symbol = df.iloc[selected_row_index]["Ticker"]
+                selected_row = event.selection.rows[0]
+                st.session_state.selected_symbol = df.iloc[selected_row]["Ticker"]
         else:
-            st.info("Bereit für Scan.")
+            st.info("Scanner bereit.")
 
     # --- 6. LIVE-CHART ---
     with col_chart:
-        st.subheader(f"📊 Live-Chart: {st.session_state.selected_symbol}")
+        st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
+        # Stabiles TradingView Widget
         chart_url = f"https://s.tradingview.com/widgetembed/?symbol={st.session_state.selected_symbol}&interval=5&theme=dark"
         st.components.v1.html(f'<iframe src="{chart_url}" width="100%" height="520" frameborder="0"></iframe>', height=520)
 
-    # --- 7. TÄGLICHE ANALYSE (Nach deinen Wünschen) ---
+    # --- 7. TÄGLICHE ANALYSE (Inklusive aller Vorschläge) ---
     st.divider()
     if st.button("📊 TÄGLICHE ANALYSE ERSTELLEN"):
         if st.session_state.scan_results:
-            df_analysis = pd.DataFrame(st.session_state.scan_results)
+            df_ana = pd.DataFrame(st.session_state.scan_results)
             st.subheader(f"📅 Analyse-Report vom {datetime.now().strftime('%d.%m.%Y')}")
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("Top Gainer", f"{df_analysis.iloc[0]['Ticker']}", f"+{df_analysis.iloc[0]['Chg%']}%")
-            c2.metric("Ø Preis", f"${df_analysis['Price'].mean():.2f}")
-            c3.metric("Gesamt-Signale", f"{len(df_analysis)}")
+            c1.metric("Top-Gainer", f"{df_ana.iloc[0]['Ticker']}", f"+{df_ana.iloc[0]['Chg%']}%")
+            c2.metric("Ø Preis der Signale", f"${df_ana['Price'].mean():.2f}")
+            c3.metric("Anzahl Signale", f"{len(df_ana)}")
             
-            st.info(f"Strategie '{main_strat}' lieferte heute {len(df_analysis)} Treffer.")
+            st.write("---")
+            st.write("**Zusammenfassung der Strategie-Performance:**")
+            st.write(f"Die Strategie '{main_strat}' hat heute den Markt nach Aktien zwischen {chg_range[0]}% und {chg_range[1]}% Veränderung durchsucht.")
+            st.write(f"Das durchschnittliche Volumen der gefundenen Ticker lag bei {int(df_ana['Vol'].mean()):,} Shares.")
         else:
-            st.warning("Keine Daten zum Analysieren.")
+            st.warning("Keine Daten für eine Analyse vorhanden.")
 
-    st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M')}")
+    st.caption(f"⚙️ Admin: Miroslav | Daten: Polygon.io (15m verzögert)")
