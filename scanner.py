@@ -21,11 +21,10 @@ def check_password():
     return True
 
 if check_password():
-    # Initialisierung der Zustände
     if "selected_symbol" not in st.session_state: st.session_state.selected_symbol = "SPY"
     if "scan_results" not in st.session_state: st.session_state.scan_results = []
 
-    # --- 2. SIDEBAR: STRATEGIEN + MANUELLE FILTER ---
+    # --- 2. SIDEBAR: STRATEGIEN + SCHIEBEREGLER ---
     with st.sidebar:
         st.title("💎 Alpha V33 Secure")
         
@@ -43,14 +42,13 @@ if check_password():
         st.divider()
         start_scan = st.button("🚀 STRATEGIE-SCAN STARTEN", use_container_width=True, type="primary")
 
-    # --- 3. HAUPTBEREICH (Layout) ---
+    # --- 3. HAUPTBEREICH ---
     st.title("⚡ Alpha Master Station: Live Radar")
     col_chart, col_journal = st.columns([1.5, 1])
 
-    # --- 4. SCANNER LOGIK (POLYGON SNAPSHOT) ---
+    # --- 4. SCANNER LOGIK ---
     if start_scan:
-        with st.status(f"🔍 Durchsuche Markt nach {main_strat}...", expanded=False) as status:
-            # Nutzt deinen POLYGON_KEY aus den Secrets
+        with st.status(f"🔍 Scanne Markt nach {main_strat}...", expanded=False) as status:
             poly_key = st.secrets.get("POLYGON_KEY")
             url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
             
@@ -65,7 +63,6 @@ if check_password():
                         vol = ticker.get("day", {}).get("v", 0)
                         last_price = ticker.get("min", {}).get("c", 0)
                         
-                        # Hybrid-Filter Logik
                         match = False
                         if main_strat == "Volume Surge" and vol > 500000: match = True
                         elif main_strat == "Gap Momentum" and chg > 5: match = True
@@ -88,52 +85,52 @@ if check_password():
                         st.session_state.selected_symbol = st.session_state.scan_results[0]['Ticker']
                         status.update(label="✅ Scan abgeschlossen!", state="complete")
                     else:
-                        st.warning("Keine Treffer gefunden.")
+                        st.warning("Keine Treffer.")
             except Exception as e:
                 st.error(f"Fehler: {e}")
 
-    # --- 5. SIGNAL JOURNAL MIT KLICK-FUNKTION (GELBER BEREICH) ---
+    # --- 5. SIGNAL JOURNAL (INTERAKTIV) ---
     with col_journal:
         st.subheader("📝 Signal Journal")
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
             
-            # Interaktive Tabelle: Ermöglicht das Anklicken einer Zeile
+            # KORREKTUR: selection_mode="single-row" (mit Bindestrich!)
             event = st.dataframe(
                 df,
                 on_select="rerun",
-                selection_mode="single_row",
+                selection_mode="single-row", 
                 use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Price": st.column_config.NumberColumn(format="$%.2f"),
-                    "Vol": st.column_config.NumberColumn(format="%d"),
-                    "Chg%": st.column_config.NumberColumn(format="%.2f%%")
-                }
+                hide_index=True
             )
             
-            # Wenn eine Zeile angeklickt wird, ändere das Symbol für den Chart
-            if len(event.selection.rows) > 0:
+            # Logik für den Klick
+            if event.selection and event.selection.rows:
                 selected_row_index = event.selection.rows[0]
                 st.session_state.selected_symbol = df.iloc[selected_row_index]["Ticker"]
         else:
-            st.info("Scanner bereit für Miroslav.")
+            st.info("Bereit für Scan.")
 
-    # --- 6. LIVE-CHART ANZEIGE (GRÜNER BEREICH) ---
+    # --- 6. LIVE-CHART ---
     with col_chart:
         st.subheader(f"📊 Live-Chart: {st.session_state.selected_symbol}")
-        # Chart wird automatisch aktualisiert, wenn oben in der Tabelle geklickt wird
         chart_url = f"https://s.tradingview.com/widgetembed/?symbol={st.session_state.selected_symbol}&interval=5&theme=dark"
         st.components.v1.html(f'<iframe src="{chart_url}" width="100%" height="520" frameborder="0"></iframe>', height=520)
 
-    # --- 7. TÄGLICHE ANALYSE ---
+    # --- 7. TÄGLICHE ANALYSE (Nach deinen Wünschen) ---
     st.divider()
     if st.button("📊 TÄGLICHE ANALYSE ERSTELLEN"):
         if st.session_state.scan_results:
-            top_stock = st.session_state.scan_results[0]
-            st.success(f"Top-Signal des Tages: {top_stock['Ticker']} mit {top_stock['Chg%']}% Plus!")
-            st.write(f"Durchschnittlicher Preis der Signale: ${df['Price'].mean():.2f}")
+            df_analysis = pd.DataFrame(st.session_state.scan_results)
+            st.subheader(f"📅 Analyse-Report vom {datetime.now().strftime('%d.%m.%Y')}")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Top Gainer", f"{df_analysis.iloc[0]['Ticker']}", f"+{df_analysis.iloc[0]['Chg%']}%")
+            c2.metric("Ø Preis", f"${df_analysis['Price'].mean():.2f}")
+            c3.metric("Gesamt-Signale", f"{len(df_analysis)}")
+            
+            st.info(f"Strategie '{main_strat}' lieferte heute {len(df_analysis)} Treffer.")
         else:
-            st.warning("Keine Daten für die Analyse vorhanden.")
+            st.warning("Keine Daten zum Analysieren.")
 
-    st.caption(f"⚙️ Admin: Miroslav | Stand: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M')}")
