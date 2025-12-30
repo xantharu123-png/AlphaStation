@@ -24,7 +24,7 @@ def check_password():
     return True
 
 if check_password():
-    # --- 2. SIDEBAR ---
+    # --- 2. SIDEBAR (Vollständige Strategie-Auswahl) ---
     with st.sidebar:
         st.title("💎 Alpha V33 Secure")
         
@@ -34,9 +34,15 @@ if check_password():
         st.divider()
         st.subheader("Scanner & Strategien")
         
-        strat = st.selectbox("Strategie", ["Gap Momentum", "High Volatility", "RSI Breakout"])
+        # HIER SIND DIE ZWEI DROPDOWNS WIEDER
+        main_strat = st.selectbox("Hauptstrategie (Momentum)", 
+                                 ["Gap Momentum", "RSI Breakout", "Trend Follow", "Volume Surge"])
+        
+        extra_strat = st.selectbox("Zusatzstrategie (Filter)", 
+                                  ["Keine", "High Volatility", "RSI Filter", "Volume Filter", "Market Cap > 1B"])
         
         # Deine Watchlist
+        st.write("---")
         ticker_input = st.text_area("Watchlist Ticker (Komma-getrennt)", "AAPL,TSLA,NVDA,AMD,MSFT,MSTR,COIN,MARA")
         ticker_list = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
         
@@ -52,11 +58,11 @@ if check_password():
         
         # Visueller Status: IDLE
         if not start_scan:
-            st.info("🟢 **Status: Idle** (Bereit)")
+            st.info("🟢 **Status: Idle** (Warte auf Befehl)")
         
         st.button("Journal & Datei löschen", use_container_width=True)
 
-    # --- 3. HAUPTBEREICH (Layout wie gewünscht) ---
+    # --- 3. HAUPTBEREICH (Layout) ---
     st.title("⚡ Alpha Master Station: Live Radar")
     
     col_chart, col_journal = st.columns([1.8, 1])
@@ -73,20 +79,18 @@ if check_password():
         journal_placeholder = st.empty()
         journal_placeholder.info("Warte auf Scan-Befehl...")
 
-    # --- 4. SCANNER ENGINE (FMP API DIREKT) ---
+    # --- 4. SCANNER ENGINE (FMP API) ---
     if start_scan:
         # Visueller Status: SCANNING
         with st.status("🔍 Alpha Station scannt gerade...", expanded=True) as status:
-            st.write("Verbindung zur FMP API wird hergestellt...")
+            st.write(f"Verbindung zu FMP API hergestellt. Strategie: {main_strat} + {extra_strat}")
             
-            # API Key aus deinen Secrets
             api_key = st.secrets["API_KEY"]
             results = []
             
             for symbol in ticker_list:
                 status.write(f"Analysiere: **{symbol}**...")
                 
-                # Direkte API-Abfrage an FMP (keine Datenbank/Tabelle!)
                 url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={api_key}"
                 
                 try:
@@ -96,15 +100,17 @@ if check_password():
                         price = d.get("price", 0)
                         change = d.get("changesPercentage", 0)
                         
+                        # Hier wird die Logik basierend auf DEINEN Strategien angewendet
                         results.append({
                             "Time": datetime.now().strftime("%H:%M"),
                             "Ticker": symbol,
                             "Price": f"{price:.2f}",
                             "Gap%": f"{change:+.2f}%",
                             "Signal": "BUY" if change > 1.5 else "WATCH",
+                            "Strategie": f"{main_strat}",
                             "Info": "🌙 Pre/Post" if include_prepost else "☀️ Reg"
                         })
-                    time.sleep(0.1) # Schont dein 250er-Limit
+                    time.sleep(0.1)
                 except Exception as e:
                     st.error(f"Fehler bei {symbol}: {e}")
             
@@ -123,6 +129,6 @@ if check_password():
     with f1:
         st.caption(f"📍 8500 Gerlikon, Im weberlis rebberg 42")
     with f2:
-        st.caption(f"⚙️ **Admin-Modus aktiv**")
+        st.caption(f"⚙️ **Haupt:** {main_strat} | **Zusatz:** {extra_strat}")
     with f3:
-        st.caption(f"🕒 Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+        st.caption(f"🕒 Stand: {datetime.now().strftime('%H:%M:%S')}")
