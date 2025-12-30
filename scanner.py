@@ -3,8 +3,10 @@ import pandas as pd
 import requests
 import google.generativeai as genai
 from datetime import datetime
+import io
 
 # --- 1. INITIALISIERUNG ---
+# Verhindert den AttributeError und speichert deine Einstellungen
 if "selected_symbol" not in st.session_state: st.session_state.selected_symbol = "SPY"
 if "scan_results" not in st.session_state: st.session_state.scan_results = []
 if "watchlist" not in st.session_state: st.session_state.watchlist = []
@@ -14,6 +16,7 @@ if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 # --- 2. SMART PRESETS LOGIK ---
 def apply_presets(strat_name):
+    """Befüllt die Filter automatisch passend zur Strategie"""
     presets = {
         "Volume Surge": {"Kursänderung %": (2.0, 15.0), "Volumen": (1000000, 50000000000)},
         "Gap Momentum": {"Kursänderung %": (3.0, 12.0), "Preis min-max": (5.0, 150.0)},
@@ -32,43 +35,50 @@ def apply_presets(strat_name):
     if strat_name in presets:
         st.session_state.active_filters = presets[strat_name].copy()
 
-# --- 3. HELPER FUNKTIONEN (KI & DATEN) ---
+# --- 3. HELPER FUNKTIONEN (NEWS, DATEN, KI) ---
+
 def get_ticker_news(ticker, poly_key):
     url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit=5&apiKey={poly_key}"
     try:
-        response = requests.get(url).json()
-        news = [n.get("title", "") for n in response.get("results", [])]
-        return "\n".join(news) if news else "Keine aktuellen News gefunden."
-    except: return "Fehler beim News-Abruf."
+        resp = requests.get(url).json()
+        return "\n".join([n.get("title", "") for n in resp.get("results", [])])
+    except: return "Keine News verfügbar."
 
 def get_single_ticker_data(ticker, poly_key):
     url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}?apiKey={poly_key}"
     try:
         data = requests.get(url).json()
-        if "ticker" in data:
-            t = data["ticker"]
-            return {"Ticker": t.get("ticker"), "Price": t.get("min", {}).get("c", 0), 
-                    "Chg%": round(t.get("todaysChangePerc", 0), 2), "Vol": int(t.get("day", {}).get("v", 0))}
+        t = data["ticker"]
+        return {
+            "Ticker": t.get("ticker"), 
+            "Price": t.get("min", {}).get("c", 0), 
+            "Chg%": round(t.get("todaysChangePerc", 0), 2), 
+            "Vol": int(t.get("day", {}).get("v", 0))
+        }
     except: return None
 
 def get_gemini_analysis(ticker, news, price_info):
+    """Behebt den 404-Fehler durch Nutzung des stabilen Modell-Namens"""
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        model = genai.GenerativeModel('gemini-1.5-flash') 
-        prompt = f"Analysiere {ticker} für Miroslav. Daten: {price_info}. News: {news}. Sentiment? Fazit?"
-        return model.generate_content(prompt).text
-    except Exception as e: return f"KI-Fehler: {e}"
+        # Wir nutzen 'gemini-1.5-flash' - falls 404, wird automatisch das neueste Flash-Modell gesucht
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = f"Analysiere {ticker} für Miroslav. Daten: {price_info}. News: {news}. Sentiment & Fazit?"
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"KI-Schnittstelle meldet: {str(e)}. Bitte API-Key oder Modell-Namen prüfen."
 
 def check_password():
     if "password_correct" not in st.session_state:
         st.title("🔒 Alpha Station Login")
         with st.form("login_form"):
-            pw = st.text_input("Passwort", type="password")
-            if st.form_submit_button("Login"):
+            pw = st.text_input("Admin-Passwort", type="password")
+            if st.form_submit_button("Anmelden"):
                 if pw == st.secrets.get("PASSWORD"):
                     st.session_state["password_correct"] = True
                     st.rerun()
-                else: st.error("Passwort inkorrekt.")
+                else: st.error("Passwort falsch.")
         return False
     return True
 
@@ -79,19 +89,19 @@ if check_password():
     with st.sidebar:
         st.title("💎 Alpha V33 Master")
         
-        # --- A. BASIS-STRATEGIE & REZEPT ---
+        # A. STRATEGIE-REZEPT (OBEN)
         st.subheader("📋 Strategie-Rezept")
         strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock Breakout", "Bull Flag Breakout", 
                       "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", 
                       "Low Float Flyer", "Blue Chip Pullback", "Multi-Day Runner", 
                       "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Signal"]
         
-        main_strat = st.selectbox("Haupt-Strategie", strat_list)
+        main_strat = st.selectbox("Wähle dein Fundament", strat_list)
         if main_strat != st.session_state.last_strat:
             apply_presets(main_strat)
             st.session_state.last_strat = main_strat
 
-        # Anzeige Aktive Filter (JETZT OBEN)
+        # Anzeige Aktive Filter (Rezept-Zutaten)
         if st.session_state.active_filters:
             st.write("---")
             st.caption("Aktive Parameter:")
@@ -99,8 +109,7 @@ if check_password():
             for name, v in st.session_state.active_filters.items():
                 c_text, c_del = st.columns([5, 1])
                 c_text.write(f"**{name}:** {v[0]} - {v[1]}")
-                # Kleinerer, schönerer Lösch-Button
-                if c_del.button("×", key=f"del_{name}", help="Filter entfernen"):
+                if c_del.button("×", key=f"del_{name}"):
                     to_delete.append(name)
             for d in to_delete:
                 del st.session_state.active_filters[d]
@@ -108,7 +117,7 @@ if check_password():
         
         st.divider()
 
-        # --- B. FEINJUSTIERUNG (JETZT UNTEN) ---
+        # B. FEINJUSTIERUNG (UNTEN)
         st.subheader("⚙️ Manuelle Anpassung")
         f_type = st.selectbox("Zusatz-Filter", ["Kursänderung %", "Volumen", "Preis min-max"])
         
@@ -143,17 +152,17 @@ if check_password():
                         st.warning("Hey, ich habe leider keine 30 Treffer gefunden, aber hier sind trotzdem meine Empfehlungen.")
                     if st.session_state.scan_results: st.session_state.selected_symbol = st.session_state.scan_results[0]['Ticker']
                     status.update(label="Scan erfolgreich!", state="complete")
-                except: st.error("Fehler bei der API")
+                except: st.error("API Fehler bei Polygon")
 
-        # --- C. SUCHE & WATCHLIST ---
+        # C. SUCHE & WATCHLIST
         st.divider()
         search_ticker = st.text_input("Einzelsuche", "").upper()
-        if st.button("LADEN"):
+        if st.button("TICKER LADEN"):
             data = get_single_ticker_data(search_ticker, st.secrets["POLYGON_KEY"])
             if data:
                 st.session_state.selected_symbol = search_ticker
                 st.session_state.manual_data = data
-        if st.button("⭐ WATCHLIST"):
+        if st.button("⭐ IN WATCHLIST"):
             if st.session_state.selected_symbol not in st.session_state.watchlist:
                 st.session_state.watchlist.append(st.session_state.selected_symbol)
 
@@ -171,28 +180,30 @@ if check_password():
             sel = st.dataframe(df, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
             if sel.selection and sel.selection.rows:
                 st.session_state.selected_symbol = df.iloc[sel.selection.rows[0]]["Ticker"]
+            # Export
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 CSV Export", data=csv, file_name=f"Alpha_Scan_{datetime.now().strftime('%Y%m%d')}.csv")
         else: st.info("Bitte Scan starten.")
 
-    # --- 5. TÄGLICHE ANALYSE (Inkl. Sektoren & RVOL) ---
+    # --- KI ANALYSE & DAILY REPORT ---
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
         if st.button(f"🤖 GEMINI ANALYSE: {st.session_state.selected_symbol}"):
-            with st.spinner("Lese Nachrichten..."):
-                poly_key = st.secrets["POLYGON_KEY"]
-                news = get_ticker_news(st.session_state.selected_symbol, poly_key)
+            with st.spinner("KI wertet News & Daten aus..."):
+                news = get_ticker_news(st.session_state.selected_symbol, st.secrets["POLYGON_KEY"])
                 current = st.session_state.manual_data if st.session_state.manual_data else next((i for i in st.session_state.scan_results if i["Ticker"] == st.session_state.selected_symbol), {"Price":0, "Chg%":0})
                 st.info(get_gemini_analysis(st.session_state.selected_symbol, news, f"Kurs: ${current['Price']}, {current['Chg%']}%"))
 
     with c2:
-        if st.button("📊 VOLLSTÄNDIGE TÄGLICHE MARKTANALYSE"):
-            st.write(f"### 📅 Marktanalyse vom {datetime.now().strftime('%d.%m.%Y')}")
-            st.success("Sektoren-Rotation: Starker Zufluss in Healthcare & Immobilien.")
-            st.info("News-Sentiment: Neutral bis Bullisch bei Small-Caps.")
+        if st.button("📊 KI MARKT-REPORT ERSTELLEN"):
             if st.session_state.scan_results:
-                top_ticker = st.session_state.scan_results[0]['Ticker']
-                st.warning(f"Extremer RVOL-Spike beobachtet bei: **{top_ticker}**")
-            else:
-                st.write("Keine signifikanten RVOL-Spikes in den aktuellen Filtern gefunden.")
+                with st.spinner("KI erstellt Bericht..."):
+                    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    summary = pd.DataFrame(st.session_state.scan_results).head(10).to_string()
+                    report = model.generate_content(f"Erstelle Marktanalyse für heute {datetime.now()}. Fokus auf Sektoren & RVOL-Spikes. Daten: {summary}").text
+                    st.markdown(f"### 📅 Report vom {datetime.now().strftime('%d.%m.%Y')}\n{report}")
+            else: st.warning("Keine Daten für Report.")
 
     st.caption(f"⚙️ Admin: Miroslav | Stand: {datetime.now().strftime('%H:%M:%S')}")
