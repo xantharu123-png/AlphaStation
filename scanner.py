@@ -8,7 +8,6 @@ from datetime import datetime
 st.set_page_config(page_title="Alpha V33 Secure", layout="wide", initial_sidebar_state="expanded")
 
 def check_password():
-    """Prüft das Passwort für den Admin Miroslav."""
     if "password_correct" not in st.session_state:
         st.title("🔒 Alpha Station Login")
         with st.form("login_form"):
@@ -23,112 +22,115 @@ def check_password():
     return True
 
 if check_password():
-    # --- 2. SIDEBAR (Vollständige Strategie-Auswahl) ---
+    # Session State für Scan-Ergebnisse initialisieren
+    if "scan_results" not in st.session_state:
+        st.session_state.scan_results = []
+    if "selected_symbol" not in st.session_state:
+        st.session_state.selected_symbol = "SPY"
+
+    # --- 2. SIDEBAR ---
     with st.sidebar:
         st.title("💎 Alpha V33 Secure")
         
-        st.subheader("Scanner-Einstellungen")
-        # Deine Hauptstrategien
-        main_strat = st.selectbox("Hauptstrategie wählen", 
+        st.subheader("Strategie-Filter")
+        main_strat = st.selectbox("Nur nach dieser Strategie suchen:", 
                                  ["Volume Surge", "Gap Momentum", "RSI Breakout"])
         
-        # Deine Zusatzfilter
         extra_strat = st.selectbox("Zusatzfilter (Strikt)", 
-                                  ["Keine", "Penny Stocks (< $10)", "Mid-Cap Focus", "Market Cap > 1B"])
+                                  ["Keine", "Penny Stocks (< $10)", "Mid-Cap Focus"])
         
         st.divider()
         include_prepost = st.checkbox("🌙 Pre & Post Market einbeziehen", value=True)
         st.toggle("Telegram Alarme 📟", value=True)
         
-        # SCAN BUTTON
         start_scan = st.button("🚀 STRATEGIE-SCAN STARTEN", use_container_width=True, type="primary")
         
         if not start_scan:
             st.info("🟢 **Status: Idle** (Bereit für Miroslav)")
 
-    # --- 3. HAUPTBEREICH (Layout) ---
+    # --- 3. HAUPTBEREICH ---
     st.title("⚡ Alpha Master Station: Live Radar")
     col_chart, col_journal = st.columns([1.8, 1])
 
-    with col_chart:
-        st.subheader("🌐 Markt-Monitor (Live)")
-        # Stabiles TradingView Widget für den SPY
-        st.components.v1.html("""
-            <iframe src="https://s.tradingview.com/widgetembed/?symbol=SPY&interval=5&theme=dark" width="100%" height="500" frameborder="0"></iframe>
-        """, height=500)
-
-    with col_journal:
-        st.subheader("📝 Signal Journal")
-        journal_placeholder = st.empty()
-        if not start_scan:
-            journal_placeholder.info(f"Wähle eine Strategie und starte den Scan. Aktuell: {main_strat}")
-
-    # --- 4. SCANNER ENGINE (STRIKTE FILTERUNG) ---
+    # --- 4. SCANNER LOGIK (VOR der Chart-Anzeige, damit Daten da sind) ---
     if start_scan:
-        with st.status(f"🔍 Alpha Station scannt nach {main_strat}...", expanded=True) as status:
-            api_key = st.secrets["API_KEY"]
+        with st.status(f"🔍 Alpha Station sucht {main_strat}...", expanded=True) as status:
+            api_key = st.secrets.get("API_KEY")
+            if not api_key:
+                st.error("API_KEY fehlt!")
+                st.stop()
             
-            # Strategie-Routing: Wir wählen den API-Endpunkt passend zur Hauptstrategie
+            # API Routing
             if main_strat == "Gap Momentum":
-                st.write("Suche nach Top Gainern für Gap-Setups...")
                 url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={api_key}"
             else:
-                # Standard für Volume Surge: Die aktivsten Aktien (wie SOPA)
-                st.write("Suche nach Aktien mit außergewöhnlichem Volumen...")
                 url = f"https://financialmodelingprep.com/api/v3/stock_market/actives?apikey={api_key}"
             
             try:
-                response = requests.get(url).json()
-                results = []
-                
-                for stock in response[:50]:
-                    symbol = stock.get("symbol")
-                    change = stock.get("changesPercentage", 0)
-                    price = stock.get("price", 0)
+                response = requests.get(url)
+                if response.status_code == 200:
+                    data = response.json()
+                    temp_results = []
                     
-                    # STRIKTE FILTER-LOGIK (Nur das anzeigen, was gewählt wurde)
-                    match = True
-                    
-                    # 1. Filter: Preis (Penny Stocks)
-                    if extra_strat == "Penny Stocks (< $10)" and price >= 10:
-                        match = False
-                    
-                    # 2. Filter: Strategie-spezifische Schwellenwerte
-                    if main_strat == "Gap Momentum" and change < 3.0:
-                        match = False
-                    if main_strat == "Volume Surge" and abs(change) < 0.5:
-                        match = False
+                    for stock in data:
+                        symbol = stock.get("symbol")
+                        change = stock.get("changesPercentage", 0)
+                        price = stock.get("price", 0)
                         
-                    if match:
-                        results.append({
-                            "Time": datetime.now().strftime("%H:%M"),
-                            "Ticker": symbol,
-                            "Price": f"${price:.2f}",
-                            "Chg%": f"{change:+.2f}%",
-                            "Strategie": main_strat,
-                            "Signal": "🔥 TRIGGER"
-                        })
-                
-                status.update(label="✅ Scan abgeschlossen!", state="complete", expanded=False)
-                
-                if results:
-                    df = pd.DataFrame(results)
-                    # Sortierung: Höchste Gaps zuerst
-                    df = df.sort_values(by="Chg%", ascending=False)
-                    journal_placeholder.table(df)
-                    st.toast(f"{len(results)} Treffer für {main_strat} gefunden!")
-                else:
-                    journal_placeholder.warning(f"Keine Aktien gefunden, die aktuell der Strategie '{main_strat}' entsprechen.")
+                        # Striktes Filtering
+                        match = True
+                        if extra_strat == "Penny Stocks (< $10)" and price >= 10: match = False
+                        if main_strat == "Gap Momentum" and change < 3.0: match = False
+                        
+                        if match:
+                            temp_results.append({
+                                "Ticker": symbol,
+                                "Price": price,
+                                "Chg%": change,
+                                "Time": datetime.now().strftime("%H:%M")
+                            })
                     
+                    # Ergebnisse speichern und Top-Symbol auswählen
+                    st.session_state.scan_results = temp_results
+                    if temp_results:
+                        # Sortieren nach Chg%
+                        st.session_state.scan_results = sorted(temp_results, key=lambda x: x['Chg%'], reverse=True)
+                        st.session_state.selected_symbol = st.session_state.scan_results[0]['Ticker']
+                    
+                    status.update(label="✅ Scan abgeschlossen!", state="complete", expanded=False)
+                else:
+                    st.error("API Fehler!")
             except Exception as e:
-                st.error(f"API Fehler: {e}")
+                st.error(f"Fehler: {e}")
 
-    # --- 5. FOOTER (Korrigiert für Miroslav) ---
+    # --- 5. CHART ANZEIGE (Dynamisch) ---
+    with col_chart:
+        # Wenn wir Treffer haben, zeige einen Selector über dem Chart
+        if st.session_state.scan_results:
+            ticker_options = [res['Ticker'] for res in st.session_state.scan_results]
+            selected = st.selectbox("🎯 Treffer-Visualisierung wählen:", ticker_options, index=0)
+            st.session_state.selected_symbol = selected
+
+        st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
+        
+        # Das dynamische TradingView Widget
+        chart_url = f"https://s.tradingview.com/widgetembed/?symbol={st.session_state.selected_symbol}&interval=5&theme=dark"
+        st.components.v1.html(f"""
+            <iframe src="{chart_url}" width="100%" height="550" frameborder="0" allowtransparency="true" scrolling="no"></iframe>
+        """, height=550)
+
+    # --- 6. SIGNAL JOURNAL (Rechte Spalte) ---
+    with col_journal:
+        st.subheader("📝 Signal Journal")
+        if st.session_state.scan_results:
+            df = pd.DataFrame(st.session_state.scan_results)
+            st.table(df[["Ticker", "Price", "Chg%", "Time"]])
+        else:
+            st.info("Warte auf Scan-Befehl...")
+
+    # --- 7. FOOTER ---
     st.divider()
     f1, f2, f3 = st.columns(3)
-    with f1:
-        st.caption("📍 8500 Gerlikon, Im weberlis rebberg 42")
-    with f2:
-        st.caption(f"⚙️ **Admin-Modus:** Miroslav | Strategie: {main_strat}")
-    with f3:
-        st.caption(f"🕒 Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    with f1: st.caption("📍 8500 Gerlikon, Im weberlis rebberg 42")
+    with f2: st.caption(f"⚙️ **Admin:** Miroslav | Fokus: {st.session_state.selected_symbol}")
+    with f3: st.caption(f"🕒 Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
