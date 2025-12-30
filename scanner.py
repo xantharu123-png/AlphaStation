@@ -13,7 +13,8 @@ def check_password():
         st.title("🔒 Alpha Station Login")
         st.write(f"Willkommen im Terminal. Heute ist der {datetime.now().strftime('%d.%m.%Y')}.")
         with st.form("login_form"):
-            pw = st.text_input("Passwort", type="password")
+            # Text angepasst: Bianca entfernt
+            pw = st.text_input("Admin-Passwort eingeben", type="password")
             if st.form_submit_button("Anmelden"):
                 if pw == st.secrets.get("PASSWORD"):
                     st.session_state["password_correct"] = True
@@ -34,7 +35,7 @@ if check_password():
         st.divider()
         st.subheader("Scanner & Strategien")
         
-        # HIER SIND DIE ZWEI DROPDOWNS WIEDER
+        # Die zwei gewünschten Dropdowns für Haupt- und Zusatzstrategie
         main_strat = st.selectbox("Hauptstrategie (Momentum)", 
                                  ["Gap Momentum", "RSI Breakout", "Trend Follow", "Volume Surge"])
         
@@ -56,13 +57,13 @@ if check_password():
         st.divider()
         start_scan = st.button("🚀 SCANNER JETZT STARTEN", use_container_width=True, type="primary")
         
-        # Visueller Status: IDLE
+        # Visueller Status: IDLE (Warten)
         if not start_scan:
-            st.info("🟢 **Status: Idle** (Warte auf Befehl)")
+            st.info("🟢 **Status: Idle** (Bereit)")
         
         st.button("Journal & Datei löschen", use_container_width=True)
 
-    # --- 3. HAUPTBEREICH (Layout) ---
+    # --- 3. HAUPTBEREICH (Layout: Chart links, Journal rechts) ---
     st.title("⚡ Alpha Master Station: Live Radar")
     
     col_chart, col_journal = st.columns([1.8, 1])
@@ -79,11 +80,11 @@ if check_password():
         journal_placeholder = st.empty()
         journal_placeholder.info("Warte auf Scan-Befehl...")
 
-    # --- 4. SCANNER ENGINE (FMP API) ---
+    # --- 4. SCANNER ENGINE (FMP API DIREKT) ---
     if start_scan:
-        # Visueller Status: SCANNING
+        # Visueller Status: SCANNING (Pulsierende Box oben)
         with st.status("🔍 Alpha Station scannt gerade...", expanded=True) as status:
-            st.write(f"Verbindung zu FMP API hergestellt. Strategie: {main_strat} + {extra_strat}")
+            st.write(f"Verbindung zu FMP API aktiv. Strategie: {main_strat} + {extra_strat}")
             
             api_key = st.secrets["API_KEY"]
             results = []
@@ -91,6 +92,7 @@ if check_password():
             for symbol in ticker_list:
                 status.write(f"Analysiere: **{symbol}**...")
                 
+                # FMP API Quote-Endpunkt
                 url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={api_key}"
                 
                 try:
@@ -100,7 +102,6 @@ if check_password():
                         price = d.get("price", 0)
                         change = d.get("changesPercentage", 0)
                         
-                        # Hier wird die Logik basierend auf DEINEN Strategien angewendet
                         results.append({
                             "Time": datetime.now().strftime("%H:%M"),
                             "Ticker": symbol,
@@ -110,7 +111,7 @@ if check_password():
                             "Strategie": f"{main_strat}",
                             "Info": "🌙 Pre/Post" if include_prepost else "☀️ Reg"
                         })
-                    time.sleep(0.1)
+                    time.sleep(0.1) # Schont dein 250er-Limit
                 except Exception as e:
                     st.error(f"Fehler bei {symbol}: {e}")
             
@@ -121,14 +122,15 @@ if check_password():
             df = pd.DataFrame(results)
             journal_placeholder.table(df)
         else:
-            journal_placeholder.warning("Keine Daten empfangen.")
+            journal_placeholder.warning("Keine Daten von der API empfangen.")
 
-    # --- 5. FOOTER ---
+    # --- 5. FOOTER (Personalisiert für Gerlikon) ---
     st.divider()
     f1, f2, f3 = st.columns(3)
     with f1:
         st.caption(f"📍 8500 Gerlikon, Im weberlis rebberg 42")
     with f2:
-        st.caption(f"⚙️ **Haupt:** {main_strat} | **Zusatz:** {extra_strat}")
+        # Footer angepasst: Nur noch Admin/Miros
+        st.caption(f"⚙️ **Admin-Modus:** Miros | {main_strat}")
     with f3:
         st.caption(f"🕒 Stand: {datetime.now().strftime('%H:%M:%S')}")
