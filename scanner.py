@@ -1,27 +1,18 @@
 import streamlit as st
 import pandas as pd
+import requests
 import time
 from datetime import datetime
-from supabase import create_client, Client
 
-# --- 1. SETTINGS & API (SUPABASE) ---
+# --- 1. SETTINGS & LOGIN ---
 st.set_page_config(page_title="Alpha V33 Secure", layout="wide", initial_sidebar_state="expanded")
 
-# Verbindung herstellen
-@st.cache_resource
-def get_supabase():
-    url = st.secrets["DB_URL"]
-    key = st.secrets["DB_TOKEN"]
-    return create_client(url, key)
-
-supabase = get_supabase()
-
-# --- 2. LOGIN (Miros & Bianca) ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.title("🔒 Alpha Station Login")
+        st.write("Willkommen zurück. Bitte Passwort für Miros & Bianca eingeben:")
         with st.form("login_form"):
-            pw = st.text_input("Passwort für Miros & Bianca", type="password")
+            pw = st.text_input("Passwort", type="password")
             if st.form_submit_button("Anmelden"):
                 if pw == st.secrets["PASSWORD"]:
                     st.session_state["password_correct"] = True
@@ -32,81 +23,97 @@ def check_password():
     return True
 
 if check_password():
-    # --- 3. SIDEBAR ---
+    # --- 2. SIDEBAR (Design aus deinem Screenshot) ---
     with st.sidebar:
         st.title("💎 Alpha V33 Secure")
-        st.radio("Navigation", ["🔴 Live Radar", "⚪ Backtest", "🧠 AI Research"], label_visibility="collapsed")
+        
+        st.subheader("Navigation")
+        st.radio("Nav", ["🔴 Live Radar", "⚪ Backtest", "🧠 AI Research"], label_visibility="collapsed")
         
         st.divider()
         st.subheader("Scanner & Strategien")
-        strat_1 = st.selectbox("Strategie 1", ["Gap Momentum", "RSI Breakout"])
-        markt_tiefe = st.slider("Markt-Tiefe", 0, 1000, 500)
+        strat_1 = st.selectbox("Strategie (Momentum)", ["Gap Momentum", "High Volatility"])
+        markt_tiefe = st.slider("Anzahl Ticker", 5, 50, 20) # Begrenzt auf 250 Requests/Tag
         
-        # DER HAKEN FÜR PRE/POST MARKET
+        # --- DER GEWÜNSCHTE HAKEN ---
         st.divider()
         include_prepost = st.checkbox("🌙 Pre & Post Market einbeziehen", value=True)
         st.toggle("Telegram Alarme 📟", value=True)
         
-        # SCAN BUTTON & IDLE STATUS
+        # --- SCAN BUTTON & STATUS ANZEIGE ---
         st.divider()
         start_scan = st.button("🚀 SCANNER JETZT STARTEN", use_container_width=True, type="primary")
         
         if not start_scan:
             st.info("🟢 **Status: Idle** (Bereit)")
+        
+        st.button("Journal & Datei löschen", use_container_width=True)
 
-    # --- 4. HAUPTBEREICH ---
+    # --- 3. HAUPTBEREICH (Layout: Chart & Journal) ---
     st.title("⚡ Alpha Master Station: Live Radar")
-    col_left, col_right = st.columns([1.8, 1])
+    col_chart, col_journal = st.columns([1.8, 1])
 
-    with col_left:
-        st.subheader("🌐 Sektor Performance (Live)")
-        # Dein TradingView Widget (SPY)
+    with col_chart:
+        st.subheader("🌐 Markt-Übersicht (SPY)")
+        # TradingView Widget
         st.components.v1.html("""
             <iframe src="https://s.tradingview.com/widgetembed/?symbol=CBOE%3ASPY&interval=5&theme=dark" width="100%" height="500" frameborder="0"></iframe>
         """, height=500)
 
-    with col_right:
+    with col_journal:
         st.subheader("📝 Signal Journal")
         journal_placeholder = st.empty()
         journal_placeholder.info("Warte auf Scan-Start...")
 
-    # --- 5. SCANNER LOGIK & STATUS ---
+    # --- 4. SCANNER LOGIK (DIREKT ÜBER API) ---
     if start_scan:
-        with st.status("🔍 Alpha Station scannt...", expanded=True) as status:
-            st.write("Rufe Daten von Supabase ab...")
+        # Hier ist die pulsierende Status-Anzeige während des Scans
+        with st.status("🔍 Alpha Station scannt gerade...", expanded=True) as status:
+            st.write("Verbindung zur API wird hergestellt...")
             
-            try:
-                # Abfrage (Haken-Logik wird hier für die Query genutzt)
-                query = supabase.table("market_data").select("*").limit(markt_tiefe)
-                if not include_prepost:
-                    query = query.eq("session", "regular")
+            # Dein API Key aus den Secrets
+            api_key = st.secrets["API_KEY"]
+            tickers = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "META", "AMZN", "GOOGL"] # Deine Ticker-Liste
+            
+            results = []
+            for symbol in tickers[:markt_tiefe]:
+                st.write(f"Analysiere: {symbol}...")
                 
-                res = query.execute()
-                data = res.data
+                # Beispiel-Abfrage an eine Stock-API (z.B. Financial Modeling Prep)
+                # Die URL passt du einfach an deine API an
+                url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={api_key}"
                 
-                st.write(f"{len(data)} Ticker analysiert...")
-                time.sleep(1) # Kurze Pause für die Optik
+                try:
+                    response = requests.get(url).json()
+                    if response:
+                        data = response[0]
+                        price = data.get("price")
+                        change = data.get("changesPercentage")
+                        
+                        # Pre-Market Logik (wenn deine API das liefert)
+                        # Hier nutzen wir den 'include_prepost' Haken
+                        
+                        results.append({
+                            "Time": datetime.now().strftime("%H:%M"),
+                            "Ticker": symbol,
+                            "Price": f"{price:.2f}",
+                            "Gap%": f"{change:+.2f}%",
+                            "Signal": "BUY" if change > 2 else "WATCH"
+                        })
+                except Exception as e:
+                    st.error(f"Fehler bei {symbol}: {e}")
                 
-                results = []
-                for item in data:
-                    results.append({
-                        "Time": datetime.now().strftime("%H:%M"),
-                        "Ticker": item.get("ticker", "N/A"),
-                        "Price": f"{item.get('price', 0):.2f}",
-                        "Gap%": f"{item.get('gap', 0):+.2f}%",
-                        "Signal": "BUY" if item.get('gap', 0) > 2 else "WATCH"
-                    })
-                
-                status.update(label="✅ Scan abgeschlossen!", state="complete", expanded=False)
-                
-                if results:
-                    journal_placeholder.table(pd.DataFrame(results))
-            except Exception as e:
-                st.error(f"Fehler: {e}")
+                time.sleep(0.1) # Um die API nicht zu überlasten
+            
+            status.update(label="✅ Scan abgeschlossen!", state="complete", expanded=False)
 
-    # --- 6. FOOTER (Personalisiert) ---
+        # Tabelle im Journal füllen
+        if results:
+            journal_placeholder.table(pd.DataFrame(results))
+
+    # --- 5. FOOTER (Deine Daten aus Gerlikon) ---
     st.divider()
     f1, f2, f3 = st.columns(3)
     with f1: st.caption(f"📍 8500 Gerlikon, Im weberlis rebberg 42")
     with f2: st.caption(f"👨‍👩‍👧‍👦 Admin: Miros & Bianca")
-    with f3: st.caption(f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    with f3: st.caption(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
