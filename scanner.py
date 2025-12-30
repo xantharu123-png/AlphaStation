@@ -33,6 +33,7 @@ def apply_presets(strat_name):
         st.session_state.active_filters = presets[strat_name].copy()
 
 # --- 3. HELPER FUNKTIONEN ---
+
 def get_ticker_news(ticker, poly_key):
     url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit=5&apiKey={poly_key}"
     try:
@@ -49,13 +50,20 @@ def get_single_ticker_data(ticker, poly_key):
                 "Chg%": round(t.get("todaysChangePerc", 0), 2), "Vol": int(t.get("day", {}).get("v", 0))}
     except: return None
 
-def get_gemini_analysis(ticker, news, price_info):
-    try:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        model = genai.GenerativeModel('gemini-1.5-flash-latest') # Stabilster Modell-Name Dez 2025
-        prompt = f"Analysiere {ticker} für Miroslav. Daten: {price_info}. News: {news}. Sentiment?"
-        return model.generate_content(prompt).text
-    except Exception as e: return f"KI-Fehler: {str(e)}"
+def get_gemini_response(prompt):
+    """Sicherer Modell-Aufruf für Ende 2025"""
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    # Liste der Modelle, die wir nacheinander probieren
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text
+        except:
+            continue
+    return "Fehler: Kein kompatibles Gemini-Modell gefunden. Bitte API-Key prüfen."
 
 def check_password():
     if "password_correct" not in st.session_state:
@@ -169,16 +177,16 @@ if check_password():
                 poly_key = st.secrets["POLYGON_KEY"]
                 news = get_ticker_news(st.session_state.selected_symbol, poly_key)
                 current = st.session_state.manual_data if st.session_state.manual_data else next((i for i in st.session_state.scan_results if i["Ticker"] == st.session_state.selected_symbol), {"Price":0, "Chg%":0})
-                st.info(get_gemini_analysis(st.session_state.selected_symbol, news, f"Kurs: ${current['Price']}, {current['Chg%']}%"))
+                prompt = f"Analysiere {st.session_state.selected_symbol}. Kurs: ${current['Price']}, Chg: {current['Chg%']}%. News: {news}. Sentiment?"
+                st.info(get_gemini_response(prompt))
 
     with c2:
         if st.button("📊 VOLLSTÄNDIGER KI MARKT-REPORT"):
             if st.session_state.scan_results:
                 with st.spinner("Erstelle Report..."):
-                    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
                     summary = pd.DataFrame(st.session_state.scan_results).head(10).to_string()
-                    report = model.generate_content(f"Erstelle Marktanalyse (Sektoren, Sentiment, RVOL). Daten: {summary}").text
+                    prompt = f"Erstelle Marktanalyse für heute {datetime.now()}. Fokus auf Sektoren & RVOL-Spikes. Daten: {summary}"
+                    report = get_gemini_response(prompt)
                     st.markdown(f"### 📅 Report vom {datetime.now().strftime('%d.%m.%Y')}\n{report}")
             else: st.warning("Keine Daten.")
 
