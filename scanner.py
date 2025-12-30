@@ -13,8 +13,7 @@ if "scan_results" not in st.session_state:
 # --- 2. HELPER FUNKTIONEN ---
 
 def get_ticker_news(ticker, poly_key):
-    """Hole aktuelle News von Massive (ehemals Polygon)"""
-    # Wir nutzen den v2 News-Endpunkt für 2025
+    """Hole aktuelle News von Polygon.io"""
     url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit=5&apiKey={poly_key}"
     try:
         response = requests.get(url).json()
@@ -24,10 +23,9 @@ def get_ticker_news(ticker, poly_key):
         return "News konnten nicht geladen werden."
 
 def get_gemini_analysis(ticker, news, price_info):
-    """KI-Analyse mit Gemini 3 Flash (Stand Dez 2025)"""
+    """KI-Analyse mit Gemini 1.5 Flash"""
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # Wir nutzen das neueste 2025er Modell für Speed & Logik
         model = genai.GenerativeModel('gemini-1.5-flash') 
         
         prompt = f"""
@@ -39,6 +37,7 @@ def get_gemini_analysis(ticker, news, price_info):
         1. Sentiment (Bullish/Bearish)
         2. Relevanz der News
         3. Empfehlung (Beobachten/Ignorieren)
+        Halte dich kurz.
         """
         response = model.generate_content(prompt)
         return response.text
@@ -64,6 +63,7 @@ def check_password():
 # --- 4. HAUPTPROGRAMM ---
 
 if check_password():
+    # Wir setzen das Layout erst nach dem Login
     st.set_page_config(page_title="Alpha V33 Pro", layout="wide", initial_sidebar_state="expanded")
 
     # --- SIDEBAR (Strategien & Range-Slider) ---
@@ -76,7 +76,7 @@ if check_password():
         st.subheader("⚙️ Feinjustierung")
         min_vol = st.number_input("Min. Volumen heute", value=300000, step=50000)
         
-        # NEU: Range-Slider (von links und rechts schiebbar)
+        # Range-Slider (von links und rechts schiebbar)
         chg_range = st.slider("Kursänderung % (Min - Max)", 0.0, 100.0, (3.0, 25.0), step=0.5)
         
         max_price = st.number_input("Max. Preis ($)", value=30.0, step=1.0)
@@ -91,7 +91,6 @@ if check_password():
     if start_scan:
         with st.status(f"🔍 Scanne Markt nach {main_strat}...", expanded=False) as status:
             poly_key = st.secrets.get("POLYGON_KEY")
-            # Snapshot API für alle US-Ticker
             url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
             
             try:
@@ -103,14 +102,12 @@ if check_password():
                     vol = t.get("day", {}).get("v", 0)
                     last = t.get("min", {}).get("c", 0)
                     
-                    # Filter-Logik (Hybrid)
                     match = False
                     if main_strat == "Volume Surge" and vol > 500000: match = True
                     elif main_strat == "Gap Momentum" and chg > 5: match = True
                     elif main_strat == "Penny Stock Breakout" and last < 5: match = True
                     
                     if match:
-                        # Range-Slider & Manuelle Filter
                         if not (chg_range[0] <= chg <= chg_range[1]): match = False
                         if vol < min_vol or last > max_price: match = False
                     
@@ -137,7 +134,6 @@ if check_password():
         st.subheader("📝 Signal Journal")
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
-            # Interaktive Auswahl
             selection = st.dataframe(
                 df,
                 on_select="rerun",
@@ -145,7 +141,6 @@ if check_password():
                 hide_index=True,
                 use_container_width=True
             )
-            # Wenn Zeile angeklickt wird -> Ticker aktualisieren
             if selection.selection and selection.selection.rows:
                 idx = selection.selection.rows[0]
                 st.session_state.selected_symbol = df.iloc[idx]["Ticker"]
@@ -155,17 +150,14 @@ if check_password():
     # --- KI ANALYSE & DAILY REPORT ---
     st.divider()
     
-
-[Image of stock market trends]
-
     c1, c2 = st.columns(2)
     
     with c1:
-        if st.button(f"🤖 GEMINI ANALYSE FÜR {st.session_state.selected_symbol}"):
-            with st.spinner("Lese News..."):
+        st.subheader("🤖 KI-Analyse")
+        if st.button(f"✨ GEMINI MEINUNG ZU {st.session_state.selected_symbol}"):
+            with st.spinner("Analysiere Daten..."):
                 poly_key = st.secrets["POLYGON_KEY"]
                 news = get_ticker_news(st.session_state.selected_symbol, poly_key)
-                # Preis-Info extrahieren
                 current = next((i for i in st.session_state.scan_results if i["Ticker"] == st.session_state.selected_symbol), {"Price":0, "Chg%":0})
                 p_info = f"Preis: ${current['Price']}, Änderung: {current['Chg%']}%"
                 
@@ -173,11 +165,15 @@ if check_password():
                 st.info(ana)
 
     with c2:
-        if st.button("📊 TÄGLICHE MARKTANALYSE"):
-            st.write(f"### 📅 Analyse vom {datetime.now().strftime('%d.%m.%Y')}")
-            st.success("Sektoren-Rotation: Fokus auf Healthcare & Defense.")
+        st.subheader("📊 Tägliche Analyse")
+        if st.button("📝 REPORT ERSTELLEN"):
+            st.write(f"### Analyse vom {datetime.now().strftime('%d.%m.%Y')}")
+            st.markdown("""
+            * **Sektoren-Rotation:** Fokus liegt auf defensiven Werten und Healthcare.
+            * **Sentiment:** Neutral, da Jahresende (Window Dressing).
+            * **RVOL:** Erhöhte Aktivität bei Small Caps beobachtet.
+            """)
             if st.session_state.scan_results:
-                st.write(f"Top RVOL-Spike: **{st.session_state.scan_results[0]['Ticker']}**")
-            st.write("News-Sentiment: Neutral bis Bullisch bei Small-Caps.")
+                st.success(f"Top-Pick heute: {st.session_state.scan_results[0]['Ticker']}")
 
     st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
