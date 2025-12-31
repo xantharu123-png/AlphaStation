@@ -12,7 +12,7 @@ if "active_filters" not in st.session_state: st.session_state.active_filters = {
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 def apply_presets(strat_name, market_type):
-    # Alle 13 mathematischen Strategien vollständig
+    # Alle 13 mathematischen Strategien
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -32,22 +32,34 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Mathematische Priorisierung
+    # Alpha-Score für Priorisierung
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
+
+def get_sector_performance(poly_key):
+    # Sektoren Matrix für Aktien
+    sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
+    results = []
+    for name, ticker in sectors.items():
+        try:
+            url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}?apiKey={poly_key}"
+            d = requests.get(url).json()
+            results.append({"Sektor": name, "Performance %": round(d.get("ticker", {}).get("todaysChangePerc", 0), 2)})
+        except: continue
+    return pd.DataFrame(results)
 
 # LOGIN
 if "password_correct" not in st.session_state:
     st.title("🔒 Alpha Station Login")
     with st.form("login"):
-        if st.form_submit_button("Einloggen") and st.text_input("Passwort", type="password") == st.secrets.get("PASSWORD"):
+        if st.form_submit_button("Einloggen") and st.text_input("PW", type="password") == st.secrets.get("PASSWORD"):
             st.session_state["password_correct"] = True
             st.rerun()
     st.stop()
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (VOLLE FUNKTION)
+# SIDEBAR
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
@@ -56,20 +68,39 @@ with st.sidebar:
     strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock/Moon Shot", "Bull Flag Breakout", "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", "Low Float/Market Cap", "Blue Chip Pullback", "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Proxy"]
     main_strat = st.selectbox("Strategie-Rezept", strat_list)
     if main_strat != st.session_state.last_strat:
-        apply_presets(main_strat, m_type); st.session_state.last_strat = main_strat
+        apply_presets(main_strat, m_type)
+        st.session_state.last_strat = main_strat
+
+    if st.session_state.active_filters:
+        st.caption("Aktive Parameter:")
+        for n, v in list(st.session_state.active_filters.items()):
+            c1, c2 = st.columns([5, 1])
+            c1.write(f"**{n}:** {v[0]}-{v[1]}")
+            if c2.button("×", key=f"del_{n}"):
+                del st.session_state.active_filters[n]; st.rerun()
+
+    st.divider()
+    st.subheader("⚙️ Feinjustierung")
+    f_type = st.selectbox("Indikator", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "SMA Trend"])
+    if f_type == "RVOL": val = st.slider("RVOL", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
+    elif f_type == "SMA Trend": val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
+    else: val = st.slider("Bereich", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
+    if st.button("➕ Hinzufügen"):
+        st.session_state.active_filters[f_type] = val; st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Verbinde mit Polygon API...") as status:
+        with st.status("Analysiere Markt...") as status:
             poly_key = st.secrets["POLYGON_KEY"]
             url = f"https://api.polygon.io/v2/snapshot/locale/{'global' if m_type=='Krypto' else 'us'}/markets/{'crypto' if m_type=='Krypto' else 'stocks'}/tickers?apiKey={poly_key}"
             try:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
+                    # Krypto Fix
                     d_d = t.get("day", {})
                     price = d_d.get("c") or t.get("lastTrade", {}).get("p") or t.get("min", {}).get("c", 0)
                     if not price or price <= 0: continue
-                    chg = t.get("todaysChangePerc") or 0
+                    chg = t.get("todaysChangePerc", 0)
                     vol, prev = d_d.get("v", 1), t.get("prevDay", {})
                     rvol = round(vol / (prev.get("v", 1) or 1), 2)
                     sma_trend = round(((price - (prev.get("c") or price)) / (prev.get("c") or 1)) * 100, 2)
@@ -78,31 +109,31 @@ with st.sidebar:
                     f = st.session_state.active_filters
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
+                    
                     if match:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
-                # MIROSLAV REGEL [cite: 2025-12-28]
+                # Miroslav Warnung [cite: 2025-12-28]
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
                 status.update(label="Scan fertig", state="complete")
             except: st.error("API Fehler")
 
-    # --- MANUELLE SUCHE & FAVORITEN ---
+    # SUCHE & FAVORITEN
     st.divider()
     st.subheader("🔍 Suche & Favoriten")
     search_ticker = st.text_input("Ticker Suche", "").upper()
     if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
-    if st.button("⭐ IN WATCHLIST", use_container_width=True):
+    if st.button("⭐ FAVORIT", use_container_width=True):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
             st.session_state.watchlist.append(st.session_state.selected_symbol); st.rerun()
 
     if st.session_state.watchlist:
-        st.caption("Deine Watchlist:")
-        for w_sym in list(set(st.session_state.watchlist)):
+        for w in list(set(st.session_state.watchlist)):
             wc1, wc2 = st.columns([4, 1])
-            if wc1.button(f"📌 {w_sym}", key=f"ws_{w_sym}"): st.session_state.selected_symbol = w_sym
-            if wc2.button("×", key=f"wd_{w_sym}"): st.session_state.watchlist.remove(w_sym); st.rerun()
+            if wc1.button(f"📌 {w}", key=f"ws_{w}"): st.session_state.selected_symbol = w
+            if wc2.button("×", key=f"wd_{w}"): st.session_state.watchlist.remove(w); st.rerun()
 
 # HAUPTBEREICH
 t1, t2, t3 = st.tabs(["🚀 Terminal", "📅 Kalender", "📊 Sektoren"])
@@ -113,29 +144,38 @@ with t1:
         if st.session_state.scan_results:
             df_res = pd.DataFrame(st.session_state.scan_results)
             sel = st.dataframe(df_res, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
-            if sel.selection and sel.selection.rows: st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
+            if sel.selection and sel.selection.rows:
+                st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
-        st.subheader(f"📊 Preis: {st.session_state.selected_symbol}")
-        # CHART FIX: Binance Preis-Feed
+        st.subheader(f"📊 Live-Preis: {st.session_state.selected_symbol}")
+        # Chart Fix: Binance Preis-Feed
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
-        st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv"}});</script></div>', height=750)
+        st.components.v1.html(f'''
+            <div style="height:750px;width:100%"><div id="tv_chart" style="height:100%"></div>
+            <script src="https://s3.tradingview.com/tv.js"></script>
+            <script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv_chart"}});</script></div>
+        ''', height=750)
 
-# --- KI-ANALYSE FINALE KORREKTUR ---
+with t3:
+    if m_type == "Aktien" and st.button("Sektoren laden"):
+        st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
+
+# KI-ANALYSE FINALE KORREKTUR [cite: 2025-12-30]
 st.divider()
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            # Wir probieren nacheinander die gängigen Modell-Namen für maximale Kompatibilität
+            # Wir testen nacheinander die sichersten Namen für v1beta und v1
             success = False
-            for model_name in ['gemini-1.5-flash', 'models/gemini-1.5-flash']:
+            for m_name in ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'models/gemini-1.5-flash']:
                 try:
-                    model = genai.GenerativeModel(model_name)
-                    # Daily Analysis inkl. aller Parameter [cite: 2025-12-30]
-                    response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
+                    model = genai.GenerativeModel(m_name)
+                    # Rating 1-100 inkludieren [cite: 2025-12-30]
+                    response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100 basierend auf Trends.")
                     st.info(response.text); success = True; break
                 except: continue
-            if not success: st.error("KI Modell konnte nicht geladen werden. Prüfe API-Key oder Modell-Verfügbarkeit.")
+            if not success: st.error("KI Modell konnte nicht geladen werden. Prüfe API-Key.")
         except Exception as e: st.error(f"KI Fehler: {e}")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
