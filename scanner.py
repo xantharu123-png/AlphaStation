@@ -32,12 +32,13 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Alpha-Score für die Priorisierung
+    # Alpha-Score Logik
+    $Score = (RVOL \cdot 12) + (|SMA_{Trend}| \cdot 10) + (|Change| \cdot 8)$
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
 
 def get_sector_performance(poly_key):
-    # US-Sektoren Matrix
+    # Sektoren Matrix
     sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
     results = []
     for name, ticker in sectors.items():
@@ -77,8 +78,7 @@ with st.sidebar:
             c1, c2 = st.columns([5, 1])
             c1.write(f"**{n}:** {v[0]}-{v[1]}")
             if c2.button("×", key=f"del_{n}"):
-                del st.session_state.active_filters[n]
-                st.rerun()
+                del st.session_state.active_filters[n]; st.rerun()
 
     st.divider()
     st.subheader("⚙️ Feinjustierung")
@@ -87,8 +87,7 @@ with st.sidebar:
     elif f_type == "SMA Trend": val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
     else: val = st.slider("Bereich", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
     if st.button("➕ Hinzufügen"):
-        st.session_state.active_filters[f_type] = val
-        st.rerun()
+        st.session_state.active_filters[f_type] = val; st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
         with st.status("Verbinde mit Polygon API...") as status:
@@ -98,7 +97,7 @@ with st.sidebar:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
-                    # --- KRYPTO ROBUSTHEITS-FIX ---
+                    # Krypto Deep-Search
                     d_d = t.get("day", {})
                     m_d = t.get("min", {})
                     tr_d = t.get("lastTrade", {})
@@ -124,11 +123,8 @@ with st.sidebar:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
-                
-                # Miroslavs Warnung [cite: 2025-12-28, 53, 65]
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
-                
                 status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Ergebnisse", state="complete")
             except: st.error("Fehler beim API-Abruf")
 
@@ -139,17 +135,14 @@ with st.sidebar:
     if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
     if st.button("⭐ IN WATCHLIST", use_container_width=True):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(st.session_state.selected_symbol)
-            st.toast(f"{st.session_state.selected_symbol} hinzugefügt!")
+            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast(f"{st.session_state.selected_symbol} OK!")
 
     if st.session_state.watchlist:
         st.caption("Deine Watchlist:")
         for w_sym in list(set(st.session_state.watchlist)):
             wc1, wc2 = st.columns([4, 1])
             if wc1.button(f"📌 {w_sym}", key=f"ws_{w_sym}"): st.session_state.selected_symbol = w_sym
-            if wc2.button("×", key=f"wd_{w_sym}"): 
-                st.session_state.watchlist.remove(w_sym)
-                st.rerun()
+            if wc2.button("×", key=f"wd_{w_sym}"): st.session_state.watchlist.remove(w_sym); st.rerun()
 
 # HAUPTBEREICH
 t1, t2, t3 = st.tabs(["🚀 Trading Terminal", "📅 Kalender", "📊 Sektoren-Matrix"])
@@ -160,24 +153,38 @@ with t1:
         if st.session_state.scan_results:
             df_res = pd.DataFrame(st.session_state.scan_results)
             sel = st.dataframe(df_res, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
-            if sel.selection and sel.selection.rows: st.session_state.selected_symbol = df_res.iloc[sel.selection.rows[0]]["Ticker"]
+            if sel.selection and sel.selection.rows:
+                # FIX: Wir nehmen nur den Ticker-String für den Chart
+                st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
-        st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
-        # Chart-Setup
+        st.subheader(f"📊 Live-Preis Chart: {st.session_state.selected_symbol}")
+        # FIX: TradingView Symbol-Pfad für PREIS-Feed
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
-        st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv", "withdateranges": true, "allow_symbol_change": true, "hide_side_toolbar": false}});</script></div>', height=750)
+        st.components.v1.html(f'''
+            <div style="height:750px;width:100%">
+                <div id="tv_chart" style="height:100%"></div>
+                <script src="https://s3.tradingview.com/tv.js"></script>
+                <script>
+                    new TradingView.widget({{
+                        "autosize": true, "symbol": "{tv_sym}", "interval": "5", "timezone": "Etc/UTC",
+                        "theme": "dark", "style": "1", "locale": "de", "toolbar_bg": "#f1f3f6",
+                        "enable_publishing": false, "hide_side_toolbar": false, "allow_symbol_change": true,
+                        "container_id": "tv_chart"
+                    }});
+                </script>
+            </div>''', height=750)
 
 with t3:
     if m_type == "Aktien" and st.button("Sektoren laden"):
         st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
 
 st.divider()
-# --- KI-ANALYSE MIT STABILEM MODELL-FIX [cite: 2025-12-30, 75, 76] ---
+# --- KI-ANALYSE MIT FIX FÜR 404 ---
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            # Stabiler Modellname ohne Präfix für v1-API
+            # Wir nutzen den universellen Namen für v1-Kompatibilität [cite: 2025-12-30]
             model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
             st.info(response.text)
