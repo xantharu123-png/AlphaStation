@@ -32,12 +32,12 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Alpha-Score für Priorisierung
+    # Alpha-Score für die Priorisierung
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
 
 def get_sector_performance(poly_key):
-    # Sektoren-Matrix für US-Aktien
+    # US-Sektoren Matrix
     sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
     results = []
     for name, ticker in sectors.items():
@@ -59,7 +59,7 @@ if "password_correct" not in st.session_state:
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (Vollständig)
+# SIDEBAR
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
@@ -98,7 +98,7 @@ with st.sidebar:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
-                    # Krypto Deep-Search
+                    # --- KRYPTO ROBUSTHEITS-FIX ---
                     d_d = t.get("day", {})
                     m_d = t.get("min", {})
                     tr_d = t.get("lastTrade", {})
@@ -124,12 +124,15 @@ with st.sidebar:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
+                
+                # Miroslavs Warnung [cite: 2025-12-28, 53, 65]
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
+                
                 status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Ergebnisse", state="complete")
             except: st.error("Fehler beim API-Abruf")
 
-    # MANUELLE SUCHE & FAVORITEN
+    # --- MANUELLE SUCHE & WATCHLIST ---
     st.divider()
     st.subheader("🔍 Suche & Favoriten")
     search_ticker = st.text_input("Ticker Suche", "").upper()
@@ -160,6 +163,7 @@ with t1:
             if sel.selection and sel.selection.rows: st.session_state.selected_symbol = df_res.iloc[sel.selection.rows[0]]["Ticker"]
     with c_chart:
         st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
+        # Chart-Setup
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
         st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv", "withdateranges": true, "allow_symbol_change": true, "hide_side_toolbar": false}});</script></div>', height=750)
 
@@ -168,11 +172,12 @@ with t3:
         st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
 
 st.divider()
-# KI-ANALYSE MIT STABILEM FIX [cite: 2025-12-30, 75]
+# --- KI-ANALYSE MIT STABILEM MODELL-FIX [cite: 2025-12-30, 75, 76] ---
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+            # Stabiler Modellname ohne Präfix für v1-API
             model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
             st.info(response.text)
