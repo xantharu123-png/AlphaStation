@@ -12,7 +12,6 @@ if "active_filters" not in st.session_state: st.session_state.active_filters = {
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 def apply_presets(strat_name, market_type):
-    # Alle 13 mathematischen Strategien vollständig
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -32,21 +31,9 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Alpha = (RVOL * 12) + (abs(SMA) * 10) + (abs(Chg) * 8)
+    # Formel: (RVOL * 12) + (ABS(SMA) * 10) + (ABS(CHG) * 8)
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
-
-def get_sector_performance(poly_key):
-    # US-Sektoren Matrix
-    sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
-    results = []
-    for name, ticker in sectors.items():
-        try:
-            url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}?apiKey={poly_key}"
-            d = requests.get(url).json()
-            results.append({"Sektor": name, "Performance %": round(d.get("ticker", {}).get("todaysChangePerc", 0), 2)})
-        except: continue
-    return pd.DataFrame(results)
 
 # LOGIN
 if "password_correct" not in st.session_state:
@@ -59,7 +46,7 @@ if "password_correct" not in st.session_state:
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (Vollständig inkl. Suche & Watchlist)
+# SIDEBAR
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
@@ -96,7 +83,6 @@ with st.sidebar:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
-                    # Krypto Deep-Search Fix
                     d_d = t.get("day", {})
                     m_d = t.get("min", {})
                     tr_d = t.get("lastTrade", {})
@@ -116,13 +102,11 @@ with st.sidebar:
                     f = st.session_state.active_filters
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
-                    if "Preis min-max" in f and not (f["Preis min-max"][0] <= price <= f["Preis min-max"][1]): match = False
-
+                    
                     if match:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
-                # Miroslavs Warnung [cite: 2025-12-28, 53]
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
                 status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Ergebnisse", state="complete")
@@ -135,7 +119,7 @@ with st.sidebar:
     if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
     if st.button("⭐ IN WATCHLIST", use_container_width=True):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast(f"{st.session_state.selected_symbol} OK!")
+            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast("Favorit gespeichert!")
 
     if st.session_state.watchlist:
         st.caption("Deine Watchlist:")
@@ -156,8 +140,8 @@ with t1:
             if sel.selection and sel.selection.rows:
                 st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
-        st.subheader(f"📊 Live-Preis Chart: {st.session_state.selected_symbol}")
-        # FIX: TradingView Symbol-Pfad für PREIS-Feed statt Market Cap
+        st.subheader(f"📊 Live-Preis: {st.session_state.selected_symbol}")
+        # CHART FIX: Erzwinge Preis-Feed
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
         st.components.v1.html(f'''
             <div style="height:750px;width:100%">
@@ -167,26 +151,22 @@ with t1:
                     new TradingView.widget({{
                         "autosize": true, "symbol": "{tv_sym}", "interval": "5", "timezone": "Etc/UTC",
                         "theme": "dark", "style": "1", "locale": "de", "toolbar_bg": "#f1f3f6",
-                        "enable_publishing": false, "hide_side_toolbar": false, "allow_symbol_change": true,
-                        "container_id": "tv_chart"
+                        "enable_publishing": false, "hide_side_toolbar": false, "container_id": "tv_chart"
                     }});
                 </script>
             </div>''', height=750)
 
-with t3:
-    if m_type == "Aktien" and st.button("Sektoren laden"):
-        st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
-
+# KI-ANALYSE FIX [cite: 2025-12-30]
 st.divider()
-# --- KI-ANALYSE MIT FIX FÜR 404 ---
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            # Stabiler Modellname für API v1 [cite: 2025-12-30]
+            # Nutze den Basistyp des Modells ohne Präfix-Pfad für maximale Kompatibilität
             model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
+            response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100. [cite: 2025-12-30]")
             st.info(response.text)
-        except Exception as e: st.error(f"KI Fehler: {e}")
+        except Exception as e:
+            st.error(f"KI Fehler: {e}")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
