@@ -13,6 +13,7 @@ if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 # --- 2. MATHEMATISCHE STRATEGIE-DEFINITIONEN ---
 def apply_presets(strat_name, market_type):
+    """Setzt die mathematischen Grenzwerte für jede Strategie"""
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -21,7 +22,7 @@ def apply_presets(strat_name, market_type):
         "Unusual Volume": {"RVOL": (5.0, 100.0), "Volumen": (2000000, 50000000000)},
         "High of Day (HOD)": {"Abstand vom Hoch %": (0.0, 0.5), "RVOL": (1.3, 50.0)},
         "Short Squeeze Candidate": {"Kursänderung %": (8.0, 45.0), "RVOL": (3.0, 50.0)},
-        "Low Float/Market Cap": {"Market Cap (Mrd $)": (0.0, 0.5), "Kursänderung %": (12.0, 100.0)},
+        "Low Float/Market Cap": {"Market Cap (Mrd $)": (0.0, 0.5), "Kursänderung %": (10.0, 100.0)},
         "Blue Chip Pullback": {"Market Cap (Mrd $)": (50.0, 3000.0), "Kursänderung %": (-4.0, -0.2)},
         "Multi-Day Runner": {"Vortag %": (2.0, 15.0), "Kursänderung %": (2.0, 15.0)},
         "Pre-Market Gapper": {"Gap %": (4.0, 40.0), "Volumen": (100000, 50000000000)},
@@ -81,7 +82,7 @@ if check_password():
             apply_presets(main_strat, market_type)
             st.session_state.last_strat = main_strat
 
-        # Aktive Parameter
+        # Aktive Parameter Anzeige & Löschen
         if st.session_state.active_filters:
             st.caption("Aktive Parameter:")
             for n, v in list(st.session_state.active_filters.items()):
@@ -92,16 +93,30 @@ if check_password():
                     st.rerun()
 
         st.divider()
+        # --- FIX: FEINJUSTIERUNG MIT DYNAMISCHEM SLIDER ---
         st.subheader("⚙️ Feinjustierung")
         f_options = ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "Gap %", "Market Cap (Mrd $)", "Abstand vom Hoch %", "SMA Trend"]
         f_type = st.selectbox("Indikator/Filter", f_options)
         
-        if f_type == "RVOL": val = st.slider("RVOL", 0.0, 20.0, (1.5, 5.0))
-        elif f_type == "SMA Trend": val = st.slider("SMA Abstand %", -10.0, 10.0, (0.5, 3.0))
-        elif f_type == "Market Cap (Mrd $)": val = st.slider("Cap (Mrd $)", 0.0, 3000.0, (0.0, 500.0))
-        else: val = st.slider("Bereich", -50.0, 100.0, (0.0, 10.0))
+        # Jeder Slider bekommt einen eindeutigen Key basierend auf f_type
+        if f_type == "RVOL": 
+            val = st.slider("RVOL Bereich", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
+        elif f_type == "SMA Trend": 
+            val = st.slider("SMA Abstand %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
+        elif f_type == "Market Cap (Mrd $)": 
+            val = st.slider("Cap (Mrd $)", 0.0, 3500.0, (0.0, 500.0), key=f"sl_{f_type}")
+        elif f_type == "Volumen": 
+            val = st.slider("Volumen", 0, 100000000, (500000, 5000000), key=f"sl_{f_type}")
+        elif f_type == "Preis min-max":
+            val = st.slider("Preis Bereich", 0.0, 5000.0, (1.0, 100.0), key=f"sl_{f_type}")
+        elif f_type == "Gap %":
+            val = st.slider("Gap Bereich %", -50.0, 50.0, (2.0, 10.0), key=f"sl_{f_type}")
+        elif f_type == "Abstand vom Hoch %":
+            val = st.slider("HOD Abstand %", 0.0, 20.0, (0.0, 1.0), key=f"sl_{f_type}")
+        else: # Kursänderung %
+            val = st.slider("Änderung %", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
         
-        if st.button("➕ Hinzufügen"):
+        if st.button("➕ Hinzufügen", use_container_width=True):
             st.session_state.active_filters[f_type] = val
             st.rerun()
 
@@ -120,11 +135,11 @@ if check_password():
                         chg, vol, high, open_p = t.get("todaysChangePerc", 0), t.get("day", {}).get("v", 1), t.get("day", {}).get("h", 1), t.get("day", {}).get("o", 1)
                         m_cap = t.get("market_cap", 0) / 1_000_000_000 if t.get("market_cap") else 0
                         prev = t.get("prevDay", {})
-                        p_close, p_vol, p_open, p_high, p_low = prev.get("c", 1), prev.get("v", 1), prev.get("o", 1), prev.get("h", 1), prev.get("l", 1)
+                        p_close, p_high, p_low = prev.get("c", 1), prev.get("h", 1), prev.get("l", 1)
 
-                        rvol = round(vol / p_vol, 2) if p_vol > 0 else 0
+                        rvol = round(vol / prev.get("v", 1), 2) if prev.get("v", 0) > 0 else 0
                         gap = round(((open_p - p_close) / p_close) * 100, 2)
-                        p_perf = round(((p_close - p_open) / p_open) * 100, 2)
+                        p_perf = round(((p_close - prev.get("o", 1)) / prev.get("o", 1)) * 100, 2)
                         dist_hod = round(((high - price) / high) * 100, 2) if high > 0 else 100
                         sma_trend = round(((price - ((p_high + p_low + p_close) / 3)) / ((p_high + p_low + p_close) / 3)) * 100, 2)
 
@@ -137,6 +152,8 @@ if check_password():
                             if "SMA Trend" in f and not (f["SMA Trend"][0] <= sma_trend <= f["SMA Trend"][1]): match = False
                             if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                             if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
+                            if "Preis min-max" in f and not (f["Preis min-max"][0] <= price <= f["Preis min-max"][1]): match = False
+                            if "Market Cap (Mrd $)" in f and not (f["Market Cap (Mrd $)"][0] <= m_cap <= f["Market Cap (Mrd $)"][1]): match = False
 
                         if match and price > 0:
                             res.append({"Ticker": clean_ticker, "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "SMA%": sma_trend, "Cap(B)": round(m_cap, 2)})
@@ -147,26 +164,18 @@ if check_password():
                     status.update(label=f"Scan fertig: {len(res)} Signale", state="complete")
                 except Exception as e: st.error(f"Fehler: {e}")
 
-        # --- NEU/RE-INTEGRIERT: MANUELLE SUCHE & WATCHLIST ---
         st.divider()
         st.subheader("🔍 Suche & Favoriten")
-        search_ticker = st.text_input("Ticker direkt suchen", "").upper()
-        if st.button("TICKER LADEN", use_container_width=True):
-            st.session_state.selected_symbol = search_ticker
-        
+        search_ticker = st.text_input("Ticker Suche", "").upper()
+        if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
         if st.button("⭐ IN WATCHLIST", use_container_width=True):
             if st.session_state.selected_symbol not in st.session_state.watchlist:
                 st.session_state.watchlist.append(st.session_state.selected_symbol)
-                st.toast(f"{st.session_state.selected_symbol} zur Watchlist hinzugefügt!")
-
         if st.session_state.watchlist:
-            st.caption("Deine Watchlist:")
             for w_sym in st.session_state.watchlist:
                 wc1, wc2 = st.columns([4, 1])
-                if wc1.button(w_sym, key=f"ws_{w_sym}"):
-                    st.session_state.selected_symbol = w_sym
-                    st.rerun()
-                if wc2.button("×", key=f"wd_{w_sym}"):
+                if wc1.button(w_sym, key=f"ws_{w_sym}"): st.session_state.selected_symbol = w_sym
+                if wc2.button("×", key=f"wd_{w_sym}"): 
                     st.session_state.watchlist.remove(w_sym)
                     st.rerun()
 
@@ -179,6 +188,7 @@ if check_password():
             st.subheader("📝 Signal Journal")
             if st.session_state.scan_results:
                 df = pd.DataFrame(st.session_state.scan_results)
+                # NAVIGATION: Pfeiltasten + Enter
                 selection = st.dataframe(df, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
                 if selection.selection and selection.selection.rows:
                     st.session_state.selected_symbol = df.iloc[selection.selection.rows[0]]["Ticker"]
@@ -187,42 +197,26 @@ if check_password():
         with c_chart:
             st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
             tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if market_type == "Krypto" else st.session_state.selected_symbol
-            
             tradingview_html = f"""
             <div class="tradingview-widget-container" style="height:750px;width:100%">
               <div id="tradingview_pro" style="height:100%;width:100%"></div>
               <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
               <script type="text/javascript">
               new TradingView.widget({{ 
-                "autosize": true, 
-                "symbol": "{tv_sym}", 
-                "interval": "5", 
-                "timezone": "Etc/UTC", 
-                "theme": "dark", 
-                "style": "1", 
-                "locale": "de", 
-                "toolbar_bg": "#f1f3f6",
-                "enable_publishing": false,
-                "withdateranges": true,
-                "hide_side_toolbar": false,
-                "allow_symbol_change": true,
-                "container_id": "tradingview_pro" 
+                "autosize": true, "symbol": "{tv_sym}", "interval": "5", "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "de", 
+                "hide_side_toolbar": false, "withdateranges": true, "allow_symbol_change": true, "container_id": "tradingview_pro" 
               }});
               </script>
             </div> """
             st.components.v1.html(tradingview_html, height=750)
 
     with tab_calendar:
-        calendar_html = """
-        <div class="tradingview-widget-container">
-          <iframe src="https://www.tradingview.com/embed-widget/events/?locale=de#%7B%22colorTheme%22%3A%22dark%22%2C%22isTransparent%22%3Afalse%2C%22width%22%3A%22100%25%22%2C%22height%22%3A%22750%22%2C%22importanceFilter%22%3A%22-1%2C0%2C1%22%7D" width="100%" height="750" frameborder="0"></iframe>
-        </div> """
-        st.components.v1.html(calendar_html, height=800)
+        st.components.v1.html('<iframe src="https://www.tradingview.com/embed-widget/events/?locale=de" width="100%" height="750" frameborder="0"></iframe>', height=800)
 
     # KI ANALYSE
     st.divider()
     if st.button(f"🤖 KI ANALYSE: {st.session_state.selected_symbol}"):
-        with st.spinner("KI berechnet..."):
+        with st.spinner("KI berechnet Sentiment..."):
             news = get_ticker_news(st.session_state.selected_symbol, st.secrets["POLYGON_KEY"])
             st.info(get_gemini_response(f"Analysiere {st.session_state.selected_symbol}. News: {news}"))
 
