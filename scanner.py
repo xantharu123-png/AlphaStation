@@ -32,12 +32,12 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Priorisierungs-Logik
+    # Alpha-Score für Priorisierung
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
 
 def get_sector_performance(poly_key):
-    # US-Sektoren Matrix
+    # Sektoren-Matrix für US-Aktien
     sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
     results = []
     for name, ticker in sectors.items():
@@ -59,13 +59,11 @@ if "password_correct" not in st.session_state:
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (ALLES WIEDER DA)
+# SIDEBAR (Vollständig)
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
-    if m_type == "Aktien": ext_hours = st.checkbox("Pre & Post Market", value=True)
-    else: ext_hours = False
-
+    
     st.divider()
     strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock/Moon Shot", "Bull Flag Breakout", "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", "Low Float/Market Cap", "Blue Chip Pullback", "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Proxy"]
     main_strat = st.selectbox("Strategie-Rezept", strat_list)
@@ -84,52 +82,54 @@ with st.sidebar:
 
     st.divider()
     st.subheader("⚙️ Feinjustierung")
-    f_options = ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "Gap %", "Market Cap (Mrd $)", "Abstand vom Hoch %", "SMA Trend"]
-    f_type = st.selectbox("Filter", f_options)
+    f_type = st.selectbox("Indikator", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "SMA Trend"])
     if f_type == "RVOL": val = st.slider("RVOL", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
     elif f_type == "SMA Trend": val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
     else: val = st.slider("Bereich", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
-    
     if st.button("➕ Hinzufügen"):
         st.session_state.active_filters[f_type] = val
         st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Analysiere Daten...") as status:
+        with st.status("Verbinde mit Polygon API...") as status:
             poly_key = st.secrets["POLYGON_KEY"]
-            url = f"https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers?apiKey={poly_key}" if m_type == "Krypto" else f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
+            url = f"https://api.polygon.io/v2/snapshot/locale/{'global' if m_type=='Krypto' else 'us'}/markets/{'crypto' if m_type=='Krypto' else 'stocks'}/tickers?apiKey={poly_key}"
             try:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
                     # Krypto Deep-Search
-                    tick_d = t.get("min", {}) or t.get("lastTrade", {})
-                    price = tick_d.get("c") or tick_d.get("p") or t.get("day", {}).get("c", 0)
-                    chg = t.get("todaysChangePerc", 0)
-                    vol = t.get("day", {}).get("v", 1)
+                    d_d = t.get("day", {})
+                    m_d = t.get("min", {})
+                    tr_d = t.get("lastTrade", {})
+                    price = d_d.get("c") or m_d.get("c") or tr_d.get("p") or t.get("todaysChangePerc", 0)
+                    if not price or price == 0: continue
+                    
+                    chg = t.get("todaysChangePerc") or 0
+                    vol = d_d.get("v") or 1
                     prev = t.get("prevDay", {})
                     p_vol = prev.get("v") or (vol * 0.9)
                     p_close = prev.get("c") or price
                     
                     rvol = round(vol / (p_vol or 1), 2)
                     sma_trend = round(((price - p_close) / (p_close or 1)) * 100, 2)
-                    m_cap = (t.get("market_cap") or 0) / 1_000_000_000
-
+                    
                     match = True
                     f = st.session_state.active_filters
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
-                    
-                    if match and price > 0:
-                        res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg), "Cap(B)": round(m_cap, 2)})
+                    if "Preis min-max" in f and not (f["Preis min-max"][0] <= price <= f["Preis min-max"][1]): match = False
+
+                    if match:
+                        res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
-                status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Signale", state="complete")
-            except: st.error("API Fehler")
+                status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Ergebnisse", state="complete")
+            except: st.error("Fehler beim API-Abruf")
 
-    # MANUELLE SUCHE & WATCHLIST [Wiederhergestellt]
+    # MANUELLE SUCHE & FAVORITEN
     st.divider()
     st.subheader("🔍 Suche & Favoriten")
     search_ticker = st.text_input("Ticker Suche", "").upper()
@@ -149,7 +149,7 @@ with st.sidebar:
                 st.rerun()
 
 # HAUPTBEREICH
-t1, t2, t3 = st.tabs(["🚀 Terminal", "📅 Kalender", "📊 Sektoren-Matrix"])
+t1, t2, t3 = st.tabs(["🚀 Trading Terminal", "📅 Kalender", "📊 Sektoren-Matrix"])
 with t1:
     c_chart, c_journal = st.columns([2, 1])
     with c_journal:
@@ -168,14 +168,14 @@ with t3:
         st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
 
 st.divider()
-# KI-ANALYSE MIT FIX
+# KI-ANALYSE MIT STABILEM FIX [cite: 2025-12-30, 75]
 if st.button("🤖 KI ANALYSE"):
-    with st.spinner("KI berechnet..."):
+    with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
             model = genai.GenerativeModel('gemini-1.5-flash')
-            # Daily Analysis inkl. aller Parameter [cite: 2025-12-30]
-            st.info(model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]").text)
+            response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
+            st.info(response.text)
         except Exception as e: st.error(f"KI Fehler: {e}")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
