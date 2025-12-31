@@ -12,6 +12,7 @@ if "active_filters" not in st.session_state: st.session_state.active_filters = {
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 def apply_presets(strat_name, market_type):
+    # Alle 13 Strategien
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -31,10 +32,12 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
+    # Alpha-Score Logik [cite: 2025-12-30]
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
 
 def get_sector_performance(poly_key):
+    # Sektoren-Matrix für US-Aktien
     sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
     results = []
     for name, ticker in sectors.items():
@@ -94,41 +97,48 @@ with st.sidebar:
         st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Berechne Mathematik...") as status:
+        with st.status("Analysiere Daten-Snapshot...") as status:
             poly_key = st.secrets["POLYGON_KEY"]
-            url = f"https://api.polygon.io/v2/snapshot/locale/{'us' if m_type=='Aktien' else 'global'}/markets/{'stocks' if m_type=='Aktien' else 'crypto'}/tickers?apiKey={poly_key}"
+            url = f"https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers?apiKey={poly_key}" if m_type == "Krypto" else f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
             try:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
+                    # --- KRYPTO FIX: DEEP SEARCH FÜR PREIS & VOLUMEN ---
                     tick_d = t.get("min", {}) or t.get("lastTrade", {})
-                    price = tick_d.get("c") or tick_d.get("p", 0)
-                    chg, vol, high, open_p = t.get("todaysChangePerc", 0), t.get("day", {}).get("v", 1), t.get("day", {}).get("h", 1), t.get("day", {}).get("o", 1)
-                    prev = t.get("prevDay", {})
-                    p_close, p_open, p_high, p_low = prev.get("c", 1), prev.get("o", 1), prev.get("h", 1), prev.get("l", 1)
+                    price = tick_d.get("c") or tick_d.get("p") or t.get("day", {}).get("c", 0)
+                    chg = t.get("todaysChangePerc", 0)
+                    vol = t.get("day", {}).get("v", 0)
                     
-                    rvol = round(vol / (prev.get("v", 1) or 1), 2)
-                    gap = round(((open_p - p_close) / p_close) * 100, 2)
-                    p_perf = round(((p_close - p_open) / p_open) * 100, 2)
-                    dist_hod = round(((high - price) / (high or 1)) * 100, 2)
-                    sma_trend = round(((price - ((p_high + p_low + p_close) / 3)) / (p_close or 1)) * 100, 2)
-                    m_cap = t.get("market_cap", 0) / 1_000_000_000
+                    prev = t.get("prevDay", {})
+                    p_vol = prev.get("v") or 1
+                    p_close = prev.get("c") or price or 1
+                    p_high = prev.get("h") or price
+                    p_low = prev.get("l") or price
+                    
+                    # Berechnungen
+                    rvol = round(vol / p_vol, 2) if p_vol > 0 else 1.0
+                    sma_trend = round(((price - ((p_high + p_low + p_close) / 3)) / p_close) * 100, 2)
+                    m_cap = (t.get("market_cap") or 0) / 1_000_000_000
 
+                    # Filter-Logik
                     match = True
                     f = st.session_state.active_filters
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
-                    if "SMA Trend" in f and not (f["SMA Trend"][0] <= sma_trend <= f["SMA Trend"][1]): match = False
                     if "Preis min-max" in f and not (f["Preis min-max"][0] <= price <= f["Preis min-max"][1]): match = False
 
                     if match and price > 0:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg), "Cap(B)": round(m_cap, 2)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
+                
+                # Miroslavs Warnung [cite: 2025-12-28]
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
-                status.update(label=f"Scan fertig: {len(res)} Signale", state="complete")
-            except: st.error("API Fehler")
+                
+                status.update(label=f"Scan fertig: {len(res)} Ergebnisse", state="complete")
+            except Exception as e: st.error(f"API Fehler: {e}")
 
     st.divider()
     search = st.text_input("Manuelle Suche").upper()
@@ -149,21 +159,21 @@ with t1:
             if sel.selection and sel.selection.rows: st.session_state.selected_symbol = df_res.iloc[sel.selection.rows[0]]["Ticker"]
     with c_chart:
         st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
+        # Chart-Logik für Krypto/Aktien
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
-        st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "hide_side_toolbar": false, "container_id": "tv", "withdateranges": true, "allow_symbol_change": true}});</script></div>', height=750)
-
-with t2:
-    st.components.v1.html('<iframe src="https://www.tradingview.com/embed-widget/events/?locale=de" width="100%" height="750" frameborder="0"></iframe>', height=800)
+        st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv", "withdateranges": true, "allow_symbol_change": true, "hide_side_toolbar": false}});</script></div>', height=750)
 
 with t3:
     if m_type == "Aktien":
         if st.button("Sektoren laden"): st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
-    else: st.info("Sektoren-Matrix nur für Aktien.")
+    else: st.info("Sektoren-Matrix aktuell für US-Aktien optimiert.")
 
 st.divider()
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        st.info(genai.GenerativeModel('gemini-1.5-flash').generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]").text)
+        # Vollständige KI-Analyse [cite: 2025-12-30]
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        st.info(model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen.").text)
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
