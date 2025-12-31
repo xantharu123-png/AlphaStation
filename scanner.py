@@ -12,7 +12,7 @@ if "active_filters" not in st.session_state: st.session_state.active_filters = {
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 def apply_presets(strat_name, market_type):
-    # Alle 13 Strategien
+    # Alle 13 mathematischen Strategien
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -32,7 +32,7 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Alpha-Score Logik [cite: 2025-12-30]
+    # Alpha-Score Berechnung
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
 
@@ -97,18 +97,18 @@ with st.sidebar:
         st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Analysiere Daten-Snapshot...") as status:
+        with st.status("Analysiere Daten-Snapshots...") as status:
             poly_key = st.secrets["POLYGON_KEY"]
             url = f"https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers?apiKey={poly_key}" if m_type == "Krypto" else f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
             try:
                 resp = requests.get(url).json()
                 res = []
-                for t in resp.get("tickers", []):
-                    # --- KRYPTO FIX: DEEP SEARCH FÜR PREIS & VOLUMEN ---
-                    tick_d = t.get("min", {}) or t.get("lastTrade", {})
-                    price = tick_d.get("c") or tick_d.get("p") or t.get("day", {}).get("c", 0)
-                    chg = t.get("todaysChangePerc", 0)
-                    vol = t.get("day", {}).get("v", 0)
+                tickers = resp.get("tickers", [])
+                for t in tickers:
+                    # --- KRYPTO FIX: MULTI-LAYER DATA EXTRACTION ---
+                    price = t.get("lastTrade", {}).get("p") or t.get("min", {}).get("c") or t.get("day", {}).get("c", 0)
+                    chg = t.get("todaysChangePerc") or 0
+                    vol = t.get("day", {}).get("v") or 1
                     
                     prev = t.get("prevDay", {})
                     p_vol = prev.get("v") or 1
@@ -117,7 +117,7 @@ with st.sidebar:
                     p_low = prev.get("l") or price
                     
                     # Berechnungen
-                    rvol = round(vol / p_vol, 2) if p_vol > 0 else 1.0
+                    rvol = round(vol / p_vol, 2)
                     sma_trend = round(((price - ((p_high + p_low + p_close) / 3)) / p_close) * 100, 2)
                     m_cap = (t.get("market_cap") or 0) / 1_000_000_000
 
@@ -133,12 +133,12 @@ with st.sidebar:
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
                 
-                # Miroslavs Warnung [cite: 2025-12-28]
+                # Miroslavs Warnung
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
                 
-                status.update(label=f"Scan fertig: {len(res)} Ergebnisse", state="complete")
-            except Exception as e: st.error(f"API Fehler: {e}")
+                status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Ergebnisse", state="complete")
+            except Exception as e: st.error(f"Fehler: {e}")
 
     st.divider()
     search = st.text_input("Manuelle Suche").upper()
@@ -159,8 +159,8 @@ with t1:
             if sel.selection and sel.selection.rows: st.session_state.selected_symbol = df_res.iloc[sel.selection.rows[0]]["Ticker"]
     with c_chart:
         st.subheader(f"📊 Chart: {st.session_state.selected_symbol}")
-        # Chart-Logik für Krypto/Aktien
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
+        # Chart Höhe 750px
         st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv", "withdateranges": true, "allow_symbol_change": true, "hide_side_toolbar": false}});</script></div>', height=750)
 
 with t3:
@@ -170,10 +170,10 @@ with t3:
 
 st.divider()
 if st.button("🤖 KI ANALYSE"):
-    with st.spinner("Gemini analysiert..."):
+    with st.spinner("KI berechnet Rating..."):
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # Vollständige KI-Analyse [cite: 2025-12-30]
+        # Vollständige KI-Analyse inkl. Rating
         model = genai.GenerativeModel('gemini-1.5-flash')
-        st.info(model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen.").text)
+        st.info(model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]").text)
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
