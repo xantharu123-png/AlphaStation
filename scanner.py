@@ -32,13 +32,12 @@ def apply_presets(strat_name, market_type):
         st.session_state.active_filters = presets[strat_name].copy()
 
 def calculate_alpha_score(rvol, sma_trend, chg):
-    # Alpha-Score Logik
-    $Score = (RVOL \cdot 12) + (|SMA_{Trend}| \cdot 10) + (|Change| \cdot 8)$
+    # Logik: Alpha = (RVOL * 12) + (|SMA| * 10) + (|Chg| * 8)
     score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
     return min(100, max(1, int(score)))
 
 def get_sector_performance(poly_key):
-    # Sektoren Matrix
+    # US-Sektoren Matrix
     sectors = {"Tech": "XLK", "Energy": "XLE", "Finance": "XLF", "Health": "XLV", "Retail": "XLY"}
     results = []
     for name, ticker in sectors.items():
@@ -97,12 +96,12 @@ with st.sidebar:
                 resp = requests.get(url).json()
                 res = []
                 for t in resp.get("tickers", []):
-                    # Krypto Deep-Search
+                    # Krypto Deep-Search Fix
                     d_d = t.get("day", {})
                     m_d = t.get("min", {})
                     tr_d = t.get("lastTrade", {})
                     price = d_d.get("c") or m_d.get("c") or tr_d.get("p") or t.get("todaysChangePerc", 0)
-                    if not price or price == 0: continue
+                    if not price or price <= 0: continue
                     
                     chg = t.get("todaysChangePerc") or 0
                     vol = d_d.get("v") or 1
@@ -128,7 +127,6 @@ with st.sidebar:
                 status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Ergebnisse", state="complete")
             except: st.error("Fehler beim API-Abruf")
 
-    # --- MANUELLE SUCHE & WATCHLIST ---
     st.divider()
     st.subheader("🔍 Suche & Favoriten")
     search_ticker = st.text_input("Ticker Suche", "").upper()
@@ -145,7 +143,7 @@ with st.sidebar:
             if wc2.button("×", key=f"wd_{w_sym}"): st.session_state.watchlist.remove(w_sym); st.rerun()
 
 # HAUPTBEREICH
-t1, t2, t3 = st.tabs(["🚀 Trading Terminal", "📅 Kalender", "📊 Sektoren-Matrix"])
+t1, t2, t3 = st.tabs(["🚀 Terminal", "📅 Kalender", "📊 Sektoren-Matrix"])
 with t1:
     c_chart, c_journal = st.columns([2, 1])
     with c_journal:
@@ -154,7 +152,6 @@ with t1:
             df_res = pd.DataFrame(st.session_state.scan_results)
             sel = st.dataframe(df_res, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
             if sel.selection and sel.selection.rows:
-                # FIX: Wir nehmen nur den Ticker-String für den Chart
                 st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
         st.subheader(f"📊 Live-Preis Chart: {st.session_state.selected_symbol}")
@@ -167,9 +164,8 @@ with t1:
                 <script>
                     new TradingView.widget({{
                         "autosize": true, "symbol": "{tv_sym}", "interval": "5", "timezone": "Etc/UTC",
-                        "theme": "dark", "style": "1", "locale": "de", "toolbar_bg": "#f1f3f6",
-                        "enable_publishing": false, "hide_side_toolbar": false, "allow_symbol_change": true,
-                        "container_id": "tv_chart"
+                        "theme": "dark", "style": "1", "locale": "de", "hide_side_toolbar": false,
+                        "allow_symbol_change": true, "container_id": "tv_chart"
                     }});
                 </script>
             </div>''', height=750)
@@ -179,12 +175,11 @@ with t3:
         st.dataframe(get_sector_performance(st.secrets["POLYGON_KEY"]), use_container_width=True, hide_index=True)
 
 st.divider()
-# --- KI-ANALYSE MIT FIX FÜR 404 ---
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            # Wir nutzen den universellen Namen für v1-Kompatibilität [cite: 2025-12-30]
+            # Stabiler Modellname für API v1
             model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
             st.info(response.text)
