@@ -12,7 +12,6 @@ if "active_filters" not in st.session_state: st.session_state.active_filters = {
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 def apply_presets(strat_name, market_type):
-    # Alle 13 mathematischen Strategien
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -42,7 +41,7 @@ if "password_correct" not in st.session_state:
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (FEINJUSTIERUNG + SUCHE + WATCHLIST)
+# SIDEBAR (KOMPLETT WIEDERHERGESTELLT)
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
@@ -53,7 +52,7 @@ with st.sidebar:
     if main_strat != st.session_state.last_strat:
         apply_presets(main_strat, m_type); st.session_state.last_strat = main_strat
 
-    # --- FEINJUSTIERUNG (REGLER) ---
+    # --- FEINJUSTIERUNG (Dauerhaft) ---
     st.divider()
     st.subheader("⚙️ Feinjustierung")
     f_type = st.selectbox("Parameter wählen", ["Kursänderung %", "RVOL", "SMA Trend", "Preis min-max"])
@@ -73,7 +72,7 @@ with st.sidebar:
                 del st.session_state.active_filters[n]; st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Verbinde mit Polygon API...") as status:
+        with st.status("Analysiere Markt...") as status:
             poly_key = st.secrets["POLYGON_KEY"]
             url = f"https://api.polygon.io/v2/snapshot/locale/{'global' if m_type=='Krypto' else 'us'}/markets/{'crypto' if m_type=='Krypto' else 'stocks'}/tickers?apiKey={poly_key}"
             try:
@@ -82,7 +81,7 @@ with st.sidebar:
                 for t in resp.get("tickers", []):
                     d_d = t.get("day", {})
                     price = d_d.get("c") or t.get("lastTrade", {}).get("p") or t.get("min", {}).get("c", 0)
-                    if not price or price <= 0: continue
+                    if price <= 0: continue
                     chg = t.get("todaysChangePerc", 0)
                     vol, prev = d_d.get("v", 1), t.get("prevDay", {})
                     rvol = round(vol / (prev.get("v", 1) or 1), 2)
@@ -92,8 +91,8 @@ with st.sidebar:
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
                     if match:
-                        score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
-                        res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": min(100, int(score))})
+                        score = min(100, int((rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)))
+                        res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": score})
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen.")
@@ -105,9 +104,9 @@ with st.sidebar:
     st.subheader("🔍 Suche & Favoriten")
     search_ticker = st.text_input("Ticker Suche", "").upper()
     if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
-    if st.button("⭐ FAVORIT", use_container_width=True):
+    if st.button("⭐ FAVORIT SPEICHERN", use_container_width=True):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast("Gespeichert!"); st.rerun()
+            st.session_state.watchlist.append(st.session_state.selected_symbol); st.rerun()
 
     if st.session_state.watchlist:
         for w in list(set(st.session_state.watchlist)):
@@ -120,38 +119,33 @@ t1, t2, t3 = st.tabs(["🚀 Terminal", "📅 Kalender", "📊 Sektoren"])
 with t1:
     c_chart, c_journal = st.columns([2, 1])
     with c_journal:
-        st.subheader("📝 Signal Journal")
+        st.subheader("📝 Journal")
         if st.session_state.scan_results:
             df_res = pd.DataFrame(st.session_state.scan_results)
             sel = st.dataframe(df_res, on_select="rerun", selection_mode="single-row", hide_index=True, use_container_width=True)
             if sel.selection and sel.selection.rows: st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
-        st.subheader(f"📊 Live-Preis: {st.session_state.selected_symbol}")
+        st.subheader(f"📊 Preis: {st.session_state.selected_symbol}")
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
-        st.components.v1.html(f'''
-            <div style="height:750px;width:100%"><div id="tv_chart" style="height:100%"></div>
-            <script src="https://s3.tradingview.com/tv.js"></script>
-            <script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv_chart"}});</script></div>
-        ''', height=750)
+        st.components.v1.html(f'<div style="height:750px;width:100%"><div id="tv" style="height:100%"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv"}});</script></div>', height=750)
 
-# --- KI-ANALYSE MASSIVER STABILITÄTS-FIX ---
+# --- KI-ANALYSE MASSIVER "BRUTE FORCE" FIX ---
 st.divider()
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            # Wir erzwingen die Nutzung der API ohne Präfix-Fehler
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            # Daily Analysis inkl. Miroslavs Sonderwünschen [cite: 2025-12-30]
-            prompt = f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100 basierend auf aktuellen Trends."
-            response = model.generate_content(prompt)
-            st.info(response.text)
-        except Exception as e:
-            # Falls v1beta zickt, probieren wir den Legacy-Namen
-            try:
-                model = genai.GenerativeModel('models/gemini-1.5-flash')
-                st.info(model.generate_content(prompt).text)
-            except:
-                st.error(f"KI Fehler (404/NotFound): Deine Bibliothek verlangt einen anderen Modellnamen. Bitte kontaktiere Admin.")
+            success = False
+            # Wir probieren alle 4 Namens-Varianten durch
+            for m_name in ['gemini-1.5-flash', 'models/gemini-1.5-flash', 'gemini-1.5-flash-latest', 'models/gemini-1.5-flash-latest']:
+                try:
+                    model = genai.GenerativeModel(m_name)
+                    response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen.")
+                    st.info(f"Modell: {m_name}\n\n{response.text}")
+                    success = True
+                    break
+                except: continue
+            if not success: st.error("KI-Modell konnte unter keinem Namen geladen werden. Bitte API-Kontingent prüfen.")
+        except Exception as e: st.error(f"Kritischer Fehler: {e}")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
