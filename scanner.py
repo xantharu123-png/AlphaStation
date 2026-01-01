@@ -35,14 +35,14 @@ def apply_presets(strat_name, market_type):
 if "password_correct" not in st.session_state:
     st.title("🔒 Alpha Station Login")
     with st.form("login"):
-        if st.form_submit_button("Einloggen") and st.text_input("Passwort", type="password") == st.secrets.get("PASSWORD"):
+        if st.form_submit_button("Einloggen") and st.text_input("PW", type="password") == st.secrets.get("PASSWORD"):
             st.session_state["password_correct"] = True
             st.rerun()
     st.stop()
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR
+# SIDEBAR (FEINJUSTIERUNG + SUCHE + WATCHLIST)
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
@@ -53,13 +53,13 @@ with st.sidebar:
     if main_strat != st.session_state.last_strat:
         apply_presets(main_strat, m_type); st.session_state.last_strat = main_strat
 
-    # --- FEINJUSTIERUNG (Dauerhaft integriert) ---
+    # --- FEINJUSTIERUNG (REGLER) ---
     st.divider()
     st.subheader("⚙️ Feinjustierung")
-    f_type = st.selectbox("Indikator wählen", ["Kursänderung %", "RVOL", "SMA Trend", "Preis min-max"])
+    f_type = st.selectbox("Parameter wählen", ["Kursänderung %", "RVOL", "SMA Trend", "Preis min-max"])
     if f_type == "RVOL": val = st.slider("RVOL Bereich", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
     elif f_type == "SMA Trend": val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
-    else: val = st.slider("Bereich", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
+    else: val = st.slider("Bereich festlegen", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
     
     if st.button("➕ Filter hinzufügen"):
         st.session_state.active_filters[f_type] = val; st.rerun()
@@ -87,7 +87,6 @@ with st.sidebar:
                     vol, prev = d_d.get("v", 1), t.get("prevDay", {})
                     rvol = round(vol / (prev.get("v", 1) or 1), 2)
                     sma_trend = round(((price - (prev.get("c") or price)) / (prev.get("c") or 1)) * 100, 2)
-                    
                     match = True
                     f = st.session_state.active_filters
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
@@ -97,7 +96,7 @@ with st.sidebar:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": score})
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
                 
-                # SONDERREGEL [cite: 2025-12-28]
+                # MIROSLAV REGEL
                 if len(st.session_state.scan_results) < 30:
                     st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen.")
                 status.update(label="Scan fertig", state="complete")
@@ -110,13 +109,12 @@ with st.sidebar:
     if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
     if st.button("⭐ FAVORIT", use_container_width=True):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(st.session_state.selected_symbol); st.rerun()
+            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast("Gespeichert!"); st.rerun()
 
-    if st.session_state.watchlist:
-        for w in list(set(st.session_state.watchlist)):
-            wc1, wc2 = st.columns([4, 1])
-            if wc1.button(f"📌 {w}", key=f"ws_{w}"): st.session_state.selected_symbol = w
-            if wc2.button("×", key=f"wd_{w}"): st.session_state.watchlist.remove(w); st.rerun()
+    for w in list(set(st.session_state.watchlist)):
+        wc1, wc2 = st.columns([4, 1])
+        if wc1.button(f"📌 {w}", key=f"ws_{w}"): st.session_state.selected_symbol = w
+        if wc2.button("×", key=f"wd_{w}"): st.session_state.watchlist.remove(w); st.rerun()
 
 # HAUPTBEREICH
 t1, t2, t3 = st.tabs(["🚀 Terminal", "📅 Kalender", "📊 Sektoren"])
@@ -130,7 +128,6 @@ with t1:
             if sel.selection and sel.selection.rows: st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
         st.subheader(f"📊 Live-Preis: {st.session_state.selected_symbol}")
-        # CHART FIX: Binance Preis-Feed
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
         st.components.v1.html(f'''
             <div style="height:750px;width:100%"><div id="tv_chart" style="height:100%"></div>
@@ -138,26 +135,27 @@ with t1:
             <script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv_chart"}});</script></div>
         ''', height=750)
 
-# --- KI-ANALYSE PANZER-FIX GEGEN 404 ---
+# --- KI-ANALYSE 2026 MODELL-FIX ---
 st.divider()
 if st.button("🤖 KI ANALYSE"):
-    with st.spinner("Gemini analysiert..."):
+    with st.spinner("Gemini 2026 analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            
-            # Panzer-Logik: Wir probieren alle Varianten, bis eine geht
-            model_names = ['gemini-1.5-flash', 'models/gemini-1.5-flash', 'gemini-1.5-flash-latest']
-            response_text = ""
-            for m_name in model_names:
+            # In 2026 sind Gemini 2.0/2.5 Modelle der Standard
+            model_options = ['gemini-2.0-flash', 'gemini-1.5-flash', 'models/gemini-1.5-flash']
+            worked = False
+            for m_name in model_options:
                 try:
                     model = genai.GenerativeModel(m_name)
-                    res = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100 basierend auf Preis und Volumen.")
-                    response_text = res.text
+                    response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib KI-Rating 1-100 basierend auf Preis und Volumen.")
+                    st.info(f"Modell {m_name} aktiv: {response.text}")
+                    worked = True
                     break
                 except: continue
-            
-            if response_text: st.info(response_text)
-            else: st.error("KI Modell konnte nicht geladen werden. Prüfe API-Key oder Region.")
+            if not worked:
+                # LISTE MODELLE ALS DIAGNOSE
+                avail = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                st.error(f"404 Fix: Kein Standard-Modell gefunden. Dein Key erlaubt: {avail}")
         except Exception as e: st.error(f"Kritischer Fehler: {e}")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
