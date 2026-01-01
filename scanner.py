@@ -12,7 +12,6 @@ if "active_filters" not in st.session_state: st.session_state.active_filters = {
 if "last_strat" not in st.session_state: st.session_state.last_strat = ""
 
 def apply_presets(strat_name, market_type):
-    # Alle 13 mathematischen Strategien
     presets = {
         "Volume Surge": {"RVOL": (2.0, 50.0), "Kursänderung %": (0.5, 30.0)},
         "Gap Momentum": {"Gap %": (2.5, 25.0), "RVOL": (1.2, 50.0)},
@@ -31,11 +30,6 @@ def apply_presets(strat_name, market_type):
     if strat_name in presets:
         st.session_state.active_filters = presets[strat_name].copy()
 
-def calculate_alpha_score(rvol, sma_trend, chg):
-    # Alpha-Score für Priorisierung
-    score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
-    return min(100, max(1, int(score)))
-
 # LOGIN
 if "password_correct" not in st.session_state:
     st.title("🔒 Alpha Station Login")
@@ -47,10 +41,10 @@ if "password_correct" not in st.session_state:
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (FEINJUSTIERUNG & SUCHE WIEDERHERGESTELLT)
+# SIDEBAR
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
-    m_type = st.radio("Markt:", ["Aktien", "Krypto"], horizontal=True)
+    m_type = st.radio("Märkte:", ["Aktien", "Krypto"], horizontal=True)
     
     st.divider()
     strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock/Moon Shot", "Bull Flag Breakout", "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", "Low Float/Market Cap", "Blue Chip Pullback", "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Proxy"]
@@ -58,23 +52,18 @@ with st.sidebar:
     if main_strat != st.session_state.last_strat:
         apply_presets(main_strat, m_type); st.session_state.last_strat = main_strat
 
-    # WICHTIG: FEINJUSTIERUNG
+    # FEINJUSTIERUNG (WIEDER DA)
     st.divider()
     st.subheader("⚙️ Feinjustierung")
-    f_type = st.selectbox("Regler auswählen", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "SMA Trend"])
-    
-    if f_type == "RVOL": 
-        val = st.slider("RVOL Bereich", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
-    elif f_type == "SMA Trend": 
-        val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
-    else: 
-        val = st.slider("Bereich festlegen", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
-    
+    f_type = st.selectbox("Parameter justieren", ["Kursänderung %", "RVOL", "SMA Trend", "Preis min-max"])
+    if f_type == "RVOL": val = st.slider("RVOL Bereich", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
+    elif f_type == "SMA Trend": val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
+    else: val = st.slider("Bereich", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
     if st.button("➕ Filter Hinzufügen"):
         st.session_state.active_filters[f_type] = val; st.rerun()
 
     if st.session_state.active_filters:
-        st.caption("Aktive Parameter:")
+        st.caption("Aktive Filter:")
         for n, v in list(st.session_state.active_filters.items()):
             c1, c2 = st.columns([5, 1])
             c1.write(f"**{n}:** {v[0]}-{v[1]}")
@@ -82,7 +71,7 @@ with st.sidebar:
                 del st.session_state.active_filters[n]; st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Verbinde mit Polygon API...") as status:
+        with st.status("Analysiere Markt...") as status:
             poly_key = st.secrets["POLYGON_KEY"]
             url = f"https://api.polygon.io/v2/snapshot/locale/{'global' if m_type=='Krypto' else 'us'}/markets/{'crypto' if m_type=='Krypto' else 'stocks'}/tickers?apiKey={poly_key}"
             try:
@@ -103,23 +92,23 @@ with st.sidebar:
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
                     
                     if match:
-                        res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
+                        score = (rvol * 12) + (abs(sma_trend) * 10) + (abs(chg) * 8)
+                        res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": min(100, int(score))})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
-                # MIROSLAV REGEL [cite: 2025-12-28]
                 if len(st.session_state.scan_results) < 30:
-                    st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
+                    st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen.")
                 status.update(label="Scan fertig", state="complete")
             except: st.error("API Fehler")
 
     # SUCHE & FAVORITEN
     st.divider()
     st.subheader("🔍 Suche & Favoriten")
-    search_ticker = st.text_input("Ticker Suche", "").upper()
-    if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
-    if st.button("⭐ FAVORIT SPEICHERN", use_container_width=True):
+    search_ticker = st.text_input("Symbol", "").upper()
+    if st.button("LADEN"): st.session_state.selected_symbol = search_ticker
+    if st.button("⭐ FAVORIT"):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(st.session_state.selected_symbol); st.rerun()
+            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast("Favorit gespeichert!")
 
     if st.session_state.watchlist:
         for w in list(set(st.session_state.watchlist)):
@@ -139,8 +128,7 @@ with t1:
             if sel.selection and sel.selection.rows:
                 st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
-        st.subheader(f"📊 Live-Preis: {st.session_state.selected_symbol}")
-        # CHART FIX: Binance Preis-Feed
+        st.subheader(f"📊 Live: {st.session_state.selected_symbol}")
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
         st.components.v1.html(f'''
             <div style="height:750px;width:100%"><div id="tv_chart" style="height:100%"></div>
@@ -148,24 +136,17 @@ with t1:
             <script>new TradingView.widget({{"autosize": true, "symbol": "{tv_sym}", "interval": "5", "theme": "dark", "style": "1", "locale": "de", "container_id": "tv_chart"}});</script></div>
         ''', height=750)
 
-# KI-ANALYSE MASSIVER FIX [cite: 2025-12-30]
+# KI-ANALYSE MASSIVER FIX
 st.divider()
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-            # Wir nutzen den Modellnamen OHNE 'models/' Präfix, da das SDK diesen oft selbst ergänzt
+            # Wir verzichten auf das models/ Präfix, falls die API es selbst ergänzt
             model = genai.GenerativeModel('gemini-1.5-flash')
-            # Rating 1-100 inkludieren [cite: 2025-12-30]
             response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
             st.info(response.text)
         except Exception as e:
-            # Fallback für spezielle API-Versionen
-            try:
-                model = genai.GenerativeModel('models/gemini-1.5-flash')
-                response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100.")
-                st.info(response.text)
-            except:
-                st.error(f"KI Fehler: {e}. Bitte prüfe, ob dein API-Key freigeschaltet ist.")
+            st.error(f"KI Fehler: {e}. Prüfe API-Key.")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
