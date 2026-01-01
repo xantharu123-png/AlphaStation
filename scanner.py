@@ -47,7 +47,7 @@ if "password_correct" not in st.session_state:
 
 st.set_page_config(page_title="Alpha Master Pro", layout="wide")
 
-# SIDEBAR (ALLES WIEDER DA)
+# SIDEBAR (FEINJUSTIERUNG & SUCHE WIEDERHERGESTELLT)
 with st.sidebar:
     st.title("💎 Alpha V33 Master")
     m_type = st.radio("Markt:", ["Aktien", "Krypto"], horizontal=True)
@@ -56,10 +56,23 @@ with st.sidebar:
     strat_list = ["Volume Surge", "Gap Momentum", "Penny Stock/Moon Shot", "Bull Flag Breakout", "Unusual Volume", "High of Day (HOD)", "Short Squeeze Candidate", "Low Float/Market Cap", "Blue Chip Pullback", "Multi-Day Runner", "Pre-Market Gapper", "Dead Cat Bounce", "Golden Cross Proxy"]
     main_strat = st.selectbox("Strategie-Rezept", strat_list)
     if main_strat != st.session_state.last_strat:
-        apply_presets(main_strat, m_type)
-        st.session_state.last_strat = main_strat
+        apply_presets(main_strat, m_type); st.session_state.last_strat = main_strat
 
-    # Aktive Parameter zum Löschen
+    # WICHTIG: FEINJUSTIERUNG
+    st.divider()
+    st.subheader("⚙️ Feinjustierung")
+    f_type = st.selectbox("Regler auswählen", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "SMA Trend"])
+    
+    if f_type == "RVOL": 
+        val = st.slider("RVOL Bereich", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
+    elif f_type == "SMA Trend": 
+        val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
+    else: 
+        val = st.slider("Bereich festlegen", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
+    
+    if st.button("➕ Filter Hinzufügen"):
+        st.session_state.active_filters[f_type] = val; st.rerun()
+
     if st.session_state.active_filters:
         st.caption("Aktive Parameter:")
         for n, v in list(st.session_state.active_filters.items()):
@@ -67,15 +80,6 @@ with st.sidebar:
             c1.write(f"**{n}:** {v[0]}-{v[1]}")
             if c2.button("×", key=f"del_{n}"):
                 del st.session_state.active_filters[n]; st.rerun()
-
-    st.divider()
-    st.subheader("⚙️ Feinjustierung")
-    f_type = st.selectbox("Indikator hinzufügen", ["Kursänderung %", "Volumen", "Preis min-max", "RVOL", "SMA Trend"])
-    if f_type == "RVOL": val = st.slider("RVOL Bereich", 0.0, 50.0, (1.5, 5.0), key=f"sl_{f_type}")
-    elif f_type == "SMA Trend": val = st.slider("SMA Trend %", -20.0, 20.0, (0.5, 3.0), key=f"sl_{f_type}")
-    else: val = st.slider("Bereich", -100.0, 100.0, (0.0, 10.0), key=f"sl_{f_type}")
-    if st.button("➕ Filter Hinzufügen"):
-        st.session_state.active_filters[f_type] = val; st.rerun()
 
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
         with st.status("Verbinde mit Polygon API...") as status:
@@ -97,13 +101,14 @@ with st.sidebar:
                     f = st.session_state.active_filters
                     if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]): match = False
                     if "Kursänderung %" in f and not (f["Kursänderung %"][0] <= chg <= f["Kursänderung %"][1]): match = False
+                    
                     if match:
                         res.append({"Ticker": t.get("ticker").replace("X:", ""), "Price": price, "Chg%": round(chg, 2), "RVOL": rvol, "Alpha-Score": calculate_alpha_score(rvol, sma_trend, chg)})
                 
                 st.session_state.scan_results = sorted(res, key=lambda x: x['Alpha-Score'], reverse=True)
                 # MIROSLAV REGEL [cite: 2025-12-28]
                 if len(st.session_state.scan_results) < 30:
-                    st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen.")
+                    st.warning("Hey, ich habe leider keine 30 Spiele gefunden, aber hier sind trotzdem meine Empfehlungen. [cite: 2025-12-28]")
                 status.update(label="Scan fertig", state="complete")
             except: st.error("API Fehler")
 
@@ -112,19 +117,18 @@ with st.sidebar:
     st.subheader("🔍 Suche & Favoriten")
     search_ticker = st.text_input("Ticker Suche", "").upper()
     if st.button("TICKER LADEN", use_container_width=True): st.session_state.selected_symbol = search_ticker
-    if st.button("⭐ FAVORIT", use_container_width=True):
+    if st.button("⭐ FAVORIT SPEICHERN", use_container_width=True):
         if st.session_state.selected_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(st.session_state.selected_symbol); st.toast("Favorit gespeichert!")
+            st.session_state.watchlist.append(st.session_state.selected_symbol); st.rerun()
 
     if st.session_state.watchlist:
-        st.caption("Deine Watchlist:")
         for w in list(set(st.session_state.watchlist)):
             wc1, wc2 = st.columns([4, 1])
             if wc1.button(f"📌 {w}", key=f"ws_{w}"): st.session_state.selected_symbol = w
             if wc2.button("×", key=f"wd_{w}"): st.session_state.watchlist.remove(w); st.rerun()
 
 # HAUPTBEREICH
-t1, t2, t3 = st.tabs(["🚀 Trading Terminal", "📅 Kalender", "📊 Sektoren"])
+t1, t2, t3 = st.tabs(["🚀 Terminal", "📅 Kalender", "📊 Sektoren"])
 with t1:
     c_chart, c_journal = st.columns([2, 1])
     with c_journal:
@@ -136,7 +140,7 @@ with t1:
                 st.session_state.selected_symbol = str(df_res.iloc[sel.selection.rows[0]]["Ticker"])
     with c_chart:
         st.subheader(f"📊 Live-Preis: {st.session_state.selected_symbol}")
-        # CHART FIX
+        # CHART FIX: Binance Preis-Feed
         tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
         st.components.v1.html(f'''
             <div style="height:750px;width:100%"><div id="tv_chart" style="height:100%"></div>
@@ -149,20 +153,19 @@ st.divider()
 if st.button("🤖 KI ANALYSE"):
     with st.spinner("Gemini analysiert..."):
         try:
-            # Verbindung & Modell-Check
-            if "GOOGLE_API_KEY" not in st.secrets:
-                st.error("API-Key fehlt in den Secrets!")
-            else:
-                genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-                # Wir probieren die stabilste Instanziierung
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                response = model.generate_content(
-                    f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]",
-                    generation_config=genai.types.GenerationConfig(temperature=0.7)
-                )
-                if response: st.info(response.text)
-                else: st.error("Keine Antwort von der KI erhalten.")
+            genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+            # Wir nutzen den Modellnamen OHNE 'models/' Präfix, da das SDK diesen oft selbst ergänzt
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            # Rating 1-100 inkludieren [cite: 2025-12-30]
+            response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100 basierend auf Preis und Volumen. [cite: 2025-12-30]")
+            st.info(response.text)
         except Exception as e:
-            st.error(f"KI Fehler: {e}. Bitte prüfe, ob dein API-Key für Gemini-1.5-Flash freigeschaltet ist.")
+            # Fallback für spezielle API-Versionen
+            try:
+                model = genai.GenerativeModel('models/gemini-1.5-flash')
+                response = model.generate_content(f"Analysiere {st.session_state.selected_symbol}. Gib ein KI-Rating von 1-100.")
+                st.info(response.text)
+            except:
+                st.error(f"KI Fehler: {e}. Bitte prüfe, ob dein API-Key freigeschaltet ist.")
 
 st.caption(f"⚙️ Admin: Miroslav | {datetime.now().strftime('%H:%M:%S')}")
