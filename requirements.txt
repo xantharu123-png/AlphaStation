@@ -4,4 +4,4 @@ requests
 plotly
 pytz
 streamlit-autorefresh
-openai
+anthropic
