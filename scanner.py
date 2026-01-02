@@ -262,19 +262,35 @@ with st.sidebar:
                     tickers = resp.get("tickers", [])
                     status.update(label=f"Verarbeite {len(tickers)} Ticker...")
                     
+                    # Debug: Zeige API Status
+                    api_status = resp.get("status", "unknown")
+                    if len(tickers) == 0:
+                        st.warning(f"API Status: {api_status} - Keine Ticker erhalten. Möglicherweise API-Limit oder Markt geschlossen.")
+                    
                     results = []
+                    skipped_no_price = 0
+                    skipped_filter = 0
                     f = st.session_state.active_filters
                     af = st.session_state.additional_filters
                     
                     for t in tickers:
                         try:
-                            day = t.get("day", {})
-                            prev = t.get("prevDay", {})
-                            last = t.get("lastTrade", {})
+                            day = t.get("day", {}) or {}
+                            prev = t.get("prevDay", {}) or {}
+                            last = t.get("lastTrade", {}) or {}
+                            minute_data = t.get("min", {}) or {}
                             
-                            # Preis ermitteln (Fallback-Kette)
-                            price = last.get("p") or day.get("c") or t.get("min", {}).get("c") or prev.get("c") or 0
+                            # Preis ermitteln (Fallback-Kette für Krypto)
+                            price = (
+                                day.get("c") or 
+                                last.get("p") or 
+                                minute_data.get("c") or 
+                                prev.get("c") or 
+                                t.get("lastQuote", {}).get("p") or
+                                0
+                            )
                             if price <= 0:
+                                skipped_no_price += 1
                                 continue
                             
                             # Metriken berechnen
@@ -282,16 +298,38 @@ with st.sidebar:
                             low = day.get("l") or price
                             close = day.get("c") or price
                             
-                            change = t.get("todaysChangePerc", 0) or 0
+                            # Change % - Polygon liefert das bei Krypto oft nicht direkt
+                            change = t.get("todaysChangePerc")
+                            if change is None:
+                                # Manuell berechnen: (close - prev_close) / prev_close * 100
+                                prev_close_price = prev.get("c") or day.get("o") or price
+                                if prev_close_price > 0:
+                                    change = ((price - prev_close_price) / prev_close_price) * 100
+                                else:
+                                    change = 0
+                            change = change or 0
                             
-                            vol = day.get("v") or last.get("v") or 1
-                            prev_vol = prev.get("v") or 1
-                            rvol = round(vol / prev_vol, 2) if prev_vol > 0 else 1.0
+                            # Volumen & RVOL
+                            vol = day.get("v") or minute_data.get("v") or 0
+                            prev_vol = prev.get("v") or 0
+                            
+                            # RVOL Berechnung mit Sicherheit
+                            if prev_vol > 0 and vol > 0:
+                                rvol = round(vol / prev_vol, 2)
+                            else:
+                                # Fallback: Wenn kein prev_vol, setze RVOL auf 1.0 (neutral)
+                                rvol = 1.0
+                            
+                            # Cap RVOL bei extremen Werten
+                            rvol = min(rvol, 999.0)
                             
                             # Vortag Change berechnen
-                            prev_open = prev.get("o") or 1
-                            prev_close = prev.get("c") or prev_open
-                            vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2) if prev_open > 0 else 0
+                            prev_open = prev.get("o") or 0
+                            prev_close = prev.get("c") or 0
+                            if prev_open > 0:
+                                vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2)
+                            else:
+                                vortag_chg = 0
                             
                             # Close Position (0 = Low, 1 = High)
                             close_pos = calculate_close_position(high, low, close)
@@ -334,6 +372,9 @@ with st.sidebar:
                             if af.get("nur_verlierer") and change >= 0:
                                 match = False
                             
+                            if not match:
+                                skipped_filter += 1
+                            
                             # =================================================
                             # ERGEBNIS SPEICHERN
                             # =================================================
@@ -358,7 +399,12 @@ with st.sidebar:
                     
                     # Nach Alpha-Score sortieren
                     st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
-                    status.update(label=f"✅ {len(st.session_state.scan_results)} Signale gefunden", state="complete")
+                    
+                    # Debug-Info
+                    debug_msg = f"✅ {len(st.session_state.scan_results)} Signale gefunden"
+                    if skipped_no_price > 0 or skipped_filter > 0:
+                        debug_msg += f" | ⚠️ {skipped_no_price} ohne Preis, {skipped_filter} gefiltert"
+                    status.update(label=debug_msg, state="complete")
                     
                 except Exception as e:
                     st.error(f"API Fehler: {e}")
