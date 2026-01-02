@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 import streamlit as st
 import pandas as pd
 import requests
@@ -18,6 +17,8 @@ if "additional_filters" not in st.session_state:
     st.session_state.additional_filters = {}
 if "current_strategy" not in st.session_state:
     st.session_state.current_strategy = None
+if "market_type" not in st.session_state:
+    st.session_state.market_type = "Krypto"
 
 # =============================================================================
 # 2. STRATEGIE-DEFINITIONEN (Kritisch geprüft)
@@ -67,18 +68,18 @@ STRATEGIES = {
         "logic": "Starker Abverkauf + hohes Volumen + Close nahe Low"
     },
     "Penny Rockets": {
-        "description": "Günstige Aktien mit explosivem Volumen",
+        "description": "Günstige Coins/Aktien mit explosivem Volumen",
         "filters": {
-            "Preis": (0.10, 5.0),
+            "Preis": (0.0001, 1.0),
             "RVOL": (3.0, 100.0),
             "Change %": (2.0, 100.0),
         },
-        "logic": "Lowcaps unter $5 mit extremem Interesse"
+        "logic": "Lowcaps unter $1 mit extremem Interesse"
     },
     "Dip Buy": {
-        "description": "Qualitätsaktien im Rücksetzer ohne Panik",
+        "description": "Qualitäts-Assets im Rücksetzer ohne Panik",
         "filters": {
-            "Preis": (10.0, 10000.0),
+            "Preis": (10.0, 100000.0),
             "Change %": (-8.0, -2.0),
             "RVOL": (0.5, 2.0),
         },
@@ -129,7 +130,7 @@ def apply_strategy(strategy_name):
 
 def calculate_close_position(high, low, close):
     """Berechnet wo der Close innerhalb der Tagesrange liegt (0=Low, 1=High)"""
-    if high == low:
+    if high == low or high is None or low is None:
         return 0.5
     return (close - low) / (high - low)
 
@@ -138,21 +139,296 @@ def calculate_alpha_score(rvol, vortag_pct, change_pct):
     return round((rvol * 12) + (abs(vortag_pct) * 10) + (abs(change_pct) * 8), 2)
 
 # =============================================================================
-# 4. STREAMLIT UI
+# 4. DATA FETCHING FUNCTIONS
 # =============================================================================
-st.set_page_config(page_title="Alpha V47 Pro", layout="wide")
+def fetch_crypto_data():
+    """Holt Krypto-Daten von CoinGecko (kostenlos)"""
+    results = []
+    skipped_filter = 0
+    
+    try:
+        # CoinGecko API - Top 250 Coins nach Marktkapitalisierung
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": False,
+            "price_change_percentage": "24h"
+        }
+        
+        resp = requests.get(url, params=params, timeout=30)
+        
+        if resp.status_code == 429:
+            st.warning("⚠️ CoinGecko Rate Limit erreicht. Warte 60 Sekunden und versuche erneut.")
+            return [], 0, 0
+        
+        coins = resp.json()
+        
+        if not isinstance(coins, list):
+            st.error(f"API Fehler: {coins}")
+            return [], 0, 0
+        
+        f = st.session_state.active_filters
+        af = st.session_state.additional_filters
+        
+        for coin in coins:
+            try:
+                price = coin.get("current_price") or 0
+                if price <= 0:
+                    continue
+                
+                # Metriken
+                change_24h = coin.get("price_change_percentage_24h") or 0
+                high_24h = coin.get("high_24h") or price
+                low_24h = coin.get("low_24h") or price
+                
+                # Volumen-Ratio berechnen (aktuelles Vol / Durchschnitt)
+                vol_24h = coin.get("total_volume") or 0
+                market_cap = coin.get("market_cap") or 1
+                
+                # RVOL Approximation: Vol/MarketCap Ratio normalisiert
+                # Höheres Volumen relativ zur Marktkapitalisierung = höherer RVOL
+                if market_cap > 0:
+                    vol_ratio = (vol_24h / market_cap) * 100  # Prozent
+                    # Normalisieren auf RVOL-Skala (typisch 0.5-10)
+                    rvol = round(vol_ratio * 5, 2)  # Skalierungsfaktor
+                    rvol = max(0.1, min(rvol, 100))  # Clamp zwischen 0.1 und 100
+                else:
+                    rvol = 1.0
+                
+                # Vortag % - CoinGecko hat keine direkten Vortag-Daten
+                # Wir nutzen die 24h Change als Proxy
+                vortag_chg = change_24h  # Approximation
+                
+                # Close Position
+                close_pos = calculate_close_position(high_24h, low_24h, price)
+                
+                # =================================================
+                # FILTER-LOGIK
+                # =================================================
+                match = True
+                
+                # Basis-Filter aus Strategie
+                if "RVOL" in f:
+                    rvol_min, rvol_max = f["RVOL"]
+                    if af.get("rvol_override_min") is not None:
+                        rvol_min = af["rvol_override_min"]
+                    if af.get("rvol_override_max") is not None:
+                        rvol_max = af["rvol_override_max"]
+                    if not (rvol_min <= rvol <= rvol_max):
+                        match = False
+                
+                if "Change %" in f and not (f["Change %"][0] <= change_24h <= f["Change %"][1]):
+                    match = False
+                
+                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]):
+                    match = False
+                
+                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]):
+                    match = False
+                
+                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]):
+                    match = False
+                
+                # Zusatzfilter
+                if af.get("preis_min", 0) > 0 and price < af["preis_min"]:
+                    match = False
+                if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]:
+                    match = False
+                if af.get("nur_gewinner") and change_24h <= 0:
+                    match = False
+                if af.get("nur_verlierer") and change_24h >= 0:
+                    match = False
+                
+                if not match:
+                    skipped_filter += 1
+                    continue
+                
+                # Ticker-Symbol (uppercase)
+                ticker = coin.get("symbol", "").upper()
+                
+                alpha = calculate_alpha_score(rvol, vortag_chg, change_24h)
+                
+                results.append({
+                    "Ticker": ticker,
+                    "Name": coin.get("name", "")[:15],  # Gekürzt für Tabelle
+                    "Preis": round(price, 6),
+                    "Chg%": round(change_24h, 2),
+                    "RVOL": rvol,
+                    "Vortag%": round(vortag_chg, 2),
+                    "ClosePos": round(close_pos, 2),
+                    "Alpha": alpha,
+                })
+                
+            except Exception:
+                continue
+        
+        return results, 0, skipped_filter
+        
+    except Exception as e:
+        st.error(f"CoinGecko API Fehler: {e}")
+        return [], 0, 0
+
+
+def fetch_stock_data(poly_key):
+    """Holt Aktien-Daten von Polygon.io"""
+    results = []
+    skipped_no_price = 0
+    skipped_filter = 0
+    
+    try:
+        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
+        resp = requests.get(url, timeout=30).json()
+        tickers = resp.get("tickers", [])
+        
+        if len(tickers) == 0:
+            api_status = resp.get("status", "unknown")
+            st.warning(f"API Status: {api_status} - Keine Ticker erhalten.")
+            return [], 0, 0
+        
+        f = st.session_state.active_filters
+        af = st.session_state.additional_filters
+        
+        for t in tickers:
+            try:
+                day = t.get("day", {}) or {}
+                prev = t.get("prevDay", {}) or {}
+                last = t.get("lastTrade", {}) or {}
+                minute_data = t.get("min", {}) or {}
+                
+                # Preis ermitteln
+                price = (
+                    day.get("c") or 
+                    last.get("p") or 
+                    minute_data.get("c") or 
+                    prev.get("c") or 
+                    0
+                )
+                if price <= 0:
+                    skipped_no_price += 1
+                    continue
+                
+                # Metriken
+                high = day.get("h") or price
+                low = day.get("l") or price
+                close = day.get("c") or price
+                
+                change = t.get("todaysChangePerc")
+                if change is None:
+                    prev_close_price = prev.get("c") or price
+                    if prev_close_price > 0:
+                        change = ((price - prev_close_price) / prev_close_price) * 100
+                    else:
+                        change = 0
+                change = change or 0
+                
+                # RVOL
+                vol = day.get("v") or minute_data.get("v") or 0
+                prev_vol = prev.get("v") or 0
+                if prev_vol > 0 and vol > 0:
+                    rvol = round(vol / prev_vol, 2)
+                else:
+                    rvol = 1.0
+                rvol = min(rvol, 999.0)
+                
+                # Vortag Change
+                prev_open = prev.get("o") or 0
+                prev_close = prev.get("c") or 0
+                if prev_open > 0:
+                    vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2)
+                else:
+                    vortag_chg = 0
+                
+                close_pos = calculate_close_position(high, low, close)
+                
+                # =================================================
+                # FILTER-LOGIK
+                # =================================================
+                match = True
+                
+                if "RVOL" in f:
+                    rvol_min, rvol_max = f["RVOL"]
+                    if af.get("rvol_override_min") is not None:
+                        rvol_min = af["rvol_override_min"]
+                    if af.get("rvol_override_max") is not None:
+                        rvol_max = af["rvol_override_max"]
+                    if not (rvol_min <= rvol <= rvol_max):
+                        match = False
+                
+                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]):
+                    match = False
+                
+                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]):
+                    match = False
+                
+                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]):
+                    match = False
+                
+                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]):
+                    match = False
+                
+                # Zusatzfilter
+                if af.get("preis_min", 0) > 0 and price < af["preis_min"]:
+                    match = False
+                if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]:
+                    match = False
+                if af.get("nur_gewinner") and change <= 0:
+                    match = False
+                if af.get("nur_verlierer") and change >= 0:
+                    match = False
+                
+                if not match:
+                    skipped_filter += 1
+                    continue
+                
+                ticker_raw = t.get("ticker", "")
+                alpha = calculate_alpha_score(rvol, vortag_chg, change)
+                
+                results.append({
+                    "Ticker": ticker_raw,
+                    "Name": "",
+                    "Preis": round(price, 4),
+                    "Chg%": round(change, 2),
+                    "RVOL": rvol,
+                    "Vortag%": vortag_chg,
+                    "ClosePos": round(close_pos, 2),
+                    "Alpha": alpha,
+                })
+                
+            except Exception:
+                continue
+        
+        return results, skipped_no_price, skipped_filter
+        
+    except Exception as e:
+        st.error(f"Polygon API Fehler: {e}")
+        return [], 0, 0
+
+# =============================================================================
+# 5. STREAMLIT UI
+# =============================================================================
+st.set_page_config(page_title="Alpha V48 Pro", layout="wide")
 
 # -----------------------------------------------------------------------------
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V47 Pro")
-    st.caption("10 Strategien | Zusatzfilter | Claude AI")
+    st.title("💎 Alpha V48 Pro")
+    st.caption("Krypto: CoinGecko | Aktien: Polygon")
     
     st.divider()
     
     # Markt-Auswahl
     m_type = st.radio("📊 Markt:", ["Krypto", "Aktien"], horizontal=True)
+    st.session_state.market_type = m_type
+    
+    # Info zur Datenquelle
+    if m_type == "Krypto":
+        st.caption("📡 Datenquelle: CoinGecko (Top 250 Coins)")
+    else:
+        st.caption("📡 Datenquelle: Polygon.io")
     
     st.divider()
     
@@ -164,7 +440,6 @@ with st.sidebar:
         help="Jede Strategie hat vordefinierte Filter"
     )
     
-    # Strategie-Info anzeigen
     with st.expander("ℹ️ Strategie-Info"):
         st.write(f"**{strat}**")
         st.write(STRATEGIES[strat]["description"])
@@ -176,7 +451,7 @@ with st.sidebar:
     
     st.divider()
     
-    # Aktive Filter anzeigen und anpassen
+    # Aktive Filter
     if st.session_state.active_filters:
         st.subheader("⚙️ Basis-Filter")
         st.caption(f"Strategie: {st.session_state.current_strategy}")
@@ -233,7 +508,6 @@ with st.sidebar:
                 rvol_min_override = None
                 rvol_max_override = None
         
-        # Speichere Zusatzfilter
         st.session_state.additional_filters = {
             "preis_min": preis_min,
             "preis_max": preis_max,
@@ -250,165 +524,25 @@ with st.sidebar:
         if not st.session_state.active_filters:
             st.warning("Bitte zuerst eine Strategie laden!")
         else:
-            with st.status("Hole Live-Daten von Polygon.io...") as status:
-                poly_key = st.secrets["POLYGON_KEY"]
-                
+            with st.status(f"Scanne {m_type}...") as status:
                 if m_type == "Krypto":
-                    url = f"https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers?apiKey={poly_key}"
+                    status.update(label="Hole Daten von CoinGecko...")
+                    results, skipped_no_price, skipped_filter = fetch_crypto_data()
                 else:
-                    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
+                    status.update(label="Hole Daten von Polygon.io...")
+                    poly_key = st.secrets["POLYGON_KEY"]
+                    results, skipped_no_price, skipped_filter = fetch_stock_data(poly_key)
                 
-                try:
-                    resp = requests.get(url, timeout=30).json()
-                    tickers = resp.get("tickers", [])
-                    status.update(label=f"Verarbeite {len(tickers)} Ticker...")
-                    
-                    # Debug: Zeige API Status
-                    api_status = resp.get("status", "unknown")
-                    if len(tickers) == 0:
-                        st.warning(f"API Status: {api_status} - Keine Ticker erhalten. Möglicherweise API-Limit oder Markt geschlossen.")
-                    
-                    results = []
-                    skipped_no_price = 0
-                    skipped_filter = 0
-                    f = st.session_state.active_filters
-                    af = st.session_state.additional_filters
-                    
-                    for t in tickers:
-                        try:
-                            day = t.get("day", {}) or {}
-                            prev = t.get("prevDay", {}) or {}
-                            last = t.get("lastTrade", {}) or {}
-                            minute_data = t.get("min", {}) or {}
-                            
-                            # Preis ermitteln (Fallback-Kette für Krypto)
-                            price = (
-                                day.get("c") or 
-                                last.get("p") or 
-                                minute_data.get("c") or 
-                                prev.get("c") or 
-                                t.get("lastQuote", {}).get("p") or
-                                0
-                            )
-                            if price <= 0:
-                                skipped_no_price += 1
-                                continue
-                            
-                            # Metriken berechnen
-                            high = day.get("h") or price
-                            low = day.get("l") or price
-                            close = day.get("c") or price
-                            
-                            # Change % - Polygon liefert das bei Krypto oft nicht direkt
-                            change = t.get("todaysChangePerc")
-                            if change is None:
-                                # Manuell berechnen: (close - prev_close) / prev_close * 100
-                                prev_close_price = prev.get("c") or day.get("o") or price
-                                if prev_close_price > 0:
-                                    change = ((price - prev_close_price) / prev_close_price) * 100
-                                else:
-                                    change = 0
-                            change = change or 0
-                            
-                            # Volumen & RVOL
-                            vol = day.get("v") or minute_data.get("v") or 0
-                            prev_vol = prev.get("v") or 0
-                            
-                            # RVOL Berechnung mit Sicherheit
-                            if prev_vol > 0 and vol > 0:
-                                rvol = round(vol / prev_vol, 2)
-                            else:
-                                # Fallback: Wenn kein prev_vol, setze RVOL auf 1.0 (neutral)
-                                rvol = 1.0
-                            
-                            # Cap RVOL bei extremen Werten
-                            rvol = min(rvol, 999.0)
-                            
-                            # Vortag Change berechnen
-                            prev_open = prev.get("o") or 0
-                            prev_close = prev.get("c") or 0
-                            if prev_open > 0:
-                                vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2)
-                            else:
-                                vortag_chg = 0
-                            
-                            # Close Position (0 = Low, 1 = High)
-                            close_pos = calculate_close_position(high, low, close)
-                            
-                            # =================================================
-                            # FILTER-LOGIK
-                            # =================================================
-                            match = True
-                            
-                            # Basis-Filter aus Strategie
-                            if "RVOL" in f:
-                                rvol_min, rvol_max = f["RVOL"]
-                                # Override falls aktiviert
-                                if af.get("rvol_override_min") is not None:
-                                    rvol_min = af["rvol_override_min"]
-                                if af.get("rvol_override_max") is not None:
-                                    rvol_max = af["rvol_override_max"]
-                                if not (rvol_min <= rvol <= rvol_max):
-                                    match = False
-                            
-                            if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]):
-                                match = False
-                            
-                            if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]):
-                                match = False
-                            
-                            if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]):
-                                match = False
-                            
-                            if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]):
-                                match = False
-                            
-                            # Zusatzfilter
-                            if af.get("preis_min", 0) > 0 and price < af["preis_min"]:
-                                match = False
-                            if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]:
-                                match = False
-                            if af.get("nur_gewinner") and change <= 0:
-                                match = False
-                            if af.get("nur_verlierer") and change >= 0:
-                                match = False
-                            
-                            if not match:
-                                skipped_filter += 1
-                            
-                            # =================================================
-                            # ERGEBNIS SPEICHERN
-                            # =================================================
-                            if match:
-                                ticker_raw = t.get("ticker", "")
-                                # Krypto: X:BTCUSD -> BTC
-                                ticker_clean = ticker_raw.replace("X:", "").replace("USD", "")
-                                
-                                alpha = calculate_alpha_score(rvol, vortag_chg, change)
-                                
-                                results.append({
-                                    "Ticker": ticker_clean,
-                                    "Preis": round(price, 4),
-                                    "Chg%": round(change, 2),
-                                    "RVOL": rvol,
-                                    "Vortag%": vortag_chg,
-                                    "ClosePos": round(close_pos, 2),
-                                    "Alpha": alpha,
-                                })
-                        except Exception:
-                            continue
-                    
-                    # Nach Alpha-Score sortieren
-                    st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
-                    
-                    # Debug-Info
-                    debug_msg = f"✅ {len(st.session_state.scan_results)} Signale gefunden"
-                    if skipped_no_price > 0 or skipped_filter > 0:
-                        debug_msg += f" | ⚠️ {skipped_no_price} ohne Preis, {skipped_filter} gefiltert"
-                    status.update(label=debug_msg, state="complete")
-                    
-                except Exception as e:
-                    st.error(f"API Fehler: {e}")
+                # Sortieren nach Alpha
+                st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
+                
+                # Status-Meldung
+                debug_msg = f"✅ {len(st.session_state.scan_results)} Signale gefunden"
+                if skipped_no_price > 0:
+                    debug_msg += f" | {skipped_no_price} ohne Preis"
+                if skipped_filter > 0:
+                    debug_msg += f" | {skipped_filter} gefiltert"
+                status.update(label=debug_msg, state="complete")
 
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH
@@ -418,14 +552,18 @@ col_chart, col_journal = st.columns([2, 1])
 with col_journal:
     st.subheader("📋 Scan-Ergebnisse")
     if st.session_state.current_strategy:
-        st.caption(f"Strategie: {st.session_state.current_strategy}")
+        st.caption(f"Strategie: {st.session_state.current_strategy} | Markt: {st.session_state.market_type}")
     
     if st.session_state.scan_results:
         df = pd.DataFrame(st.session_state.scan_results)
         
-        # Farbige Darstellung
+        # Spalten für Anzeige (Name nur bei Krypto)
+        display_cols = ["Ticker", "Preis", "Chg%", "RVOL", "Alpha"]
+        if st.session_state.market_type == "Krypto" and "Name" in df.columns:
+            display_cols = ["Ticker", "Name", "Preis", "Chg%", "RVOL", "Alpha"]
+        
         sel = st.dataframe(
-            df,
+            df[display_cols],
             on_select="rerun",
             selection_mode="single-row",
             hide_index=True,
@@ -434,8 +572,6 @@ with col_journal:
                 "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
                 "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
                 "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
-                "Vortag%": st.column_config.NumberColumn("Vortag%", format="%.2f%%"),
-                "ClosePos": st.column_config.ProgressColumn("ClosePos", min_value=0, max_value=1),
                 "Alpha": st.column_config.NumberColumn("Alpha", format="%.1f ⭐"),
             }
         )
@@ -451,7 +587,7 @@ with col_chart:
     st.subheader(f"📊 {st.session_state.selected_symbol}")
     
     # TradingView Chart
-    if m_type == "Krypto":
+    if st.session_state.market_type == "Krypto":
         tv_symbol = f"BINANCE:{st.session_state.selected_symbol}USDT"
     else:
         tv_symbol = st.session_state.selected_symbol
@@ -499,35 +635,40 @@ if analyze_btn:
         with st.spinner("Claude analysiert..."):
             try:
                 d = st.session_state.current_data
+                m_type = st.session_state.market_type
                 
-                # News holen
-                poly_key = st.secrets["POLYGON_KEY"]
-                ticker_for_news = st.session_state.selected_symbol
-                if m_type == "Krypto":
-                    ticker_for_news = f"X:{st.session_state.selected_symbol}USD"
-                
-                news_resp = requests.get(
-                    f"https://api.polygon.io/v2/reference/news?ticker={ticker_for_news}&limit=3&apiKey={poly_key}",
-                    timeout=10
-                ).json()
-                news_items = news_resp.get("results", [])
-                news_txt = "\n".join([f"- {n.get('title', 'N/A')}" for n in news_items]) if news_items else "Keine aktuellen News."
+                # News holen (nur für Aktien via Polygon)
+                news_txt = "Keine News verfügbar."
+                if m_type == "Aktien":
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        news_resp = requests.get(
+                            f"https://api.polygon.io/v2/reference/news?ticker={st.session_state.selected_symbol}&limit=3&apiKey={poly_key}",
+                            timeout=10
+                        ).json()
+                        news_items = news_resp.get("results", [])
+                        if news_items:
+                            news_txt = "\n".join([f"- {n.get('title', 'N/A')}" for n in news_items])
+                    except:
+                        pass
                 
                 # Claude API Call
                 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
                 
+                asset_name = d.get('Name', d['Ticker']) if m_type == "Krypto" else d['Ticker']
+                
                 prompt = f"""TECHNISCHES TERMINAL - ANALYSE
 
 TICKER: {d['Ticker']}
+NAME: {asset_name}
 STRATEGIE: {st.session_state.current_strategy}
 MARKT: {m_type}
 
 DATEN:
 - Preis: ${d['Preis']}
-- Tagesänderung: {d['Chg%']}%
-- RVOL: {d['RVOL']}x
-- Vortag-Performance: {d['Vortag%']}%
-- Close Position: {d['ClosePos']} (0=Tagestief, 1=Tageshoch)
+- 24h Änderung: {d['Chg%']}%
+- RVOL (Volumen-Ratio): {d['RVOL']}x
+- Close Position: {d.get('ClosePos', 0.5)} (0=Tagestief, 1=Tageshoch)
 - Alpha-Score: {d['Alpha']}
 
 NEWS:
@@ -550,7 +691,6 @@ Keine Disclaimers. Nur Fakten und Zahlen."""
                     messages=[{"role": "user", "content": prompt}]
                 )
                 
-                # Ausgabe
                 st.markdown(f"### 📊 Report: {d['Ticker']}")
                 st.caption(f"Strategie: {st.session_state.current_strategy} | Alpha: {d['Alpha']}")
                 st.divider()
@@ -563,186 +703,8 @@ Keine Disclaimers. Nur Fakten und Zahlen."""
 # FOOTER
 # -----------------------------------------------------------------------------
 st.divider()
-st.caption("Alpha Station V47 Pro | 10 Strategien | Claude AI | Made for Miroslav")
-=======
-import streamlit as st
-import pandas as pd
-import requests
-import anthropic
-from datetime import datetime
-
-# 1. INITIALISIERUNG
-if "selected_symbol" not in st.session_state:
-    st.session_state.selected_symbol = "BTC"
-if "scan_results" not in st.session_state:
-    st.session_state.scan_results = []
-if "active_filters" not in st.session_state:
-    st.session_state.active_filters = {}
-
-def apply_presets(strat_name, market_type):
-    presets = {
-        "Volume Surge": {"RVOL": (2.0, 50.0), "Kursaenderung %": (0.5, 30.0)},
-        "Bull Flag": {"Vortag %": (4.0, 25.0), "Kursaenderung %": (-1.5, 1.5), "RVOL": (1.0, 50.0)},
-        "Penny Stock": {"Preis": (0.0001, 5.0), "RVOL": (1.5, 50.0)},
-        "Unusual Volume": {"RVOL": (5.0, 100.0)}
-    }
-    if strat_name in presets:
-        st.session_state.active_filters = presets[strat_name].copy()
-
-st.set_page_config(page_title="Alpha V46 Claude Pro", layout="wide")
-
-# SIDEBAR: UNIFIED STRATEGY & FILTER
-with st.sidebar:
-    st.title("💎 Alpha V46 Claude")
-    m_type = st.radio("Markt:", ["Krypto", "Aktien"], horizontal=True)
-    strat = st.selectbox("Strategie:", ["Volume Surge", "Bull Flag", "Penny Stock", "Unusual Volume"])
-    
-    if st.button("➕ Filter laden"):
-        apply_presets(strat, m_type)
-        st.rerun()
-
-    if st.session_state.active_filters:
-        for n, v in list(st.session_state.active_filters.items()):
-            st.session_state.active_filters[n] = st.slider(
-                f"{n}", -100.0, 100.0, (float(v[0]), float(v[1])), key=f"s_{n}"
-            )
-    
-    if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        with st.status("Hole Live-Daten...") as status:
-            poly_key = st.secrets["POLYGON_KEY"]
-            url = f"https://api.polygon.io/v2/snapshot/locale/{'global' if m_type=='Krypto' else 'us'}/markets/{'crypto' if m_type=='Krypto' else 'stocks'}/tickers?apiKey={poly_key}"
-            try:
-                resp = requests.get(url).json()
-                tickers = resp.get("tickers", [])
-                res = []
-                for t in tickers:
-                    d, prev, last = t.get("day", {}), t.get("prevDay", {}), t.get("lastTrade", {})
-                    price = last.get("p") or d.get("c") or t.get("min", {}).get("c") or prev.get("c") or 0
-                    if price <= 0:
-                        continue
-                    
-                    chg = t.get("todaysChangePerc", 0)
-                    vol = d.get("v") or last.get("v") or 1
-                    prev_vol = prev.get("v", 1) or 1
-                    rvol = round(vol / prev_vol, 2)
-                    vortag_chg = round(((prev.get("c", 0) - prev.get("o", 0)) / (prev.get("o", 1) or 1)) * 100, 2)
-                    
-                    # Filter-Logik
-                    match = True
-                    f = st.session_state.active_filters
-                    if f:
-                        if "RVOL" in f and not (f["RVOL"][0] <= rvol <= f["RVOL"][1]):
-                            match = False
-                        if "Kursaenderung %" in f and not (f["Kursaenderung %"][0] <= chg <= f["Kursaenderung %"][1]):
-                            match = False
-                        if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]):
-                            match = False
-                        if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]):
-                            match = False
-                    
-                    if match:
-                        # Krypto-Ticker bereinigen: X:BTCUSD -> BTC
-                        ticker_clean = t.get("ticker", "").replace("X:", "").replace("USD", "")
-                        res.append({
-                            "Ticker": ticker_clean,
-                            "Price": round(price, 6),
-                            "Chg%": round(chg, 2),
-                            "RVOL": rvol,
-                            "Vortag%": vortag_chg
-                        })
-                
-                # Sortierung nach RVOL (höchstes zuerst)
-                st.session_state.scan_results = sorted(res, key=lambda x: x['RVOL'], reverse=True)[:50]
-                status.update(label=f"Scan fertig: {len(st.session_state.scan_results)} Signale", state="complete")
-            except Exception as e:
-                st.error(f"API Fehler: {e}")
-
-# HAUPTBEREICH
-c_chart, c_journal = st.columns([2, 1])
-
-with c_journal:
-    st.subheader("📋 Live Journal")
-    if st.session_state.scan_results:
-        df = pd.DataFrame(st.session_state.scan_results)
-        sel = st.dataframe(
-            df,
-            on_select="rerun",
-            selection_mode="single-row",
-            hide_index=True,
-            use_container_width=True
-        )
-        if sel.selection and sel.selection.rows:
-            row = df.iloc[sel.selection.rows[0]]
-            st.session_state.selected_symbol = str(row["Ticker"])
-            st.session_state.current_data = row.to_dict()
-
-with c_chart:
-    st.subheader(f"📊 {st.session_state.selected_symbol} (4H Ansicht)")
-    # TradingView Symbol: Krypto braucht BINANCE:XXXUSDT Format
-    tv_sym = f"BINANCE:{st.session_state.selected_symbol}USDT" if m_type == "Krypto" else st.session_state.selected_symbol
-    tv_html = f'''
-    <div style="height:550px;">
-        <div id="tv" style="height:100%"></div>
-        <script src="https://s3.tradingview.com/tv.js"></script>
-        <script>
-            new TradingView.widget({{
-                "autosize": true,
-                "symbol": "{tv_sym}",
-                "interval": "240",
-                "theme": "dark",
-                "style": "1",
-                "container_id": "tv"
-            }});
-        </script>
-    </div>
-    '''
-    st.components.v1.html(tv_html, height=550)
-
-# --- CLAUDE KI-ANALYSE ---
-st.divider()
-if st.button("🤖 CLAUDE PROFI-ANALYSE"):
-    if "current_data" in st.session_state:
-        with st.spinner("Claude 3.5 Sonnet analysiert..."):
-            try:
-                poly_key = st.secrets["POLYGON_KEY"]
-                ticker = st.session_state.selected_symbol
-                news_resp = requests.get(
-                    f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit=3&apiKey={poly_key}"
-                ).json()
-                news_txt = "\n".join([f"- {n['title']}" for n in news_resp.get("results", [])])
-                if not news_txt:
-                    news_txt = "Keine aktuellen News verfügbar."
-
-                client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-                d = st.session_state.current_data
-                
-                prompt = f"""Du bist ein technisches Trading-Terminal. Analysiere {d['Ticker']} basierend auf diesen FAKTEN:
-- Preis: {d['Price']}
-- RVOL: {d['RVOL']}
-- Tagesänderung: {d['Chg%']}%
-- Vortag: {d['Vortag%']}%
-
-News:
-{news_txt}
-
-Aufgabe:
-1. Nenne exakte Support/Resistance Marken (basierend auf runden Zahlen und psychologischen Leveln)
-2. Berechne den Alpha-Score: (RVOL * 12) + (|Vortag%| * 10) + (|Chg%| * 8)
-3. Gib ein Rating von 1-100 für die Trade-Qualität
-4. Klare Empfehlung: LONG, SHORT oder ABWARTEN
-
-Keine Ausreden, keine Risikowarnungen. Nur Fakten und Zahlen."""
-
-                message = client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1024,
-                    system="Du bist ein präzises Finanz-Terminal für professionelle Trader. Keine Höflichkeitsfloskeln, keine Disclaimers. Nur technische Analyse und konkrete Zahlen.",
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                st.markdown(f"### 🛡️ Claude Report: {d['Ticker']}")
-                st.write(message.content[0].text)
-            except Exception as e:
-                st.error(f"Claude API Fehler: {e}")
-    else:
-        st.warning("Wähle erst einen Ticker aus dem Journal aus.")
->>>>>>> d3bc7e8 (V46: Cloud-Ready)
+col_f1, col_f2 = st.columns(2)
+with col_f1:
+    st.caption("Alpha Station V48 Pro | Made for Miroslav")
+with col_f2:
+    st.caption("Krypto: CoinGecko API | Aktien: Polygon.io")
