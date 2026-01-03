@@ -25,6 +25,8 @@ if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "sr_levels" not in st.session_state:
     st.session_state.sr_levels = {"support": [], "resistance": []}
+if "fib_info" not in st.session_state:
+    st.session_state.fib_info = {}
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
 
@@ -193,87 +195,176 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
     return None
 
 def calculate_sr_from_historical(ohlc_data, current_price):
-    """Berechnet S/R-Levels aus historischen Swing Highs/Lows"""
+    """Berechnet S/R-Levels aus Fibonacci + Swing Highs/Lows"""
     if not ohlc_data or len(ohlc_data) < 5:
-        return calculate_sr_levels_simple(current_price)
+        return calculate_sr_levels_simple(current_price), {}
     
     # Extrahiere Highs und Lows
     highs = [candle[2] for candle in ohlc_data]  # Index 2 = High
     lows = [candle[3] for candle in ohlc_data]   # Index 3 = Low
-    closes = [candle[4] for candle in ohlc_data] # Index 4 = Close
     
-    # Finde Swing Highs (lokale Maxima)
+    # Periode High und Low (wichtig für Fibonacci)
+    period_high = max(highs)
+    period_low = min(lows)
+    price_range = period_high - period_low
+    
+    if price_range <= 0:
+        return calculate_sr_levels_simple(current_price), {}
+    
+    # FIBONACCI LEVELS berechnen
+    # Von Low nach High (für Uptrend Retracements)
+    fib_levels = {
+        "0.0": period_low,                              # 0% = Low
+        "23.6": period_low + price_range * 0.236,       # 23.6%
+        "38.2": period_low + price_range * 0.382,       # 38.2%
+        "50.0": period_low + price_range * 0.5,         # 50%
+        "61.8": period_low + price_range * 0.618,       # 61.8% (Golden Ratio)
+        "78.6": period_low + price_range * 0.786,       # 78.6%
+        "100.0": period_high,                           # 100% = High
+        # Extensions
+        "127.2": period_high + price_range * 0.272,     # 127.2%
+        "161.8": period_high + price_range * 0.618,     # 161.8%
+    }
+    
+    # Finde Swing Highs (lokale Maxima) mit größerem Fenster
     swing_highs = []
-    for i in range(2, len(highs) - 2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+    window = min(3, len(highs) // 4)  # Dynamisches Fenster
+    for i in range(window, len(highs) - window):
+        is_swing = True
+        for j in range(1, window + 1):
+            if highs[i] <= highs[i-j] or highs[i] <= highs[i+j]:
+                is_swing = False
+                break
+        if is_swing:
             swing_highs.append(highs[i])
     
     # Finde Swing Lows (lokale Minima)
     swing_lows = []
-    for i in range(2, len(lows) - 2):
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+    for i in range(window, len(lows) - window):
+        is_swing = True
+        for j in range(1, window + 1):
+            if lows[i] >= lows[i-j] or lows[i] >= lows[i+j]:
+                is_swing = False
+                break
+        if is_swing:
             swing_lows.append(lows[i])
     
-    # Füge auch absolutes High/Low hinzu
-    swing_highs.append(max(highs))
-    swing_lows.append(min(lows))
+    # Füge Period High/Low hinzu
+    swing_highs.append(period_high)
+    swing_lows.append(period_low)
     
-    # Pivot Point berechnen
-    last_high = highs[-1]
-    last_low = lows[-1]
-    last_close = closes[-1]
-    pivot = (last_high + last_low + last_close) / 3
+    # Entferne Duplikate und sortiere
+    swing_highs = sorted(set(swing_highs), reverse=True)
+    swing_lows = sorted(set(swing_lows))
     
-    # Klassische Pivot-Level
-    r1 = 2 * pivot - last_low
-    r2 = pivot + (last_high - last_low)
-    s1 = 2 * pivot - last_high
-    s2 = pivot - (last_high - last_low)
+    # SUPPORTS: Kombiniere Swing Lows + Fibonacci Levels unter dem Preis
+    all_supports = []
     
-    # Kombiniere: Swing-Level die unter dem Preis liegen = Support
-    supports = sorted(set([s for s in swing_lows if s < current_price] + [s1, s2]), reverse=True)[:3]
+    # Swing Lows unter dem Preis
+    for sl in swing_lows:
+        if sl < current_price:
+            all_supports.append({"price": sl, "type": "Swing Low"})
     
-    # Swing-Level die über dem Preis liegen = Resistance
-    resistances = sorted(set([r for r in swing_highs if r > current_price] + [r1, r2]))[:3]
+    # Fibonacci Levels unter dem Preis
+    for fib_name, fib_price in fib_levels.items():
+        if fib_price < current_price and float(fib_name) <= 100:
+            all_supports.append({"price": fib_price, "type": f"Fib {fib_name}%"})
     
-    # Runden
-    supports = [round(s, 6) for s in supports if s > 0]
-    resistances = [round(r, 6) for r in resistances if r > 0]
+    # RESISTANCES: Kombiniere Swing Highs + Fibonacci Levels über dem Preis
+    all_resistances = []
     
-    # Fallback wenn nicht genug Level gefunden
-    if len(supports) < 3:
-        simple_s, _ = calculate_sr_levels_simple(current_price)
-        supports = (supports + simple_s)[:3]
-    if len(resistances) < 3:
-        _, simple_r = calculate_sr_levels_simple(current_price)
-        resistances = (resistances + simple_r)[:3]
+    # Swing Highs über dem Preis
+    for sh in swing_highs:
+        if sh > current_price:
+            all_resistances.append({"price": sh, "type": "Swing High"})
     
-    return supports[:3], resistances[:3]
+    # Fibonacci Levels über dem Preis
+    for fib_name, fib_price in fib_levels.items():
+        if fib_price > current_price:
+            all_resistances.append({"price": fib_price, "type": f"Fib {fib_name}%"})
+    
+    # Sortieren: Supports absteigend (nächster zuerst), Resistances aufsteigend
+    all_supports = sorted(all_supports, key=lambda x: x["price"], reverse=True)
+    all_resistances = sorted(all_resistances, key=lambda x: x["price"])
+    
+    # Cluster-Bereinigung: Wenn zwei Level zu nah beieinander, behalte nur das stärkere
+    def remove_clusters(levels, min_distance_pct=2.0):
+        if not levels:
+            return []
+        cleaned = [levels[0]]
+        for level in levels[1:]:
+            last_price = cleaned[-1]["price"]
+            distance_pct = abs(level["price"] - last_price) / last_price * 100
+            if distance_pct >= min_distance_pct:
+                cleaned.append(level)
+        return cleaned
+    
+    supports_cleaned = remove_clusters(all_supports)[:3]
+    resistances_cleaned = remove_clusters(all_resistances)[:3]
+    
+    # Extrahiere nur Preise für die Hauptfunktion
+    supports = [s["price"] for s in supports_cleaned]
+    resistances = [r["price"] for r in resistances_cleaned]
+    
+    # Runden basierend auf Preisgröße
+    def smart_round(price):
+        if price >= 1000:
+            return round(price, 0)
+        elif price >= 100:
+            return round(price, 1)
+        elif price >= 10:
+            return round(price, 2)
+        elif price >= 1:
+            return round(price, 3)
+        else:
+            return round(price, 6)
+    
+    supports = [smart_round(s) for s in supports]
+    resistances = [smart_round(r) for r in resistances]
+    
+    # Zusätzliche Fibonacci-Info für AI-Analyse
+    fib_info = {
+        "period_high": smart_round(period_high),
+        "period_low": smart_round(period_low),
+        "fib_236": smart_round(fib_levels["23.6"]),
+        "fib_382": smart_round(fib_levels["38.2"]),
+        "fib_500": smart_round(fib_levels["50.0"]),
+        "fib_618": smart_round(fib_levels["61.8"]),
+        "fib_786": smart_round(fib_levels["78.6"]),
+        "fib_1272": smart_round(fib_levels["127.2"]),
+        "fib_1618": smart_round(fib_levels["161.8"]),
+        "supports_detail": supports_cleaned,
+        "resistances_detail": resistances_cleaned,
+    }
+    
+    return (supports, resistances), fib_info
+
 
 def calculate_sr_levels_simple(price):
-    """Fallback: Berechnet S/R basierend auf runden Zahlen"""
+    """Fallback: Berechnet S/R basierend auf Fibonacci vom Preis"""
     if price <= 0:
-        return [], []
+        return ([], []), {}
     
-    if price >= 1000:
-        step = 50
-    elif price >= 100:
-        step = 10
-    elif price >= 10:
-        step = 1
-    elif price >= 1:
-        step = 0.1
-    elif price >= 0.1:
-        step = 0.01
-    else:
-        step = 0.001
+    # Schätze eine Range basierend auf typischer Volatilität (±20%)
+    estimated_high = price * 1.20
+    estimated_low = price * 0.80
+    price_range = estimated_high - estimated_low
     
-    base = round(price / step) * step
+    # Fibonacci Levels
+    supports = [
+        round(price * 0.95, 6),   # -5%
+        round(price * 0.90, 6),   # -10%
+        round(price * 0.85, 6),   # -15%
+    ]
     
-    supports = [round(base - step, 6), round(base - step * 2, 6), round(base - step * 3, 6)]
-    resistances = [round(base + step, 6), round(base + step * 2, 6), round(base + step * 3, 6)]
+    resistances = [
+        round(price * 1.05, 6),   # +5%
+        round(price * 1.10, 6),   # +10%
+        round(price * 1.15, 6),   # +15%
+    ]
     
-    return supports, resistances
+    return (supports, resistances), {}
+
 
 def calculate_sr_levels(price, ticker=None, market_type="Krypto", timeframe="4H", poly_key=None):
     """Hauptfunktion: Berechnet S/R-Levels basierend auf Timeframe"""
@@ -292,7 +383,6 @@ def calculate_sr_levels(price, ticker=None, market_type="Krypto", timeframe="4H"
     ohlc_data = None
     
     if market_type == "Krypto" and ticker:
-        # CoinGecko braucht coin_id (lowercase)
         coin_id = ticker.lower()
         ohlc_data = fetch_historical_data_crypto(coin_id, days)
     
@@ -935,7 +1025,7 @@ with tab_scanner:
                     pass
             
             # S/R mit historischen Daten berechnen
-            supports, resistances = calculate_sr_levels(
+            (supports, resistances), fib_info = calculate_sr_levels(
                 price=current_price,
                 ticker=ticker,
                 market_type=m_type,
@@ -943,10 +1033,11 @@ with tab_scanner:
                 poly_key=poly_key
             )
             st.session_state.sr_levels = {"support": supports, "resistance": resistances}
+            st.session_state.fib_info = fib_info
         
         # S/R LEVELS ANZEIGE
         if st.session_state.sr_levels["support"] or st.session_state.sr_levels["resistance"]:
-            st.caption(f"📐 S/R-Levels basierend auf {selected_tf} Timeframe")
+            st.caption(f"📐 Fibonacci S/R ({selected_tf})")
             col_s, col_r = st.columns(2)
             with col_s:
                 st.markdown("**🟢 Support**")
@@ -956,6 +1047,20 @@ with tab_scanner:
                 st.markdown("**🔴 Resistance**")
                 for i, r in enumerate(st.session_state.sr_levels["resistance"], 1):
                     st.caption(f"R{i}: ${r:,.4f}")
+            
+            # Fibonacci Zusatz-Info anzeigen
+            if st.session_state.get("fib_info"):
+                with st.expander("📊 Fibonacci Details"):
+                    fi = st.session_state.fib_info
+                    if fi.get("period_high"):
+                        st.caption(f"Periode High: ${fi['period_high']:,.4f}")
+                        st.caption(f"Periode Low: ${fi['period_low']:,.4f}")
+                        st.caption(f"---")
+                        st.caption(f"Fib 23.6%: ${fi.get('fib_236', 0):,.4f}")
+                        st.caption(f"Fib 38.2%: ${fi.get('fib_382', 0):,.4f}")
+                        st.caption(f"Fib 50.0%: ${fi.get('fib_500', 0):,.4f}")
+                        st.caption(f"Fib 61.8%: ${fi.get('fib_618', 0):,.4f}")
+                        st.caption(f"Fib 78.6%: ${fi.get('fib_786', 0):,.4f}")
         
         # TradingView Chart mit dynamischem Interval
         if st.session_state.market_type == "Krypto":
@@ -1323,6 +1428,7 @@ if analyze_btn:
                 d = st.session_state.current_data
                 m_type = st.session_state.market_type
                 sr = st.session_state.sr_levels
+                fib = st.session_state.get("fib_info", {})
                 
                 news_txt = "Keine News."
                 if m_type == "Aktien":
@@ -1340,10 +1446,26 @@ if analyze_btn:
                 
                 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
                 
+                # Fibonacci-erweiterte S/R Info
                 sr_text = f"""
-BERECHNETE SUPPORT/RESISTANCE:
-Support: {', '.join([f'${s}' for s in sr['support']])}
-Resistance: {', '.join([f'${r}' for r in sr['resistance']])}
+SUPPORT & RESISTANCE (aus Swing Highs/Lows + Fibonacci):
+Support-Zonen: {', '.join([f'${s}' for s in sr['support']])}
+Resistance-Zonen: {', '.join([f'${r}' for r in sr['resistance']])}
+"""
+                
+                # Fibonacci Details hinzufügen wenn vorhanden
+                if fib:
+                    sr_text += f"""
+FIBONACCI LEVELS (basierend auf Periode High/Low):
+• Periode High: ${fib.get('period_high', 'N/A')}
+• Periode Low: ${fib.get('period_low', 'N/A')}
+• Fib 23.6%: ${fib.get('fib_236', 'N/A')}
+• Fib 38.2%: ${fib.get('fib_382', 'N/A')}
+• Fib 50.0%: ${fib.get('fib_500', 'N/A')}
+• Fib 61.8% (Golden Ratio): ${fib.get('fib_618', 'N/A')}
+• Fib 78.6%: ${fib.get('fib_786', 'N/A')}
+• Fib Extension 127.2%: ${fib.get('fib_1272', 'N/A')}
+• Fib Extension 161.8%: ${fib.get('fib_1618', 'N/A')}
 """
                 
                 # Erweiterter Profi-Prompt
@@ -1453,33 +1575,44 @@ DEINE AUFGABEN (VOLLSTÄNDIGER REPORT):
    - Bewerte das Setup für die Strategie "{st.session_state.current_strategy}"
    - Passt das Asset zur gewählten Strategie? Warum/warum nicht?
 
-2. ENTRY-STRATEGIE
+2. FIBONACCI-ANALYSE
+   - Analysiere die gegebenen Fibonacci-Levels
+   - Wo steht der Preis im Verhältnis zu den Fib-Levels?
+   - Welches Fib-Level ist das wichtigste für diesen Trade?
+   - Bei welchem Fib-Level erwarten wir Reaktion?
+   - Gib konkrete Preise an: "Fib 61.8% bei $XX ist Key-Level"
+
+3. ELLIOTT WAVE ANALYSE
+   - In welcher Elliott Wave befinden wir uns wahrscheinlich?
+   - Welle 1, 2, 3, 4 oder 5 (Impuls) oder A, B, C (Korrektur)?
+   - Begründe deine Einschätzung basierend auf der Preisbewegung
+   - Was ist das wahrscheinliche Kursziel basierend auf Elliott Wave?
+   - Beispiel: "Wir sind in Welle 3, typisches Ziel ist 161.8% Extension bei $XX"
+
+4. ENTRY-STRATEGIE
    - Exakter Einstiegspunkt (Preis)
    - Entry-Typ: Market Order / Limit Order / Stop-Entry?
    - Optimaler Einstiegszeitpunkt (sofort, bei Pullback, bei Breakout?)
+   - Nutze Fibonacci-Level für Entry: "Limit Buy bei Fib 38.2% = $XX"
 
-3. STOP-LOSS & TAKE-PROFIT
-   - Stop-Loss Level mit Begründung
-   - Take-Profit 1 (konservativ)
-   - Take-Profit 2 (aggressiv)
+5. STOP-LOSS & TAKE-PROFIT (MIT FIBONACCI)
+   - Stop-Loss: Unter welchem Fib-Level? Konkreter Preis
+   - Take-Profit 1: Welches Fib-Level? Konkreter Preis
+   - Take-Profit 2: Welches Fib-Extension Level? Konkreter Preis
    - Risk/Reward Ratio
 
-4. SUPPORT & RESISTANCE
-   - Validiere/korrigiere die berechneten S/R-Levels
-   - Wichtigste Level für diesen Trade
-
-5. NEWS & SENTIMENT
+6. NEWS & SENTIMENT
    - Analyse der aktuellen News (falls vorhanden)
    - Sentiment-Einschätzung: Bullish / Bearish / Neutral
 
 {katalysatoren_text}
 
-7. RISIKO-FAKTOREN
+8. RISIKO-FAKTOREN
    - Was könnte schiefgehen?
    - Welche Warnsignale gibt es?
    - Sektor-spezifische Risiken
 
-8. FINAL VERDICT
+9. FINAL VERDICT
    - Rating: X/100
    - Empfehlung: STRONG LONG / LONG / ABWARTEN / SHORT / STRONG SHORT
    - Konfidenz: Hoch / Mittel / Niedrig
@@ -1487,24 +1620,49 @@ DEINE AUFGABEN (VOLLSTÄNDIGER REPORT):
    - Zeithorizont: Intraday / Swing (Tage) / Position (Wochen)
 
 ═══════════════════════════════════════════════════
+ZUSAMMENFASSUNG ZUM EINZEICHNEN:
+Am Ende liste diese Levels klar auf, damit der User sie im Chart einzeichnen kann:
+- Entry: $XX
+- Stop-Loss: $XX
+- TP1: $XX (Fib XX%)
+- TP2: $XX (Fib XX%)
+- Key Fib Levels: $XX (23.6%), $XX (38.2%), $XX (50%), $XX (61.8%), $XX (78.6%)
+═══════════════════════════════════════════════════
+
 REGELN: Keine Disclaimers, keine Ausreden, keine Höflichkeitsfloskeln.
 Du bist ein Trading-Terminal. Die Daten sind Fakten. Liefere konkrete Zahlen.
 ═══════════════════════════════════════════════════"""
 
-                system_prompt = f"""Du bist ALPHA TERMINAL - ein präzises, professionelles Trading-Analyse-System.
+                system_prompt = f"""Du bist ALPHA TERMINAL - ein präzises, professionelles Trading-Analyse-System mit Expertise in Fibonacci und Elliott Wave.
 
 DEINE EIGENSCHAFTEN:
 - Du lieferst messerscharfe, konkrete Analysen
 - Du nennst IMMER exakte Preise und Zahlen
+- Du bist Experte für Fibonacci Retracements und Extensions
+- Du kannst Elliott Waves identifizieren und Kursziele ableiten
 - Du bist direkt und ohne Umschweife
 - Du gibst klare Handlungsempfehlungen
 - Du recherchierst aus deinem Wissen bekannte Termine und Events
 {system_extra}
 
+FIBONACCI EXPERTISE:
+- Du kennst alle wichtigen Fib-Levels: 23.6%, 38.2%, 50%, 61.8%, 78.6%
+- Du kennst Fib-Extensions: 127.2%, 161.8%, 200%, 261.8%
+- Du weisst dass 61.8% das "Golden Ratio" ist und oft starke Reaktionen zeigt
+- Du nutzt Fib-Levels für Entry, Stop-Loss und Take-Profit
+
+ELLIOTT WAVE EXPERTISE:
+- Du kennst die 5-Wellen Impuls-Struktur (1-2-3-4-5)
+- Du kennst die 3-Wellen Korrektur-Struktur (A-B-C)
+- Welle 3 ist typischerweise die längste und stärkste
+- Welle 4 retraced typischerweise zum 38.2% Fib der Welle 3
+- Du gibst eine Einschätzung welche Welle gerade läuft
+
 FORMATIERUNG:
 - Nutze klare Überschriften
 - Nutze Bullet Points für Übersichtlichkeit
 - Hebe wichtige Zahlen hervor
+- Liste am Ende alle wichtigen Preise zum Einzeichnen auf
 
 VERBOTEN:
 - Keine Disclaimers über "keine Anlageberatung"
