@@ -1189,7 +1189,79 @@ with tab_search:
                         else:
                             st.info("Bereits in Watchlist")
                 with col_act2:
-                    st.info("💡 Wechsle zum Scanner-Tab für Chart & AI-Analyse")
+                    if st.button("🤖 AI-Analyse starten", key="search_ai_btn", type="primary", use_container_width=True):
+                        st.session_state.run_search_analysis = True
+                
+                # Chart direkt anzeigen
+                st.divider()
+                st.subheader(f"📊 Chart: {search_result['Ticker']}")
+                
+                if search_market == "Krypto":
+                    tv_symbol = f"BINANCE:{search_result['Ticker']}USDT"
+                else:
+                    tv_symbol = search_result['Ticker']
+                
+                tv_html = f'''
+                <div style="height:400px; border-radius: 8px; overflow: hidden;">
+                    <div id="tv_search_chart" style="height:100%"></div>
+                    <script src="https://s3.tradingview.com/tv.js"></script>
+                    <script>
+                        new TradingView.widget({{
+                            "autosize": true,
+                            "symbol": "{tv_symbol}",
+                            "interval": "240",
+                            "timezone": "Europe/Berlin",
+                            "theme": "dark",
+                            "style": "1",
+                            "locale": "de_DE",
+                            "enable_publishing": false,
+                            "hide_side_toolbar": false,
+                            "allow_symbol_change": true,
+                            "studies": ["Volume@tv-basicstudies"],
+                            "container_id": "tv_search_chart"
+                        }});
+                    </script>
+                </div>
+                '''
+                st.components.v1.html(tv_html, height=400)
+                
+                # AI-Analyse wenn Button geklickt wurde
+                if st.session_state.get("run_search_analysis", False):
+                    st.divider()
+                    st.subheader("🤖 AI-Analyse")
+                    with st.spinner("Claude analysiert..."):
+                        try:
+                            client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+                            
+                            prompt = f"""SCHNELL-ANALYSE für {search_result['Ticker']}
+
+DATEN:
+- Preis: ${search_result['Preis']}
+- 24h Change: {search_result['Chg%']}%
+- RVOL: {search_result['RVOL']}x
+- Alpha-Score: {search_result['Alpha']}
+- Markt: {search_market}
+
+AUFGABEN:
+1. Kurze technische Einschätzung (2-3 Sätze)
+2. Key Support & Resistance Levels
+3. Empfehlung: LONG / SHORT / ABWARTEN
+4. Rating: X/100
+
+Keine Disclaimers. Direkt und knapp."""
+
+                            message = client.messages.create(
+                                model="claude-sonnet-4-20250514",
+                                max_tokens=800,
+                                system="Du bist ein präzises Trading-Terminal. Kurz und knackig.",
+                                messages=[{"role": "user", "content": prompt}]
+                            )
+                            
+                            st.write(message.content[0].text)
+                            st.session_state.run_search_analysis = False
+                            
+                        except Exception as e:
+                            st.error(f"Fehler: {e}")
                 
             else:
                 st.warning(f"❌ '{search_input}' nicht gefunden. Prüfe die Schreibweise.")
