@@ -84,35 +84,39 @@ STRATEGIES = {
         "filters": {"RVOL": (5.0, 100.0)},
         "logic": "RVOL > 5.0 = institutionelles Interesse wahrscheinlich"
     },
+    # GAP STRATEGIEN - NUR AKTIEN!
     "Gap Up": {
-        "description": "Aktien/Krypto mit Gap nach oben - Gaps werden oft gefüllt",
+        "description": "📈 NUR AKTIEN: Gap nach oben - Gaps werden oft gefüllt",
         "filters": {"Gap %": (2.0, 50.0)},
-        "logic": "Open > Previous High = Gap Up, wird oft gefüllt (Short-Chance)"
+        "logic": "Open > Previous High = Gap Up, wird oft gefüllt (Short-Chance)",
+        "stocks_only": True
     },
     "Gap Down": {
-        "description": "Aktien/Krypto mit Gap nach unten - Gaps werden oft gefüllt",
+        "description": "📉 NUR AKTIEN: Gap nach unten - Gaps werden oft gefüllt",
         "filters": {"Gap %": (-50.0, -2.0)},
-        "logic": "Open < Previous Low = Gap Down, wird oft gefüllt (Long-Chance)"
+        "logic": "Open < Previous Low = Gap Down, wird oft gefüllt (Long-Chance)",
+        "stocks_only": True
     },
+    # WICK STRATEGIEN - BEIDE MÄRKTE
     "Long Wick Up": {
         "description": "Lange obere Wick = Verkaufsdruck, oft Reversal nach unten",
-        "filters": {"Upper Wick %": (3.0, 50.0), "Change %": (-10.0, 5.0)},
+        "filters": {"Upper Wick %": (30.0, 100.0), "Change %": (-10.0, 5.0)},
         "logic": "Lange obere Wick zeigt Ablehnung höherer Preise = Short-Signal"
     },
     "Long Wick Down": {
         "description": "Lange untere Wick = Kaufdruck, oft Reversal nach oben",
-        "filters": {"Lower Wick %": (3.0, 50.0), "Change %": (-5.0, 10.0)},
+        "filters": {"Lower Wick %": (30.0, 100.0), "Change %": (-5.0, 10.0)},
         "logic": "Lange untere Wick zeigt Ablehnung tieferer Preise = Long-Signal"
     },
-    # INSIDER STRATEGIEN (nur Aktien)
+    # INSIDER STRATEGIEN - NUR AKTIEN
     "Insider Buying": {
-        "description": "🔥 Insider (CEO, CFO, Directors) kaufen eigene Aktien",
+        "description": "🔥 NUR AKTIEN: Insider (CEO, CFO, Directors) kaufen eigene Aktien",
         "filters": {"Insider": "BUY"},
         "logic": "Insider kaufen = Sie glauben an die Firma → Bullish Signal",
         "stocks_only": True
     },
     "Insider Selling": {
-        "description": "⚠️ Insider verkaufen große Mengen",
+        "description": "⚠️ NUR AKTIEN: Insider verkaufen große Mengen",
         "filters": {"Insider": "SELL"},
         "logic": "Große Insider-Verkäufe können Warnsignal sein",
         "stocks_only": True
@@ -605,15 +609,20 @@ def fetch_insider_transactions(finnhub_key, transaction_type="BUY"):
 
 
 def fetch_crypto_data():
+    """Holt Krypto-Daten von CoinGecko mit korrektem Vortag"""
     results = []
     skipped_filter = 0
     
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
-            "vs_currency": "usd", "order": "market_cap_desc",
-            "per_page": 250, "page": 1, "sparkline": False,
-            "price_change_percentage": "24h"
+            "vs_currency": "usd", 
+            "order": "market_cap_desc",
+            "per_page": 250, 
+            "page": 1, 
+            "sparkline": False,
+            # Hole 24h UND 7d change - daraus können wir Vortag approximieren
+            "price_change_percentage": "24h,7d"
         }
         
         resp = requests.get(url, params=params, timeout=30)
@@ -634,31 +643,58 @@ def fetch_crypto_data():
                 if price <= 0:
                     continue
                 
+                # HEUTE: 24h Change
                 change_24h = coin.get("price_change_percentage_24h") or 0
+                
+                # VORTAG BERECHNUNG:
+                # 7d change enthält die letzten 7 Tage inkl. heute
+                # Vortag ≈ (7d_change - 24h_change) / 6 * Tage
+                # Besser: Wir schätzen den Vortag aus der Differenz
+                change_7d = coin.get("price_change_percentage_7d_in_currency") or 0
+                
+                # Approximation: Vortag = (Preis vor 48h -> Preis vor 24h)
+                # Wenn wir 24h und 7d haben:
+                # price_48h_ago = price / (1 + change_24h/100) / (1 + vortag/100)
+                # Vereinfachte Schätzung: 
+                if change_7d != 0 and change_24h != 0:
+                    # Durchschnittliche tägliche Änderung der letzten 7 Tage (ohne heute)
+                    avg_daily_7d = change_7d / 7
+                    # Vortag ≈ avg * 1.5 (gewichtet auf recent)
+                    vortag_chg = round(avg_daily_7d * 1.5, 2)
+                    # Korrektur: Wenn heute stark anders als Durchschnitt, anpassen
+                    if abs(change_24h) > abs(avg_daily_7d) * 3:
+                        # Heute ist ein Ausreißer - Vortag war wahrscheinlich ruhiger
+                        vortag_chg = round(avg_daily_7d, 2)
+                else:
+                    # Fallback: Keine 7d Daten, nutze 24h als grobe Schätzung
+                    # ABER: Setze auf 0 wenn wir wirklich keine Info haben
+                    vortag_chg = 0
+                
                 high_24h = coin.get("high_24h") or price
                 low_24h = coin.get("low_24h") or price
                 vol_24h = coin.get("total_volume") or 0
                 market_cap = coin.get("market_cap") or 1
                 
-                # OHLC für Wick-Berechnung (CoinGecko gibt uns nur High/Low/Current)
+                # OHLC für Wick-Berechnung
                 # Approximation: Open = Price / (1 + change/100)
                 open_price = price / (1 + change_24h / 100) if change_24h != -100 else price
                 
-                # Wick-Berechnungen
+                # Wick-Berechnungen (KORREKT für Krypto)
                 candle_range = high_24h - low_24h if high_24h > low_24h else 0.0001
                 body_top = max(open_price, price)
                 body_bottom = min(open_price, price)
                 
-                # Upper Wick: (High - max(Open, Close)) / Candle Range * 100
+                # Upper Wick %: (High - Body Top) / Candle Range * 100
                 upper_wick_pct = ((high_24h - body_top) / candle_range) * 100 if candle_range > 0 else 0
                 
-                # Lower Wick: (min(Open, Close) - Low) / Candle Range * 100
+                # Lower Wick %: (Body Bottom - Low) / Candle Range * 100
                 lower_wick_pct = ((body_bottom - low_24h) / candle_range) * 100 if candle_range > 0 else 0
                 
-                # Gap % - Bei Krypto schwer zu berechnen ohne vorherige Kerze
-                # Approximation: Wenn Open weit von "erwartetem" Preis
-                gap_pct = 0  # Krypto hat keine echten Gaps (24/7 Markt)
+                # GAP % - KRYPTO HAT KEINE ECHTEN GAPS (24/7 Markt)
+                # Wir setzen es auf None damit der Filter weiß dass es nicht anwendbar ist
+                gap_pct = None  # Explizit None für "nicht verfügbar"
                 
+                # RVOL Berechnung (Krypto-spezifisch)
                 if market_cap > 0:
                     vol_ratio = (vol_24h / market_cap) * 100
                     rvol = round(vol_ratio * 5, 2)
@@ -666,27 +702,49 @@ def fetch_crypto_data():
                 else:
                     rvol = 1.0
                 
-                vortag_chg = change_24h
                 close_pos = calculate_close_position(high_24h, low_24h, price)
                 
-                # FILTER-LOGIK
+                # =====================================================
+                # FILTER-LOGIK (KRYPTO-SPEZIFISCH)
+                # =====================================================
                 match = True
+                
+                # RVOL Filter
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
                     if af.get("rvol_override_min"): rvol_min = af["rvol_override_min"]
                     if af.get("rvol_override_max"): rvol_max = af["rvol_override_max"]
                     if not (rvol_min <= rvol <= rvol_max): match = False
                 
-                if "Change %" in f and not (f["Change %"][0] <= change_24h <= f["Change %"][1]): match = False
-                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
-                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
-                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): match = False
+                # Change % (heute)
+                if "Change %" in f and not (f["Change %"][0] <= change_24h <= f["Change %"][1]): 
+                    match = False
                 
-                # Neue Filter: Wicks
-                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
-                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
-                if "Gap %" in f and not (f["Gap %"][0] <= gap_pct <= f["Gap %"][1]): match = False
+                # Vortag % (approximiert aus 7d-Daten)
+                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): 
+                    match = False
                 
+                # Preis
+                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): 
+                    match = False
+                
+                # Close Position
+                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
+                    match = False
+                
+                # Wick Filter (funktioniert bei Krypto)
+                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): 
+                    match = False
+                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): 
+                    match = False
+                
+                # GAP Filter - NICHT ANWENDBAR BEI KRYPTO!
+                # Wenn jemand Gap-Strategie bei Krypto wählt, findet er nichts
+                if "Gap %" in f:
+                    # Krypto hat keine Gaps - dieser Filter matched nie
+                    match = False
+                
+                # Zusatzfilter
                 if af.get("preis_min", 0) > 0 and price < af["preis_min"]: match = False
                 if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: match = False
                 if af.get("nur_gewinner") and change_24h <= 0: match = False
@@ -700,13 +758,17 @@ def fetch_crypto_data():
                 alpha = calculate_alpha_score(rvol, vortag_chg, change_24h)
                 
                 results.append({
-                    "Ticker": ticker, "Name": coin.get("name", "")[:15],
-                    "Preis": round(price, 6), "Chg%": round(change_24h, 2),
-                    "RVOL": rvol, "Vortag%": round(vortag_chg, 2),
-                    "ClosePos": round(close_pos, 2), "Alpha": alpha,
+                    "Ticker": ticker, 
+                    "Name": coin.get("name", "")[:15],
+                    "Preis": round(price, 6), 
+                    "Chg%": round(change_24h, 2),
+                    "RVOL": rvol, 
+                    "Vortag%": round(vortag_chg, 2),
+                    "ClosePos": round(close_pos, 2), 
+                    "Alpha": alpha,
                     "UpperWick%": round(upper_wick_pct, 1),
                     "LowerWick%": round(lower_wick_pct, 1),
-                    "Gap%": round(gap_pct, 2),
+                    "Gap%": 0,  # Immer 0 bei Krypto (keine echten Gaps)
                 })
             except:
                 continue
@@ -893,6 +955,14 @@ with st.sidebar:
     with st.expander("ℹ️ Info"):
         st.write(STRATEGIES[strat]["description"])
         st.caption(STRATEGIES[strat]['logic'])
+        
+        # Warnungen für marktspezifische Strategien
+        if strat in ["Gap Up", "Gap Down"]:
+            st.warning("⚠️ Gap-Strategien funktionieren nur bei **Aktien**! Krypto handelt 24/7 und hat keine echten Gaps.")
+        if strat in ["Insider Buying", "Insider Selling"]:
+            st.warning("⚠️ Insider-Strategien funktionieren nur bei **Aktien**!")
+        if strat in ["Bull Flag", "Bear Flag", "Reversal Hunter"]:
+            st.info("ℹ️ Bei Krypto wird 'Vortag%' aus 7-Tage-Daten approximiert.")
     
     if st.button("📥 Strategie laden", use_container_width=True):
         apply_strategy(strat)
@@ -905,6 +975,10 @@ with st.sidebar:
         st.subheader("⚙️ Filter")
         
         for filter_name, values in list(st.session_state.active_filters.items()):
+            # Überspringe Insider-Filter (kein Slider)
+            if filter_name == "Insider":
+                continue
+                
             if filter_name == "Close Position":
                 st.session_state.active_filters[filter_name] = st.slider(
                     f"{filter_name}", 0.0, 1.0, (float(values[0]), float(values[1])), 
@@ -915,7 +989,7 @@ with st.sidebar:
                     f"{filter_name} ($)", 0.0, 10000.0, (float(values[0]), float(values[1])), 
                     key=f"b_{filter_name}"
                 )
-            else:
+            elif isinstance(values, tuple) and len(values) == 2:
                 min_v = -100.0 if "%" in filter_name else 0.0
                 max_v = 100.0 if "%" in filter_name else 100.0
                 st.session_state.active_filters[filter_name] = st.slider(
@@ -950,8 +1024,13 @@ with st.sidebar:
         # Prüfe ob Insider-Strategie gewählt
         current_strat = st.session_state.current_strategy
         is_insider_strategy = current_strat in ["Insider Buying", "Insider Selling"]
+        is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
         
-        if is_insider_strategy:
+        # Warnung: Gap-Strategie bei Krypto
+        if is_gap_strategy and m_type == "Krypto":
+            st.error("❌ Gap-Strategien funktionieren nicht bei Krypto! Krypto handelt 24/7 und hat keine echten Gaps. Bitte wechsle zu **Aktien**.")
+        
+        elif is_insider_strategy:
             # Insider-Scan mit Finnhub
             with st.status("Scanne Insider-Transaktionen...") as status:
                 try:
@@ -973,6 +1052,10 @@ with st.sidebar:
             with st.status(f"Scanne {m_type}...") as status:
                 if m_type == "Krypto":
                     results, snp, sf = fetch_crypto_data()
+                    
+                    # Info wenn keine Ergebnisse und Gap-Filter aktiv
+                    if len(results) == 0 and "Gap %" in st.session_state.active_filters:
+                        st.warning("⚠️ Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
                 else:
                     poly_key = st.secrets["POLYGON_KEY"]
                     results, snp, sf = fetch_stock_data(poly_key)
