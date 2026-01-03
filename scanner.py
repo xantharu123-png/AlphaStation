@@ -195,13 +195,14 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
     return None
 
 def calculate_sr_from_historical(ohlc_data, current_price):
-    """Berechnet S/R-Levels aus Fibonacci + Swing Highs/Lows"""
+    """Berechnet S/R-Levels aus Fibonacci + Swing Highs/Lows + Konsolidierungszonen"""
     if not ohlc_data or len(ohlc_data) < 5:
         return calculate_sr_levels_simple(current_price), {}
     
-    # Extrahiere Highs und Lows
+    # Extrahiere OHLC Daten
     highs = [candle[2] for candle in ohlc_data]  # Index 2 = High
     lows = [candle[3] for candle in ohlc_data]   # Index 3 = Low
+    closes = [candle[4] for candle in ohlc_data] # Index 4 = Close
     
     # Periode High und Low (wichtig für Fibonacci)
     period_high = max(highs)
@@ -211,24 +212,88 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     if price_range <= 0:
         return calculate_sr_levels_simple(current_price), {}
     
+    # =========================================================================
+    # KONSOLIDIERUNGSZONEN BERECHNEN
+    # Finde Preiszonen wo der Preis oft war (High Activity Zones)
+    # =========================================================================
+    
+    # Teile den Preisbereich in Zonen auf
+    num_zones = 20  # 20 Zonen über den Preisbereich
+    zone_size = price_range / num_zones
+    zone_counts = {}  # zone_start -> anzahl_tage
+    
+    for i, close in enumerate(closes):
+        # Welche Zone ist dieser Close?
+        zone_idx = int((close - period_low) / zone_size)
+        zone_idx = min(zone_idx, num_zones - 1)  # Clamp
+        zone_start = period_low + zone_idx * zone_size
+        zone_end = zone_start + zone_size
+        
+        zone_key = (round(zone_start, 6), round(zone_end, 6))
+        zone_counts[zone_key] = zone_counts.get(zone_key, 0) + 1
+    
+    # Sortiere nach Häufigkeit (meiste Tage zuerst)
+    sorted_zones = sorted(zone_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # Top Konsolidierungszonen (min 3 Tage in der Zone)
+    consolidation_zones = []
+    total_candles = len(closes)
+    
+    for (zone_start, zone_end), count in sorted_zones[:5]:  # Top 5
+        if count >= 3:  # Mindestens 3 Kerzen in dieser Zone
+            pct_time = round((count / total_candles) * 100, 1)
+            zone_mid = (zone_start + zone_end) / 2
+            consolidation_zones.append({
+                "low": zone_start,
+                "high": zone_end,
+                "mid": zone_mid,
+                "days": count,
+                "pct_time": pct_time
+            })
+    
+    # Merge überlappende Zonen
+    def merge_zones(zones):
+        if not zones:
+            return []
+        zones = sorted(zones, key=lambda x: x["low"])
+        merged = [zones[0]]
+        for zone in zones[1:]:
+            last = merged[-1]
+            if zone["low"] <= last["high"] * 1.02:  # 2% Überlappung erlaubt
+                # Merge
+                merged[-1] = {
+                    "low": last["low"],
+                    "high": max(last["high"], zone["high"]),
+                    "mid": (last["low"] + max(last["high"], zone["high"])) / 2,
+                    "days": last["days"] + zone["days"],
+                    "pct_time": last["pct_time"] + zone["pct_time"]
+                }
+            else:
+                merged.append(zone)
+        return merged
+    
+    consolidation_zones = merge_zones(consolidation_zones)[:3]  # Max 3 Zonen
+    
+    # =========================================================================
     # FIBONACCI LEVELS berechnen
-    # Von Low nach High (für Uptrend Retracements)
+    # =========================================================================
     fib_levels = {
-        "0.0": period_low,                              # 0% = Low
-        "23.6": period_low + price_range * 0.236,       # 23.6%
-        "38.2": period_low + price_range * 0.382,       # 38.2%
-        "50.0": period_low + price_range * 0.5,         # 50%
-        "61.8": period_low + price_range * 0.618,       # 61.8% (Golden Ratio)
-        "78.6": period_low + price_range * 0.786,       # 78.6%
-        "100.0": period_high,                           # 100% = High
-        # Extensions
-        "127.2": period_high + price_range * 0.272,     # 127.2%
-        "161.8": period_high + price_range * 0.618,     # 161.8%
+        "0.0": period_low,
+        "23.6": period_low + price_range * 0.236,
+        "38.2": period_low + price_range * 0.382,
+        "50.0": period_low + price_range * 0.5,
+        "61.8": period_low + price_range * 0.618,
+        "78.6": period_low + price_range * 0.786,
+        "100.0": period_high,
+        "127.2": period_high + price_range * 0.272,
+        "161.8": period_high + price_range * 0.618,
     }
     
-    # Finde Swing Highs (lokale Maxima) mit größerem Fenster
+    # =========================================================================
+    # SWING HIGHS/LOWS finden
+    # =========================================================================
     swing_highs = []
-    window = min(3, len(highs) // 4)  # Dynamisches Fenster
+    window = min(3, len(highs) // 4)
     for i in range(window, len(highs) - window):
         is_swing = True
         for j in range(1, window + 1):
@@ -238,7 +303,6 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         if is_swing:
             swing_highs.append(highs[i])
     
-    # Finde Swing Lows (lokale Minima)
     swing_lows = []
     for i in range(window, len(lows) - window):
         is_swing = True
@@ -249,45 +313,42 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         if is_swing:
             swing_lows.append(lows[i])
     
-    # Füge Period High/Low hinzu
     swing_highs.append(period_high)
     swing_lows.append(period_low)
-    
-    # Entferne Duplikate und sortiere
     swing_highs = sorted(set(swing_highs), reverse=True)
     swing_lows = sorted(set(swing_lows))
     
-    # SUPPORTS: Kombiniere Swing Lows + Fibonacci Levels unter dem Preis
+    # =========================================================================
+    # SUPPORTS & RESISTANCES kombinieren
+    # =========================================================================
     all_supports = []
+    all_resistances = []
     
-    # Swing Lows unter dem Preis
+    # Swing Lows
     for sl in swing_lows:
         if sl < current_price:
             all_supports.append({"price": sl, "type": "Swing Low"})
     
-    # Fibonacci Levels unter dem Preis
+    # Fibonacci unter Preis
     for fib_name, fib_price in fib_levels.items():
         if fib_price < current_price and float(fib_name) <= 100:
             all_supports.append({"price": fib_price, "type": f"Fib {fib_name}%"})
     
-    # RESISTANCES: Kombiniere Swing Highs + Fibonacci Levels über dem Preis
-    all_resistances = []
-    
-    # Swing Highs über dem Preis
+    # Swing Highs
     for sh in swing_highs:
         if sh > current_price:
             all_resistances.append({"price": sh, "type": "Swing High"})
     
-    # Fibonacci Levels über dem Preis
+    # Fibonacci über Preis
     for fib_name, fib_price in fib_levels.items():
         if fib_price > current_price:
             all_resistances.append({"price": fib_price, "type": f"Fib {fib_name}%"})
     
-    # Sortieren: Supports absteigend (nächster zuerst), Resistances aufsteigend
+    # Sortieren
     all_supports = sorted(all_supports, key=lambda x: x["price"], reverse=True)
     all_resistances = sorted(all_resistances, key=lambda x: x["price"])
     
-    # Cluster-Bereinigung: Wenn zwei Level zu nah beieinander, behalte nur das stärkere
+    # Cluster-Bereinigung
     def remove_clusters(levels, min_distance_pct=2.0):
         if not levels:
             return []
@@ -302,11 +363,10 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     supports_cleaned = remove_clusters(all_supports)[:3]
     resistances_cleaned = remove_clusters(all_resistances)[:3]
     
-    # Extrahiere nur Preise für die Hauptfunktion
     supports = [s["price"] for s in supports_cleaned]
     resistances = [r["price"] for r in resistances_cleaned]
     
-    # Runden basierend auf Preisgröße
+    # Smart Rounding
     def smart_round(price):
         if price >= 1000:
             return round(price, 0)
@@ -322,7 +382,15 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     supports = [smart_round(s) for s in supports]
     resistances = [smart_round(r) for r in resistances]
     
-    # Zusätzliche Fibonacci-Info für AI-Analyse
+    # Runde Konsolidierungszonen
+    for zone in consolidation_zones:
+        zone["low"] = smart_round(zone["low"])
+        zone["high"] = smart_round(zone["high"])
+        zone["mid"] = smart_round(zone["mid"])
+    
+    # =========================================================================
+    # FIB INFO für AI-Analyse
+    # =========================================================================
     fib_info = {
         "period_high": smart_round(period_high),
         "period_low": smart_round(period_low),
@@ -335,6 +403,8 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         "fib_1618": smart_round(fib_levels["161.8"]),
         "supports_detail": supports_cleaned,
         "resistances_detail": resistances_cleaned,
+        "consolidation_zones": consolidation_zones,  # NEU!
+        "total_candles": total_candles,
     }
     
     return (supports, resistances), fib_info
@@ -1048,6 +1118,12 @@ with tab_scanner:
                 for i, r in enumerate(st.session_state.sr_levels["resistance"], 1):
                     st.caption(f"R{i}: ${r:,.4f}")
             
+            # Konsolidierungszonen anzeigen
+            if st.session_state.get("fib_info", {}).get("consolidation_zones"):
+                st.markdown("**🟣 Konsolidierungszonen** (High Activity)")
+                for i, zone in enumerate(st.session_state.fib_info["consolidation_zones"], 1):
+                    st.caption(f"Zone {i}: ${zone['low']:,.4f} - ${zone['high']:,.4f} ({zone['days']} Kerzen, {zone['pct_time']}%)")
+            
             # Fibonacci Zusatz-Info anzeigen
             if st.session_state.get("fib_info"):
                 with st.expander("📊 Fibonacci Details"):
@@ -1061,6 +1137,9 @@ with tab_scanner:
                         st.caption(f"Fib 50.0%: ${fi.get('fib_500', 0):,.4f}")
                         st.caption(f"Fib 61.8%: ${fi.get('fib_618', 0):,.4f}")
                         st.caption(f"Fib 78.6%: ${fi.get('fib_786', 0):,.4f}")
+            
+            # TradingView Tipp
+            st.info("💡 **Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
         
         # TradingView Chart mit dynamischem Interval
         if st.session_state.market_type == "Krypto":
@@ -1467,6 +1546,20 @@ FIBONACCI LEVELS (basierend auf Periode High/Low):
 • Fib Extension 127.2%: ${fib.get('fib_1272', 'N/A')}
 • Fib Extension 161.8%: ${fib.get('fib_1618', 'N/A')}
 """
+                    
+                    # Konsolidierungszonen hinzufügen
+                    if fib.get('consolidation_zones'):
+                        sr_text += f"""
+KONSOLIDIERUNGSZONEN (High Activity - wo viel gehandelt wurde):
+"""
+                        for i, zone in enumerate(fib['consolidation_zones'], 1):
+                            sr_text += f"• Zone {i}: ${zone['low']} - ${zone['high']} ({zone['days']} Kerzen = {zone['pct_time']}% der Zeit)\n"
+                        sr_text += """
+Diese Zonen sind wichtig weil:
+- Viele Orders/Positionen wurden hier eröffnet
+- Oft fungieren sie als Support/Resistance
+- Preis tendiert dazu, in diese Zonen zurückzukehren
+"""
                 
                 # Erweiterter Profi-Prompt
                 asset_name = d.get('Name', d['Ticker'])
@@ -1582,37 +1675,44 @@ DEINE AUFGABEN (VOLLSTÄNDIGER REPORT):
    - Bei welchem Fib-Level erwarten wir Reaktion?
    - Gib konkrete Preise an: "Fib 61.8% bei $XX ist Key-Level"
 
-3. ELLIOTT WAVE ANALYSE
+3. KONSOLIDIERUNGSZONEN-ANALYSE
+   - Analysiere die High-Activity Zonen wo viel gehandelt wurde
+   - Liegt der aktuelle Preis in/nahe einer Konsolidierungszone?
+   - Welche Zone ist am wichtigsten als S/R?
+   - Erkläre warum diese Zonen als Support/Resistance fungieren können
+   - Beispiel: "Zone $1.78-$1.92 war 40% der Zeit aktiv = starke Support-Zone"
+
+4. ELLIOTT WAVE ANALYSE
    - In welcher Elliott Wave befinden wir uns wahrscheinlich?
    - Welle 1, 2, 3, 4 oder 5 (Impuls) oder A, B, C (Korrektur)?
    - Begründe deine Einschätzung basierend auf der Preisbewegung
    - Was ist das wahrscheinliche Kursziel basierend auf Elliott Wave?
    - Beispiel: "Wir sind in Welle 3, typisches Ziel ist 161.8% Extension bei $XX"
 
-4. ENTRY-STRATEGIE
+5. ENTRY-STRATEGIE
    - Exakter Einstiegspunkt (Preis)
    - Entry-Typ: Market Order / Limit Order / Stop-Entry?
    - Optimaler Einstiegszeitpunkt (sofort, bei Pullback, bei Breakout?)
-   - Nutze Fibonacci-Level für Entry: "Limit Buy bei Fib 38.2% = $XX"
+   - Nutze Fibonacci-Level oder Konsolidierungszone für Entry
 
-5. STOP-LOSS & TAKE-PROFIT (MIT FIBONACCI)
-   - Stop-Loss: Unter welchem Fib-Level? Konkreter Preis
-   - Take-Profit 1: Welches Fib-Level? Konkreter Preis
+6. STOP-LOSS & TAKE-PROFIT (MIT FIBONACCI + ZONEN)
+   - Stop-Loss: Unter welchem Fib-Level oder welcher Zone? Konkreter Preis
+   - Take-Profit 1: Welches Fib-Level oder Zone? Konkreter Preis
    - Take-Profit 2: Welches Fib-Extension Level? Konkreter Preis
    - Risk/Reward Ratio
 
-6. NEWS & SENTIMENT
+7. NEWS & SENTIMENT
    - Analyse der aktuellen News (falls vorhanden)
    - Sentiment-Einschätzung: Bullish / Bearish / Neutral
 
 {katalysatoren_text}
 
-8. RISIKO-FAKTOREN
+9. RISIKO-FAKTOREN
    - Was könnte schiefgehen?
    - Welche Warnsignale gibt es?
    - Sektor-spezifische Risiken
 
-9. FINAL VERDICT
+10. FINAL VERDICT
    - Rating: X/100
    - Empfehlung: STRONG LONG / LONG / ABWARTEN / SHORT / STRONG SHORT
    - Konfidenz: Hoch / Mittel / Niedrig
