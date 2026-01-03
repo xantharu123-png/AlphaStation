@@ -114,7 +114,6 @@ def add_to_watchlist(ticker, data):
         "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "data": data
     }
-    # Prüfen ob schon vorhanden
     existing = [w["ticker"] for w in st.session_state.watchlist]
     if ticker not in existing:
         st.session_state.watchlist.append(entry)
@@ -125,12 +124,104 @@ def remove_from_watchlist(ticker):
     """Entfernt Ticker von Watchlist"""
     st.session_state.watchlist = [w for w in st.session_state.watchlist if w["ticker"] != ticker]
 
-def calculate_sr_levels(price):
-    """Berechnet Support/Resistance basierend auf runden Zahlen"""
+def fetch_historical_data_crypto(coin_id, days):
+    """Holt historische OHLC-Daten von CoinGecko"""
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+        params = {"vs_currency": "usd", "days": days}
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            # Format: [[timestamp, open, high, low, close], ...]
+            if data and len(data) > 0:
+                return data
+    except:
+        pass
+    return None
+
+def fetch_historical_data_stocks(ticker, days, poly_key):
+    """Holt historische Daten von Polygon"""
+    try:
+        from datetime import timedelta
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
+        params = {"apiKey": poly_key, "limit": days}
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("results", [])
+            if results:
+                # Format anpassen: [[timestamp, open, high, low, close], ...]
+                return [[r["t"], r["o"], r["h"], r["l"], r["c"]] for r in results]
+    except:
+        pass
+    return None
+
+def calculate_sr_from_historical(ohlc_data, current_price):
+    """Berechnet S/R-Levels aus historischen Swing Highs/Lows"""
+    if not ohlc_data or len(ohlc_data) < 5:
+        return calculate_sr_levels_simple(current_price)
+    
+    # Extrahiere Highs und Lows
+    highs = [candle[2] for candle in ohlc_data]  # Index 2 = High
+    lows = [candle[3] for candle in ohlc_data]   # Index 3 = Low
+    closes = [candle[4] for candle in ohlc_data] # Index 4 = Close
+    
+    # Finde Swing Highs (lokale Maxima)
+    swing_highs = []
+    for i in range(2, len(highs) - 2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            swing_highs.append(highs[i])
+    
+    # Finde Swing Lows (lokale Minima)
+    swing_lows = []
+    for i in range(2, len(lows) - 2):
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            swing_lows.append(lows[i])
+    
+    # Füge auch absolutes High/Low hinzu
+    swing_highs.append(max(highs))
+    swing_lows.append(min(lows))
+    
+    # Pivot Point berechnen
+    last_high = highs[-1]
+    last_low = lows[-1]
+    last_close = closes[-1]
+    pivot = (last_high + last_low + last_close) / 3
+    
+    # Klassische Pivot-Level
+    r1 = 2 * pivot - last_low
+    r2 = pivot + (last_high - last_low)
+    s1 = 2 * pivot - last_high
+    s2 = pivot - (last_high - last_low)
+    
+    # Kombiniere: Swing-Level die unter dem Preis liegen = Support
+    supports = sorted(set([s for s in swing_lows if s < current_price] + [s1, s2]), reverse=True)[:3]
+    
+    # Swing-Level die über dem Preis liegen = Resistance
+    resistances = sorted(set([r for r in swing_highs if r > current_price] + [r1, r2]))[:3]
+    
+    # Runden
+    supports = [round(s, 6) for s in supports if s > 0]
+    resistances = [round(r, 6) for r in resistances if r > 0]
+    
+    # Fallback wenn nicht genug Level gefunden
+    if len(supports) < 3:
+        simple_s, _ = calculate_sr_levels_simple(current_price)
+        supports = (supports + simple_s)[:3]
+    if len(resistances) < 3:
+        _, simple_r = calculate_sr_levels_simple(current_price)
+        resistances = (resistances + simple_r)[:3]
+    
+    return supports[:3], resistances[:3]
+
+def calculate_sr_levels_simple(price):
+    """Fallback: Berechnet S/R basierend auf runden Zahlen"""
     if price <= 0:
         return [], []
     
-    # Magnitude bestimmen
     if price >= 1000:
         step = 50
     elif price >= 100:
@@ -144,24 +235,42 @@ def calculate_sr_levels(price):
     else:
         step = 0.001
     
-    # Runde auf nächsten Step
     base = round(price / step) * step
     
-    # Support-Level (unter dem Preis)
-    supports = [
-        round(base - step, 6),
-        round(base - step * 2, 6),
-        round(base - step * 3, 6),
-    ]
-    
-    # Resistance-Level (über dem Preis)
-    resistances = [
-        round(base + step, 6),
-        round(base + step * 2, 6),
-        round(base + step * 3, 6),
-    ]
+    supports = [round(base - step, 6), round(base - step * 2, 6), round(base - step * 3, 6)]
+    resistances = [round(base + step, 6), round(base + step * 2, 6), round(base + step * 3, 6)]
     
     return supports, resistances
+
+def calculate_sr_levels(price, ticker=None, market_type="Krypto", timeframe="4H", poly_key=None):
+    """Hauptfunktion: Berechnet S/R-Levels basierend auf Timeframe"""
+    
+    # Timeframe zu Tagen mappen
+    tf_to_days = {
+        "1H": 1,
+        "4H": 7,
+        "1D": 30,
+        "1W": 90,
+        "1M": 180
+    }
+    days = tf_to_days.get(timeframe, 7)
+    
+    # Versuche historische Daten zu holen
+    ohlc_data = None
+    
+    if market_type == "Krypto" and ticker:
+        # CoinGecko braucht coin_id (lowercase)
+        coin_id = ticker.lower()
+        ohlc_data = fetch_historical_data_crypto(coin_id, days)
+    
+    elif market_type == "Aktien" and ticker and poly_key:
+        ohlc_data = fetch_historical_data_stocks(ticker, days, poly_key)
+    
+    # Berechne S/R aus historischen Daten oder Fallback
+    if ohlc_data:
+        return calculate_sr_from_historical(ohlc_data, price)
+    else:
+        return calculate_sr_levels_simple(price)
 
 # =============================================================================
 # 4. DATA FETCHING FUNCTIONS
@@ -492,10 +601,6 @@ with tab_scanner:
                 st.session_state.selected_symbol = str(row["Ticker"])
                 st.session_state.current_data = row.to_dict()
                 
-                # S/R Levels berechnen
-                supports, resistances = calculate_sr_levels(row["Preis"])
-                st.session_state.sr_levels = {"support": supports, "resistance": resistances}
-                
                 # Watchlist Button
                 if st.button(f"⭐ {row['Ticker']} zur Watchlist", use_container_width=True):
                     if add_to_watchlist(row["Ticker"], row.to_dict()):
@@ -508,8 +613,54 @@ with tab_scanner:
     with col_chart:
         st.subheader(f"📊 {st.session_state.selected_symbol}")
         
+        # TIMEFRAME SELECTOR
+        col_tf, col_empty = st.columns([1, 2])
+        with col_tf:
+            selected_tf = st.selectbox(
+                "⏱️ Timeframe",
+                ["1H", "4H", "1D", "1W", "1M"],
+                index=1,  # Default: 4H
+                key="tf_selector",
+                help="S/R-Levels werden basierend auf diesem Timeframe berechnet"
+            )
+        
+        # Timeframe zu TradingView Interval mappen
+        tf_to_tv = {
+            "1H": "60",
+            "4H": "240", 
+            "1D": "D",
+            "1W": "W",
+            "1M": "M"
+        }
+        tv_interval = tf_to_tv.get(selected_tf, "240")
+        
+        # S/R Levels NEU berechnen wenn Timeframe sich ändert
+        if "current_data" in st.session_state:
+            current_price = st.session_state.current_data.get("Preis", 0)
+            ticker = st.session_state.selected_symbol
+            m_type = st.session_state.market_type
+            
+            # Polygon Key für Aktien
+            poly_key = None
+            if m_type == "Aktien":
+                try:
+                    poly_key = st.secrets["POLYGON_KEY"]
+                except:
+                    pass
+            
+            # S/R mit historischen Daten berechnen
+            supports, resistances = calculate_sr_levels(
+                price=current_price,
+                ticker=ticker,
+                market_type=m_type,
+                timeframe=selected_tf,
+                poly_key=poly_key
+            )
+            st.session_state.sr_levels = {"support": supports, "resistance": resistances}
+        
         # S/R LEVELS ANZEIGE
         if st.session_state.sr_levels["support"] or st.session_state.sr_levels["resistance"]:
+            st.caption(f"📐 S/R-Levels basierend auf {selected_tf} Timeframe")
             col_s, col_r = st.columns(2)
             with col_s:
                 st.markdown("**🟢 Support**")
@@ -520,21 +671,21 @@ with tab_scanner:
                 for i, r in enumerate(st.session_state.sr_levels["resistance"], 1):
                     st.caption(f"R{i}: ${r:,.4f}")
         
-        # TradingView Chart
+        # TradingView Chart mit dynamischem Interval
         if st.session_state.market_type == "Krypto":
             tv_symbol = f"BINANCE:{st.session_state.selected_symbol}USDT"
         else:
             tv_symbol = st.session_state.selected_symbol
         
         tv_html = f'''
-        <div style="height:450px; border-radius: 8px; overflow: hidden;">
+        <div style="height:420px; border-radius: 8px; overflow: hidden;">
             <div id="tv_chart" style="height:100%"></div>
             <script src="https://s3.tradingview.com/tv.js"></script>
             <script>
                 new TradingView.widget({{
                     "autosize": true,
                     "symbol": "{tv_symbol}",
-                    "interval": "240",
+                    "interval": "{tv_interval}",
                     "timezone": "Europe/Berlin",
                     "theme": "dark",
                     "style": "1",
@@ -548,7 +699,7 @@ with tab_scanner:
             </script>
         </div>
         '''
-        st.components.v1.html(tv_html, height=450)
+        st.components.v1.html(tv_html, height=420)
 
 # -----------------------------------------------------------------------------
 # WATCHLIST TAB
