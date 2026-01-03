@@ -82,6 +82,26 @@ STRATEGIES = {
         "filters": {"RVOL": (5.0, 100.0)},
         "logic": "RVOL > 5.0 = institutionelles Interesse wahrscheinlich"
     },
+    "Gap Up": {
+        "description": "Aktien/Krypto mit Gap nach oben - Gaps werden oft gefüllt",
+        "filters": {"Gap %": (2.0, 50.0)},
+        "logic": "Open > Previous High = Gap Up, wird oft gefüllt (Short-Chance)"
+    },
+    "Gap Down": {
+        "description": "Aktien/Krypto mit Gap nach unten - Gaps werden oft gefüllt",
+        "filters": {"Gap %": (-50.0, -2.0)},
+        "logic": "Open < Previous Low = Gap Down, wird oft gefüllt (Long-Chance)"
+    },
+    "Long Wick Up": {
+        "description": "Lange obere Wick = Verkaufsdruck, oft Reversal nach unten",
+        "filters": {"Upper Wick %": (3.0, 50.0), "Change %": (-10.0, 5.0)},
+        "logic": "Lange obere Wick zeigt Ablehnung höherer Preise = Short-Signal"
+    },
+    "Long Wick Down": {
+        "description": "Lange untere Wick = Kaufdruck, oft Reversal nach oben",
+        "filters": {"Lower Wick %": (3.0, 50.0), "Change %": (-5.0, 10.0)},
+        "logic": "Lange untere Wick zeigt Ablehnung tieferer Preise = Long-Signal"
+    },
 }
 
 # =============================================================================
@@ -311,6 +331,25 @@ def fetch_crypto_data():
                 vol_24h = coin.get("total_volume") or 0
                 market_cap = coin.get("market_cap") or 1
                 
+                # OHLC für Wick-Berechnung (CoinGecko gibt uns nur High/Low/Current)
+                # Approximation: Open = Price / (1 + change/100)
+                open_price = price / (1 + change_24h / 100) if change_24h != -100 else price
+                
+                # Wick-Berechnungen
+                candle_range = high_24h - low_24h if high_24h > low_24h else 0.0001
+                body_top = max(open_price, price)
+                body_bottom = min(open_price, price)
+                
+                # Upper Wick: (High - max(Open, Close)) / Candle Range * 100
+                upper_wick_pct = ((high_24h - body_top) / candle_range) * 100 if candle_range > 0 else 0
+                
+                # Lower Wick: (min(Open, Close) - Low) / Candle Range * 100
+                lower_wick_pct = ((body_bottom - low_24h) / candle_range) * 100 if candle_range > 0 else 0
+                
+                # Gap % - Bei Krypto schwer zu berechnen ohne vorherige Kerze
+                # Approximation: Wenn Open weit von "erwartetem" Preis
+                gap_pct = 0  # Krypto hat keine echten Gaps (24/7 Markt)
+                
                 if market_cap > 0:
                     vol_ratio = (vol_24h / market_cap) * 100
                     rvol = round(vol_ratio * 5, 2)
@@ -321,6 +360,7 @@ def fetch_crypto_data():
                 vortag_chg = change_24h
                 close_pos = calculate_close_position(high_24h, low_24h, price)
                 
+                # FILTER-LOGIK
                 match = True
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
@@ -332,6 +372,11 @@ def fetch_crypto_data():
                 if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
                 if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
                 if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): match = False
+                
+                # Neue Filter: Wicks
+                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
+                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
+                if "Gap %" in f and not (f["Gap %"][0] <= gap_pct <= f["Gap %"][1]): match = False
                 
                 if af.get("preis_min", 0) > 0 and price < af["preis_min"]: match = False
                 if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: match = False
@@ -350,6 +395,9 @@ def fetch_crypto_data():
                     "Preis": round(price, 6), "Chg%": round(change_24h, 2),
                     "RVOL": rvol, "Vortag%": round(vortag_chg, 2),
                     "ClosePos": round(close_pos, 2), "Alpha": alpha,
+                    "UpperWick%": round(upper_wick_pct, 1),
+                    "LowerWick%": round(lower_wick_pct, 1),
+                    "Gap%": round(gap_pct, 2),
                 })
             except:
                 continue
@@ -388,14 +436,43 @@ def fetch_stock_data(poly_key):
                     skipped_no_price += 1
                     continue
                 
+                # OHLC Daten
+                open_price = day.get("o") or price
                 high = day.get("h") or price
                 low = day.get("l") or price
                 close = day.get("c") or price
                 
+                # Previous Day Daten für Gap-Berechnung
+                prev_high = prev.get("h") or 0
+                prev_low = prev.get("l") or 0
+                prev_close = prev.get("c") or 0
+                
+                # GAP-Berechnung
+                # Gap Up: Open > Previous High
+                # Gap Down: Open < Previous Low
+                gap_pct = 0
+                if prev_high > 0 and prev_low > 0:
+                    if open_price > prev_high:
+                        # Gap Up: Wie viel % über dem Previous High
+                        gap_pct = ((open_price - prev_high) / prev_high) * 100
+                    elif open_price < prev_low:
+                        # Gap Down: Wie viel % unter dem Previous Low (negativ)
+                        gap_pct = ((open_price - prev_low) / prev_low) * 100
+                
+                # WICK-Berechnungen
+                candle_range = high - low if high > low else 0.0001
+                body_top = max(open_price, close)
+                body_bottom = min(open_price, close)
+                
+                # Upper Wick %: (High - Body Top) / Candle Range * 100
+                upper_wick_pct = ((high - body_top) / candle_range) * 100 if candle_range > 0 else 0
+                
+                # Lower Wick %: (Body Bottom - Low) / Candle Range * 100
+                lower_wick_pct = ((body_bottom - low) / candle_range) * 100 if candle_range > 0 else 0
+                
                 change = t.get("todaysChangePerc")
                 if change is None:
-                    prev_close_price = prev.get("c") or price
-                    change = ((price - prev_close_price) / prev_close_price) * 100 if prev_close_price > 0 else 0
+                    change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
                 change = change or 0
                 
                 vol = day.get("v") or minute_data.get("v") or 0
@@ -404,11 +481,11 @@ def fetch_stock_data(poly_key):
                 rvol = min(rvol, 999.0)
                 
                 prev_open = prev.get("o") or 0
-                prev_close = prev.get("c") or 0
                 vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2) if prev_open > 0 else 0
                 
                 close_pos = calculate_close_position(high, low, close)
                 
+                # FILTER-LOGIK
                 match = True
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
@@ -420,6 +497,11 @@ def fetch_stock_data(poly_key):
                 if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
                 if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
                 if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): match = False
+                
+                # Neue Filter: Gap & Wicks
+                if "Gap %" in f and not (f["Gap %"][0] <= gap_pct <= f["Gap %"][1]): match = False
+                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
+                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
                 
                 if af.get("preis_min", 0) > 0 and price < af["preis_min"]: match = False
                 if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: match = False
@@ -438,6 +520,9 @@ def fetch_stock_data(poly_key):
                     "Preis": round(price, 4), "Chg%": round(change, 2),
                     "RVOL": rvol, "Vortag%": vortag_chg,
                     "ClosePos": round(close_pos, 2), "Alpha": alpha,
+                    "Gap%": round(gap_pct, 2),
+                    "UpperWick%": round(upper_wick_pct, 1),
+                    "LowerWick%": round(lower_wick_pct, 1),
                 })
             except:
                 continue
@@ -708,71 +793,100 @@ with tab_search:
     st.subheader("🔍 Manuelle Suche")
     st.caption("Suche nach einer bestimmten Aktie oder Kryptowährung")
     
-    col_search1, col_search2 = st.columns([2, 1])
+    col_search1, col_search2, col_search3 = st.columns([2, 1, 1])
     
     with col_search1:
         search_input = st.text_input(
             "Ticker eingeben",
-            placeholder="z.B. TSLA, AAPL, BTC, ETH...",
+            placeholder="z.B. TSLA, AAPL, BTC, ETH, XRP...",
             key="manual_search_input"
         ).upper().strip()
     
     with col_search2:
         search_market = st.radio("Markt", ["Aktien", "Krypto"], horizontal=True, key="search_market")
     
-    if st.button("🔍 Suchen", type="primary", use_container_width=True) and search_input:
+    with col_search3:
+        st.write("")  # Spacer
+        search_clicked = st.button("🔍 Suchen", type="primary", key="search_btn")
+    
+    if search_clicked and search_input:
         with st.spinner(f"Suche {search_input}..."):
             search_result = None
             
             if search_market == "Krypto":
-                # CoinGecko Suche
+                # CoinGecko Suche - Verbessert mit Search API
                 try:
-                    # Erst in der Coin-Liste suchen
-                    url = "https://api.coingecko.com/api/v3/coins/markets"
-                    params = {
-                        "vs_currency": "usd",
-                        "order": "market_cap_desc",
-                        "per_page": 250,
-                        "page": 1,
-                        "sparkline": False,
-                        "price_change_percentage": "24h"
-                    }
-                    resp = requests.get(url, params=params, timeout=30)
+                    # Methode 1: Direkte Suche via Search API
+                    search_url = f"https://api.coingecko.com/api/v3/search?query={search_input.lower()}"
+                    search_resp = requests.get(search_url, timeout=15)
                     
-                    if resp.status_code == 200:
-                        coins = resp.json()
-                        # Suche nach Symbol oder Name
-                        for coin in coins:
-                            if coin.get("symbol", "").upper() == search_input or coin.get("id", "").upper() == search_input:
-                                price = coin.get("current_price", 0)
-                                change = coin.get("price_change_percentage_24h", 0) or 0
-                                vol = coin.get("total_volume", 0)
-                                mcap = coin.get("market_cap", 1)
-                                
-                                rvol = round((vol / mcap) * 500, 2) if mcap > 0 else 1.0
-                                rvol = max(0.1, min(rvol, 100))
-                                
-                                high = coin.get("high_24h", price)
-                                low = coin.get("low_24h", price)
-                                close_pos = calculate_close_position(high, low, price)
-                                
-                                alpha = calculate_alpha_score(rvol, change, change)
-                                
-                                search_result = {
-                                    "Ticker": coin.get("symbol", "").upper(),
-                                    "Name": coin.get("name", ""),
-                                    "Preis": round(price, 6),
-                                    "Chg%": round(change, 2),
-                                    "RVOL": rvol,
-                                    "Vortag%": round(change, 2),
-                                    "ClosePos": round(close_pos, 2),
-                                    "Alpha": alpha,
-                                    "High24h": high,
-                                    "Low24h": low,
-                                    "Volume": vol,
-                                    "MarketCap": mcap
-                                }
+                    coin_id = None
+                    if search_resp.status_code == 200:
+                        search_data = search_resp.json()
+                        coins_found = search_data.get("coins", [])
+                        
+                        # Finde den besten Match
+                        for c in coins_found:
+                            if c.get("symbol", "").upper() == search_input:
+                                coin_id = c.get("id")
                                 break
+                        
+                        # Fallback: Erster Treffer
+                        if not coin_id and coins_found:
+                            coin_id = coins_found[0].get("id")
+                    
+                    # Methode 2: Falls Search nicht klappt, in Markets suchen
+                    if not coin_id:
+                        markets_url = "https://api.coingecko.com/api/v3/coins/markets"
+                        params = {
+                            "vs_currency": "usd",
+                            "order": "market_cap_desc",
+                            "per_page": 250,
+                            "page": 1
+                        }
+                        markets_resp = requests.get(markets_url, params=params, timeout=30)
+                        if markets_resp.status_code == 200:
+                            for coin in markets_resp.json():
+                                if coin.get("symbol", "").upper() == search_input:
+                                    coin_id = coin.get("id")
+                                    break
+                    
+                    # Jetzt Coin-Daten holen
+                    if coin_id:
+                        detail_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+                        params = {"localization": "false", "tickers": "false", "community_data": "false", "developer_data": "false"}
+                        detail_resp = requests.get(detail_url, params=params, timeout=15)
+                        
+                        if detail_resp.status_code == 200:
+                            coin = detail_resp.json()
+                            market_data = coin.get("market_data", {})
+                            
+                            price = market_data.get("current_price", {}).get("usd", 0)
+                            change = market_data.get("price_change_percentage_24h", 0) or 0
+                            vol = market_data.get("total_volume", {}).get("usd", 0)
+                            mcap = market_data.get("market_cap", {}).get("usd", 1)
+                            high = market_data.get("high_24h", {}).get("usd", price)
+                            low = market_data.get("low_24h", {}).get("usd", price)
+                            
+                            rvol = round((vol / mcap) * 500, 2) if mcap > 0 else 1.0
+                            rvol = max(0.1, min(rvol, 100))
+                            close_pos = calculate_close_position(high, low, price)
+                            alpha = calculate_alpha_score(rvol, change, change)
+                            
+                            search_result = {
+                                "Ticker": coin.get("symbol", "").upper(),
+                                "Name": coin.get("name", ""),
+                                "Preis": round(price, 6),
+                                "Chg%": round(change, 2),
+                                "RVOL": rvol,
+                                "Vortag%": round(change, 2),
+                                "ClosePos": round(close_pos, 2),
+                                "Alpha": alpha,
+                                "High24h": high,
+                                "Low24h": low,
+                                "Volume": vol,
+                                "MarketCap": mcap
+                            }
                 except Exception as e:
                     st.error(f"Fehler bei Krypto-Suche: {e}")
             
