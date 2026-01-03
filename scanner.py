@@ -569,7 +569,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
-tab_scanner, tab_watchlist = st.tabs(["📊 Scanner", "⭐ Watchlist"])
+tab_scanner, tab_search, tab_watchlist = st.tabs(["📊 Scanner", "🔍 Suche", "⭐ Watchlist"])
 
 with tab_scanner:
     col_chart, col_journal = st.columns([2, 1])
@@ -700,6 +700,185 @@ with tab_scanner:
         </div>
         '''
         st.components.v1.html(tv_html, height=420)
+
+# -----------------------------------------------------------------------------
+# SUCHE TAB - Manuelle Ticker-Suche
+# -----------------------------------------------------------------------------
+with tab_search:
+    st.subheader("🔍 Manuelle Suche")
+    st.caption("Suche nach einer bestimmten Aktie oder Kryptowährung")
+    
+    col_search1, col_search2 = st.columns([2, 1])
+    
+    with col_search1:
+        search_input = st.text_input(
+            "Ticker eingeben",
+            placeholder="z.B. TSLA, AAPL, BTC, ETH...",
+            key="manual_search_input"
+        ).upper().strip()
+    
+    with col_search2:
+        search_market = st.radio("Markt", ["Aktien", "Krypto"], horizontal=True, key="search_market")
+    
+    if st.button("🔍 Suchen", type="primary", use_container_width=True) and search_input:
+        with st.spinner(f"Suche {search_input}..."):
+            search_result = None
+            
+            if search_market == "Krypto":
+                # CoinGecko Suche
+                try:
+                    # Erst in der Coin-Liste suchen
+                    url = "https://api.coingecko.com/api/v3/coins/markets"
+                    params = {
+                        "vs_currency": "usd",
+                        "order": "market_cap_desc",
+                        "per_page": 250,
+                        "page": 1,
+                        "sparkline": False,
+                        "price_change_percentage": "24h"
+                    }
+                    resp = requests.get(url, params=params, timeout=30)
+                    
+                    if resp.status_code == 200:
+                        coins = resp.json()
+                        # Suche nach Symbol oder Name
+                        for coin in coins:
+                            if coin.get("symbol", "").upper() == search_input or coin.get("id", "").upper() == search_input:
+                                price = coin.get("current_price", 0)
+                                change = coin.get("price_change_percentage_24h", 0) or 0
+                                vol = coin.get("total_volume", 0)
+                                mcap = coin.get("market_cap", 1)
+                                
+                                rvol = round((vol / mcap) * 500, 2) if mcap > 0 else 1.0
+                                rvol = max(0.1, min(rvol, 100))
+                                
+                                high = coin.get("high_24h", price)
+                                low = coin.get("low_24h", price)
+                                close_pos = calculate_close_position(high, low, price)
+                                
+                                alpha = calculate_alpha_score(rvol, change, change)
+                                
+                                search_result = {
+                                    "Ticker": coin.get("symbol", "").upper(),
+                                    "Name": coin.get("name", ""),
+                                    "Preis": round(price, 6),
+                                    "Chg%": round(change, 2),
+                                    "RVOL": rvol,
+                                    "Vortag%": round(change, 2),
+                                    "ClosePos": round(close_pos, 2),
+                                    "Alpha": alpha,
+                                    "High24h": high,
+                                    "Low24h": low,
+                                    "Volume": vol,
+                                    "MarketCap": mcap
+                                }
+                                break
+                except Exception as e:
+                    st.error(f"Fehler bei Krypto-Suche: {e}")
+            
+            else:
+                # Polygon Aktien-Suche
+                try:
+                    poly_key = st.secrets["POLYGON_KEY"]
+                    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{search_input}"
+                    params = {"apiKey": poly_key}
+                    resp = requests.get(url, params=params, timeout=15)
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        ticker_data = data.get("ticker", {})
+                        
+                        if ticker_data:
+                            day = ticker_data.get("day", {}) or {}
+                            prev = ticker_data.get("prevDay", {}) or {}
+                            last = ticker_data.get("lastTrade", {}) or {}
+                            
+                            price = day.get("c") or last.get("p") or prev.get("c") or 0
+                            
+                            if price > 0:
+                                high = day.get("h", price)
+                                low = day.get("l", price)
+                                
+                                change = ticker_data.get("todaysChangePerc", 0) or 0
+                                
+                                vol = day.get("v", 0)
+                                prev_vol = prev.get("v", 1)
+                                rvol = round(vol / prev_vol, 2) if prev_vol > 0 else 1.0
+                                
+                                prev_open = prev.get("o", 0)
+                                prev_close = prev.get("c", 0)
+                                vortag = round(((prev_close - prev_open) / prev_open) * 100, 2) if prev_open > 0 else 0
+                                
+                                close_pos = calculate_close_position(high, low, price)
+                                alpha = calculate_alpha_score(rvol, vortag, change)
+                                
+                                search_result = {
+                                    "Ticker": search_input,
+                                    "Name": search_input,
+                                    "Preis": round(price, 4),
+                                    "Chg%": round(change, 2),
+                                    "RVOL": rvol,
+                                    "Vortag%": vortag,
+                                    "ClosePos": round(close_pos, 2),
+                                    "Alpha": alpha,
+                                    "High24h": high,
+                                    "Low24h": low,
+                                    "Volume": vol
+                                }
+                except Exception as e:
+                    st.error(f"Fehler bei Aktien-Suche: {e}")
+            
+            # Ergebnis anzeigen
+            if search_result:
+                st.success(f"✅ {search_result['Ticker']} gefunden!")
+                
+                # In Session State speichern
+                st.session_state.selected_symbol = search_result["Ticker"]
+                st.session_state.current_data = search_result
+                st.session_state.market_type = search_market
+                
+                # Daten anzeigen
+                st.divider()
+                
+                col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+                with col_d1:
+                    st.metric("Preis", f"${search_result['Preis']:,.4f}")
+                with col_d2:
+                    st.metric("24h", f"{search_result['Chg%']:.2f}%", 
+                             delta=f"{search_result['Chg%']:.2f}%",
+                             delta_color="normal" if search_result['Chg%'] >= 0 else "inverse")
+                with col_d3:
+                    st.metric("RVOL", f"{search_result['RVOL']:.1f}x")
+                with col_d4:
+                    st.metric("Alpha", f"{search_result['Alpha']:.0f}")
+                
+                st.divider()
+                
+                # Details
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    st.caption(f"📈 24h High: ${search_result.get('High24h', 0):,.4f}")
+                    st.caption(f"📉 24h Low: ${search_result.get('Low24h', 0):,.4f}")
+                with col_info2:
+                    st.caption(f"📊 Volume: {search_result.get('Volume', 0):,.0f}")
+                    if 'MarketCap' in search_result:
+                        st.caption(f"💰 Market Cap: ${search_result.get('MarketCap', 0):,.0f}")
+                
+                # Aktionen
+                st.divider()
+                col_act1, col_act2 = st.columns(2)
+                with col_act1:
+                    if st.button(f"⭐ {search_result['Ticker']} zur Watchlist", key="search_watchlist", use_container_width=True):
+                        if add_to_watchlist(search_result["Ticker"], search_result):
+                            st.success("Hinzugefügt!")
+                        else:
+                            st.info("Bereits in Watchlist")
+                with col_act2:
+                    st.info("💡 Wechsle zum Scanner-Tab für Chart & AI-Analyse")
+                
+            else:
+                st.warning(f"❌ '{search_input}' nicht gefunden. Prüfe die Schreibweise.")
+                st.caption("Beispiele: TSLA, AAPL, NVDA, BTC, ETH, SOL")
 
 # -----------------------------------------------------------------------------
 # WATCHLIST TAB
