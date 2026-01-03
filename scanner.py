@@ -102,6 +102,19 @@ STRATEGIES = {
         "filters": {"Lower Wick %": (3.0, 50.0), "Change %": (-5.0, 10.0)},
         "logic": "Lange untere Wick zeigt Ablehnung tieferer Preise = Long-Signal"
     },
+    # INSIDER STRATEGIEN (nur Aktien)
+    "Insider Buying": {
+        "description": "🔥 Insider (CEO, CFO, Directors) kaufen eigene Aktien",
+        "filters": {"Insider": "BUY"},
+        "logic": "Insider kaufen = Sie glauben an die Firma → Bullish Signal",
+        "stocks_only": True
+    },
+    "Insider Selling": {
+        "description": "⚠️ Insider verkaufen große Mengen",
+        "filters": {"Insider": "SELL"},
+        "logic": "Große Insider-Verkäufe können Warnsignal sein",
+        "stocks_only": True
+    },
 }
 
 # =============================================================================
@@ -295,6 +308,142 @@ def calculate_sr_levels(price, ticker=None, market_type="Krypto", timeframe="4H"
 # =============================================================================
 # 4. DATA FETCHING FUNCTIONS
 # =============================================================================
+
+def fetch_insider_transactions(finnhub_key, transaction_type="BUY"):
+    """Holt Insider-Transaktionen von Finnhub"""
+    results = []
+    
+    try:
+        from datetime import timedelta
+        
+        # Letzte 30 Tage
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        
+        # Finnhub Insider Transactions API
+        url = f"https://finnhub.io/api/v1/stock/insider-transactions"
+        params = {
+            "symbol": "",  # Leer = alle
+            "from": start_date,
+            "to": end_date,
+            "token": finnhub_key
+        }
+        
+        # Wir holen die Top-Aktien mit Insider-Aktivität
+        # Da Finnhub kein "alle" unterstützt, holen wir beliebte Ticker
+        popular_tickers = [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "AMD", "INTC",
+            "JPM", "BAC", "WFC", "GS", "MS", "V", "MA", "PYPL",
+            "JNJ", "PFE", "UNH", "MRK", "ABBV", "LLY", "BMY",
+            "XOM", "CVX", "COP", "SLB", "OXY",
+            "DIS", "NFLX", "CMCSA", "T", "VZ",
+            "WMT", "COST", "TGT", "HD", "LOW",
+            "BA", "CAT", "GE", "MMM", "HON",
+            "KO", "PEP", "MCD", "SBUX", "NKE",
+            "CRM", "ORCL", "IBM", "CSCO", "ADBE", "NOW", "SNOW", "PLTR",
+            "SQ", "SHOP", "COIN", "HOOD", "SOFI",
+            "RIVN", "LCID", "NIO", "F", "GM",
+            "MRNA", "BNTX", "REGN", "VRTX", "BIIB"
+        ]
+        
+        insider_data = {}  # ticker -> list of transactions
+        
+        # Batch-Abfrage (max 60/min bei Finnhub)
+        for ticker in popular_tickers[:50]:  # Limitieren auf 50 für Speed
+            try:
+                url = f"https://finnhub.io/api/v1/stock/insider-transactions"
+                params = {"symbol": ticker, "token": finnhub_key}
+                resp = requests.get(url, params=params, timeout=5)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    transactions = data.get("data", [])
+                    
+                    if transactions:
+                        insider_data[ticker] = transactions
+                        
+            except:
+                continue
+        
+        # Filtern nach BUY oder SELL
+        for ticker, transactions in insider_data.items():
+            buy_value = 0
+            sell_value = 0
+            buy_count = 0
+            sell_count = 0
+            recent_transactions = []
+            
+            for t in transactions[:20]:  # Letzte 20 Transaktionen
+                trans_type = t.get("transactionType", "")
+                shares = abs(t.get("share", 0) or 0)
+                price = t.get("transactionPrice", 0) or 0
+                value = shares * price
+                name = t.get("name", "Unknown")
+                date = t.get("transactionDate", "")
+                
+                # P-Purchase, S-Sale, A-Grant/Award
+                if "P" in trans_type or "Buy" in trans_type.lower():
+                    buy_value += value
+                    buy_count += 1
+                    recent_transactions.append({
+                        "type": "BUY",
+                        "name": name,
+                        "shares": shares,
+                        "value": value,
+                        "date": date
+                    })
+                elif "S" in trans_type or "Sale" in trans_type.lower():
+                    sell_value += value
+                    sell_count += 1
+                    recent_transactions.append({
+                        "type": "SELL",
+                        "name": name,
+                        "shares": shares,
+                        "value": value,
+                        "date": date
+                    })
+            
+            # Filter nach gewünschtem Typ
+            if transaction_type == "BUY" and buy_count > 0 and buy_value > 10000:
+                results.append({
+                    "Ticker": ticker,
+                    "Name": "",
+                    "InsiderType": "BUY",
+                    "BuyCount": buy_count,
+                    "BuyValue": buy_value,
+                    "SellCount": sell_count,
+                    "SellValue": sell_value,
+                    "NetValue": buy_value - sell_value,
+                    "Transactions": recent_transactions[:5],
+                    "Alpha": int(buy_value / 10000)  # Alpha basiert auf Kaufvolumen
+                })
+            elif transaction_type == "SELL" and sell_count > 0 and sell_value > 50000:
+                results.append({
+                    "Ticker": ticker,
+                    "Name": "",
+                    "InsiderType": "SELL",
+                    "BuyCount": buy_count,
+                    "BuyValue": buy_value,
+                    "SellCount": sell_count,
+                    "SellValue": sell_value,
+                    "NetValue": buy_value - sell_value,
+                    "Transactions": recent_transactions[:5],
+                    "Alpha": int(sell_value / 10000)
+                })
+        
+        # Sortieren nach Value
+        if transaction_type == "BUY":
+            results = sorted(results, key=lambda x: x["BuyValue"], reverse=True)
+        else:
+            results = sorted(results, key=lambda x: x["SellValue"], reverse=True)
+        
+        return results[:30], 0, 0
+        
+    except Exception as e:
+        st.error(f"Finnhub Fehler: {e}")
+        return [], 0, 0
+
+
 def fetch_crypto_data():
     results = []
     skipped_filter = 0
@@ -535,7 +684,7 @@ def fetch_stock_data(poly_key):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V50 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V52 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -546,8 +695,8 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V50 Pro")
-    st.caption("Full Trading Reports | Katalysatoren | Entry-Strategie")
+    st.title("💎 Alpha V52 Pro")
+    st.caption("Insider Trading | Gaps | Wicks | AI Reports")
     
     st.divider()
     
@@ -638,7 +787,27 @@ with st.sidebar:
     
     # SCAN Button
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
-        if not st.session_state.active_filters:
+        # Prüfe ob Insider-Strategie gewählt
+        current_strat = st.session_state.current_strategy
+        is_insider_strategy = current_strat in ["Insider Buying", "Insider Selling"]
+        
+        if is_insider_strategy:
+            # Insider-Scan mit Finnhub
+            with st.status("Scanne Insider-Transaktionen...") as status:
+                try:
+                    finnhub_key = st.secrets["FINNHUB_KEY"]
+                    trans_type = "BUY" if current_strat == "Insider Buying" else "SELL"
+                    status.update(label=f"Hole {trans_type} Transaktionen von Finnhub...")
+                    results, snp, sf = fetch_insider_transactions(finnhub_key, trans_type)
+                    st.session_state.scan_results = results
+                    st.session_state.market_type = "Aktien"  # Insider nur für Aktien
+                    status.update(label=f"✅ {len(results)} Insider-Signale gefunden", state="complete")
+                except KeyError:
+                    st.error("❌ FINNHUB_KEY fehlt in Secrets! Füge ihn hinzu unter Settings → Secrets")
+                except Exception as e:
+                    st.error(f"Fehler: {e}")
+        
+        elif not st.session_state.active_filters:
             st.warning("Erst Strategie laden!")
         else:
             with st.status(f"Scanne {m_type}...") as status:
@@ -659,6 +828,9 @@ tab_scanner, tab_search, tab_watchlist = st.tabs(["📊 Scanner", "🔍 Suche", 
 with tab_scanner:
     col_chart, col_journal = st.columns([2, 1])
     
+    # Prüfe ob Insider-Strategie aktiv
+    is_insider = st.session_state.current_strategy in ["Insider Buying", "Insider Selling"]
+    
     with col_journal:
         st.subheader("📋 Ergebnisse")
         if st.session_state.current_strategy:
@@ -666,25 +838,54 @@ with tab_scanner:
         
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
-            display_cols = ["Ticker", "Preis", "Chg%", "RVOL", "Alpha"]
-            if st.session_state.market_type == "Krypto" and "Name" in df.columns:
-                display_cols = ["Ticker", "Name", "Preis", "Chg%", "Alpha"]
             
-            sel = st.dataframe(
-                df[display_cols], on_select="rerun", selection_mode="single-row",
-                hide_index=True, use_container_width=True,
-                column_config={
+            # Verschiedene Spalten je nach Strategie
+            if is_insider and "BuyValue" in df.columns:
+                # Insider-Anzeige
+                display_cols = ["Ticker", "BuyCount", "BuyValue", "SellCount", "SellValue"]
+                col_config = {
+                    "BuyCount": st.column_config.NumberColumn("🟢 Käufe", format="%d"),
+                    "BuyValue": st.column_config.NumberColumn("🟢 Wert", format="$%,.0f"),
+                    "SellCount": st.column_config.NumberColumn("🔴 Verkäufe", format="%d"),
+                    "SellValue": st.column_config.NumberColumn("🔴 Wert", format="$%,.0f"),
+                }
+            elif st.session_state.market_type == "Krypto" and "Name" in df.columns:
+                display_cols = ["Ticker", "Name", "Preis", "Chg%", "Alpha"]
+                col_config = {
+                    "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
+                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
+                }
+            else:
+                display_cols = ["Ticker", "Preis", "Chg%", "RVOL", "Alpha"]
+                col_config = {
                     "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
                     "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
                     "RVOL": st.column_config.NumberColumn("RVOL", format="%.1fx"),
                     "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
                 }
+            
+            # Nur vorhandene Spalten anzeigen
+            display_cols = [c for c in display_cols if c in df.columns]
+            
+            sel = st.dataframe(
+                df[display_cols], on_select="rerun", selection_mode="single-row",
+                hide_index=True, use_container_width=True,
+                column_config=col_config
             )
             
             if sel.selection and sel.selection.rows:
                 row = df.iloc[sel.selection.rows[0]]
                 st.session_state.selected_symbol = str(row["Ticker"])
                 st.session_state.current_data = row.to_dict()
+                
+                # Insider Details anzeigen
+                if is_insider and "Transactions" in row:
+                    st.divider()
+                    st.caption("📊 Letzte Transaktionen:")
+                    for t in row.get("Transactions", [])[:3]:
+                        emoji = "🟢" if t["type"] == "BUY" else "🔴"
+                        st.caption(f"{emoji} {t['name'][:20]}: {t['shares']:,.0f} Aktien (${t['value']:,.0f})")
                 
                 # Watchlist Button
                 if st.button(f"⭐ {row['Ticker']} zur Watchlist", use_container_width=True):
@@ -1271,7 +1472,7 @@ VERBOTEN:
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V50 Pro")
+    st.caption("Alpha Station V52 Pro")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
