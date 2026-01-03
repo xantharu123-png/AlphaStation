@@ -341,7 +341,7 @@ def fetch_stock_data(poly_key):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V49 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V50 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -352,8 +352,8 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V49 Pro")
-    st.caption("Watchlist | Auto-Refresh | S/R Levels")
+    st.title("💎 Alpha V50 Pro")
+    st.caption("Full Trading Reports | Katalysatoren | Entry-Strategie")
     
     st.divider()
     
@@ -629,40 +629,192 @@ Support: {', '.join([f'${s}' for s in sr['support']])}
 Resistance: {', '.join([f'${r}' for r in sr['resistance']])}
 """
                 
-                prompt = f"""TECHNISCHES TERMINAL - ANALYSE
+                # Erweiterter Profi-Prompt
+                asset_name = d.get('Name', d['Ticker'])
+                current_date = datetime.now().strftime("%d.%m.%Y")
+                
+                # MARKTSPEZIFISCHE KATALYSATOREN
+                if m_type == "Krypto":
+                    katalysatoren_text = """6. KOMMENDE KATALYSATOREN (KRYPTO-SPEZIFISCH)
+   - Token Unlocks / Vesting Schedules (wann werden Tokens freigeschaltet?)
+   - Protokoll-Upgrades / Hard Forks / Soft Forks
+   - Mainnet Launches / Testnet Updates
+   - Halvings (bei PoW Coins)
+   - Token Burns / Buybacks
+   - Neue Exchange Listings
+   - Partnership Announcements
+   - Staking/Yield Änderungen
+   - Regulatorische Entwicklungen (ETF-Entscheidungen, Gesetzgebung)
+   - Makro: Fed-Entscheidungen, Risk-On/Risk-Off Sentiment
+   - Wann ist das nächste wichtige Datum für diesen Coin?"""
+                    
+                    system_extra = """
+KRYPTO-EXPERTISE:
+- Du kennst typische Krypto-Katalysatoren: Halvings, Upgrades, Token Burns, Unlocks, Forks
+- Du weisst dass Krypto 24/7 handelt und volatiler ist
+- Du berücksichtigst On-Chain Metriken wenn relevant
+- Du kennst die wichtigsten Protokolle und deren Upgrade-Zyklen"""
 
-TICKER: {d['Ticker']}
-STRATEGIE: {st.session_state.current_strategy}
+                else:  # Aktien
+                    katalysatoren_text = """6. KOMMENDE KATALYSATOREN (AKTIEN-SPEZIFISCH)
+   
+   EARNINGS & FINANCIALS:
+   - Nächster Earnings Report (Datum, Erwartungen)
+   - Guidance Updates
+   - Dividenden-Termine (Ex-Date, Payment Date)
+   - Aktienrückkauf-Programme
+   
+   SEKTOR-SPEZIFISCH:
+   
+   Biotech/Pharma:
+   - FDA-Entscheidungen (PDUFA Dates)
+   - Klinische Studien (Phase 1/2/3 Readouts)
+   - AdCom Meetings
+   - Patent-Abläufe
+   
+   Tech:
+   - Produkt-Launches
+   - Developer Conferences
+   - Nutzerzahlen / MAU Reports
+   
+   Retail:
+   - Same-Store-Sales Reports
+   - Holiday Season Performance
+   
+   Energie:
+   - OPEC Meetings
+   - Inventory Reports
+   
+   ALLGEMEIN:
+   - Insider-Käufe/Verkäufe
+   - Institutionelle Bewegungen (13F Filings)
+   - Analysten-Rating Änderungen
+   - Index-Aufnahmen/Entfernungen (S&P 500, etc.)
+   - Stock Splits
+   - Spin-Offs / M&A Gerüchte
+   
+   MAKRO:
+   - Fed Meetings / Zinsentscheidungen
+   - CPI / Inflationsdaten
+   - Arbeitsmarktdaten
+   
+   - Wann ist das nächste wichtige Datum für diese Aktie?"""
+                    
+                    system_extra = """
+AKTIEN-EXPERTISE:
+- Du kennst Earnings-Zyklen und typische Reaktionen
+- Bei Biotech/Pharma kennst du FDA-Prozesse und klinische Studien-Phasen
+- Du weisst dass Pre-Market und After-Hours wichtig sind
+- Du berücksichtigst Sektor-Rotation und Marktbreite
+- Du kennst die Bedeutung von Insider-Transaktionen und institutionellem Ownership"""
+                
+                prompt = f"""ALPHA STATION PRO - VOLLSTÄNDIGER TRADING REPORT
+
+═══════════════════════════════════════════════════
+ASSET: {d['Ticker']} ({asset_name})
 MARKT: {m_type}
+DATUM: {current_date}
+═══════════════════════════════════════════════════
 
-DATEN:
-- Preis: ${d['Preis']}
-- 24h Änderung: {d['Chg%']}%
-- RVOL: {d['RVOL']}x
-- Alpha-Score: {d['Alpha']}
+LIVE-DATEN:
+• Aktueller Preis: ${d['Preis']}
+• 24h Änderung: {d['Chg%']}%
+• RVOL (Volumen-Ratio): {d['RVOL']}x
+• Close Position: {d.get('ClosePos', 0.5)} (0=Tagestief, 1=Tageshoch)
+• Alpha-Score: {d['Alpha']}
 
 {sr_text}
 
-NEWS: {news_txt}
+AKTUELLE NEWS:
+{news_txt}
 
-AUFGABEN:
-1. Bewerte Setup für Strategie "{st.session_state.current_strategy}"
-2. Validiere/korrigiere die S/R-Levels falls nötig
-3. Risk/Reward Ratio
-4. Rating 1-100
-5. Empfehlung: LONG / SHORT / ABWARTEN
+═══════════════════════════════════════════════════
+DEINE AUFGABEN (VOLLSTÄNDIGER REPORT):
+═══════════════════════════════════════════════════
 
-Keine Disclaimers. Nur Fakten."""
+1. STRATEGIE-ANALYSE
+   - Bewerte das Setup für die Strategie "{st.session_state.current_strategy}"
+   - Passt das Asset zur gewählten Strategie? Warum/warum nicht?
+
+2. ENTRY-STRATEGIE
+   - Exakter Einstiegspunkt (Preis)
+   - Entry-Typ: Market Order / Limit Order / Stop-Entry?
+   - Optimaler Einstiegszeitpunkt (sofort, bei Pullback, bei Breakout?)
+
+3. STOP-LOSS & TAKE-PROFIT
+   - Stop-Loss Level mit Begründung
+   - Take-Profit 1 (konservativ)
+   - Take-Profit 2 (aggressiv)
+   - Risk/Reward Ratio
+
+4. SUPPORT & RESISTANCE
+   - Validiere/korrigiere die berechneten S/R-Levels
+   - Wichtigste Level für diesen Trade
+
+5. NEWS & SENTIMENT
+   - Analyse der aktuellen News (falls vorhanden)
+   - Sentiment-Einschätzung: Bullish / Bearish / Neutral
+
+{katalysatoren_text}
+
+7. RISIKO-FAKTOREN
+   - Was könnte schiefgehen?
+   - Welche Warnsignale gibt es?
+   - Sektor-spezifische Risiken
+
+8. FINAL VERDICT
+   - Rating: X/100
+   - Empfehlung: STRONG LONG / LONG / ABWARTEN / SHORT / STRONG SHORT
+   - Konfidenz: Hoch / Mittel / Niedrig
+   - Positionsgröße-Empfehlung: Klein (1-2%) / Normal (2-5%) / Aggressiv (5-10%)
+   - Zeithorizont: Intraday / Swing (Tage) / Position (Wochen)
+
+═══════════════════════════════════════════════════
+REGELN: Keine Disclaimers, keine Ausreden, keine Höflichkeitsfloskeln.
+Du bist ein Trading-Terminal. Die Daten sind Fakten. Liefere konkrete Zahlen.
+═══════════════════════════════════════════════════"""
+
+                system_prompt = f"""Du bist ALPHA TERMINAL - ein präzises, professionelles Trading-Analyse-System.
+
+DEINE EIGENSCHAFTEN:
+- Du lieferst messerscharfe, konkrete Analysen
+- Du nennst IMMER exakte Preise und Zahlen
+- Du bist direkt und ohne Umschweife
+- Du gibst klare Handlungsempfehlungen
+- Du recherchierst aus deinem Wissen bekannte Termine und Events
+{system_extra}
+
+FORMATIERUNG:
+- Nutze klare Überschriften
+- Nutze Bullet Points für Übersichtlichkeit
+- Hebe wichtige Zahlen hervor
+
+VERBOTEN:
+- Keine Disclaimers über "keine Anlageberatung"
+- Keine Ausreden über fehlende Daten
+- Keine vagen Aussagen - immer konkret"""
 
                 message = client.messages.create(
                     model="claude-sonnet-4-20250514",
-                    max_tokens=1500,
-                    system="Du bist ein präzises Finanz-Terminal. Keine Höflichkeitsfloskeln. Die Daten sind Fakten.",
+                    max_tokens=2500,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": prompt}]
                 )
                 
-                st.markdown(f"### 📊 Report: {d['Ticker']}")
-                st.caption(f"Strategie: {st.session_state.current_strategy} | Alpha: {d['Alpha']}")
+                st.markdown(f"### 🎯 ALPHA REPORT: {d['Ticker']}")
+                
+                # Info-Box mit Key-Metriken
+                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                with col_m1:
+                    st.metric("Preis", f"${d['Preis']:.4f}")
+                with col_m2:
+                    delta_color = "normal" if d['Chg%'] >= 0 else "inverse"
+                    st.metric("24h", f"{d['Chg%']:.2f}%", delta=f"{d['Chg%']:.2f}%", delta_color=delta_color)
+                with col_m3:
+                    st.metric("RVOL", f"{d['RVOL']:.1f}x")
+                with col_m4:
+                    st.metric("Alpha", f"{d['Alpha']:.0f}")
+                
                 st.divider()
                 st.write(message.content[0].text)
                 
@@ -675,7 +827,7 @@ Keine Disclaimers. Nur Fakten."""
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V49 Pro")
+    st.caption("Alpha Station V50 Pro")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
