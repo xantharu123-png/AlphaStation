@@ -2164,6 +2164,361 @@ INTERNATIONAL_STOCKS = {
     }
 }
 
+# =============================================================================
+# FUTURES - Kontrakt-Listen nach Kategorie
+# =============================================================================
+FUTURES_CONTRACTS = {
+    "INDEX": {
+        "name": "Index Futures",
+        "contracts": [
+            ("ES=F", "S&P 500 E-mini"),
+            ("NQ=F", "Nasdaq 100 E-mini"),
+            ("YM=F", "Dow Jones E-mini"),
+            ("RTY=F", "Russell 2000 E-mini"),
+            ("NKD=F", "Nikkei 225"),
+            ("FCHI=F", "CAC 40"),
+            ("GDAXI=F", "DAX"),
+            ("FTSE=F", "FTSE 100"),
+            ("HSI=F", "Hang Seng"),
+            ("VIX=F", "VIX Volatility"),
+        ]
+    },
+    "ENERGY": {
+        "name": "Energie Futures",
+        "contracts": [
+            ("CL=F", "Crude Oil WTI"),
+            ("BZ=F", "Brent Crude"),
+            ("NG=F", "Natural Gas"),
+            ("HO=F", "Heating Oil"),
+            ("RB=F", "RBOB Gasoline"),
+        ]
+    },
+    "METALS": {
+        "name": "Metall Futures",
+        "contracts": [
+            ("GC=F", "Gold"),
+            ("SI=F", "Silber"),
+            ("PL=F", "Platin"),
+            ("PA=F", "Palladium"),
+            ("HG=F", "Kupfer"),
+        ]
+    },
+    "AGRI": {
+        "name": "Agrar Futures",
+        "contracts": [
+            ("ZC=F", "Mais (Corn)"),
+            ("ZW=F", "Weizen (Wheat)"),
+            ("ZS=F", "Sojabohnen"),
+            ("KC=F", "Kaffee"),
+            ("CT=F", "Baumwolle"),
+            ("SB=F", "Zucker"),
+            ("CC=F", "Kakao"),
+            ("OJ=F", "Orangensaft"),
+            ("LBS=F", "Holz (Lumber)"),
+            ("LE=F", "Live Cattle"),
+        ]
+    },
+    "RATES": {
+        "name": "Zins Futures",
+        "contracts": [
+            ("ZB=F", "30-Year T-Bond"),
+            ("ZN=F", "10-Year T-Note"),
+            ("ZF=F", "5-Year T-Note"),
+            ("ZT=F", "2-Year T-Note"),
+            ("GE=F", "Eurodollar"),
+        ]
+    }
+}
+
+# =============================================================================
+# FOREX - Währungspaare nach Kategorie
+# =============================================================================
+FOREX_PAIRS = {
+    "MAJORS": {
+        "name": "Major Pairs",
+        "pairs": [
+            ("EURUSD=X", "EUR/USD"),
+            ("GBPUSD=X", "GBP/USD"),
+            ("USDJPY=X", "USD/JPY"),
+            ("USDCHF=X", "USD/CHF"),
+            ("AUDUSD=X", "AUD/USD"),
+            ("USDCAD=X", "USD/CAD"),
+            ("NZDUSD=X", "NZD/USD"),
+        ]
+    },
+    "MINORS": {
+        "name": "Minor Pairs",
+        "pairs": [
+            ("EURGBP=X", "EUR/GBP"),
+            ("EURJPY=X", "EUR/JPY"),
+            ("GBPJPY=X", "GBP/JPY"),
+            ("EURCHF=X", "EUR/CHF"),
+            ("EURAUD=X", "EUR/AUD"),
+            ("EURCAD=X", "EUR/CAD"),
+            ("GBPCHF=X", "GBP/CHF"),
+            ("GBPAUD=X", "GBP/AUD"),
+            ("AUDJPY=X", "AUD/JPY"),
+            ("CADJPY=X", "CAD/JPY"),
+            ("CHFJPY=X", "CHF/JPY"),
+            ("AUDNZD=X", "AUD/NZD"),
+            ("AUDCAD=X", "AUD/CAD"),
+            ("NZDJPY=X", "NZD/JPY"),
+        ]
+    },
+    "EXOTICS": {
+        "name": "Exotic Pairs",
+        "pairs": [
+            ("USDTRY=X", "USD/TRY"),
+            ("USDZAR=X", "USD/ZAR"),
+            ("USDMXN=X", "USD/MXN"),
+            ("USDBRL=X", "USD/BRL"),
+            ("USDPLN=X", "USD/PLN"),
+            ("USDSEK=X", "USD/SEK"),
+            ("USDNOK=X", "USD/NOK"),
+            ("USDDKK=X", "USD/DKK"),
+            ("USDSGD=X", "USD/SGD"),
+            ("USDHKD=X", "USD/HKD"),
+            ("USDCNH=X", "USD/CNH"),
+            ("USDINR=X", "USD/INR"),
+            ("EURTRY=X", "EUR/TRY"),
+            ("EURZAR=X", "EUR/ZAR"),
+        ]
+    }
+}
+
+@st.cache_data(ttl=60)  # 1 Minute Cache
+def fetch_futures_data(category):
+    """
+    Holt Futures-Daten via Yahoo Finance API.
+    
+    Args:
+        category: "INDEX", "ENERGY", "METALS", "AGRI", "RATES"
+    
+    Returns:
+        Liste von Futures-Daten
+    """
+    results = []
+    skipped_no_price = 0
+    skipped_filter = 0
+    
+    if category not in FUTURES_CONTRACTS:
+        return [], 0, 0
+    
+    contracts = FUTURES_CONTRACTS[category]["contracts"]
+    
+    f = st.session_state.active_filters
+    af = st.session_state.additional_filters
+    
+    try:
+        for ticker, name in contracts:
+            try:
+                # Yahoo Finance API Query
+                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                params = {"interval": "1d", "range": "5d"}
+                headers = {"User-Agent": "Mozilla/5.0"}
+                
+                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                if resp.status_code != 200:
+                    skipped_no_price += 1
+                    continue
+                
+                data = resp.json()
+                chart = data.get("chart", {}).get("result", [])
+                if not chart:
+                    skipped_no_price += 1
+                    continue
+                
+                quote = chart[0]
+                meta = quote.get("meta", {})
+                indicators = quote.get("indicators", {}).get("quote", [{}])[0]
+                
+                price = meta.get("regularMarketPrice", 0)
+                prev_close = meta.get("previousClose") or meta.get("chartPreviousClose", 0)
+                
+                if price <= 0:
+                    skipped_no_price += 1
+                    continue
+                
+                # OHLCV
+                closes = [c for c in indicators.get("close", []) if c is not None]
+                highs = [h for h in indicators.get("high", []) if h is not None]
+                lows = [l for l in indicators.get("low", []) if l is not None]
+                volumes = [v for v in indicators.get("volume", []) if v is not None]
+                
+                if len(closes) < 2:
+                    skipped_no_price += 1
+                    continue
+                
+                yesterday_close = closes[-2] if len(closes) >= 2 else prev_close
+                today_high = highs[-1] if highs else price
+                today_low = lows[-1] if lows else price
+                today_vol = volumes[-1] if volumes else 0
+                yesterday_vol = volumes[-2] if len(volumes) >= 2 else today_vol
+                
+                change = ((price - yesterday_close) / yesterday_close * 100) if yesterday_close > 0 else 0
+                
+                if len(closes) >= 3:
+                    vortag_chg = ((yesterday_close - closes[-3]) / closes[-3] * 100) if closes[-3] > 0 else 0
+                else:
+                    vortag_chg = 0
+                
+                rvol = round(today_vol / yesterday_vol, 2) if yesterday_vol > 0 else 1.0
+                rvol = min(rvol, 999.0)
+                
+                close_pos = calculate_close_position(today_high, today_low, price)
+                
+                # Filter-Logik
+                match = True
+                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
+                if af.get("nur_gewinner") and change <= 0: match = False
+                if af.get("nur_verlierer") and change >= 0: match = False
+                
+                if not match:
+                    skipped_filter += 1
+                    continue
+                
+                alpha = calculate_alpha_score(rvol, vortag_chg, change)
+                
+                results.append({
+                    "Ticker": ticker.replace("=F", ""),
+                    "Name": name,
+                    "Preis": round(price, 2),
+                    "Chg%": round(change, 2),
+                    "RVOL": rvol,
+                    "Vortag%": round(vortag_chg, 2),
+                    "ClosePos": round(close_pos, 2),
+                    "Alpha": alpha,
+                    "Category": FUTURES_CONTRACTS[category]["name"],
+                    "FullTicker": ticker,
+                })
+                
+            except Exception:
+                continue
+        
+        return results, skipped_no_price, skipped_filter
+        
+    except Exception as e:
+        st.error(f"Futures Fehler: {e}")
+        return [], 0, 0
+
+@st.cache_data(ttl=60)  # 1 Minute Cache
+def fetch_forex_data(category):
+    """
+    Holt Forex-Daten via Yahoo Finance API.
+    
+    Args:
+        category: "MAJORS", "MINORS", "EXOTICS"
+    
+    Returns:
+        Liste von Forex-Daten
+    """
+    results = []
+    skipped_no_price = 0
+    skipped_filter = 0
+    
+    if category not in FOREX_PAIRS:
+        return [], 0, 0
+    
+    pairs = FOREX_PAIRS[category]["pairs"]
+    
+    f = st.session_state.active_filters
+    af = st.session_state.additional_filters
+    
+    try:
+        for ticker, name in pairs:
+            try:
+                # Yahoo Finance API Query
+                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                params = {"interval": "1d", "range": "5d"}
+                headers = {"User-Agent": "Mozilla/5.0"}
+                
+                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                if resp.status_code != 200:
+                    skipped_no_price += 1
+                    continue
+                
+                data = resp.json()
+                chart = data.get("chart", {}).get("result", [])
+                if not chart:
+                    skipped_no_price += 1
+                    continue
+                
+                quote = chart[0]
+                meta = quote.get("meta", {})
+                indicators = quote.get("indicators", {}).get("quote", [{}])[0]
+                
+                price = meta.get("regularMarketPrice", 0)
+                prev_close = meta.get("previousClose") or meta.get("chartPreviousClose", 0)
+                
+                if price <= 0:
+                    skipped_no_price += 1
+                    continue
+                
+                # OHLCV
+                closes = [c for c in indicators.get("close", []) if c is not None]
+                highs = [h for h in indicators.get("high", []) if h is not None]
+                lows = [l for l in indicators.get("low", []) if l is not None]
+                
+                if len(closes) < 2:
+                    skipped_no_price += 1
+                    continue
+                
+                yesterday_close = closes[-2] if len(closes) >= 2 else prev_close
+                today_high = highs[-1] if highs else price
+                today_low = lows[-1] if lows else price
+                
+                change = ((price - yesterday_close) / yesterday_close * 100) if yesterday_close > 0 else 0
+                
+                if len(closes) >= 3:
+                    vortag_chg = ((yesterday_close - closes[-3]) / closes[-3] * 100) if closes[-3] > 0 else 0
+                else:
+                    vortag_chg = 0
+                
+                close_pos = calculate_close_position(today_high, today_low, price)
+                
+                # Pip-Berechnung (für Forex relevant)
+                # Für JPY-Paare: 1 Pip = 0.01, sonst 0.0001
+                if "JPY" in ticker:
+                    pip_value = 0.01
+                    pip_change = (price - yesterday_close) / pip_value
+                else:
+                    pip_value = 0.0001
+                    pip_change = (price - yesterday_close) / pip_value
+                
+                # Filter-Logik
+                match = True
+                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
+                if af.get("nur_gewinner") and change <= 0: match = False
+                if af.get("nur_verlierer") and change >= 0: match = False
+                
+                if not match:
+                    skipped_filter += 1
+                    continue
+                
+                alpha = abs(change) * 20  # Forex hat kleinere Moves, daher *20
+                
+                results.append({
+                    "Ticker": name,
+                    "Name": "",
+                    "Preis": round(price, 5),  # 5 Dezimalstellen für Forex
+                    "Chg%": round(change, 3),
+                    "Pips": round(pip_change, 1),
+                    "Vortag%": round(vortag_chg, 3),
+                    "ClosePos": round(close_pos, 2),
+                    "Alpha": round(alpha, 0),
+                    "Category": FOREX_PAIRS[category]["name"],
+                    "FullTicker": ticker,
+                })
+                
+            except Exception:
+                continue
+        
+        return results, skipped_no_price, skipped_filter
+        
+    except Exception as e:
+        st.error(f"Forex Fehler: {e}")
+        return [], 0, 0
+
 @st.cache_data(ttl=60)  # 1 Minute Cache
 def fetch_international_stock_data(exchange_code):
     """
@@ -2352,7 +2707,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V58 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V59 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -2363,18 +2718,57 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V58 Pro")
+    st.title("💎 Alpha V59 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
     
-    # Markt-Auswahl
-    m_type = st.radio("📊 Markt:", ["Krypto", "Aktien"], horizontal=True)
+    # Markt-Auswahl (4 Kategorien)
+    m_type = st.radio("📊 Markt:", ["Krypto", "Aktien", "Futures", "Forex"], horizontal=True)
     st.session_state.market_type = m_type
     
     if m_type == "Krypto":
         st.caption("📡 CoinGecko (Top 250) - 24/7")
-    else:
+    
+    elif m_type == "Futures":
+        # FUTURES KATEGORIE-AUSWAHL
+        futures_categories = {
+            "📈 Index Futures": "INDEX",
+            "🛢️ Energie (Öl, Gas)": "ENERGY",
+            "🥇 Metalle (Gold, Silber)": "METALS",
+            "🌾 Agrar (Weizen, Mais)": "AGRI",
+            "💵 Zinsen (Bonds)": "RATES"
+        }
+        
+        selected_futures = st.selectbox(
+            "📊 Futures-Kategorie:",
+            list(futures_categories.keys()),
+            index=0,
+            key="futures_selector"
+        )
+        st.session_state.selected_futures_cat = futures_categories[selected_futures]
+        st.caption("📡 Yahoo Finance - 15min verzögert")
+        st.caption("🕐 Handelszeiten: Fast 24/7 (So-Fr)")
+    
+    elif m_type == "Forex":
+        # FOREX KATEGORIE-AUSWAHL
+        forex_categories = {
+            "💵 Majors (EUR, GBP, JPY)": "MAJORS",
+            "🌍 Minors (AUD, NZD, CAD)": "MINORS",
+            "🌏 Exotics (TRY, ZAR, MXN)": "EXOTICS"
+        }
+        
+        selected_forex = st.selectbox(
+            "💱 Forex-Kategorie:",
+            list(forex_categories.keys()),
+            index=0,
+            key="forex_selector"
+        )
+        st.session_state.selected_forex_cat = forex_categories[selected_forex]
+        st.caption("📡 Yahoo Finance - 15min verzögert")
+        st.caption("🕐 Handelszeiten: 24/5 (So 22:00 - Fr 22:00 UTC)")
+    
+    else:  # Aktien
         # BÖRSEN-AUSWAHL
         exchange_options = {
             "🇺🇸 USA (NYSE/NASDAQ)": "US",
@@ -2665,6 +3059,36 @@ with st.sidebar:
                     if len(results) == 0 and "Gap %" in st.session_state.active_filters:
                         st.warning("⚠️ Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
                 
+                elif m_type == "Futures":
+                    # FUTURES SCAN
+                    futures_cat = st.session_state.get("selected_futures_cat", "INDEX")
+                    cat_names = {
+                        "INDEX": "📈 Index Futures",
+                        "ENERGY": "🛢️ Energie Futures",
+                        "METALS": "🥇 Metall Futures",
+                        "AGRI": "🌾 Agrar Futures",
+                        "RATES": "💵 Zins Futures"
+                    }
+                    status.update(label=f"Scanne {cat_names.get(futures_cat, futures_cat)}...")
+                    results, snp, sf = fetch_futures_data(futures_cat)
+                    
+                    if len(results) == 0:
+                        st.warning(f"⚠️ Keine Ergebnisse für {cat_names.get(futures_cat)} mit aktuellen Filtern")
+                
+                elif m_type == "Forex":
+                    # FOREX SCAN
+                    forex_cat = st.session_state.get("selected_forex_cat", "MAJORS")
+                    cat_names = {
+                        "MAJORS": "💵 Major Pairs",
+                        "MINORS": "🌍 Minor Pairs",
+                        "EXOTICS": "🌏 Exotic Pairs"
+                    }
+                    status.update(label=f"Scanne {cat_names.get(forex_cat, forex_cat)}...")
+                    results, snp, sf = fetch_forex_data(forex_cat)
+                    
+                    if len(results) == 0:
+                        st.warning(f"⚠️ Keine Ergebnisse für {cat_names.get(forex_cat)} mit aktuellen Filtern")
+                
                 elif exchange == "US":
                     # US-Aktien mit Polygon.io
                     session_labels = {
@@ -2707,7 +3131,11 @@ with st.sidebar:
                 st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
                 
                 # Session-Info in Status
-                if m_type == "Aktien" and exchange != "US":
+                if m_type == "Futures":
+                    status.update(label=f"✅ {len(st.session_state.scan_results)} Futures Signale", state="complete")
+                elif m_type == "Forex":
+                    status.update(label=f"✅ {len(st.session_state.scan_results)} Forex Signale", state="complete")
+                elif m_type == "Aktien" and exchange != "US":
                     exchange_flag = {"DE": "🇩🇪", "UK": "🇬🇧", "CH": "🇨🇭", "EU": "🇪🇺", "JP": "🇯🇵", "HK": "🇭🇰"}.get(exchange, "🌍")
                     status.update(label=f"✅ {len(st.session_state.scan_results)} {exchange_flag} Signale", state="complete")
                 elif m_type == "Aktien" and session != "Regular":
@@ -2764,6 +3192,23 @@ with tab_scanner:
                     "VoidScore": st.column_config.NumberColumn("🕳️ Score", format="%d"),
                     "VoidDist%": st.column_config.NumberColumn("Dist%", format="%.1f%%"),
                     "VoidSize%": st.column_config.NumberColumn("Size%", format="%.1f%%"),
+                }
+            elif st.session_state.market_type == "Futures" and "Name" in df.columns:
+                # Futures Anzeige
+                display_cols = ["Ticker", "Name", "Preis", "Chg%", "Alpha"]
+                col_config = {
+                    "Preis": st.column_config.NumberColumn("Preis", format="%.2f"),
+                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
+                }
+            elif st.session_state.market_type == "Forex" and "Pips" in df.columns:
+                # Forex Anzeige mit Pips
+                display_cols = ["Ticker", "Preis", "Chg%", "Pips", "Alpha"]
+                col_config = {
+                    "Preis": st.column_config.NumberColumn("Preis", format="%.5f"),
+                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.3f%%"),
+                    "Pips": st.column_config.NumberColumn("Pips", format="%.1f"),
+                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
                 }
             elif st.session_state.market_type == "Krypto" and "Name" in df.columns:
                 display_cols = ["Ticker", "Name", "Preis", "Chg%", "Alpha"]
@@ -4162,7 +4607,7 @@ with tab_moneyflow:
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V58 Pro")
+    st.caption("Alpha Station V59 Pro")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
