@@ -248,6 +248,209 @@ STRATEGIES = {
 }
 
 # =============================================================================
+# FUTURES STRATEGIEN 📈
+# =============================================================================
+FUTURES_STRATEGIES = {
+    # =========================================================================
+    # MOMENTUM STRATEGIEN
+    # =========================================================================
+    "Futures Momentum 📈": {
+        "description": "📈 Starke Bewegung mit Volumen-Bestätigung",
+        "filters": {"Change %": (1.0, 20.0)},
+        "logic": "Futures mit >1% Tagesbewegung = klares Momentum"
+    },
+    "Futures Breakdown 📉": {
+        "description": "📉 Starker Abverkauf - Short-Opportunity",
+        "filters": {"Change %": (-20.0, -1.0)},
+        "logic": "Futures mit <-1% = Verkaufsdruck"
+    },
+    "Futures Reversal 🔄": {
+        "description": "🔄 Trendumkehr nach starkem Move",
+        "filters": {"Vortag %": (-10.0, -2.0), "Change %": (0.5, 10.0)},
+        "logic": "Gestern gefallen, heute steigend = potenzielle Umkehr"
+    },
+    # =========================================================================
+    # SESSION-BASIERTE STRATEGIEN
+    # =========================================================================
+    "Globex Gap 🌙": {
+        "description": "🌙 Overnight Gap vs. Regular Session Close",
+        "filters": {"Change %": (0.3, 10.0)},
+        "logic": "Gap zwischen US Close und Asia/Europe Session"
+    },
+    "London Open Momentum 🇬🇧": {
+        "description": "🇬🇧 Momentum bei London Börsenöffnung (08:00 UTC)",
+        "filters": {"Change %": (0.2, 5.0)},
+        "logic": "Europa-Session bringt oft neue Richtung"
+    },
+    "NY Open Breakout 🗽": {
+        "description": "🗽 Breakout bei US-Börsenöffnung (14:30 UTC)",
+        "filters": {"Change %": (0.3, 10.0)},
+        "logic": "US-Session mit höchster Liquidität = große Moves"
+    },
+    # =========================================================================
+    # SPREAD & STRUKTUR
+    # =========================================================================
+    "High Volatility ⚡": {
+        "description": "⚡ Überdurchschnittliche Tagesbewegung",
+        "filters": {"Change %": (2.0, 50.0)},
+        "logic": "Große Bewegung = Trading-Opportunity"
+    },
+    "Low Volatility Squeeze 🎯": {
+        "description": "🎯 Enge Range - Breakout erwartet",
+        "filters": {"Change %": (-0.3, 0.3)},
+        "logic": "Sehr kleine Bewegung = Ruhe vor dem Sturm"
+    },
+    "VIX Spike Alert 🔥": {
+        "description": "🔥 VIX steigt stark - Angst im Markt",
+        "filters": {"Change %": (5.0, 100.0)},
+        "logic": "Nur für VIX: Starker Anstieg = Absicherung aktiv"
+    },
+}
+
+# =============================================================================
+# FOREX STRATEGIEN 💱
+# =============================================================================
+FOREX_STRATEGIES = {
+    # =========================================================================
+    # PIP-BASIERTE MOMENTUM STRATEGIEN
+    # =========================================================================
+    "Forex Momentum 💹": {
+        "description": "💹 Starke Pip-Bewegung in eine Richtung",
+        "filters": {"Change %": (0.3, 5.0)},
+        "logic": "Für Forex ist >0.3% bereits signifikant"
+    },
+    "Forex Reversal 🔄": {
+        "description": "🔄 Gegenbewegung nach starkem Vortag",
+        "filters": {"Vortag %": (-3.0, -0.5), "Change %": (0.1, 3.0)},
+        "logic": "Gestern gefallen, heute steigend = Umkehr-Signal"
+    },
+    "Pip Hunter 🎯": {
+        "description": "🎯 Größte Pip-Bewegungen des Tages",
+        "filters": {"Change %": (0.5, 10.0)},
+        "logic": "Top Movers nach Pips sortiert"
+    },
+    # =========================================================================
+    # SESSION-STRATEGIEN
+    # =========================================================================
+    "Tokyo Session 🇯🇵": {
+        "description": "🇯🇵 Bewegungen während Tokyo Session (00:00-09:00 UTC)",
+        "filters": {"Change %": (0.1, 3.0)},
+        "logic": "Asiatische Session - oft ruhiger, aber JPY-Paare aktiv"
+    },
+    "London Session 🇬🇧": {
+        "description": "🇬🇧 Bewegungen während London Session (08:00-17:00 UTC)",
+        "filters": {"Change %": (0.2, 5.0)},
+        "logic": "Höchste Liquidität - EUR/GBP-Paare besonders aktiv"
+    },
+    "NY Session 🗽": {
+        "description": "🗽 Bewegungen während NY Session (13:00-22:00 UTC)",
+        "filters": {"Change %": (0.2, 5.0)},
+        "logic": "USD-Paare am aktivsten"
+    },
+    "London/NY Overlap 🔥": {
+        "description": "🔥 Höchste Volatilität: London + NY gleichzeitig (13:00-17:00 UTC)",
+        "filters": {"Change %": (0.3, 10.0)},
+        "logic": "Beste Trading-Zeit - maximale Liquidität und Bewegung"
+    },
+    # =========================================================================
+    # SPEZIELLE FOREX-STRATEGIEN
+    # =========================================================================
+    "Safe Haven Flow 🛡️": {
+        "description": "🛡️ Flucht in sichere Währungen (CHF, JPY)",
+        "filters": {"Change %": (-5.0, -0.2)},
+        "logic": "USD/CHF oder USD/JPY fallen = Risk-Off Modus"
+    },
+    "Risk-On Rally 🚀": {
+        "description": "🚀 Risikofreudige Währungen steigen (AUD, NZD)",
+        "filters": {"Change %": (0.2, 5.0)},
+        "logic": "AUD/USD, NZD/USD steigen = Risk-On Sentiment"
+    },
+    "Exotic Movers 🌍": {
+        "description": "🌍 Große Bewegungen in Exotic Pairs",
+        "filters": {"Change %": (0.5, 20.0)},
+        "logic": "Emerging Market Währungen mit hoher Volatilität"
+    },
+    "Range Bound 📊": {
+        "description": "📊 Seitwärts-Bewegung - Range Trading",
+        "filters": {"Change %": (-0.15, 0.15)},
+        "logic": "Minimale Bewegung = Trade die Range"
+    },
+}
+
+# =============================================================================
+# KRYPTO STRATEGIEN 🌐 (angepasst - keine Gaps/Pre-Post)
+# =============================================================================
+CRYPTO_STRATEGIES = {
+    "Volume Surge": {
+        "description": "Extremes Volumen + starke Bewegung",
+        "filters": {"RVOL": (2.0, 100.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 2.0 UND Change > 3%"
+    },
+    "Bull Flag": {
+        "description": "Bullische Konsolidierung nach Anstieg",
+        "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
+        "logic": "Vortag +4-25%, heute flach mit sinkendem Volumen"
+    },
+    "Bear Flag": {
+        "description": "Bärische Konsolidierung nach Abverkauf",
+        "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
+        "logic": "Vortag -4-25%, heute flach = weitere Schwäche"
+    },
+    "Breakout Long": {
+        "description": "Ausbruch nach oben mit Volumen",
+        "filters": {"Change %": (5.0, 50.0), "RVOL": (2.0, 50.0), "Close Position": (0.7, 1.0)},
+        "logic": "Close nahe High + hohes Volumen = Stärke"
+    },
+    "Breakdown Short": {
+        "description": "Ausbruch nach unten mit Volumen",
+        "filters": {"Change %": (-50.0, -5.0), "RVOL": (2.0, 50.0), "Close Position": (0.0, 0.3)},
+        "logic": "Close nahe Low + hohes Volumen = Schwäche"
+    },
+    "Penny Rockets 🚀": {
+        "description": "Günstige Coins mit explosivem Volumen",
+        "filters": {"Preis": (0.0001, 1.0), "RVOL": (3.0, 100.0), "Change %": (2.0, 100.0)},
+        "logic": "Lowcaps unter $1 mit extremem Interesse"
+    },
+    "Dip Buy": {
+        "description": "Qualitäts-Assets im Rücksetzer ohne Panik",
+        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.5, 2.0)},
+        "logic": "Moderater Rücksetzer ohne Volumen-Panik"
+    },
+    "Reversal Hunter": {
+        "description": "Trendumkehr nach starkem Abverkauf",
+        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (2.0, 30.0), "RVOL": (1.5, 50.0)},
+        "logic": "Gestern Crash, heute Käufer"
+    },
+    "Early Momentum": {
+        "description": "Starke Bewegung mit Volumen",
+        "filters": {"Change %": (3.0, 30.0), "RVOL": (1.5, 50.0)},
+        "logic": "Positive Bewegung mit überdurchschnittlichem Volumen"
+    },
+    "Whale Watch 🐋": {
+        "description": "Extremes Volumen - Big Player aktiv",
+        "filters": {"RVOL": (5.0, 100.0)},
+        "logic": "RVOL > 5.0 = institutionelles Interesse"
+    },
+    "Accumulation 📦": {
+        "description": "Leise Akkumulation bei stabilem Preis",
+        "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.5, 5.0)},
+        "logic": "Seitwärts + erhöhtes Volumen = jemand sammelt"
+    },
+}
+
+# Funktion um Strategien basierend auf Markt zu bekommen
+def get_strategies_for_market(market_type):
+    """Gibt die passenden Strategien für den gewählten Markt zurück"""
+    if market_type == "Krypto":
+        return CRYPTO_STRATEGIES
+    elif market_type == "Futures":
+        return FUTURES_STRATEGIES
+    elif market_type == "Forex":
+        return FOREX_STRATEGIES
+    else:  # Aktien
+        return STRATEGIES
+
+# =============================================================================
 # 3. HELPER FUNCTIONS
 # =============================================================================
 def get_current_trading_session():
@@ -288,9 +491,13 @@ def get_current_trading_session():
         return "Regular", "📊 Regular Hours"
 
 
-def apply_strategy(strategy_name):
-    if strategy_name in STRATEGIES:
-        strategy = STRATEGIES[strategy_name]
+def apply_strategy(strategy_name, strategies_dict=None):
+    """Wendet eine Strategie an. strategies_dict ist optional (Standard: STRATEGIES für Aktien)"""
+    if strategies_dict is None:
+        strategies_dict = STRATEGIES
+    
+    if strategy_name in strategies_dict:
+        strategy = strategies_dict[strategy_name]
         st.session_state.active_filters = strategy["filters"].copy()
         st.session_state.current_strategy = strategy_name
         st.session_state.additional_filters = {
@@ -299,7 +506,7 @@ def apply_strategy(strategy_name):
             "rvol_override_min": None, "rvol_override_max": None,
         }
         
-        # Auto-Switch für PM/AH Strategien
+        # Auto-Switch für PM/AH Strategien (nur bei Aktien-Strategien)
         if strategy.get("session_hint") == "Pre-Market":
             st.session_state.active_trading_session = "Pre-Market"
             st.session_state.market_type = "Aktien"
@@ -2707,7 +2914,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V59 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V60 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -2718,7 +2925,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V59 Pro")
+    st.title("💎 Alpha V60 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -2853,24 +3060,32 @@ with st.sidebar:
     
     st.divider()
     
-    # Strategie-Auswahl
+    # Strategie-Auswahl - DYNAMISCH basierend auf Markt!
     st.subheader("🎯 Strategie")
-    strat = st.selectbox("Wähle Strategie:", list(STRATEGIES.keys()))
+    
+    # Hole passende Strategien für aktuellen Markt
+    current_strategies = get_strategies_for_market(m_type)
+    strategy_list = list(current_strategies.keys())
+    
+    # Info welcher Markt
+    market_emoji = {"Krypto": "🌐", "Aktien": "📊", "Futures": "📈", "Forex": "💱"}.get(m_type, "📊")
+    st.caption(f"{market_emoji} {len(strategy_list)} Strategien für **{m_type}**")
+    
+    strat = st.selectbox("Wähle Strategie:", strategy_list, key="strategy_select")
     
     with st.expander("ℹ️ Info"):
-        st.write(STRATEGIES[strat]["description"])
-        st.caption(STRATEGIES[strat]['logic'])
+        st.write(current_strategies[strat]["description"])
+        st.caption(current_strategies[strat]['logic'])
         
-        # Warnungen für marktspezifische Strategien
-        if strat in ["Gap Up", "Gap Down"]:
-            st.warning("⚠️ Gap-Strategien funktionieren nur bei **Aktien**! Krypto handelt 24/7 und hat keine echten Gaps.")
-        if strat in ["Insider Buying", "Insider Selling"]:
-            st.warning("⚠️ Insider-Strategien funktionieren nur bei **Aktien**!")
-        if strat in ["Bull Flag", "Bear Flag", "Reversal Hunter"]:
-            st.info("ℹ️ Bei Krypto wird 'Vortag%' aus 7-Tage-Daten approximiert.")
+        # Warnungen für marktspezifische Strategien (nur bei Aktien relevant)
+        if m_type == "Aktien":
+            if strat in ["Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)"]:
+                st.info("ℹ️ Gap-Strategien funktionieren nur bei US-Börse mit Polygon.io")
+            if strat in ["Insider Buying", "Insider Selling"]:
+                st.warning("⚠️ Insider-Strategien benötigen Finnhub API Key!")
     
     if st.button("📥 Strategie laden", use_container_width=True):
-        apply_strategy(strat)
+        apply_strategy(strat, current_strategies)
         st.rerun()
     
     st.divider()
@@ -4607,7 +4822,7 @@ with tab_moneyflow:
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V59 Pro")
+    st.caption("Alpha Station V60 Pro")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
