@@ -2098,9 +2098,261 @@ def fetch_stock_data(poly_key, session="Regular"):
         return [], 0, 0
 
 # =============================================================================
+# INTERNATIONALE BÖRSEN - Top Aktien Listen
+# =============================================================================
+INTERNATIONAL_STOCKS = {
+    "DE": {  # Deutschland XETRA
+        "suffix": ".DE",
+        "name": "Deutschland (XETRA)",
+        "stocks": [
+            "SAP", "SIE", "ALV", "DTE", "BAS", "BAYN", "MRK", "BMW", "VOW3", "MBG",
+            "ADS", "IFX", "DB1", "MUV2", "HEN3", "DPW", "RWE", "EON", "FRE", "HEI",
+            "CON", "BEI", "LIN", "FME", "VNA", "SRT3", "1COV", "MTX", "SY1", "PUM",
+            "ZAL", "ENR", "HFG", "LEG", "AIR", "EVK", "DHER", "RHM", "SHL", "QIA"
+        ]
+    },
+    "UK": {  # London Stock Exchange
+        "suffix": ".L",
+        "name": "UK (London)",
+        "stocks": [
+            "SHEL", "AZN", "HSBA", "ULVR", "BP", "GSK", "RIO", "DGE", "BATS", "REL",
+            "LSEG", "NG", "VOD", "PRU", "LLOY", "BARC", "AAL", "BHP", "GLEN", "CRH",
+            "RKT", "IMB", "SSE", "AHT", "ABF", "NWG", "EXPN", "SMT", "III", "WPP",
+            "ANTO", "STAN", "LAND", "SGE", "PSON", "INF", "BA", "JD", "TSCO", "SBRY"
+        ]
+    },
+    "CH": {  # Schweiz SIX
+        "suffix": ".SW",
+        "name": "Schweiz (SIX)",
+        "stocks": [
+            "NESN", "ROG", "NOVN", "UBSG", "ZURN", "ABBN", "CSGN", "SREN", "GIVN", "LONN",
+            "SCMN", "SIKA", "GEBN", "PGHN", "CFR", "ALC", "SLHN", "BALN", "SGSN", "LOGN",
+            "SOON", "TEMN", "VACN", "BARN", "HOLN", "SRENH", "STMN", "SCHP", "LISN", "SIGN",
+            "MBTN", "EMMN", "DKSH", "BUCN", "SANN", "SFZN", "BCVN", "BEKN", "CERN", "TIBN"
+        ]
+    },
+    "EU": {  # Euronext (Paris, Amsterdam)
+        "suffix": ".PA",  # Hauptsächlich Paris
+        "name": "Europa (Euronext)",
+        "stocks": [
+            # Frankreich
+            "MC", "OR", "TTE", "SAN", "AIR", "SU", "BNP", "AI", "CS", "DG",
+            "SAF", "RI", "KER", "BN", "VIV", "CA", "CAP", "EN", "GLE", "SGO",
+            # Amsterdam (.AS)
+            "ASML.AS", "INGA.AS", "PHIA.AS", "AD.AS", "HEIA.AS", "UNA.AS", "WKL.AS", "RAND.AS", "DSM.AS", "AKZA.AS"
+        ]
+    },
+    "JP": {  # Tokyo Stock Exchange
+        "suffix": ".T",
+        "name": "Japan (Tokyo)",
+        "stocks": [
+            "7203", "6758", "9984", "8306", "6861", "6501", "7267", "9432", "8035", "4063",
+            "6902", "7974", "8058", "9433", "4502", "6954", "8316", "7751", "3382", "6367",
+            "8801", "4503", "6981", "7201", "9434", "4661", "7270", "6752", "8411", "7733",
+            "5108", "8031", "4519", "6301", "8766", "9020", "4568", "2914", "8802", "6594"
+        ]
+    },
+    "HK": {  # Hong Kong
+        "suffix": ".HK",
+        "name": "Hong Kong",
+        "stocks": [
+            "0700", "9988", "0005", "1299", "2318", "0939", "1398", "0388", "0941", "0883",
+            "2628", "1211", "0027", "1038", "2382", "0011", "0016", "0001", "0066", "3988",
+            "0267", "0669", "1928", "0175", "0002", "0012", "0003", "0688", "0386", "1113",
+            "0823", "0006", "1997", "0019", "2269", "0960", "1109", "0762", "0017", "2020"
+        ]
+    }
+}
+
+@st.cache_data(ttl=60)  # 1 Minute Cache
+def fetch_international_stock_data(exchange_code):
+    """
+    Holt Aktien-Daten von internationalen Börsen via Yahoo Finance API.
+    
+    Args:
+        exchange_code: "DE", "UK", "CH", "EU", "JP", "HK"
+    
+    Returns:
+        Liste von Aktien-Daten
+    """
+    results = []
+    skipped_no_price = 0
+    skipped_filter = 0
+    
+    if exchange_code not in INTERNATIONAL_STOCKS:
+        return [], 0, 0
+    
+    exchange = INTERNATIONAL_STOCKS[exchange_code]
+    suffix = exchange["suffix"]
+    stocks = exchange["stocks"]
+    
+    f = st.session_state.active_filters
+    af = st.session_state.additional_filters
+    
+    try:
+        for ticker_base in stocks:
+            try:
+                # Ticker mit Suffix (außer wenn schon vorhanden)
+                if "." in ticker_base:
+                    ticker = ticker_base
+                else:
+                    ticker = f"{ticker_base}{suffix}"
+                
+                # Yahoo Finance API Query
+                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                params = {
+                    "interval": "1d",
+                    "range": "5d"
+                }
+                headers = {"User-Agent": "Mozilla/5.0"}
+                
+                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                if resp.status_code != 200:
+                    skipped_no_price += 1
+                    continue
+                
+                data = resp.json()
+                
+                # Parse Yahoo Finance Response
+                chart = data.get("chart", {}).get("result", [])
+                if not chart:
+                    skipped_no_price += 1
+                    continue
+                
+                quote = chart[0]
+                meta = quote.get("meta", {})
+                indicators = quote.get("indicators", {}).get("quote", [{}])[0]
+                
+                # Aktuelle Daten
+                price = meta.get("regularMarketPrice", 0)
+                prev_close = meta.get("previousClose") or meta.get("chartPreviousClose", 0)
+                
+                if price <= 0:
+                    skipped_no_price += 1
+                    continue
+                
+                # OHLCV aus den letzten Kerzen
+                closes = indicators.get("close", [])
+                opens = indicators.get("open", [])
+                highs = indicators.get("high", [])
+                lows = indicators.get("low", [])
+                volumes = indicators.get("volume", [])
+                
+                # Filtere None-Werte
+                closes = [c for c in closes if c is not None]
+                opens = [o for o in opens if o is not None]
+                highs = [h for h in highs if h is not None]
+                lows = [l for l in lows if l is not None]
+                volumes = [v for v in volumes if v is not None]
+                
+                if len(closes) < 2:
+                    skipped_no_price += 1
+                    continue
+                
+                # Berechnungen
+                today_close = closes[-1] if closes else price
+                today_open = opens[-1] if opens else price
+                today_high = highs[-1] if highs else price
+                today_low = lows[-1] if lows else price
+                today_vol = volumes[-1] if volumes else 0
+                
+                yesterday_close = closes[-2] if len(closes) >= 2 else prev_close
+                yesterday_vol = volumes[-2] if len(volumes) >= 2 else today_vol
+                
+                # Change %
+                change = ((price - yesterday_close) / yesterday_close * 100) if yesterday_close > 0 else 0
+                
+                # Vortag Change (Tag davor)
+                if len(closes) >= 3:
+                    day_before = closes[-3]
+                    vortag_chg = ((yesterday_close - day_before) / day_before * 100) if day_before > 0 else 0
+                else:
+                    vortag_chg = 0
+                
+                # RVOL
+                rvol = round(today_vol / yesterday_vol, 2) if yesterday_vol > 0 else 1.0
+                rvol = min(rvol, 999.0)
+                
+                # Close Position
+                close_pos = calculate_close_position(today_high, today_low, price)
+                
+                # Wick Berechnungen
+                candle_range = today_high - today_low if today_high > today_low else 0.0001
+                body_top = max(today_open, today_close)
+                body_bottom = min(today_open, today_close)
+                upper_wick_pct = ((today_high - body_top) / candle_range) * 100
+                lower_wick_pct = ((body_bottom - today_low) / candle_range) * 100
+                
+                # ATR
+                atr_pct = calculate_atr_from_ohlc(today_high, today_low, today_close, yesterday_close)
+                volatility_regime, _ = get_volatility_regime(atr_pct)
+                
+                # Dollar Volume
+                dollar_volume = today_vol * price
+                is_liquid = dollar_volume >= 50000
+                
+                # FILTER-LOGIK
+                match = True
+                
+                if "RVOL" in f:
+                    rvol_min, rvol_max = f["RVOL"]
+                    if not (rvol_min <= rvol <= rvol_max): match = False
+                
+                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
+                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
+                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
+                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): match = False
+                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
+                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
+                
+                if af.get("preis_min", 0) > 0 and price < af["preis_min"]: match = False
+                if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: match = False
+                if af.get("nur_gewinner") and change <= 0: match = False
+                if af.get("nur_verlierer") and change >= 0: match = False
+                
+                if not match:
+                    skipped_filter += 1
+                    continue
+                
+                # Clean Ticker für Anzeige
+                display_ticker = ticker_base if ticker_base else ticker.replace(suffix, "")
+                
+                alpha = calculate_alpha_score(rvol, vortag_chg, change)
+                
+                results.append({
+                    "Ticker": display_ticker,
+                    "Name": meta.get("shortName", "")[:15] if meta.get("shortName") else "",
+                    "Preis": round(price, 2),
+                    "Chg%": round(change, 2),
+                    "RVOL": rvol,
+                    "Vortag%": round(vortag_chg, 2),
+                    "ClosePos": round(close_pos, 2),
+                    "Alpha": alpha,
+                    "Gap%": 0,
+                    "UpperWick%": round(upper_wick_pct, 1),
+                    "LowerWick%": round(lower_wick_pct, 1),
+                    "ATR%": atr_pct,
+                    "VolRegime": volatility_regime,
+                    "DollarVol": dollar_volume,
+                    "IsLiquid": is_liquid,
+                    "Currency": meta.get("currency", ""),
+                    "Exchange": exchange["name"],
+                    "FullTicker": ticker,
+                })
+                
+            except Exception:
+                continue
+        
+        return results, skipped_no_price, skipped_filter
+        
+    except Exception as e:
+        st.error(f"Yahoo Finance Fehler: {e}")
+        return [], 0, 0
+
+# =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V57 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V58 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -2111,7 +2363,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V57 Pro")
+    st.title("💎 Alpha V58 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -2123,32 +2375,72 @@ with st.sidebar:
     if m_type == "Krypto":
         st.caption("📡 CoinGecko (Top 250) - 24/7")
     else:
-        # TRADING SESSION - AUTOMATISCH MIT OVERRIDE
-        st.caption("📡 Polygon.io Premium")
+        # BÖRSEN-AUSWAHL
+        exchange_options = {
+            "🇺🇸 USA (NYSE/NASDAQ)": "US",
+            "🇩🇪 Deutschland (XETRA)": "DE",
+            "🇬🇧 UK (London)": "UK",
+            "🇨🇭 Schweiz (SIX)": "CH",
+            "🇪🇺 Europa (Euronext)": "EU",
+            "🇯🇵 Japan (Tokyo)": "JP",
+            "🇭🇰 Hong Kong": "HK"
+        }
         
-        # Automatische Session ermitteln
-        auto_session, session_status = get_current_trading_session()
+        selected_exchange = st.selectbox(
+            "🌍 Börse:",
+            list(exchange_options.keys()),
+            index=0,
+            key="exchange_selector"
+        )
+        st.session_state.selected_exchange = exchange_options[selected_exchange]
         
-        # Override Option
-        manual_override = st.checkbox("⚙️ Session manuell wählen", key="session_override")
-        
-        if manual_override:
-            # Manueller Modus
-            trading_session = st.radio(
-                "⏰ Session:",
-                ["Regular", "Pre-Market", "After-Hours", "Extended"],
-                horizontal=True,
-                key="manual_session",
-                help="Regular: 9:30-16:00 ET | Pre: 4:00-9:30 ET | After: 16:00-20:00 ET"
-            )
-            st.caption(f"📌 Manuell: {trading_session}")
+        # API Info je nach Börse
+        if st.session_state.selected_exchange == "US":
+            st.caption("📡 Polygon.io Premium - Near Realtime")
         else:
-            # Automatischer Modus
-            trading_session = auto_session
-            st.success(session_status)
+            st.caption("📡 Yahoo Finance - 15min verzögert")
         
-        # Session in session_state speichern (für Scan)
-        st.session_state.active_trading_session = trading_session
+        # TRADING SESSION - Nur für US relevant
+        if st.session_state.selected_exchange == "US":
+            # Automatische Session ermitteln
+            auto_session, session_status = get_current_trading_session()
+            
+            # Override Option
+            manual_override = st.checkbox("⚙️ Session manuell wählen", key="session_override")
+            
+            if manual_override:
+                # Manueller Modus
+                trading_session = st.radio(
+                    "⏰ Session:",
+                    ["Regular", "Pre-Market", "After-Hours", "Extended"],
+                    horizontal=True,
+                    key="manual_session",
+                    help="Regular: 9:30-16:00 ET | Pre: 4:00-9:30 ET | After: 16:00-20:00 ET"
+                )
+                st.caption(f"📌 Manuell: {trading_session}")
+            else:
+                # Automatischer Modus
+                trading_session = auto_session
+                st.success(session_status)
+            
+            # Session in session_state speichern (für Scan)
+            st.session_state.active_trading_session = trading_session
+        else:
+            # Internationale Börsen: Keine Session-Auswahl
+            st.session_state.active_trading_session = "Regular"
+            
+            # Handelszeiten Info
+            trading_hours = {
+                "DE": "09:00-17:30 CET",
+                "UK": "08:00-16:30 GMT", 
+                "CH": "09:00-17:30 CET",
+                "EU": "09:00-17:30 CET",
+                "JP": "09:00-15:00 JST",
+                "HK": "09:30-16:00 HKT"
+            }
+            hours = trading_hours.get(st.session_state.selected_exchange, "")
+            if hours:
+                st.caption(f"🕐 Handelszeiten: {hours}")
     
     st.divider()
     
@@ -2362,6 +2654,7 @@ with st.sidebar:
         else:
             # Trading Session für Aktien (automatisch oder manuell)
             session = st.session_state.get("active_trading_session", "Regular")
+            exchange = st.session_state.get("selected_exchange", "US")
             
             with st.status(f"Scanne {m_type}...") as status:
                 if m_type == "Krypto":
@@ -2371,15 +2664,16 @@ with st.sidebar:
                     # Info wenn keine Ergebnisse und Gap-Filter aktiv
                     if len(results) == 0 and "Gap %" in st.session_state.active_filters:
                         st.warning("⚠️ Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
-                else:
-                    # Aktien mit Session
+                
+                elif exchange == "US":
+                    # US-Aktien mit Polygon.io
                     session_labels = {
                         "Regular": "Regular Hours (9:30-16:00)",
                         "Pre-Market": "Pre-Market (4:00-9:30)",
                         "After-Hours": "After-Hours (16:00-20:00)",
                         "Extended": "Extended Hours (Pre+Regular+After)"
                     }
-                    status.update(label=f"Scanne {session_labels.get(session, session)}...")
+                    status.update(label=f"🇺🇸 Scanne USA {session_labels.get(session, session)}...")
                     
                     # RVOL-Warnung für Pre/Post Market
                     if session in ["Pre-Market", "After-Hours"] and "RVOL" in st.session_state.active_filters:
@@ -2392,10 +2686,31 @@ with st.sidebar:
                     if len(results) < 5 and session in ["Pre-Market", "After-Hours"]:
                         st.info(f"ℹ️ Wenige {session} Ergebnisse ({len(results)}) - probiere PM/AH-Strategien ohne RVOL!")
                 
+                else:
+                    # INTERNATIONALE BÖRSEN mit Yahoo Finance
+                    exchange_names = {
+                        "DE": "🇩🇪 Deutschland (XETRA)",
+                        "UK": "🇬🇧 UK (London)",
+                        "CH": "🇨🇭 Schweiz (SIX)",
+                        "EU": "🇪🇺 Europa (Euronext)",
+                        "JP": "🇯🇵 Japan (Tokyo)",
+                        "HK": "🇭🇰 Hong Kong"
+                    }
+                    exchange_name = exchange_names.get(exchange, exchange)
+                    status.update(label=f"Scanne {exchange_name}...")
+                    
+                    results, snp, sf = fetch_international_stock_data(exchange)
+                    
+                    if len(results) == 0:
+                        st.warning(f"⚠️ Keine Ergebnisse für {exchange_name} mit aktuellen Filtern")
+                
                 st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
                 
                 # Session-Info in Status
-                if m_type == "Aktien" and session != "Regular":
+                if m_type == "Aktien" and exchange != "US":
+                    exchange_flag = {"DE": "🇩🇪", "UK": "🇬🇧", "CH": "🇨🇭", "EU": "🇪🇺", "JP": "🇯🇵", "HK": "🇭🇰"}.get(exchange, "🌍")
+                    status.update(label=f"✅ {len(st.session_state.scan_results)} {exchange_flag} Signale", state="complete")
+                elif m_type == "Aktien" and session != "Regular":
                     status.update(label=f"✅ {len(st.session_state.scan_results)} {session} Signale", state="complete")
                 else:
                     status.update(label=f"✅ {len(st.session_state.scan_results)} Signale", state="complete")
@@ -3847,7 +4162,7 @@ with tab_moneyflow:
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V57 Pro")
+    st.caption("Alpha Station V58 Pro")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
