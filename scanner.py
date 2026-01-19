@@ -2914,7 +2914,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V60 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V61 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -2925,7 +2925,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V60 Pro")
+    st.title("💎 Alpha V61 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -3071,7 +3071,25 @@ with st.sidebar:
     market_emoji = {"Krypto": "🌐", "Aktien": "📊", "Futures": "📈", "Forex": "💱"}.get(m_type, "📊")
     st.caption(f"{market_emoji} {len(strategy_list)} Strategien für **{m_type}**")
     
-    strat = st.selectbox("Wähle Strategie:", strategy_list, key="strategy_select")
+    # Prüfe ob aktuelle Strategie zum Markt passt, sonst Reset
+    current_saved_strategy = st.session_state.get("current_strategy", "")
+    if current_saved_strategy and current_saved_strategy not in strategy_list:
+        # Strategie passt nicht zum neuen Markt - Reset
+        st.session_state.current_strategy = ""
+        st.session_state.active_filters = {}
+        current_saved_strategy = ""
+    
+    # Finde Index der aktuellen Strategie (falls vorhanden)
+    default_index = 0
+    if current_saved_strategy in strategy_list:
+        default_index = strategy_list.index(current_saved_strategy)
+    
+    strat = st.selectbox("Wähle Strategie:", strategy_list, index=default_index, key="strategy_select")
+    
+    # AUTOMATISCH Strategie laden wenn sich Auswahl ändert
+    if strat != st.session_state.get("current_strategy", ""):
+        apply_strategy(strat, current_strategies)
+        st.rerun()
     
     with st.expander("ℹ️ Info"):
         st.write(current_strategies[strat]["description"])
@@ -3083,10 +3101,6 @@ with st.sidebar:
                 st.info("ℹ️ Gap-Strategien funktionieren nur bei US-Börse mit Polygon.io")
             if strat in ["Insider Buying", "Insider Selling"]:
                 st.warning("⚠️ Insider-Strategien benötigen Finnhub API Key!")
-    
-    if st.button("📥 Strategie laden", use_container_width=True):
-        apply_strategy(strat, current_strategies)
-        st.rerun()
     
     st.divider()
     
