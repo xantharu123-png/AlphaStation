@@ -19,7 +19,7 @@ if "active_filters" not in st.session_state:
 if "additional_filters" not in st.session_state:
     st.session_state.additional_filters = {}
 if "current_strategy" not in st.session_state:
-    st.session_state.current_strategy = None
+    st.session_state.current_strategy = ""
 if "market_type" not in st.session_state:
     st.session_state.market_type = "Krypto"
 if "trading_session" not in st.session_state:
@@ -492,9 +492,19 @@ def get_current_trading_session():
 
 
 def apply_strategy(strategy_name, strategies_dict=None):
-    """Wendet eine Strategie an. strategies_dict ist optional (Standard: STRATEGIES für Aktien)"""
+    """Wendet eine Strategie an. strategies_dict ist optional - wird automatisch ermittelt."""
+    
+    # Wenn kein Dictionary übergeben, suche in allen
     if strategies_dict is None:
-        strategies_dict = STRATEGIES
+        # Prüfe in welchem Dictionary die Strategie existiert
+        if strategy_name in CRYPTO_STRATEGIES:
+            strategies_dict = CRYPTO_STRATEGIES
+        elif strategy_name in FUTURES_STRATEGIES:
+            strategies_dict = FUTURES_STRATEGIES
+        elif strategy_name in FOREX_STRATEGIES:
+            strategies_dict = FOREX_STRATEGIES
+        else:
+            strategies_dict = STRATEGIES  # Aktien als Fallback
     
     if strategy_name in strategies_dict:
         strategy = strategies_dict[strategy_name]
@@ -517,6 +527,11 @@ def apply_strategy(strategy_name, strategies_dict=None):
         # Auto-Switch auf Aktien für stocks_only Strategien
         if strategy.get("stocks_only"):
             st.session_state.market_type = "Aktien"
+    else:
+        # Strategie nicht gefunden - setze trotzdem auf den Namen
+        st.session_state.current_strategy = strategy_name
+        st.session_state.active_filters = {}
+        st.warning(f"⚠️ Strategie '{strategy_name}' nicht gefunden!")
 
 def calculate_close_position(high, low, close):
     if high == low or high is None or low is None:
@@ -3074,19 +3089,20 @@ with st.sidebar:
     # Prüfe ob aktuelle Strategie zum Markt passt, sonst Reset
     current_saved_strategy = st.session_state.get("current_strategy", "")
     if current_saved_strategy and current_saved_strategy not in strategy_list:
-        # Strategie passt nicht zum neuen Markt - Reset
-        st.session_state.current_strategy = ""
-        st.session_state.active_filters = {}
-        current_saved_strategy = ""
+        # Strategie passt nicht zum neuen Markt - Reset auf erste Strategie des neuen Markts
+        first_strategy = strategy_list[0]
+        apply_strategy(first_strategy, current_strategies)
+        current_saved_strategy = first_strategy
     
     # Finde Index der aktuellen Strategie (falls vorhanden)
     default_index = 0
     if current_saved_strategy in strategy_list:
         default_index = strategy_list.index(current_saved_strategy)
     
-    strat = st.selectbox("Wähle Strategie:", strategy_list, index=default_index, key="strategy_select")
+    # WICHTIG: Key muss zum Markt passen, sonst verwirrt Streamlit sich!
+    strat = st.selectbox("Wähle Strategie:", strategy_list, index=default_index, key=f"strategy_select_{m_type}")
     
-    # AUTOMATISCH Strategie laden wenn sich Auswahl ändert
+    # Strategie laden wenn sich Auswahl ändert
     if strat != st.session_state.get("current_strategy", ""):
         apply_strategy(strat, current_strategies)
         st.rerun()
@@ -3171,8 +3187,11 @@ with st.sidebar:
     
     # SCAN Button
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
+        # DEBUG: Zeige aktuelle Konfiguration
+        st.caption(f"🔍 Debug: Markt={m_type}, Strategie={st.session_state.get('current_strategy', 'KEINE')}, Filter={st.session_state.active_filters}")
+        
         # Prüfe ob Insider-Strategie gewählt
-        current_strat = st.session_state.current_strategy
+        current_strat = st.session_state.get("current_strategy", "")
         is_insider_strategy = current_strat in ["Insider Buying", "Insider Selling"]
         is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
         is_volume_void_strategy = current_strat in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
@@ -3284,9 +3303,13 @@ with st.sidebar:
                     status.update(label="Scanne Krypto (24/7)...")
                     results, snp, sf = fetch_crypto_data()
                     
-                    # Info wenn keine Ergebnisse und Gap-Filter aktiv
-                    if len(results) == 0 and "Gap %" in st.session_state.active_filters:
-                        st.warning("⚠️ Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
+                    # Info wenn keine Ergebnisse
+                    if len(results) == 0:
+                        if "Gap %" in st.session_state.active_filters:
+                            st.warning("⚠️ Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
+                        else:
+                            st.warning(f"⚠️ Keine Krypto gefunden mit aktuellen Filtern. {sf} von 250 Coins gefiltert.")
+                            st.caption(f"Aktive Filter: {st.session_state.active_filters}")
                 
                 elif m_type == "Futures":
                     # FUTURES SCAN
