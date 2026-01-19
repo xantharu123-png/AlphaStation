@@ -45,14 +45,20 @@ STRATEGIES = {
         "logic": "RVOL > 2.0 zeigt erhöhtes Interesse"
     },
     "Bull Flag": {
-        "description": "Konsolidierung nach starkem Anstieg - Volumen nimmt ab",
+        "description": "Konsolidierung nach starkem Anstieg - Multi-Day Pattern",
         "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
-        "logic": "Vortag stark positiv, heute seitwärts, Volumen sinkt = Bullflag"
+        "logic": "Starke Fahnenstange + enge Konsolidierung mit sinkendem Volumen",
+        "needs_history": True,
+        "pattern_type": "bull_flag",
+        "history_days": 5
     },
     "Bear Flag": {
-        "description": "Konsolidierung nach Abverkauf - Short-Setup",
+        "description": "Konsolidierung nach Abverkauf - Multi-Day Short-Setup",
         "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
-        "logic": "Vortag stark negativ, heute seitwärts, Volumen sinkt = Bearflag"
+        "logic": "Starker Abfall + enge Konsolidierung mit sinkendem Volumen",
+        "needs_history": True,
+        "pattern_type": "bear_flag",
+        "history_days": 5
     },
     "Breakout Long": {
         "description": "Momentum-Ausbruch mit Volumen-Bestätigung",
@@ -200,33 +206,41 @@ STRATEGIES = {
         "stocks_only": True
     },
     # =========================================================================
-    # AKKUMULATIONS-STRATEGIEN 📦 - Wyckoff-Style
+    # KONSOLIDIERUNGS-STRATEGIEN 📦 - (Wyckoff-inspiriert, vereinfacht)
+    # HINWEIS: Echte Wyckoff-Analyse erfordert Wochen von Daten!
+    # Diese Strategien finden 2-Tage Konsolidierungen, NICHT echte Wyckoff-Patterns.
+    # Mit Multi-Day Analyse (5 Tage) für bessere Pattern-Erkennung.
     # =========================================================================
-    "Accumulation 📦": {
-        "description": "📦 Wyckoff: Lange Seitwärtsphase mit abnehmendem Volumen - Breakout kommt!",
+    "Consolidation 📦": {
+        "description": "📦 Multi-Day Seitwärtsphase mit sinkendem Volumen - Breakout möglich",
         "filters": {"Change %": (-3.0, 3.0), "Vortag %": (-3.0, 3.0), "RVOL": (0.3, 1.5)},
-        "logic": "Enge Range + niedriges Volumen = Smart Money akkumuliert leise",
-        "needs_history": True
+        "logic": "Enge Range + niedriges Volumen = Ruhe vor dem Sturm (Richtung unklar!)",
+        "needs_history": True,
+        "pattern_type": "consolidation",
+        "history_days": 5
     },
-    "Accumulation Breakout 🚀": {
-        "description": "📦→🚀 Breakout aus Akkumulationsphase mit Volumen-Bestätigung",
+    "Consolidation Breakout 🚀": {
+        "description": "📦→🚀 Ausbruch aus enger Range mit Volumen-Bestätigung",
         "filters": {"Change %": (3.0, 30.0), "Vortag %": (-5.0, 5.0), "RVOL": (1.5, 50.0)},
-        "logic": "Nach langer Ruhe plötzlich Ausbruch + Volumen = GO!"
+        "logic": "Nach flachem Vortag plötzlich Ausbruch + Volumen = Momentum"
     },
-    "Spring Setup 🪤": {
-        "description": "📦 Wyckoff Spring: Fakeout unter Support dann Recovery - Klassiker!",
+    "Reversal Setup 🪤": {
+        "description": "📦 Bärischer Vortag + heute bullisch = potenzielle Umkehr",
         "filters": {"Change %": (2.0, 15.0), "Vortag %": (-8.0, -2.0), "RVOL": (1.2, 10.0)},
-        "logic": "Gestern Dump (Spring), heute Recovery mit Volumen = Bullish Trap für Shorts"
+        "logic": "Gestern rot, heute grün mit Volumen = Käufer steigen ein"
     },
     "Tight Range 📐": {
         "description": "📐 Extrem enge Tagesrange - Explosion steht bevor (Richtung unklar)",
         "filters": {"Change %": (-1.5, 1.5), "RVOL": (0.3, 1.5)},
         "logic": "Wenn Volatilität extrem niedrig → folgt oft große Bewegung"
     },
-    "Distribution 📤": {
-        "description": "📤 Mögliche Distribution: Hohes Volumen + Close in oberer Range-Hälfte",
+    "High Volume Churn 📤": {
+        "description": "📤 Hohes Volumen ohne Preisfortschritt = mögliche Verteilung",
         "filters": {"Change %": (-5.0, 5.0), "RVOL": (2.0, 50.0), "Close Position": (0.5, 0.9)},
-        "logic": "Hohes Volumen ohne Fortschritt am Top = Smart Money verteilt an Retail"
+        "logic": "Hohes Volumen ohne Fortschritt = jemand verkauft in die Stärke",
+        "needs_history": True,
+        "pattern_type": "accumulation",
+        "history_days": 5
     },
     # =========================================================================
     # VOLUME VOID STRATEGIEN 🕳️ - Low Volume Node Scanner
@@ -252,7 +266,7 @@ STRATEGIES = {
 # =============================================================================
 FUTURES_STRATEGIES = {
     # =========================================================================
-    # MOMENTUM STRATEGIEN
+    # MOMENTUM STRATEGIEN (Any Time)
     # =========================================================================
     "Futures Momentum 📈": {
         "description": "📈 Starke Bewegung mit Volumen-Bestätigung",
@@ -270,25 +284,28 @@ FUTURES_STRATEGIES = {
         "logic": "Gestern gefallen, heute steigend = potenzielle Umkehr"
     },
     # =========================================================================
-    # SESSION-BASIERTE STRATEGIEN
+    # SESSION-BASIERTE STRATEGIEN (mit Zeitfenster-Hinweis)
     # =========================================================================
     "Globex Gap 🌙": {
         "description": "🌙 Overnight Gap vs. Regular Session Close",
         "filters": {"Change %": (0.3, 10.0)},
-        "logic": "Gap zwischen US Close und Asia/Europe Session"
+        "logic": "Gap zwischen US Close und Asia/Europe Session",
+        "best_time": "18:00-08:00 UTC (Globex Overnight)"
     },
     "London Open Momentum 🇬🇧": {
         "description": "🇬🇧 Momentum bei London Börsenöffnung (08:00 UTC)",
         "filters": {"Change %": (0.2, 5.0)},
-        "logic": "Europa-Session bringt oft neue Richtung"
+        "logic": "Europa-Session bringt oft neue Richtung",
+        "best_time": "07:00-10:00 UTC"
     },
     "NY Open Breakout 🗽": {
         "description": "🗽 Breakout bei US-Börsenöffnung (14:30 UTC)",
         "filters": {"Change %": (0.3, 10.0)},
-        "logic": "US-Session mit höchster Liquidität = große Moves"
+        "logic": "US-Session mit höchster Liquidität = große Moves",
+        "best_time": "13:30-16:00 UTC"
     },
     # =========================================================================
-    # SPREAD & STRUKTUR
+    # SPREAD & STRUKTUR (Any Time)
     # =========================================================================
     "High Volatility ⚡": {
         "description": "⚡ Überdurchschnittliche Tagesbewegung",
@@ -312,7 +329,7 @@ FUTURES_STRATEGIES = {
 # =============================================================================
 FOREX_STRATEGIES = {
     # =========================================================================
-    # PIP-BASIERTE MOMENTUM STRATEGIEN
+    # PIP-BASIERTE MOMENTUM STRATEGIEN (Any Time)
     # =========================================================================
     "Forex Momentum 💹": {
         "description": "💹 Starke Pip-Bewegung in eine Richtung",
@@ -330,40 +347,49 @@ FOREX_STRATEGIES = {
         "logic": "Top Movers nach Pips sortiert"
     },
     # =========================================================================
-    # SESSION-STRATEGIEN
+    # SESSION-STRATEGIEN (mit Zeitfenster für optimale Nutzung)
     # =========================================================================
     "Tokyo Session 🇯🇵": {
         "description": "🇯🇵 Bewegungen während Tokyo Session (00:00-09:00 UTC)",
         "filters": {"Change %": (0.1, 3.0)},
-        "logic": "Asiatische Session - oft ruhiger, aber JPY-Paare aktiv"
+        "logic": "Asiatische Session - oft ruhiger, aber JPY-Paare aktiv",
+        "best_time": "00:00-09:00 UTC",
+        "best_pairs": ["USDJPY", "EURJPY", "GBPJPY", "AUDJPY"]
     },
     "London Session 🇬🇧": {
         "description": "🇬🇧 Bewegungen während London Session (08:00-17:00 UTC)",
         "filters": {"Change %": (0.2, 5.0)},
-        "logic": "Höchste Liquidität - EUR/GBP-Paare besonders aktiv"
+        "logic": "Höchste Liquidität - EUR/GBP-Paare besonders aktiv",
+        "best_time": "08:00-17:00 UTC",
+        "best_pairs": ["EURUSD", "GBPUSD", "EURGBP", "EURJPY"]
     },
     "NY Session 🗽": {
         "description": "🗽 Bewegungen während NY Session (13:00-22:00 UTC)",
         "filters": {"Change %": (0.2, 5.0)},
-        "logic": "USD-Paare am aktivsten"
+        "logic": "USD-Paare am aktivsten",
+        "best_time": "13:00-22:00 UTC",
+        "best_pairs": ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
     },
     "London/NY Overlap 🔥": {
         "description": "🔥 Höchste Volatilität: London + NY gleichzeitig (13:00-17:00 UTC)",
         "filters": {"Change %": (0.3, 10.0)},
-        "logic": "Beste Trading-Zeit - maximale Liquidität und Bewegung"
+        "logic": "Beste Trading-Zeit - maximale Liquidität und Bewegung",
+        "best_time": "13:00-17:00 UTC"
     },
     # =========================================================================
-    # SPEZIELLE FOREX-STRATEGIEN
+    # SPEZIELLE FOREX-STRATEGIEN (Any Time)
     # =========================================================================
     "Safe Haven Flow 🛡️": {
         "description": "🛡️ Flucht in sichere Währungen (CHF, JPY)",
         "filters": {"Change %": (-5.0, -0.2)},
-        "logic": "USD/CHF oder USD/JPY fallen = Risk-Off Modus"
+        "logic": "USD/CHF oder USD/JPY fallen = Risk-Off Modus",
+        "best_pairs": ["USDCHF", "USDJPY", "EURJPY"]
     },
     "Risk-On Rally 🚀": {
         "description": "🚀 Risikofreudige Währungen steigen (AUD, NZD)",
         "filters": {"Change %": (0.2, 5.0)},
-        "logic": "AUD/USD, NZD/USD steigen = Risk-On Sentiment"
+        "logic": "AUD/USD, NZD/USD steigen = Risk-On Sentiment",
+        "best_pairs": ["AUDUSD", "NZDUSD", "AUDJPY"]
     },
     "Exotic Movers 🌍": {
         "description": "🌍 Große Bewegungen in Exotic Pairs",
@@ -539,7 +565,30 @@ def calculate_close_position(high, low, close):
     return (close - low) / (high - low)
 
 def calculate_alpha_score(rvol, vortag_pct, change_pct):
-    return round((rvol * 12) + (abs(vortag_pct) * 10) + (abs(change_pct) * 8), 2)
+    """
+    Normalisierter Alpha Score 0-100.
+    
+    Gewichtung:
+    - RVOL (Volumen-Interesse): max 30 Punkte
+    - Vortag% (Trend-Kontext): max 35 Punkte  
+    - Change% (Heutige Stärke): max 35 Punkte
+    
+    RVOL Skala: 1.0 = normal, 2.0 = doppelt, 5.0+ = extrem
+    Change Skala: 5% = moderat, 10%+ = stark
+    """
+    # RVOL: 0-5 mapped zu 0-30 Punkte (cap bei 5x)
+    rvol_capped = min(max(rvol, 0), 5)
+    rvol_score = (rvol_capped / 5) * 30
+    
+    # Vortag%: 0-15% mapped zu 0-35 Punkte
+    vortag_abs = min(abs(vortag_pct), 15)
+    vortag_score = (vortag_abs / 15) * 35
+    
+    # Change%: 0-15% mapped zu 0-35 Punkte
+    change_abs = min(abs(change_pct), 15)
+    change_score = (change_abs / 15) * 35
+    
+    return round(rvol_score + vortag_score + change_score, 0)
 
 def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
     """
@@ -799,6 +848,144 @@ def is_signal_significant(change_pct, atr_pct, multiplier=1.5):
     
     significance_ratio = abs(change_pct) / atr_pct
     return significance_ratio >= multiplier
+
+
+def fetch_multi_day_data(ticker, api_key, days=5):
+    """
+    Holt Multi-Day OHLCV Daten von Polygon für echte Pattern-Analyse.
+    
+    Returns: Liste von Dictionaries mit {date, open, high, low, close, volume}
+             Sortiert von ältestem zu neuestem Tag
+    """
+    try:
+        from datetime import datetime, timedelta
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days + 5)  # Extra Buffer für Wochenenden
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        params = {"adjusted": "true", "sort": "asc", "apiKey": api_key}
+        
+        resp = requests.get(url, params=params, timeout=15)
+        data = resp.json()
+        
+        if data.get("status") != "OK" or not data.get("results"):
+            return []
+        
+        results = []
+        for bar in data["results"][-days:]:  # Letzte N Tage
+            results.append({
+                "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                "open": bar["o"],
+                "high": bar["h"],
+                "low": bar["l"],
+                "close": bar["c"],
+                "volume": bar["v"]
+            })
+        
+        return results
+    except:
+        return []
+
+
+def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
+    """
+    Analysiert Multi-Day Patterns basierend auf historischen Daten.
+    
+    Pattern Types:
+    - consolidation: Enge Range über mehrere Tage (Breakout Setup)
+    - bull_flag: Starker Anstieg gefolgt von enger Konsolidierung
+    - bear_flag: Starker Abfall gefolgt von enger Konsolidierung
+    - accumulation: Seitwärts mit steigendem Volumen am Ende
+    
+    Returns: (is_valid, score, details)
+    """
+    if len(bars) < 3:
+        return False, 0, ["❌ Nicht genug Daten (min. 3 Tage)"]
+    
+    details = []
+    score = 0
+    
+    # Berechne tägliche Änderungen
+    daily_changes = []
+    for i in range(1, len(bars)):
+        chg = ((bars[i]["close"] - bars[i-1]["close"]) / bars[i-1]["close"]) * 100
+        daily_changes.append(chg)
+    
+    # Berechne Gesamt-Range der letzten Tage
+    all_highs = [b["high"] for b in bars]
+    all_lows = [b["low"] for b in bars]
+    total_range_pct = ((max(all_highs) - min(all_lows)) / bars[0]["close"]) * 100
+    
+    # Durchschnittliches Volumen
+    volumes = [b["volume"] for b in bars]
+    avg_vol = sum(volumes) / len(volumes)
+    recent_vol = volumes[-1]
+    vol_trend = recent_vol / avg_vol if avg_vol > 0 else 1.0
+    
+    if pattern_type == "consolidation":
+        # Enge Range über mehrere Tage
+        if total_range_pct < 8:
+            score += 30
+            details.append(f"✅ Enge Range: {total_range_pct:.1f}% über {len(bars)} Tage")
+        elif total_range_pct < 12:
+            score += 15
+            details.append(f"⚠️ Moderate Range: {total_range_pct:.1f}%")
+        else:
+            details.append(f"❌ Range zu groß: {total_range_pct:.1f}%")
+        
+        # Volumen sollte sinken
+        if vol_trend < 0.8:
+            score += 20
+            details.append(f"✅ Volumen sinkt: {vol_trend:.2f}x")
+        elif vol_trend < 1.2:
+            score += 10
+            details.append(f"⚠️ Volumen stabil: {vol_trend:.2f}x")
+        else:
+            details.append(f"❌ Volumen steigt: {vol_trend:.2f}x")
+    
+    elif pattern_type == "bull_flag":
+        # Erster Teil: Starker Anstieg (Fahnenstange)
+        if len(bars) >= 4:
+            pole_move = ((bars[-3]["close"] - bars[0]["close"]) / bars[0]["close"]) * 100
+            
+            if pole_move >= 5:
+                score += 30
+                details.append(f"✅ Fahnenstange: {pole_move:+.1f}%")
+            elif pole_move >= 3:
+                score += 15
+                details.append(f"⚠️ Schwache Fahnenstange: {pole_move:+.1f}%")
+            else:
+                details.append(f"❌ Keine Fahnenstange: {pole_move:+.1f}%")
+            
+            # Letzten 2 Tage: Konsolidierung
+            recent_range = abs(daily_changes[-1]) + abs(daily_changes[-2]) if len(daily_changes) >= 2 else 0
+            if recent_range < 4:
+                score += 25
+                details.append(f"✅ Konsolidierung: {recent_range:.1f}% Bewegung")
+            else:
+                details.append(f"❌ Keine Konsolidierung: {recent_range:.1f}%")
+    
+    elif pattern_type == "accumulation":
+        # Seitwärts mit steigendem Volumen am Ende
+        if total_range_pct < 10:
+            score += 20
+            details.append(f"✅ Seitwärtsphase: {total_range_pct:.1f}%")
+        
+        # Volumen steigt zum Ende
+        if len(volumes) >= 3:
+            early_vol = sum(volumes[:len(volumes)//2]) / (len(volumes)//2)
+            late_vol = sum(volumes[len(volumes)//2:]) / (len(volumes) - len(volumes)//2)
+            
+            if late_vol > early_vol * 1.3:
+                score += 30
+                details.append(f"✅ Volumen-Akkumulation: {late_vol/early_vol:.1f}x")
+            elif late_vol > early_vol:
+                score += 15
+                details.append(f"⚠️ Leichte Volumen-Zunahme: {late_vol/early_vol:.1f}x")
+    
+    is_valid = score >= 40
+    return is_valid, score, details
 
 def get_volatility_regime(atr_pct):
     """
@@ -1981,10 +2168,23 @@ def fetch_crypto_data():
                 gap_pct = None  # Explizit None für "nicht verfügbar"
                 
                 # RVOL Berechnung (Krypto-spezifisch)
-                if market_cap > 0:
-                    vol_ratio = (vol_24h / market_cap) * 100
-                    rvol = round(vol_ratio * 5, 2)
-                    rvol = max(0.1, min(rvol, 100))
+                # WICHTIG: CoinGecko liefert kein historisches Durchschnittsvolumen!
+                # Wir verwenden "Turnover Ratio" = Vol24h / MarketCap als Proxy
+                # 
+                # Interpretation:
+                # - Turnover < 5%: Niedriges relatives Volumen
+                # - Turnover 5-15%: Normales Volumen
+                # - Turnover > 15%: Hohes relatives Volumen
+                # 
+                # Wir normalisieren zu RVOL-ähnlicher Skala:
+                # - 10% Turnover = RVOL 1.0 (Baseline)
+                # - 20% Turnover = RVOL 2.0
+                # - 5% Turnover = RVOL 0.5
+                if market_cap > 0 and vol_24h > 0:
+                    turnover_pct = (vol_24h / market_cap) * 100
+                    # Normalisiere: 10% Turnover = RVOL 1.0
+                    rvol = round(turnover_pct / 10, 2)
+                    rvol = max(0.1, min(rvol, 50.0))  # Cap bei 50x
                 else:
                     rvol = 1.0
                 
@@ -2182,14 +2382,30 @@ def fetch_stock_data(poly_key, session="Regular"):
                 prev_low = prev.get("l") or 0
                 prev_close = prev.get("c") or 0
                 
-                # GAP-Berechnung (Open vs Previous High/Low)
-                gap_pct = 0
+                # GAP-Berechnung - ZWEI VARIANTEN:
+                # 
+                # 1. Gap vs Close (Standard): Wie viel hat es seit gestern Schlusskurs bewegt?
+                #    - Positiv: Open > Previous Close
+                #    - Wird für "normale" Gap-Strategien verwendet
+                #
+                # 2. True Gap (über/unter Range): Open außerhalb der gestrigen Range
+                #    - Gap Up: Open > Previous HIGH (komplett über der Range)
+                #    - Gap Down: Open < Previous LOW (komplett unter der Range)
+                #    - Stärkeres Signal als normaler Gap
+                
                 day_open = day.get("o") or open_price
+                
+                # Standard Gap vs Close
+                gap_vs_close = ((day_open - prev_close) / prev_close) * 100 if prev_close > 0 else 0
+                
+                # True Gap (was wir aktuell als "Gap %" verwenden)
+                gap_pct = 0
                 if prev_high > 0 and prev_low > 0:
                     if day_open > prev_high:
                         gap_pct = ((day_open - prev_high) / prev_high) * 100
                     elif day_open < prev_low:
                         gap_pct = ((day_open - prev_low) / prev_low) * 100
+                    # Wenn Open innerhalb der Range: gap_pct = 0 (kein True Gap)
                 
                 # WICK-Berechnungen
                 candle_range = high - low if high > low else 0.0001
@@ -2204,18 +2420,34 @@ def fetch_stock_data(poly_key, session="Regular"):
                 rvol = calculate_rvol_at_time(vol, prev_vol, session)
                 rvol = min(rvol, 999.0)
                 
-                # Vortag Change
+                # Vortag Change - WICHTIG: Das ist die INTRADAY-Bewegung von GESTERN
+                # (prev_close - prev_open) / prev_open
+                # NICHT die Bewegung von vorgestern zu gestern!
+                # 
+                # Für Bull/Bear Flag wäre eigentlich (prev_close - prev_prev_close) nötig,
+                # aber Polygon Snapshot hat nur 1 Tag History.
+                # 
+                # Interpretation:
+                # - Positiv: Gestern war eine bullische Kerze (Close > Open)
+                # - Negativ: Gestern war eine bärische Kerze (Close < Open)
                 prev_open = prev.get("o") or 0
                 vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2) if prev_open > 0 else 0
                 
-                close_pos = calculate_close_position(high, low, close)
+                # Close Position Berechnung
+                # WICHTIG: Bei Extended Hours ist Close Position NICHT sinnvoll!
+                # High/Low kommen aus Regular Session, aber Close ist Extended Preis
+                # Beispiel: Regular High=$100, Extended Preis=$115 → Close Pos = 1.5 (unmöglich!)
+                if session in ["Pre-Market", "After-Hours", "Extended"]:
+                    close_pos = None  # Nicht berechenbar für Extended Hours
+                else:
+                    close_pos = calculate_close_position(high, low, close)
                 
                 # ATR Berechnung (Volatilitäts-Kontext)
                 atr_pct = calculate_atr_from_ohlc(high, low, close, prev_close)
                 volatility_regime, vola_adj = get_volatility_regime(atr_pct)
                 
                 # Liquiditäts-Check (Gemini Fix: Keine Pennystocks mit 100 Aktien)
-                is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_volume=50000)
+                is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_volume=100000)
                 
                 # FILTER-LOGIK
                 match = True
@@ -2229,13 +2461,13 @@ def fetch_stock_data(poly_key, session="Regular"):
                     "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Movers 🌙"
                 ]
                 
-                # PM/AH: Niedrigerer Threshold ($25k) weil weniger Volumen normal ist
-                # Regular: Höherer Threshold ($50k)
+                # PM/AH: Niedrigerer Threshold ($50k) weil weniger Volumen normal ist
+                # Regular: Höherer Threshold ($100k) für bessere Qualität
                 if current_strat in liquidity_strategies:
                     if session in ["Pre-Market", "After-Hours"]:
-                        min_dollar_vol = 25000  # $25k für PM/AH
+                        min_dollar_vol = 50000   # $50k für PM/AH (war $25k)
                     else:
-                        min_dollar_vol = 50000  # $50k für Regular
+                        min_dollar_vol = 100000  # $100k für Regular (war $50k)
                     
                     is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_vol)
                     if not is_liquid:
@@ -2251,7 +2483,13 @@ def fetch_stock_data(poly_key, session="Regular"):
                 if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
                 if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
                 if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
-                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): match = False
+                
+                # Close Position Filter - Skip wenn None (Extended Hours)
+                if "Close Position" in f:
+                    if close_pos is not None:
+                        if not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
+                            match = False
+                    # Wenn close_pos None ist (Extended Hours), ignoriere diesen Filter
                 
                 # Neue Filter: Gap & Wicks
                 if "Gap %" in f and not (f["Gap %"][0] <= gap_pct <= f["Gap %"][1]): match = False
@@ -2929,7 +3167,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V61 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V63 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -2940,7 +3178,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V61 Pro")
+    st.title("💎 Alpha V63 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -3110,6 +3348,51 @@ with st.sidebar:
     with st.expander("ℹ️ Info"):
         st.write(current_strategies[strat]["description"])
         st.caption(current_strategies[strat]['logic'])
+        
+        # Multi-Day Pattern Analyse Hinweis
+        strategy_data = current_strategies[strat]
+        if strategy_data.get("needs_history"):
+            pattern_type = strategy_data.get("pattern_type", "unknown")
+            history_days = strategy_data.get("history_days", 5)
+            st.info(f"📊 **Multi-Day Analyse:** {history_days} Tage Pattern ({pattern_type})")
+            st.caption("🔬 Pattern-Validierung mit historischen Daten für bessere Trefferquote")
+        
+        # Session-Zeit Check für Futures/Forex Strategien
+        if "best_time" in strategy_data:
+            best_time = strategy_data["best_time"]
+            st.info(f"⏰ **Beste Zeit:** {best_time}")
+            
+            # Aktive Session-Prüfung
+            try:
+                from datetime import datetime
+                import pytz
+                utc_now = datetime.now(pytz.UTC)
+                current_utc_hour = utc_now.hour
+                
+                # Parse best_time (Format: "HH:00-HH:00 UTC")
+                if "UTC" in best_time:
+                    time_range = best_time.replace(" UTC", "").split("-")
+                    if len(time_range) == 2:
+                        start_hour = int(time_range[0].split(":")[0])
+                        end_hour = int(time_range[1].split(":")[0])
+                        
+                        # Prüfe ob aktuelle Zeit im Fenster liegt
+                        if start_hour <= end_hour:
+                            in_window = start_hour <= current_utc_hour < end_hour
+                        else:  # Overnight (z.B. 18:00-08:00)
+                            in_window = current_utc_hour >= start_hour or current_utc_hour < end_hour
+                        
+                        if in_window:
+                            st.success(f"✅ Aktuell im optimalen Zeitfenster ({current_utc_hour}:00 UTC)")
+                        else:
+                            st.warning(f"⚠️ Außerhalb des optimalen Zeitfensters ({current_utc_hour}:00 UTC)")
+            except:
+                pass  # Fehler ignorieren
+        
+        # Best Pairs für Forex
+        if "best_pairs" in strategy_data:
+            pairs = ", ".join(strategy_data["best_pairs"])
+            st.caption(f"💱 Beste Paare: {pairs}")
         
         # Warnungen für marktspezifische Strategien (nur bei Aktien relevant)
         if m_type == "Aktien":
