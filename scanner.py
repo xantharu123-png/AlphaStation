@@ -6,7 +6,6 @@ import json
 import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
-import streamlit.components.v1 as components
 
 # =============================================================================
 # 1. INITIALISIERUNG
@@ -4547,8 +4546,7 @@ with tab_scanner:
             display_cols = [c for c in display_cols if c in df.columns]
             
             # =====================================================================
-            # KEYBOARD NAVIGATION 🎹
-            # Pfeil ↑/↓ zum Navigieren, Enter zum Auswählen
+            # NAVIGATION MIT VISUELLER MARKIERUNG
             # =====================================================================
             num_results = len(df)
             current_idx = st.session_state.selected_row_index
@@ -4558,92 +4556,52 @@ with tab_scanner:
                 current_idx = max(0, num_results - 1)
                 st.session_state.selected_row_index = current_idx
             
-            # JavaScript für Keyboard-Navigation
-            keyboard_js = f"""
-            <script>
-            // Keyboard Navigation für Scanner Results
-            (function() {{
-                // Verhindere mehrfache Listener
-                if (window.keyboardNavInitialized) return;
-                window.keyboardNavInitialized = true;
-                
-                document.addEventListener('keydown', function(e) {{
-                    // Nur wenn nicht in einem Input-Feld
-                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-                    
-                    const currentIdx = {current_idx};
-                    const maxIdx = {num_results - 1};
-                    let newIdx = currentIdx;
-                    
-                    if (e.key === 'ArrowDown' || e.key === 'j') {{
-                        e.preventDefault();
-                        newIdx = Math.min(currentIdx + 1, maxIdx);
-                    }} else if (e.key === 'ArrowUp' || e.key === 'k') {{
-                        e.preventDefault();
-                        newIdx = Math.max(currentIdx - 1, 0);
-                    }} else {{
-                        return;
-                    }}
-                    
-                    if (newIdx !== currentIdx) {{
-                        // Update URL mit neuem Index und reload
-                        const url = new URL(window.location);
-                        url.searchParams.set('row_idx', newIdx);
-                        window.location.href = url.toString();
-                    }}
-                }});
-            }})();
-            </script>
-            """
-            components.html(keyboard_js, height=0)
-            
-            # Lese Index aus URL Parameter
-            query_params = st.query_params
-            if "row_idx" in query_params:
-                try:
-                    new_idx = int(query_params["row_idx"])
-                    if 0 <= new_idx < num_results:
-                        st.session_state.selected_row_index = new_idx
-                        current_idx = new_idx
-                except:
-                    pass
-            
-            # Zeige Navigation Hint
-            st.caption(f"🎹 Zeile {current_idx + 1}/{num_results} | ↑↓ oder j/k zum Navigieren")
-            
-            # Quick Navigation Buttons
+            # Navigation Buttons
             nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
             with nav_col1:
-                if st.button("⬆️ Vorherige", key="nav_prev", disabled=(current_idx <= 0)):
+                if st.button("⬆️ Vorherige", key="nav_prev", disabled=(current_idx <= 0), use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
                     st.rerun()
             with nav_col2:
-                if st.button("⬇️ Nächste", key="nav_next", disabled=(current_idx >= num_results - 1)):
+                if st.button("⬇️ Nächste", key="nav_next", disabled=(current_idx >= num_results - 1), use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
                     st.rerun()
             with nav_col3:
-                # Jump to input - nur bei Enter ausführen
-                st.caption(f"#{current_idx + 1}")
+                st.markdown(f"**#{current_idx + 1}** / {num_results}")
             
-            # Dataframe mit Highlighting der aktuellen Zeile
+            # Erstelle Kopie des DataFrames mit visueller Markierung
+            df_display = df[display_cols].copy()
+            
+            # Füge Marker-Spalte hinzu (→ für aktuelle Zeile)
+            markers = [""] * len(df_display)
+            markers[current_idx] = "→"
+            df_display.insert(0, "▶", markers)
+            
+            # Dataframe anzeigen (ohne selection_mode für bessere Kompatibilität)
             sel = st.dataframe(
-                df[display_cols], on_select="rerun", selection_mode="single-row",
-                hide_index=True, use_container_width=True,
-                column_config=col_config
+                df_display, 
+                on_select="rerun", 
+                selection_mode="single-row",
+                hide_index=True, 
+                use_container_width=True,
+                column_config={
+                    "▶": st.column_config.TextColumn("", width="small"),
+                    **col_config
+                }
             )
             
-            # Auswahl verarbeiten: Entweder aus Dataframe-Klick ODER aus Button/Keyboard-Navigation
-            selected_row_idx = None
+            # Auswahl verarbeiten
+            selected_row_idx = current_idx  # Default: aktuelle Navigation
             
-            # Priorität 1: Klick auf Dataframe
+            # Bei Klick auf Dataframe: überschreibe mit geklickter Zeile
             if sel.selection and sel.selection.rows:
-                selected_row_idx = sel.selection.rows[0]
-                st.session_state.selected_row_index = selected_row_idx
-            # Priorität 2: Button/Keyboard Navigation (aus session_state)
-            else:
-                selected_row_idx = st.session_state.selected_row_index
+                clicked_idx = sel.selection.rows[0]
+                if clicked_idx != current_idx:
+                    st.session_state.selected_row_index = clicked_idx
+                    selected_row_idx = clicked_idx
+                    st.rerun()
             
-            # Zeile verarbeiten wenn ausgewählt
+            # Zeile verarbeiten
             if selected_row_idx is not None and 0 <= selected_row_idx < len(df):
                 row = df.iloc[selected_row_idx]
                 st.session_state.selected_symbol = str(row["Ticker"])
