@@ -1923,8 +1923,8 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
             data = resp.json()
             results = data.get("results", [])
             if results:
-                # Format anpassen: [[timestamp, open, high, low, close], ...]
-                return [[r["t"], r["o"], r["h"], r["l"], r["c"]] for r in results]
+                # Format anpassen: [[timestamp, open, high, low, close, volume], ...]
+                return [[r["t"], r["o"], r["h"], r["l"], r["c"], r.get("v", 0)] for r in results]
     except:
         pass
     return None
@@ -2271,11 +2271,25 @@ def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
         
         result["data_available"] = True
         
-        # Daten extrahieren
-        closes = [d["close"] for d in ohlc_data]
-        highs = [d["high"] for d in ohlc_data]
-        lows = [d["low"] for d in ohlc_data]
-        volumes = [d.get("volume", 0) for d in ohlc_data]
+        # Daten extrahieren - OHLC Format: [timestamp, open, high, low, close]
+        # Index: 0=timestamp, 1=open, 2=high, 3=low, 4=close
+        closes = [d[4] for d in ohlc_data if len(d) >= 5]
+        highs = [d[2] for d in ohlc_data if len(d) >= 5]
+        lows = [d[3] for d in ohlc_data if len(d) >= 5]
+        
+        # Für Volume: Polygon hat es im Result, CoinGecko nicht direkt
+        # Wir nehmen einfach den Preisspread als Proxy wenn kein Volume
+        volumes = []
+        for d in ohlc_data:
+            if len(d) >= 6 and d[5]:  # Volume ist Index 5 wenn vorhanden
+                volumes.append(d[5])
+            elif len(d) >= 5:
+                # Proxy: (High - Low) als "Activity"
+                volumes.append(abs(d[2] - d[3]) * 1000)
+        
+        if not closes or not highs or not lows:
+            result["interpretation"] = "Ungültiges Datenformat"
+            return result
         
         current_price = closes[-1]
         period_high = max(highs)
