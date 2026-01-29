@@ -259,6 +259,33 @@ STRATEGIES = {
         "stocks_only": True,
         "needs_volume_profile": True
     },
+    # =========================================================================
+    # HARMONIC PATTERN STRATEGIEN 🦋 - Fibonacci-basierte Reversal Patterns
+    # =========================================================================
+    "Harmonic Bullish 🦋⬆️": {
+        "description": "🦋 Bullische Harmonic Patterns (Gartley, Bat, Butterfly, Crab)",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "XABCD Pattern mit Fibonacci-Verhältnissen → Long Entry am Punkt D",
+        "stocks_only": True,
+        "needs_harmonic": True,
+        "harmonic_direction": "LONG"
+    },
+    "Harmonic Bearish 🦋⬇️": {
+        "description": "🦋 Bärische Harmonic Patterns (Short-Setups)",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "XABCD Pattern mit Fibonacci-Verhältnissen → Short Entry am Punkt D",
+        "stocks_only": True,
+        "needs_harmonic": True,
+        "harmonic_direction": "SHORT"
+    },
+    "Harmonic All Patterns 🦋": {
+        "description": "🦋 Alle Harmonic Patterns (Long + Short)",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "Scannt nach allen XABCD Patterns unabhängig von Richtung",
+        "stocks_only": True,
+        "needs_harmonic": True,
+        "harmonic_direction": "ALL"
+    },
 }
 
 # =============================================================================
@@ -405,62 +432,64 @@ FOREX_STRATEGIES = {
 
 # =============================================================================
 # KRYPTO STRATEGIEN 🌐 (angepasst - keine Gaps/Pre-Post)
+# RVOL bei Krypto = Turnover Ratio normalisiert (10% Turnover = 1.0)
+# Typische Werte: 0.3-0.8 normal, >1.0 erhöht, >2.0 sehr hoch
 # =============================================================================
 CRYPTO_STRATEGIES = {
     "Volume Surge": {
-        "description": "Extremes Volumen + starke Bewegung",
-        "filters": {"RVOL": (2.0, 100.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 2.0 UND Change > 3%"
+        "description": "Erhöhtes Volumen + starke Bewegung",
+        "filters": {"RVOL": (1.0, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 1.0 (überdurchschnittlicher Turnover) + Change > 3%"
     },
     "Bull Flag": {
         "description": "Bullische Konsolidierung nach Anstieg",
-        "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
+        "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 0.8)},
         "logic": "Vortag +4-25%, heute flach mit sinkendem Volumen"
     },
     "Bear Flag": {
         "description": "Bärische Konsolidierung nach Abverkauf",
-        "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
+        "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 0.8)},
         "logic": "Vortag -4-25%, heute flach = weitere Schwäche"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben mit Volumen",
-        "filters": {"Change %": (5.0, 50.0), "RVOL": (2.0, 50.0), "Close Position": (0.7, 1.0)},
-        "logic": "Close nahe High + hohes Volumen = Stärke"
+        "filters": {"Change %": (5.0, 50.0), "RVOL": (0.8, 20.0), "Close Position": (0.7, 1.0)},
+        "logic": "Close nahe High + erhöhtes Volumen = Stärke"
     },
     "Breakdown Short": {
         "description": "Ausbruch nach unten mit Volumen",
-        "filters": {"Change %": (-50.0, -5.0), "RVOL": (2.0, 50.0), "Close Position": (0.0, 0.3)},
-        "logic": "Close nahe Low + hohes Volumen = Schwäche"
+        "filters": {"Change %": (-50.0, -5.0), "RVOL": (0.8, 20.0), "Close Position": (0.0, 0.3)},
+        "logic": "Close nahe Low + erhöhtes Volumen = Schwäche"
     },
-    "Penny Rockets 🚀": {
+    "Low Cap Rockets 🚀": {
         "description": "Günstige Coins mit explosivem Volumen",
-        "filters": {"Preis": (0.0001, 1.0), "RVOL": (3.0, 100.0), "Change %": (2.0, 100.0)},
-        "logic": "Lowcaps unter $1 mit extremem Interesse"
+        "filters": {"Preis": (0.0001, 1.0), "RVOL": (1.5, 50.0), "Change %": (2.0, 100.0)},
+        "logic": "Coins unter $1 mit überdurchschnittlichem Turnover"
     },
     "Dip Buy": {
         "description": "Qualitäts-Assets im Rücksetzer ohne Panik",
-        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.5, 2.0)},
+        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.2, 1.0)},
         "logic": "Moderater Rücksetzer ohne Volumen-Panik"
     },
     "Reversal Hunter": {
         "description": "Trendumkehr nach starkem Abverkauf",
-        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (2.0, 30.0), "RVOL": (1.5, 50.0)},
+        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (2.0, 30.0), "RVOL": (0.5, 20.0)},
         "logic": "Gestern Crash, heute Käufer"
     },
     "Early Momentum": {
-        "description": "Starke Bewegung mit Volumen",
-        "filters": {"Change %": (3.0, 30.0), "RVOL": (1.5, 50.0)},
-        "logic": "Positive Bewegung mit überdurchschnittlichem Volumen"
+        "description": "Starke Bewegung mit erhöhtem Volumen",
+        "filters": {"Change %": (3.0, 30.0), "RVOL": (0.5, 20.0)},
+        "logic": "Positive Bewegung mit überdurchschnittlichem Turnover"
     },
     "Whale Watch 🐋": {
         "description": "Extremes Volumen - Big Player aktiv",
-        "filters": {"RVOL": (5.0, 100.0)},
-        "logic": "RVOL > 5.0 = institutionelles Interesse"
+        "filters": {"RVOL": (2.0, 50.0)},
+        "logic": "RVOL > 2.0 = deutlich überdurchschnittlicher Turnover"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
-        "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.5, 5.0)},
-        "logic": "Seitwärts + erhöhtes Volumen = jemand sammelt"
+        "filters": {"Change %": (-2.0, 2.0), "RVOL": (0.5, 2.0)},
+        "logic": "Seitwärts + leicht erhöhtes Volumen = jemand sammelt"
     },
 }
 
@@ -986,6 +1015,490 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     
     is_valid = score >= 40
     return is_valid, score, details
+
+
+# =============================================================================
+# HARMONIC PATTERN SCANNER 🦋
+# Erkennt Gartley, Butterfly, Bat, Crab, Shark Patterns
+# =============================================================================
+
+def find_pivots(prices, window=5):
+    """
+    Findet Swing Highs und Swing Lows (Pivot Points) mit ZigZag-Logik.
+    
+    Args:
+        prices: Liste von Dictionaries mit 'high', 'low', 'close', 'date'
+        window: Anzahl Kerzen links/rechts für Pivot-Bestätigung
+    
+    Returns:
+        Liste von Pivots: [{'type': 'high'/'low', 'price': x, 'index': i, 'date': d}, ...]
+    """
+    if len(prices) < window * 2 + 1:
+        return []
+    
+    pivots = []
+    
+    for i in range(window, len(prices) - window):
+        # Prüfe Swing High
+        is_swing_high = True
+        current_high = prices[i]['high']
+        for j in range(i - window, i + window + 1):
+            if j != i and prices[j]['high'] >= current_high:
+                is_swing_high = False
+                break
+        
+        if is_swing_high:
+            pivots.append({
+                'type': 'high',
+                'price': current_high,
+                'index': i,
+                'date': prices[i].get('date', '')
+            })
+            continue  # Ein Punkt kann nicht beides sein
+        
+        # Prüfe Swing Low
+        is_swing_low = True
+        current_low = prices[i]['low']
+        for j in range(i - window, i + window + 1):
+            if j != i and prices[j]['low'] <= current_low:
+                is_swing_low = False
+                break
+        
+        if is_swing_low:
+            pivots.append({
+                'type': 'low',
+                'price': current_low,
+                'index': i,
+                'date': prices[i].get('date', '')
+            })
+    
+    return pivots
+
+
+def calculate_retracement(point_a, point_b, point_c):
+    """
+    Berechnet das Fibonacci Retracement von C relativ zu A-B.
+    
+    Formel: (B - C) / (B - A) für bullish
+            (C - B) / (A - B) für bearish
+    """
+    ab_move = abs(point_b - point_a)
+    if ab_move == 0:
+        return 0
+    
+    bc_move = abs(point_c - point_b)
+    return bc_move / ab_move
+
+
+def calculate_extension(point_a, point_b, point_c, point_d):
+    """
+    Berechnet die Fibonacci Extension von D relativ zu B-C.
+    
+    Formel: (D - C) / (B - C)
+    """
+    bc_move = abs(point_c - point_b)
+    if bc_move == 0:
+        return 0
+    
+    cd_move = abs(point_d - point_c)
+    return cd_move / bc_move
+
+
+def check_fibonacci_ratio(actual, target, tolerance=0.05):
+    """
+    Prüft ob ein Verhältnis innerhalb der Toleranz liegt.
+    
+    Args:
+        actual: Berechnetes Verhältnis
+        target: Ziel-Fibonacci-Level (z.B. 0.618)
+        tolerance: Erlaubte Abweichung (default 5%)
+    
+    Returns:
+        (is_valid, deviation_pct)
+    """
+    deviation = abs(actual - target)
+    deviation_pct = (deviation / target) * 100 if target > 0 else 100
+    is_valid = deviation <= tolerance
+    return is_valid, deviation_pct
+
+
+# Harmonic Pattern Definitionen mit Fibonacci-Verhältnissen
+HARMONIC_PATTERNS = {
+    "Gartley": {
+        "emoji": "🦋",
+        "description": "Klassisches Harmonic Pattern mit hoher Erfolgsrate",
+        "ratios": {
+            "AB_XA": (0.618, 0.05),      # AB = 61.8% von XA
+            "BC_AB": (0.382, 0.886, 0.05), # BC = 38.2-88.6% von AB
+            "CD_BC": (1.272, 1.618, 0.05), # CD = 127.2-161.8% von BC
+            "AD_XA": (0.786, 0.05),       # D = 78.6% Retracement von XA
+        },
+        "success_rate": 70,
+        "target_ratios": [0.382, 0.618]  # Profit Targets
+    },
+    "Butterfly": {
+        "emoji": "🦋",
+        "description": "Extension Pattern - D geht über X hinaus",
+        "ratios": {
+            "AB_XA": (0.786, 0.05),
+            "BC_AB": (0.382, 0.886, 0.05),
+            "CD_BC": (1.618, 2.618, 0.08),
+            "AD_XA": (1.272, 1.618, 0.08),  # D extends beyond X
+        },
+        "success_rate": 65,
+        "target_ratios": [0.382, 0.618, 1.0]
+    },
+    "Bat": {
+        "emoji": "🦇",
+        "description": "Tiefes Retracement Pattern",
+        "ratios": {
+            "AB_XA": (0.382, 0.5, 0.05),
+            "BC_AB": (0.382, 0.886, 0.05),
+            "CD_BC": (1.618, 2.618, 0.08),
+            "AD_XA": (0.886, 0.05),
+        },
+        "success_rate": 70,
+        "target_ratios": [0.382, 0.618]
+    },
+    "Crab": {
+        "emoji": "🦀",
+        "description": "Extremes Extension Pattern",
+        "ratios": {
+            "AB_XA": (0.382, 0.618, 0.05),
+            "BC_AB": (0.382, 0.886, 0.05),
+            "CD_BC": (2.24, 3.618, 0.10),
+            "AD_XA": (1.618, 0.08),
+        },
+        "success_rate": 60,
+        "target_ratios": [0.382, 0.618]
+    },
+    "Shark": {
+        "emoji": "🦈",
+        "description": "Aggressives Reversal Pattern",
+        "ratios": {
+            "AB_XA": (0.446, 0.618, 0.05),
+            "BC_AB": (1.13, 1.618, 0.08),
+            "CD_BC": (1.618, 2.24, 0.08),
+            "AD_XA": (0.886, 1.13, 0.08),
+        },
+        "success_rate": 55,
+        "target_ratios": [0.5, 0.886]
+    }
+}
+
+
+def identify_harmonic_pattern(pivots, prices, min_pivots=5):
+    """
+    Identifiziert Harmonic Patterns aus Pivot Points.
+    
+    Args:
+        pivots: Liste von Pivot Points
+        prices: Original Preisdaten
+        min_pivots: Minimum Anzahl Pivots für Pattern
+    
+    Returns:
+        Liste von erkannten Patterns mit Score und Details
+    """
+    if len(pivots) < min_pivots:
+        return []
+    
+    patterns_found = []
+    
+    # Suche nach XABCD Sequenzen (letzte 5 Pivots)
+    # Pattern muss alternieren: High-Low-High-Low-High oder Low-High-Low-High-Low
+    for i in range(len(pivots) - 4):
+        potential_xabcd = pivots[i:i+5]
+        
+        # Prüfe Alternierung
+        types = [p['type'] for p in potential_xabcd]
+        alternates = all(types[j] != types[j+1] for j in range(4))
+        if not alternates:
+            continue
+        
+        # Extrahiere XABCD Preise
+        X = potential_xabcd[0]['price']
+        A = potential_xabcd[1]['price']
+        B = potential_xabcd[2]['price']
+        C = potential_xabcd[3]['price']
+        D = potential_xabcd[4]['price']
+        
+        # Bestimme Richtung (bullish = X ist Low, bearish = X ist High)
+        is_bullish = potential_xabcd[0]['type'] == 'low'
+        
+        # Berechne Fibonacci Verhältnisse
+        xa_move = abs(A - X)
+        if xa_move == 0:
+            continue
+            
+        ab_retracement = abs(B - A) / xa_move
+        
+        ab_move = abs(B - A)
+        if ab_move == 0:
+            continue
+        bc_retracement = abs(C - B) / ab_move
+        
+        bc_move = abs(C - B)
+        if bc_move == 0:
+            continue
+        cd_extension = abs(D - C) / bc_move
+        
+        ad_retracement = abs(D - A) / xa_move
+        
+        # Prüfe gegen alle Pattern-Definitionen
+        for pattern_name, pattern_def in HARMONIC_PATTERNS.items():
+            score = 0
+            details = []
+            matches = 0
+            total_checks = 0
+            
+            ratios = pattern_def["ratios"]
+            
+            # AB/XA Check
+            if "AB_XA" in ratios:
+                target = ratios["AB_XA"]
+                if len(target) == 2:  # Single value
+                    target_val, tol = target
+                    is_valid, dev = check_fibonacci_ratio(ab_retracement, target_val, tol)
+                else:  # Range
+                    min_val, max_val, tol = target
+                    is_valid = (min_val - tol) <= ab_retracement <= (max_val + tol)
+                    dev = 0 if is_valid else min(abs(ab_retracement - min_val), abs(ab_retracement - max_val)) * 100
+                
+                total_checks += 1
+                if is_valid:
+                    matches += 1
+                    score += 20
+                    details.append(f"✅ AB/XA: {ab_retracement:.3f}")
+                else:
+                    details.append(f"❌ AB/XA: {ab_retracement:.3f}")
+            
+            # BC/AB Check
+            if "BC_AB" in ratios:
+                target = ratios["BC_AB"]
+                if len(target) == 2:
+                    target_val, tol = target
+                    is_valid, dev = check_fibonacci_ratio(bc_retracement, target_val, tol)
+                else:
+                    min_val, max_val, tol = target
+                    is_valid = (min_val - tol) <= bc_retracement <= (max_val + tol)
+                
+                total_checks += 1
+                if is_valid:
+                    matches += 1
+                    score += 20
+                    details.append(f"✅ BC/AB: {bc_retracement:.3f}")
+                else:
+                    details.append(f"❌ BC/AB: {bc_retracement:.3f}")
+            
+            # CD/BC Check
+            if "CD_BC" in ratios:
+                target = ratios["CD_BC"]
+                if len(target) == 2:
+                    target_val, tol = target
+                    is_valid, dev = check_fibonacci_ratio(cd_extension, target_val, tol)
+                else:
+                    min_val, max_val, tol = target
+                    is_valid = (min_val - tol) <= cd_extension <= (max_val + tol)
+                
+                total_checks += 1
+                if is_valid:
+                    matches += 1
+                    score += 25
+                    details.append(f"✅ CD/BC: {cd_extension:.3f}")
+                else:
+                    details.append(f"❌ CD/BC: {cd_extension:.3f}")
+            
+            # AD/XA Check (wichtigstes Verhältnis!)
+            if "AD_XA" in ratios:
+                target = ratios["AD_XA"]
+                if len(target) == 2:
+                    target_val, tol = target
+                    is_valid, dev = check_fibonacci_ratio(ad_retracement, target_val, tol)
+                else:
+                    min_val, max_val, tol = target
+                    is_valid = (min_val - tol) <= ad_retracement <= (max_val + tol)
+                
+                total_checks += 1
+                if is_valid:
+                    matches += 1
+                    score += 35  # Höhere Gewichtung
+                    details.append(f"✅ AD/XA: {ad_retracement:.3f}")
+                else:
+                    details.append(f"❌ AD/XA: {ad_retracement:.3f}")
+            
+            # Pattern gilt als erkannt wenn mindestens 3/4 Verhältnisse stimmen
+            if matches >= 3 and score >= 60:
+                # Berechne Entry, Stop Loss, Take Profits
+                if is_bullish:
+                    entry = D
+                    stop_loss = D * 0.97  # 3% unter D
+                    tp1 = D + (C - D) * 0.382
+                    tp2 = D + (C - D) * 0.618
+                    tp3 = C  # Full retracement
+                    direction = "LONG"
+                else:
+                    entry = D
+                    stop_loss = D * 1.03  # 3% über D
+                    tp1 = D - (D - C) * 0.382
+                    tp2 = D - (D - C) * 0.618
+                    tp3 = C
+                    direction = "SHORT"
+                
+                patterns_found.append({
+                    "pattern": pattern_name,
+                    "emoji": pattern_def["emoji"],
+                    "direction": direction,
+                    "score": score,
+                    "matches": f"{matches}/{total_checks}",
+                    "success_rate": pattern_def["success_rate"],
+                    "details": details,
+                    "points": {
+                        "X": round(X, 2),
+                        "A": round(A, 2),
+                        "B": round(B, 2),
+                        "C": round(C, 2),
+                        "D": round(D, 2)
+                    },
+                    "ratios": {
+                        "AB/XA": round(ab_retracement, 3),
+                        "BC/AB": round(bc_retracement, 3),
+                        "CD/BC": round(cd_extension, 3),
+                        "AD/XA": round(ad_retracement, 3)
+                    },
+                    "trade": {
+                        "entry": round(entry, 2),
+                        "stop_loss": round(stop_loss, 2),
+                        "tp1": round(tp1, 2),
+                        "tp2": round(tp2, 2),
+                        "tp3": round(tp3, 2),
+                        "risk_reward": round(abs(tp2 - entry) / abs(entry - stop_loss), 2) if abs(entry - stop_loss) > 0 else 0
+                    },
+                    "pivot_indices": [p['index'] for p in potential_xabcd],
+                    "dates": {
+                        "X": potential_xabcd[0].get('date', ''),
+                        "D": potential_xabcd[4].get('date', '')
+                    }
+                })
+    
+    # Sortiere nach Score (beste zuerst)
+    patterns_found.sort(key=lambda x: x['score'], reverse=True)
+    return patterns_found
+
+
+def scan_harmonic_patterns(ticker, api_key, days=60, timeframe="day"):
+    """
+    Scannt eine Aktie nach Harmonic Patterns.
+    
+    Args:
+        ticker: Aktien-Symbol
+        api_key: Polygon API Key
+        days: Anzahl Tage historischer Daten
+        timeframe: "day" für Daily, "hour" für 4H
+    
+    Returns:
+        Dictionary mit Pattern-Ergebnissen
+    """
+    try:
+        from datetime import datetime, timedelta
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days + 10)
+        
+        # Polygon Aggregates API
+        multiplier = 1
+        span = "day"
+        if timeframe == "hour":
+            multiplier = 4
+            span = "hour"
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{span}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        params = {"adjusted": "true", "sort": "asc", "limit": 500, "apiKey": api_key}
+        
+        resp = requests.get(url, params=params, timeout=20)
+        data = resp.json()
+        
+        if data.get("status") != "OK" or not data.get("results"):
+            return {"error": "No data", "patterns": []}
+        
+        # Konvertiere zu unserem Format
+        prices = []
+        for bar in data["results"]:
+            prices.append({
+                "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                "open": bar["o"],
+                "high": bar["h"],
+                "low": bar["l"],
+                "close": bar["c"],
+                "volume": bar["v"]
+            })
+        
+        if len(prices) < 20:
+            return {"error": "Not enough data", "patterns": []}
+        
+        # Finde Pivots
+        pivots = find_pivots(prices, window=3)
+        
+        if len(pivots) < 5:
+            return {"error": "Not enough pivots", "patterns": [], "pivot_count": len(pivots)}
+        
+        # Identifiziere Patterns
+        patterns = identify_harmonic_pattern(pivots, prices)
+        
+        # Aktueller Preis
+        current_price = prices[-1]["close"]
+        
+        return {
+            "ticker": ticker,
+            "current_price": current_price,
+            "days_analyzed": len(prices),
+            "pivots_found": len(pivots),
+            "patterns": patterns,
+            "last_update": prices[-1]["date"]
+        }
+        
+    except Exception as e:
+        return {"error": str(e), "patterns": []}
+
+
+def scan_harmonic_batch(tickers, api_key, days=60):
+    """
+    Scannt mehrere Aktien nach Harmonic Patterns.
+    
+    Returns:
+        Liste von Aktien mit gefundenen Patterns
+    """
+    results = []
+    
+    for ticker in tickers:
+        try:
+            scan_result = scan_harmonic_patterns(ticker, api_key, days)
+            
+            if scan_result.get("patterns"):
+                # Nimm das beste Pattern
+                best_pattern = scan_result["patterns"][0]
+                
+                results.append({
+                    "Ticker": ticker,
+                    "Pattern": f"{best_pattern['emoji']} {best_pattern['pattern']}",
+                    "Direction": best_pattern["direction"],
+                    "Score": best_pattern["score"],
+                    "Matches": best_pattern["matches"],
+                    "SuccessRate": f"{best_pattern['success_rate']}%",
+                    "Entry": best_pattern["trade"]["entry"],
+                    "StopLoss": best_pattern["trade"]["stop_loss"],
+                    "TP1": best_pattern["trade"]["tp1"],
+                    "TP2": best_pattern["trade"]["tp2"],
+                    "RiskReward": best_pattern["trade"]["risk_reward"],
+                    "Price": scan_result["current_price"],
+                    "PatternData": best_pattern
+                })
+        except:
+            continue
+    
+    # Sortiere nach Score
+    results.sort(key=lambda x: x["Score"], reverse=True)
+    return results
+
 
 def get_volatility_regime(atr_pct):
     """
@@ -3167,7 +3680,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V63 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V64 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -3178,7 +3691,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V63 Pro")
+    st.title("💎 Alpha V64 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -3558,6 +4071,81 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Fehler: {e}")
         
+        # HARMONIC PATTERN SCAN - Spezielle Logik 🦋
+        elif current_strat in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]:
+            if m_type != "Aktien":
+                st.error("❌ Harmonic Pattern Scanner funktioniert nur für **Aktien**!")
+            else:
+                with st.status("🦋 Scanne Harmonic Patterns...") as status:
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        
+                        # Bestimme Richtung
+                        if "Bullish" in current_strat:
+                            direction = "LONG"
+                        elif "Bearish" in current_strat:
+                            direction = "SHORT"
+                        else:
+                            direction = "ALL"
+                        
+                        status.update(label="Hole Top-Aktien für Pattern-Analyse...")
+                        
+                        # Erst Standard-Scan für Kandidaten
+                        candidates, _, _ = fetch_stock_data(poly_key, session="Regular")
+                        
+                        # Filter: Nur liquide Aktien mit Bewegung
+                        filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
+                        
+                        # Sortiere nach Alpha Score, nimm Top 50
+                        filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:50]
+                        tickers = [c["Ticker"] for c in filtered]
+                        
+                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns (60 Tage)...")
+                        
+                        # Harmonic Scan
+                        harmonic_results = scan_harmonic_batch(tickers, poly_key, days=60)
+                        
+                        # Filter nach Richtung
+                        if direction != "ALL":
+                            harmonic_results = [r for r in harmonic_results if r["Direction"] == direction]
+                        
+                        # Konvertiere zu Standard-Format für Anzeige
+                        results = []
+                        for hr in harmonic_results:
+                            results.append({
+                                "Ticker": hr["Ticker"],
+                                "Name": hr["Pattern"],
+                                "Preis": hr["Price"],
+                                "Chg%": 0,  # Nicht relevant für Pattern
+                                "RVOL": 0,
+                                "Vortag%": 0,
+                                "ClosePos": 0,
+                                "Alpha": hr["Score"],
+                                "Gap%": 0,
+                                # Harmonic-spezifische Felder
+                                "Pattern": hr["Pattern"],
+                                "Direction": hr["Direction"],
+                                "Matches": hr["Matches"],
+                                "SuccessRate": hr["SuccessRate"],
+                                "Entry": hr["Entry"],
+                                "StopLoss": hr["StopLoss"],
+                                "TP1": hr["TP1"],
+                                "TP2": hr["TP2"],
+                                "RiskReward": hr["RiskReward"],
+                                "PatternData": hr["PatternData"]
+                            })
+                        
+                        st.session_state.scan_results = results
+                        st.session_state.market_type = "Aktien"
+                        
+                        direction_emoji = "⬆️" if direction == "LONG" else ("⬇️" if direction == "SHORT" else "🔄")
+                        status.update(label=f"✅ {len(results)} Harmonic Patterns {direction_emoji} gefunden", state="complete")
+                        
+                    except KeyError:
+                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    except Exception as e:
+                        st.error(f"Fehler: {e}")
+        
         elif is_insider_strategy:
             # Insider-Scan mit Finnhub
             with st.status("Scanne Insider-Transaktionen...") as status:
@@ -3689,6 +4277,7 @@ with tab_scanner:
     # Prüfe ob Insider-Strategie aktiv
     is_insider = st.session_state.current_strategy in ["Insider Buying", "Insider Selling"]
     is_volume_void = st.session_state.current_strategy in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
+    is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]
     
     with col_journal:
         st.subheader("📋 Ergebnisse")
@@ -3727,6 +4316,17 @@ with tab_scanner:
                     "VoidScore": st.column_config.NumberColumn("🕳️ Score", format="%d"),
                     "VoidDist%": st.column_config.NumberColumn("Dist%", format="%.1f%%"),
                     "VoidSize%": st.column_config.NumberColumn("Size%", format="%.1f%%"),
+                }
+            elif "Pattern" in df.columns and "RiskReward" in df.columns:
+                # Harmonic Pattern Anzeige 🦋
+                display_cols = ["Ticker", "Pattern", "Direction", "Entry", "StopLoss", "TP1", "RiskReward"]
+                col_config = {
+                    "Pattern": st.column_config.TextColumn("🦋 Pattern"),
+                    "Direction": st.column_config.TextColumn("📈"),
+                    "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+                    "StopLoss": st.column_config.NumberColumn("SL", format="$%.2f"),
+                    "TP1": st.column_config.NumberColumn("TP1", format="$%.2f"),
+                    "RiskReward": st.column_config.NumberColumn("R:R", format="%.1f"),
                 }
             elif st.session_state.market_type == "Futures" and "Name" in df.columns:
                 # Futures Anzeige
@@ -3896,6 +4496,78 @@ with tab_scanner:
                             st.caption(f"   Range: ${nearest_void.get('low', 0):.2f} - ${nearest_void.get('high', 0):.2f}")
                             st.caption(f"   Volumen: {nearest_void.get('volume_pct', 0):.0f}% des Durchschnitts")
                         
+                    except:
+                        pass
+                
+                # Harmonic Pattern Details anzeigen 🦋
+                if "PatternData" in df.columns and pd.notna(row.get("PatternData")):
+                    try:
+                        pattern_data = row["PatternData"]
+                        if isinstance(pattern_data, dict):
+                            st.divider()
+                            
+                            # Pattern Header
+                            emoji = pattern_data.get("emoji", "🦋")
+                            pattern_name = pattern_data.get("pattern", "Unknown")
+                            direction = pattern_data.get("direction", "")
+                            score = pattern_data.get("score", 0)
+                            success_rate = pattern_data.get("success_rate", 0)
+                            
+                            dir_emoji = "⬆️ LONG" if direction == "LONG" else "⬇️ SHORT"
+                            
+                            if score >= 80:
+                                st.success(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100")
+                            elif score >= 60:
+                                st.info(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100")
+                            else:
+                                st.warning(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100")
+                            
+                            st.caption(f"📊 Historische Erfolgsrate: **{success_rate}%**")
+                            
+                            # XABCD Punkte
+                            points = pattern_data.get("points", {})
+                            if points:
+                                st.caption("**📍 XABCD Punkte:**")
+                                point_str = " → ".join([f"{k}=${v}" for k, v in points.items()])
+                                st.caption(f"   {point_str}")
+                            
+                            # Fibonacci Ratios
+                            ratios = pattern_data.get("ratios", {})
+                            if ratios:
+                                st.caption("**📐 Fibonacci Verhältnisse:**")
+                                for ratio_name, ratio_val in ratios.items():
+                                    st.caption(f"   {ratio_name}: {ratio_val}")
+                            
+                            # Trade Setup
+                            trade = pattern_data.get("trade", {})
+                            if trade:
+                                st.divider()
+                                st.caption("**🎯 Trade Setup:**")
+                                
+                                col_t1, col_t2 = st.columns(2)
+                                with col_t1:
+                                    st.metric("Entry", f"${trade.get('entry', 0):.2f}")
+                                    st.metric("Stop Loss", f"${trade.get('stop_loss', 0):.2f}", 
+                                             delta=f"{((trade.get('stop_loss', 0) - trade.get('entry', 1)) / trade.get('entry', 1) * 100):.1f}%",
+                                             delta_color="inverse")
+                                with col_t2:
+                                    st.metric("TP1", f"${trade.get('tp1', 0):.2f}")
+                                    st.metric("TP2", f"${trade.get('tp2', 0):.2f}")
+                                
+                                rr = trade.get('risk_reward', 0)
+                                if rr >= 2:
+                                    st.success(f"✅ Risk/Reward: **{rr:.1f}:1** (Excellent)")
+                                elif rr >= 1.5:
+                                    st.info(f"📊 Risk/Reward: **{rr:.1f}:1** (Good)")
+                                else:
+                                    st.warning(f"⚠️ Risk/Reward: **{rr:.1f}:1** (Consider)")
+                            
+                            # Pattern Details (Matches)
+                            details = pattern_data.get("details", [])
+                            if details:
+                                with st.expander("📋 Pattern Details"):
+                                    for detail in details:
+                                        st.caption(detail)
                     except:
                         pass
                 
