@@ -1932,6 +1932,166 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
         pass
     return None
 
+
+def fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret):
+    """
+    Holt REALTIME Preis von Alpaca (kostenlos mit Account!)
+    
+    Alpaca bietet kostenlose Realtime-Daten für US-Aktien.
+    Erstelle Account auf alpaca.markets und hole API Keys.
+    
+    Returns: dict mit price, change, change_pct, timestamp oder None
+    """
+    try:
+        # Alpaca Latest Quote API
+        url = f"https://data.alpaca.markets/v2/stocks/{ticker}/quotes/latest"
+        headers = {
+            "APCA-API-KEY-ID": alpaca_key,
+            "APCA-API-SECRET-KEY": alpaca_secret
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            quote = data.get("quote", {})
+            
+            # Bid/Ask Midpoint als Preis
+            bid = quote.get("bp", 0)
+            ask = quote.get("ap", 0)
+            
+            if bid > 0 and ask > 0:
+                price = (bid + ask) / 2
+                timestamp = quote.get("t", "")
+                
+                return {
+                    "price": round(price, 2),
+                    "bid": bid,
+                    "ask": ask,
+                    "spread": round(ask - bid, 4),
+                    "timestamp": timestamp,
+                    "source": "Alpaca Realtime"
+                }
+        
+        # Fallback: Latest Trade
+        url = f"https://data.alpaca.markets/v2/stocks/{ticker}/trades/latest"
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            trade = data.get("trade", {})
+            price = trade.get("p", 0)
+            
+            if price > 0:
+                return {
+                    "price": round(price, 2),
+                    "timestamp": trade.get("t", ""),
+                    "source": "Alpaca Realtime"
+                }
+    except:
+        pass
+    return None
+
+
+def fetch_realtime_price_polygon(ticker, poly_key):
+    """
+    Holt REALTIME Preis von Polygon (benötigt Stocks Starter oder höher!)
+    
+    Nutzt den Single-Ticker Snapshot für schnellste Updates.
+    
+    Returns: dict mit price, change_pct, volume oder None
+    """
+    try:
+        # Single Ticker Snapshot = schnellster Realtime-Endpoint
+        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}"
+        params = {"apiKey": poly_key}
+        
+        resp = requests.get(url, params=params, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            ticker_data = data.get("ticker", {})
+            
+            if ticker_data:
+                last_trade = ticker_data.get("lastTrade", {})
+                day = ticker_data.get("day", {})
+                prev = ticker_data.get("prevDay", {})
+                
+                # Preis aus lastTrade (REALTIME!)
+                price = last_trade.get("p", 0) or day.get("c", 0)
+                
+                if price > 0:
+                    prev_close = prev.get("c", 0)
+                    change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                    
+                    # Timestamp vom letzten Trade
+                    timestamp = last_trade.get("t", 0)
+                    if timestamp:
+                        # Nanoseconds to datetime
+                        from datetime import datetime
+                        try:
+                            ts_seconds = timestamp / 1e9
+                            trade_time = datetime.fromtimestamp(ts_seconds)
+                            time_str = trade_time.strftime("%H:%M:%S")
+                        except:
+                            time_str = ""
+                    else:
+                        time_str = ""
+                    
+                    return {
+                        "price": round(price, 2),
+                        "change_pct": round(change_pct, 2),
+                        "volume": day.get("v", 0),
+                        "high": day.get("h", price),
+                        "low": day.get("l", price),
+                        "time": time_str,
+                        "source": "Polygon Realtime"
+                    }
+    except:
+        pass
+    return None
+
+
+def fetch_realtime_batch_alpaca(tickers, alpaca_key, alpaca_secret):
+    """
+    Holt REALTIME Preise für mehrere Ticker von Alpaca.
+    
+    Returns: dict {ticker: price}
+    """
+    try:
+        # Alpaca Snapshots API (Batch)
+        symbols = ",".join(tickers[:50])  # Max 50 pro Request
+        url = f"https://data.alpaca.markets/v2/stocks/snapshots"
+        headers = {
+            "APCA-API-KEY-ID": alpaca_key,
+            "APCA-API-SECRET-KEY": alpaca_secret
+        }
+        params = {"symbols": symbols}
+        
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            
+            prices = {}
+            for ticker, snapshot in data.items():
+                # Letzter Trade
+                latest_trade = snapshot.get("latestTrade", {})
+                price = latest_trade.get("p", 0)
+                
+                if price > 0:
+                    # Berechne Change vs Previous Close
+                    prev_close = snapshot.get("prevDailyBar", {}).get("c", 0)
+                    change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                    
+                    prices[ticker] = {
+                        "price": round(price, 2),
+                        "prev_close": round(prev_close, 2),
+                        "change_pct": round(change_pct, 2),
+                        "volume": snapshot.get("dailyBar", {}).get("v", 0)
+                    }
+            
+            return prices
+    except:
+        pass
+    return {}
+
 def calculate_sr_from_historical(ohlc_data, current_price):
     """Berechnet S/R-Levels aus Fibonacci + Swing Highs/Lows + Konsolidierungszonen"""
     if not ohlc_data or len(ohlc_data) < 5:
@@ -2886,22 +3046,21 @@ def fetch_stock_data(poly_key, session="Regular"):
                     change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
                     
                 else:  # Regular Hours (default)
-                    price = day.get("c") or last.get("p") or minute_data.get("c") or prev.get("c") or 0
+                    # WICHTIG: lastTrade.p = REALTIME Preis! Priorisieren!
+                    price = last.get("p") or day.get("c") or minute_data.get("c") or prev.get("c") or 0
                     if price <= 0:
                         skipped_no_price += 1
                         continue
                     
                     open_price = day.get("o") or price
-                    high = day.get("h") or price
-                    low = day.get("l") or price
-                    close = day.get("c") or price
+                    high = max(day.get("h") or price, price)  # High = max aus day.h und aktuellem Preis
+                    low = min(day.get("l") or price, price)   # Low = min aus day.l und aktuellem Preis
+                    close = price  # REALTIME Preis
                     vol = day.get("v") or minute_data.get("v") or 0
                     
-                    change = t.get("todaysChangePerc")
-                    if change is None:
-                        prev_close = prev.get("c") or 0
-                        change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
-                    change = change or 0
+                    # Change berechnen mit REALTIME Preis
+                    prev_close = prev.get("c") or 0
+                    change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
                 
                 # =====================================================
                 # GEMEINSAME BERECHNUNGEN
@@ -3780,7 +3939,7 @@ with st.sidebar:
         
         # API Info je nach Börse
         if st.session_state.selected_exchange == "US":
-            st.caption("📡 Polygon.io Premium - Near Realtime")
+            st.caption("📡 Polygon.io Realtime (Starter/Paid)")
         else:
             st.caption("📡 Yahoo Finance - 15min verzögert")
         
@@ -4312,6 +4471,9 @@ with tab_scanner:
                     "Extended": "📊"
                 }
                 st.caption(f"{st.session_state.current_strategy} | {st.session_state.market_type} | {session_emoji.get(session, '')} {session}")
+                
+                # Info: Realtime mit Polygon Paid
+                st.caption("📡 Mit Polygon Starter: **Realtime** | Free: ~15min verzögert")
             else:
                 st.caption(f"{st.session_state.current_strategy} | {st.session_state.market_type} | 24/7")
         
@@ -4486,6 +4648,54 @@ with tab_scanner:
                 row = df.iloc[selected_row_idx]
                 st.session_state.selected_symbol = str(row["Ticker"])
                 st.session_state.current_data = row.to_dict()
+                
+                # =====================================================
+                # REALTIME PREIS CHECK (Polygon Paid oder Alpaca)
+                # =====================================================
+                if st.session_state.market_type == "Aktien":
+                    try:
+                        ticker = str(row["Ticker"])
+                        scanner_price = row.get("Preis", 0)
+                        realtime = None
+                        
+                        # 1. Versuche Polygon (wenn Key vorhanden = Paid User)
+                        try:
+                            poly_key = st.secrets["POLYGON_KEY"]
+                            realtime = fetch_realtime_price_polygon(ticker, poly_key)
+                        except:
+                            pass
+                        
+                        # 2. Fallback: Alpaca
+                        if not realtime:
+                            try:
+                                alpaca_key = st.secrets["ALPACA_KEY"]
+                                alpaca_secret = st.secrets["ALPACA_SECRET"]
+                                if alpaca_key and alpaca_secret:
+                                    realtime = fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret)
+                            except:
+                                pass
+                        
+                        if realtime and realtime.get("price", 0) > 0:
+                            rt_price = realtime["price"]
+                            price_diff = rt_price - scanner_price
+                            price_diff_pct = (price_diff / scanner_price * 100) if scanner_price > 0 else 0
+                            
+                            source = realtime.get("source", "")
+                            time_str = realtime.get("time", "")
+                            time_info = f" @ {time_str}" if time_str else ""
+                            
+                            # Warnung wenn Preis stark abweicht (>3%)
+                            if abs(price_diff_pct) > 3:
+                                if price_diff_pct > 0:
+                                    st.error(f"🚨 **LIVE: ${rt_price:.2f}** (+{price_diff_pct:.1f}% über Scanner!){time_info}")
+                                else:
+                                    st.success(f"📉 **LIVE: ${rt_price:.2f}** ({price_diff_pct:.1f}% unter Scanner){time_info}")
+                            elif abs(price_diff_pct) > 1:
+                                st.info(f"📡 **LIVE: ${rt_price:.2f}** ({price_diff_pct:+.1f}%){time_info}")
+                            else:
+                                st.caption(f"📡 Live: ${rt_price:.2f} ✓{time_info}")
+                    except Exception as e:
+                        pass  # Fehler ignorieren
                 
                 # Insider Details anzeigen
                 if is_insider and "Transactions" in df.columns:
