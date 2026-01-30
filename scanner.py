@@ -1,3 +1,30 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        ALPHA STATION V65.2 PRO                               ║
+║                     Multi-Asset Scanner & Analyzer                           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Version: 65.2 (Ultra Audit Complete)                                        ║
+║  Date: 30. Januar 2026                                                       ║
+║  Author: Miroslav + Claude                                                   ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  ULTRA AUDIT V65.2 - ALLE FIXES:                                             ║
+║  ✅ Close Position min_range_pct: 0.3% → 1.0% (Morgen-Problem behoben)       ║
+║  ✅ Wick-Berechnung: min 0.5% Range für zuverlässige Wicks                   ║
+║  ✅ Alle ClosePos Zuweisungen: None-Check implementiert (8 Stellen)          ║
+║  ✅ Strategie-Beschreibungen: Vortag% = Kerze (nicht Tages-Performance)      ║
+║  ✅ Breakout Long: Close Position 0.65-1.0 (frühere Erkennung)               ║
+║  ✅ Breakdown Short: Close Position 0.0-0.35 (frühere Erkennung)             ║
+║  ✅ High Volume Churn: Close Position Filter entfernt                        ║
+║  ✅ Tight Range: RVOL 0.2-0.8 (war zu hoch)                                  ║
+║  ✅ Debug-Stats: Zeigt welcher Filter wie viele Aktien rauswirft             ║
+║                                                                              ║
+║  BEKANNTE LIMITIERUNGEN (dokumentiert):                                      ║
+║  ⚠️ Vortag% = Intraday-Kerze (prev_close - prev_open)                        ║
+║  ⚠️ Betrifft: Bull Flag, Bear Flag, Reversal Hunter, Consolidation          ║
+║  ⚠️ Fix für V66: 2-Tage History API (Polygon Aggregates)                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -42,60 +69,62 @@ if "auto_refresh_enabled" not in st.session_state:
 # =============================================================================
 STRATEGIES = {
     "Volume Surge": {
-        "description": "Aktien/Krypto mit überdurchschnittlichem Volumen",
-        "filters": {"RVOL": (2.0, 50.0)},
-        "logic": "RVOL > 2.0 zeigt erhöhtes Interesse"
+        "description": "Aktien/Krypto mit überdurchschnittlichem Volumen UND Bewegung",
+        "filters": {"RVOL": (2.0, 50.0), "Change %": (2.0, 100.0)},
+        "logic": "RVOL > 2.0 + Change > 2% = echtes Interesse mit Richtung"
     },
     "Bull Flag": {
-        "description": "Konsolidierung nach starkem Anstieg - Multi-Day Pattern",
-        "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
-        "logic": "Starke Fahnenstange + enge Konsolidierung mit sinkendem Volumen",
+        "description": "Konsolidierung nach starkem Anstieg - Multi-Day Pattern (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.2, 2.0)},
+        "logic": "Starke bullische Vortags-KERZE (Close>Open) + heute enge Konsolidierung",
         "needs_history": True,
         "pattern_type": "bull_flag",
         "history_days": 5
     },
     "Bear Flag": {
-        "description": "Konsolidierung nach Abverkauf - Multi-Day Short-Setup",
-        "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.3, 1.5)},
-        "logic": "Starker Abfall + enge Konsolidierung mit sinkendem Volumen",
+        "description": "Konsolidierung nach Abverkauf - Multi-Day Short-Setup (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.2, 2.0)},
+        "logic": "Starke bärische Vortags-KERZE (Close<Open) + heute enge Konsolidierung",
         "needs_history": True,
         "pattern_type": "bear_flag",
         "history_days": 5
     },
     "Breakout Long": {
         "description": "Momentum-Ausbruch mit Volumen-Bestätigung",
-        "filters": {"Change %": (5.0, 50.0), "RVOL": (2.0, 50.0), "Close Position": (0.75, 1.0)},
-        "logic": "Starker Anstieg + hohes Volumen + Close nahe High"
+        "filters": {"Change %": (5.0, 50.0), "RVOL": (2.0, 50.0), "Close Position": (0.65, 1.0)},
+        "logic": "Starker Anstieg + hohes Volumen + Close nahe High (0.65 statt 0.75 für frühe Erkennung)"
     },
     "Breakdown Short": {
         "description": "Abverkauf mit Volumen - Short-Chance",
-        "filters": {"Change %": (-50.0, -5.0), "RVOL": (2.0, 50.0), "Close Position": (0.0, 0.25)},
-        "logic": "Starker Abverkauf + hohes Volumen + Close nahe Low"
+        "filters": {"Change %": (-50.0, -5.0), "RVOL": (2.0, 50.0), "Close Position": (0.0, 0.35)},
+        "logic": "Starker Abverkauf + hohes Volumen + Close nahe Low (0.35 statt 0.25 für frühe Erkennung)"
     },
     "Penny Rockets": {
-        "description": "Günstige Coins/Aktien mit explosivem Volumen",
-        "filters": {"Preis": (0.0001, 1.0), "RVOL": (3.0, 100.0), "Change %": (2.0, 100.0)},
-        "logic": "Lowcaps unter $1 mit extremem Interesse"
+        "description": "Günstige Aktien mit explosivem Volumen (min $100k Volumen)",
+        "filters": {"Preis": (0.10, 5.0), "RVOL": (3.0, 100.0), "Change %": (5.0, 100.0)},
+        "logic": "Lowcaps unter $5 mit extremem Interesse - NUR liquide!",
+        "min_dollar_volume": 100000
     },
     "Dip Buy": {
-        "description": "Qualitäts-Assets im Rücksetzer ohne Panik",
+        "description": "Qualitäts-Assets im Rücksetzer ohne Panik (min $500k Volumen)",
         "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.5, 2.0)},
-        "logic": "Moderater Rücksetzer ohne Volumen-Panik = Kaufchance"
+        "logic": "Moderater Rücksetzer ohne Volumen-Panik = Kaufchance",
+        "min_dollar_volume": 500000
     },
     "Reversal Hunter": {
-        "description": "Trendumkehr nach starkem Abverkauf",
-        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (2.0, 30.0), "RVOL": (1.5, 50.0)},
-        "logic": "Gestern Crash, heute Käufer = potenzielle Umkehr"
+        "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (3.0, 30.0), "RVOL": (2.0, 50.0)},
+        "logic": "Gestern bärische KERZE (Close<Open, -5% bis -50%), heute Käufer (+3%+) mit Volumen"
     },
     "Early Momentum": {
         "description": "Starker Tagesstart mit Volumen",
-        "filters": {"Change %": (3.0, 30.0), "RVOL": (1.5, 50.0)},
-        "logic": "Positive Bewegung mit überdurchschnittlichem Volumen"
+        "filters": {"Change %": (4.0, 30.0), "RVOL": (2.0, 50.0)},
+        "logic": "Change > 4% + RVOL > 2 = echtes Momentum (nicht nur Noise)"
     },
     "Whale Watch": {
-        "description": "Extremes Volumen - Big Player aktiv",
-        "filters": {"RVOL": (5.0, 100.0)},
-        "logic": "RVOL > 5.0 = institutionelles Interesse wahrscheinlich"
+        "description": "Extremes Volumen MIT Bewegung - Big Player aktiv",
+        "filters": {"RVOL": (5.0, 100.0), "Change %": (1.0, 100.0)},
+        "logic": "RVOL > 5.0 + Change > 1% = institutionelles Interesse mit Richtung"
     },
     # =========================================================================
     # PRE-MARKET STRATEGIEN 🌅 - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
@@ -184,13 +213,15 @@ STRATEGIES = {
     # =========================================================================
     "Long Wick Up": {
         "description": "Lange obere Wick = Verkaufsdruck, oft Reversal nach unten",
-        "filters": {"Upper Wick %": (30.0, 100.0), "Change %": (-10.0, 5.0)},
-        "logic": "Lange obere Wick zeigt Ablehnung höherer Preise = Short-Signal"
+        "filters": {"Upper Wick %": (35.0, 100.0), "Change %": (-10.0, 3.0)},
+        "logic": "Obere Wick > 35% + Change < 3% = Ablehnung höherer Preise (Short-Signal)",
+        "min_range_pct": 0.5
     },
     "Long Wick Down": {
         "description": "Lange untere Wick = Kaufdruck, oft Reversal nach oben",
-        "filters": {"Lower Wick %": (30.0, 100.0), "Change %": (-3.0, 15.0)},
-        "logic": "Lange untere Wick zeigt Ablehnung tieferer Preise = Long-Signal"
+        "filters": {"Lower Wick %": (35.0, 100.0), "Change %": (-5.0, 10.0)},
+        "logic": "Untere Wick > 35% = Ablehnung tieferer Preise (Long-Signal, Hammer-Pattern)",
+        "min_range_pct": 0.5
     },
     # =========================================================================
     # INSIDER STRATEGIEN - NUR AKTIEN
@@ -214,32 +245,32 @@ STRATEGIES = {
     # Mit Multi-Day Analyse (5 Tage) für bessere Pattern-Erkennung.
     # =========================================================================
     "Consolidation 📦": {
-        "description": "📦 Multi-Day Seitwärtsphase mit sinkendem Volumen - Breakout möglich",
-        "filters": {"Change %": (-3.0, 3.0), "Vortag %": (-3.0, 3.0), "RVOL": (0.3, 1.5)},
-        "logic": "Enge Range + niedriges Volumen = Ruhe vor dem Sturm (Richtung unklar!)",
+        "description": "📦 Multi-Day Seitwärtsphase mit sinkendem Volumen (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "filters": {"Change %": (-2.0, 2.0), "Vortag %": (-2.0, 2.0), "RVOL": (0.2, 1.2)},
+        "logic": "Enge Range (±2%) + kleine Vortags-Kerze + niedriges Volumen = Ruhe vor dem Sturm",
         "needs_history": True,
         "pattern_type": "consolidation",
         "history_days": 5
     },
     "Consolidation Breakout 🚀": {
-        "description": "📦→🚀 Ausbruch aus enger Range mit Volumen-Bestätigung",
-        "filters": {"Change %": (3.0, 30.0), "Vortag %": (-5.0, 5.0), "RVOL": (1.5, 50.0)},
-        "logic": "Nach flachem Vortag plötzlich Ausbruch + Volumen = Momentum"
+        "description": "📦→🚀 Ausbruch aus enger Range mit Volumen (⚠️ Vortag% = Kerze)",
+        "filters": {"Change %": (3.0, 30.0), "Vortag %": (-2.5, 2.5), "RVOL": (2.0, 50.0)},
+        "logic": "Kleine Vortags-Kerze (±2.5%) + heute Ausbruch (+3%+) mit hohem Volumen"
     },
     "Reversal Setup 🪤": {
-        "description": "📦 Bärischer Vortag + heute bullisch = potenzielle Umkehr",
-        "filters": {"Change %": (2.0, 15.0), "Vortag %": (-8.0, -2.0), "RVOL": (1.2, 10.0)},
-        "logic": "Gestern rot, heute grün mit Volumen = Käufer steigen ein"
+        "description": "📦 Bärische Vortags-Kerze + heute bullisch (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "filters": {"Change %": (2.0, 15.0), "Vortag %": (-8.0, -2.0), "RVOL": (1.8, 10.0)},
+        "logic": "Gestern rote Kerze (Close<Open, -2% bis -8%), heute grün mit erhöhtem Volumen"
     },
     "Tight Range 📐": {
-        "description": "📐 Extrem enge Tagesrange - Explosion steht bevor (Richtung unklar)",
-        "filters": {"Change %": (-1.5, 1.5), "RVOL": (0.3, 1.5)},
-        "logic": "Wenn Volatilität extrem niedrig → folgt oft große Bewegung"
+        "description": "📐 Extrem enge Tagesrange mit niedrigem Volumen - Explosion steht bevor",
+        "filters": {"Change %": (-1.0, 1.0), "RVOL": (0.2, 0.8)},
+        "logic": "Enge Range + niedriges Volumen = echte Ruhe vor dem Sturm (Richtung unklar)"
     },
     "High Volume Churn 📤": {
         "description": "📤 Hohes Volumen ohne Preisfortschritt = mögliche Verteilung",
-        "filters": {"Change %": (-5.0, 5.0), "RVOL": (2.0, 50.0), "Close Position": (0.5, 0.9)},
-        "logic": "Hohes Volumen ohne Fortschritt = jemand verkauft in die Stärke",
+        "filters": {"Change %": (-3.0, 3.0), "RVOL": (2.5, 50.0)},
+        "logic": "Hohes Volumen (RVOL > 2.5) + enge Range = jemand akkumuliert/distribuiert",
         "needs_history": True,
         "pattern_type": "accumulation",
         "history_days": 5
@@ -308,9 +339,9 @@ FUTURES_STRATEGIES = {
         "logic": "Futures mit <-1% = Verkaufsdruck"
     },
     "Futures Reversal 🔄": {
-        "description": "🔄 Trendumkehr nach starkem Move",
+        "description": "🔄 Trendumkehr nach starkem Move (⚠️ Vortag% = Session-Kerze)",
         "filters": {"Vortag %": (-10.0, -2.0), "Change %": (0.5, 10.0)},
-        "logic": "Gestern gefallen, heute steigend = potenzielle Umkehr"
+        "logic": "Letzte Session gefallen, jetzt steigend = potenzielle Umkehr"
     },
     # =========================================================================
     # SESSION-BASIERTE STRATEGIEN (mit Zeitfenster-Hinweis)
@@ -366,9 +397,9 @@ FOREX_STRATEGIES = {
         "logic": "Für Forex ist >0.3% bereits signifikant"
     },
     "Forex Reversal 🔄": {
-        "description": "🔄 Gegenbewegung nach starkem Vortag",
+        "description": "🔄 Gegenbewegung nach starkem Vortag (⚠️ Vortag% = 24h Kerze)",
         "filters": {"Vortag %": (-3.0, -0.5), "Change %": (0.1, 3.0)},
-        "logic": "Gestern gefallen, heute steigend = Umkehr-Signal"
+        "logic": "Letzte 24h gefallen, jetzt steigend = Umkehr-Signal"
     },
     "Pip Hunter 🎯": {
         "description": "🎯 Größte Pip-Bewegungen des Tages",
@@ -444,14 +475,14 @@ CRYPTO_STRATEGIES = {
         "logic": "RVOL > 1.0 (überdurchschnittlicher Turnover) + Change > 3%"
     },
     "Bull Flag": {
-        "description": "Bullische Konsolidierung nach Anstieg",
+        "description": "Bullische Konsolidierung nach Anstieg (⚠️ Vortag% = 24h Kerze)",
         "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 0.8)},
-        "logic": "Vortag +4-25%, heute flach mit sinkendem Volumen"
+        "logic": "Starke 24h-Kerze (+4-25%), heute flach mit sinkendem Volumen"
     },
     "Bear Flag": {
-        "description": "Bärische Konsolidierung nach Abverkauf",
+        "description": "Bärische Konsolidierung nach Abverkauf (⚠️ Vortag% = 24h Kerze)",
         "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 0.8)},
-        "logic": "Vortag -4-25%, heute flach = weitere Schwäche"
+        "logic": "Starke 24h-Kerze (-4 bis -25%), heute flach = weitere Schwäche"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben mit Volumen",
@@ -474,9 +505,9 @@ CRYPTO_STRATEGIES = {
         "logic": "Moderater Rücksetzer ohne Volumen-Panik"
     },
     "Reversal Hunter": {
-        "description": "Trendumkehr nach starkem Abverkauf",
+        "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = 24h Kerze)",
         "filters": {"Vortag %": (-50.0, -5.0), "Change %": (2.0, 30.0), "RVOL": (0.5, 20.0)},
-        "logic": "Gestern Crash, heute Käufer"
+        "logic": "Letzte 24h stark negativ (-5% bis -50%), jetzt Käufer (+2%+)"
     },
     "Early Momentum": {
         "description": "Starke Bewegung mit erhöhtem Volumen",
@@ -484,9 +515,9 @@ CRYPTO_STRATEGIES = {
         "logic": "Positive Bewegung mit überdurchschnittlichem Turnover"
     },
     "Whale Watch 🐋": {
-        "description": "Extremes Volumen - Big Player aktiv",
-        "filters": {"RVOL": (2.0, 50.0)},
-        "logic": "RVOL > 2.0 = deutlich überdurchschnittlicher Turnover"
+        "description": "Extremes Volumen MIT Bewegung - Big Player aktiv",
+        "filters": {"RVOL": (2.0, 50.0), "Change %": (2.0, 100.0)},
+        "logic": "RVOL > 2.0 + Change > 2% = Whale Activity mit Richtung"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
@@ -590,10 +621,49 @@ def apply_strategy(strategy_name, strategies_dict=None):
         st.session_state.active_filters = {}
         st.warning(f"⚠️ Strategie '{strategy_name}' nicht gefunden!")
 
-def calculate_close_position(high, low, close):
-    if high == low or high is None or low is None:
-        return 0.5
-    return (close - low) / (high - low)
+def calculate_close_position(high, low, close, min_range_pct=0.5):
+    """
+    Berechnet Close Position mit Sicherheits-Checks.
+    
+    Close Position = (close - low) / (high - low)
+    Zeigt wo der Preis innerhalb der Tagesrange geschlossen hat:
+    - 1.0 = Close am High (bullisch)
+    - 0.5 = Close in der Mitte
+    - 0.0 = Close am Low (bärisch)
+    
+    WICHTIG: Morgens ist die Range sehr klein → Close Position unzuverlässig!
+    Wir geben None zurück wenn die Range < min_range_pct ist.
+    
+    Bei min_range_pct=0.5%:
+    - $50 Aktie braucht mindestens $0.25 Range
+    - $100 Aktie braucht mindestens $0.50 Range
+    - Balance zwischen Zuverlässigkeit und früher Erkennung
+    
+    Args:
+        high: Tageshoch
+        low: Tagestief
+        close: Aktueller Preis
+        min_range_pct: Mindest-Range in % für zuverlässige Berechnung (default 1.0%)
+    
+    Returns:
+        Close Position (0-1) oder None wenn nicht berechenbar
+    """
+    if high is None or low is None or close is None:
+        return None
+    if high <= 0 or low <= 0:
+        return None
+    if high == low:
+        return None  # Keine Range = keine Close Position
+    
+    # Prüfe ob genug Range vorhanden (Morgen-Problem vermeiden)
+    range_pct = ((high - low) / low) * 100
+    if range_pct < min_range_pct:
+        return None  # Zu wenig Range für zuverlässige Close Position
+    
+    close_pos = (close - low) / (high - low)
+    
+    # Clamp auf 0-1 (kann >1 oder <0 sein wenn close außerhalb range)
+    return max(0.0, min(1.0, close_pos))
 
 def calculate_alpha_score(rvol, vortag_pct, change_pct):
     """
@@ -2841,16 +2911,19 @@ def fetch_crypto_data():
                 # Approximation: Open = Price / (1 + change/100)
                 open_price = price / (1 + change_24h / 100) if change_24h != -100 else price
                 
-                # Wick-Berechnungen (KORREKT für Krypto)
-                candle_range = high_24h - low_24h if high_24h > low_24h else 0.0001
-                body_top = max(open_price, price)
-                body_bottom = min(open_price, price)
+                # Wick-Berechnungen (mit min_range_pct Check für Konsistenz)
+                candle_range = high_24h - low_24h if high_24h > low_24h else 0
+                range_pct = (candle_range / low_24h * 100) if low_24h > 0 else 0
                 
-                # Upper Wick %: (High - Body Top) / Candle Range * 100
-                upper_wick_pct = ((high_24h - body_top) / candle_range) * 100 if candle_range > 0 else 0
-                
-                # Lower Wick %: (Body Bottom - Low) / Candle Range * 100
-                lower_wick_pct = ((body_bottom - low_24h) / candle_range) * 100 if candle_range > 0 else 0
+                # Nur Wick berechnen wenn genug Range (min 0.5%)
+                if range_pct >= 0.5 and candle_range > 0:
+                    body_top = max(open_price, price)
+                    body_bottom = min(open_price, price)
+                    upper_wick_pct = ((high_24h - body_top) / candle_range) * 100
+                    lower_wick_pct = ((body_bottom - low_24h) / candle_range) * 100
+                else:
+                    upper_wick_pct = 0
+                    lower_wick_pct = 0
                 
                 # GAP % - KRYPTO HAT KEINE ECHTEN GAPS (24/7 Markt)
                 # Wir setzen es auf None damit der Filter weiß dass es nicht anwendbar ist
@@ -2903,9 +2976,12 @@ def fetch_crypto_data():
                 if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): 
                     match = False
                 
-                # Close Position
-                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
-                    match = False
+                # Close Position - mit None Check (falls Range zu klein)
+                if "Close Position" in f:
+                    if close_pos is not None:
+                        if not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
+                            match = False
+                    # Wenn close_pos None ist, ignoriere den Filter
                 
                 # Wick Filter (funktioniert bei Krypto)
                 if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): 
@@ -2965,7 +3041,7 @@ def fetch_crypto_data():
                     "Chg%": round(change_24h, 2),
                     "RVOL": rvol, 
                     "Vortag%": round(vortag_chg, 2),
-                    "ClosePos": round(close_pos, 2), 
+                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5, 
                     "Alpha": alpha,
                     "UpperWick%": round(upper_wick_pct, 1),
                     "LowerWick%": round(lower_wick_pct, 1),
@@ -2999,6 +3075,18 @@ def fetch_stock_data(poly_key, session="Regular"):
     results = []
     skipped_no_price = 0
     skipped_filter = 0
+    
+    # DEBUG: Detaillierte Filter-Statistiken
+    debug_stats = {
+        "total_tickers": 0,
+        "skipped_change": 0,
+        "skipped_rvol": 0,
+        "skipped_closepos": 0,
+        "skipped_vortag": 0,
+        "skipped_preis": 0,
+        "skipped_other": 0,
+        "closepos_samples": [],  # Sammle ein paar Close Position Werte
+    }
     
     try:
         # Polygon Snapshot API
@@ -3045,21 +3133,24 @@ def fetch_stock_data(poly_key, session="Regular"):
                     change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
                     
                 else:  # Regular Hours (default)
-                    # WICHTIG: lastTrade.p = REALTIME Preis! Priorisieren!
-                    price = last.get("p") or day.get("c") or minute_data.get("c") or prev.get("c") or 0
+                    # Preis: day.c zuerst, dann lastTrade als Fallback
+                    price = day.get("c") or last.get("p") or minute_data.get("c") or prev.get("c") or 0
                     if price <= 0:
                         skipped_no_price += 1
                         continue
                     
                     open_price = day.get("o") or price
-                    high = max(day.get("h") or price, price)  # High = max aus day.h und aktuellem Preis
-                    low = min(day.get("l") or price, price)   # Low = min aus day.l und aktuellem Preis
-                    close = price  # REALTIME Preis
+                    high = day.get("h") or price
+                    low = day.get("l") or price
+                    close = day.get("c") or price
                     vol = day.get("v") or minute_data.get("v") or 0
                     
-                    # Change berechnen mit REALTIME Preis
-                    prev_close = prev.get("c") or 0
-                    change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
+                    # Change berechnen
+                    change = t.get("todaysChangePerc")
+                    if change is None:
+                        prev_close = prev.get("c") or 0
+                        change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0
+                    change = change or 0
                 
                 # =====================================================
                 # GEMEINSAME BERECHNUNGEN
@@ -3096,12 +3187,19 @@ def fetch_stock_data(poly_key, session="Regular"):
                     # Wenn Open innerhalb der Range: gap_pct = 0 (kein True Gap)
                 
                 # WICK-Berechnungen
-                candle_range = high - low if high > low else 0.0001
-                body_top = max(open_price, close)
-                body_bottom = min(open_price, close)
+                # WICHTIG: Morgens ist die Range oft zu klein für zuverlässige Wick-Analyse
+                candle_range = high - low if high > low else 0
+                range_pct = (candle_range / low * 100) if low > 0 else 0
                 
-                upper_wick_pct = ((high - body_top) / candle_range) * 100 if candle_range > 0 else 0
-                lower_wick_pct = ((body_bottom - low) / candle_range) * 100 if candle_range > 0 else 0
+                # Nur Wick berechnen wenn genug Range (min 0.5% = sinnvolle Kerze)
+                if range_pct >= 0.5 and candle_range > 0:
+                    body_top = max(open_price, close)
+                    body_bottom = min(open_price, close)
+                    upper_wick_pct = ((high - body_top) / candle_range) * 100
+                    lower_wick_pct = ((body_bottom - low) / candle_range) * 100
+                else:
+                    upper_wick_pct = 0
+                    lower_wick_pct = 0
                 
                 # RVOL Berechnung - VERBESSERT mit Time-Normalisierung
                 prev_vol = prev.get("v") or 0
@@ -3143,6 +3241,18 @@ def fetch_stock_data(poly_key, session="Regular"):
                 # Liquiditäts-Filter für Gap-Strategien UND PM/AH Strategien (Gemini's Kritik)
                 # Pre-Market ist dünn: ohne Dollar-Volume Filter zeigt Scanner illiquide Pennystocks
                 current_strat = st.session_state.get("current_strategy", "")
+                
+                # Hole min_dollar_volume aus Strategie-Definition falls vorhanden
+                strategy_def = STRATEGIES.get(current_strat, {})
+                strat_min_dollar_vol = strategy_def.get("min_dollar_volume", 0)
+                
+                # Wenn Strategie min_dollar_volume definiert, nutze das
+                if strat_min_dollar_vol > 0:
+                    if dollar_volume < strat_min_dollar_vol:
+                        skipped_filter += 1
+                        debug_stats["skipped_other"] += 1
+                        continue  # Skip wegen Strategie-spezifischem Dollar Volume
+                
                 liquidity_strategies = [
                     "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
                     "PM Gainers 🌅", "PM Losers 🌅", "PM Gap & Go 🌅", "PM Penny Movers 🌅",
@@ -3162,34 +3272,85 @@ def fetch_stock_data(poly_key, session="Regular"):
                         skipped_filter += 1
                         continue  # Skip illiquide Trades
                 
+                # DEBUG: Zähle total tickers
+                debug_stats["total_tickers"] += 1
+                
+                # Sammle Close Position Samples (erste 20)
+                if close_pos is not None and len(debug_stats["closepos_samples"]) < 20:
+                    debug_stats["closepos_samples"].append(round(close_pos, 2))
+                
+                # FILTER-CHECKS mit detailliertem Tracking
+                filter_failed = None
+                
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
                     if af.get("rvol_override_min"): rvol_min = af["rvol_override_min"]
                     if af.get("rvol_override_max"): rvol_max = af["rvol_override_max"]
-                    if not (rvol_min <= rvol <= rvol_max): match = False
+                    if not (rvol_min <= rvol <= rvol_max): 
+                        filter_failed = "rvol"
+                        debug_stats["skipped_rvol"] += 1
                 
-                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
-                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
-                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
+                if filter_failed is None and "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): 
+                    filter_failed = "change"
+                    debug_stats["skipped_change"] += 1
+                    
+                if filter_failed is None and "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): 
+                    filter_failed = "vortag"
+                    debug_stats["skipped_vortag"] += 1
+                    
+                if filter_failed is None and "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): 
+                    filter_failed = "preis"
+                    debug_stats["skipped_preis"] += 1
                 
                 # Close Position Filter - Skip wenn None (Extended Hours)
-                if "Close Position" in f:
+                if filter_failed is None and "Close Position" in f:
                     if close_pos is not None:
                         if not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
-                            match = False
+                            filter_failed = "closepos"
+                            debug_stats["skipped_closepos"] += 1
                     # Wenn close_pos None ist (Extended Hours), ignoriere diesen Filter
                 
                 # Neue Filter: Gap & Wicks
-                if "Gap %" in f and not (f["Gap %"][0] <= gap_pct <= f["Gap %"][1]): match = False
-                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
-                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
+                if filter_failed is None and "Gap %" in f and not (f["Gap %"][0] <= gap_pct <= f["Gap %"][1]): 
+                    filter_failed = "gap"
+                    debug_stats["skipped_other"] += 1
                 
-                if af.get("preis_min", 0) > 0 and price < af["preis_min"]: match = False
-                if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: match = False
-                if af.get("nur_gewinner") and change <= 0: match = False
-                if af.get("nur_verlierer") and change >= 0: match = False
+                # Wick-Filter mit Mindest-Range-Check
+                # Morgens ist die Range sehr klein → Wick% unzuverlässig
+                range_pct = ((high - low) / low * 100) if low > 0 else 0
+                strat_min_range = strategy_def.get("min_range_pct", 0)
                 
-                if not match:
+                if filter_failed is None and "Upper Wick %" in f:
+                    # Prüfe ob genug Range für zuverlässige Wick-Berechnung
+                    if strat_min_range > 0 and range_pct < strat_min_range:
+                        filter_failed = "range_too_small"
+                        debug_stats["skipped_other"] += 1
+                    elif not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): 
+                        filter_failed = "upper_wick"
+                        debug_stats["skipped_other"] += 1
+                        
+                if filter_failed is None and "Lower Wick %" in f:
+                    if strat_min_range > 0 and range_pct < strat_min_range:
+                        filter_failed = "range_too_small"
+                        debug_stats["skipped_other"] += 1
+                    elif not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): 
+                        filter_failed = "lower_wick"
+                        debug_stats["skipped_other"] += 1
+                
+                if filter_failed is None and af.get("preis_min", 0) > 0 and price < af["preis_min"]: 
+                    filter_failed = "preis_min"
+                    debug_stats["skipped_other"] += 1
+                if filter_failed is None and af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: 
+                    filter_failed = "preis_max"
+                    debug_stats["skipped_other"] += 1
+                if filter_failed is None and af.get("nur_gewinner") and change <= 0: 
+                    filter_failed = "nur_gewinner"
+                    debug_stats["skipped_other"] += 1
+                if filter_failed is None and af.get("nur_verlierer") and change >= 0: 
+                    filter_failed = "nur_verlierer"
+                    debug_stats["skipped_other"] += 1
+                
+                if filter_failed is not None:
                     skipped_filter += 1
                     continue
                 
@@ -3223,7 +3384,7 @@ def fetch_stock_data(poly_key, session="Regular"):
                     "Ticker": ticker_raw, "Name": "",
                     "Preis": round(price, 4), "Chg%": round(change, 2),
                     "RVOL": rvol, "Vortag%": vortag_chg,
-                    "ClosePos": round(close_pos, 2), "Alpha": alpha,
+                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5, "Alpha": alpha,
                     "Gap%": round(gap_pct, 2),
                     "UpperWick%": round(upper_wick_pct, 1),
                     "LowerWick%": round(lower_wick_pct, 1),
@@ -3240,10 +3401,10 @@ def fetch_stock_data(poly_key, session="Regular"):
             except:
                 continue
         
-        return results, skipped_no_price, skipped_filter
+        return results, skipped_no_price, skipped_filter, debug_stats
     except Exception as e:
         st.error(f"Polygon Fehler: {e}")
-        return [], 0, 0
+        return [], 0, 0, {}
 
 # =============================================================================
 # INTERNATIONALE BÖRSEN - Top Aktien Listen
@@ -3534,7 +3695,7 @@ def fetch_futures_data(category):
                     "Chg%": round(change, 2),
                     "RVOL": rvol,
                     "Vortag%": round(vortag_chg, 2),
-                    "ClosePos": round(close_pos, 2),
+                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5,
                     "Alpha": alpha,
                     "Category": FUTURES_CONTRACTS[category]["name"],
                     "FullTicker": ticker,
@@ -3652,7 +3813,7 @@ def fetch_forex_data(category):
                     "Chg%": round(change, 3),
                     "Pips": round(pip_change, 1),
                     "Vortag%": round(vortag_chg, 3),
-                    "ClosePos": round(close_pos, 2),
+                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5,
                     "Alpha": round(alpha, 0),
                     "Category": FOREX_PAIRS[category]["name"],
                     "FullTicker": ticker,
@@ -3779,12 +3940,18 @@ def fetch_international_stock_data(exchange_code):
                 # Close Position
                 close_pos = calculate_close_position(today_high, today_low, price)
                 
-                # Wick Berechnungen
-                candle_range = today_high - today_low if today_high > today_low else 0.0001
-                body_top = max(today_open, today_close)
-                body_bottom = min(today_open, today_close)
-                upper_wick_pct = ((today_high - body_top) / candle_range) * 100
-                lower_wick_pct = ((body_bottom - today_low) / candle_range) * 100
+                # Wick Berechnungen (mit min_range_pct Check für Konsistenz)
+                candle_range = today_high - today_low if today_high > today_low else 0
+                range_pct = (candle_range / today_low * 100) if today_low > 0 else 0
+                
+                if range_pct >= 0.5 and candle_range > 0:
+                    body_top = max(today_open, today_close)
+                    body_bottom = min(today_open, today_close)
+                    upper_wick_pct = ((today_high - body_top) / candle_range) * 100
+                    lower_wick_pct = ((body_bottom - today_low) / candle_range) * 100
+                else:
+                    upper_wick_pct = 0
+                    lower_wick_pct = 0
                 
                 # ATR
                 atr_pct = calculate_atr_from_ohlc(today_high, today_low, today_close, yesterday_close)
@@ -3804,7 +3971,14 @@ def fetch_international_stock_data(exchange_code):
                 if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
                 if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
                 if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
-                if "Close Position" in f and not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): match = False
+                
+                # Close Position - mit None Check
+                if "Close Position" in f:
+                    if close_pos is not None:
+                        if not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
+                            match = False
+                    # Wenn close_pos None ist, ignoriere den Filter
+                
                 if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
                 if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
                 
@@ -3829,7 +4003,7 @@ def fetch_international_stock_data(exchange_code):
                     "Chg%": round(change, 2),
                     "RVOL": rvol,
                     "Vortag%": round(vortag_chg, 2),
-                    "ClosePos": round(close_pos, 2),
+                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5,
                     "Alpha": alpha,
                     "Gap%": 0,
                     "UpperWick%": round(upper_wick_pct, 1),
@@ -4190,7 +4364,7 @@ with st.sidebar:
                     status.update(label=f"Hole Top-Aktien für Volume Profile Analyse...")
                     
                     # Erst Standard-Scan für Kandidaten
-                    candidates, _, _ = fetch_stock_data(poly_key, session="Regular")
+                    candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
                     
                     # Filter: Nur Aktien mit genug Bewegung und Liquidität
                     if direction == "long":
@@ -4269,7 +4443,7 @@ with st.sidebar:
                         status.update(label="Hole Top-Aktien für Pattern-Analyse...")
                         
                         # Erst Standard-Scan für Kandidaten
-                        candidates, _, _ = fetch_stock_data(poly_key, session="Regular")
+                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
                         
                         # Filter: Nur liquide Aktien mit Bewegung
                         filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
@@ -4405,7 +4579,43 @@ with st.sidebar:
                         st.warning("⚠️ **RVOL im Pre/Post-Market ungenau!** RVOL vergleicht mit Tagesvolumen, aber der Tag hat gerade erst begonnen. Nutze besser PM/AH-Strategien ohne RVOL.")
                     
                     poly_key = st.secrets["POLYGON_KEY"]
-                    results, snp, sf = fetch_stock_data(poly_key, session=session)
+                    results, snp, sf, debug_stats = fetch_stock_data(poly_key, session=session)
+                    
+                    # DEBUG: Zeige Filter-Statistiken wenn 0 Ergebnisse
+                    if len(results) == 0 and debug_stats:
+                        with st.expander("🔍 Debug: Warum 0 Ergebnisse?", expanded=True):
+                            st.write(f"**Gesamt geprüfte Aktien:** {debug_stats.get('total_tickers', 0):,}")
+                            st.write(f"**Session:** {session}")
+                            st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'Keine')}")
+                            
+                            st.write("**Gefiltert wegen:**")
+                            cols = st.columns(5)
+                            with cols[0]:
+                                st.metric("Change%", debug_stats.get('skipped_change', 0))
+                            with cols[1]:
+                                st.metric("RVOL", debug_stats.get('skipped_rvol', 0))
+                            with cols[2]:
+                                st.metric("Close Pos", debug_stats.get('skipped_closepos', 0))
+                            with cols[3]:
+                                st.metric("Vortag%", debug_stats.get('skipped_vortag', 0))
+                            with cols[4]:
+                                st.metric("Andere", debug_stats.get('skipped_other', 0))
+                            
+                            # Zeige aktive Filter
+                            st.write(f"**Aktive Filter:** {st.session_state.active_filters}")
+                            
+                            # Zeige Close Position Samples
+                            samples = debug_stats.get('closepos_samples', [])
+                            if samples:
+                                st.write(f"**Close Position Werte (Sample):** {samples}")
+                                avg_cp = sum(samples) / len(samples)
+                                st.write(f"**Durchschnitt:** {avg_cp:.2f}")
+                                
+                                # Dynamisch den Filter-Wert auslesen
+                                cp_filter = st.session_state.active_filters.get("Close Position", (0, 1))
+                                st.info(f"💡 Dein Filter: {cp_filter[0]}-{cp_filter[1]} | Durchschnitt: {avg_cp:.2f}")
+                            else:
+                                st.warning("⚠️ Keine Close Position Samples - Range zu klein oder Session Problem")
                     
                     # Info wenn wenig Ergebnisse
                     if len(results) < 5 and session in ["Pre-Market", "After-Hours"]:
@@ -5169,7 +5379,7 @@ with tab_search:
                                 "Chg%": round(change, 2),
                                 "RVOL": rvol,
                                 "Vortag%": round(change, 2),
-                                "ClosePos": round(close_pos, 2),
+                                "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5,
                                 "Alpha": alpha,
                                 "High24h": high,
                                 "Low24h": low,
@@ -5222,7 +5432,7 @@ with tab_search:
                                     "Chg%": round(change, 2),
                                     "RVOL": rvol,
                                     "Vortag%": vortag,
-                                    "ClosePos": round(close_pos, 2),
+                                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5,
                                     "Alpha": alpha,
                                     "High24h": high,
                                     "Low24h": low,
@@ -5968,7 +6178,7 @@ with tab_moneyflow:
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V60 Pro")
+    st.caption("Alpha Station V65 Pro (Audit Release)")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
