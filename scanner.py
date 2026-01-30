@@ -5704,384 +5704,258 @@ VERBOTEN:
 # MONEY FLOW TAB - Sektor Rotation & Smart Money Tracking
 # -----------------------------------------------------------------------------
 with tab_moneyflow:
-    st.subheader("💰 Money Flow Radar")
-    st.caption("Wohin fließt das Smart Money? Sektor-Rotation & Asset-Klassen Analyse")
+    st.subheader("💰 Money Flow Heatmap")
+    st.caption("Wohin fließt das Smart Money? Sektor-Rotation auf einen Blick")
     
-    # Refresh Button
-    col_ref1, col_ref2 = st.columns([1, 4])
-    with col_ref1:
-        refresh_flow = st.button("🔄 Aktualisieren", key="refresh_moneyflow")
+    # Zeitraum Auswahl
+    col_period, col_refresh, col_empty = st.columns([2, 1, 2])
+    with col_period:
+        period = st.selectbox(
+            "📅 Zeitraum",
+            ["1 Tag", "1 Woche", "1 Monat", "3 Monate"],
+            index=1,  # Default: 1 Woche
+            key="moneyflow_period"
+        )
+    with col_refresh:
+        if st.button("🔄", key="refresh_moneyflow", help="Daten aktualisieren"):
+            st.cache_data.clear()
+            st.rerun()
     
-    # Cache für Money Flow Daten
-    @st.cache_data(ttl=300)  # 5 Minuten Cache
-    def fetch_sector_etfs(poly_key):
-        """Holt Sektor-ETF Daten von Polygon"""
+    # Period zu Tagen
+    period_days = {"1 Tag": 1, "1 Woche": 7, "1 Monat": 30, "3 Monate": 90}
+    days = period_days.get(period, 7)
+    
+    @st.cache_data(ttl=600)  # 10 Minuten Cache
+    def fetch_sector_performance(poly_key, days):
+        """Holt historische Performance für Sektoren"""
+        from datetime import timedelta
+        
         sectors = {
             # US Sektor ETFs (SPDR)
-            "XLK": {"name": "💻 Technology", "category": "Aktien"},
-            "XLF": {"name": "🏦 Financials", "category": "Aktien"},
-            "XLE": {"name": "⚡ Energy", "category": "Aktien"},
-            "XLV": {"name": "🏥 Healthcare", "category": "Aktien"},
-            "XLI": {"name": "🏭 Industrials", "category": "Aktien"},
-            "XLY": {"name": "🛒 Consumer Disc.", "category": "Aktien"},
-            "XLP": {"name": "🥫 Consumer Staples", "category": "Aktien"},
-            "XLU": {"name": "💡 Utilities", "category": "Aktien"},
-            "XLB": {"name": "�ite Materials", "category": "Aktien"},
-            "XLRE": {"name": "🏠 Real Estate", "category": "Aktien"},
-            "XLC": {"name": "📱 Communication", "category": "Aktien"},
+            "XLK": {"name": "Technology", "emoji": "💻", "category": "Sektoren"},
+            "XLF": {"name": "Financials", "emoji": "🏦", "category": "Sektoren"},
+            "XLE": {"name": "Energy", "emoji": "⚡", "category": "Sektoren"},
+            "XLV": {"name": "Healthcare", "emoji": "🏥", "category": "Sektoren"},
+            "XLI": {"name": "Industrials", "emoji": "🏭", "category": "Sektoren"},
+            "XLY": {"name": "Consumer Disc.", "emoji": "🛒", "category": "Sektoren"},
+            "XLP": {"name": "Consumer Staples", "emoji": "🥫", "category": "Sektoren"},
+            "XLU": {"name": "Utilities", "emoji": "💡", "category": "Sektoren"},
+            "XLB": {"name": "Materials", "emoji": "🧱", "category": "Sektoren"},
+            "XLRE": {"name": "Real Estate", "emoji": "🏠", "category": "Sektoren"},
+            "XLC": {"name": "Communication", "emoji": "📱", "category": "Sektoren"},
             # Thematische ETFs
-            "ITA": {"name": "🛡️ Defense/Aerospace", "category": "Themen"},
-            "ARKK": {"name": "🚀 Innovation", "category": "Themen"},
-            "SMH": {"name": "🔌 Semiconductors", "category": "Themen"},
-            "TAN": {"name": "☀️ Solar Energy", "category": "Themen"},
-            "HACK": {"name": "🔒 Cybersecurity", "category": "Themen"},
-            "BOTZ": {"name": "🤖 AI & Robotics", "category": "Themen"},
+            "SMH": {"name": "Semiconductors", "emoji": "🔌", "category": "Themen"},
+            "ARKK": {"name": "Innovation", "emoji": "🚀", "category": "Themen"},
+            "HACK": {"name": "Cybersecurity", "emoji": "🔒", "category": "Themen"},
+            "TAN": {"name": "Solar", "emoji": "☀️", "category": "Themen"},
+            "BOTZ": {"name": "AI & Robotics", "emoji": "🤖", "category": "Themen"},
             # Asset Klassen
-            "GLD": {"name": "🥇 Gold", "category": "Commodities"},
-            "SLV": {"name": "🥈 Silver", "category": "Commodities"},
-            "USO": {"name": "🛢️ Oil", "category": "Commodities"},
-            "UNG": {"name": "🔥 Natural Gas", "category": "Commodities"},
-            # Bonds & Safe Haven
-            "TLT": {"name": "📜 Long-Term Bonds", "category": "Bonds"},
-            "SHY": {"name": "📄 Short-Term Bonds", "category": "Bonds"},
-            "UUP": {"name": "💵 US Dollar", "category": "Currency"},
+            "GLD": {"name": "Gold", "emoji": "🥇", "category": "Assets"},
+            "SLV": {"name": "Silver", "emoji": "🥈", "category": "Assets"},
+            "USO": {"name": "Oil", "emoji": "🛢️", "category": "Assets"},
+            "TLT": {"name": "Bonds 20Y", "emoji": "📜", "category": "Assets"},
+            "UUP": {"name": "US Dollar", "emoji": "💵", "category": "Assets"},
             # Indices
-            "SPY": {"name": "📊 S&P 500", "category": "Index"},
-            "QQQ": {"name": "📈 Nasdaq 100", "category": "Index"},
-            "IWM": {"name": "📉 Russell 2000", "category": "Index"},
-            "DIA": {"name": "🏛️ Dow Jones", "category": "Index"},
+            "SPY": {"name": "S&P 500", "emoji": "📊", "category": "Indices"},
+            "QQQ": {"name": "Nasdaq 100", "emoji": "📈", "category": "Indices"},
+            "IWM": {"name": "Russell 2000", "emoji": "📉", "category": "Indices"},
+            "DIA": {"name": "Dow Jones", "emoji": "🏛️", "category": "Indices"},
         }
         
         results = []
-        try:
-            for ticker, info in sectors.items():
-                try:
-                    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}?apiKey={poly_key}"
-                    resp = requests.get(url, timeout=10)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        t = data.get("ticker", {})
-                        day = t.get("day", {}) or {}
-                        prev = t.get("prevDay", {}) or {}
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days + 5)  # Extra Tage für Wochenenden
+        
+        for ticker, info in sectors.items():
+            try:
+                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+                params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 100}
+                resp = requests.get(url, params=params, timeout=10)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    bars = data.get("results", [])
+                    
+                    if bars and len(bars) >= 2:
+                        # Start und End Preis
+                        start_price = bars[0]["c"]
+                        end_price = bars[-1]["c"]
                         
-                        price = day.get("c") or 0
-                        prev_close = prev.get("c") or 0
-                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
-                        
-                        vol = day.get("v") or 0
-                        prev_vol = prev.get("v") or 1
-                        rvol = vol / prev_vol if prev_vol > 0 else 1
+                        # Performance berechnen
+                        change_pct = ((end_price - start_price) / start_price * 100) if start_price > 0 else 0
                         
                         results.append({
-                            "Ticker": ticker,
-                            "Name": info["name"],
-                            "Category": info["category"],
-                            "Price": round(price, 2),
-                            "Change%": round(change_pct, 2),
-                            "RVOL": round(rvol, 2),
-                            "Volume": vol
+                            "ticker": ticker,
+                            "name": info["name"],
+                            "emoji": info["emoji"],
+                            "category": info["category"],
+                            "change": round(change_pct, 2),
+                            "price": round(end_price, 2)
                         })
-                except:
-                    continue
-        except:
-            pass
+            except:
+                continue
         
         return results
     
-    @st.cache_data(ttl=300)
-    def fetch_crypto_categories():
-        """Holt Krypto-Kategorien von CoinGecko"""
-        categories = [
-            {"id": "layer-1", "name": "🔗 Layer 1 (BTC, ETH, SOL)"},
-            {"id": "layer-2", "name": "🔷 Layer 2 (ARB, OP, MATIC)"},
-            {"id": "decentralized-finance-defi", "name": "🏛️ DeFi"},
-            {"id": "artificial-intelligence", "name": "🤖 AI & Big Data"},
-            {"id": "gaming", "name": "🎮 Gaming (GameFi)"},
-            {"id": "meme-token", "name": "🐕 Meme Coins"},
-            {"id": "exchange-based-tokens", "name": "🏦 Exchange Tokens"},
-            {"id": "stablecoins", "name": "💵 Stablecoins"},
-            {"id": "non-fungible-tokens-nft", "name": "🖼️ NFT & Metaverse"},
-            {"id": "real-world-assets-rwa", "name": "🏠 Real World Assets"},
-        ]
-        
-        results = []
-        try:
-            for cat in categories:
-                try:
-                    url = f"https://api.coingecko.com/api/v3/coins/markets"
-                    params = {
-                        "vs_currency": "usd",
-                        "category": cat["id"],
-                        "order": "market_cap_desc",
-                        "per_page": 10,
-                        "page": 1
-                    }
-                    resp = requests.get(url, params=params, timeout=10)
-                    if resp.status_code == 200:
-                        coins = resp.json()
-                        if coins:
-                            # Durchschnittliche Performance der Top 10 Coins
-                            changes = [c.get("price_change_percentage_24h", 0) or 0 for c in coins]
-                            avg_change = sum(changes) / len(changes) if changes else 0
-                            total_vol = sum(c.get("total_volume", 0) or 0 for c in coins)
-                            
-                            results.append({
-                                "Category": cat["name"],
-                                "CategoryID": cat["id"],
-                                "Change%": round(avg_change, 2),
-                                "Volume24h": total_vol,
-                                "TopCoins": ", ".join([c["symbol"].upper() for c in coins[:3]])
-                            })
-                except:
-                    continue
-                    
-                # Rate limit für CoinGecko
-                import time
-                time.sleep(0.5)
-        except:
-            pass
-        
-        return results
+    def get_heatmap_color(change):
+        """Gibt Hintergrundfarbe basierend auf Performance zurück"""
+        if change >= 10:
+            return "#006400"  # Dunkelgrün
+        elif change >= 5:
+            return "#228B22"  # Grün
+        elif change >= 2:
+            return "#32CD32"  # Hellgrün
+        elif change >= 0:
+            return "#90EE90"  # Sehr hellgrün
+        elif change >= -2:
+            return "#FFB6C1"  # Hellrot
+        elif change >= -5:
+            return "#FF6B6B"  # Rot
+        elif change >= -10:
+            return "#DC143C"  # Dunkelrot
+        else:
+            return "#8B0000"  # Sehr dunkelrot
     
-    @st.cache_data(ttl=300)
-    def fetch_market_indices(poly_key):
-        """Holt Haupt-Markt-Indices"""
-        indices = {
-            "SPY": "S&P 500",
-            "QQQ": "Nasdaq 100", 
-            "IWM": "Russell 2000",
-            "DIA": "Dow Jones",
-            "VIX": "VIX (Fear Index)"
-        }
-        results = {}
-        
-        try:
-            for ticker, name in indices.items():
-                try:
-                    # VIX braucht spezielle Behandlung
-                    if ticker == "VIX":
-                        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/VIXY?apiKey={poly_key}"
-                    else:
-                        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}?apiKey={poly_key}"
-                    
-                    resp = requests.get(url, timeout=10)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        t = data.get("ticker", {})
-                        day = t.get("day", {}) or {}
-                        prev = t.get("prevDay", {}) or {}
-                        
-                        price = day.get("c") or 0
-                        prev_close = prev.get("c") or 0
-                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
-                        
-                        results[ticker] = {
-                            "name": name,
-                            "price": price,
-                            "change": round(change_pct, 2)
-                        }
-                except:
-                    continue
-        except:
-            pass
-        
-        return results
+    def get_text_color(change):
+        """Gibt Textfarbe basierend auf Hintergrund zurück"""
+        if abs(change) >= 5:
+            return "white"
+        else:
+            return "black"
     
     # Daten laden
     try:
         poly_key = st.secrets["POLYGON_KEY"]
         
-        # Market Overview
-        st.markdown("### 📊 Market Overview")
-        indices = fetch_market_indices(poly_key)
+        with st.spinner(f"Lade {period} Performance..."):
+            sector_data = fetch_sector_performance(poly_key, days)
         
-        if indices:
-            idx_cols = st.columns(len(indices))
-            for i, (ticker, data) in enumerate(indices.items()):
-                with idx_cols[i]:
-                    delta_color = "normal" if data["change"] >= 0 else "inverse"
-                    st.metric(
-                        data["name"], 
-                        f"${data['price']:,.2f}", 
-                        f"{data['change']:+.2f}%",
-                        delta_color=delta_color
-                    )
-        
-        st.divider()
-        
-        # Zwei Spalten: Aktien Sektoren | Krypto Kategorien
-        col_stocks, col_crypto = st.columns(2)
-        
-        with col_stocks:
-            st.markdown("### 📈 Aktien Sektoren & Assets")
+        if sector_data:
+            # Gruppiere nach Kategorie
+            categories = {}
+            for item in sector_data:
+                cat = item["category"]
+                if cat not in categories:
+                    categories[cat] = []
+                categories[cat].append(item)
             
-            sector_data = fetch_sector_etfs(poly_key)
+            # Sortiere jede Kategorie nach Performance
+            for cat in categories:
+                categories[cat] = sorted(categories[cat], key=lambda x: x["change"], reverse=True)
             
-            if sector_data:
-                # Nach Kategorie gruppieren
-                categories = {}
-                for item in sector_data:
-                    cat = item["Category"]
-                    if cat not in categories:
-                        categories[cat] = []
-                    categories[cat].append(item)
-                
-                # Sortiere jede Kategorie nach Performance
-                for cat_name, items in categories.items():
-                    items_sorted = sorted(items, key=lambda x: x["Change%"], reverse=True)
+            # HEATMAP ANZEIGE
+            st.markdown(f"### 🗺️ Sektor Heatmap ({period})")
+            
+            # Reihenfolge der Kategorien
+            cat_order = ["Indices", "Sektoren", "Themen", "Assets"]
+            
+            for cat_name in cat_order:
+                if cat_name not in categories:
+                    continue
                     
-                    with st.expander(f"**{cat_name}**", expanded=(cat_name in ["Aktien", "Themen"])):
-                        for item in items_sorted:
-                            change = item["Change%"]
-                            rvol = item["RVOL"]
-                            
-                            # Farbe basierend auf Performance
-                            if change > 2:
-                                color = "🟢"
-                                bar = "█" * min(int(change), 15)
-                            elif change > 0:
-                                color = "🟡"
-                                bar = "█" * min(int(change * 3), 10)
-                            elif change > -2:
-                                color = "🟠"
-                                bar = "░" * min(int(abs(change) * 3), 10)
-                            else:
-                                color = "🔴"
-                                bar = "░" * min(int(abs(change)), 15)
-                            
-                            # RVOL Indikator
-                            rvol_icon = "🔥" if rvol > 1.5 else ""
-                            
-                            st.caption(f"{color} **{item['Name']}** ({item['Ticker']})")
-                            st.caption(f"   {bar} {change:+.2f}% | RVOL: {rvol:.1f}x {rvol_icon}")
+                items = categories[cat_name]
                 
-                # Top Movers
-                st.markdown("#### 🚀 Top Gainers (Heute)")
-                top_gainers = sorted(sector_data, key=lambda x: x["Change%"], reverse=True)[:5]
-                for item in top_gainers:
-                    st.caption(f"🟢 {item['Name']}: **{item['Change%']:+.2f}%**")
+                st.markdown(f"**{cat_name}**")
                 
-                st.markdown("#### 📉 Top Losers (Heute)")
-                top_losers = sorted(sector_data, key=lambda x: x["Change%"])[:5]
-                for item in top_losers:
-                    st.caption(f"🔴 {item['Name']}: **{item['Change%']:+.2f}%**")
+                # Grid Layout (4 Spalten)
+                cols = st.columns(4)
                 
-                # High Volume Alert
-                st.markdown("#### 🔥 Unusual Volume (RVOL > 1.5)")
-                high_vol = [x for x in sector_data if x["RVOL"] > 1.5]
-                high_vol = sorted(high_vol, key=lambda x: x["RVOL"], reverse=True)[:5]
-                if high_vol:
-                    for item in high_vol:
-                        st.caption(f"🔥 {item['Name']}: RVOL **{item['RVOL']:.1f}x** ({item['Change%']:+.2f}%)")
-                else:
-                    st.caption("Keine ungewöhnlichen Volumina heute")
-            else:
-                st.warning("Sektor-Daten konnten nicht geladen werden")
-        
-        with col_crypto:
-            st.markdown("### 🪙 Krypto Kategorien")
-            
-            crypto_cats = fetch_crypto_categories()
-            
-            if crypto_cats:
-                # Sortiere nach Performance
-                crypto_sorted = sorted(crypto_cats, key=lambda x: x["Change%"], reverse=True)
-                
-                for item in crypto_sorted:
-                    change = item["Change%"]
+                for i, item in enumerate(items):
+                    col_idx = i % 4
                     
-                    # Farbe und Bar
-                    if change > 5:
-                        color = "🟢"
-                        label = "HOT 🔥"
-                    elif change > 2:
-                        color = "🟢"
-                        label = ""
-                    elif change > 0:
-                        color = "🟡"
-                        label = ""
-                    elif change > -2:
-                        color = "🟠"
-                        label = ""
-                    else:
-                        color = "🔴"
-                        label = "WEAK"
-                    
-                    bar_len = min(int(abs(change)), 20)
-                    bar = "█" * bar_len if change > 0 else "░" * bar_len
-                    
-                    st.caption(f"{color} **{item['Category']}** {label}")
-                    st.caption(f"   {bar} {change:+.2f}%")
-                    st.caption(f"   Top: {item['TopCoins']}")
-                    st.divider()
+                    with cols[col_idx]:
+                        change = item["change"]
+                        bg_color = get_heatmap_color(change)
+                        text_color = get_text_color(change)
+                        
+                        # Heatmap Kachel mit HTML
+                        st.markdown(f"""
+                        <div style="
+                            background-color: {bg_color};
+                            color: {text_color};
+                            padding: 12px;
+                            border-radius: 8px;
+                            text-align: center;
+                            margin: 4px 0;
+                        ">
+                            <div style="font-size: 20px;">{item['emoji']}</div>
+                            <div style="font-weight: bold; font-size: 14px;">{item['name']}</div>
+                            <div style="font-size: 18px; font-weight: bold;">{change:+.1f}%</div>
+                            <div style="font-size: 11px; opacity: 0.8;">{item['ticker']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
                 
-                # Summary
-                st.markdown("#### 📊 Krypto Sentiment")
-                avg_change = sum(c["Change%"] for c in crypto_cats) / len(crypto_cats) if crypto_cats else 0
-                positive = len([c for c in crypto_cats if c["Change%"] > 0])
-                
-                if avg_change > 3:
-                    st.success(f"🚀 **BULLISH** - Markt-Durchschnitt: {avg_change:+.2f}%")
-                elif avg_change > 0:
-                    st.info(f"📈 **LEICHT POSITIV** - Durchschnitt: {avg_change:+.2f}%")
-                elif avg_change > -3:
-                    st.warning(f"📉 **LEICHT NEGATIV** - Durchschnitt: {avg_change:+.2f}%")
-                else:
-                    st.error(f"🔴 **BEARISH** - Durchschnitt: {avg_change:+.2f}%")
-                
-                st.caption(f"{positive}/{len(crypto_cats)} Kategorien im Plus")
-            else:
-                st.warning("Krypto-Kategorien konnten nicht geladen werden (CoinGecko Rate Limit?)")
-        
-        st.divider()
-        
-        # Money Flow Interpretation
-        st.markdown("### 🧠 Money Flow Interpretation")
-        
-        # Analysiere die Daten
-        if sector_data and crypto_cats:
-            col_int1, col_int2 = st.columns(2)
+                st.markdown("")  # Spacer
             
-            with col_int1:
-                st.markdown("**Risk-On vs Risk-Off:**")
-                
-                # Risk-On Assets (Tech, Crypto, Small Caps)
-                risk_on = [x for x in sector_data if x["Ticker"] in ["XLK", "QQQ", "IWM", "ARKK", "SMH"]]
-                risk_on_avg = sum(x["Change%"] for x in risk_on) / len(risk_on) if risk_on else 0
-                
-                # Risk-Off Assets (Bonds, Gold, Utilities)
-                risk_off = [x for x in sector_data if x["Ticker"] in ["TLT", "GLD", "XLU", "SHY"]]
-                risk_off_avg = sum(x["Change%"] for x in risk_off) / len(risk_off) if risk_off else 0
-                
-                if risk_on_avg > risk_off_avg + 0.5:
-                    st.success(f"🟢 **RISK-ON** - Geld fließt in Wachstum/Risiko")
-                    st.caption(f"Risk-On: {risk_on_avg:+.2f}% vs Risk-Off: {risk_off_avg:+.2f}%")
-                elif risk_off_avg > risk_on_avg + 0.5:
-                    st.warning(f"🟡 **RISK-OFF** - Geld fließt in sichere Häfen")
-                    st.caption(f"Risk-Off: {risk_off_avg:+.2f}% vs Risk-On: {risk_on_avg:+.2f}%")
+            st.divider()
+            
+            # TOP & BOTTOM MOVERS
+            all_sorted = sorted(sector_data, key=lambda x: x["change"], reverse=True)
+            
+            col_top, col_bottom = st.columns(2)
+            
+            with col_top:
+                st.markdown("### 🚀 Top Performer")
+                for item in all_sorted[:5]:
+                    st.markdown(f"🟢 **{item['emoji']} {item['name']}**: {item['change']:+.1f}%")
+            
+            with col_bottom:
+                st.markdown("### 📉 Schwächste")
+                for item in all_sorted[-5:]:
+                    st.markdown(f"🔴 **{item['emoji']} {item['name']}**: {item['change']:+.1f}%")
+            
+            st.divider()
+            
+            # MONEY FLOW INTERPRETATION
+            st.markdown("### 🧠 Money Flow Analyse")
+            
+            # Risk-On vs Risk-Off
+            risk_on_tickers = ["XLK", "QQQ", "IWM", "ARKK", "SMH", "XLY"]
+            risk_off_tickers = ["TLT", "GLD", "XLU", "XLP", "UUP"]
+            
+            risk_on = [x for x in sector_data if x["ticker"] in risk_on_tickers]
+            risk_off = [x for x in sector_data if x["ticker"] in risk_off_tickers]
+            
+            risk_on_avg = sum(x["change"] for x in risk_on) / len(risk_on) if risk_on else 0
+            risk_off_avg = sum(x["change"] for x in risk_off) / len(risk_off) if risk_off else 0
+            
+            col_ro1, col_ro2 = st.columns(2)
+            
+            with col_ro1:
+                if risk_on_avg > risk_off_avg + 1:
+                    st.success(f"🟢 **RISK-ON** Modus")
+                    st.caption(f"Wachstum: {risk_on_avg:+.1f}% vs Sicherheit: {risk_off_avg:+.1f}%")
+                    st.caption("→ Geld fließt in Tech, Small Caps, Growth")
+                elif risk_off_avg > risk_on_avg + 1:
+                    st.warning(f"🟡 **RISK-OFF** Modus")
+                    st.caption(f"Sicherheit: {risk_off_avg:+.1f}% vs Wachstum: {risk_on_avg:+.1f}%")
+                    st.caption("→ Geld fließt in Bonds, Gold, Defensive")
                 else:
                     st.info(f"⚖️ **NEUTRAL** - Kein klarer Trend")
+                    st.caption(f"Risk-On: {risk_on_avg:+.1f}% | Risk-Off: {risk_off_avg:+.1f}%")
             
-            with col_int2:
-                st.markdown("**Sektor Rotation:**")
-                
-                # Finde stärksten und schwächsten Sektor
-                aktien_sektoren = [x for x in sector_data if x["Category"] == "Aktien"]
-                if aktien_sektoren:
-                    best = max(aktien_sektoren, key=lambda x: x["Change%"])
-                    worst = min(aktien_sektoren, key=lambda x: x["Change%"])
+            with col_ro2:
+                # Stärkster vs Schwächster Sektor
+                sektoren = [x for x in sector_data if x["category"] == "Sektoren"]
+                if sektoren:
+                    best = max(sektoren, key=lambda x: x["change"])
+                    worst = min(sektoren, key=lambda x: x["change"])
+                    spread = best["change"] - worst["change"]
                     
-                    st.caption(f"🚀 Stärkster: **{best['Name']}** ({best['Change%']:+.2f}%)")
-                    st.caption(f"📉 Schwächster: **{worst['Name']}** ({worst['Change%']:+.2f}%)")
+                    st.markdown("**Sektor Rotation:**")
+                    st.caption(f"🚀 Leader: **{best['name']}** ({best['change']:+.1f}%)")
+                    st.caption(f"📉 Laggard: **{worst['name']}** ({worst['change']:+.1f}%)")
                     
-                    spread = best["Change%"] - worst["Change%"]
-                    if spread > 3:
-                        st.caption(f"⚠️ Hohe Sektor-Dispersion ({spread:.1f}%) - Stockpicking wichtig!")
+                    if spread > 10:
+                        st.caption(f"⚠️ Hohe Dispersion ({spread:.0f}%) - Stockpicking wichtig!")
                     else:
-                        st.caption(f"✅ Niedrige Dispersion ({spread:.1f}%) - Breite Rally/Sell-Off")
+                        st.caption(f"✅ Moderate Dispersion ({spread:.0f}%)")
+            
+            st.divider()
+            st.caption(f"💡 Daten von Polygon.io | Letzte {days} Handelstage | Cache: 10 Min")
         
-        st.divider()
-        st.caption("💡 **Tipp:** Daten werden alle 5 Minuten aktualisiert. Klicke 'Aktualisieren' für Live-Daten.")
+        else:
+            st.warning("Keine Daten verfügbar. Markt evtl. geschlossen?")
         
     except KeyError:
         st.error("❌ POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
