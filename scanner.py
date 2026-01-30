@@ -3095,7 +3095,7 @@ def fetch_stock_data(poly_key, session="Regular"):
         tickers = resp.get("tickers", [])
         
         if len(tickers) == 0:
-            return [], 0, 0
+            return [], 0, 0, debug_stats
         
         f = st.session_state.active_filters
         af = st.session_state.additional_filters
