@@ -1,27 +1,21 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V65.2 PRO                               ║
+║                        ALPHA STATION V65.3 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 65.2 (Ultra Audit Complete)                                        ║
+║  Version: 65.3 (Filter Auto-Sync)                                            ║
 ║  Date: 30. Januar 2026                                                       ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  ULTRA AUDIT V65.2 - ALLE FIXES:                                             ║
-║  ✅ Close Position min_range_pct: 0.3% → 1.0% (Morgen-Problem behoben)       ║
-║  ✅ Wick-Berechnung: min 0.5% Range für zuverlässige Wicks                   ║
-║  ✅ Alle ClosePos Zuweisungen: None-Check implementiert (8 Stellen)          ║
-║  ✅ Strategie-Beschreibungen: Vortag% = Kerze (nicht Tages-Performance)      ║
-║  ✅ Breakout Long: Close Position 0.65-1.0 (frühere Erkennung)               ║
-║  ✅ Breakdown Short: Close Position 0.0-0.35 (frühere Erkennung)             ║
-║  ✅ High Volume Churn: Close Position Filter entfernt                        ║
-║  ✅ Tight Range: RVOL 0.2-0.8 (war zu hoch)                                  ║
-║  ✅ Debug-Stats: Zeigt welcher Filter wie viele Aktien rauswirft             ║
+║  V65.3 FIXES:                                                                ║
+║  ✅ Auto-Sync: Filter werden automatisch aktualisiert bei Code-Änderung     ║
+║  ✅ FILTER_VERSION Check: Kein veralteter Browser-Cache mehr                 ║
+║  ✅ Close Position min_range_pct: 1.0% (war fälschlich 0.5%)                 ║
+║  ✅ fetch_stock_data: Return 4 Werte (war 3)                                 ║
 ║                                                                              ║
 ║  BEKANNTE LIMITIERUNGEN (dokumentiert):                                      ║
 ║  ⚠️ Vortag% = Intraday-Kerze (prev_close - prev_open)                        ║
 ║  ⚠️ Betrifft: Bull Flag, Bear Flag, Reversal Hunter, Consolidation          ║
-║  ⚠️ Fix für V66: 2-Tage History API (Polygon Aggregates)                     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -63,6 +57,12 @@ if "fib_info" not in st.session_state:
     st.session_state.fib_info = {}
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
+
+# VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
+FILTER_VERSION = "65.3"
+if st.session_state.get("filter_version") != FILTER_VERSION:
+    st.session_state.filters_synced = False
+    st.session_state.filter_version = FILTER_VERSION
 
 # =============================================================================
 # 2. STRATEGIE-DEFINITIONEN
@@ -621,7 +621,7 @@ def apply_strategy(strategy_name, strategies_dict=None):
         st.session_state.active_filters = {}
         st.warning(f"⚠️ Strategie '{strategy_name}' nicht gefunden!")
 
-def calculate_close_position(high, low, close, min_range_pct=0.5):
+def calculate_close_position(high, low, close, min_range_pct=1.0):
     """
     Berechnet Close Position mit Sicherheits-Checks.
     
@@ -634,7 +634,9 @@ def calculate_close_position(high, low, close, min_range_pct=0.5):
     WICHTIG: Morgens ist die Range sehr klein → Close Position unzuverlässig!
     Wir geben None zurück wenn die Range < min_range_pct ist.
     
-    Bei min_range_pct=0.5%:
+    Bei min_range_pct=1.0%:
+    - $50 Aktie braucht mindestens $0.50 Range
+    - $100 Aktie braucht mindestens $1.00 Range
     - $50 Aktie braucht mindestens $0.25 Range
     - $100 Aktie braucht mindestens $0.50 Range
     - Balance zwischen Zuverlässigkeit und früher Erkennung
@@ -4205,7 +4207,22 @@ with st.sidebar:
     # Strategie laden wenn sich Auswahl ändert
     if strat != st.session_state.get("current_strategy", ""):
         apply_strategy(strat, current_strategies)
+        st.session_state.filters_synced = True  # Flag dass Filter aktuell sind
         st.rerun()
+    
+    # AUTO-FIX: Wenn Filter nicht mit Strategie-Definition übereinstimmen
+    # (passiert wenn Code aktualisiert wurde aber alter Browser-Cache existiert)
+    # Nur EINMAL pro Session ausführen um manuelle Änderungen nicht zu überschreiben
+    if not st.session_state.get("filters_synced", False):
+        expected_filters = current_strategies[strat]["filters"]
+        current_filters = st.session_state.active_filters
+        if current_filters != expected_filters:
+            st.toast("🔄 Filter aktualisiert (neue Version)")
+            apply_strategy(strat, current_strategies)
+            st.session_state.filters_synced = True
+            st.rerun()
+        else:
+            st.session_state.filters_synced = True  # Filter stimmen bereits
     
     with st.expander("ℹ️ Info"):
         st.write(current_strategies[strat]["description"])
