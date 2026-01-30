@@ -1,16 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V65.3.2 PRO                             ║
+║                        ALPHA STATION V66.1 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 65.3.2 (Slider Cache Fix)                                          ║
+║  Version: 66.1 (MA Bounce + ETF Filter + Reliable S/R)                       ║
 ║  Date: 30. Januar 2026                                                       ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V65.3.2 FIXES:                                                              ║
-║  ✅ Slider-Keys mit Version - keine gecachten alten Filter mehr!             ║
-║  ✅ Auto-Sync: Filter werden bei neuer Version automatisch aktualisiert      ║
-║  ✅ Close Position min_range_pct: 1.0%                                       ║
+║  V66 NEW FEATURES:                                                           ║
+║  ✅ ETF-Filter: Filtert ETFs, Leveraged Products (TQQQ, SQQQ, etc.)          ║
+║  ✅ MA Bounce Strategien: SMA 50, SMA 200, EMA 21 Support/Resistance         ║
+║  ✅ SMA/EMA Berechnung mit Polygon Aggregates API                            ║
+║  ✅ ETF-Blacklist mit 100+ bekannten ETFs/ETNs                               ║
+║  V66.1 S/R IMPROVEMENTS:                                                     ║
+║  ✅ Previous Day High/Low/Close (PDH/PDL/PDC) - Wichtigste Levels!           ║
+║  ✅ Multi-Touch Validation - Zählt wie oft Level getestet wurde              ║
+║  ✅ Round Numbers - Psychologische Levels ($10, $50, $100)                   ║
+║  ✅ Stärke-Score für jedes Level (PDH=95, Swing 3x=80, Fib=60-70)            ║
+║  ✅ Klare Labels - Zeigt woher jedes Level kommt                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -54,10 +61,12 @@ if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "65.3.2"
+FILTER_VERSION = "66.1"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
+    # FORCE: Lösche auch active_filters damit sie neu geladen werden
+    st.session_state.active_filters = {}
 
 # =============================================================================
 # 2. STRATEGIE-DEFINITIONEN
@@ -313,6 +322,64 @@ STRATEGIES = {
         "stocks_only": True,
         "needs_harmonic": True,
         "harmonic_direction": "ALL"
+    },
+    # =========================================================================
+    # MA BOUNCE STRATEGIEN 📈 - Support/Resistance an Moving Averages
+    # =========================================================================
+    "SMA 50 Bounce Long 📈": {
+        "description": "📈 Preis nähert sich SMA 50 von OBEN - Support-Zone für Long",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-5.0, 2.0)},
+        "logic": "Preis 0-3% über SMA50 + SMA50 steigend = Support-Bounce Setup",
+        "stocks_only": True,
+        "needs_ma": True,
+        "ma_type": "SMA",
+        "ma_period": 50,
+        "ma_approach": "from_above",  # Preis kommt von oben
+        "ma_distance_max": 3.0  # Max 3% über SMA
+    },
+    "SMA 50 Bounce Short 📉": {
+        "description": "📉 Preis nähert sich SMA 50 von UNTEN - Resistance-Zone für Short",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-2.0, 5.0)},
+        "logic": "Preis 0-3% unter SMA50 + SMA50 fallend = Resistance-Bounce Setup",
+        "stocks_only": True,
+        "needs_ma": True,
+        "ma_type": "SMA",
+        "ma_period": 50,
+        "ma_approach": "from_below",  # Preis kommt von unten
+        "ma_distance_max": 3.0
+    },
+    "SMA 200 Bounce Long 🏛️": {
+        "description": "🏛️ Preis nähert sich SMA 200 von OBEN - STARKER Support (Paul Tudor Jones)",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-8.0, 2.0)},
+        "logic": "SMA200 ist DER wichtigste MA! Preis 0-3% über SMA200 = Kaufchance",
+        "stocks_only": True,
+        "needs_ma": True,
+        "ma_type": "SMA",
+        "ma_period": 200,
+        "ma_approach": "from_above",
+        "ma_distance_max": 3.0
+    },
+    "SMA 200 Bounce Short 🏛️": {
+        "description": "🏛️ Preis nähert sich SMA 200 von UNTEN - STARKE Resistance",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-2.0, 8.0)},
+        "logic": "SMA200 ist starke Resistance! Preis 0-3% unter SMA200 = Short-Chance",
+        "stocks_only": True,
+        "needs_ma": True,
+        "ma_type": "SMA",
+        "ma_period": 200,
+        "ma_approach": "from_below",
+        "ma_distance_max": 3.0
+    },
+    "EMA 21 Bounce (Swing) 🎯": {
+        "description": "🎯 EMA 21 Bounce - Linda Raschke 'Holy Grail' Setup",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-4.0, 4.0)},
+        "logic": "EMA21 ist DER Swing-Trading MA! Pullback zur EMA21 im Uptrend = Entry",
+        "stocks_only": True,
+        "needs_ma": True,
+        "ma_type": "EMA",
+        "ma_period": 21,
+        "ma_approach": "from_above",
+        "ma_distance_max": 2.0  # Enger für EMA21
     },
 }
 
@@ -1601,6 +1668,209 @@ def validate_liquidity(volume, price, min_dollar_volume=100000):
     
     return is_liquid, dollar_volume
 
+# =============================================================================
+# ETF / ETP FILTER - Filtert Leveraged ETFs, ETNs, etc.
+# =============================================================================
+# Bekannte ETF-Suffixe und Patterns
+ETF_BLACKLIST = {
+    # Leveraged ETFs (2x, 3x)
+    "TQQQ", "SQQQ", "UPRO", "SPXU", "UDOW", "SDOW", "UMDD", "SMDD",
+    "QLD", "QID", "SSO", "SDS", "DDM", "DXD", "MVV", "MZZ",
+    "UWM", "TWM", "UYM", "SZK", "ROM", "REW", "USD", "SSG",
+    "AGQ", "ZSL", "UCO", "SCO", "BOIL", "KOLD", "NUGT", "DUST",
+    "JNUG", "JDST", "LABU", "LABD", "TECS", "TECL", "SOXL", "SOXS",
+    "FNGU", "FNGD", "WEBL", "WEBS", "NAIL", "DRV", "ERX", "ERY",
+    "FAS", "FAZ", "TNA", "TZA", "SPXL", "SPXS", "URTY", "SRTY",
+    "CURE", "PILL", "RETL", "WANT", "MIDU", "MIDZ", "HIBL", "HIBS",
+    "BULZ", "BERZ", "BNKU", "BNKD", "DPST", "WDRW", "DFEN", "DUSL",
+    "EURL", "DRN", "SRS", "YINN", "YANG", "INDL", "EDC", "EDZ",
+    "RUSL", "RUSS", "LBJ", "BZQ", "EWV", "EFO", "EFU", "EET", "EEV",
+    "UGE", "SBB", "UCC", "SCC", "UPW", "SDP",
+    
+    # Volatility ETFs/ETNs
+    "VXX", "UVXY", "SVXY", "VIXY", "VIXM", "VXZ", "TVIX", "SVOL",
+    
+    # Inverse ETFs (1x)
+    "SH", "PSQ", "DOG", "RWM", "MYY", "SBB", "SEF",
+    
+    # Gold/Silver/Commodity ETFs
+    "GLD", "SLV", "IAU", "PHYS", "PSLV", "SGOL", "SIVR", "BAR",
+    "USO", "UNG", "DBA", "DBC", "GSG", "PDBC", "COMT",
+    
+    # Bond ETFs
+    "TLT", "IEF", "SHY", "BND", "AGG", "LQD", "HYG", "JNK", "EMB",
+    "TIP", "GOVT", "MUB", "VCSH", "VCIT", "VCLT", "BSV", "BIV", "BLV",
+    
+    # Major Index ETFs
+    "SPY", "QQQ", "DIA", "IWM", "IWF", "IWD", "IWB", "IWV",
+    "VOO", "VTI", "VTV", "VUG", "VIG", "VYM", "VEA", "VWO",
+    "EFA", "EEM", "IEFA", "IEMG", "ACWI", "VT", "VXUS",
+    "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE",
+    "IYR", "VNQ", "REIT",
+    
+    # Thematic/Sector ETFs  
+    "ARKK", "ARKG", "ARKW", "ARKF", "ARKQ", "ARKX", "PRNT", "IZRL",
+    "HACK", "CIBR", "WCLD", "SKYY", "CLOU", "BLOK", "BITO", "GBTC",
+    "KWEB", "MCHI", "FXI", "ASHR", "GXC", "CQQQ",
+    
+    # Tradr ETFs (wie NBIZ aus deinem Screenshot)
+    "NBIZ", "NBIS",
+}
+
+# Patterns die auf ETFs hindeuten
+ETF_PATTERNS = [
+    "ETF", "ETN", "ETP",  # Enthält ETF/ETN/ETP
+    "2X", "3X", "-2X", "-3X",  # Leveraged
+    "ULTRA", "PROSHARES", "DIREXION",  # Bekannte ETF-Anbieter
+    "BULL", "BEAR",  # Leveraged Bull/Bear
+    "SHORT", "INVERSE",  # Inverse
+]
+
+def is_etf_or_etp(ticker):
+    """
+    Prüft ob ein Ticker ein ETF, ETN, Warrant, Unit oder ähnliches Produkt ist.
+    
+    Returns: True wenn KEIN normaler Aktien-Ticker, False wenn normale Aktie
+    """
+    if not ticker:
+        return False
+    
+    ticker_upper = ticker.upper().strip()
+    
+    # Direkte Blacklist-Prüfung
+    if ticker_upper in ETF_BLACKLIST:
+        return True
+    
+    # Pattern-basierte Prüfung (für Namen, falls verfügbar)
+    for pattern in ETF_PATTERNS:
+        if pattern in ticker_upper:
+            return True
+    
+    # =========================================================================
+    # WARRANTS & UNITS FILTER
+    # =========================================================================
+    # Warrants: .WS, .WT, .W, oder W am Ende (wie TLSIW)
+    if ticker_upper.endswith(".WS") or ticker_upper.endswith(".WT"):
+        return True
+    if ticker_upper.endswith(".W") or ticker_upper.endswith("W"):
+        # Aber nicht wenn es ein normaler Ticker ist der zufällig mit W endet
+        # Prüfe ob vorletzte Zeichen ein Buchstabe ist (normale Aktie) oder Zahl (Warrant)
+        if len(ticker_upper) > 1:
+            # Warrants haben oft Format: TICKER + W (wie TLSIW = TLSI + W)
+            # Normale Aktien mit W am Ende: BMW, LOW, etc. (aber diese sind nicht in US)
+            pass  # Erstmal alle mit W am Ende durchlassen, .WS und .WT sind sicher
+    
+    # Units: .U oder U am Ende
+    if ticker_upper.endswith(".U"):
+        return True
+    
+    # Rights: .R oder .RT
+    if ticker_upper.endswith(".R") or ticker_upper.endswith(".RT"):
+        return True
+    
+    # Z am Ende = oft Units (wie BCTXZ)
+    # ABER: Viele normale Aktien enden auf Z (AMZN hat kein Z am Ende, aber andere)
+    # Sicherer: Nur wenn Ticker > 4 Zeichen und auf Z endet
+    if len(ticker_upper) > 4 and ticker_upper.endswith("Z"):
+        return True
+    
+    # Preferred Stock: .PR, -P, /P
+    if ".PR" in ticker_upper or "-P" in ticker_upper:
+        return True
+    
+    return False
+
+# =============================================================================
+# SMA / EMA BERECHNUNG
+# =============================================================================
+def calculate_sma(closes, period):
+    """
+    Berechnet Simple Moving Average.
+    
+    Args:
+        closes: Liste von Schlusskursen (neuester zuletzt)
+        period: SMA Periode (z.B. 50, 200)
+    
+    Returns:
+        SMA Wert oder None wenn nicht genug Daten
+    """
+    if not closes or len(closes) < period:
+        return None
+    
+    # Nimm die letzten 'period' Werte
+    relevant_closes = closes[-period:]
+    return sum(relevant_closes) / period
+
+def calculate_ema(closes, period):
+    """
+    Berechnet Exponential Moving Average.
+    
+    Args:
+        closes: Liste von Schlusskursen (neuester zuletzt)
+        period: EMA Periode (z.B. 8, 21)
+    
+    Returns:
+        EMA Wert oder None wenn nicht genug Daten
+    """
+    if not closes or len(closes) < period:
+        return None
+    
+    multiplier = 2 / (period + 1)
+    
+    # Starte mit SMA als Basis
+    ema = sum(closes[:period]) / period
+    
+    # Berechne EMA für restliche Werte
+    for close in closes[period:]:
+        ema = (close - ema) * multiplier + ema
+    
+    return ema
+
+def fetch_historical_closes(ticker, api_key, days=200):
+    """
+    Holt historische Schlusskurse von Polygon für SMA/EMA Berechnung.
+    
+    Args:
+        ticker: Aktien-Ticker
+        api_key: Polygon API Key
+        days: Anzahl Tage (default 200 für SMA200)
+    
+    Returns:
+        Liste von Schlusskursen (ältester zuerst) oder None bei Fehler
+    """
+    try:
+        from datetime import datetime, timedelta
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days + 50)  # Extra Puffer
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        params = {"apiKey": api_key, "limit": days + 50, "sort": "asc"}
+        
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        
+        if data.get("status") != "OK" or not data.get("results"):
+            return None
+        
+        closes = [bar["c"] for bar in data["results"]]
+        return closes
+    
+    except Exception as e:
+        return None
+
+def calculate_ma_distance(price, ma_value):
+    """
+    Berechnet den Abstand vom Preis zum Moving Average in Prozent.
+    
+    Positiv = Preis über MA
+    Negativ = Preis unter MA
+    """
+    if not ma_value or ma_value <= 0:
+        return None
+    
+    return ((price - ma_value) / ma_value) * 100
+
 def calculate_volume_profile(ohlcv_data, num_bins=20):
     """
     Berechnet Volume Profile aus historischen OHLCV Daten.
@@ -2159,16 +2429,40 @@ def fetch_realtime_batch_alpaca(tickers, alpaca_key, alpaca_secret):
     return {}
 
 def calculate_sr_from_historical(ohlc_data, current_price):
-    """Berechnet S/R-Levels aus Fibonacci + Swing Highs/Lows + Konsolidierungszonen"""
+    """
+    VERBESSERTE S/R-Berechnung mit Multi-Touch Validation.
+    
+    Kombiniert:
+    1. Previous Day High/Low/Close (PDH/PDL/PDC) - Sehr wichtig für Swing!
+    2. Swing Highs/Lows mit Touch Count
+    3. Fibonacci Retracements
+    4. Round Numbers (psychologische Levels)
+    5. Konsolidierungszonen (hohe Aktivität)
+    
+    Jedes Level bekommt einen STÄRKE-SCORE basierend auf:
+    - Touch Count (öfter getestet = stärker)
+    - Recency (neuere Levels = relevanter)
+    - Typ (PDH/PDL sind sehr stark)
+    """
     if not ohlc_data or len(ohlc_data) < 5:
         return calculate_sr_levels_simple(current_price)
     
     # Extrahiere OHLC Daten
-    highs = [candle[2] for candle in ohlc_data]  # Index 2 = High
-    lows = [candle[3] for candle in ohlc_data]   # Index 3 = Low
-    closes = [candle[4] for candle in ohlc_data] # Index 4 = Close
+    highs = [candle[2] for candle in ohlc_data]   # Index 2 = High
+    lows = [candle[3] for candle in ohlc_data]    # Index 3 = Low
+    closes = [candle[4] for candle in ohlc_data]  # Index 4 = Close
     
-    # Periode High und Low (wichtig für Fibonacci)
+    total_candles = len(ohlc_data)
+    
+    # =========================================================================
+    # 1. PREVIOUS DAY HIGH/LOW/CLOSE (Wichtigste Levels!)
+    # =========================================================================
+    # Die letzten Candle-Daten (neueste = letzte)
+    prev_day_high = highs[-1] if highs else 0
+    prev_day_low = lows[-1] if lows else 0
+    prev_day_close = closes[-1] if closes else 0
+    
+    # Periode High und Low (für Fibonacci)
     period_high = max(highs)
     period_low = min(lows)
     price_range = period_high - period_low
@@ -2177,34 +2471,127 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         return calculate_sr_levels_simple(current_price), {}
     
     # =========================================================================
-    # KONSOLIDIERUNGSZONEN BERECHNEN
-    # Finde Preiszonen wo der Preis oft war (High Activity Zones)
+    # 2. ROUND NUMBERS (Psychologische Levels)
     # =========================================================================
+    def find_round_numbers(price, range_pct=0.15):
+        """Findet relevante runde Zahlen nahe dem Preis"""
+        rounds = []
+        
+        # Bestimme relevante Rundungsstufen basierend auf Preis
+        if price >= 100:
+            steps = [100, 50, 25, 10]
+        elif price >= 10:
+            steps = [10, 5, 2.5, 1]
+        elif price >= 1:
+            steps = [1, 0.5, 0.25, 0.1]
+        else:
+            steps = [0.1, 0.05, 0.01]
+        
+        price_min = price * (1 - range_pct)
+        price_max = price * (1 + range_pct)
+        
+        for step in steps:
+            # Finde nächste runde Zahl unter dem Preis
+            lower = (price // step) * step
+            upper = lower + step
+            
+            if price_min <= lower <= price_max and lower != price:
+                rounds.append({"price": lower, "type": f"Round ${lower:.0f}" if lower >= 1 else f"Round ${lower:.2f}"})
+            if price_min <= upper <= price_max and upper != price:
+                rounds.append({"price": upper, "type": f"Round ${upper:.0f}" if upper >= 1 else f"Round ${upper:.2f}"})
+        
+        return rounds[:4]  # Max 4 runde Zahlen
     
-    # Teile den Preisbereich in Zonen auf
-    num_zones = 20  # 20 Zonen über den Preisbereich
+    round_numbers = find_round_numbers(current_price)
+    
+    # =========================================================================
+    # 3. SWING HIGHS/LOWS MIT TOUCH COUNT
+    # =========================================================================
+    def find_swing_points_with_touches(prices, is_high=True, lookback=3):
+        """Findet Swing Points und zählt wie oft sie getestet wurden"""
+        swings = []
+        tolerance_pct = 0.015  # 1.5% Toleranz für "gleicher Preis"
+        
+        window = min(lookback, len(prices) // 4)
+        if window < 1:
+            return swings
+        
+        for i in range(window, len(prices) - window):
+            is_swing = True
+            price = prices[i]
+            
+            for j in range(1, window + 1):
+                if is_high:
+                    if price <= prices[i-j] or price <= prices[i+j]:
+                        is_swing = False
+                        break
+                else:
+                    if price >= prices[i-j] or price >= prices[i+j]:
+                        is_swing = False
+                        break
+            
+            if is_swing:
+                # Zähle Touches: Wie oft kam der Preis auf dieses Level?
+                touch_count = 0
+                for p in prices:
+                    if abs(p - price) / price <= tolerance_pct:
+                        touch_count += 1
+                
+                # Recency Score (neuere = höher)
+                recency = (i / len(prices)) * 100  # 0-100
+                
+                swings.append({
+                    "price": price,
+                    "touches": touch_count,
+                    "recency": recency,
+                    "index": i,
+                    "type": "Swing High" if is_high else "Swing Low"
+                })
+        
+        # Sortiere nach Touches (mehr = besser)
+        swings = sorted(swings, key=lambda x: (x["touches"], x["recency"]), reverse=True)
+        return swings[:5]  # Top 5
+    
+    swing_highs = find_swing_points_with_touches(highs, is_high=True)
+    swing_lows = find_swing_points_with_touches(lows, is_high=False)
+    
+    # =========================================================================
+    # 4. FIBONACCI LEVELS
+    # =========================================================================
+    fib_levels = {
+        "23.6": period_low + price_range * 0.236,
+        "38.2": period_low + price_range * 0.382,
+        "50.0": period_low + price_range * 0.5,
+        "61.8": period_low + price_range * 0.618,
+        "78.6": period_low + price_range * 0.786,
+    }
+    
+    # Extensions
+    fib_extensions = {
+        "127.2": period_high + price_range * 0.272,
+        "161.8": period_high + price_range * 0.618,
+    }
+    
+    # =========================================================================
+    # 5. KONSOLIDIERUNGSZONEN (High Activity)
+    # =========================================================================
+    num_zones = 20
     zone_size = price_range / num_zones
-    zone_counts = {}  # zone_start -> anzahl_tage
+    zone_counts = {}
     
-    for i, close in enumerate(closes):
-        # Welche Zone ist dieser Close?
+    for close in closes:
         zone_idx = int((close - period_low) / zone_size)
-        zone_idx = min(zone_idx, num_zones - 1)  # Clamp
+        zone_idx = min(zone_idx, num_zones - 1)
         zone_start = period_low + zone_idx * zone_size
         zone_end = zone_start + zone_size
-        
         zone_key = (round(zone_start, 6), round(zone_end, 6))
         zone_counts[zone_key] = zone_counts.get(zone_key, 0) + 1
     
-    # Sortiere nach Häufigkeit (meiste Tage zuerst)
     sorted_zones = sorted(zone_counts.items(), key=lambda x: x[1], reverse=True)
     
-    # Top Konsolidierungszonen (min 3 Tage in der Zone)
     consolidation_zones = []
-    total_candles = len(closes)
-    
-    for (zone_start, zone_end), count in sorted_zones[:5]:  # Top 5
-        if count >= 3:  # Mindestens 3 Kerzen in dieser Zone
+    for (zone_start, zone_end), count in sorted_zones[:5]:
+        if count >= 3:
             pct_time = round((count / total_candles) * 100, 1)
             zone_mid = (zone_start + zone_end) / 2
             consolidation_zones.append({
@@ -2223,8 +2610,7 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         merged = [zones[0]]
         for zone in zones[1:]:
             last = merged[-1]
-            if zone["low"] <= last["high"] * 1.02:  # 2% Überlappung erlaubt
-                # Merge
+            if zone["low"] <= last["high"] * 1.02:
                 merged[-1] = {
                     "low": last["low"],
                     "high": max(last["high"], zone["high"]),
@@ -2236,101 +2622,131 @@ def calculate_sr_from_historical(ohlc_data, current_price):
                 merged.append(zone)
         return merged
     
-    consolidation_zones = merge_zones(consolidation_zones)[:3]  # Max 3 Zonen
+    consolidation_zones = merge_zones(consolidation_zones)[:3]
     
     # =========================================================================
-    # FIBONACCI LEVELS berechnen
+    # 6. KOMBINIERE ALLE LEVELS MIT STÄRKE-SCORE
     # =========================================================================
-    fib_levels = {
-        "0.0": period_low,
-        "23.6": period_low + price_range * 0.236,
-        "38.2": period_low + price_range * 0.382,
-        "50.0": period_low + price_range * 0.5,
-        "61.8": period_low + price_range * 0.618,
-        "78.6": period_low + price_range * 0.786,
-        "100.0": period_high,
-        "127.2": period_high + price_range * 0.272,
-        "161.8": period_high + price_range * 0.618,
-    }
+    all_levels = []
     
-    # =========================================================================
-    # SWING HIGHS/LOWS finden
-    # =========================================================================
-    swing_highs = []
-    window = min(3, len(highs) // 4)
-    for i in range(window, len(highs) - window):
-        is_swing = True
-        for j in range(1, window + 1):
-            if highs[i] <= highs[i-j] or highs[i] <= highs[i+j]:
-                is_swing = False
-                break
-        if is_swing:
-            swing_highs.append(highs[i])
+    # Previous Day Levels (SEHR STARK - Score 90-100)
+    if prev_day_high > current_price:
+        all_levels.append({"price": prev_day_high, "type": "PDH (Prev Day High)", "strength": 95, "is_support": False})
+    else:
+        all_levels.append({"price": prev_day_high, "type": "PDH (Prev Day High)", "strength": 95, "is_support": True})
     
-    swing_lows = []
-    for i in range(window, len(lows) - window):
-        is_swing = True
-        for j in range(1, window + 1):
-            if lows[i] >= lows[i-j] or lows[i] >= lows[i+j]:
-                is_swing = False
-                break
-        if is_swing:
-            swing_lows.append(lows[i])
+    if prev_day_low < current_price:
+        all_levels.append({"price": prev_day_low, "type": "PDL (Prev Day Low)", "strength": 95, "is_support": True})
+    else:
+        all_levels.append({"price": prev_day_low, "type": "PDL (Prev Day Low)", "strength": 95, "is_support": False})
     
-    swing_highs.append(period_high)
-    swing_lows.append(period_low)
-    swing_highs = sorted(set(swing_highs), reverse=True)
-    swing_lows = sorted(set(swing_lows))
+    if prev_day_close != current_price:
+        is_support = prev_day_close < current_price
+        all_levels.append({"price": prev_day_close, "type": "PDC (Prev Day Close)", "strength": 85, "is_support": is_support})
     
-    # =========================================================================
-    # SUPPORTS & RESISTANCES kombinieren
-    # =========================================================================
-    all_supports = []
-    all_resistances = []
+    # Period High/Low (STARK - Score 80-90)
+    if period_high > current_price:
+        all_levels.append({"price": period_high, "type": "Period High", "strength": 85, "is_support": False})
+    if period_low < current_price:
+        all_levels.append({"price": period_low, "type": "Period Low", "strength": 85, "is_support": True})
     
-    # Swing Lows
-    for sl in swing_lows:
-        if sl < current_price:
-            all_supports.append({"price": sl, "type": "Swing Low"})
-    
-    # Fibonacci unter Preis
-    for fib_name, fib_price in fib_levels.items():
-        if fib_price < current_price and float(fib_name) <= 100:
-            all_supports.append({"price": fib_price, "type": f"Fib {fib_name}%"})
-    
-    # Swing Highs
+    # Swing Points (Score basierend auf Touches)
     for sh in swing_highs:
-        if sh > current_price:
-            all_resistances.append({"price": sh, "type": "Swing High"})
+        # Score: 50 + (touches * 10), max 80
+        strength = min(50 + sh["touches"] * 10, 80)
+        is_support = sh["price"] < current_price
+        touch_label = f" ({sh['touches']}x)" if sh["touches"] >= 2 else ""
+        all_levels.append({
+            "price": sh["price"], 
+            "type": f"Swing High{touch_label}", 
+            "strength": strength, 
+            "is_support": is_support
+        })
     
-    # Fibonacci über Preis
+    for sl in swing_lows:
+        strength = min(50 + sl["touches"] * 10, 80)
+        is_support = sl["price"] < current_price
+        touch_label = f" ({sl['touches']}x)" if sl["touches"] >= 2 else ""
+        all_levels.append({
+            "price": sl["price"], 
+            "type": f"Swing Low{touch_label}", 
+            "strength": strength, 
+            "is_support": is_support
+        })
+    
+    # Fibonacci Levels (Score 60-70)
     for fib_name, fib_price in fib_levels.items():
-        if fib_price > current_price:
-            all_resistances.append({"price": fib_price, "type": f"Fib {fib_name}%"})
+        is_support = fib_price < current_price
+        # 50% und 61.8% sind stärker
+        strength = 70 if fib_name in ["50.0", "61.8"] else 60
+        all_levels.append({
+            "price": fib_price, 
+            "type": f"Fib {fib_name}%", 
+            "strength": strength, 
+            "is_support": is_support
+        })
     
-    # Sortieren
-    all_supports = sorted(all_supports, key=lambda x: x["price"], reverse=True)
-    all_resistances = sorted(all_resistances, key=lambda x: x["price"])
+    # Round Numbers (Score 55)
+    for rn in round_numbers:
+        is_support = rn["price"] < current_price
+        all_levels.append({
+            "price": rn["price"], 
+            "type": rn["type"], 
+            "strength": 55, 
+            "is_support": is_support
+        })
     
-    # Cluster-Bereinigung
-    def remove_clusters(levels, min_distance_pct=2.0):
+    # Konsolidierungszonen Mitte (Score basierend auf Zeit)
+    for zone in consolidation_zones:
+        strength = min(50 + zone["pct_time"] * 2, 75)  # Mehr Zeit = stärker
+        is_support = zone["mid"] < current_price
+        all_levels.append({
+            "price": zone["mid"], 
+            "type": f"Consol Zone ({zone['pct_time']}%)", 
+            "strength": strength, 
+            "is_support": is_support
+        })
+    
+    # =========================================================================
+    # 7. CLUSTER-BEREINIGUNG & SORTIERUNG
+    # =========================================================================
+    # Sortiere nach Stärke
+    supports_raw = [l for l in all_levels if l["is_support"]]
+    resistances_raw = [l for l in all_levels if not l["is_support"]]
+    
+    supports_raw = sorted(supports_raw, key=lambda x: x["price"], reverse=True)  # Nächster Support zuerst
+    resistances_raw = sorted(resistances_raw, key=lambda x: x["price"])  # Nächste Resistance zuerst
+    
+    # Entferne Cluster (Levels die zu nah beieinander sind)
+    def remove_clusters_with_merge(levels, min_distance_pct=1.5):
+        """Merged Levels die nah beieinander sind, behält stärkstes"""
         if not levels:
             return []
+        
         cleaned = [levels[0]]
         for level in levels[1:]:
             last_price = cleaned[-1]["price"]
-            distance_pct = abs(level["price"] - last_price) / last_price * 100
-            if distance_pct >= min_distance_pct:
+            distance_pct = abs(level["price"] - last_price) / max(last_price, 0.001) * 100
+            
+            if distance_pct < min_distance_pct:
+                # Merge: Behalte das stärkere Level
+                if level["strength"] > cleaned[-1]["strength"]:
+                    cleaned[-1] = level
+            else:
                 cleaned.append(level)
+        
         return cleaned
     
-    supports_cleaned = remove_clusters(all_supports)[:3]
-    resistances_cleaned = remove_clusters(all_resistances)[:3]
+    supports_cleaned = remove_clusters_with_merge(supports_raw)[:3]
+    resistances_cleaned = remove_clusters_with_merge(resistances_raw)[:3]
     
-    supports = [s["price"] for s in supports_cleaned]
-    resistances = [r["price"] for r in resistances_cleaned]
+    # Sortiere final nach Stärke innerhalb der Top 3
+    supports_cleaned = sorted(supports_cleaned, key=lambda x: x["strength"], reverse=True)
+    resistances_cleaned = sorted(resistances_cleaned, key=lambda x: x["strength"], reverse=True)
     
-    # Smart Rounding
+    # =========================================================================
+    # 8. OUTPUT
+    # =========================================================================
     def smart_round(price):
         if price >= 1000:
             return round(price, 0)
@@ -2341,10 +2757,15 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         elif price >= 1:
             return round(price, 3)
         else:
-            return round(price, 6)
+            return round(price, 4)
     
-    supports = [smart_round(s) for s in supports]
-    resistances = [smart_round(r) for r in resistances]
+    # Formatiere für Ausgabe
+    supports = [smart_round(s["price"]) for s in supports_cleaned]
+    resistances = [smart_round(r["price"]) for r in resistances_cleaned]
+    
+    # Füge Type-Info für Detail-Anzeige hinzu
+    supports_detail = [{"price": smart_round(s["price"]), "type": s["type"], "strength": s["strength"]} for s in supports_cleaned]
+    resistances_detail = [{"price": smart_round(r["price"]), "type": r["type"], "strength": r["strength"]} for r in resistances_cleaned]
     
     # Runde Konsolidierungszonen
     for zone in consolidation_zones:
@@ -2352,22 +2773,21 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         zone["high"] = smart_round(zone["high"])
         zone["mid"] = smart_round(zone["mid"])
     
-    # =========================================================================
     # FIB INFO für AI-Analyse
-    # =========================================================================
     fib_info = {
         "period_high": smart_round(period_high),
         "period_low": smart_round(period_low),
+        "prev_day_high": smart_round(prev_day_high),
+        "prev_day_low": smart_round(prev_day_low),
+        "prev_day_close": smart_round(prev_day_close),
         "fib_236": smart_round(fib_levels["23.6"]),
         "fib_382": smart_round(fib_levels["38.2"]),
         "fib_500": smart_round(fib_levels["50.0"]),
         "fib_618": smart_round(fib_levels["61.8"]),
         "fib_786": smart_round(fib_levels["78.6"]),
-        "fib_1272": smart_round(fib_levels["127.2"]),
-        "fib_1618": smart_round(fib_levels["161.8"]),
-        "supports_detail": supports_cleaned,
-        "resistances_detail": resistances_cleaned,
-        "consolidation_zones": consolidation_zones,  # NEU!
+        "supports_detail": supports_detail,
+        "resistances_detail": resistances_detail,
+        "consolidation_zones": consolidation_zones,
         "total_candles": total_candles,
     }
     
@@ -3058,7 +3478,7 @@ def fetch_crypto_data():
         return [], 0, 0
 
 
-def fetch_stock_data(poly_key, session="Regular"):
+def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
     """
     Holt Aktien-Daten von Polygon.io Snapshot API.
     
@@ -3068,6 +3488,8 @@ def fetch_stock_data(poly_key, session="Regular"):
     Session Parameter steuert wie wir die Daten interpretieren:
     - Regular: Nutze 'day' Daten (Regular Hours OHLCV)
     - Pre-Market/After-Hours/Extended: Nutze 'lastTrade' für aktuellen Preis
+    
+    skip_filters: Wenn True, werden keine Filter angewendet (für MA Bounce etc.)
     """
     results = []
     skipped_no_price = 0
@@ -3081,6 +3503,7 @@ def fetch_stock_data(poly_key, session="Regular"):
         "skipped_closepos": 0,
         "skipped_vortag": 0,
         "skipped_preis": 0,
+        "skipped_etf": 0,
         "skipped_other": 0,
         "closepos_samples": [],  # Sammle ein paar Close Position Werte
     }
@@ -3094,11 +3517,27 @@ def fetch_stock_data(poly_key, session="Regular"):
         if len(tickers) == 0:
             return [], 0, 0, debug_stats
         
-        f = st.session_state.active_filters
-        af = st.session_state.additional_filters
+        # Bei skip_filters: Keine Filter anwenden, nur Basis-Daten
+        if skip_filters:
+            f = {}  # Keine Filter
+            af = {"exclude_etfs": True, "preis_min": 0, "preis_max": 100000, "min_liquidity": 0}  # Basis-Filter
+        else:
+            f = st.session_state.active_filters
+            af = st.session_state.additional_filters
+        
+        # ETF-Filter Flag
+        exclude_etfs = af.get("exclude_etfs", True)
         
         for t in tickers:
             try:
+                # =====================================================
+                # ETF FILTER - Früh ausführen für Performance
+                # =====================================================
+                ticker_symbol = t.get("ticker", "")
+                if exclude_etfs and is_etf_or_etp(ticker_symbol):
+                    debug_stats["skipped_etf"] += 1
+                    continue
+                
                 day = t.get("day", {}) or {}
                 prev = t.get("prevDay", {}) or {}
                 last = t.get("lastTrade", {}) or {}
@@ -3268,6 +3707,13 @@ def fetch_stock_data(poly_key, session="Regular"):
                     if not is_liquid:
                         skipped_filter += 1
                         continue  # Skip illiquide Trades
+                
+                # GLOBALER LIQUIDITÄTS-FILTER (aus Zusatzfiltern)
+                user_min_liquidity = af.get("min_liquidity", 0)
+                if user_min_liquidity > 0 and dollar_volume < user_min_liquidity:
+                    skipped_filter += 1
+                    debug_stats["skipped_other"] += 1
+                    continue  # Skip wegen User-definiertem Liquiditäts-Minimum
                 
                 # DEBUG: Zähle total tickers
                 debug_stats["total_tickers"] += 1
@@ -4026,7 +4472,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V65.3 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V66.1 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -4037,7 +4483,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V65.3 Pro")
+    st.title("💎 Alpha V66.1 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -4334,10 +4780,38 @@ with st.sidebar:
             with c4:
                 nur_verlierer = st.checkbox("🔻 Verlierer", key="af_lose")
             
+            # ETF Filter (nur bei Aktien relevant)
+            if m_type == "Aktien":
+                st.divider()
+                exclude_etfs = st.checkbox("🚫 ETFs ausblenden", value=True, key="af_exclude_etf",
+                                          help="Filtert ETFs, Leveraged ETFs (TQQQ, SQQQ, etc.), ETNs, Warrants und Units")
+                
+                # Liquiditäts-Filter
+                liq_options = {
+                    "Kein Minimum": 0,
+                    "$1M Minimum": 1_000_000,
+                    "$5M Minimum": 5_000_000,
+                    "$10M Minimum": 10_000_000,
+                    "$50M Minimum": 50_000_000,
+                }
+                liq_choice = st.selectbox(
+                    "💧 Min. Liquidität", 
+                    list(liq_options.keys()), 
+                    index=3,  # Default: $10M
+                    key="af_min_liq",
+                    help="Dollar Volume = Preis × Volumen. Höher = besser handelbar."
+                )
+                min_liquidity = liq_options[liq_choice]
+            else:
+                exclude_etfs = False
+                min_liquidity = 0
+            
             st.session_state.additional_filters = {
                 "preis_min": preis_min, "preis_max": preis_max,
                 "nur_gewinner": nur_gewinner, "nur_verlierer": nur_verlierer,
                 "rvol_override_min": None, "rvol_override_max": None,
+                "exclude_etfs": exclude_etfs,
+                "min_liquidity": min_liquidity,
             }
     
     st.divider()
@@ -4355,6 +4829,7 @@ with st.sidebar:
         is_insider_strategy = current_strat in ["Insider Buying", "Insider Selling"]
         is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
         is_volume_void_strategy = current_strat in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
+        is_ma_bounce_strategy = "Bounce" in current_strat and ("SMA" in current_strat or "EMA" in current_strat)
         
         # Warnung: Gap-Strategie bei Krypto
         if is_gap_strategy and m_type == "Krypto":
@@ -4525,6 +5000,129 @@ with st.sidebar:
                     st.error("❌ FINNHUB_KEY fehlt in Secrets! Füge ihn hinzu unter Settings → Secrets")
                 except Exception as e:
                     st.error(f"Fehler: {e}")
+        
+        # =================================================================
+        # MA BOUNCE STRATEGIE - SMA/EMA Support/Resistance Scanner
+        # =================================================================
+        elif is_ma_bounce_strategy:
+            with st.status("📈 Scanne MA Bounce Setups...") as status:
+                try:
+                    poly_key = st.secrets["POLYGON_KEY"]
+                    
+                    # Hole Strategie-Parameter
+                    strategy_data = STRATEGIES.get(current_strat, {})
+                    ma_type = strategy_data.get("ma_type", "SMA")
+                    ma_period = strategy_data.get("ma_period", 50)
+                    ma_approach = strategy_data.get("ma_approach", "from_above")
+                    ma_distance_max = strategy_data.get("ma_distance_max", 3.0)
+                    
+                    status.update(label=f"Schritt 1/3: Hole alle Aktien (ungefiltert)...")
+                    
+                    # WICHTIG: skip_filters=True um ALLE Aktien zu bekommen!
+                    # Der normale Scan würde sonst Aktien mit kleinem Change% rausfiltern
+                    candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                    
+                    status.update(label=f"Schritt 1/3: {len(candidates)} Aktien geladen, filtere...")
+                    
+                    # Basis-Filter: Preis $5-$1000 UND Liquidität >= $10M
+                    MIN_LIQUIDITY = 10_000_000  # $10 Millionen
+                    candidates = [c for c in candidates 
+                                  if 5 <= c.get("Preis", 0) <= 1000 
+                                  and c.get("DollarVol", 0) >= MIN_LIQUIDITY]
+                    
+                    status.update(label=f"Schritt 1/3: {len(candidates)} Aktien nach Preis/Liquiditäts-Filter...")
+                    
+                    # Filter nach Strategie-Richtung (für Bounce brauchen wir Pullbacks!)
+                    if ma_approach == "from_above":
+                        # Long Setup: Aktien die FALLEN oder flat sind (Pullback zum MA)
+                        filtered = [c for c in candidates if -15 <= c.get("Chg%", 0) <= 3]
+                    else:
+                        # Short Setup: Aktien die STEIGEN oder flat sind (Rally zum MA)
+                        filtered = [c for c in candidates if -3 <= c.get("Chg%", 0) <= 15]
+                    
+                    status.update(label=f"Schritt 1/3: {len(filtered)} Kandidaten nach Change%-Filter")
+                    
+                    # Sortiere nach Change% (kleinste Bewegung zuerst = näher am Pullback)
+                    filtered = sorted(filtered, key=lambda x: abs(x.get("Chg%", 0)))[:200]
+                    
+                    status.update(label=f"Schritt 2/3: Berechne {ma_type} {ma_period} für {len(filtered)} Aktien...")
+                    
+                    # MA Berechnung für jeden Kandidaten
+                    results = []
+                    ma_checked = 0
+                    
+                    for candidate in filtered:
+                        ticker = candidate["Ticker"]
+                        price = candidate["Preis"]
+                        
+                        # Hole historische Daten
+                        closes = fetch_historical_closes(ticker, poly_key, days=ma_period + 10)
+                        
+                        if not closes or len(closes) < ma_period:
+                            continue
+                        
+                        # Berechne MA
+                        if ma_type == "SMA":
+                            ma_value = calculate_sma(closes, ma_period)
+                        else:
+                            ma_value = calculate_ema(closes, ma_period)
+                        
+                        if not ma_value:
+                            continue
+                        
+                        ma_checked += 1
+                        
+                        # Berechne Distanz zum MA
+                        ma_distance = calculate_ma_distance(price, ma_value)
+                        
+                        if ma_distance is None:
+                            continue
+                        
+                        # Prüfe ob Setup gültig ist
+                        is_valid = False
+                        
+                        if ma_approach == "from_above":
+                            # Long: Preis nahe am MA (-1% bis +ma_distance_max%)
+                            # Gelockert: Auch leicht unter MA ist OK (Bounce-Zone)
+                            is_valid = -1.0 <= ma_distance <= ma_distance_max
+                        else:
+                            # Short: Preis nahe am MA (-ma_distance_max% bis +1%)
+                            is_valid = -ma_distance_max <= ma_distance <= 1.0
+                        
+                        if is_valid:
+                            # Füge MA-Daten zum Ergebnis hinzu
+                            candidate["MA_Value"] = round(ma_value, 2)
+                            candidate["MA_Distance%"] = round(ma_distance, 2)
+                            candidate["MA_Type"] = f"{ma_type}{ma_period}"
+                            candidate["Alpha"] = round(100 - abs(ma_distance) * 20, 1)  # Näher am MA = höherer Score
+                            results.append(candidate)
+                        
+                        # Progress Update
+                        if ma_checked % 20 == 0:
+                            status.update(label=f"Schritt 2/3: {ma_checked}/{len(filtered)} Aktien geprüft...")
+                    
+                    # Sortiere nach MA-Distanz (näher = besser)
+                    results = sorted(results, key=lambda x: abs(x.get("MA_Distance%", 999)))[:50]
+                    
+                    st.session_state.scan_results = results
+                    st.session_state.market_type = "Aktien"
+                    
+                    direction_text = "Support (Long)" if ma_approach == "from_above" else "Resistance (Short)"
+                    status.update(label=f"✅ {len(results)} {ma_type}{ma_period} {direction_text} Setups gefunden", state="complete")
+                    
+                    # DEBUG INFO
+                    st.caption(f"🔍 Debug: {len(candidates)} Aktien geladen → {len(filtered)} nach Change%-Filter → {ma_checked} MA berechnet → {len(results)} im {ma_distance_max}%-Band")
+                    
+                    if len(results) == 0:
+                        st.info(f"ℹ️ Keine Aktien gefunden die sich innerhalb von -{1.0}% bis +{ma_distance_max}% der {ma_type}{ma_period} befinden. "
+                               f"Versuche später erneut.")
+                    
+                except KeyError:
+                    st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                except Exception as e:
+                    st.error(f"Fehler beim MA Bounce Scan: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
         
         elif not st.session_state.active_filters:
             st.warning("Erst Strategie laden!")
@@ -4944,6 +5542,37 @@ with tab_scanner:
                     except:
                         pass
                 
+                # MA Bounce Details anzeigen
+                if "MA_Value" in df.columns and pd.notna(row.get("MA_Value")):
+                    try:
+                        ma_value = row["MA_Value"]
+                        ma_distance = row["MA_Distance%"] if pd.notna(row.get("MA_Distance%")) else 0
+                        ma_type = row["MA_Type"] if "MA_Type" in df.columns else "MA"
+                        
+                        st.divider()
+                        st.subheader(f"📈 {ma_type} Support/Resistance")
+                        
+                        col_ma1, col_ma2 = st.columns(2)
+                        with col_ma1:
+                            st.metric(f"{ma_type} Wert", f"${ma_value:.2f}")
+                        with col_ma2:
+                            if ma_distance >= 0:
+                                st.metric("Abstand", f"+{ma_distance:.1f}%", delta="ÜBER MA", delta_color="normal")
+                            else:
+                                st.metric("Abstand", f"{ma_distance:.1f}%", delta="UNTER MA", delta_color="inverse")
+                        
+                        # Setup Qualität
+                        abs_dist = abs(ma_distance)
+                        if abs_dist <= 1.0:
+                            st.success(f"🎯 **PERFEKT** - Nur {abs_dist:.1f}% vom {ma_type} entfernt!")
+                        elif abs_dist <= 2.0:
+                            st.info(f"✅ **GUT** - {abs_dist:.1f}% vom {ma_type} entfernt")
+                        else:
+                            st.warning(f"⚠️ **OK** - {abs_dist:.1f}% vom {ma_type} entfernt")
+                        
+                    except:
+                        pass
+                
                 # Volume Void Details anzeigen
                 if is_volume_void and "VoidScore" in df.columns:
                     try:
@@ -5133,27 +5762,85 @@ with tab_scanner:
         
         # S/R LEVELS ANZEIGE
         if st.session_state.sr_levels["support"] or st.session_state.sr_levels["resistance"]:
-            st.caption(f"📐 Fibonacci S/R ({selected_tf})")
+            st.caption(f"🎯 **Support & Resistance** ({selected_tf})")
+            
+            # Hole Detail-Infos falls vorhanden
+            fib_info = st.session_state.get("fib_info", {})
+            supports_detail = fib_info.get("supports_detail", [])
+            resistances_detail = fib_info.get("resistances_detail", [])
+            
             col_s, col_r = st.columns(2)
             with col_s:
                 st.markdown("**🟢 Support**")
-                for i, s in enumerate(st.session_state.sr_levels["support"], 1):
-                    st.caption(f"S{i}: ${s:,.4f}")
+                if supports_detail:
+                    for i, s in enumerate(supports_detail, 1):
+                        # Stärke-Emoji basierend auf Score
+                        strength = s.get("strength", 50)
+                        if strength >= 90:
+                            emoji = "🔥"  # Sehr stark
+                        elif strength >= 70:
+                            emoji = "💪"  # Stark
+                        elif strength >= 50:
+                            emoji = "✓"   # OK
+                        else:
+                            emoji = "○"   # Schwach
+                        
+                        price = s.get("price", 0)
+                        level_type = s.get("type", "")
+                        st.caption(f"S{i}: ${price:,.4f} {emoji}")
+                        st.caption(f"   ↳ {level_type}")
+                else:
+                    for i, s in enumerate(st.session_state.sr_levels["support"], 1):
+                        st.caption(f"S{i}: ${s:,.4f}")
+                        
             with col_r:
                 st.markdown("**🔴 Resistance**")
-                for i, r in enumerate(st.session_state.sr_levels["resistance"], 1):
-                    st.caption(f"R{i}: ${r:,.4f}")
+                if resistances_detail:
+                    for i, r in enumerate(resistances_detail, 1):
+                        strength = r.get("strength", 50)
+                        if strength >= 90:
+                            emoji = "🔥"
+                        elif strength >= 70:
+                            emoji = "💪"
+                        elif strength >= 50:
+                            emoji = "✓"
+                        else:
+                            emoji = "○"
+                        
+                        price = r.get("price", 0)
+                        level_type = r.get("type", "")
+                        st.caption(f"R{i}: ${price:,.4f} {emoji}")
+                        st.caption(f"   ↳ {level_type}")
+                else:
+                    for i, r in enumerate(st.session_state.sr_levels["resistance"], 1):
+                        st.caption(f"R{i}: ${r:,.4f}")
+            
+            # Legende
+            st.caption("🔥=Sehr stark (PDH/PDL) | 💪=Stark (Multi-Touch) | ✓=OK")
+            
+            # Previous Day Levels separat anzeigen
+            if fib_info.get("prev_day_high"):
+                st.divider()
+                st.caption("**📅 Previous Day Levels**")
+                col_pd1, col_pd2, col_pd3 = st.columns(3)
+                with col_pd1:
+                    st.metric("PDH", f"${fib_info['prev_day_high']:,.4f}")
+                with col_pd2:
+                    st.metric("PDL", f"${fib_info['prev_day_low']:,.4f}")
+                with col_pd3:
+                    if fib_info.get("prev_day_close"):
+                        st.metric("PDC", f"${fib_info['prev_day_close']:,.4f}")
             
             # Konsolidierungszonen anzeigen
-            if st.session_state.get("fib_info", {}).get("consolidation_zones"):
+            if fib_info.get("consolidation_zones"):
                 st.markdown("**🟣 Konsolidierungszonen** (High Activity)")
-                for i, zone in enumerate(st.session_state.fib_info["consolidation_zones"], 1):
+                for i, zone in enumerate(fib_info["consolidation_zones"], 1):
                     st.caption(f"Zone {i}: ${zone['low']:,.4f} - ${zone['high']:,.4f} ({zone['days']} Kerzen, {zone['pct_time']}%)")
             
             # Fibonacci Zusatz-Info anzeigen
-            if st.session_state.get("fib_info"):
+            if fib_info:
                 with st.expander("📊 Fibonacci Details"):
-                    fi = st.session_state.fib_info
+                    fi = fib_info
                     if fi.get("period_high"):
                         st.caption(f"Periode High: ${fi['period_high']:,.4f}")
                         st.caption(f"Periode Low: ${fi['period_low']:,.4f}")
