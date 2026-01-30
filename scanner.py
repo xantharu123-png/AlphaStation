@@ -1,21 +1,16 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V65.3 PRO                               ║
+║                        ALPHA STATION V65.3.2 PRO                             ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 65.3 (Filter Auto-Sync)                                            ║
+║  Version: 65.3.2 (Slider Cache Fix)                                          ║
 ║  Date: 30. Januar 2026                                                       ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V65.3 FIXES:                                                                ║
-║  ✅ Auto-Sync: Filter werden automatisch aktualisiert bei Code-Änderung     ║
-║  ✅ FILTER_VERSION Check: Kein veralteter Browser-Cache mehr                 ║
-║  ✅ Close Position min_range_pct: 1.0% (war fälschlich 0.5%)                 ║
-║  ✅ fetch_stock_data: Return 4 Werte (war 3)                                 ║
-║                                                                              ║
-║  BEKANNTE LIMITIERUNGEN (dokumentiert):                                      ║
-║  ⚠️ Vortag% = Intraday-Kerze (prev_close - prev_open)                        ║
-║  ⚠️ Betrifft: Bull Flag, Bear Flag, Reversal Hunter, Consolidation          ║
+║  V65.3.2 FIXES:                                                              ║
+║  ✅ Slider-Keys mit Version - keine gecachten alten Filter mehr!             ║
+║  ✅ Auto-Sync: Filter werden bei neuer Version automatisch aktualisiert      ║
+║  ✅ Close Position min_range_pct: 1.0%                                       ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -59,7 +54,7 @@ if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "65.3"
+FILTER_VERSION = "65.3.2"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
@@ -4304,13 +4299,13 @@ with st.sidebar:
             if filter_name == "Close Position":
                 new_val = st.slider(
                     f"{filter_name}", 0.0, 1.0, (float(values[0]), float(values[1])), 
-                    step=0.05, key=f"slider_{filter_name}"
+                    step=0.05, key=f"slider_{filter_name}_{FILTER_VERSION}"
                 )
                 updated_filters[filter_name] = new_val
             elif filter_name == "Preis":
                 new_val = st.slider(
                     f"{filter_name} ($)", 0.0, 10000.0, (float(values[0]), float(values[1])), 
-                    key=f"slider_{filter_name}"
+                    key=f"slider_{filter_name}_{FILTER_VERSION}"
                 )
                 updated_filters[filter_name] = new_val
             else:
@@ -4318,7 +4313,7 @@ with st.sidebar:
                 max_v = 100.0 if "%" in filter_name else 100.0
                 new_val = st.slider(
                     filter_name, min_v, max_v, (float(values[0]), float(values[1])), 
-                    key=f"slider_{filter_name}"
+                    key=f"slider_{filter_name}_{FILTER_VERSION}"
                 )
                 updated_filters[filter_name] = new_val
         
