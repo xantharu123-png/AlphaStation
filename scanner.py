@@ -5602,7 +5602,7 @@ with tab_scanner:
                 st.session_state.selected_row_index = current_idx
             
             # =====================================================================
-            # KEYBOARD NAVIGATION (↑/↓ Pfeiltasten)
+            # KEYBOARD NAVIGATION (W/E Tasten)
             # =====================================================================
             # JavaScript für Keyboard Events
             keyboard_js = """
@@ -5614,10 +5614,9 @@ with tab_scanner:
                     return;
                 }
                 
-                if (e.key === 'ArrowUp') {
+                if (e.key === 'w' || e.key === 'W') {
                     e.preventDefault();
                     // Finde und klicke den "Vorherige" Button
-                    const prevBtn = document.querySelector('[data-testid="stButton"] button[kind="secondary"]');
                     const buttons = document.querySelectorAll('button');
                     buttons.forEach(btn => {
                         if (btn.innerText.includes('Vorherige') && !btn.disabled) {
@@ -5625,7 +5624,7 @@ with tab_scanner:
                         }
                     });
                 }
-                if (e.key === 'ArrowDown') {
+                if (e.key === 'e' || e.key === 'E') {
                     e.preventDefault();
                     // Finde und klicke den "Nächste" Button
                     const buttons = document.querySelectorAll('button');
@@ -5653,7 +5652,7 @@ with tab_scanner:
             with nav_col3:
                 st.markdown(f"**#{current_idx + 1}** / {num_results}")
             
-            st.caption("💡 Tipp: Nutze ↑/↓ Pfeiltasten zum Navigieren")
+            st.caption("💡 Tastatur: **W** = Vorherige | **E** = Nächste")
             
             # Erstelle Kopie des DataFrames mit visueller Markierung
             df_display = df[display_cols].copy()
