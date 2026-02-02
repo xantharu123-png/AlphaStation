@@ -6253,55 +6253,82 @@ with tab_scanner:
             # =====================================================================
             # KEYBOARD NAVIGATION (W/E Tasten)
             # =====================================================================
-            # JavaScript für Keyboard Events
-            keyboard_js = """
-            <script>
-            document.addEventListener('keydown', function(e) {
-                // Nur wenn kein Input-Feld fokussiert ist
-                if (document.activeElement.tagName === 'INPUT' || 
-                    document.activeElement.tagName === 'TEXTAREA') {
-                    return;
-                }
-                
-                if (e.key === 'w' || e.key === 'W') {
-                    e.preventDefault();
-                    // Finde und klicke den "Vorherige" Button
-                    const buttons = document.querySelectorAll('button');
-                    buttons.forEach(btn => {
-                        if (btn.innerText.includes('Vorherige') && !btn.disabled) {
-                            btn.click();
-                        }
-                    });
-                }
-                if (e.key === 'e' || e.key === 'E') {
-                    e.preventDefault();
-                    // Finde und klicke den "Nächste" Button
-                    const buttons = document.querySelectorAll('button');
-                    buttons.forEach(btn => {
-                        if (btn.innerText.includes('Nächste') && !btn.disabled) {
-                            btn.click();
-                        }
-                    });
-                }
-            });
-            </script>
-            """
-            st.markdown(keyboard_js, unsafe_allow_html=True)
+            # Methode 1: Verstecktes HTML Component für Keyboard Events
+            from streamlit.components.v1 import html
             
-            # Navigation Buttons
+            keyboard_html = f"""
+            <div id="keyboard-nav-container" style="height:0;overflow:hidden;">
+                <script>
+                    // Keyboard Navigation für Alpha Station
+                    (function() {{
+                        var currentIdx = {current_idx};
+                        var maxIdx = {num_results - 1};
+                        
+                        function findAndClickButton(searchText) {{
+                            // Suche im Parent-Dokument (Streamlit App)
+                            var doc = window.parent.document;
+                            var buttons = doc.querySelectorAll('button');
+                            for (var i = 0; i < buttons.length; i++) {{
+                                var btn = buttons[i];
+                                var text = (btn.textContent || btn.innerText || '').toLowerCase();
+                                if (text.includes(searchText.toLowerCase())) {{
+                                    btn.click();
+                                    return true;
+                                }}
+                            }}
+                            return false;
+                        }}
+                        
+                        function handleKeyDown(e) {{
+                            // Prüfe ob Input fokussiert
+                            var activeEl = window.parent.document.activeElement;
+                            var tag = activeEl ? activeEl.tagName.toLowerCase() : '';
+                            if (tag === 'input' || tag === 'textarea') return;
+                            
+                            var key = e.key.toLowerCase();
+                            
+                            if ((key === 'w' || key === 'arrowup') && currentIdx > 0) {{
+                                e.preventDefault();
+                                findAndClickButton('vorherige');
+                            }}
+                            
+                            if ((key === 'e' || key === 'arrowdown') && currentIdx < maxIdx) {{
+                                e.preventDefault();
+                                findAndClickButton('nächste');
+                            }}
+                        }}
+                        
+                        // Event Listener auf Parent-Dokument
+                        try {{
+                            window.parent.document.removeEventListener('keydown', window.parent.alphaKeyHandler);
+                            window.parent.alphaKeyHandler = handleKeyDown;
+                            window.parent.document.addEventListener('keydown', handleKeyDown);
+                        }} catch(err) {{
+                            // Fallback: Listener auf dieses Dokument
+                            document.addEventListener('keydown', handleKeyDown);
+                        }}
+                    }})();
+                </script>
+            </div>
+            """
+            html(keyboard_html, height=0)
+            
+            # Navigation Buttons mit eindeutigen Keys
             nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
             with nav_col1:
-                if st.button("⬆️ Vorherige", key="nav_prev", disabled=(current_idx <= 0), use_container_width=True):
+                prev_disabled = current_idx <= 0
+                if st.button("⬆️ Vorherige (W)", key="nav_prev_btn", disabled=prev_disabled, use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
                     st.rerun()
             with nav_col2:
-                if st.button("⬇️ Nächste", key="nav_next", disabled=(current_idx >= num_results - 1), use_container_width=True):
+                next_disabled = current_idx >= num_results - 1
+                if st.button("⬇️ Nächste (E)", key="nav_next_btn", disabled=next_disabled, use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
                     st.rerun()
             with nav_col3:
                 st.markdown(f"**#{current_idx + 1}** / {num_results}")
             
-            st.caption("💡 Tastatur: **W** = Vorherige | **E** = Nächste")
+            st.caption("💡 Tastatur: **W** oder **↑** = Vorherige | **E** oder **↓** = Nächste")
             
             # Erstelle Kopie des DataFrames mit visueller Markierung
             df_display = df[display_cols].copy()
