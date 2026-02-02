@@ -1,10 +1,10 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V66.1 PRO                               ║
+║                        ALPHA STATION V66.2 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 66.1 (MA Bounce + ETF Filter + Reliable S/R)                       ║
-║  Date: 30. Januar 2026                                                       ║
+║  Version: 66.2 (MA Bounce + ETF Filter + Breakout Timing)                    ║
+║  Date: 02. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  V66 NEW FEATURES:                                                           ║
@@ -18,6 +18,11 @@
 ║  ✅ Round Numbers - Psychologische Levels ($10, $50, $100)                   ║
 ║  ✅ Stärke-Score für jedes Level (PDH=95, Swing 3x=80, Fib=60-70)            ║
 ║  ✅ Klare Labels - Zeigt woher jedes Level kommt                             ║
+║  V66.2 NEW:                                                                  ║
+║  ✅ Keyboard Navigation - ↑/↓ Pfeiltasten zum Wechseln                       ║
+║  ✅ Breakout-Timing Bewertung - FRÜH/OK/ZU SPÄT mit 6-Faktor-Score           ║
+║  ✅ Nur echte Aktien - Polygon Reference API (type=CS) Filter                ║
+║  ✅ Liquiditäts-Dropdown - Wählbar: $1M/$5M/$10M/$50M Minimum                ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -61,7 +66,7 @@ if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "66.1"
+FILTER_VERSION = "66.2"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
@@ -1726,6 +1731,63 @@ ETF_PATTERNS = [
     "SHORT", "INVERSE",  # Inverse
 ]
 
+# =============================================================================
+# ECHTE AKTIEN LISTE (Common Stock = CS)
+# =============================================================================
+# Cache für echte Aktien-Ticker (wird einmal pro Session geladen)
+COMMON_STOCK_TICKERS = set()
+
+def load_common_stock_tickers(api_key):
+    """
+    Lädt alle echten Aktien (type=CS) von Polygon Reference API.
+    Cached in COMMON_STOCK_TICKERS für schnelle Lookups.
+    """
+    global COMMON_STOCK_TICKERS
+    
+    if COMMON_STOCK_TICKERS:
+        return COMMON_STOCK_TICKERS  # Bereits geladen
+    
+    try:
+        # Polygon Reference Tickers API mit type=CS (Common Stock)
+        url = f"https://api.polygon.io/v3/reference/tickers"
+        params = {
+            "type": "CS",  # Common Stock = echte Aktien
+            "market": "stocks",
+            "active": "true",
+            "limit": 1000,
+            "apiKey": api_key
+        }
+        
+        all_tickers = set()
+        next_url = None
+        
+        # Paginiere durch alle Ergebnisse
+        for _ in range(20):  # Max 20 Seiten (20k Aktien)
+            if next_url:
+                resp = requests.get(next_url, timeout=30).json()
+            else:
+                resp = requests.get(url, params=params, timeout=30).json()
+            
+            results = resp.get("results", [])
+            for r in results:
+                ticker = r.get("ticker", "")
+                if ticker:
+                    all_tickers.add(ticker.upper())
+            
+            # Nächste Seite?
+            next_url = resp.get("next_url")
+            if next_url:
+                next_url = f"{next_url}&apiKey={api_key}"
+            else:
+                break
+        
+        COMMON_STOCK_TICKERS = all_tickers
+        return COMMON_STOCK_TICKERS
+    
+    except Exception as e:
+        print(f"Fehler beim Laden der Aktien-Liste: {e}")
+        return set()
+
 def is_etf_or_etp(ticker):
     """
     Prüft ob ein Ticker ein ETF, ETN, Warrant, Unit oder ähnliches Produkt ist.
@@ -1871,7 +1933,157 @@ def calculate_ma_distance(price, ma_value):
     
     return ((price - ma_value) / ma_value) * 100
 
-def calculate_volume_profile(ohlcv_data, num_bins=20):
+
+# =============================================================================
+# BREAKOUT TIMING BEWERTUNG
+# =============================================================================
+def calculate_breakout_timing(row_data, fib_info=None):
+    """
+    Bewertet ob ein Breakout-Einstieg noch gut ist oder schon überdehnt.
+    
+    Faktoren:
+    1. Distanz vom Breakout (Change%) - wie weit ist der Move schon?
+    2. RSI - überkauft/überverkauft?
+    3. Fib Extension - über 127.2% / 161.8%?
+    4. RVOL - Volumen-Bestätigung?
+    5. ATR - ist der Move überdehnt vs. normale Volatilität?
+    
+    Returns:
+        dict mit:
+        - score: 0-6 Punkte
+        - rating: "FRÜH", "OK", oder "ZU SPÄT"
+        - emoji: ✅, ⚠️, oder ❌
+        - factors: Liste der Einzelbewertungen
+        - risk: Risiko-Einschätzung
+    """
+    factors = []
+    score = 0
+    
+    # Extrahiere Daten
+    change_pct = abs(row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0)
+    rvol = row_data.get("RVOL", 1) or 1
+    atr_pct = row_data.get("ATR%", 0) or 0
+    price = row_data.get("Preis", 0) or row_data.get("Price", 0) or 0
+    
+    # 1. DISTANZ VOM BREAKOUT (Change%)
+    if change_pct <= 3:
+        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Früh im Move"})
+        score += 1
+    elif change_pct <= 7:
+        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Noch OK"})
+        score += 0.5
+    else:
+        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": False, "detail": "Schon weit gelaufen"})
+    
+    # 2. RSI (wenn verfügbar, sonst anhand von Change% schätzen)
+    # RSI ist oft nicht direkt verfügbar, daher Schätzung basierend auf Move
+    estimated_rsi = 50 + (change_pct * 2.5)  # Grobe Schätzung
+    if estimated_rsi < 65:
+        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Nicht überkauft"})
+        score += 1
+    elif estimated_rsi < 75:
+        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht erhöht"})
+        score += 0.5
+    else:
+        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Überkauft"})
+    
+    # 3. FIBONACCI EXTENSION
+    if fib_info and price > 0:
+        fib_127 = fib_info.get("fib_1272", 0) or fib_info.get("period_high", 0) * 1.05
+        fib_161 = fib_info.get("fib_1618", 0) or fib_info.get("period_high", 0) * 1.15
+        
+        if fib_127 > 0:
+            if price < fib_127:
+                factors.append({"name": "Fib Extension", "value": "Unter 127.2%", "ok": True, "detail": "Raum nach oben"})
+                score += 1
+            elif price < fib_161:
+                factors.append({"name": "Fib Extension", "value": "Bei 127.2%", "ok": True, "detail": "Erstes Ziel erreicht"})
+                score += 0.5
+            else:
+                factors.append({"name": "Fib Extension", "value": "Über 161.8%", "ok": False, "detail": "Stark überdehnt"})
+    else:
+        # Fallback ohne Fib-Daten
+        if change_pct < 5:
+            factors.append({"name": "Fib Extension", "value": "N/A", "ok": True, "detail": "Früh im Move"})
+            score += 1
+    
+    # 4. RVOL (Relative Volume)
+    if rvol >= 2.0:
+        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Starke Bestätigung"})
+        score += 1
+    elif rvol >= 1.5:
+        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Gute Bestätigung"})
+        score += 1
+    elif rvol >= 1.0:
+        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Normal"})
+        score += 0.5
+    else:
+        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwaches Volumen"})
+    
+    # 5. ATR ÜBERDEHNUNG
+    if atr_pct > 0:
+        atr_multiple = change_pct / atr_pct if atr_pct > 0 else 0
+        if atr_multiple <= 1.0:
+            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": True, "detail": "Normal"})
+            score += 1
+        elif atr_multiple <= 1.5:
+            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": True, "detail": "Leicht erhöht"})
+            score += 0.5
+        elif atr_multiple <= 2.0:
+            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": False, "detail": "Überdehnt"})
+        else:
+            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": False, "detail": "Stark überdehnt!"})
+    else:
+        # Schätze ATR basierend auf typischer Volatilität (~2-3%)
+        estimated_atr_multiple = change_pct / 2.5
+        if estimated_atr_multiple <= 1.5:
+            factors.append({"name": "ATR (est.)", "value": f"~{estimated_atr_multiple:.1f}x", "ok": True, "detail": "Normal"})
+            score += 1
+        else:
+            factors.append({"name": "ATR (est.)", "value": f"~{estimated_atr_multiple:.1f}x", "ok": False, "detail": "Überdehnt"})
+    
+    # 6. VOLUME TREND (basierend auf RVOL Stärke)
+    if rvol >= 1.5:
+        factors.append({"name": "Vol. Trend", "value": "Steigend", "ok": True, "detail": "Kaufdruck"})
+        score += 1
+    elif rvol >= 1.0:
+        factors.append({"name": "Vol. Trend", "value": "Flat", "ok": True, "detail": "Stabil"})
+        score += 0.5
+    else:
+        factors.append({"name": "Vol. Trend", "value": "Fallend", "ok": False, "detail": "Nachlassend"})
+    
+    # GESAMTBEWERTUNG
+    max_score = 6
+    score = min(score, max_score)
+    
+    if score >= 5:
+        rating = "FRÜH"
+        emoji = "✅"
+        risk = "Niedrig - Guter Einstieg möglich"
+        color = "green"
+    elif score >= 3:
+        rating = "OK"
+        emoji = "⚠️"
+        risk = "Mittel - Vorsichtig positionieren"
+        color = "orange"
+    else:
+        rating = "ZU SPÄT"
+        emoji = "❌"
+        risk = "Hoch - Besser auf Pullback warten"
+        color = "red"
+    
+    return {
+        "score": round(score, 1),
+        "max_score": max_score,
+        "rating": rating,
+        "emoji": emoji,
+        "factors": factors,
+        "risk": risk,
+        "color": color
+    }
+
+
+
     """
     Berechnet Volume Profile aus historischen OHLCV Daten.
     
@@ -3528,15 +3740,28 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
         # ETF-Filter Flag
         exclude_etfs = af.get("exclude_etfs", True)
         
+        # Lade Liste der echten Aktien (Common Stock) wenn Filter aktiv
+        common_stocks = set()
+        if exclude_etfs:
+            common_stocks = load_common_stock_tickers(poly_key)
+        
         for t in tickers:
             try:
                 # =====================================================
-                # ETF FILTER - Früh ausführen für Performance
+                # AKTIEN FILTER - Nur echte Aktien (Common Stock)
                 # =====================================================
                 ticker_symbol = t.get("ticker", "")
-                if exclude_etfs and is_etf_or_etp(ticker_symbol):
-                    debug_stats["skipped_etf"] += 1
-                    continue
+                
+                if exclude_etfs:
+                    # Methode 1: Prüfe ob in Common Stock Liste
+                    if common_stocks and ticker_symbol.upper() not in common_stocks:
+                        debug_stats["skipped_etf"] += 1
+                        continue
+                    
+                    # Methode 2: Fallback - alte Pattern-Prüfung falls Liste leer
+                    if not common_stocks and is_etf_or_etp(ticker_symbol):
+                        debug_stats["skipped_etf"] += 1
+                        continue
                 
                 day = t.get("day", {}) or {}
                 prev = t.get("prevDay", {}) or {}
@@ -4472,7 +4697,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V66.1 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V66.2 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -4483,7 +4708,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V66.1 Pro")
+    st.title("💎 Alpha V66.2 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -5376,6 +5601,45 @@ with tab_scanner:
                 current_idx = max(0, num_results - 1)
                 st.session_state.selected_row_index = current_idx
             
+            # =====================================================================
+            # KEYBOARD NAVIGATION (↑/↓ Pfeiltasten)
+            # =====================================================================
+            # JavaScript für Keyboard Events
+            keyboard_js = """
+            <script>
+            document.addEventListener('keydown', function(e) {
+                // Nur wenn kein Input-Feld fokussiert ist
+                if (document.activeElement.tagName === 'INPUT' || 
+                    document.activeElement.tagName === 'TEXTAREA') {
+                    return;
+                }
+                
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    // Finde und klicke den "Vorherige" Button
+                    const prevBtn = document.querySelector('[data-testid="stButton"] button[kind="secondary"]');
+                    const buttons = document.querySelectorAll('button');
+                    buttons.forEach(btn => {
+                        if (btn.innerText.includes('Vorherige') && !btn.disabled) {
+                            btn.click();
+                        }
+                    });
+                }
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    // Finde und klicke den "Nächste" Button
+                    const buttons = document.querySelectorAll('button');
+                    buttons.forEach(btn => {
+                        if (btn.innerText.includes('Nächste') && !btn.disabled) {
+                            btn.click();
+                        }
+                    });
+                }
+            });
+            </script>
+            """
+            st.markdown(keyboard_js, unsafe_allow_html=True)
+            
             # Navigation Buttons
             nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
             with nav_col1:
@@ -5388,6 +5652,8 @@ with tab_scanner:
                     st.rerun()
             with nav_col3:
                 st.markdown(f"**#{current_idx + 1}** / {num_results}")
+            
+            st.caption("💡 Tipp: Nutze ↑/↓ Pfeiltasten zum Navigieren")
             
             # Erstelle Kopie des DataFrames mit visueller Markierung
             df_display = df[display_cols].copy()
@@ -5540,6 +5806,53 @@ with tab_scanner:
                                     liq_str = f"${dollar_vol/1000:.0f}K"
                                     st.metric("💧 Liquidität", liq_str, delta="LOW ⚠️", delta_color="inverse")
                     except:
+                        pass
+                
+                # =====================================================================
+                # BREAKOUT TIMING BEWERTUNG (nur für Breakout-Strategien)
+                # =====================================================================
+                current_strat = st.session_state.get("current_strategy", "")
+                breakout_strategies = [
+                    "Breakout Long", "Breakout Short", "Breakout Long (Ultra)",
+                    "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
+                    "PM Gainers 🌅", "PM Gap & Go 🌅", "AH Gainers 🌙"
+                ]
+                
+                if current_strat in breakout_strategies:
+                    try:
+                        # Hole Fib-Info falls verfügbar
+                        fib_info = st.session_state.get("fib_info", {})
+                        
+                        # Berechne Breakout-Timing
+                        timing = calculate_breakout_timing(row.to_dict(), fib_info)
+                        
+                        st.divider()
+                        st.subheader(f"🎯 Breakout-Timing: {timing['emoji']} {timing['rating']}")
+                        st.caption(f"Score: **{timing['score']}/{timing['max_score']}** | {timing['risk']}")
+                        
+                        # Faktoren anzeigen
+                        col_tech, col_conf = st.columns(2)
+                        
+                        with col_tech:
+                            st.markdown("**📊 Technische Faktoren:**")
+                            for f in timing['factors'][:3]:
+                                icon = "✅" if f['ok'] else "❌"
+                                st.caption(f"{icon} {f['name']}: {f['value']} ({f['detail']})")
+                        
+                        with col_conf:
+                            st.markdown("**📈 Bestätigungs-Faktoren:**")
+                            for f in timing['factors'][3:]:
+                                icon = "✅" if f['ok'] else "❌"
+                                st.caption(f"{icon} {f['name']}: {f['value']} ({f['detail']})")
+                        
+                        # Empfehlung
+                        if timing['rating'] == "FRÜH":
+                            st.success("💡 **Empfehlung:** Guter Einstiegspunkt - Position aufbauen möglich")
+                        elif timing['rating'] == "OK":
+                            st.warning("💡 **Empfehlung:** Vorsichtig - kleinere Position oder auf Pullback warten")
+                        else:
+                            st.error("💡 **Empfehlung:** Zu spät - auf Pullback zum Support warten")
+                    except Exception as e:
                         pass
                 
                 # MA Bounce Details anzeigen
