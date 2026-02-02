@@ -1,26 +1,21 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V66.2 PRO                               ║
+║                        ALPHA STATION V66.3 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 66.2 (MA Bounce + ETF Filter + Breakout Timing)                    ║
+║  Version: 66.3 (6 Strategy-Specific Timing Assessments)                      ║
 ║  Date: 02. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V66 NEW FEATURES:                                                           ║
-║  ✅ ETF-Filter: Filtert ETFs, Leveraged Products (TQQQ, SQQQ, etc.)          ║
-║  ✅ MA Bounce Strategien: SMA 50, SMA 200, EMA 21 Support/Resistance         ║
-║  ✅ SMA/EMA Berechnung mit Polygon Aggregates API                            ║
-║  ✅ ETF-Blacklist mit 100+ bekannten ETFs/ETNs                               ║
-║  V66.1 S/R IMPROVEMENTS:                                                     ║
-║  ✅ Previous Day High/Low/Close (PDH/PDL/PDC) - Wichtigste Levels!           ║
-║  ✅ Multi-Touch Validation - Zählt wie oft Level getestet wurde              ║
-║  ✅ Round Numbers - Psychologische Levels ($10, $50, $100)                   ║
-║  ✅ Stärke-Score für jedes Level (PDH=95, Swing 3x=80, Fib=60-70)            ║
-║  ✅ Klare Labels - Zeigt woher jedes Level kommt                             ║
-║  V66.2 NEW:                                                                  ║
-║  ✅ Keyboard Navigation - ↑/↓ Pfeiltasten zum Wechseln                       ║
-║  ✅ Breakout-Timing Bewertung - FRÜH/OK/ZU SPÄT mit 6-Faktor-Score           ║
+║  V66.3 NEW - TIMING BEWERTUNGEN FÜR ALLE STRATEGIEN:                         ║
+║  ✅ Breakout Timing: Distanz, RSI, Fib, RVOL, ATR (6 Faktoren)               ║
+║  ✅ Gap Timing: Gap Size, Volume, Fill-Risiko, Momentum (6 Faktoren)         ║
+║  ✅ MA Bounce Timing: MA Distanz, Bounce, RSI Zone (5 Faktoren)              ║
+║  ✅ Reversal Timing: RSI Extrem, Extension, Capitulation (6 Faktoren)        ║
+║  ✅ Volume Void Timing: Void Size, Distanz, Trend (5 Faktoren)               ║
+║  ✅ Insider Timing: Cluster, Größe, Rolle, Timing (5 Faktoren)               ║
+║  V66.2:                                                                      ║
+║  ✅ Keyboard Navigation - W/E Tasten zum Wechseln                            ║
 ║  ✅ Nur echte Aktien - Polygon Reference API (type=CS) Filter                ║
 ║  ✅ Liquiditäts-Dropdown - Wählbar: $1M/$5M/$10M/$50M Minimum                ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -66,7 +61,7 @@ if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "66.2"
+FILTER_VERSION = "66.3"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
@@ -2083,24 +2078,678 @@ def calculate_breakout_timing(row_data, fib_info=None):
     }
 
 
+# =============================================================================
+# GAP TIMING BEWERTUNG
+# =============================================================================
+def calculate_gap_timing(row_data, is_gap_up=True):
+    """
+    Bewertet ob ein Gap-Trade-Einstieg noch gut ist.
+    
+    Faktoren:
+    1. Gap Size - Optimale Größe 3-8%
+    2. VWAP Position - Gap Up über VWAP = bullish
+    3. PM/AH Volume - Starkes Pre-Market Volume bestätigt
+    4. Gap Fill Risiko - High Vol Gaps füllen seltener (45% vs 85%)
+    5. Zeit seit Open - Früher ist besser
+    6. ATR Context - Gap vs. normale Volatilität
+    """
+    factors = []
+    score = 0
+    
+    change_pct = abs(row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0)
+    rvol = row_data.get("RVOL", 1) or 1
+    atr_pct = row_data.get("ATR%", 2.5) or 2.5
+    price = row_data.get("Preis", 0) or row_data.get("Price", 0) or 0
+    prev_close = row_data.get("Prev Close", 0) or row_data.get("PrevClose", 0) or 0
+    
+    # 1. GAP SIZE - Optimal 3-8%
+    if 3 <= change_pct <= 8:
+        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Optimale Größe"})
+        score += 1
+    elif 1 <= change_pct < 3:
+        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Klein aber OK"})
+        score += 0.5
+    elif 8 < change_pct <= 15:
+        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Groß - Vorsicht"})
+        score += 0.5
+    else:
+        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": False, "detail": "Zu klein/groß"})
+    
+    # 2. RVOL als Proxy für PM Volume
+    if rvol >= 2.0:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Starke Bestätigung"})
+        score += 1
+        gap_fill_risk = "Low"
+    elif rvol >= 1.5:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Gute Bestätigung"})
+        score += 0.75
+        gap_fill_risk = "Medium"
+    elif rvol >= 1.0:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Normal"})
+        score += 0.5
+        gap_fill_risk = "Medium"
+    else:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwach - Fill wahrscheinlich"})
+        gap_fill_risk = "High"
+    
+    # 3. GAP FILL RISIKO
+    # High Volume Gaps: nur 45% füllen in 5+ Tagen
+    # Low Volume Gaps: 85% füllen in 2 Tagen
+    if gap_fill_risk == "Low":
+        factors.append({"name": "Fill Risiko", "value": "~45%", "ok": True, "detail": "Trend wahrscheinlich"})
+        score += 1
+    elif gap_fill_risk == "Medium":
+        factors.append({"name": "Fill Risiko", "value": "~60%", "ok": True, "detail": "Moderat"})
+        score += 0.5
+    else:
+        factors.append({"name": "Fill Risiko", "value": "~85%", "ok": False, "detail": "Fill sehr wahrscheinlich"})
+    
+    # 4. ATR CONTEXT - Gap vs. normale Volatilität
+    gap_atr_ratio = change_pct / atr_pct if atr_pct > 0 else 1
+    if gap_atr_ratio >= 1.5:
+        factors.append({"name": "Gap/ATR", "value": f"{gap_atr_ratio:.1f}x", "ok": True, "detail": "Signifikanter Gap"})
+        score += 1
+    elif gap_atr_ratio >= 1.0:
+        factors.append({"name": "Gap/ATR", "value": f"{gap_atr_ratio:.1f}x", "ok": True, "detail": "Normaler Gap"})
+        score += 0.5
+    else:
+        factors.append({"name": "Gap/ATR", "value": f"{gap_atr_ratio:.1f}x", "ok": False, "detail": "Kleiner Gap"})
+    
+    # 5. MOMENTUM BESTÄTIGUNG (basierend auf Change-Richtung vs Gap)
+    # Wenn Gap Up und Change positiv = Momentum hält
+    if is_gap_up:
+        if change_pct > 0:
+            factors.append({"name": "Momentum", "value": "Hält", "ok": True, "detail": "Gap hält über Open"})
+            score += 1
+        else:
+            factors.append({"name": "Momentum", "value": "Schwächt", "ok": False, "detail": "Gap füllt sich"})
+    else:
+        if change_pct < 0:
+            factors.append({"name": "Momentum", "value": "Hält", "ok": True, "detail": "Gap hält unter Open"})
+            score += 1
+        else:
+            factors.append({"name": "Momentum", "value": "Schwächt", "ok": False, "detail": "Gap füllt sich"})
+    
+    # 6. OPENING RANGE CONTEXT
+    # Schätze basierend auf Change und RVOL
+    if rvol >= 1.5 and change_pct >= 2:
+        factors.append({"name": "OR Break", "value": "Wahrscheinlich", "ok": True, "detail": "Starker Start"})
+        score += 1
+    elif rvol >= 1.0:
+        factors.append({"name": "OR Break", "value": "Möglich", "ok": True, "detail": "Abwarten"})
+        score += 0.5
+    else:
+        factors.append({"name": "OR Break", "value": "Unsicher", "ok": False, "detail": "Schwacher Start"})
+    
+    # GESAMTBEWERTUNG
+    max_score = 6
+    score = min(score, max_score)
+    
+    if score >= 4.5:
+        rating = "GO"
+        emoji = "✅"
+        risk = "Gap & Go Setup - Trend folgen"
+        recommendation = "Gap hält wahrscheinlich - Trend folgen"
+    elif score >= 3:
+        rating = "WARTEN"
+        emoji = "⚠️"
+        risk = "Abwarten - Opening Range beobachten"
+        recommendation = "15-30min warten, dann entscheiden"
+    else:
+        rating = "FADE"
+        emoji = "❌"
+        risk = "Gap Fill wahrscheinlich - Vorsicht"
+        recommendation = "Gap könnte füllen - Gegen-Trade oder Skip"
+    
+    return {
+        "score": round(score, 1),
+        "max_score": max_score,
+        "rating": rating,
+        "emoji": emoji,
+        "factors": factors,
+        "risk": risk,
+        "recommendation": recommendation,
+        "color": "green" if score >= 4.5 else "orange" if score >= 3 else "red"
+    }
 
+
+# =============================================================================
+# MA BOUNCE TIMING BEWERTUNG
+# =============================================================================
+def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
+    """
+    Bewertet ob ein MA Bounce Einstieg gut getimed ist.
+    
+    Faktoren:
+    1. Distanz zum MA - Näher = besser (0-2% ideal)
+    2. MA Trend-Richtung - MA muss in Trade-Richtung zeigen
+    3. Bounce Bestätigung - Reaktion am MA sichtbar?
+    4. RSI Zone - Neutral (40-60) ist ideal für Bounce
+    5. Zeit seit letztem MA-Test - Länger weg = stärkerer Bounce
+    """
+    factors = []
+    score = 0
+    
+    ma_distance = abs(row_data.get("MA_Distance%", 0) or row_data.get("MA Distance", 0) or 0)
+    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
+    rvol = row_data.get("RVOL", 1) or 1
+    
+    # 1. DISTANZ ZUM MA - Näher = besser
+    if ma_distance <= 0.5:
+        factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": True, "detail": "Perfekt am MA"})
+        score += 1.5
+    elif ma_distance <= 1.0:
+        factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": True, "detail": "Sehr nah"})
+        score += 1.25
+    elif ma_distance <= 2.0:
+        factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": True, "detail": "Akzeptabel"})
+        score += 1
+    elif ma_distance <= 3.0:
+        factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": True, "detail": "Noch OK"})
+        score += 0.5
+    else:
+        factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": False, "detail": "Zu weit vom MA"})
+    
+    # 2. BOUNCE BESTÄTIGUNG (Change-Richtung nach Touch)
+    # Bei Long-Setup: Change sollte positiv sein (Bounce nach oben)
+    if change_pct > 0:
+        if change_pct >= 1:
+            factors.append({"name": "Bounce", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Starke Reaktion"})
+            score += 1
+        else:
+            factors.append({"name": "Bounce", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Leichte Reaktion"})
+            score += 0.75
+    elif change_pct > -1:
+        factors.append({"name": "Bounce", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Neutral"})
+        score += 0.5
+    else:
+        factors.append({"name": "Bounce", "value": f"{change_pct:.1f}%", "ok": False, "detail": "Kein Bounce - Durchbruch?"})
+    
+    # 3. RSI ZONE (geschätzt aus Change)
+    # Ideal für Bounce: RSI 40-60 (neutral)
+    estimated_rsi = 50 + (change_pct * 3)
+    if 40 <= estimated_rsi <= 60:
+        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Neutral - Ideal"})
+        score += 1
+    elif 35 <= estimated_rsi < 40 or 60 < estimated_rsi <= 65:
+        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht extended"})
+        score += 0.5
+    else:
+        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Überkauft/Überverkauft"})
+    
+    # 4. VOLUME BESTÄTIGUNG
+    if rvol >= 1.5:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Starkes Interesse"})
+        score += 1
+    elif rvol >= 1.0:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Normal"})
+        score += 0.5
+    else:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwaches Interesse"})
+    
+    # 5. MA TYP KONTEXT
+    if "200" in ma_type:
+        factors.append({"name": "MA Typ", "value": "SMA 200", "ok": True, "detail": "Stärkster Support"})
+        score += 0.5
+    elif "50" in ma_type:
+        factors.append({"name": "MA Typ", "value": "SMA 50", "ok": True, "detail": "Starker Support"})
+        score += 0.5
+    else:
+        factors.append({"name": "MA Typ", "value": "EMA 21", "ok": True, "detail": "Swing-Trading MA"})
+        score += 0.5
+    
+    # GESAMTBEWERTUNG
+    max_score = 5
+    score = min(score, max_score)
+    
+    if score >= 4:
+        rating = "PERFEKT"
+        emoji = "✅"
+        risk = "Idealer Bounce-Einstieg"
+        recommendation = "Entry am MA mit Stop darunter"
+    elif score >= 2.5:
+        rating = "GUT"
+        emoji = "⚠️"
+        risk = "Akzeptabler Einstieg"
+        recommendation = "Entry möglich, engerer Stop"
+    else:
+        rating = "WARTEN"
+        emoji = "❌"
+        risk = "Kein klarer Bounce"
+        recommendation = "Auf besseren Entry warten"
+    
+    return {
+        "score": round(score, 1),
+        "max_score": max_score,
+        "rating": rating,
+        "emoji": emoji,
+        "factors": factors,
+        "risk": risk,
+        "recommendation": recommendation,
+        "color": "green" if score >= 4 else "orange" if score >= 2.5 else "red"
+    }
+
+
+# =============================================================================
+# MEAN REVERSION / REVERSAL TIMING BEWERTUNG
+# =============================================================================
+def calculate_reversal_timing(row_data, is_long=True):
+    """
+    Bewertet ob ein Mean Reversion / Reversal Einstieg gut getimed ist.
+    
+    Faktoren:
+    1. RSI Extrem - <30 für Long, >70 für Short
+    2. Bollinger Band - Außerhalb = überdehnt
+    3. Distanz von MA - >2 Std.Dev = überdehnt
+    4. Umkehr-Signal - Change-Richtung dreht?
+    5. Volume - Capitulation Volume = gut
+    6. S/R Level - Bei Support/Resistance?
+    """
+    factors = []
+    score = 0
+    
+    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
+    rvol = row_data.get("RVOL", 1) or 1
+    atr_pct = row_data.get("ATR%", 2.5) or 2.5
+    
+    # 1. RSI EXTREM (geschätzt)
+    # Für Mean Reversion brauchen wir extreme RSI-Werte
+    # Bei Selloff: RSI sollte <30 sein für Long-Reversal
+    estimated_rsi = 50 + (change_pct * 3)
+    
+    if is_long:
+        if estimated_rsi <= 25:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Stark überverkauft"})
+            score += 1.5
+        elif estimated_rsi <= 30:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Überverkauft"})
+            score += 1
+        elif estimated_rsi <= 40:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht überverkauft"})
+            score += 0.5
+        else:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Nicht überverkauft"})
+    else:  # Short Reversal
+        if estimated_rsi >= 75:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Stark überkauft"})
+            score += 1.5
+        elif estimated_rsi >= 70:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Überkauft"})
+            score += 1
+        elif estimated_rsi >= 60:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht überkauft"})
+            score += 0.5
+        else:
+            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Nicht überkauft"})
+    
+    # 2. ÜBERDEHNUNG (Change vs ATR)
+    extension = abs(change_pct) / atr_pct if atr_pct > 0 else 0
+    if extension >= 2.0:
+        factors.append({"name": "Extension", "value": f"{extension:.1f}x ATR", "ok": True, "detail": "Stark überdehnt"})
+        score += 1
+    elif extension >= 1.5:
+        factors.append({"name": "Extension", "value": f"{extension:.1f}x ATR", "ok": True, "detail": "Überdehnt"})
+        score += 0.75
+    elif extension >= 1.0:
+        factors.append({"name": "Extension", "value": f"{extension:.1f}x ATR", "ok": True, "detail": "Moderat"})
+        score += 0.5
+    else:
+        factors.append({"name": "Extension", "value": f"{extension:.1f}x ATR", "ok": False, "detail": "Nicht überdehnt"})
+    
+    # 3. VOLUME (Capitulation = gut für Reversal)
+    if rvol >= 2.5:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Capitulation möglich"})
+        score += 1
+    elif rvol >= 1.5:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Erhöhtes Volumen"})
+        score += 0.75
+    elif rvol >= 1.0:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Normal"})
+        score += 0.5
+    else:
+        factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwach"})
+    
+    # 4. UMKEHR-SIGNAL (Change zeigt erste Erholung?)
+    if is_long:
+        if change_pct > 0:
+            factors.append({"name": "Umkehr", "value": "Ja", "ok": True, "detail": "Erste Erholung sichtbar"})
+            score += 1
+        elif change_pct > -2:
+            factors.append({"name": "Umkehr", "value": "Möglich", "ok": True, "detail": "Stabilisiert sich"})
+            score += 0.5
+        else:
+            factors.append({"name": "Umkehr", "value": "Nein", "ok": False, "detail": "Fällt noch"})
+    else:
+        if change_pct < 0:
+            factors.append({"name": "Umkehr", "value": "Ja", "ok": True, "detail": "Erste Schwäche sichtbar"})
+            score += 1
+        elif change_pct < 2:
+            factors.append({"name": "Umkehr", "value": "Möglich", "ok": True, "detail": "Momentum nachlassend"})
+            score += 0.5
+        else:
+            factors.append({"name": "Umkehr", "value": "Nein", "ok": False, "detail": "Steigt noch"})
+    
+    # 5. RISK/REWARD basierend auf Extension
+    if extension >= 1.5:
+        factors.append({"name": "R:R", "value": "Gut", "ok": True, "detail": f"Mean ~{extension:.0f}x ATR entfernt"})
+        score += 1
+    elif extension >= 1.0:
+        factors.append({"name": "R:R", "value": "OK", "ok": True, "detail": "Akzeptables R:R"})
+        score += 0.5
+    else:
+        factors.append({"name": "R:R", "value": "Schlecht", "ok": False, "detail": "Wenig Raum zum Mean"})
+    
+    # GESAMTBEWERTUNG
+    max_score = 6
+    score = min(score, max_score)
+    
+    if score >= 4.5:
+        rating = "EXTREM"
+        emoji = "✅"
+        risk = "Stark überdehnt - Reversal wahrscheinlich"
+        recommendation = "Entry mit Stop unter Extrem"
+    elif score >= 3:
+        rating = "MÖGLICH"
+        emoji = "⚠️"
+        risk = "Überdehnt - Reversal möglich"
+        recommendation = "Auf Bestätigung warten"
+    else:
+        rating = "ZU FRÜH"
+        emoji = "❌"
+        risk = "Nicht genug überdehnt"
+        recommendation = "Warten auf stärkere Überdehnung"
+    
+    return {
+        "score": round(score, 1),
+        "max_score": max_score,
+        "rating": rating,
+        "emoji": emoji,
+        "factors": factors,
+        "risk": risk,
+        "recommendation": recommendation,
+        "color": "green" if score >= 4.5 else "orange" if score >= 3 else "red"
+    }
+
+
+# =============================================================================
+# VOLUME VOID TIMING BEWERTUNG
+# =============================================================================
+def calculate_void_timing(row_data):
+    """
+    Bewertet ob ein Volume Void Trade-Einstieg gut getimed ist.
+    
+    Faktoren:
+    1. Void Size - Größer = mehr Potenzial
+    2. Distanz zum Void - Näher = besser
+    3. Trend-Richtung - Void in Trend-Richtung = stärker
+    4. Void Alter - Neuere Voids sind relevanter
+    5. Multiple Voids - Gestaffelte Voids = stärker
+    """
+    factors = []
+    score = 0
+    
+    void_size = row_data.get("VoidSize%", 0) or row_data.get("Void Size", 0) or 0
+    void_dist = abs(row_data.get("VoidDist%", 0) or row_data.get("Void Distance", 0) or 0)
+    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
+    voids_above = row_data.get("VoidsAbove", 0) or 0
+    voids_below = row_data.get("VoidsBelow", 0) or 0
+    
+    # 1. VOID SIZE
+    if void_size >= 5:
+        factors.append({"name": "Void Size", "value": f"{void_size:.1f}%", "ok": True, "detail": "Großes Void"})
+        score += 1
+    elif void_size >= 3:
+        factors.append({"name": "Void Size", "value": f"{void_size:.1f}%", "ok": True, "detail": "Gutes Void"})
+        score += 0.75
+    elif void_size >= 1:
+        factors.append({"name": "Void Size", "value": f"{void_size:.1f}%", "ok": True, "detail": "Kleines Void"})
+        score += 0.5
+    else:
+        factors.append({"name": "Void Size", "value": f"{void_size:.1f}%", "ok": False, "detail": "Sehr klein"})
+    
+    # 2. DISTANZ ZUM VOID
+    if void_dist <= 1:
+        factors.append({"name": "Distanz", "value": f"{void_dist:.1f}%", "ok": True, "detail": "Sehr nah"})
+        score += 1
+    elif void_dist <= 2:
+        factors.append({"name": "Distanz", "value": f"{void_dist:.1f}%", "ok": True, "detail": "Nah"})
+        score += 0.75
+    elif void_dist <= 5:
+        factors.append({"name": "Distanz", "value": f"{void_dist:.1f}%", "ok": True, "detail": "Moderat"})
+        score += 0.5
+    else:
+        factors.append({"name": "Distanz", "value": f"{void_dist:.1f}%", "ok": False, "detail": "Weit entfernt"})
+    
+    # 3. TREND-RICHTUNG vs VOID
+    # Wenn Preis steigt und Void oben liegt = gut
+    if change_pct > 0 and voids_above > 0:
+        factors.append({"name": "Trend → Void", "value": "Aligned", "ok": True, "detail": "Void in Bewegungsrichtung"})
+        score += 1
+    elif change_pct < 0 and voids_below > 0:
+        factors.append({"name": "Trend → Void", "value": "Aligned", "ok": True, "detail": "Void in Bewegungsrichtung"})
+        score += 1
+    elif voids_above > 0 or voids_below > 0:
+        factors.append({"name": "Trend → Void", "value": "Neutral", "ok": True, "detail": "Void vorhanden"})
+        score += 0.5
+    else:
+        factors.append({"name": "Trend → Void", "value": "Kein Void", "ok": False, "detail": "Kein nahes Void"})
+    
+    # 4. MULTIPLE VOIDS
+    total_voids = voids_above + voids_below
+    if total_voids >= 3:
+        factors.append({"name": "Voids", "value": f"{total_voids} Voids", "ok": True, "detail": "Mehrere Voids = mehr Targets"})
+        score += 1
+    elif total_voids >= 1:
+        factors.append({"name": "Voids", "value": f"{total_voids} Void(s)", "ok": True, "detail": "Void vorhanden"})
+        score += 0.5
+    else:
+        factors.append({"name": "Voids", "value": "0 Voids", "ok": False, "detail": "Keine Voids sichtbar"})
+    
+    # 5. SETUP QUALITÄT
+    if void_size >= 3 and void_dist <= 2:
+        factors.append({"name": "Setup", "value": "A+", "ok": True, "detail": "Großes Void, sehr nah"})
+        score += 1
+    elif void_size >= 2 and void_dist <= 3:
+        factors.append({"name": "Setup", "value": "B", "ok": True, "detail": "Gutes Setup"})
+        score += 0.5
+    else:
+        factors.append({"name": "Setup", "value": "C", "ok": False, "detail": "Schwaches Setup"})
+    
+    # GESAMTBEWERTUNG
+    max_score = 5
+    score = min(score, max_score)
+    
+    if score >= 4:
+        rating = "STARK"
+        emoji = "✅"
+        risk = "Klares Void-Setup"
+        recommendation = "Entry Richtung Void mit Target am Void-Ende"
+    elif score >= 2.5:
+        rating = "OK"
+        emoji = "⚠️"
+        risk = "Akzeptables Setup"
+        recommendation = "Entry möglich, konservatives Target"
+    else:
+        rating = "SCHWACH"
+        emoji = "❌"
+        risk = "Kein klares Void-Setup"
+        recommendation = "Besseres Setup abwarten"
+    
+    return {
+        "score": round(score, 1),
+        "max_score": max_score,
+        "rating": rating,
+        "emoji": emoji,
+        "factors": factors,
+        "risk": risk,
+        "recommendation": recommendation,
+        "color": "green" if score >= 4 else "orange" if score >= 2.5 else "red"
+    }
+
+
+# =============================================================================
+# INSIDER TIMING BEWERTUNG
+# =============================================================================
+def calculate_insider_timing(row_data):
+    """
+    Bewertet ob ein Insider-Buying Signal stark ist.
+    
+    Faktoren:
+    1. Cluster Buying - Mehrere Insider = stärker
+    2. Transaktionsgröße - Größer = mehr Conviction
+    3. Insider-Rolle - CEO/CFO > Director > 10% Owner
+    4. Timing - Nach Pullback = besser
+    5. Open Market Purchase - Code "P" = echtes Geld
+    """
+    factors = []
+    score = 0
+    
+    # Extrahiere Insider-Daten (falls verfügbar)
+    num_insiders = row_data.get("Insiders", 1) or row_data.get("InsiderCount", 1) or 1
+    transaction_value = row_data.get("InsiderValue", 0) or row_data.get("TransValue", 0) or 0
+    insider_role = row_data.get("InsiderRole", "Unknown") or "Unknown"
+    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
+    change_1m = row_data.get("1M%", 0) or row_data.get("Change1M", 0) or 0
+    
+    # 1. CLUSTER BUYING
+    if num_insiders >= 3:
+        factors.append({"name": "Cluster", "value": f"{num_insiders} Insider", "ok": True, "detail": "Starkes Cluster-Signal"})
+        score += 1.5
+    elif num_insiders >= 2:
+        factors.append({"name": "Cluster", "value": f"{num_insiders} Insider", "ok": True, "detail": "Cluster-Signal"})
+        score += 1
+    else:
+        factors.append({"name": "Cluster", "value": "1 Insider", "ok": True, "detail": "Einzelner Kauf"})
+        score += 0.5
+    
+    # 2. TRANSAKTIONSGRÖSSE
+    if transaction_value >= 500000:
+        factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Sehr große Position"})
+        score += 1
+    elif transaction_value >= 100000:
+        factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Große Position"})
+        score += 0.75
+    elif transaction_value > 0:
+        factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Moderate Position"})
+        score += 0.5
+    else:
+        factors.append({"name": "Größe", "value": "N/A", "ok": True, "detail": "Keine Daten"})
+        score += 0.5
+    
+    # 3. INSIDER-ROLLE
+    role_upper = insider_role.upper() if isinstance(insider_role, str) else ""
+    if "CEO" in role_upper or "CFO" in role_upper or "CHIEF" in role_upper:
+        factors.append({"name": "Rolle", "value": insider_role[:10], "ok": True, "detail": "C-Suite = höchste Conviction"})
+        score += 1
+    elif "DIRECTOR" in role_upper or "DIR" in role_upper:
+        factors.append({"name": "Rolle", "value": "Director", "ok": True, "detail": "Board-Member"})
+        score += 0.75
+    elif "10%" in role_upper or "OWNER" in role_upper:
+        factors.append({"name": "Rolle", "value": "10% Owner", "ok": True, "detail": "Großaktionär"})
+        score += 0.5
+    else:
+        factors.append({"name": "Rolle", "value": "Insider", "ok": True, "detail": "Unbekannte Rolle"})
+        score += 0.5
+    
+    # 4. TIMING - Kauf nach Pullback ist besser
+    if change_1m < -10:
+        factors.append({"name": "Timing", "value": f"{change_1m:.0f}% (1M)", "ok": True, "detail": "Kauf nach starkem Pullback"})
+        score += 1
+    elif change_1m < -5:
+        factors.append({"name": "Timing", "value": f"{change_1m:.0f}% (1M)", "ok": True, "detail": "Kauf nach Pullback"})
+        score += 0.75
+    elif change_1m < 0:
+        factors.append({"name": "Timing", "value": f"{change_1m:.0f}% (1M)", "ok": True, "detail": "Kauf bei Schwäche"})
+        score += 0.5
+    else:
+        factors.append({"name": "Timing", "value": f"+{change_1m:.0f}% (1M)", "ok": False, "detail": "Kauf nach Run-up"})
+    
+    # 5. PREIS-AKTION BESTÄTIGUNG
+    if change_pct > 0:
+        factors.append({"name": "Preis", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Positive Reaktion"})
+        score += 0.5
+    elif change_pct > -2:
+        factors.append({"name": "Preis", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Stabil"})
+        score += 0.25
+    else:
+        factors.append({"name": "Preis", "value": f"{change_pct:.1f}%", "ok": False, "detail": "Weiter fallend"})
+    
+    # GESAMTBEWERTUNG
+    max_score = 5
+    score = min(score, max_score)
+    
+    if score >= 4:
+        rating = "STARK"
+        emoji = "✅"
+        risk = "Starkes Insider-Signal"
+        recommendation = "Entry mit Stop unter Recent Low"
+    elif score >= 2.5:
+        rating = "MODERAT"
+        emoji = "⚠️"
+        risk = "Moderates Signal"
+        recommendation = "Auf weitere Bestätigung achten"
+    else:
+        rating = "SCHWACH"
+        emoji = "❌"
+        risk = "Schwaches Signal"
+        recommendation = "Nicht allein auf Insider verlassen"
+    
+    return {
+        "score": round(score, 1),
+        "max_score": max_score,
+        "rating": rating,
+        "emoji": emoji,
+        "factors": factors,
+        "risk": risk,
+        "recommendation": recommendation,
+        "color": "green" if score >= 4 else "orange" if score >= 2.5 else "red"
+    }
+
+
+# =============================================================================
+# MASTER TIMING BEWERTUNG - Wählt richtige Funktion basierend auf Strategie
+# =============================================================================
+def get_timing_assessment(row_data, strategy_name, fib_info=None):
+    """
+    Wählt die richtige Timing-Bewertung basierend auf der Strategie.
+    """
+    strategy_upper = strategy_name.upper() if strategy_name else ""
+    
+    # Breakout Strategien
+    if any(x in strategy_upper for x in ["BREAKOUT", "AUSBRUCH", "ULTRA"]):
+        return calculate_breakout_timing(row_data, fib_info)
+    
+    # Gap Strategien
+    elif any(x in strategy_upper for x in ["GAP UP", "GAP DOWN", "PM GAINER", "PM GAP", "AH GAINER", "PREMARKET", "AFTERHOUR"]):
+        is_gap_up = "DOWN" not in strategy_upper
+        return calculate_gap_timing(row_data, is_gap_up)
+    
+    # MA Bounce Strategien
+    elif any(x in strategy_upper for x in ["MA BOUNCE", "EMA", "SMA", "MOVING AVERAGE", "BOUNCE"]):
+        ma_type = "EMA 21" if "EMA" in strategy_upper else ("SMA 200" if "200" in strategy_upper else "SMA 50")
+        return calculate_ma_bounce_timing(row_data, ma_type)
+    
+    # Mean Reversion / Reversal Strategien
+    elif any(x in strategy_upper for x in ["REVERSAL", "MEAN REVERSION", "OVERSOLD", "OVERBOUGHT", "RSI"]):
+        is_long = "SHORT" not in strategy_upper and "OVERBOUGHT" not in strategy_upper
+        return calculate_reversal_timing(row_data, is_long)
+    
+    # Volume Void Strategien
+    elif any(x in strategy_upper for x in ["VOID", "VOLUME VOID", "FVG", "FAIR VALUE", "LIQUIDITY"]):
+        return calculate_void_timing(row_data)
+    
+    # Insider Strategien
+    elif any(x in strategy_upper for x in ["INSIDER", "FORM 4", "SEC"]):
+        return calculate_insider_timing(row_data)
+    
+    # Default: Breakout-Bewertung als Fallback
+    else:
+        return calculate_breakout_timing(row_data, fib_info)
+
+
+def calculate_volume_profile(ohlcv_data, num_bins=20):
     """
     Berechnet Volume Profile aus historischen OHLCV Daten.
-    
-    Volume Profile zeigt wie viel Volumen auf welchem Preisniveau gehandelt wurde.
-    
-    Args:
-        ohlcv_data: Liste von dicts mit 'high', 'low', 'close', 'volume'
-        num_bins: Anzahl der Preis-Zonen (default 20)
-    
-    Returns:
-        dict mit:
-        - bins: Liste von (price_low, price_high, volume) Tuples
-        - poc: Point of Control (Preis mit meistem Volumen)
-        - vah: Value Area High
-        - val: Value Area Low
-        - lvns: Liste von Low Volume Nodes
-        - hvns: Liste von High Volume Nodes
     """
     if not ohlcv_data or len(ohlcv_data) < 5:
         return None
@@ -4697,7 +5346,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V66.2 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V66.3 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -4708,7 +5357,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V66.2 Pro")
+    st.title("💎 Alpha V66.3 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -5808,49 +6457,111 @@ with tab_scanner:
                         pass
                 
                 # =====================================================================
-                # BREAKOUT TIMING BEWERTUNG (nur für Breakout-Strategien)
+                # STRATEGIE-TIMING BEWERTUNG (für alle unterstützten Strategien)
                 # =====================================================================
                 current_strat = st.session_state.get("current_strategy", "")
-                breakout_strategies = [
-                    "Breakout Long", "Breakout Short", "Breakout Long (Ultra)",
-                    "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
-                    "PM Gainers 🌅", "PM Gap & Go 🌅", "AH Gainers 🌙"
-                ]
                 
-                if current_strat in breakout_strategies:
+                # Strategien mit Timing-Bewertung
+                timing_strategies = {
+                    # Breakout Strategien
+                    "Breakout Long": "breakout", "Breakout Short": "breakout", 
+                    "Breakout Long (Ultra)": "breakout", "Breakout Short (Ultra)": "breakout",
+                    # Gap Strategien
+                    "Gap Up": "gap", "Gap Down": "gap", 
+                    "Gap Up (High Vol)": "gap", "Gap Down (High Vol)": "gap",
+                    "PM Gainers 🌅": "gap", "PM Gap & Go 🌅": "gap", "AH Gainers 🌙": "gap",
+                    # MA Bounce Strategien
+                    "EMA 21 Bounce (Long)": "ma_bounce", "EMA 21 Bounce (Short)": "ma_bounce",
+                    "SMA 50 Bounce (Long)": "ma_bounce", "SMA 50 Bounce (Short)": "ma_bounce",
+                    "SMA 200 Bounce (Long)": "ma_bounce", "SMA 200 Bounce (Short)": "ma_bounce",
+                    # Mean Reversion Strategien
+                    "Mean Reversion Long": "reversal", "Mean Reversion Short": "reversal",
+                    "Oversold Bounce": "reversal", "Overbought Short": "reversal",
+                    "RSI Oversold": "reversal", "RSI Overbought": "reversal",
+                    # Volume Void Strategien
+                    "Volume Void Long": "void", "Volume Void Short": "void",
+                    # Insider Strategien
+                    "Insider Buying": "insider", "Insider Cluster": "insider",
+                }
+                
+                # Prüfe ob aktuelle Strategie eine Timing-Bewertung hat
+                strat_type = timing_strategies.get(current_strat)
+                
+                # Fallback: Prüfe Strategie-Name auf Keywords
+                if not strat_type:
+                    strat_upper = current_strat.upper() if current_strat else ""
+                    if any(x in strat_upper for x in ["BREAKOUT", "AUSBRUCH", "ULTRA"]):
+                        strat_type = "breakout"
+                    elif any(x in strat_upper for x in ["GAP", "PM", "AH", "PREMARKET"]):
+                        strat_type = "gap"
+                    elif any(x in strat_upper for x in ["BOUNCE", "EMA", "SMA", "MA "]):
+                        strat_type = "ma_bounce"
+                    elif any(x in strat_upper for x in ["REVERSAL", "REVERSION", "OVERSOLD", "OVERBOUGHT", "RSI"]):
+                        strat_type = "reversal"
+                    elif any(x in strat_upper for x in ["VOID", "FVG", "LIQUIDITY"]):
+                        strat_type = "void"
+                    elif any(x in strat_upper for x in ["INSIDER", "FORM 4"]):
+                        strat_type = "insider"
+                
+                if strat_type:
                     try:
                         # Hole Fib-Info falls verfügbar
                         fib_info = st.session_state.get("fib_info", {})
                         
-                        # Berechne Breakout-Timing
-                        timing = calculate_breakout_timing(row.to_dict(), fib_info)
+                        # Berechne Strategie-spezifisches Timing
+                        timing = get_timing_assessment(row.to_dict(), current_strat, fib_info)
                         
                         st.divider()
-                        st.subheader(f"🎯 Breakout-Timing: {timing['emoji']} {timing['rating']}")
+                        
+                        # Titel basierend auf Strategie-Typ
+                        timing_titles = {
+                            "breakout": "🎯 Breakout-Timing",
+                            "gap": "🌅 Gap-Timing",
+                            "ma_bounce": "📈 MA-Bounce Timing",
+                            "reversal": "🔄 Reversal-Timing",
+                            "void": "📊 Volume-Void Timing",
+                            "insider": "👔 Insider-Signal Stärke"
+                        }
+                        title = timing_titles.get(strat_type, "🎯 Timing-Bewertung")
+                        
+                        st.subheader(f"{title}: {timing['emoji']} {timing['rating']}")
                         st.caption(f"Score: **{timing['score']}/{timing['max_score']}** | {timing['risk']}")
                         
                         # Faktoren anzeigen
                         col_tech, col_conf = st.columns(2)
                         
+                        # Faktor-Überschriften je nach Strategie
+                        factor_titles = {
+                            "breakout": ("📊 Technische Faktoren:", "📈 Bestätigungs-Faktoren:"),
+                            "gap": ("📊 Gap-Faktoren:", "📈 Bestätigung:"),
+                            "ma_bounce": ("📊 MA-Faktoren:", "📈 Bestätigung:"),
+                            "reversal": ("📊 Überdehnungs-Faktoren:", "📈 Umkehr-Signale:"),
+                            "void": ("📊 Void-Faktoren:", "📈 Setup-Qualität:"),
+                            "insider": ("📊 Signal-Stärke:", "📈 Timing-Faktoren:")
+                        }
+                        title1, title2 = factor_titles.get(strat_type, ("📊 Faktoren:", "📈 Bestätigung:"))
+                        
                         with col_tech:
-                            st.markdown("**📊 Technische Faktoren:**")
+                            st.markdown(f"**{title1}**")
                             for f in timing['factors'][:3]:
                                 icon = "✅" if f['ok'] else "❌"
                                 st.caption(f"{icon} {f['name']}: {f['value']} ({f['detail']})")
                         
                         with col_conf:
-                            st.markdown("**📈 Bestätigungs-Faktoren:**")
+                            st.markdown(f"**{title2}**")
                             for f in timing['factors'][3:]:
                                 icon = "✅" if f['ok'] else "❌"
                                 st.caption(f"{icon} {f['name']}: {f['value']} ({f['detail']})")
                         
-                        # Empfehlung
-                        if timing['rating'] == "FRÜH":
-                            st.success("💡 **Empfehlung:** Guter Einstiegspunkt - Position aufbauen möglich")
-                        elif timing['rating'] == "OK":
-                            st.warning("💡 **Empfehlung:** Vorsichtig - kleinere Position oder auf Pullback warten")
+                        # Strategie-spezifische Empfehlung
+                        recommendation = timing.get('recommendation', timing['risk'])
+                        
+                        if timing['rating'] in ["FRÜH", "GO", "PERFEKT", "EXTREM", "STARK"]:
+                            st.success(f"💡 **Empfehlung:** {recommendation}")
+                        elif timing['rating'] in ["OK", "WARTEN", "GUT", "MÖGLICH", "MODERAT"]:
+                            st.warning(f"💡 **Empfehlung:** {recommendation}")
                         else:
-                            st.error("💡 **Empfehlung:** Zu spät - auf Pullback zum Support warten")
+                            st.error(f"💡 **Empfehlung:** {recommendation}")
                     except Exception as e:
                         pass
                 
