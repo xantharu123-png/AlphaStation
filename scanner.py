@@ -1,23 +1,20 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V66.3 PRO                               ║
+║                        ALPHA STATION V66.4 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 66.3 (6 Strategy-Specific Timing Assessments)                      ║
+║  Version: 66.4 (Pre-Market Watchlist)                                        ║
 ║  Date: 02. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V66.3 NEW - TIMING BEWERTUNGEN FÜR ALLE STRATEGIEN:                         ║
-║  ✅ Breakout Timing: Distanz, RSI, Fib, RVOL, ATR (6 Faktoren)               ║
-║  ✅ Gap Timing: Gap Size, Volume, Fill-Risiko, Momentum (6 Faktoren)         ║
-║  ✅ MA Bounce Timing: MA Distanz, Bounce, RSI Zone (5 Faktoren)              ║
-║  ✅ Reversal Timing: RSI Extrem, Extension, Capitulation (6 Faktoren)        ║
-║  ✅ Volume Void Timing: Void Size, Distanz, Trend (5 Faktoren)               ║
-║  ✅ Insider Timing: Cluster, Größe, Rolle, Timing (5 Faktoren)               ║
-║  V66.2:                                                                      ║
-║  ✅ Keyboard Navigation - W/E Tasten zum Wechseln                            ║
-║  ✅ Nur echte Aktien - Polygon Reference API (type=CS) Filter                ║
-║  ✅ Liquiditäts-Dropdown - Wählbar: $1M/$5M/$10M/$50M Minimum                ║
+║  V66.4 NEW - PRE-MARKET WATCHLIST:                                           ║
+║  ✅ PM Mover Erkennung VOR Market Open (4:00-9:30 ET)                        ║
+║  ✅ PM High/Low, PM Volume, PM Change% Anzeige                               ║
+║  ✅ Entry Signal: OR BREAK / WATCH / PULLBACK                                ║
+║  ✅ Long & Short Kandidaten getrennt                                         ║
+║  ✅ Export-Funktion für Watchlist                                            ║
+║  V66.3: 6 Strategy-Specific Timing Assessments                               ║
+║  V66.2: W/E Keyboard Navigation, Common Stock Filter, Liquidity Dropdown     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -59,9 +56,13 @@ if "fib_info" not in st.session_state:
     st.session_state.fib_info = {}
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = False
+if "show_pm_watchlist" not in st.session_state:
+    st.session_state.show_pm_watchlist = False
+if "pm_watchlist_data" not in st.session_state:
+    st.session_state.pm_watchlist_data = None
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "66.3"
+FILTER_VERSION = "66.4"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
@@ -4723,6 +4724,287 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
         st.error(f"Polygon Fehler: {e}")
         return [], 0, 0, {}
 
+
+# =============================================================================
+# PRE-MARKET WATCHLIST - Spezielle PM Analyse
+# =============================================================================
+def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_price=1.0, max_price=500.0):
+    """
+    Holt Pre-Market Movers mit speziellen PM-Metriken.
+    
+    Zeigt:
+    - PM Change% (vs. Previous Close)
+    - PM Volume
+    - PM High / PM Low
+    - Distance to PM High (für Entry-Timing)
+    - Entry Signal (OR Break Potential)
+    
+    Returns: List of PM Watchlist candidates
+    """
+    results = []
+    
+    try:
+        # Polygon Snapshot API - hat Pre-Market Daten in lastTrade/min
+        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
+        resp = requests.get(url, timeout=30).json()
+        tickers = resp.get("tickers", [])
+        
+        if len(tickers) == 0:
+            return []
+        
+        # Lade Common Stocks für Filter
+        common_stocks = load_common_stock_tickers(poly_key)
+        
+        for t in tickers:
+            try:
+                ticker = t.get("ticker", "")
+                
+                # Nur echte Aktien (Common Stock)
+                if common_stocks and ticker not in common_stocks:
+                    continue
+                
+                # Skip Warrants, Units, Rights
+                if any(ticker.endswith(suffix) for suffix in [".WS", ".WT", ".W", ".U", ".R", ".RT", "W", "U"]):
+                    continue
+                if ticker.endswith("W") and len(ticker) > 3:
+                    continue
+                
+                day = t.get("day", {})
+                prev_day = t.get("prevDay", {})
+                last_trade = t.get("lastTrade", {})
+                min_data = t.get("min", {})
+                
+                prev_close = prev_day.get("c", 0)
+                if prev_close <= 0:
+                    continue
+                
+                # Pre-Market Preis aus lastTrade oder min
+                pm_price = last_trade.get("p", 0) or min_data.get("c", 0)
+                if pm_price <= 0:
+                    continue
+                
+                # Preisfilter
+                if pm_price < min_price or pm_price > max_price:
+                    continue
+                
+                # PM Change berechnen (vs. Previous Close)
+                pm_change = ((pm_price - prev_close) / prev_close) * 100
+                
+                # Min Change Filter
+                if abs(pm_change) < min_change:
+                    continue
+                
+                # PM Volume aus min aggregates
+                pm_volume = min_data.get("v", 0)
+                if pm_volume < min_volume:
+                    continue
+                
+                # PM High/Low aus min oder day (morgens ist day leer)
+                pm_high = min_data.get("h", pm_price)
+                pm_low = min_data.get("l", pm_price)
+                
+                # Fallback wenn min leer
+                if pm_high == 0:
+                    pm_high = pm_price
+                if pm_low == 0:
+                    pm_low = pm_price
+                
+                # Distance to PM High (wie nah am High?)
+                pm_range = pm_high - pm_low if pm_high > pm_low else 0.01
+                dist_to_high_pct = ((pm_high - pm_price) / pm_high) * 100 if pm_high > 0 else 0
+                
+                # Position in PM Range (0% = Low, 100% = High)
+                pm_position = ((pm_price - pm_low) / pm_range) * 100 if pm_range > 0 else 50
+                
+                # Regular Session Volume (falls verfügbar) für RVOL
+                regular_vol = day.get("v", 0)
+                prev_vol = prev_day.get("v", 1)
+                
+                # Entry Signal Bewertung
+                entry_signal = "⏳ WARTEN"
+                entry_detail = ""
+                
+                if pm_change > 0:  # Long Kandidat
+                    if pm_position >= 80:
+                        entry_signal = "🎯 OR BREAK"
+                        entry_detail = "Nah am PM High - warte auf Opening Range Break"
+                    elif pm_position >= 50:
+                        entry_signal = "👀 WATCH"
+                        entry_detail = "Mitte der Range - beobachten"
+                    else:
+                        entry_signal = "⚠️ PULLBACK"
+                        entry_detail = "Weit vom High - warte auf Stärke"
+                else:  # Short Kandidat
+                    if pm_position <= 20:
+                        entry_signal = "🎯 OR BREAK"
+                        entry_detail = "Nah am PM Low - Short bei Break"
+                    elif pm_position <= 50:
+                        entry_signal = "👀 WATCH"
+                        entry_detail = "Mitte der Range - beobachten"
+                    else:
+                        entry_signal = "⚠️ BOUNCE"
+                        entry_detail = "Weit vom Low - warte auf Schwäche"
+                
+                # PM Dollar Volume für Liquidität
+                pm_dollar_vol = pm_price * pm_volume
+                
+                results.append({
+                    "Ticker": ticker,
+                    "PM_Preis": round(pm_price, 2),
+                    "PM_Chg%": round(pm_change, 2),
+                    "PM_Vol": pm_volume,
+                    "PM_DollarVol": pm_dollar_vol,
+                    "PM_High": round(pm_high, 2),
+                    "PM_Low": round(pm_low, 2),
+                    "Dist_High%": round(dist_to_high_pct, 2),
+                    "PM_Position": round(pm_position, 1),
+                    "PrevClose": round(prev_close, 2),
+                    "Entry_Signal": entry_signal,
+                    "Entry_Detail": entry_detail,
+                    "Direction": "🟢 LONG" if pm_change > 0 else "🔴 SHORT",
+                })
+                
+            except Exception:
+                continue
+        
+        # Sortiere nach absolutem PM Change
+        results.sort(key=lambda x: abs(x["PM_Chg%"]), reverse=True)
+        
+        return results[:50]  # Top 50
+        
+    except Exception as e:
+        st.error(f"PM Watchlist Fehler: {e}")
+        return []
+
+
+def display_premarket_watchlist(pm_data):
+    """Zeigt Pre-Market Watchlist in formatierter Tabelle."""
+    
+    if not pm_data:
+        st.warning("⏳ Keine Pre-Market Mover gefunden. PM Session: 4:00-9:30 AM ET")
+        return
+    
+    st.success(f"📋 **{len(pm_data)} Pre-Market Mover** gefunden")
+    
+    # Aufteilen in Long und Short Kandidaten
+    long_candidates = [x for x in pm_data if x["PM_Chg%"] > 0]
+    short_candidates = [x for x in pm_data if x["PM_Chg%"] < 0]
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("🟢 LONG Kandidaten")
+        if long_candidates:
+            for item in long_candidates[:15]:
+                with st.container():
+                    # Ticker und Change
+                    ticker_col, data_col = st.columns([1, 2])
+                    with ticker_col:
+                        st.markdown(f"### {item['Ticker']}")
+                        st.markdown(f"**+{item['PM_Chg%']:.1f}%**")
+                    
+                    with data_col:
+                        st.caption(f"💰 ${item['PM_Preis']:.2f} | Vol: {item['PM_Vol']:,.0f}")
+                        st.caption(f"📊 PM High: ${item['PM_High']:.2f} | Low: ${item['PM_Low']:.2f}")
+                        
+                        # Entry Signal mit Farbe
+                        signal = item['Entry_Signal']
+                        if "OR BREAK" in signal:
+                            st.success(f"{signal}")
+                        elif "WATCH" in signal:
+                            st.info(f"{signal}")
+                        else:
+                            st.warning(f"{signal}")
+                        
+                        st.caption(item['Entry_Detail'])
+                    
+                    st.divider()
+        else:
+            st.info("Keine Long Kandidaten im PM")
+    
+    with col2:
+        st.subheader("🔴 SHORT Kandidaten")
+        if short_candidates:
+            for item in short_candidates[:15]:
+                with st.container():
+                    ticker_col, data_col = st.columns([1, 2])
+                    with ticker_col:
+                        st.markdown(f"### {item['Ticker']}")
+                        st.markdown(f"**{item['PM_Chg%']:.1f}%**")
+                    
+                    with data_col:
+                        st.caption(f"💰 ${item['PM_Preis']:.2f} | Vol: {item['PM_Vol']:,.0f}")
+                        st.caption(f"📊 PM High: ${item['PM_High']:.2f} | Low: ${item['PM_Low']:.2f}")
+                        
+                        signal = item['Entry_Signal']
+                        if "OR BREAK" in signal:
+                            st.success(f"{signal}")
+                        elif "WATCH" in signal:
+                            st.info(f"{signal}")
+                        else:
+                            st.warning(f"{signal}")
+                        
+                        st.caption(item['Entry_Detail'])
+                    
+                    st.divider()
+        else:
+            st.info("Keine Short Kandidaten im PM")
+    
+    # Zusammenfassung
+    st.divider()
+    st.subheader("📋 PM Watchlist Export")
+    
+    # Einfache Tabelle für Copy/Paste
+    watchlist_text = "**🎯 OR BREAK Kandidaten (Entry bei Open):**\n"
+    or_break = [x for x in pm_data if "OR BREAK" in x["Entry_Signal"]]
+    if or_break:
+        for item in or_break[:10]:
+            direction = "LONG" if item["PM_Chg%"] > 0 else "SHORT"
+            watchlist_text += f"• {item['Ticker']} ({direction}) - PM: {item['PM_Chg%']:+.1f}% @ ${item['PM_Preis']:.2f}\n"
+    else:
+        watchlist_text += "• Keine OR Break Kandidaten\n"
+    
+    st.code(watchlist_text)
+    
+    # Trading Hinweise
+    with st.expander("💡 PM Watchlist Trading Tipps"):
+        st.markdown("""
+        ### So nutzt du die PM Watchlist:
+        
+        **1. VOR Market Open (6:00-9:30 ET):**
+        - Öffne PM Watchlist
+        - Notiere 🎯 OR BREAK Kandidaten
+        - Setze Alarme in TradingView
+        
+        **2. Opening Range (9:30-9:45 ET):**
+        - Warte erste 15 Minuten ab
+        - Beobachte Opening Range (OR High/Low)
+        - Entry NICHT sofort bei Open!
+        
+        **3. Entry Strategie:**
+        - **LONG:** Entry wenn Preis > OR High UND > PM High
+        - **SHORT:** Entry wenn Preis < OR Low UND < PM Low
+        - Stop Loss: Andere Seite der Opening Range
+        
+        **4. Beispiel:**
+        ```
+        GERN im PM: +3.5% @ $1.58, PM High = $1.60
+        
+        9:30 Open: $1.55
+        9:45 OR High: $1.62, OR Low: $1.52
+        
+        Entry: Wenn > $1.62 (OR High)
+        Stop: $1.52 (OR Low)
+        Target: $1.62 + ($1.62 - $1.52) = $1.72
+        ```
+        
+        **⚠️ Wichtig:**
+        - PM Volume kann täuschen (dünn)
+        - Nicht jeden PM Mover traden
+        - Warte auf Bestätigung nach Open
+        """)
+
+
 # =============================================================================
 # INTERNATIONALE BÖRSEN - Top Aktien Listen
 # =============================================================================
@@ -5346,7 +5628,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V66.3 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V66.4 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -5357,7 +5639,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V66.3 Pro")
+    st.title("💎 Alpha V66.4 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -5489,6 +5771,30 @@ with st.sidebar:
     
     if auto_refresh:
         st.success(f"⏱️ Refresh alle {refresh_mins} Min")
+    
+    # PRE-MARKET WATCHLIST BUTTON (nur für US Aktien)
+    if m_type == "Aktien" and st.session_state.get("selected_exchange", "US") == "US":
+        session_info = get_current_trading_session()
+        if session_info[0] == "Pre-Market":
+            st.divider()
+            st.subheader("🌅 Pre-Market Watchlist")
+            st.caption("Finde PM Movers VOR Market Open")
+            
+            if st.button("📋 PM Watchlist laden", key="pm_watchlist_btn", use_container_width=True):
+                st.session_state.show_pm_watchlist = True
+                st.session_state.pm_watchlist_data = None  # Reset für neue Daten
+            
+            if st.session_state.get("show_pm_watchlist", False):
+                st.success("✅ PM Watchlist aktiv")
+                if st.button("❌ Schließen", key="close_pm_watchlist"):
+                    st.session_state.show_pm_watchlist = False
+                    st.rerun()
+        else:
+            # Außerhalb PM Session - zeige Hinweis
+            st.divider()
+            with st.expander("🌅 Pre-Market Watchlist"):
+                st.info(f"⏰ PM Session: 4:00-9:30 AM ET\n\nAktuell: {session_info[1]}")
+                st.caption("PM Watchlist verfügbar während Pre-Market Session")
     
     st.divider()
     
@@ -6144,6 +6450,39 @@ with st.sidebar:
 tab_scanner, tab_search, tab_watchlist, tab_moneyflow = st.tabs(["📊 Scanner", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow"])
 
 with tab_scanner:
+    # PRE-MARKET WATCHLIST ANZEIGE (wenn aktiv)
+    if st.session_state.get("show_pm_watchlist", False):
+        st.header("🌅 Pre-Market Watchlist")
+        
+        # PM Daten laden wenn noch nicht vorhanden
+        if st.session_state.get("pm_watchlist_data") is None:
+            try:
+                poly_key = st.secrets["POLYGON_KEY"]
+                with st.spinner("🔍 Lade Pre-Market Movers..."):
+                    pm_data = fetch_premarket_watchlist(
+                        poly_key, 
+                        min_change=2.0,  # Min 2% Bewegung
+                        min_volume=50000,  # Min 50K Vol
+                        min_price=1.0,  # Min $1
+                        max_price=500.0  # Max $500
+                    )
+                    st.session_state.pm_watchlist_data = pm_data
+            except KeyError:
+                st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                pm_data = []
+            except Exception as e:
+                st.error(f"Fehler: {e}")
+                pm_data = []
+        else:
+            pm_data = st.session_state.pm_watchlist_data
+        
+        # PM Watchlist anzeigen
+        if pm_data:
+            display_premarket_watchlist(pm_data)
+        
+        st.divider()
+        st.caption("👇 Normaler Scanner weiterhin verfügbar")
+    
     col_chart, col_journal = st.columns([2, 1])
     
     # Prüfe ob Insider-Strategie aktiv
