@@ -3145,42 +3145,43 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
 # AI CHART ANALYZER - PATTERN RECOGNITION & TECHNICAL ANALYSIS
 # =============================================================================
 
-def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=200):
+def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
     """
     Holt OHLCV Daten für Chart-Darstellung.
     
     Args:
         ticker: Ticker Symbol
         poly_key: Polygon API Key
-        timeframe: "1m", "5m", "15m", "1H", "4H", "1D"
+        timeframe: "5m", "15m", "1H", "4H", "1D"
         bars: Anzahl Bars
         
     Returns:
         List of dicts with time, open, high, low, close, volume
     """
     try:
-        # Timeframe mapping
+        # Timeframe mapping: (multiplier, span, days_back)
+        # Polygon API: /range/{multiplier}/{timespan}/{from}/{to}
+        # Timespans: minute, hour, day, week, month
         tf_map = {
-            "1m": ("1", "minute", 1),
-            "5m": ("5", "minute", 5),
-            "15m": ("15", "minute", 15),
-            "1H": ("1", "hour", 60),
-            "4H": ("4", "hour", 240),
-            "1D": ("1", "day", 1440)
+            "5m": ("5", "minute", 5),      # 5 Tage zurück für 5-min
+            "15m": ("15", "minute", 10),   # 10 Tage zurück für 15-min
+            "1H": ("1", "hour", 30),       # 30 Tage zurück für 1H
+            "4H": ("1", "hour", 60),       # 60 Tage zurück, dann aggregieren zu 4H
+            "1D": ("1", "day", 365),       # 1 Jahr zurück für Daily
         }
         
         if timeframe not in tf_map:
             timeframe = "1H"
         
-        mult, span, minutes_per_bar = tf_map[timeframe]
+        mult, span, days_back = tf_map[timeframe]
         
-        # Berechne Startdatum
-        total_minutes = bars * minutes_per_bar
-        start_date = (datetime.now() - timedelta(minutes=total_minutes * 1.5)).strftime("%Y-%m-%d")
+        # Berechne Datum-Range
         end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
         
+        # API Call
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start_date}/{end_date}"
-        params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": bars}
+        params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 50000}
         
         resp = requests.get(url, params=params, timeout=15)
         if resp.status_code != 200:
@@ -3191,6 +3192,22 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=200):
         
         if not results:
             return None
+        
+        # Für 4H: Aggregiere 1H Bars zu 4H
+        if timeframe == "4H":
+            aggregated = []
+            for i in range(0, len(results), 4):
+                chunk = results[i:i+4]
+                if len(chunk) >= 1:
+                    aggregated.append({
+                        "t": chunk[0]["t"],
+                        "o": chunk[0]["o"],
+                        "h": max(c["h"] for c in chunk),
+                        "l": min(c["l"] for c in chunk),
+                        "c": chunk[-1]["c"],
+                        "v": sum(c.get("v", 0) for c in chunk)
+                    })
+            results = aggregated
         
         # Formatiere für Lightweight Charts
         ohlcv = []
@@ -4378,16 +4395,19 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     
     # Fetch Data
     with st.spinner(f"📥 Lade {ticker} Chart Daten ({current_tf})..."):
-        ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, current_tf, bars=200)
+        ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, current_tf, bars=300)
     
     if not ohlcv:
-        st.error("❌ Keine Chart-Daten verfügbar")
+        st.error(f"❌ Keine Chart-Daten für {ticker} im Timeframe {current_tf} verfügbar")
+        st.caption("Versuche einen anderen Timeframe oder prüfe ob der Ticker korrekt ist.")
         return
+    
+    st.caption(f"📊 {len(ohlcv)} Bars geladen")
     
     # Calculate ALL Technical Analysis
     with st.spinner("🔍 Berechne alle Indikatoren..."):
         # Support/Resistance
-        sr_levels = calculate_support_resistance(ohlcv, num_levels=4, lookback=100)
+        sr_levels = calculate_support_resistance(ohlcv, num_levels=3, lookback=100)
         
         # Fibonacci
         fib_levels = calculate_fibonacci_levels(ohlcv, lookback=100)
@@ -4420,23 +4440,21 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                 "target": trade.get("target")
             }
     
-    # Display Options
+    # Display Options - ÜBERSICHTLICHER: Weniger default an
     st.markdown("**⚙️ Chart Optionen:**")
-    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5 = st.columns(5)
+    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5, col_opt6 = st.columns(6)
     with col_opt1:
-        show_ema = st.checkbox("📈 EMAs", value=True, key=f"ema_{ticker}")
+        show_ema = st.checkbox("📈 EMAs", value=True, key=f"ema_{ticker}_{current_tf}")
     with col_opt2:
-        show_sr = st.checkbox("📏 S/R", value=True, key=f"sr_{ticker}")
+        show_sr = st.checkbox("📏 S/R", value=True, key=f"sr_{ticker}_{current_tf}")
     with col_opt3:
-        show_vwap = st.checkbox("📊 VWAP", value=True, key=f"vwap_{ticker}")
+        show_vwap = st.checkbox("📊 VWAP", value=False, key=f"vwap_{ticker}_{current_tf}")
     with col_opt4:
-        show_fib = st.checkbox("🎯 Fib", value=False, key=f"fib_{ticker}")
+        show_fib = st.checkbox("🎯 Fib", value=False, key=f"fib_{ticker}_{current_tf}")
     with col_opt5:
-        show_voids = st.checkbox("🕳️ Voids", value=True, key=f"voids_{ticker}")
-    
-    col_opt6, col_opt7 = st.columns(2)
+        show_voids = st.checkbox("🕳️ Voids", value=False, key=f"voids_{ticker}_{current_tf}")
     with col_opt6:
-        show_zones = st.checkbox("🎯 Trade Zones (Entry/Stop/Target)", value=True, key=f"zones_{ticker}")
+        show_zones = st.checkbox("🎯 Zones", value=False, key=f"zones_{ticker}_{current_tf}")
     
     # Generate Chart HTML
     chart_html = create_lightweight_chart_html(
@@ -4445,7 +4463,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         sr_levels=sr_levels if show_sr else None,
         patterns=patterns,
         fib_levels=fib_levels if show_fib else None,
-        ema_periods=[20, 50, 100, 200] if show_ema else [],
+        ema_periods=[20, 50, 200] if show_ema else [],
         height=500,
         show_volume=True,
         vwap_data=vwap_data if show_vwap else None,
