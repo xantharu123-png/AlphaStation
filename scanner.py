@@ -5115,19 +5115,17 @@ def fetch_realtime_batch_alpaca(tickers, alpaca_key, alpaca_secret):
 
 def calculate_sr_from_historical(ohlc_data, current_price):
     """
-    VERBESSERTE S/R-Berechnung mit Multi-Touch Validation.
+    ECHTE S/R-Berechnung mit technischer Analyse.
     
-    Kombiniert:
-    1. Previous Day High/Low/Close (PDH/PDL/PDC) - Sehr wichtig für Swing!
-    2. Swing Highs/Lows mit Touch Count
-    3. Fibonacci Retracements
-    4. Round Numbers (psychologische Levels)
-    5. Konsolidierungszonen (hohe Aktivität)
+    Methoden:
+    1. Major Swing Points (≥10% Bewegung danach = signifikant!)
+    2. Volume Clusters (wo wurde am meisten gehandelt?)
+    3. Fibonacci Retracements (50%, 61.8% = stärkste)
+    4. Period High/Low (absolute Grenzen)
+    5. Round Numbers (psychologische Levels)
+    6. Gap Levels (offene Gaps)
     
-    Jedes Level bekommt einen STÄRKE-SCORE basierend auf:
-    - Touch Count (öfter getestet = stärker)
-    - Recency (neuere Levels = relevanter)
-    - Typ (PDH/PDL sind sehr stark)
+    CONFLUENCE = mehrere Levels nah beieinander = STÄRKER!
     """
     if not ohlc_data or len(ohlc_data) < 5:
         return calculate_sr_levels_simple(current_price)
@@ -5139,15 +5137,12 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     
     total_candles = len(ohlc_data)
     
-    # =========================================================================
-    # 1. PREVIOUS DAY HIGH/LOW/CLOSE (Wichtigste Levels!)
-    # =========================================================================
-    # Die letzten Candle-Daten (neueste = letzte)
+    # PDH/PDL/PDC (letzte Candle)
     prev_day_high = highs[-1] if highs else 0
     prev_day_low = lows[-1] if lows else 0
     prev_day_close = closes[-1] if closes else 0
     
-    # Periode High und Low (für Fibonacci)
+    # Period High und Low
     period_high = max(highs)
     period_low = min(lows)
     price_range = period_high - period_low
@@ -5155,95 +5150,45 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     if price_range <= 0:
         return calculate_sr_levels_simple(current_price), {}
     
-    # =========================================================================
-    # 2. ROUND NUMBERS (Psychologische Levels)
-    # =========================================================================
-    def find_round_numbers(price, range_pct=0.15):
-        """Findet relevante runde Zahlen nahe dem Preis"""
-        rounds = []
-        
-        # Bestimme relevante Rundungsstufen basierend auf Preis
-        if price >= 100:
-            steps = [100, 50, 25, 10]
-        elif price >= 10:
-            steps = [10, 5, 2.5, 1]
-        elif price >= 1:
-            steps = [1, 0.5, 0.25, 0.1]
-        else:
-            steps = [0.1, 0.05, 0.01]
-        
-        price_min = price * (1 - range_pct)
-        price_max = price * (1 + range_pct)
-        
-        for step in steps:
-            # Finde nächste runde Zahl unter dem Preis
-            lower = (price // step) * step
-            upper = lower + step
-            
-            if price_min <= lower <= price_max and lower != price:
-                rounds.append({"price": lower, "type": f"Round ${lower:.0f}" if lower >= 1 else f"Round ${lower:.2f}"})
-            if price_min <= upper <= price_max and upper != price:
-                rounds.append({"price": upper, "type": f"Round ${upper:.0f}" if upper >= 1 else f"Round ${upper:.2f}"})
-        
-        return rounds[:4]  # Max 4 runde Zahlen
-    
-    round_numbers = find_round_numbers(current_price)
+    key_levels = []
     
     # =========================================================================
-    # 3. SWING HIGHS/LOWS MIT TOUCH COUNT
+    # 1. MAJOR SWING POINTS (nur signifikante Wendepunkte!)
     # =========================================================================
-    def find_swing_points_with_touches(prices, is_high=True, lookback=3):
-        """Findet Swing Points und zählt wie oft sie getestet wurden"""
-        swings = []
-        tolerance_pct = 0.015  # 1.5% Toleranz für "gleicher Preis"
-        
-        window = min(lookback, len(prices) // 4)
-        if window < 1:
-            return swings
-        
-        for i in range(window, len(prices) - window):
-            is_swing = True
-            price = prices[i]
+    min_swing_pct = 0.10  # 10% Bewegung danach = signifikant
+    
+    # Swing Highs
+    for i in range(5, len(highs) - 1):
+        if highs[i] >= max(highs[max(0,i-5):i]) and highs[i] >= max(highs[i+1:min(len(highs),i+3)]):
+            future_low = min(lows[i+1:min(len(lows), i+20)]) if i+1 < len(lows) else lows[-1]
+            drop_pct = (highs[i] - future_low) / highs[i] if highs[i] > 0 else 0
             
-            for j in range(1, window + 1):
-                if is_high:
-                    if price <= prices[i-j] or price <= prices[i+j]:
-                        is_swing = False
-                        break
-                else:
-                    if price >= prices[i-j] or price >= prices[i+j]:
-                        is_swing = False
-                        break
-            
-            if is_swing:
-                # Zähle Touches: Wie oft kam der Preis auf dieses Level?
-                touch_count = 0
-                for p in prices:
-                    if abs(p - price) / price <= tolerance_pct:
-                        touch_count += 1
-                
-                # Recency Score (neuere = höher)
-                recency = (i / len(prices)) * 100  # 0-100
-                
-                swings.append({
-                    "price": price,
-                    "touches": touch_count,
-                    "recency": recency,
-                    "index": i,
-                    "type": "Swing High" if is_high else "Swing Low"
+            if drop_pct >= min_swing_pct:
+                key_levels.append({
+                    "price": highs[i],
+                    "type": "Swing High",
+                    "strength": min(90, 60 + int(drop_pct * 100)),
+                    "is_support": highs[i] < current_price
                 })
-        
-        # Sortiere nach Touches (mehr = besser)
-        swings = sorted(swings, key=lambda x: (x["touches"], x["recency"]), reverse=True)
-        return swings[:5]  # Top 5
     
-    swing_highs = find_swing_points_with_touches(highs, is_high=True)
-    swing_lows = find_swing_points_with_touches(lows, is_high=False)
+    # Swing Lows
+    for i in range(5, len(lows) - 1):
+        if lows[i] <= min(lows[max(0,i-5):i]) and lows[i] <= min(lows[i+1:min(len(lows),i+3)]):
+            future_high = max(highs[i+1:min(len(highs), i+20)]) if i+1 < len(highs) else highs[-1]
+            rally_pct = (future_high - lows[i]) / lows[i] if lows[i] > 0 else 0
+            
+            if rally_pct >= min_swing_pct:
+                key_levels.append({
+                    "price": lows[i],
+                    "type": "Swing Low",
+                    "strength": min(90, 60 + int(rally_pct * 100)),
+                    "is_support": lows[i] < current_price
+                })
     
     # =========================================================================
-    # 4. FIBONACCI LEVELS
+    # 2. FIBONACCI LEVELS
     # =========================================================================
-    fib_levels = {
+    fib_levels_dict = {
         "23.6": period_low + price_range * 0.236,
         "38.2": period_low + price_range * 0.382,
         "50.0": period_low + price_range * 0.5,
@@ -5251,186 +5196,133 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         "78.6": period_low + price_range * 0.786,
     }
     
-    # Extensions
-    fib_extensions = {
-        "127.2": period_high + price_range * 0.272,
-        "161.8": period_high + price_range * 0.618,
-    }
-    
-    # =========================================================================
-    # 5. KONSOLIDIERUNGSZONEN (High Activity)
-    # =========================================================================
-    num_zones = 20
-    zone_size = price_range / num_zones
-    zone_counts = {}
-    
-    for close in closes:
-        zone_idx = int((close - period_low) / zone_size)
-        zone_idx = min(zone_idx, num_zones - 1)
-        zone_start = period_low + zone_idx * zone_size
-        zone_end = zone_start + zone_size
-        zone_key = (round(zone_start, 6), round(zone_end, 6))
-        zone_counts[zone_key] = zone_counts.get(zone_key, 0) + 1
-    
-    sorted_zones = sorted(zone_counts.items(), key=lambda x: x[1], reverse=True)
-    
-    consolidation_zones = []
-    for (zone_start, zone_end), count in sorted_zones[:5]:
-        if count >= 3:
-            pct_time = round((count / total_candles) * 100, 1)
-            zone_mid = (zone_start + zone_end) / 2
-            consolidation_zones.append({
-                "low": zone_start,
-                "high": zone_end,
-                "mid": zone_mid,
-                "days": count,
-                "pct_time": pct_time
+    for fib_name, fib_price in fib_levels_dict.items():
+        if abs(fib_price - current_price) / current_price > 0.03:
+            strength = 75 if fib_name in ["50.0", "61.8"] else 65
+            key_levels.append({
+                "price": fib_price,
+                "type": f"Fib {fib_name}%",
+                "strength": strength,
+                "is_support": fib_price < current_price
             })
     
-    # Merge überlappende Zonen
-    def merge_zones(zones):
-        if not zones:
-            return []
-        zones = sorted(zones, key=lambda x: x["low"])
-        merged = [zones[0]]
-        for zone in zones[1:]:
-            last = merged[-1]
-            if zone["low"] <= last["high"] * 1.02:
-                merged[-1] = {
-                    "low": last["low"],
-                    "high": max(last["high"], zone["high"]),
-                    "mid": (last["low"] + max(last["high"], zone["high"])) / 2,
-                    "days": last["days"] + zone["days"],
-                    "pct_time": last["pct_time"] + zone["pct_time"]
-                }
-            else:
-                merged.append(zone)
-        return merged
-    
-    consolidation_zones = merge_zones(consolidation_zones)[:3]
+    # =========================================================================
+    # 3. PERIOD HIGH/LOW
+    # =========================================================================
+    key_levels.append({
+        "price": period_high,
+        "type": "Period High",
+        "strength": 95,
+        "is_support": False
+    })
+    key_levels.append({
+        "price": period_low,
+        "type": "Period Low",
+        "strength": 95,
+        "is_support": True
+    })
     
     # =========================================================================
-    # 6. KOMBINIERE ALLE LEVELS MIT STÄRKE-SCORE
+    # 4. ROUND NUMBERS
     # =========================================================================
-    all_levels = []
-    
-    # Previous Day Levels (SEHR STARK - Score 90-100)
-    if prev_day_high > current_price:
-        all_levels.append({"price": prev_day_high, "type": "PDH (Prev Day High)", "strength": 95, "is_support": False})
+    if current_price >= 10:
+        round_step = 5
+    elif current_price >= 1:
+        round_step = 0.5
     else:
-        all_levels.append({"price": prev_day_high, "type": "PDH (Prev Day High)", "strength": 95, "is_support": True})
+        round_step = 0.1
     
-    if prev_day_low < current_price:
-        all_levels.append({"price": prev_day_low, "type": "PDL (Prev Day Low)", "strength": 95, "is_support": True})
-    else:
-        all_levels.append({"price": prev_day_low, "type": "PDL (Prev Day Low)", "strength": 95, "is_support": False})
-    
-    if prev_day_close != current_price:
-        is_support = prev_day_close < current_price
-        all_levels.append({"price": prev_day_close, "type": "PDC (Prev Day Close)", "strength": 85, "is_support": is_support})
-    
-    # Period High/Low (STARK - Score 80-90)
-    if period_high > current_price:
-        all_levels.append({"price": period_high, "type": "Period High", "strength": 85, "is_support": False})
-    if period_low < current_price:
-        all_levels.append({"price": period_low, "type": "Period Low", "strength": 85, "is_support": True})
-    
-    # Swing Points (Score basierend auf Touches)
-    for sh in swing_highs:
-        # Score: 50 + (touches * 10), max 80
-        strength = min(50 + sh["touches"] * 10, 80)
-        is_support = sh["price"] < current_price
-        touch_label = f" ({sh['touches']}x)" if sh["touches"] >= 2 else ""
-        all_levels.append({
-            "price": sh["price"], 
-            "type": f"Swing High{touch_label}", 
-            "strength": strength, 
-            "is_support": is_support
-        })
-    
-    for sl in swing_lows:
-        strength = min(50 + sl["touches"] * 10, 80)
-        is_support = sl["price"] < current_price
-        touch_label = f" ({sl['touches']}x)" if sl["touches"] >= 2 else ""
-        all_levels.append({
-            "price": sl["price"], 
-            "type": f"Swing Low{touch_label}", 
-            "strength": strength, 
-            "is_support": is_support
-        })
-    
-    # Fibonacci Levels (Score 60-70)
-    for fib_name, fib_price in fib_levels.items():
-        is_support = fib_price < current_price
-        # 50% und 61.8% sind stärker
-        strength = 70 if fib_name in ["50.0", "61.8"] else 60
-        all_levels.append({
-            "price": fib_price, 
-            "type": f"Fib {fib_name}%", 
-            "strength": strength, 
-            "is_support": is_support
-        })
-    
-    # Round Numbers (Score 55)
-    for rn in round_numbers:
-        is_support = rn["price"] < current_price
-        all_levels.append({
-            "price": rn["price"], 
-            "type": rn["type"], 
-            "strength": 55, 
-            "is_support": is_support
-        })
-    
-    # Konsolidierungszonen Mitte (Score basierend auf Zeit)
-    for zone in consolidation_zones:
-        strength = min(50 + zone["pct_time"] * 2, 75)  # Mehr Zeit = stärker
-        is_support = zone["mid"] < current_price
-        all_levels.append({
-            "price": zone["mid"], 
-            "type": f"Consol Zone ({zone['pct_time']}%)", 
-            "strength": strength, 
-            "is_support": is_support
-        })
+    round_price = round(current_price / round_step) * round_step
+    for offset in [-2, -1, 1, 2]:
+        rp = round_price + offset * round_step
+        if period_low <= rp <= period_high and abs(rp - current_price) / current_price > 0.02:
+            key_levels.append({
+                "price": rp,
+                "type": f"Round ${rp:.2f}",
+                "strength": 65,
+                "is_support": rp < current_price
+            })
     
     # =========================================================================
-    # 7. CLUSTER-BEREINIGUNG & SORTIERUNG
+    # 5. GAP LEVELS
     # =========================================================================
-    # Sortiere nach Stärke
-    supports_raw = [l for l in all_levels if l["is_support"]]
-    resistances_raw = [l for l in all_levels if not l["is_support"]]
+    for i in range(1, len(closes)):
+        prev_close = closes[i-1]
+        curr_high = highs[i]
+        curr_low = lows[i]
+        
+        # Gap Up
+        if curr_low > prev_close:
+            gap_pct = (curr_low - prev_close) / prev_close if prev_close > 0 else 0
+            if gap_pct > 0.03:
+                key_levels.append({
+                    "price": prev_close,
+                    "type": "Gap Fill",
+                    "strength": 70,
+                    "is_support": prev_close < current_price
+                })
+        
+        # Gap Down
+        if curr_high < prev_close:
+            gap_pct = (prev_close - curr_high) / prev_close if prev_close > 0 else 0
+            if gap_pct > 0.03:
+                key_levels.append({
+                    "price": prev_close,
+                    "type": "Gap Fill",
+                    "strength": 70,
+                    "is_support": prev_close < current_price
+                })
     
-    supports_raw = sorted(supports_raw, key=lambda x: x["price"], reverse=True)  # Nächster Support zuerst
-    resistances_raw = sorted(resistances_raw, key=lambda x: x["price"])  # Nächste Resistance zuerst
-    
-    # Entferne Cluster (Levels die zu nah beieinander sind)
-    def remove_clusters_with_merge(levels, min_distance_pct=1.5):
-        """Merged Levels die nah beieinander sind, behält stärkstes"""
+    # =========================================================================
+    # 6. CLUSTERING MIT CONFLUENCE
+    # =========================================================================
+    def cluster_with_confluence(levels, tolerance_pct=0.03):
         if not levels:
             return []
         
-        cleaned = [levels[0]]
-        for level in levels[1:]:
-            last_price = cleaned[-1]["price"]
-            distance_pct = abs(level["price"] - last_price) / max(last_price, 0.001) * 100
-            
-            if distance_pct < min_distance_pct:
-                # Merge: Behalte das stärkere Level
-                if level["strength"] > cleaned[-1]["strength"]:
-                    cleaned[-1] = level
-            else:
-                cleaned.append(level)
+        sorted_levels = sorted(levels, key=lambda x: x["price"])
+        clusters = []
+        current_cluster = [sorted_levels[0]]
         
-        return cleaned
+        for level in sorted_levels[1:]:
+            cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
+            if abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
+                current_cluster.append(level)
+            else:
+                best = max(current_cluster, key=lambda x: x["strength"])
+                types = list(set(l["type"] for l in current_cluster))
+                if len(types) > 1:
+                    best["type"] = " + ".join(types[:2])
+                best["strength"] = min(99, best["strength"] + len(current_cluster) * 5)
+                clusters.append(best)
+                current_cluster = [level]
+        
+        if current_cluster:
+            best = max(current_cluster, key=lambda x: x["strength"])
+            types = list(set(l["type"] for l in current_cluster))
+            if len(types) > 1:
+                best["type"] = " + ".join(types[:2])
+            best["strength"] = min(99, best["strength"] + len(current_cluster) * 5)
+            clusters.append(best)
+        
+        return clusters
     
-    supports_cleaned = remove_clusters_with_merge(supports_raw)[:3]
-    resistances_cleaned = remove_clusters_with_merge(resistances_raw)[:3]
+    all_clustered = cluster_with_confluence(key_levels, tolerance_pct=0.03)
     
-    # Sortiere final nach Stärke innerhalb der Top 3
-    supports_cleaned = sorted(supports_cleaned, key=lambda x: x["strength"], reverse=True)
-    resistances_cleaned = sorted(resistances_cleaned, key=lambda x: x["strength"], reverse=True)
+    # Trenne Support und Resistance
+    supports_raw = [l for l in all_clustered if l["price"] < current_price * 0.98]
+    resistances_raw = [l for l in all_clustered if l["price"] > current_price * 1.02]
+    
+    # Sortiere nach Stärke und nimm Top 3
+    supports_raw = sorted(supports_raw, key=lambda x: x["strength"], reverse=True)[:3]
+    resistances_raw = sorted(resistances_raw, key=lambda x: x["strength"], reverse=True)[:3]
+    
+    # Sortiere nach Preis für Anzeige
+    supports_cleaned = sorted(supports_raw, key=lambda x: x["price"], reverse=True)
+    resistances_cleaned = sorted(resistances_raw, key=lambda x: x["price"])
     
     # =========================================================================
-    # 8. OUTPUT
+    # OUTPUT
     # =========================================================================
     def smart_round(price):
         if price >= 1000:
@@ -5444,35 +5336,26 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         else:
             return round(price, 4)
     
-    # Formatiere für Ausgabe
     supports = [smart_round(s["price"]) for s in supports_cleaned]
     resistances = [smart_round(r["price"]) for r in resistances_cleaned]
     
-    # Füge Type-Info für Detail-Anzeige hinzu
     supports_detail = [{"price": smart_round(s["price"]), "type": s["type"], "strength": s["strength"]} for s in supports_cleaned]
     resistances_detail = [{"price": smart_round(r["price"]), "type": r["type"], "strength": r["strength"]} for r in resistances_cleaned]
     
-    # Runde Konsolidierungszonen
-    for zone in consolidation_zones:
-        zone["low"] = smart_round(zone["low"])
-        zone["high"] = smart_round(zone["high"])
-        zone["mid"] = smart_round(zone["mid"])
-    
-    # FIB INFO für AI-Analyse
     fib_info = {
         "period_high": smart_round(period_high),
         "period_low": smart_round(period_low),
         "prev_day_high": smart_round(prev_day_high),
         "prev_day_low": smart_round(prev_day_low),
         "prev_day_close": smart_round(prev_day_close),
-        "fib_236": smart_round(fib_levels["23.6"]),
-        "fib_382": smart_round(fib_levels["38.2"]),
-        "fib_500": smart_round(fib_levels["50.0"]),
-        "fib_618": smart_round(fib_levels["61.8"]),
-        "fib_786": smart_round(fib_levels["78.6"]),
+        "fib_236": smart_round(fib_levels_dict["23.6"]),
+        "fib_382": smart_round(fib_levels_dict["38.2"]),
+        "fib_500": smart_round(fib_levels_dict["50.0"]),
+        "fib_618": smart_round(fib_levels_dict["61.8"]),
+        "fib_786": smart_round(fib_levels_dict["78.6"]),
         "supports_detail": supports_detail,
         "resistances_detail": resistances_detail,
-        "consolidation_zones": consolidation_zones,
+        "consolidation_zones": [],
         "total_candles": total_candles,
     }
     
