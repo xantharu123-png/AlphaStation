@@ -3227,9 +3227,13 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
         return None
 
 
-def calculate_support_resistance(ohlcv_data, num_levels=5, lookback=50):
+def calculate_support_resistance(ohlcv_data, num_levels=5, lookback=100):
     """
-    Berechnet Support/Resistance Levels aus Pivot Points und Volume Clusters.
+    Berechnet Support/Resistance Levels aus:
+    - Pivot Points (lokale Hochs/Tiefs)
+    - Swing Highs/Lows (wichtige Wendepunkte)
+    - Round Numbers ($1, $2, $5, $10, etc.)
+    - Volume Clusters
     
     Returns:
         dict mit support_levels, resistance_levels, each with price and strength
@@ -3238,77 +3242,179 @@ def calculate_support_resistance(ohlcv_data, num_levels=5, lookback=50):
         return {"support_levels": [], "resistance_levels": []}
     
     try:
-        highs = [d["high"] for d in ohlcv_data[-lookback:]]
-        lows = [d["low"] for d in ohlcv_data[-lookback:]]
-        closes = [d["close"] for d in ohlcv_data[-lookback:]]
-        volumes = [d.get("volume", 0) for d in ohlcv_data[-lookback:]]
+        # Nutze ALLE Daten, nicht nur lookback
+        data = ohlcv_data[-min(lookback, len(ohlcv_data)):]
+        
+        highs = [d["high"] for d in data]
+        lows = [d["low"] for d in data]
+        closes = [d["close"] for d in data]
+        volumes = [d.get("volume", 0) for d in data]
         
         current_price = closes[-1]
+        price_range = max(highs) - min(lows)
         
-        # Finde Pivot Highs (lokale Hochpunkte)
-        pivot_highs = []
+        # Mindestabstand zwischen Levels (5% der Range oder 3% vom Preis)
+        min_distance = max(price_range * 0.05, current_price * 0.03)
+        
+        all_levels = []
+        
+        # === 1. SWING HIGHS/LOWS (wichtigste Levels) ===
+        # Swing High = Höher als alle X Bars links UND rechts
+        swing_window = max(5, len(data) // 10)  # Dynamisch basierend auf Datenmenge
+        
+        for i in range(swing_window, len(highs) - swing_window):
+            left_highs = highs[i-swing_window:i]
+            right_highs = highs[i+1:i+swing_window+1]
+            
+            if highs[i] >= max(left_highs) and highs[i] >= max(right_highs):
+                all_levels.append({
+                    "price": highs[i],
+                    "type": "swing_high",
+                    "strength": 3,  # Swing = stark
+                    "volume": volumes[i]
+                })
+        
+        for i in range(swing_window, len(lows) - swing_window):
+            left_lows = lows[i-swing_window:i]
+            right_lows = lows[i+1:i+swing_window+1]
+            
+            if lows[i] <= min(left_lows) and lows[i] <= min(right_lows):
+                all_levels.append({
+                    "price": lows[i],
+                    "type": "swing_low",
+                    "strength": 3,
+                    "volume": volumes[i]
+                })
+        
+        # === 2. PIVOT POINTS (kleinere lokale Extrema) ===
         for i in range(2, len(highs) - 2):
             if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
                highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                pivot_highs.append({
+                all_levels.append({
                     "price": highs[i],
-                    "index": i,
+                    "type": "pivot_high",
+                    "strength": 1,
                     "volume": volumes[i]
                 })
         
-        # Finde Pivot Lows (lokale Tiefpunkte)
-        pivot_lows = []
         for i in range(2, len(lows) - 2):
             if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
                lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-                pivot_lows.append({
+                all_levels.append({
                     "price": lows[i],
-                    "index": i,
+                    "type": "pivot_low",
+                    "strength": 1,
                     "volume": volumes[i]
                 })
         
-        # Cluster ähnliche Levels (innerhalb 1%)
-        def cluster_levels(levels, tolerance=0.01):
+        # === 3. ROUND NUMBERS ===
+        min_price = min(lows) * 0.9
+        max_price = max(highs) * 1.1
+        
+        # Bestimme sinnvolle Round Number Intervalle basierend auf Preis
+        if current_price >= 100:
+            intervals = [10, 25, 50, 100]
+        elif current_price >= 10:
+            intervals = [1, 2, 5, 10]
+        elif current_price >= 1:
+            intervals = [0.25, 0.5, 1, 2]
+        else:
+            intervals = [0.05, 0.1, 0.25, 0.5]
+        
+        for interval in intervals:
+            level = (min_price // interval) * interval
+            while level <= max_price:
+                if level > 0:
+                    # Stärke basierend auf "Rundheit"
+                    strength = 2 if level % (interval * 4) == 0 else 1
+                    all_levels.append({
+                        "price": level,
+                        "type": "round_number",
+                        "strength": strength,
+                        "volume": 0
+                    })
+                level += interval
+        
+        # === 4. ABSOLUTE HIGH/LOW ===
+        all_levels.append({
+            "price": max(highs),
+            "type": "absolute_high",
+            "strength": 4,
+            "volume": max(volumes)
+        })
+        all_levels.append({
+            "price": min(lows),
+            "type": "absolute_low",
+            "strength": 4,
+            "volume": max(volumes)
+        })
+        
+        # === CLUSTER & FILTER ===
+        def cluster_and_filter(levels, min_dist, max_count=10):
+            """Clustert nahe Levels und behält die stärksten"""
             if not levels:
                 return []
             
+            # Sortiere nach Preis
             sorted_levels = sorted(levels, key=lambda x: x["price"])
+            
+            # Cluster ähnliche Levels (innerhalb 3% voneinander)
             clusters = []
             current_cluster = [sorted_levels[0]]
             
             for level in sorted_levels[1:]:
-                if abs(level["price"] - current_cluster[-1]["price"]) / current_cluster[-1]["price"] < tolerance:
+                # Prüfe ob nahe genug zum Cluster
+                cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
+                if abs(level["price"] - cluster_avg) / cluster_avg < 0.03:
                     current_cluster.append(level)
                 else:
                     # Cluster abschließen
-                    avg_price = sum(l["price"] for l in current_cluster) / len(current_cluster)
-                    total_vol = sum(l.get("volume", 0) for l in current_cluster)
-                    clusters.append({
-                        "price": round(avg_price, 2),
-                        "strength": len(current_cluster),  # Mehr Touches = stärker
-                        "volume": total_vol
-                    })
+                    clusters.append(current_cluster)
                     current_cluster = [level]
             
-            # Letzter Cluster
             if current_cluster:
-                avg_price = sum(l["price"] for l in current_cluster) / len(current_cluster)
-                total_vol = sum(l.get("volume", 0) for l in current_cluster)
-                clusters.append({
-                    "price": round(avg_price, 2),
-                    "strength": len(current_cluster),
-                    "volume": total_vol
+                clusters.append(current_cluster)
+            
+            # Für jeden Cluster: Berechne gewichteten Durchschnitt und Gesamtstärke
+            result = []
+            for cluster in clusters:
+                total_strength = sum(l["strength"] for l in cluster)
+                total_volume = sum(l.get("volume", 0) for l in cluster)
+                
+                # Gewichteter Durchschnitt nach Stärke
+                weighted_price = sum(l["price"] * l["strength"] for l in cluster) / total_strength
+                
+                result.append({
+                    "price": round(weighted_price, 2),
+                    "strength": total_strength,
+                    "volume": total_volume,
+                    "touches": len(cluster)
                 })
             
-            return clusters
+            # Sortiere nach Stärke (absteigend)
+            result.sort(key=lambda x: x["strength"], reverse=True)
+            
+            # Filtere zu nahe beieinander liegende Levels
+            filtered = []
+            for level in result:
+                is_too_close = False
+                for existing in filtered:
+                    if abs(level["price"] - existing["price"]) < min_dist:
+                        is_too_close = True
+                        break
+                if not is_too_close:
+                    filtered.append(level)
+                if len(filtered) >= max_count:
+                    break
+            
+            return filtered
         
-        # Cluster und sortiere nach Stärke
-        resistance_clusters = cluster_levels(pivot_highs)
-        support_clusters = cluster_levels(pivot_lows)
+        # Cluster alle Levels
+        all_clustered = cluster_and_filter(all_levels, min_distance, max_count=20)
         
-        # Filtere: Resistance über aktuellem Preis, Support darunter
-        resistance_levels = [r for r in resistance_clusters if r["price"] > current_price]
-        support_levels = [s for s in support_clusters if s["price"] < current_price]
+        # Trenne in Support und Resistance
+        resistance_levels = [l for l in all_clustered if l["price"] > current_price * 1.005]
+        support_levels = [l for l in all_clustered if l["price"] < current_price * 0.995]
         
         # Sortiere nach Nähe zum aktuellen Preis
         resistance_levels.sort(key=lambda x: x["price"])
@@ -4033,23 +4139,51 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
     
     vwap_json = json.dumps(vwap_lines)
     
-    # Prepare S/R lines
+    # Prepare S/R lines - VERBESSERT mit Type Labels
     sr_lines = []
     if sr_levels:
         for s in sr_levels.get("support_levels", [])[:3]:
+            # Stärke skalieren: 50-100 → 1-3 für Liniendicke
+            strength_raw = s.get("strength", 50)
+            line_width = 1 if strength_raw < 70 else (2 if strength_raw < 90 else 3)
+            
+            # Type als Label nutzen wenn vorhanden
+            level_type = s.get("type", "Support")
+            label = f"S: ${s['price']:.2f}"
+            if "PDL" in level_type:
+                label = f"PDL: ${s['price']:.2f}"
+            elif "Fib" in level_type:
+                label = f"Fib: ${s['price']:.2f}"
+            elif "Round" in level_type:
+                label = f"${s['price']:.2f}"
+            
             sr_lines.append({
                 "price": s["price"],
                 "color": "#4CAF50",
-                "lineWidth": min(s.get("strength", 1) + 1, 3),
-                "label": f"S: ${s['price']:.2f}",
+                "lineWidth": line_width,
+                "label": label,
                 "type": "support"
             })
         for r in sr_levels.get("resistance_levels", [])[:3]:
+            strength_raw = r.get("strength", 50)
+            line_width = 1 if strength_raw < 70 else (2 if strength_raw < 90 else 3)
+            
+            level_type = r.get("type", "Resistance")
+            label = f"R: ${r['price']:.2f}"
+            if "PDH" in level_type:
+                label = f"PDH: ${r['price']:.2f}"
+            elif "PDC" in level_type:
+                label = f"PDC: ${r['price']:.2f}"
+            elif "Fib" in level_type:
+                label = f"Fib: ${r['price']:.2f}"
+            elif "Round" in level_type:
+                label = f"${r['price']:.2f}"
+            
             sr_lines.append({
                 "price": r["price"],
                 "color": "#F44336",
-                "lineWidth": min(r.get("strength", 1) + 1, 3),
-                "label": f"R: ${r['price']:.2f}",
+                "lineWidth": line_width,
+                "label": label,
                 "type": "resistance"
             })
     sr_json = json.dumps(sr_lines)
@@ -4404,13 +4538,55 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     
     st.caption(f"📊 {len(ohlcv)} Bars geladen")
     
+    current_price = ohlcv[-1]["close"]
+    
     # Calculate ALL Technical Analysis
     with st.spinner("🔍 Berechne alle Indikatoren..."):
-        # Support/Resistance
-        sr_levels = calculate_support_resistance(ohlcv, num_levels=3, lookback=100)
         
-        # Fibonacci
-        fib_levels = calculate_fibonacci_levels(ohlcv, lookback=100)
+        # ======== NUTZE DIE GUTE S/R FUNKTION! ========
+        # Konvertiere OHLCV Daten ins richtige Format für calculate_sr_from_historical
+        # Format erwartet: [[timestamp, open, high, low, close], ...]
+        ohlc_data_for_sr = [
+            [d["time"], d["open"], d["high"], d["low"], d["close"]] 
+            for d in ohlcv
+        ]
+        
+        # Rufe die GUTE Funktion auf
+        try:
+            (supports_list, resistances_list), fib_info = calculate_sr_from_historical(ohlc_data_for_sr, current_price)
+            
+            # Konvertiere in das Format das der Chart erwartet
+            sr_levels = {
+                "support_levels": fib_info.get("supports_detail", []),
+                "resistance_levels": fib_info.get("resistances_detail", []),
+                "current_price": current_price
+            }
+            
+            # Fib Levels aus fib_info extrahieren
+            fib_levels = {
+                "swing_high": fib_info.get("period_high", max(d["high"] for d in ohlcv)),
+                "swing_low": fib_info.get("period_low", min(d["low"] for d in ohlcv)),
+                "levels": {
+                    "0.0": fib_info.get("period_low", 0),
+                    "0.236": fib_info.get("fib_236", 0),
+                    "0.382": fib_info.get("fib_382", 0),
+                    "0.5": fib_info.get("fib_500", 0),
+                    "0.618": fib_info.get("fib_618", 0),
+                    "0.786": fib_info.get("fib_786", 0),
+                    "1.0": fib_info.get("period_high", 0),
+                }
+            }
+            
+            # PDH/PDL/PDC für Anzeige speichern
+            pdh = fib_info.get("prev_day_high", 0)
+            pdl = fib_info.get("prev_day_low", 0) 
+            pdc = fib_info.get("prev_day_close", 0)
+            
+        except Exception as e:
+            # Fallback zur einfachen Berechnung
+            sr_levels = calculate_support_resistance(ohlcv, num_levels=3, lookback=100)
+            fib_levels = calculate_fibonacci_levels(ohlcv, lookback=100)
+            pdh, pdl, pdc = 0, 0, 0
         
         # Patterns
         patterns = detect_chart_patterns(ohlcv, lookback=80)
@@ -4455,6 +4631,16 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         show_voids = st.checkbox("🕳️ Voids", value=False, key=f"voids_{ticker}_{current_tf}")
     with col_opt6:
         show_zones = st.checkbox("🎯 Zones", value=False, key=f"zones_{ticker}_{current_tf}")
+    
+    # PDH/PDL/PDC Anzeige
+    if pdh > 0 and pdl > 0:
+        col_pdh, col_pdl, col_pdc = st.columns(3)
+        with col_pdh:
+            st.caption(f"📈 PDH: ${pdh:.2f}")
+        with col_pdl:
+            st.caption(f"📉 PDL: ${pdl:.2f}")
+        with col_pdc:
+            st.caption(f"📊 PDC: ${pdc:.2f}")
     
     # Generate Chart HTML
     chart_html = create_lightweight_chart_html(
