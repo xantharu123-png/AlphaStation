@@ -1,25 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V66.5 PRO                               ║
+║                        ALPHA STATION V67.0 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 66.5 (Extended Pre-Market Watchlist V2)                            ║
+║  Version: 67.0 (AI Chart Analyzer)                                           ║
 ║  Date: 03. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V66.5 NEW - EXTENDED PRE-MARKET WATCHLIST V2:                               ║
-║  ✅ ECHTE PM Session High/Low (Aggregates API, nicht nur letzte Minute)      ║
-║  ✅ Previous Day High/Low (PDH/PDL) Levels                                   ║
-║  ✅ Gap Size & Direction mit Gap-Klassifizierung                             ║
-║  ✅ Relative Strength vs SPY (Outperformer erkennen)                         ║
-║  ✅ Setup-Kategorien: GAP&GO, SQUEEZE, CONTINUATION, REVERSAL, RANGE         ║
-║  ✅ Risk Management: Entry/Stop/Target1/Target2 automatisch berechnet        ║
-║  ✅ PM VWAP für Intraday-Levels                                              ║
-║  ✅ Position Meter (visuell wo Preis in PM Range steht)                      ║
-║  ✅ Move Time Detection (wann kam der PM Move?)                              ║
-║  ✅ Export & Watchlist Integration                                            ║
-║  V66.4: Basic Pre-Market Watchlist                                           ║
-║  V66.3: 6 Strategy-Specific Timing Assessments                               ║
+║  V67.0 NEW - AI CHART ANALYZER:                                              ║
+║  ✅ EIGENER CHART mit Lightweight Charts (TradingView Engine)                ║
+║  ✅ PATTERN RECOGNITION: Double Top/Bottom, H&S, Triangles, Flags            ║
+║  ✅ AUTOMATISCHE S/R: Support & Resistance aus Pivot Points                  ║
+║  ✅ FIBONACCI LEVELS: Auto-Berechnung der Retracements                       ║
+║  ✅ EMA OVERLAYS: 20/50/200 EMAs automatisch eingezeichnet                   ║
+║  ✅ VOLUME PROFILE: POC, VAH, VAL Integration                                ║
+║  ✅ AI TRADE SETUP: Entry/Stop/Target automatisch generiert                  ║
+║  ✅ R:R BERECHNUNG: Risk-Reward Ratio für jeden Trade                        ║
+║  V66.6: PM Watchlist Complete - News + Float                                 ║
+║  V66.5: Extended PM Watchlist - Echte PM H/L, PDH/PDL, RS vs SPY             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -29,8 +27,10 @@ import requests
 import anthropic
 import json
 import pytz
-from datetime import datetime
+import numpy as np
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1 as components
 
 # =============================================================================
 # 1. INITIALISIERUNG
@@ -67,9 +67,13 @@ if "pm_watchlist_data" not in st.session_state:
     st.session_state.pm_watchlist_data = None
 if "pm_spy_change" not in st.session_state:
     st.session_state.pm_spy_change = 0
+if "show_ai_chart" not in st.session_state:
+    st.session_state.show_ai_chart = False
+if "ai_chart_ticker" not in st.session_state:
+    st.session_state.ai_chart_ticker = None
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "66.5"
+FILTER_VERSION = "67.0"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
@@ -3120,7 +3124,6 @@ def fetch_historical_data_crypto(coin_id, days):
 def fetch_historical_data_stocks(ticker, days, poly_key):
     """Holt historische Daten von Polygon"""
     try:
-        from datetime import timedelta
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
@@ -3136,6 +3139,1424 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
     except:
         pass
     return None
+
+
+# =============================================================================
+# AI CHART ANALYZER - PATTERN RECOGNITION & TECHNICAL ANALYSIS
+# =============================================================================
+
+def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=200):
+    """
+    Holt OHLCV Daten für Chart-Darstellung.
+    
+    Args:
+        ticker: Ticker Symbol
+        poly_key: Polygon API Key
+        timeframe: "1m", "5m", "15m", "1H", "4H", "1D"
+        bars: Anzahl Bars
+        
+    Returns:
+        List of dicts with time, open, high, low, close, volume
+    """
+    try:
+        # Timeframe mapping
+        tf_map = {
+            "1m": ("1", "minute", 1),
+            "5m": ("5", "minute", 5),
+            "15m": ("15", "minute", 15),
+            "1H": ("1", "hour", 60),
+            "4H": ("4", "hour", 240),
+            "1D": ("1", "day", 1440)
+        }
+        
+        if timeframe not in tf_map:
+            timeframe = "1H"
+        
+        mult, span, minutes_per_bar = tf_map[timeframe]
+        
+        # Berechne Startdatum
+        total_minutes = bars * minutes_per_bar
+        start_date = (datetime.now() - timedelta(minutes=total_minutes * 1.5)).strftime("%Y-%m-%d")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start_date}/{end_date}"
+        params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": bars}
+        
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            return None
+        
+        data = resp.json()
+        results = data.get("results", [])
+        
+        if not results:
+            return None
+        
+        # Formatiere für Lightweight Charts
+        ohlcv = []
+        for bar in results[-bars:]:
+            ohlcv.append({
+                "time": bar["t"] // 1000,  # JavaScript timestamp (seconds)
+                "open": bar["o"],
+                "high": bar["h"],
+                "low": bar["l"],
+                "close": bar["c"],
+                "volume": bar.get("v", 0)
+            })
+        
+        return ohlcv
+        
+    except Exception as e:
+        return None
+
+
+def calculate_support_resistance(ohlcv_data, num_levels=5, lookback=50):
+    """
+    Berechnet Support/Resistance Levels aus Pivot Points und Volume Clusters.
+    
+    Returns:
+        dict mit support_levels, resistance_levels, each with price and strength
+    """
+    if not ohlcv_data or len(ohlcv_data) < 20:
+        return {"support_levels": [], "resistance_levels": []}
+    
+    try:
+        highs = [d["high"] for d in ohlcv_data[-lookback:]]
+        lows = [d["low"] for d in ohlcv_data[-lookback:]]
+        closes = [d["close"] for d in ohlcv_data[-lookback:]]
+        volumes = [d.get("volume", 0) for d in ohlcv_data[-lookback:]]
+        
+        current_price = closes[-1]
+        
+        # Finde Pivot Highs (lokale Hochpunkte)
+        pivot_highs = []
+        for i in range(2, len(highs) - 2):
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+               highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                pivot_highs.append({
+                    "price": highs[i],
+                    "index": i,
+                    "volume": volumes[i]
+                })
+        
+        # Finde Pivot Lows (lokale Tiefpunkte)
+        pivot_lows = []
+        for i in range(2, len(lows) - 2):
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+               lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                pivot_lows.append({
+                    "price": lows[i],
+                    "index": i,
+                    "volume": volumes[i]
+                })
+        
+        # Cluster ähnliche Levels (innerhalb 1%)
+        def cluster_levels(levels, tolerance=0.01):
+            if not levels:
+                return []
+            
+            sorted_levels = sorted(levels, key=lambda x: x["price"])
+            clusters = []
+            current_cluster = [sorted_levels[0]]
+            
+            for level in sorted_levels[1:]:
+                if abs(level["price"] - current_cluster[-1]["price"]) / current_cluster[-1]["price"] < tolerance:
+                    current_cluster.append(level)
+                else:
+                    # Cluster abschließen
+                    avg_price = sum(l["price"] for l in current_cluster) / len(current_cluster)
+                    total_vol = sum(l.get("volume", 0) for l in current_cluster)
+                    clusters.append({
+                        "price": round(avg_price, 2),
+                        "strength": len(current_cluster),  # Mehr Touches = stärker
+                        "volume": total_vol
+                    })
+                    current_cluster = [level]
+            
+            # Letzter Cluster
+            if current_cluster:
+                avg_price = sum(l["price"] for l in current_cluster) / len(current_cluster)
+                total_vol = sum(l.get("volume", 0) for l in current_cluster)
+                clusters.append({
+                    "price": round(avg_price, 2),
+                    "strength": len(current_cluster),
+                    "volume": total_vol
+                })
+            
+            return clusters
+        
+        # Cluster und sortiere nach Stärke
+        resistance_clusters = cluster_levels(pivot_highs)
+        support_clusters = cluster_levels(pivot_lows)
+        
+        # Filtere: Resistance über aktuellem Preis, Support darunter
+        resistance_levels = [r for r in resistance_clusters if r["price"] > current_price]
+        support_levels = [s for s in support_clusters if s["price"] < current_price]
+        
+        # Sortiere nach Nähe zum aktuellen Preis
+        resistance_levels.sort(key=lambda x: x["price"])
+        support_levels.sort(key=lambda x: x["price"], reverse=True)
+        
+        return {
+            "support_levels": support_levels[:num_levels],
+            "resistance_levels": resistance_levels[:num_levels],
+            "current_price": current_price
+        }
+        
+    except Exception as e:
+        return {"support_levels": [], "resistance_levels": []}
+
+
+def calculate_fibonacci_levels(ohlcv_data, lookback=50):
+    """
+    Berechnet Fibonacci Retracement Levels.
+    """
+    if not ohlcv_data or len(ohlcv_data) < 20:
+        return None
+    
+    try:
+        highs = [d["high"] for d in ohlcv_data[-lookback:]]
+        lows = [d["low"] for d in ohlcv_data[-lookback:]]
+        
+        swing_high = max(highs)
+        swing_low = min(lows)
+        diff = swing_high - swing_low
+        
+        # Fibonacci Levels
+        levels = {
+            "0.0": round(swing_low, 2),
+            "0.236": round(swing_low + diff * 0.236, 2),
+            "0.382": round(swing_low + diff * 0.382, 2),
+            "0.5": round(swing_low + diff * 0.5, 2),
+            "0.618": round(swing_low + diff * 0.618, 2),
+            "0.786": round(swing_low + diff * 0.786, 2),
+            "1.0": round(swing_high, 2),
+            "1.272": round(swing_high + diff * 0.272, 2),
+            "1.618": round(swing_high + diff * 0.618, 2),
+        }
+        
+        return {
+            "swing_high": swing_high,
+            "swing_low": swing_low,
+            "levels": levels
+        }
+    except:
+        return None
+
+
+def detect_chart_patterns(ohlcv_data, lookback=50):
+    """
+    Erkennt Chart-Patterns automatisch.
+    
+    Detektiert:
+    - Double Top / Double Bottom
+    - Head & Shoulders / Inverse H&S
+    - Ascending/Descending/Symmetrical Triangle
+    - Bull/Bear Flag
+    - Pennant
+    - Cup & Handle
+    - Rising/Falling Wedge
+    
+    Returns:
+        List of detected patterns with details
+    """
+    if not ohlcv_data or len(ohlcv_data) < 30:
+        return []
+    
+    patterns = []
+    
+    try:
+        data = ohlcv_data[-lookback:]
+        highs = [d["high"] for d in data]
+        lows = [d["low"] for d in data]
+        closes = [d["close"] for d in data]
+        volumes = [d.get("volume", 0) for d in data]
+        
+        current_price = closes[-1]
+        
+        # Finde Swing Highs und Lows
+        swing_highs = []
+        swing_lows = []
+        
+        for i in range(3, len(data) - 3):
+            # Swing High
+            if highs[i] >= max(highs[i-3:i]) and highs[i] >= max(highs[i+1:i+4]):
+                swing_highs.append({"price": highs[i], "index": i, "volume": volumes[i]})
+            # Swing Low
+            if lows[i] <= min(lows[i-3:i]) and lows[i] <= min(lows[i+1:i+4]):
+                swing_lows.append({"price": lows[i], "index": i, "volume": volumes[i]})
+        
+        # === DOUBLE TOP ===
+        if len(swing_highs) >= 2:
+            last_two_highs = swing_highs[-2:]
+            h1, h2 = last_two_highs[0]["price"], last_two_highs[1]["price"]
+            
+            # Ähnliche Höhe (innerhalb 2%)
+            if abs(h1 - h2) / h1 < 0.02:
+                neckline = min(lows[last_two_highs[0]["index"]:last_two_highs[1]["index"]+1])
+                
+                # Preis unter Neckline = bestätigt
+                if current_price < neckline:
+                    patterns.append({
+                        "pattern": "Double Top",
+                        "emoji": "🔻",
+                        "type": "bearish",
+                        "level1": round(h1, 2),
+                        "level2": round(h2, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline - (h1 - neckline), 2),
+                        "confidence": "High" if current_price < neckline * 0.99 else "Medium",
+                        "description": f"Double Top @ ${h1:.2f} - Bearish Reversal. Target: ${neckline - (h1 - neckline):.2f}"
+                    })
+                elif current_price < h1 * 0.98:
+                    patterns.append({
+                        "pattern": "Double Top (forming)",
+                        "emoji": "⚠️",
+                        "type": "bearish",
+                        "level1": round(h1, 2),
+                        "level2": round(h2, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline - (h1 - neckline), 2),
+                        "confidence": "Low",
+                        "description": f"Potential Double Top forming @ ${h1:.2f}. Watch neckline ${neckline:.2f}"
+                    })
+        
+        # === DOUBLE BOTTOM ===
+        if len(swing_lows) >= 2:
+            last_two_lows = swing_lows[-2:]
+            l1, l2 = last_two_lows[0]["price"], last_two_lows[1]["price"]
+            
+            if abs(l1 - l2) / l1 < 0.02:
+                neckline = max(highs[last_two_lows[0]["index"]:last_two_lows[1]["index"]+1])
+                
+                if current_price > neckline:
+                    patterns.append({
+                        "pattern": "Double Bottom",
+                        "emoji": "🚀",
+                        "type": "bullish",
+                        "level1": round(l1, 2),
+                        "level2": round(l2, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline + (neckline - l1), 2),
+                        "confidence": "High" if current_price > neckline * 1.01 else "Medium",
+                        "description": f"Double Bottom @ ${l1:.2f} - Bullish Reversal. Target: ${neckline + (neckline - l1):.2f}"
+                    })
+                elif current_price > l1 * 1.02:
+                    patterns.append({
+                        "pattern": "Double Bottom (forming)",
+                        "emoji": "👀",
+                        "type": "bullish",
+                        "level1": round(l1, 2),
+                        "level2": round(l2, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline + (neckline - l1), 2),
+                        "confidence": "Low",
+                        "description": f"Potential Double Bottom forming @ ${l1:.2f}. Watch neckline ${neckline:.2f}"
+                    })
+        
+        # === HEAD & SHOULDERS ===
+        if len(swing_highs) >= 3:
+            last_three = swing_highs[-3:]
+            h1, h2, h3 = last_three[0]["price"], last_three[1]["price"], last_three[2]["price"]
+            
+            # Head (h2) muss höher sein als beide Shoulders
+            if h2 > h1 and h2 > h3 and abs(h1 - h3) / h1 < 0.03:
+                neckline = min(lows[last_three[0]["index"]:last_three[2]["index"]+1])
+                
+                if current_price < neckline:
+                    patterns.append({
+                        "pattern": "Head & Shoulders",
+                        "emoji": "🔻🔻",
+                        "type": "bearish",
+                        "left_shoulder": round(h1, 2),
+                        "head": round(h2, 2),
+                        "right_shoulder": round(h3, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline - (h2 - neckline), 2),
+                        "confidence": "High",
+                        "description": f"H&S Complete! Neckline broken. Target: ${neckline - (h2 - neckline):.2f}"
+                    })
+                elif current_price < h3 * 0.98:
+                    patterns.append({
+                        "pattern": "Head & Shoulders (forming)",
+                        "emoji": "⚠️",
+                        "type": "bearish",
+                        "left_shoulder": round(h1, 2),
+                        "head": round(h2, 2),
+                        "right_shoulder": round(h3, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline - (h2 - neckline), 2),
+                        "confidence": "Medium",
+                        "description": f"H&S forming. Watch neckline @ ${neckline:.2f}"
+                    })
+        
+        # === INVERSE HEAD & SHOULDERS ===
+        if len(swing_lows) >= 3:
+            last_three = swing_lows[-3:]
+            l1, l2, l3 = last_three[0]["price"], last_three[1]["price"], last_three[2]["price"]
+            
+            # Head (l2) muss tiefer sein als beide Shoulders
+            if l2 < l1 and l2 < l3 and abs(l1 - l3) / l1 < 0.03:
+                neckline = max(highs[last_three[0]["index"]:last_three[2]["index"]+1])
+                
+                if current_price > neckline:
+                    patterns.append({
+                        "pattern": "Inverse Head & Shoulders",
+                        "emoji": "🚀🚀",
+                        "type": "bullish",
+                        "left_shoulder": round(l1, 2),
+                        "head": round(l2, 2),
+                        "right_shoulder": round(l3, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline + (neckline - l2), 2),
+                        "confidence": "High",
+                        "description": f"Inv. H&S Complete! Neckline broken. Target: ${neckline + (neckline - l2):.2f}"
+                    })
+                elif current_price > l3 * 1.02:
+                    patterns.append({
+                        "pattern": "Inverse H&S (forming)",
+                        "emoji": "👀",
+                        "type": "bullish",
+                        "left_shoulder": round(l1, 2),
+                        "head": round(l2, 2),
+                        "right_shoulder": round(l3, 2),
+                        "neckline": round(neckline, 2),
+                        "target": round(neckline + (neckline - l2), 2),
+                        "confidence": "Medium",
+                        "description": f"Inv. H&S forming. Watch neckline @ ${neckline:.2f}"
+                    })
+        
+        # === TRIANGLES ===
+        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+            recent_highs = [h["price"] for h in swing_highs[-3:]]
+            recent_lows = [l["price"] for l in swing_lows[-3:]]
+            
+            if len(recent_highs) >= 2 and len(recent_lows) >= 2:
+                high_trend = (recent_highs[-1] - recent_highs[0]) / recent_highs[0]
+                low_trend = (recent_lows[-1] - recent_lows[0]) / recent_lows[0]
+                high_range = (max(recent_highs) - min(recent_highs)) / max(recent_highs)
+                low_range = (max(recent_lows) - min(recent_lows)) / max(recent_lows)
+                
+                # ASCENDING TRIANGLE: Flat resistance + rising support
+                if high_range < 0.02 and low_trend > 0.02:
+                    resistance = sum(recent_highs) / len(recent_highs)
+                    patterns.append({
+                        "pattern": "Ascending Triangle",
+                        "emoji": "📐⬆️",
+                        "type": "bullish",
+                        "resistance": round(resistance, 2),
+                        "target": round(resistance * 1.05, 2),
+                        "confidence": "Medium",
+                        "description": f"Ascending Triangle - Resistance @ ${resistance:.2f}. Breakout target +5%"
+                    })
+                
+                # DESCENDING TRIANGLE: Falling resistance + flat support
+                elif low_range < 0.02 and high_trend < -0.02:
+                    support = sum(recent_lows) / len(recent_lows)
+                    patterns.append({
+                        "pattern": "Descending Triangle",
+                        "emoji": "📐⬇️",
+                        "type": "bearish",
+                        "support": round(support, 2),
+                        "target": round(support * 0.95, 2),
+                        "confidence": "Medium",
+                        "description": f"Descending Triangle - Support @ ${support:.2f}. Breakdown target -5%"
+                    })
+                
+                # SYMMETRICAL TRIANGLE: Converging trendlines
+                elif high_trend < -0.01 and low_trend > 0.01:
+                    apex_price = (recent_highs[-1] + recent_lows[-1]) / 2
+                    range_pct = (recent_highs[-1] - recent_lows[-1]) / apex_price * 100
+                    
+                    if range_pct < 5:  # Converging
+                        patterns.append({
+                            "pattern": "Symmetrical Triangle",
+                            "emoji": "📐",
+                            "type": "neutral",
+                            "apex": round(apex_price, 2),
+                            "range": f"{range_pct:.1f}%",
+                            "confidence": "Medium",
+                            "description": f"Symmetrical Triangle - Apex @ ${apex_price:.2f}. Breakout imminent!"
+                        })
+        
+        # === FLAGS & PENNANTS ===
+        if len(closes) >= 20:
+            # Pole: Starke Bewegung in ersten 30%
+            pole_end = int(len(closes) * 0.3)
+            pole_move = (closes[pole_end] - closes[0]) / closes[0]
+            
+            # Flag/Pennant: Konsolidierung in letzten 70%
+            flag_data = closes[pole_end:]
+            flag_highs = highs[pole_end:]
+            flag_lows = lows[pole_end:]
+            flag_range = max(flag_data) - min(flag_data)
+            flag_range_pct = flag_range / closes[pole_end] if closes[pole_end] > 0 else 0
+            
+            # Check für Kanal (Flag) vs. Konvergenz (Pennant)
+            flag_high_trend = (flag_highs[-1] - flag_highs[0]) / flag_highs[0] if flag_highs[0] > 0 else 0
+            flag_low_trend = (flag_lows[-1] - flag_lows[0]) / flag_lows[0] if flag_lows[0] > 0 else 0
+            
+            # BULL FLAG: Starker Anstieg + leichter Rückgang
+            if pole_move > 0.08 and flag_range_pct < 0.06:
+                if flag_high_trend < 0 and flag_low_trend < 0:  # Paralleler Kanal nach unten
+                    patterns.append({
+                        "pattern": "Bull Flag",
+                        "emoji": "🚩⬆️",
+                        "type": "bullish",
+                        "pole_move": f"{pole_move*100:.1f}%",
+                        "target": round(closes[-1] * (1 + pole_move), 2),
+                        "confidence": "Medium",
+                        "description": f"Bull Flag after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move):.2f}"
+                    })
+                elif flag_high_trend < 0 and flag_low_trend > 0:  # Konvergierend
+                    patterns.append({
+                        "pattern": "Bullish Pennant",
+                        "emoji": "🔺⬆️",
+                        "type": "bullish",
+                        "pole_move": f"{pole_move*100:.1f}%",
+                        "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
+                        "confidence": "Medium",
+                        "description": f"Bullish Pennant after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
+                    })
+            
+            # BEAR FLAG: Starker Abfall + leichte Erholung
+            elif pole_move < -0.08 and flag_range_pct < 0.06:
+                if flag_high_trend > 0 and flag_low_trend > 0:  # Paralleler Kanal nach oben
+                    patterns.append({
+                        "pattern": "Bear Flag",
+                        "emoji": "🚩⬇️",
+                        "type": "bearish",
+                        "pole_move": f"{pole_move*100:.1f}%",
+                        "target": round(closes[-1] * (1 + pole_move), 2),
+                        "confidence": "Medium",
+                        "description": f"Bear Flag after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move):.2f}"
+                    })
+                elif flag_high_trend < 0 and flag_low_trend > 0:  # Konvergierend
+                    patterns.append({
+                        "pattern": "Bearish Pennant",
+                        "emoji": "🔻⬇️",
+                        "type": "bearish",
+                        "pole_move": f"{pole_move*100:.1f}%",
+                        "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
+                        "confidence": "Medium",
+                        "description": f"Bearish Pennant after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
+                    })
+        
+        # === CUP & HANDLE ===
+        if len(closes) >= 30:
+            # Cup: U-förmige Formation in ersten 70%
+            cup_end = int(len(closes) * 0.7)
+            cup_data = closes[:cup_end]
+            
+            if len(cup_data) >= 15:
+                cup_left = cup_data[:len(cup_data)//3]
+                cup_bottom = cup_data[len(cup_data)//3:2*len(cup_data)//3]
+                cup_right = cup_data[2*len(cup_data)//3:]
+                
+                left_avg = sum(cup_left) / len(cup_left)
+                bottom_avg = sum(cup_bottom) / len(cup_bottom)
+                right_avg = sum(cup_right) / len(cup_right)
+                
+                # Cup Kriterien: Links hoch, Mitte tief, Rechts wieder hoch
+                if left_avg > bottom_avg and right_avg > bottom_avg:
+                    cup_depth = (left_avg - bottom_avg) / left_avg
+                    
+                    # Cup sollte 15-35% tief sein
+                    if 0.10 < cup_depth < 0.40:
+                        # Handle: Letzten 30%
+                        handle_data = closes[cup_end:]
+                        handle_range = (max(handle_data) - min(handle_data)) / max(handle_data)
+                        
+                        # Handle sollte kleiner als Cup sein
+                        if handle_range < cup_depth * 0.5:
+                            cup_lip = max(left_avg, right_avg)
+                            
+                            if current_price > cup_lip * 0.95:  # Nahe am Breakout
+                                patterns.append({
+                                    "pattern": "Cup & Handle",
+                                    "emoji": "☕⬆️",
+                                    "type": "bullish",
+                                    "cup_depth": f"{cup_depth*100:.1f}%",
+                                    "breakout_level": round(cup_lip, 2),
+                                    "target": round(cup_lip * (1 + cup_depth), 2),
+                                    "confidence": "High" if current_price > cup_lip else "Medium",
+                                    "description": f"Cup & Handle - Breakout @ ${cup_lip:.2f}. Target: ${cup_lip * (1 + cup_depth):.2f}"
+                                })
+        
+        # === WEDGES ===
+        if len(swing_highs) >= 3 and len(swing_lows) >= 3:
+            recent_highs = [h["price"] for h in swing_highs[-4:]]
+            recent_lows = [l["price"] for l in swing_lows[-4:]]
+            
+            if len(recent_highs) >= 3 and len(recent_lows) >= 3:
+                # Trendrichtung beider Linien
+                high_slope = (recent_highs[-1] - recent_highs[0]) / len(recent_highs)
+                low_slope = (recent_lows[-1] - recent_lows[0]) / len(recent_lows)
+                
+                # Konvergenz prüfen
+                are_converging = abs(high_slope - low_slope) < abs(high_slope + low_slope) / 2
+                
+                # RISING WEDGE (bearish): Beide Linien steigen, aber konvergieren
+                if high_slope > 0 and low_slope > 0 and are_converging and low_slope > high_slope:
+                    patterns.append({
+                        "pattern": "Rising Wedge",
+                        "emoji": "📈⬇️",
+                        "type": "bearish",
+                        "target": round(recent_lows[0], 2),
+                        "confidence": "Medium",
+                        "description": f"Rising Wedge (bearish) - Target support @ ${recent_lows[0]:.2f}"
+                    })
+                
+                # FALLING WEDGE (bullish): Beide Linien fallen, aber konvergieren
+                elif high_slope < 0 and low_slope < 0 and are_converging and high_slope > low_slope:
+                    patterns.append({
+                        "pattern": "Falling Wedge",
+                        "emoji": "📉⬆️",
+                        "type": "bullish",
+                        "target": round(recent_highs[0], 2),
+                        "confidence": "Medium",
+                        "description": f"Falling Wedge (bullish) - Target resistance @ ${recent_highs[0]:.2f}"
+                    })
+        
+        return patterns
+        
+    except Exception as e:
+        return []
+
+
+def calculate_vwap(ohlcv_data):
+    """
+    Berechnet VWAP (Volume Weighted Average Price) mit Standard Deviations.
+    
+    Returns:
+        dict mit vwap, upper_band_1, upper_band_2, lower_band_1, lower_band_2
+    """
+    if not ohlcv_data or len(ohlcv_data) < 5:
+        return None
+    
+    try:
+        # Typischer Preis = (High + Low + Close) / 3
+        typical_prices = [(d["high"] + d["low"] + d["close"]) / 3 for d in ohlcv_data]
+        volumes = [d.get("volume", 0) for d in ohlcv_data]
+        
+        # Kumulative Werte
+        cumulative_tp_vol = 0
+        cumulative_vol = 0
+        vwap_values = []
+        
+        for tp, vol in zip(typical_prices, volumes):
+            cumulative_tp_vol += tp * vol
+            cumulative_vol += vol
+            if cumulative_vol > 0:
+                vwap_values.append(cumulative_tp_vol / cumulative_vol)
+            else:
+                vwap_values.append(tp)
+        
+        current_vwap = vwap_values[-1] if vwap_values else typical_prices[-1]
+        
+        # Standard Deviation berechnen
+        squared_diffs = [(tp - current_vwap) ** 2 for tp in typical_prices]
+        variance = sum(squared_diffs) / len(squared_diffs)
+        std_dev = variance ** 0.5
+        
+        return {
+            "vwap": round(current_vwap, 2),
+            "vwap_values": vwap_values,
+            "std_dev": round(std_dev, 2),
+            "upper_1": round(current_vwap + std_dev, 2),
+            "upper_2": round(current_vwap + 2 * std_dev, 2),
+            "lower_1": round(current_vwap - std_dev, 2),
+            "lower_2": round(current_vwap - 2 * std_dev, 2),
+        }
+    except:
+        return None
+
+
+def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
+    """
+    Findet Volume Voids für Chart-Darstellung.
+    
+    Returns:
+        List of void zones with price_low, price_high, strength
+    """
+    if not ohlcv_data or len(ohlcv_data) < 10:
+        return []
+    
+    try:
+        # Preis-Range
+        all_highs = [d["high"] for d in ohlcv_data]
+        all_lows = [d["low"] for d in ohlcv_data]
+        
+        range_high = max(all_highs)
+        range_low = min(all_lows)
+        bin_size = (range_high - range_low) / num_bins
+        
+        # Volume pro Bin
+        bins = [{"low": range_low + i * bin_size, 
+                 "high": range_low + (i + 1) * bin_size, 
+                 "volume": 0} for i in range(num_bins)]
+        
+        for d in ohlcv_data:
+            vol = d.get("volume", 0)
+            h, l = d["high"], d["low"]
+            day_range = h - l if h > l else 0.01
+            
+            for bin in bins:
+                overlap_low = max(bin["low"], l)
+                overlap_high = min(bin["high"], h)
+                if overlap_high > overlap_low:
+                    overlap_pct = (overlap_high - overlap_low) / day_range
+                    bin["volume"] += vol * overlap_pct
+        
+        # Durchschnitt berechnen
+        avg_vol = sum(b["volume"] for b in bins) / len(bins)
+        
+        # Voids = Bins mit < 30% des Durchschnitts
+        voids = []
+        for bin in bins:
+            if bin["volume"] < avg_vol * 0.3:
+                strength = 1 - (bin["volume"] / avg_vol) if avg_vol > 0 else 1
+                voids.append({
+                    "price_low": round(bin["low"], 2),
+                    "price_high": round(bin["high"], 2),
+                    "strength": round(strength, 2)
+                })
+        
+        return voids
+    except:
+        return []
+
+
+def calculate_ema(closes, period):
+    """Berechnet EMA für eine Liste von Close-Preisen."""
+    if len(closes) < period:
+        return []
+    
+    multiplier = 2 / (period + 1)
+    ema = [sum(closes[:period]) / period]  # SMA als Start
+    
+    for price in closes[period:]:
+        ema.append((price - ema[-1]) * multiplier + ema[-1])
+    
+    # Padding am Anfang
+    return [None] * (len(closes) - len(ema)) + ema
+
+
+def generate_ai_chart_analysis(ticker, ohlcv_data, patterns, sr_levels, fib_levels, volume_profile=None):
+    """
+    Generiert KI-basierte Chart-Analyse.
+    
+    Returns:
+        dict mit summary, trade_idea, risk_reward, key_levels
+    """
+    if not ohlcv_data or len(ohlcv_data) < 10:
+        return None
+    
+    current_price = ohlcv_data[-1]["close"]
+    
+    analysis = {
+        "ticker": ticker,
+        "current_price": current_price,
+        "summary": [],
+        "trade_idea": None,
+        "key_levels": [],
+        "bias": "Neutral"
+    }
+    
+    # Pattern Analysis
+    bullish_patterns = [p for p in patterns if p.get("type") == "bullish"]
+    bearish_patterns = [p for p in patterns if p.get("type") == "bearish"]
+    
+    if bullish_patterns:
+        for p in bullish_patterns:
+            analysis["summary"].append(f"{p['emoji']} {p['pattern']}: {p['description']}")
+        analysis["bias"] = "Bullish"
+    
+    if bearish_patterns:
+        for p in bearish_patterns:
+            analysis["summary"].append(f"{p['emoji']} {p['pattern']}: {p['description']}")
+        if not bullish_patterns:
+            analysis["bias"] = "Bearish"
+        else:
+            analysis["bias"] = "Mixed"
+    
+    # Support/Resistance Analysis
+    if sr_levels:
+        supports = sr_levels.get("support_levels", [])
+        resistances = sr_levels.get("resistance_levels", [])
+        
+        if supports:
+            nearest_support = supports[0]
+            dist = (current_price - nearest_support["price"]) / current_price * 100
+            analysis["summary"].append(f"📉 Nearest Support: ${nearest_support['price']:.2f} ({dist:.1f}% below)")
+            analysis["key_levels"].append({"type": "support", "price": nearest_support["price"], "strength": nearest_support.get("strength", 1)})
+        
+        if resistances:
+            nearest_resistance = resistances[0]
+            dist = (nearest_resistance["price"] - current_price) / current_price * 100
+            analysis["summary"].append(f"📈 Nearest Resistance: ${nearest_resistance['price']:.2f} ({dist:.1f}% above)")
+            analysis["key_levels"].append({"type": "resistance", "price": nearest_resistance["price"], "strength": nearest_resistance.get("strength", 1)})
+    
+    # Trade Idea Generation
+    if analysis["bias"] == "Bullish" and sr_levels:
+        supports = sr_levels.get("support_levels", [])
+        resistances = sr_levels.get("resistance_levels", [])
+        
+        if supports and resistances:
+            entry = current_price
+            stop = supports[0]["price"] * 0.99
+            target = resistances[0]["price"]
+            risk = entry - stop
+            reward = target - entry
+            rr = reward / risk if risk > 0 else 0
+            
+            analysis["trade_idea"] = {
+                "direction": "LONG",
+                "entry": round(entry, 2),
+                "stop": round(stop, 2),
+                "target": round(target, 2),
+                "risk_reward": round(rr, 2)
+            }
+    
+    elif analysis["bias"] == "Bearish" and sr_levels:
+        supports = sr_levels.get("support_levels", [])
+        resistances = sr_levels.get("resistance_levels", [])
+        
+        if supports and resistances:
+            entry = current_price
+            stop = resistances[0]["price"] * 1.01
+            target = supports[0]["price"]
+            risk = stop - entry
+            reward = entry - target
+            rr = reward / risk if risk > 0 else 0
+            
+            analysis["trade_idea"] = {
+                "direction": "SHORT",
+                "entry": round(entry, 2),
+                "stop": round(stop, 2),
+                "target": round(target, 2),
+                "risk_reward": round(rr, 2)
+            }
+    
+    return analysis
+
+
+def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=None, fib_levels=None, 
+                                   ema_periods=[20, 50, 100, 200], height=500, show_volume=True,
+                                   vwap_data=None, volume_voids=None, trade_zones=None):
+    """
+    Erstellt HTML für Lightweight Charts mit ALLEN Overlays:
+    - Candlesticks + Volume
+    - EMAs (20/50/100/200)
+    - Support/Resistance Levels
+    - Fibonacci Retracements
+    - VWAP + Standard Deviation Bands
+    - Volume Voids (orange highlights)
+    - Trade Zones (Entry/Stop/Target)
+    - Pattern Markers
+    
+    Returns:
+        HTML string für streamlit.components.v1.html()
+    """
+    if not ohlcv_data or len(ohlcv_data) < 5:
+        return "<div>Keine Daten verfügbar</div>"
+    
+    # Prepare candlestick data
+    candles_json = json.dumps(ohlcv_data)
+    
+    # Prepare volume data
+    volume_data = [{"time": d["time"], "value": d.get("volume", 0), 
+                    "color": "rgba(38, 166, 154, 0.5)" if d["close"] >= d["open"] else "rgba(239, 83, 80, 0.5)"} 
+                   for d in ohlcv_data]
+    volume_json = json.dumps(volume_data)
+    
+    # Prepare EMA data
+    closes = [d["close"] for d in ohlcv_data]
+    times = [d["time"] for d in ohlcv_data]
+    
+    ema_lines = []
+    ema_colors = ["#2196F3", "#FF9800", "#E91E63", "#9C27B0"]  # Blue, Orange, Pink, Purple
+    
+    for i, period in enumerate(ema_periods):
+        ema_values = calculate_ema(closes, period)
+        ema_data = []
+        for j, val in enumerate(ema_values):
+            if val is not None:
+                ema_data.append({"time": times[j], "value": round(val, 2)})
+        if ema_data:
+            ema_lines.append({
+                "data": ema_data,
+                "color": ema_colors[i % len(ema_colors)],
+                "label": f"EMA {period}"
+            })
+    
+    ema_json = json.dumps(ema_lines)
+    
+    # Prepare VWAP data
+    vwap_lines = []
+    if vwap_data:
+        vwap_values = vwap_data.get("vwap_values", [])
+        if vwap_values and len(vwap_values) == len(times):
+            # VWAP Line
+            vwap_line_data = [{"time": times[i], "value": round(vwap_values[i], 2)} for i in range(len(vwap_values))]
+            vwap_lines.append({"data": vwap_line_data, "color": "#FFEB3B", "label": "VWAP", "lineWidth": 2})
+            
+            # Upper/Lower Bands
+            std = vwap_data.get("std_dev", 0)
+            if std > 0:
+                upper_1 = [{"time": times[i], "value": round(vwap_values[i] + std, 2)} for i in range(len(vwap_values))]
+                lower_1 = [{"time": times[i], "value": round(vwap_values[i] - std, 2)} for i in range(len(vwap_values))]
+                upper_2 = [{"time": times[i], "value": round(vwap_values[i] + 2*std, 2)} for i in range(len(vwap_values))]
+                lower_2 = [{"time": times[i], "value": round(vwap_values[i] - 2*std, 2)} for i in range(len(vwap_values))]
+                
+                vwap_lines.append({"data": upper_1, "color": "rgba(255, 235, 59, 0.5)", "label": "VWAP +1σ", "lineWidth": 1})
+                vwap_lines.append({"data": lower_1, "color": "rgba(255, 235, 59, 0.5)", "label": "VWAP -1σ", "lineWidth": 1})
+                vwap_lines.append({"data": upper_2, "color": "rgba(255, 235, 59, 0.3)", "label": "VWAP +2σ", "lineWidth": 1})
+                vwap_lines.append({"data": lower_2, "color": "rgba(255, 235, 59, 0.3)", "label": "VWAP -2σ", "lineWidth": 1})
+    
+    vwap_json = json.dumps(vwap_lines)
+    
+    # Prepare S/R lines
+    sr_lines = []
+    if sr_levels:
+        for s in sr_levels.get("support_levels", [])[:3]:
+            sr_lines.append({
+                "price": s["price"],
+                "color": "#4CAF50",
+                "lineWidth": min(s.get("strength", 1) + 1, 3),
+                "label": f"S: ${s['price']:.2f}",
+                "type": "support"
+            })
+        for r in sr_levels.get("resistance_levels", [])[:3]:
+            sr_lines.append({
+                "price": r["price"],
+                "color": "#F44336",
+                "lineWidth": min(r.get("strength", 1) + 1, 3),
+                "label": f"R: ${r['price']:.2f}",
+                "type": "resistance"
+            })
+    sr_json = json.dumps(sr_lines)
+    
+    # Prepare Fibonacci lines
+    fib_lines = []
+    if fib_levels:
+        fib_colors = {
+            "0.0": "#787B86", "0.236": "#F44336", "0.382": "#FF9800",
+            "0.5": "#FFEB3B", "0.618": "#4CAF50", "0.786": "#2196F3",
+            "1.0": "#787B86", "1.272": "#9C27B0", "1.618": "#E91E63"
+        }
+        for level, price in fib_levels.get("levels", {}).items():
+            fib_lines.append({
+                "price": price,
+                "color": fib_colors.get(level, "#787B86"),
+                "label": f"Fib {level}"
+            })
+    fib_json = json.dumps(fib_lines)
+    
+    # Prepare Volume Voids (for horizontal highlighting)
+    voids_json = json.dumps(volume_voids if volume_voids else [])
+    
+    # Prepare Trade Zones
+    zones = []
+    if trade_zones:
+        if trade_zones.get("entry"):
+            zones.append({"price": trade_zones["entry"], "color": "rgba(76, 175, 80, 0.3)", "label": "ENTRY", "type": "entry"})
+        if trade_zones.get("stop"):
+            zones.append({"price": trade_zones["stop"], "color": "rgba(244, 67, 54, 0.3)", "label": "STOP", "type": "stop"})
+        if trade_zones.get("target"):
+            zones.append({"price": trade_zones["target"], "color": "rgba(33, 150, 243, 0.3)", "label": "TARGET", "type": "target"})
+        if trade_zones.get("target2"):
+            zones.append({"price": trade_zones["target2"], "color": "rgba(33, 150, 243, 0.2)", "label": "TP2", "type": "target2"})
+    zones_json = json.dumps(zones)
+    
+    # Pattern markers
+    markers = []
+    if patterns:
+        for p in patterns[:5]:  # Max 5 patterns
+            marker_color = "#4CAF50" if p.get("type") == "bullish" else "#F44336" if p.get("type") == "bearish" else "#FFEB3B"
+            markers.append({
+                "time": ohlcv_data[-1]["time"],
+                "position": "aboveBar" if p.get("type") == "bearish" else "belowBar",
+                "color": marker_color,
+                "shape": "arrowDown" if p.get("type") == "bearish" else "arrowUp",
+                "text": p.get("pattern", "")[:15]
+            })
+    markers_json = json.dumps(markers)
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+        <style>
+            body {{ margin: 0; padding: 0; background: #1a1a2e; font-family: Arial, sans-serif; }}
+            #chart-container {{ width: 100%; height: {height}px; position: relative; }}
+            .chart-legend {{
+                position: absolute; top: 10px; left: 10px; z-index: 100;
+                background: rgba(26, 26, 46, 0.95); padding: 10px; border-radius: 5px;
+                color: #fff; font-size: 11px; max-width: 180px;
+            }}
+            .legend-item {{ display: flex; align-items: center; margin: 2px 0; }}
+            .legend-color {{ width: 16px; height: 3px; margin-right: 6px; border-radius: 1px; }}
+            .legend-section {{ margin-top: 6px; font-weight: bold; color: #888; font-size: 10px; }}
+            .ticker-title {{
+                position: absolute; top: 10px; right: 10px; z-index: 100;
+                background: rgba(26, 26, 46, 0.95); padding: 10px 15px; border-radius: 5px;
+                color: #fff; font-size: 16px; font-weight: bold;
+            }}
+            .pattern-box {{
+                position: absolute; bottom: 10px; right: 10px; z-index: 100;
+                background: rgba(26, 26, 46, 0.95); padding: 8px 12px; border-radius: 5px;
+                color: #fff; font-size: 11px; max-width: 200px;
+            }}
+            .pattern-bullish {{ color: #4CAF50; }}
+            .pattern-bearish {{ color: #F44336; }}
+            .void-indicator {{
+                position: absolute; top: 50px; right: 10px; z-index: 100;
+                background: rgba(255, 152, 0, 0.2); padding: 5px 10px; border-radius: 3px;
+                color: #FF9800; font-size: 10px; border: 1px solid rgba(255, 152, 0, 0.5);
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="chart-container">
+            <div class="ticker-title">{ticker}</div>
+            <div class="chart-legend" id="legend"></div>
+            <div class="pattern-box" id="patterns"></div>
+        </div>
+        
+        <script>
+            const container = document.getElementById('chart-container');
+            
+            const chart = LightweightCharts.createChart(container, {{
+                width: container.clientWidth,
+                height: {height},
+                layout: {{
+                    background: {{ type: 'solid', color: '#1a1a2e' }},
+                    textColor: '#d1d4dc',
+                }},
+                grid: {{
+                    vertLines: {{ color: 'rgba(42, 46, 57, 0.5)' }},
+                    horzLines: {{ color: 'rgba(42, 46, 57, 0.5)' }},
+                }},
+                crosshair: {{
+                    mode: LightweightCharts.CrosshairMode.Normal,
+                }},
+                rightPriceScale: {{
+                    borderColor: 'rgba(197, 203, 206, 0.4)',
+                    scaleMargins: {{ top: 0.05, bottom: 0.2 }},
+                }},
+                timeScale: {{
+                    borderColor: 'rgba(197, 203, 206, 0.4)',
+                    timeVisible: true,
+                    secondsVisible: false,
+                }},
+            }});
+            
+            // Candlestick Series
+            const candleSeries = chart.addCandlestickSeries({{
+                upColor: '#26a69a',
+                downColor: '#ef5350',
+                borderUpColor: '#26a69a',
+                borderDownColor: '#ef5350',
+                wickUpColor: '#26a69a',
+                wickDownColor: '#ef5350',
+            }});
+            
+            const candleData = {candles_json};
+            candleSeries.setData(candleData);
+            
+            // Volume Series
+            {"" if not show_volume else f'''
+            const volumeSeries = chart.addHistogramSeries({{
+                priceFormat: {{ type: 'volume' }},
+                priceScaleId: '',
+            }});
+            volumeSeries.priceScale().applyOptions({{
+                scaleMargins: {{ top: 0.85, bottom: 0 }},
+            }});
+            const volumeData = {volume_json};
+            volumeSeries.setData(volumeData);
+            '''}
+            
+            // Build Legend
+            let legendHtml = '<div class="legend-section">📈 EMAs</div>';
+            
+            // EMA Lines
+            const emaLines = {ema_json};
+            emaLines.forEach((ema, index) => {{
+                const lineSeries = chart.addLineSeries({{
+                    color: ema.color,
+                    lineWidth: 1,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                }});
+                lineSeries.setData(ema.data);
+                legendHtml += `<div class="legend-item"><div class="legend-color" style="background:${{ema.color}}"></div>${{ema.label}}</div>`;
+            }});
+            
+            // VWAP Lines
+            const vwapLines = {vwap_json};
+            if (vwapLines.length > 0) {{
+                legendHtml += '<div class="legend-section">📊 VWAP</div>';
+                vwapLines.forEach((vwap, index) => {{
+                    const lineSeries = chart.addLineSeries({{
+                        color: vwap.color,
+                        lineWidth: vwap.lineWidth || 1,
+                        priceLineVisible: false,
+                        lastValueVisible: index === 0,
+                    }});
+                    lineSeries.setData(vwap.data);
+                    if (index === 0) {{
+                        legendHtml += `<div class="legend-item"><div class="legend-color" style="background:${{vwap.color}}"></div>${{vwap.label}}</div>`;
+                    }}
+                }});
+            }}
+            
+            // Support/Resistance Lines
+            const srLines = {sr_json};
+            if (srLines.length > 0) {{
+                legendHtml += '<div class="legend-section">📏 S/R Levels</div>';
+                srLines.forEach(sr => {{
+                    candleSeries.createPriceLine({{
+                        price: sr.price,
+                        color: sr.color,
+                        lineWidth: sr.lineWidth,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true,
+                        title: sr.label,
+                    }});
+                    const icon = sr.type === 'support' ? '🟢' : '🔴';
+                    legendHtml += `<div class="legend-item">${{icon}} ${{sr.price.toFixed(2)}}</div>`;
+                }});
+            }}
+            
+            // Fibonacci Lines
+            const fibLines = {fib_json};
+            if (fibLines.length > 0) {{
+                fibLines.forEach(fib => {{
+                    candleSeries.createPriceLine({{
+                        price: fib.price,
+                        color: fib.color,
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: true,
+                        title: fib.label,
+                    }});
+                }});
+            }}
+            
+            // Trade Zones (as price lines with different styles)
+            const tradeZones = {zones_json};
+            if (tradeZones.length > 0) {{
+                legendHtml += '<div class="legend-section">🎯 Trade Setup</div>';
+                tradeZones.forEach(zone => {{
+                    let lineColor, lineStyle, icon;
+                    if (zone.type === 'entry') {{
+                        lineColor = '#4CAF50';
+                        lineStyle = LightweightCharts.LineStyle.Solid;
+                        icon = '🎯';
+                    }} else if (zone.type === 'stop') {{
+                        lineColor = '#F44336';
+                        lineStyle = LightweightCharts.LineStyle.Solid;
+                        icon = '🛑';
+                    }} else {{
+                        lineColor = '#2196F3';
+                        lineStyle = LightweightCharts.LineStyle.Dashed;
+                        icon = '✅';
+                    }}
+                    
+                    candleSeries.createPriceLine({{
+                        price: zone.price,
+                        color: lineColor,
+                        lineWidth: 2,
+                        lineStyle: lineStyle,
+                        axisLabelVisible: true,
+                        title: zone.label,
+                    }});
+                    legendHtml += `<div class="legend-item">${{icon}} ${{zone.price.toFixed(2)}} (${{zone.label}})</div>`;
+                }});
+            }}
+            
+            // Volume Voids - Add indicator if any exist
+            const volumeVoids = {voids_json};
+            if (volumeVoids.length > 0) {{
+                volumeVoids.forEach(void_ => {{
+                    // Add dotted lines at void boundaries
+                    candleSeries.createPriceLine({{
+                        price: void_.price_low,
+                        color: 'rgba(255, 152, 0, 0.6)',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: false,
+                    }});
+                    candleSeries.createPriceLine({{
+                        price: void_.price_high,
+                        color: 'rgba(255, 152, 0, 0.6)',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: false,
+                    }});
+                }});
+                
+                // Add void indicator
+                const voidDiv = document.createElement('div');
+                voidDiv.className = 'void-indicator';
+                voidDiv.innerHTML = `🕳️ ${{volumeVoids.length}} Volume Void${{volumeVoids.length > 1 ? 's' : ''}}`;
+                container.appendChild(voidDiv);
+            }}
+            
+            // Pattern Markers
+            const markers = {markers_json};
+            if (markers.length > 0) {{
+                candleSeries.setMarkers(markers);
+            }}
+            
+            // Pattern Box
+            const patterns = {json.dumps([{"pattern": p.get("pattern", ""), "type": p.get("type", "neutral"), "confidence": p.get("confidence", "Medium")} for p in (patterns or [])[:3]])};
+            if (patterns.length > 0) {{
+                let patternHtml = '<strong>🔍 Patterns:</strong><br>';
+                patterns.forEach(p => {{
+                    const cls = p.type === 'bullish' ? 'pattern-bullish' : p.type === 'bearish' ? 'pattern-bearish' : '';
+                    patternHtml += `<div class="${{cls}}">${{p.pattern}} (${{p.confidence}})</div>`;
+                }});
+                document.getElementById('patterns').innerHTML = patternHtml;
+            }} else {{
+                document.getElementById('patterns').style.display = 'none';
+            }}
+            
+            document.getElementById('legend').innerHTML = legendHtml;
+            
+            // Auto-fit
+            chart.timeScale().fitContent();
+            
+            // Resize handler
+            window.addEventListener('resize', () => {{
+                chart.applyOptions({{ width: container.clientWidth }});
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    
+    return html
+
+
+def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
+    """
+    Hauptfunktion: Zeigt AI Chart mit ALLEN Analysen.
+    
+    Features:
+    - Candlestick Chart mit Volume
+    - EMAs (20/50/100/200)
+    - Support/Resistance Levels
+    - Fibonacci Retracements
+    - VWAP + Standard Deviation Bands
+    - Volume Voids (orange markiert)
+    - Pattern Recognition
+    - Trade Zones (Entry/Stop/Target)
+    """
+    st.subheader(f"🤖 AI Chart Analyzer - {ticker}")
+    
+    # Timeframe Selector
+    col_tf1, col_tf2, col_tf3, col_tf4, col_tf5 = st.columns(5)
+    
+    timeframes = ["5m", "15m", "1H", "4H", "1D"]
+    tf_labels = ["5 Min", "15 Min", "1 Stunde", "4 Stunden", "1 Tag"]
+    
+    for i, (tf, label) in enumerate(zip(timeframes, tf_labels)):
+        with [col_tf1, col_tf2, col_tf3, col_tf4, col_tf5][i]:
+            current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
+            if st.button(label, key=f"tf_{tf}_{ticker}", 
+                        type="primary" if tf == current_tf else "secondary",
+                        use_container_width=True):
+                st.session_state[f"chart_tf_{ticker}"] = tf
+                st.rerun()
+    
+    # Get current timeframe from session
+    current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
+    
+    # Fetch Data
+    with st.spinner(f"📥 Lade {ticker} Chart Daten ({current_tf})..."):
+        ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, current_tf, bars=200)
+    
+    if not ohlcv:
+        st.error("❌ Keine Chart-Daten verfügbar")
+        return
+    
+    # Calculate ALL Technical Analysis
+    with st.spinner("🔍 Berechne alle Indikatoren..."):
+        # Support/Resistance
+        sr_levels = calculate_support_resistance(ohlcv, num_levels=4, lookback=100)
+        
+        # Fibonacci
+        fib_levels = calculate_fibonacci_levels(ohlcv, lookback=100)
+        
+        # Patterns
+        patterns = detect_chart_patterns(ohlcv, lookback=80)
+        
+        # VWAP
+        vwap_data = calculate_vwap(ohlcv)
+        
+        # Volume Voids
+        volume_voids = find_volume_voids_for_chart(ohlcv, num_bins=20)
+        
+        # Volume Profile für POC/VAH/VAL
+        vp = None
+        if len(ohlcv) >= 20:
+            ohlcv_for_vp = [{"high": d["high"], "low": d["low"], "volume": d["volume"]} for d in ohlcv]
+            vp = calculate_volume_profile(ohlcv_for_vp, num_bins=15)
+        
+        # Generate AI Analysis
+        ai_analysis = generate_ai_chart_analysis(ticker, ohlcv, patterns, sr_levels, fib_levels, vp)
+        
+        # Trade Zones from AI Analysis
+        trade_zones = None
+        if ai_analysis and ai_analysis.get("trade_idea"):
+            trade = ai_analysis["trade_idea"]
+            trade_zones = {
+                "entry": trade.get("entry"),
+                "stop": trade.get("stop"),
+                "target": trade.get("target")
+            }
+    
+    # Display Options
+    st.markdown("**⚙️ Chart Optionen:**")
+    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5 = st.columns(5)
+    with col_opt1:
+        show_ema = st.checkbox("📈 EMAs", value=True, key=f"ema_{ticker}")
+    with col_opt2:
+        show_sr = st.checkbox("📏 S/R", value=True, key=f"sr_{ticker}")
+    with col_opt3:
+        show_vwap = st.checkbox("📊 VWAP", value=True, key=f"vwap_{ticker}")
+    with col_opt4:
+        show_fib = st.checkbox("🎯 Fib", value=False, key=f"fib_{ticker}")
+    with col_opt5:
+        show_voids = st.checkbox("🕳️ Voids", value=True, key=f"voids_{ticker}")
+    
+    col_opt6, col_opt7 = st.columns(2)
+    with col_opt6:
+        show_zones = st.checkbox("🎯 Trade Zones (Entry/Stop/Target)", value=True, key=f"zones_{ticker}")
+    
+    # Generate Chart HTML
+    chart_html = create_lightweight_chart_html(
+        ohlcv_data=ohlcv,
+        ticker=ticker,
+        sr_levels=sr_levels if show_sr else None,
+        patterns=patterns,
+        fib_levels=fib_levels if show_fib else None,
+        ema_periods=[20, 50, 100, 200] if show_ema else [],
+        height=500,
+        show_volume=True,
+        vwap_data=vwap_data if show_vwap else None,
+        volume_voids=volume_voids if show_voids else None,
+        trade_zones=trade_zones if show_zones else None
+    )
+    
+    # Display Chart
+    components.html(chart_html, height=520)
+    
+    # Analysis Section
+    st.divider()
+    
+    col_patterns, col_levels, col_trade = st.columns([1, 1, 1])
+    
+    # === PATTERNS ===
+    with col_patterns:
+        st.subheader("🔍 Patterns")
+        
+        if patterns:
+            for p in patterns[:5]:
+                emoji = p.get("emoji", "📊")
+                pattern_name = p.get("pattern", "Unknown")
+                pattern_type = p.get("type", "neutral")
+                confidence = p.get("confidence", "Medium")
+                
+                if pattern_type == "bullish":
+                    st.success(f"{emoji} **{pattern_name}**")
+                elif pattern_type == "bearish":
+                    st.error(f"{emoji} **{pattern_name}**")
+                else:
+                    st.info(f"{emoji} **{pattern_name}**")
+                
+                st.caption(f"{confidence} Confidence")
+        else:
+            st.info("👀 Keine klaren Patterns")
+    
+    # === LEVELS ===
+    with col_levels:
+        st.subheader("📏 Key Levels")
+        
+        current_price = ohlcv[-1]["close"]
+        st.metric("Aktuell", f"${current_price:.2f}")
+        
+        # S/R
+        if sr_levels:
+            supports = sr_levels.get("support_levels", [])
+            resistances = sr_levels.get("resistance_levels", [])
+            
+            if resistances:
+                st.caption(f"🔴 R1: ${resistances[0]['price']:.2f}")
+            if supports:
+                st.caption(f"🟢 S1: ${supports[0]['price']:.2f}")
+        
+        # VWAP
+        if vwap_data:
+            vwap = vwap_data.get("vwap", 0)
+            st.caption(f"📊 VWAP: ${vwap:.2f}")
+            if current_price > vwap:
+                st.caption("↑ Über VWAP (Bullish)")
+            else:
+                st.caption("↓ Unter VWAP (Bearish)")
+        
+        # Volume Profile
+        if vp:
+            poc = vp.get("poc", current_price)
+            st.caption(f"📈 POC: ${poc:.2f}")
+            
+        # Volume Voids
+        if volume_voids:
+            st.caption(f"🕳️ {len(volume_voids)} Volume Voids gefunden")
+    
+    # === TRADE SETUP ===
+    with col_trade:
+        st.subheader("💡 Trade Setup")
+        
+        if ai_analysis and ai_analysis.get("trade_idea"):
+            trade = ai_analysis["trade_idea"]
+            bias = ai_analysis.get("bias", "Neutral")
+            
+            bias_emoji = "🟢" if trade["direction"] == "LONG" else "🔴"
+            st.markdown(f"### {bias_emoji} {trade['direction']}")
+            
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                st.metric("🎯 Entry", f"${trade['entry']:.2f}")
+                st.metric("🛑 Stop", f"${trade['stop']:.2f}")
+            with col_t2:
+                st.metric("✅ Target", f"${trade['target']:.2f}")
+                rr = trade.get("risk_reward", 0)
+                rr_color = "green" if rr >= 2 else "orange" if rr >= 1 else "red"
+                st.markdown(f"**R:R:** <span style='color:{rr_color};font-size:18px;'>{rr:.1f}:1</span>", unsafe_allow_html=True)
+            
+            # Rating
+            if rr >= 2:
+                st.success("✅ Gutes Setup!")
+            elif rr >= 1:
+                st.warning("⚠️ OK Setup")
+            else:
+                st.error("❌ Schlechtes R:R")
+        else:
+            st.info("🔍 Warte auf klares Setup...")
+            st.caption("Kein eindeutiger Bias erkannt.")
+    
+    # Pattern Details Expander
+    if patterns:
+        with st.expander("📋 Pattern Details"):
+            for p in patterns:
+                st.markdown(f"**{p.get('emoji', '')} {p.get('pattern', '')}**")
+                st.caption(p.get("description", ""))
+                st.divider()
 
 
 def fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret):
@@ -4736,6 +6157,100 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
 # PRE-MARKET WATCHLIST - ERWEITERTE PM ANALYSE V2
 # =============================================================================
 
+def get_ticker_news(poly_key, ticker, limit=3):
+    """
+    Holt die neuesten News für einen Ticker via Polygon News API.
+    Returns: List of news items with title, sentiment, published date
+    """
+    try:
+        url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit={limit}&apiKey={poly_key}"
+        resp = requests.get(url, timeout=5).json()
+        results = resp.get("results", [])
+        
+        news_items = []
+        for item in results[:limit]:
+            # Parse published date
+            pub_date = item.get("published_utc", "")[:10]  # YYYY-MM-DD
+            
+            # Sentiment analysieren (wenn vorhanden)
+            insights = item.get("insights", [])
+            sentiment = "neutral"
+            sentiment_score = 0
+            for insight in insights:
+                if insight.get("ticker") == ticker:
+                    sentiment = insight.get("sentiment", "neutral")
+                    sentiment_score = insight.get("sentiment_reasoning", "")
+                    break
+            
+            news_items.append({
+                "title": item.get("title", "")[:80],  # Kürzen
+                "publisher": item.get("publisher", {}).get("name", ""),
+                "published": pub_date,
+                "sentiment": sentiment,
+                "url": item.get("article_url", "")
+            })
+        
+        return news_items
+    except Exception:
+        return []
+
+
+def get_ticker_details(poly_key, ticker):
+    """
+    Holt Ticker Details: Shares Outstanding, Market Cap, etc.
+    Returns: dict mit shares_outstanding, market_cap, float_category
+    """
+    try:
+        url = f"https://api.polygon.io/v3/reference/tickers/{ticker}?apiKey={poly_key}"
+        resp = requests.get(url, timeout=5).json()
+        results = resp.get("results", {})
+        
+        shares_out = results.get("share_class_shares_outstanding", 0) or results.get("weighted_shares_outstanding", 0)
+        market_cap = results.get("market_cap", 0)
+        
+        # Float Kategorie schätzen (Shares Outstanding als Proxy)
+        # Echtes Float = Shares - Insider - Institutional, aber das haben wir nicht
+        float_category = "UNKNOWN"
+        float_emoji = "❓"
+        
+        if shares_out > 0:
+            shares_millions = shares_out / 1_000_000
+            if shares_millions < 10:
+                float_category = "MICRO"
+                float_emoji = "🔥🔥🔥"  # Sehr explosiv
+            elif shares_millions < 20:
+                float_category = "LOW"
+                float_emoji = "🔥🔥"  # Explosiv
+            elif shares_millions < 50:
+                float_category = "MEDIUM"
+                float_emoji = "🔥"
+            else:
+                float_category = "HIGH"
+                float_emoji = "📊"
+        
+        return {
+            "shares_outstanding": shares_out,
+            "shares_millions": round(shares_out / 1_000_000, 1) if shares_out > 0 else 0,
+            "market_cap": market_cap,
+            "market_cap_millions": round(market_cap / 1_000_000, 1) if market_cap > 0 else 0,
+            "float_category": float_category,
+            "float_emoji": float_emoji,
+            "name": results.get("name", ""),
+            "description": results.get("description", "")[:100] if results.get("description") else ""
+        }
+    except Exception:
+        return {
+            "shares_outstanding": 0,
+            "shares_millions": 0,
+            "market_cap": 0,
+            "market_cap_millions": 0,
+            "float_category": "UNKNOWN",
+            "float_emoji": "❓",
+            "name": "",
+            "description": ""
+        }
+
+
 def get_pm_session_bars(poly_key, ticker, date_str):
     """
     Holt die Pre-Market Session Bars (4:00-9:30 ET) via Aggregates API.
@@ -5075,6 +6590,13 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         "Risk_R": round(risk, 2),
                         "Direction": "🟢 LONG" if cand["pm_change"] > 0 else "🔴 SHORT",
                         "Move_Time": pm_data.get("first_move_time", "N/A"),
+                        # Placeholder für News und Details (werden später gefüllt)
+                        "News": [],
+                        "Shares_M": 0,
+                        "Float_Cat": "UNKNOWN",
+                        "Float_Emoji": "❓",
+                        "Market_Cap_M": 0,
+                        "Company_Name": "",
                     })
                     
             except Exception as e:
@@ -5083,7 +6605,29 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
         # Sortiere nach absolutem PM Change
         results.sort(key=lambda x: abs(x["PM_Chg%"]), reverse=True)
         
-        return results[:30], spy_pm_change  # Top 30
+        # 4. Hole News und Details für Top 20 (API Call Limit beachten)
+        final_results = results[:30]
+        for i, item in enumerate(final_results[:20]):  # Nur Top 20 für Details
+            try:
+                ticker = item["Ticker"]
+                
+                # Ticker Details (Shares, Market Cap)
+                details = get_ticker_details(poly_key, ticker)
+                item["Shares_M"] = details["shares_millions"]
+                item["Float_Cat"] = details["float_category"]
+                item["Float_Emoji"] = details["float_emoji"]
+                item["Market_Cap_M"] = details["market_cap_millions"]
+                item["Company_Name"] = details["name"]
+                
+                # News (nur Top 10 für News - API intensive)
+                if i < 10:
+                    news = get_ticker_news(poly_key, ticker, limit=2)
+                    item["News"] = news
+                    
+            except Exception:
+                continue
+        
+        return final_results, spy_pm_change
         
     except Exception as e:
         st.error(f"PM Watchlist Fehler: {e}")
@@ -5127,6 +6671,9 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         change_color = "green" if item['PM_Chg%'] > 0 else "red"
                         st.markdown(f"**<span style='color:{change_color};font-size:24px;'>+{item['PM_Chg%']:.1f}%</span>**", unsafe_allow_html=True)
                         st.caption(f"{item['Setup_Emoji']} {item['Setup_Type']}")
+                        # Float Info
+                        if item.get('Shares_M', 0) > 0:
+                            st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
                     
                     with col2:
                         # Preis & Levels
@@ -5134,6 +6681,13 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         st.caption(f"📊 PM High: **${item['PM_High']:.2f}** | Low: ${item['PM_Low']:.2f} | VWAP: ${item['PM_VWAP']:.2f}")
                         st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
                         st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
+                        # Market Cap
+                        if item.get('Market_Cap_M', 0) > 0:
+                            mcap = item['Market_Cap_M']
+                            if mcap >= 1000:
+                                st.caption(f"💵 MCap: ${mcap/1000:.1f}B")
+                            else:
+                                st.caption(f"💵 MCap: ${mcap:.0f}M")
                     
                     with col3:
                         # Entry Signal
@@ -5150,6 +6704,16 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         pos_bar = "🟩" * int(pos/10) + "⬜" * (10 - int(pos/10))
                         st.caption(f"Position: {pos_bar} {pos:.0f}%")
                     
+                    # News Row (wenn vorhanden)
+                    news_list = item.get('News', [])
+                    if news_list:
+                        news_text = ""
+                        for n in news_list[:2]:
+                            sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
+                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}... ({n.get('published', '')})\n"
+                        if news_text:
+                            st.caption(f"📰 **News:** {news_text}")
+                    
                     # Risk Management Row
                     with st.expander(f"📐 Trade Setup - {item['Setup_Desc']}"):
                         rm_col1, rm_col2, rm_col3, rm_col4 = st.columns(4)
@@ -5163,6 +6727,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                             st.metric("✅ TP2 (2.5R)", f"${item['Target2']:.2f}")
                         
                         st.caption(f"Risk per Share: ${item['Risk_R']:.2f} | Move Start: {item.get('Move_Time', 'N/A')}")
+                        if item.get('Company_Name'):
+                            st.caption(f"🏢 {item['Company_Name']}")
                     
                     st.divider()
         else:
@@ -5179,12 +6745,22 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         st.markdown(f"## {item['Ticker']}")
                         st.markdown(f"**<span style='color:red;font-size:24px;'>{item['PM_Chg%']:.1f}%</span>**", unsafe_allow_html=True)
                         st.caption(f"{item['Setup_Emoji']} {item['Setup_Type']}")
+                        # Float Info
+                        if item.get('Shares_M', 0) > 0:
+                            st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
                     
                     with col2:
                         st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}")
                         st.caption(f"📊 PM High: ${item['PM_High']:.2f} | Low: **${item['PM_Low']:.2f}** | VWAP: ${item['PM_VWAP']:.2f}")
                         st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
                         st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
+                        # Market Cap
+                        if item.get('Market_Cap_M', 0) > 0:
+                            mcap = item['Market_Cap_M']
+                            if mcap >= 1000:
+                                st.caption(f"💵 MCap: ${mcap/1000:.1f}B")
+                            else:
+                                st.caption(f"💵 MCap: ${mcap:.0f}M")
                     
                     with col3:
                         signal = item['Entry_Signal']
@@ -5199,6 +6775,16 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         pos_bar = "🟥" * int(pos/10) + "⬜" * (10 - int(pos/10))
                         st.caption(f"Position: {pos_bar} {pos:.0f}%")
                     
+                    # News Row (wenn vorhanden)
+                    news_list = item.get('News', [])
+                    if news_list:
+                        news_text = ""
+                        for n in news_list[:2]:
+                            sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
+                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}... ({n.get('published', '')})\n"
+                        if news_text:
+                            st.caption(f"📰 **News:** {news_text}")
+                    
                     with st.expander(f"📐 Trade Setup - {item['Setup_Desc']}"):
                         rm_col1, rm_col2, rm_col3, rm_col4 = st.columns(4)
                         with rm_col1:
@@ -5211,6 +6797,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                             st.metric("✅ TP2 (2.5R)", f"${item['Target2']:.2f}")
                         
                         st.caption(f"Risk per Share: ${item['Risk_R']:.2f} | Move Start: {item.get('Move_Time', 'N/A')}")
+                        if item.get('Company_Name'):
+                            st.caption(f"🏢 {item['Company_Name']}")
                     
                     st.divider()
         else:
@@ -5221,11 +6809,12 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         import pandas as pd
         df = pd.DataFrame(pm_data)
         
-        # Spalten für Anzeige
-        display_cols = ["Ticker", "PM_Chg%", "PM_Preis", "PM_High", "PM_Low", "Gap%", "RS_vs_SPY", "Setup_Type", "Entry_Signal"]
-        if all(col in df.columns for col in display_cols):
+        # Spalten für Anzeige (erweitert mit Float)
+        display_cols = ["Ticker", "PM_Chg%", "PM_Preis", "PM_High", "PM_Low", "Gap%", "RS_vs_SPY", "Shares_M", "Float_Cat", "Setup_Type", "Entry_Signal"]
+        available_cols = [col for col in display_cols if col in df.columns]
+        if available_cols:
             st.dataframe(
-                df[display_cols],
+                df[available_cols],
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker"),
                     "PM_Chg%": st.column_config.NumberColumn("PM Chg%", format="%.1f%%"),
@@ -5233,7 +6822,9 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                     "PM_High": st.column_config.NumberColumn("PM High", format="$%.2f"),
                     "PM_Low": st.column_config.NumberColumn("PM Low", format="$%.2f"),
                     "Gap%": st.column_config.NumberColumn("Gap%", format="%.1f%%"),
-                    "RS_vs_SPY": st.column_config.NumberColumn("RS vs SPY", format="%.1f%%"),
+                    "RS_vs_SPY": st.column_config.NumberColumn("RS SPY", format="%.1f%%"),
+                    "Shares_M": st.column_config.NumberColumn("Shares(M)", format="%.1f"),
+                    "Float_Cat": st.column_config.TextColumn("Float"),
                     "Setup_Type": st.column_config.TextColumn("Setup"),
                     "Entry_Signal": st.column_config.TextColumn("Signal"),
                 },
@@ -5252,11 +6843,12 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         export_text += f"SPY PM: {spy_change:+.2f}%\n\n"
         
         export_text += "🎯 OR BREAK SETUPS (Entry bei Open):\n"
-        export_text += "─" * 50 + "\n"
+        export_text += "─" * 60 + "\n"
         if or_break:
             for item in or_break[:10]:
                 direction = "LONG" if item["PM_Chg%"] > 0 else "SHORT"
-                export_text += f"{item['Ticker']:6} | {direction:5} | {item['PM_Chg%']:+6.1f}% | Entry: ${item['Entry_Price']:.2f} | Stop: ${item['Stop_Price']:.2f}\n"
+                float_info = f" | {item.get('Float_Emoji', '')} {item.get('Shares_M', 0):.0f}M" if item.get('Shares_M', 0) > 0 else ""
+                export_text += f"{item['Ticker']:6} | {direction:5} | {item['PM_Chg%']:+6.1f}% | E: ${item['Entry_Price']:.2f} | S: ${item['Stop_Price']:.2f}{float_info}\n"
         else:
             export_text += "Keine OR Break Kandidaten\n"
         
@@ -6806,6 +8398,32 @@ with tab_scanner:
         st.divider()
         st.caption("👇 Normaler Scanner weiterhin verfügbar")
     
+    # AI CHART ANALYZER ANZEIGE (wenn aktiv)
+    if st.session_state.get("show_ai_chart", False) and st.session_state.get("ai_chart_ticker"):
+        ticker = st.session_state.ai_chart_ticker
+        
+        col_chart_header, col_chart_close = st.columns([4, 1])
+        with col_chart_header:
+            st.header(f"🤖 AI Chart Analyzer")
+        with col_chart_close:
+            if st.button("❌ Schließen", key="close_ai_chart"):
+                st.session_state.show_ai_chart = False
+                st.session_state.ai_chart_ticker = None
+                st.rerun()
+        
+        try:
+            poly_key = st.secrets["POLYGON_KEY"]
+            display_ai_chart_analyzer(ticker, poly_key, timeframe="1H")
+        except KeyError:
+            st.error("❌ POLYGON_KEY fehlt in Secrets!")
+        except Exception as e:
+            st.error(f"Chart Fehler: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+        
+        st.divider()
+        st.caption("👇 Normaler Scanner weiterhin verfügbar")
+    
     col_chart, col_journal = st.columns([2, 1])
     
     # Prüfe ob Insider-Strategie aktiv
@@ -7420,6 +9038,13 @@ with tab_scanner:
                         st.success(f"✅ {row['Ticker']} hinzugefügt!")
                     else:
                         st.info("Bereits in Watchlist")
+                
+                # AI CHART BUTTON
+                if st.session_state.market_type == "Aktien":
+                    if st.button(f"🤖 AI Chart für {row['Ticker']}", use_container_width=True, type="primary"):
+                        st.session_state.show_ai_chart = True
+                        st.session_state.ai_chart_ticker = row['Ticker']
+                        st.rerun()
         else:
             st.info("Klicke 'SCAN STARTEN'")
     
