@@ -4543,50 +4543,241 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     # Calculate ALL Technical Analysis
     with st.spinner("🔍 Berechne alle Indikatoren..."):
         
-        # ======== NUTZE DIE GUTE S/R FUNKTION! ========
-        # Konvertiere OHLCV Daten ins richtige Format für calculate_sr_from_historical
-        # Format erwartet: [[timestamp, open, high, low, close], ...]
-        ohlc_data_for_sr = [
-            [d["time"], d["open"], d["high"], d["low"], d["close"]] 
-            for d in ohlcv
-        ]
+        # ======== ECHTE S/R ANALYSE ========
+        highs = [d["high"] for d in ohlcv]
+        lows = [d["low"] for d in ohlcv]
+        closes = [d["close"] for d in ohlcv]
+        volumes = [d.get("volume", 0) for d in ohlcv]
         
-        # Rufe die GUTE Funktion auf
-        try:
-            (supports_list, resistances_list), fib_info = calculate_sr_from_historical(ohlc_data_for_sr, current_price)
+        period_high = max(highs)
+        period_low = min(lows)
+        price_range = period_high - period_low
+        
+        key_levels = []
+        
+        # ============================================
+        # 1. MAJOR SWING POINTS (Wichtigste Wendepunkte)
+        # ============================================
+        # Finde signifikante Swings - nicht jeden kleinen Pivot!
+        # Ein Major Swing braucht mindestens X% Bewegung danach
+        
+        min_swing_pct = 0.10  # 10% Bewegung = signifikanter Swing
+        
+        # Swing Highs
+        for i in range(5, len(highs) - 1):
+            # Ist dies ein lokales Hoch?
+            if highs[i] >= max(highs[max(0,i-5):i]) and highs[i] >= max(highs[i+1:min(len(highs),i+3)]):
+                # Wie weit ist der Preis danach gefallen?
+                future_low = min(lows[i+1:min(len(lows), i+20)]) if i+1 < len(lows) else lows[-1]
+                drop_pct = (highs[i] - future_low) / highs[i]
+                
+                if drop_pct >= min_swing_pct:
+                    key_levels.append({
+                        "price": highs[i],
+                        "type": "Swing High",
+                        "strength": min(90, 60 + int(drop_pct * 100)),
+                        "is_support": highs[i] < current_price
+                    })
+        
+        # Swing Lows
+        for i in range(5, len(lows) - 1):
+            if lows[i] <= min(lows[max(0,i-5):i]) and lows[i] <= min(lows[i+1:min(len(lows),i+3)]):
+                future_high = max(highs[i+1:min(len(highs), i+20)]) if i+1 < len(highs) else highs[-1]
+                rally_pct = (future_high - lows[i]) / lows[i] if lows[i] > 0 else 0
+                
+                if rally_pct >= min_swing_pct:
+                    key_levels.append({
+                        "price": lows[i],
+                        "type": "Swing Low",
+                        "strength": min(90, 60 + int(rally_pct * 100)),
+                        "is_support": lows[i] < current_price
+                    })
+        
+        # ============================================
+        # 2. VOLUME CLUSTER LEVELS (Wo wurde viel gehandelt?)
+        # ============================================
+        if sum(volumes) > 0:
+            # Teile Price Range in Bins
+            num_bins = 30
+            bin_size = price_range / num_bins if price_range > 0 else 1
+            volume_bins = {}
             
-            # Konvertiere in das Format das der Chart erwartet
-            sr_levels = {
-                "support_levels": fib_info.get("supports_detail", []),
-                "resistance_levels": fib_info.get("resistances_detail", []),
-                "current_price": current_price
+            for i, (h, l, v) in enumerate(zip(highs, lows, volumes)):
+                # Verteile Volume auf alle Bins die die Kerze berührt
+                low_bin = int((l - period_low) / bin_size) if bin_size > 0 else 0
+                high_bin = int((h - period_low) / bin_size) if bin_size > 0 else 0
+                
+                for b in range(max(0, low_bin), min(num_bins, high_bin + 1)):
+                    bin_price = period_low + (b + 0.5) * bin_size
+                    if bin_price not in volume_bins:
+                        volume_bins[bin_price] = 0
+                    volume_bins[bin_price] += v / max(1, high_bin - low_bin + 1)
+            
+            # Finde die Top Volume Levels (POC-artig)
+            if volume_bins:
+                sorted_bins = sorted(volume_bins.items(), key=lambda x: x[1], reverse=True)
+                avg_vol = sum(v for _, v in sorted_bins) / len(sorted_bins)
+                
+                # Nur Levels mit überdurchschnittlichem Volume
+                for price, vol in sorted_bins[:5]:
+                    if vol > avg_vol * 1.5:  # 50% über Durchschnitt
+                        key_levels.append({
+                            "price": price,
+                            "type": "High Volume",
+                            "strength": 75,
+                            "is_support": price < current_price
+                        })
+        
+        # ============================================
+        # 3. FIBONACCI LEVELS (Von Period High zu Low)
+        # ============================================
+        fib_ratios = [0.236, 0.382, 0.5, 0.618, 0.786]
+        
+        for ratio in fib_ratios:
+            fib_price = period_low + price_range * ratio
+            # Nur wenn nicht zu nah am aktuellen Preis
+            if abs(fib_price - current_price) / current_price > 0.03:
+                key_levels.append({
+                    "price": fib_price,
+                    "type": f"Fib {ratio*100:.1f}%",
+                    "strength": 70 if ratio in [0.5, 0.618] else 60,
+                    "is_support": fib_price < current_price
+                })
+        
+        # ============================================
+        # 4. PERIOD HIGH/LOW (Absolute Grenzen)
+        # ============================================
+        key_levels.append({
+            "price": period_high,
+            "type": "Period High",
+            "strength": 95,
+            "is_support": False
+        })
+        key_levels.append({
+            "price": period_low,
+            "type": "Period Low", 
+            "strength": 95,
+            "is_support": True
+        })
+        
+        # ============================================
+        # 5. ROUND NUMBERS (Psychologische Levels)
+        # ============================================
+        if current_price >= 10:
+            round_step = 5
+        elif current_price >= 1:
+            round_step = 0.5
+        else:
+            round_step = 0.1
+        
+        round_price = round(current_price / round_step) * round_step
+        for offset in [-2, -1, 1, 2]:
+            rp = round_price + offset * round_step
+            if period_low <= rp <= period_high and abs(rp - current_price) / current_price > 0.02:
+                key_levels.append({
+                    "price": rp,
+                    "type": f"Round ${rp:.2f}",
+                    "strength": 65,
+                    "is_support": rp < current_price
+                })
+        
+        # ============================================
+        # 6. GAP LEVELS (Offene Gaps)
+        # ============================================
+        for i in range(1, len(ohlcv)):
+            prev_close = ohlcv[i-1]["close"]
+            curr_open = ohlcv[i]["open"]
+            gap_pct = abs(curr_open - prev_close) / prev_close if prev_close > 0 else 0
+            
+            # Nur signifikante Gaps (>3%)
+            if gap_pct > 0.03:
+                gap_price = (prev_close + curr_open) / 2
+                key_levels.append({
+                    "price": gap_price,
+                    "type": "Gap",
+                    "strength": 70,
+                    "is_support": gap_price < current_price
+                })
+        
+        # ============================================
+        # CLUSTERING: Merge nahe Levels
+        # ============================================
+        def cluster_nearby_levels(levels, tolerance_pct=0.03):
+            """Merged Levels die zu nah beieinander sind"""
+            if not levels:
+                return []
+            
+            sorted_levels = sorted(levels, key=lambda x: x["price"])
+            clusters = []
+            current_cluster = [sorted_levels[0]]
+            
+            for level in sorted_levels[1:]:
+                cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
+                if abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
+                    current_cluster.append(level)
+                else:
+                    # Finalisiere Cluster - behalte stärkstes Level
+                    best = max(current_cluster, key=lambda x: x["strength"])
+                    # Kombiniere Types
+                    types = list(set(l["type"] for l in current_cluster))
+                    if len(types) > 1:
+                        best["type"] = " + ".join(types[:2])
+                    # Erhöhe Stärke bei Confluence
+                    best["strength"] = min(99, best["strength"] + len(current_cluster) * 5)
+                    clusters.append(best)
+                    current_cluster = [level]
+            
+            # Letzter Cluster
+            if current_cluster:
+                best = max(current_cluster, key=lambda x: x["strength"])
+                types = list(set(l["type"] for l in current_cluster))
+                if len(types) > 1:
+                    best["type"] = " + ".join(types[:2])
+                best["strength"] = min(99, best["strength"] + len(current_cluster) * 5)
+                clusters.append(best)
+            
+            return clusters
+        
+        # Cluster alle Levels
+        all_clustered = cluster_nearby_levels(key_levels, tolerance_pct=0.03)
+        
+        # Trenne in Support und Resistance
+        supports = [l for l in all_clustered if l["price"] < current_price * 0.98]
+        resistances = [l for l in all_clustered if l["price"] > current_price * 1.02]
+        
+        # Sortiere nach Stärke und nimm Top 3
+        supports = sorted(supports, key=lambda x: x["strength"], reverse=True)[:3]
+        resistances = sorted(resistances, key=lambda x: x["strength"], reverse=True)[:3]
+        
+        # Sortiere nach Nähe zum Preis für Anzeige
+        supports = sorted(supports, key=lambda x: x["price"], reverse=True)
+        resistances = sorted(resistances, key=lambda x: x["price"])
+        
+        sr_levels = {
+            "support_levels": supports,
+            "resistance_levels": resistances,
+            "current_price": current_price
+        }
+        
+        # PDH/PDL/PDC
+        pdh = period_high
+        pdl = period_low
+        pdc = closes[-1]
+        
+        # Fib Levels für separate Anzeige
+        fib_levels = {
+            "swing_high": period_high,
+            "swing_low": period_low,
+            "levels": {
+                "0.0": period_low,
+                "0.236": period_low + price_range * 0.236,
+                "0.382": period_low + price_range * 0.382,
+                "0.5": period_low + price_range * 0.5,
+                "0.618": period_low + price_range * 0.618,
+                "0.786": period_low + price_range * 0.786,
+                "1.0": period_high,
             }
-            
-            # Fib Levels aus fib_info extrahieren
-            fib_levels = {
-                "swing_high": fib_info.get("period_high", max(d["high"] for d in ohlcv)),
-                "swing_low": fib_info.get("period_low", min(d["low"] for d in ohlcv)),
-                "levels": {
-                    "0.0": fib_info.get("period_low", 0),
-                    "0.236": fib_info.get("fib_236", 0),
-                    "0.382": fib_info.get("fib_382", 0),
-                    "0.5": fib_info.get("fib_500", 0),
-                    "0.618": fib_info.get("fib_618", 0),
-                    "0.786": fib_info.get("fib_786", 0),
-                    "1.0": fib_info.get("period_high", 0),
-                }
-            }
-            
-            # PDH/PDL/PDC für Anzeige speichern
-            pdh = fib_info.get("prev_day_high", 0)
-            pdl = fib_info.get("prev_day_low", 0) 
-            pdc = fib_info.get("prev_day_close", 0)
-            
-        except Exception as e:
-            # Fallback zur einfachen Berechnung
-            sr_levels = calculate_support_resistance(ohlcv, num_levels=3, lookback=100)
-            fib_levels = calculate_fibonacci_levels(ohlcv, lookback=100)
-            pdh, pdl, pdc = 0, 0, 0
+        }
         
         # Patterns
         patterns = detect_chart_patterns(ohlcv, lookback=80)
