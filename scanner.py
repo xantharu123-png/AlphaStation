@@ -1,20 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V67.2 PRO                               ║
+║                        ALPHA STATION V67.3 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 67.2 (Chart History + Weekly TF)                                   ║
+║  Version: 67.3 (Strategy Audit & Fixes)                                      ║
 ║  Date: 12. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V67.2 NEW - CHART HISTORY FIX:                                              ║
-║  ✅ 1H: 30 Tage → 3 Monate (3× mehr)                                       ║
-║  ✅ 4H: 60 Tage → 6 Monate (3× mehr)                                       ║
-║  ✅ 1D: 1 Jahr → 2 Jahre (2× mehr, ~500 Bars)                              ║
-║  ✅ NEU: 1W Weekly Timeframe (5 Jahre History!)                              ║
-║  ✅ 15m: 10 Tage → 3 Wochen                                                ║
-║  ✅ Dynamische Max-Bars pro Timeframe (statt hardcoded 300)                  ║
-║  V67.1: PM Watchlist DST/Gap/Vol/Katalysator + AI Chart Pattern Rewrite      ║
+║  V67.3 NEW - STRATEGY AUDIT (8 Fixes):                                       ║
+║  ✅ FIX1: AH Earnings → Split in Gainers 📈 + Losers 📉 (war nur positiv)  ║
+║  ✅ FIX2: Whale Watch → Change 3%+ (war 1%) + neuer Whale Watch Short 🐻   ║
+║  ✅ FIX3: Early Momentum → +Close Position 0.6+ (Abgrenzung zu Vol Surge)   ║
+║  ✅ FIX4: Consolidation Breakout → needs_history für Multi-Day Validierung   ║
+║  ✅ FIX5: Reversal Setup → needs_history für Mehrtages-Downtrend Check       ║
+║  ✅ FIX6: Krypto Vortag% → (7d-24h)/6 statt 7d/7 (genauer)                ║
+║  ✅ FIX7: Forex/Futures → Vortag% Filter fehlte komplett! + best_pairs       ║
+║  ✅ FIX8: Safe Haven/Risk-On → Stärkere Thresholds (0.4% statt 0.2%)        ║
+║  V67.2: Chart History 3x mehr + Weekly Timeframe                             ║
+║  V67.1: PM Watchlist + AI Chart Pattern Rewrite                              ║
 ║  V67.0: AI Chart Analyzer mit Lightweight Charts                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
@@ -131,14 +134,19 @@ STRATEGIES = {
         "logic": "Gestern bärische KERZE (Close<Open, -5% bis -50%), heute Käufer (+3%+) mit Volumen"
     },
     "Early Momentum": {
-        "description": "Starker Tagesstart mit Volumen",
-        "filters": {"Change %": (4.0, 30.0), "RVOL": (2.0, 50.0)},
-        "logic": "Change > 4% + RVOL > 2 = echtes Momentum (nicht nur Noise)"
+        "description": "Starker Tagesstart mit Volumen - Preis hält sich oben",
+        "filters": {"Change %": (4.0, 30.0), "RVOL": (2.0, 50.0), "Close Position": (0.6, 1.0), "Preis": (5.0, 500.0)},
+        "logic": "Change > 4% + RVOL > 2 + Close nahe High = echtes Momentum (nicht Pump & Dump)"
     },
     "Whale Watch": {
-        "description": "Extremes Volumen MIT Bewegung - Big Player aktiv",
-        "filters": {"RVOL": (5.0, 100.0), "Change %": (1.0, 100.0)},
-        "logic": "RVOL > 5.0 + Change > 1% = institutionelles Interesse mit Richtung"
+        "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
+        "filters": {"RVOL": (5.0, 100.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 5.0 + Change > 3% = institutionelles Interesse mit klarer Richtung"
+    },
+    "Whale Watch Short 🐻": {
+        "description": "Extremes Volumen + Abverkauf - Big Player verkaufen",
+        "filters": {"RVOL": (5.0, 100.0), "Change %": (-100.0, -3.0)},
+        "logic": "RVOL > 5.0 + Change < -3% = institutioneller Verkaufsdruck"
     },
     # =========================================================================
     # PRE-MARKET STRATEGIEN 🌅 - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
@@ -188,10 +196,17 @@ STRATEGIES = {
         "stocks_only": True,
         "session_hint": "After-Hours"
     },
-    "AH Earnings Movers 🌙": {
-        "description": "🌙 AFTER-HOURS: Starke Bewegung (Earnings Season)",
+    "AH Earnings Gainers 🌙📈": {
+        "description": "🌙 AFTER-HOURS: Starker ANSTIEG nach Earnings",
         "filters": {"Change %": (8.0, 200.0), "Preis": (10.0, 1000.0)},
-        "logic": ">8% Move nach Close = wahrscheinlich Earnings Reaction",
+        "logic": ">8% Anstieg nach Close = positive Earnings Überraschung",
+        "stocks_only": True,
+        "session_hint": "After-Hours"
+    },
+    "AH Earnings Losers 🌙📉": {
+        "description": "🌙 AFTER-HOURS: Starker ABVERKAUF nach Earnings",
+        "filters": {"Change %": (-200.0, -8.0), "Preis": (10.0, 1000.0)},
+        "logic": ">8% Fall nach Close = negative Earnings Überraschung oder Guidance",
         "stocks_only": True,
         "session_hint": "After-Hours"
     },
@@ -267,14 +282,20 @@ STRATEGIES = {
         "history_days": 5
     },
     "Consolidation Breakout 🚀": {
-        "description": "📦→🚀 Ausbruch aus enger Range mit Volumen (⚠️ Vortag% = Kerze)",
+        "description": "📦→🚀 Ausbruch aus MEHRTÄGIGER enger Range mit Volumen (⚠️ Vortag% = Kerze)",
         "filters": {"Change %": (3.0, 30.0), "Vortag %": (-2.5, 2.5), "RVOL": (2.0, 50.0)},
-        "logic": "Kleine Vortags-Kerze (±2.5%) + heute Ausbruch (+3%+) mit hohem Volumen"
+        "logic": "Mehrtägige enge Range + heute Ausbruch (+3%+) mit hohem Volumen",
+        "needs_history": True,
+        "pattern_type": "consolidation_breakout",
+        "history_days": 5
     },
     "Reversal Setup 🪤": {
-        "description": "📦 Bärische Vortags-Kerze + heute bullisch (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
-        "filters": {"Change %": (2.0, 15.0), "Vortag %": (-8.0, -2.0), "RVOL": (1.8, 10.0)},
-        "logic": "Gestern rote Kerze (Close<Open, -2% bis -8%), heute grün mit erhöhtem Volumen"
+        "description": "📦 Mehrtägiger Abverkauf + heute bullische Umkehr (⚠️ Vortag% = Kerze)",
+        "filters": {"Change %": (2.0, 15.0), "Vortag %": (-8.0, -2.0), "RVOL": (1.5, 10.0)},
+        "logic": "Mehrtägiger Downtrend + heute grün mit erhöhtem Volumen = Boden-Bildung",
+        "needs_history": True,
+        "pattern_type": "reversal_setup",
+        "history_days": 5
     },
     "Tight Range 📐": {
         "description": "📐 Extrem enge Tagesrange mit niedrigem Volumen - Explosion steht bevor",
@@ -512,15 +533,15 @@ FOREX_STRATEGIES = {
     # SPEZIELLE FOREX-STRATEGIEN (Any Time)
     # =========================================================================
     "Safe Haven Flow 🛡️": {
-        "description": "🛡️ Flucht in sichere Währungen (CHF, JPY)",
-        "filters": {"Change %": (-5.0, -0.2)},
-        "logic": "USD/CHF oder USD/JPY fallen = Risk-Off Modus",
+        "description": "🛡️ Flucht in sichere Währungen (CHF, JPY) - Risk-Off Signal",
+        "filters": {"Change %": (-5.0, -0.4)},
+        "logic": "USD/CHF oder USD/JPY fallen deutlich = Risk-Off Modus (Investoren kaufen CHF/JPY)",
         "best_pairs": ["USDCHF", "USDJPY", "EURJPY"]
     },
     "Risk-On Rally 🚀": {
-        "description": "🚀 Risikofreudige Währungen steigen (AUD, NZD)",
-        "filters": {"Change %": (0.2, 5.0)},
-        "logic": "AUD/USD, NZD/USD steigen = Risk-On Sentiment",
+        "description": "🚀 Risikofreudige Währungen steigen (AUD, NZD) - Risk-On Signal",
+        "filters": {"Change %": (0.3, 5.0)},
+        "logic": "AUD/USD, NZD/USD steigen deutlich = Risk-On Sentiment (Investoren gehen ins Risiko)",
         "best_pairs": ["AUDUSD", "NZDUSD", "AUDJPY"]
     },
     "Exotic Movers 🌍": {
@@ -587,9 +608,9 @@ CRYPTO_STRATEGIES = {
         "logic": "Positive Bewegung mit überdurchschnittlichem Turnover"
     },
     "Whale Watch 🐋": {
-        "description": "Extremes Volumen MIT Bewegung - Big Player aktiv",
-        "filters": {"RVOL": (2.0, 50.0), "Change %": (2.0, 100.0)},
-        "logic": "RVOL > 2.0 + Change > 2% = Whale Activity mit Richtung"
+        "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
+        "filters": {"RVOL": (2.0, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
@@ -1158,6 +1179,104 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
             elif late_vol > early_vol:
                 score += 15
                 details.append(f"⚠️ Leichte Volumen-Zunahme: {late_vol/early_vol:.1f}x")
+    
+    elif pattern_type == "consolidation_breakout":
+        # Prüfe ob die Tage VOR dem Breakout eng waren
+        # Letzter Tag = heute (Breakout) → prüfe nur die Tage davor
+        if len(bars) >= 4:
+            pre_breakout_bars = bars[:-1]  # Alles außer heute
+            pre_highs = [b["high"] for b in pre_breakout_bars]
+            pre_lows = [b["low"] for b in pre_breakout_bars]
+            pre_range_pct = ((max(pre_highs) - min(pre_lows)) / pre_breakout_bars[0]["close"]) * 100
+            
+            # Kriterium 1: Enge Range VOR dem Breakout
+            if pre_range_pct < 6:
+                score += 35
+                details.append(f"✅ Enge Vorbreakout-Range: {pre_range_pct:.1f}% über {len(pre_breakout_bars)} Tage")
+            elif pre_range_pct < 10:
+                score += 20
+                details.append(f"⚠️ Moderate Vorbreakout-Range: {pre_range_pct:.1f}%")
+            else:
+                details.append(f"❌ Range vor Breakout zu groß: {pre_range_pct:.1f}%")
+            
+            # Kriterium 2: Tägliche Änderungen waren klein
+            pre_changes = [abs(c) for c in daily_changes[:-1]]  # Ohne heute
+            if pre_changes:
+                avg_daily_change = sum(pre_changes) / len(pre_changes)
+                if avg_daily_change < 2.0:
+                    score += 25
+                    details.append(f"✅ Ruhige Vortage: ∅{avg_daily_change:.1f}% tgl. Bewegung")
+                elif avg_daily_change < 3.5:
+                    score += 10
+                    details.append(f"⚠️ Moderate Vortage: ∅{avg_daily_change:.1f}%")
+                else:
+                    details.append(f"❌ Volatile Vortage: ∅{avg_daily_change:.1f}%")
+            
+            # Kriterium 3: Volumen war niedrig vor dem Breakout, steigt am Breakout-Tag
+            pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
+            breakout_vol = volumes[-1]
+            vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
+            
+            if vol_ratio > 2.0:
+                score += 20
+                details.append(f"✅ Volumen-Explosion: {vol_ratio:.1f}x vs Vortage")
+            elif vol_ratio > 1.3:
+                score += 10
+                details.append(f"⚠️ Leicht erhöhtes Volumen: {vol_ratio:.1f}x")
+            else:
+                details.append(f"❌ Kein Volumen-Anstieg: {vol_ratio:.1f}x")
+        else:
+            details.append("❌ Nicht genug Daten für Breakout-Validierung")
+    
+    elif pattern_type == "reversal_setup":
+        # Prüfe ob es einen mehrtägigen Downtrend gab VOR dem heutigen Reversal
+        if len(bars) >= 3:
+            # Kriterium 1: Gesamtbewegung der Vortage war negativ
+            pre_bars = bars[:-1]  # Alles außer heute
+            total_decline = ((pre_bars[-1]["close"] - pre_bars[0]["close"]) / pre_bars[0]["close"]) * 100
+            
+            if total_decline <= -5:
+                score += 35
+                details.append(f"✅ Starker Mehrtages-Decline: {total_decline:+.1f}%")
+            elif total_decline <= -3:
+                score += 20
+                details.append(f"⚠️ Moderater Decline: {total_decline:+.1f}%")
+            elif total_decline <= -1:
+                score += 10
+                details.append(f"⚠️ Leichter Decline: {total_decline:+.1f}%")
+            else:
+                details.append(f"❌ Kein Downtrend vor Reversal: {total_decline:+.1f}%")
+            
+            # Kriterium 2: Mindestens 2 von N Vortagen waren rot
+            red_days = sum(1 for c in daily_changes[:-1] if c < 0)
+            total_pre_days = len(daily_changes) - 1
+            if total_pre_days > 0:
+                red_pct = red_days / total_pre_days
+                if red_pct >= 0.6:
+                    score += 25
+                    details.append(f"✅ {red_days}/{total_pre_days} Vortage rot = Verkaufsdruck")
+                elif red_pct >= 0.4:
+                    score += 10
+                    details.append(f"⚠️ {red_days}/{total_pre_days} Vortage rot")
+                else:
+                    details.append(f"❌ Nur {red_days}/{total_pre_days} rote Vortage")
+            
+            # Kriterium 3: Heutiges Reversal mit erhöhtem Volumen
+            if len(volumes) >= 2:
+                pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1])
+                today_vol = volumes[-1]
+                vol_ratio = today_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
+                
+                if vol_ratio > 1.5:
+                    score += 20
+                    details.append(f"✅ Reversal-Volumen: {vol_ratio:.1f}x über Vortage")
+                elif vol_ratio > 1.0:
+                    score += 10
+                    details.append(f"⚠️ Leicht erhöhtes Volumen: {vol_ratio:.1f}x")
+                else:
+                    details.append(f"❌ Schwaches Reversal-Volumen: {vol_ratio:.1f}x")
+        else:
+            details.append("❌ Nicht genug Daten für Reversal-Validierung")
     
     is_valid = score >= 40
     return is_valid, score, details
@@ -6028,22 +6147,22 @@ def fetch_crypto_data():
                 # HEUTE: 24h Change
                 change_24h = coin.get("price_change_percentage_24h") or 0
                 
-                # VORTAG BERECHNUNG:
-                # CoinGecko kann 7d unter verschiedenen Namen liefern
+                # VORTAG BERECHNUNG (VERBESSERT V67.3):
+                # CoinGecko liefert kein einzelnes "gestern" - wir approximieren:
+                # Vortag ≈ (7d_change - 24h_change) / 6
+                # Das gibt den Durchschnitt der 6 Tage VOR heute (ohne heute)
+                # Besser als vorher: 7d/7 hat heute mit reingerechnet
                 change_7d = (
                     coin.get("price_change_percentage_7d_in_currency") or 
                     coin.get("price_change_percentage_7d") or 
                     0
                 )
                 
-                # Berechne Vortag aus 7d-Daten
                 if change_7d != 0:
-                    # Durchschnittliche tägliche Änderung der letzten 7 Tage
-                    avg_daily_7d = change_7d / 7
-                    # Vortag ≈ Durchschnitt (einfacher und stabiler)
-                    vortag_chg = round(avg_daily_7d, 2)
+                    # Entferne heutige Bewegung aus dem 7d-Durchschnitt
+                    remaining_6d = change_7d - change_24h
+                    vortag_chg = round(remaining_6d / 6, 2)
                 else:
-                    # Fallback: Setze auf 0
                     vortag_chg = 0
                 
                 high_24h = coin.get("high_24h") or price
@@ -6432,7 +6551,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 liquidity_strategies = [
                     "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
                     "PM Gainers 🌅", "PM Losers 🌅", "PM Gap & Go 🌅", "PM Penny Movers 🌅",
-                    "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Movers 🌙"
+                    "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Gainers 🌙📈", "AH Earnings Losers 🌙📉"
                 ]
                 
                 # PM/AH: Niedrigerer Threshold ($50k) weil weniger Volumen normal ist
@@ -7708,9 +7827,10 @@ def fetch_futures_data(category):
                 
                 close_pos = calculate_close_position(today_high, today_low, price)
                 
-                # Filter-Logik
+                # Filter-Logik (V67.3: +Vortag% Filter - fehlte komplett!)
                 match = True
                 if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
+                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
                 if af.get("nur_gewinner") and change <= 0: match = False
                 if af.get("nur_verlierer") and change >= 0: match = False
                 
@@ -7826,11 +7946,24 @@ def fetch_forex_data(category):
                     pip_value = 0.0001
                     pip_change = (price - yesterday_close) / pip_value
                 
-                # Filter-Logik
+                # Filter-Logik (V67.3: +Vortag%, +best_pairs Filter)
                 match = True
-                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
-                if af.get("nur_gewinner") and change <= 0: match = False
-                if af.get("nur_verlierer") and change >= 0: match = False
+                
+                # Strategie-spezifische best_pairs Filterung
+                current_strat = st.session_state.get("current_strategy", "")
+                strat_def = FOREX_STRATEGIES.get(current_strat, {})
+                best_pairs = strat_def.get("best_pairs", [])
+                
+                if best_pairs:
+                    # best_pairs Format: "USDJPY", ticker Format: "USDJPY=X"
+                    ticker_clean = ticker.replace("=X", "")
+                    if ticker_clean not in best_pairs:
+                        match = False
+                
+                if match and "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
+                if match and "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
+                if match and af.get("nur_gewinner") and change <= 0: match = False
+                if match and af.get("nur_verlierer") and change >= 0: match = False
                 
                 if not match:
                     skipped_filter += 1
