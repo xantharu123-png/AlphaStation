@@ -3,7 +3,7 @@
 ║                        ALPHA STATION V67.1 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 67.1 (PM Watchlist Upgrade)                                        ║
+║  Version: 67.1 (PM Watchlist + AI Chart Fixes)                               ║
 ║  Date: 12. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -12,9 +12,16 @@
 ║  ✅ KATALYSATOR: News-Erkennung (Earnings, FDA, Offering, M&A, etc.)        ║
 ║  ✅ ECHTE GAP: PM Open vs PrevClose (nicht Current vs PrevClose)             ║
 ║  ✅ VOLUME RATIO: PM Vol vs Avg Daily Vol (zeigt ungewöhnliche Aktivität)    ║
+║  V67.1 NEW - AI CHART FIXES:                                                ║
+║  ✅ PATTERN FIX: Double Bottom/Top mit 4 strengen Kriterien                 ║
+║     → Min 10 Bars Abstand, Min 2× ATR Tiefe, ATR-basierte Toleranz          ║
+║     → Volume-Bestätigung, adaptives Swing-Window (5-10)                      ║
+║  ✅ S/R FIX: Adaptiver min_swing_pct (3×ATR statt 10% hardcoded)            ║
+║  ✅ FIB FIX: Letzter signifikanter Swing statt immer Period High/Low         ║
+║  ✅ H&S FIX: Min Abstand + Head muss 1×ATR höher sein                       ║
+║  ✅ FLAG FIX: Erkennt echten Pole durch Preisbewegung statt 30/70 Split      ║
 ║  V67.0: AI Chart Analyzer mit Lightweight Charts                             ║
 ║  V66.6: PM Watchlist Complete - News + Float                                 ║
-║  V66.5: Extended PM Watchlist - Echte PM H/L, PDH/PDL, RS vs SPY            ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -3468,14 +3475,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
     """
     Erkennt Chart-Patterns automatisch.
     
-    Detektiert:
-    - Double Top / Double Bottom
-    - Head & Shoulders / Inverse H&S
-    - Ascending/Descending/Symmetrical Triangle
-    - Bull/Bear Flag
-    - Pennant
-    - Cup & Handle
-    - Rising/Falling Wedge
+    V67.1 REWRITE - Strengere Kriterien:
+    - Adaptives Swing-Window (min 5, skaliert mit Datenmenge)
+    - Mindestabstand zwischen Pattern-Punkten (min 10 Bars)
+    - Mindesttiefe/Höhe für Neckline
+    - Volume-Bestätigung
+    - Weniger "forming" false positives
     
     Returns:
         List of detected patterns with details
@@ -3493,165 +3498,273 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         volumes = [d.get("volume", 0) for d in data]
         
         current_price = closes[-1]
+        avg_volume = sum(volumes) / len(volumes) if volumes else 1
         
-        # Finde Swing Highs und Lows
+        # ATR-basierte Toleranz (adaptiv statt hardcoded)
+        atr_values = []
+        for i in range(1, len(data)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            atr_values.append(tr)
+        atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
+        atr_pct = atr / current_price if current_price > 0 else 0.02
+        
+        # Finde Swing Highs und Lows mit ADAPTIVEM Window
+        # Window = mindestens 5, maximal 10, skaliert mit Datenmenge
+        swing_window = max(5, min(10, len(data) // 8))
+        
         swing_highs = []
         swing_lows = []
         
-        for i in range(3, len(data) - 3):
-            # Swing High
-            if highs[i] >= max(highs[i-3:i]) and highs[i] >= max(highs[i+1:i+4]):
+        for i in range(swing_window, len(data) - swing_window):
+            # Swing High: Höher als alle Bars links UND rechts im Window
+            if highs[i] >= max(highs[i-swing_window:i]) and highs[i] >= max(highs[i+1:i+swing_window+1]):
                 swing_highs.append({"price": highs[i], "index": i, "volume": volumes[i]})
-            # Swing Low
-            if lows[i] <= min(lows[i-3:i]) and lows[i] <= min(lows[i+1:i+4]):
+            # Swing Low: Tiefer als alle Bars links UND rechts im Window
+            if lows[i] <= min(lows[i-swing_window:i]) and lows[i] <= min(lows[i+1:i+swing_window+1]):
                 swing_lows.append({"price": lows[i], "index": i, "volume": volumes[i]})
         
         # === DOUBLE TOP ===
         if len(swing_highs) >= 2:
-            last_two_highs = swing_highs[-2:]
-            h1, h2 = last_two_highs[0]["price"], last_two_highs[1]["price"]
-            
-            # Ähnliche Höhe (innerhalb 2%)
-            if abs(h1 - h2) / h1 < 0.02:
-                neckline = min(lows[last_two_highs[0]["index"]:last_two_highs[1]["index"]+1])
-                
-                # Preis unter Neckline = bestätigt
-                if current_price < neckline:
-                    patterns.append({
-                        "pattern": "Double Top",
-                        "emoji": "🔻",
-                        "type": "bearish",
-                        "level1": round(h1, 2),
-                        "level2": round(h2, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline - (h1 - neckline), 2),
-                        "confidence": "High" if current_price < neckline * 0.99 else "Medium",
-                        "description": f"Double Top @ ${h1:.2f} - Bearish Reversal. Target: ${neckline - (h1 - neckline):.2f}"
-                    })
-                elif current_price < h1 * 0.98:
-                    patterns.append({
-                        "pattern": "Double Top (forming)",
-                        "emoji": "⚠️",
-                        "type": "bearish",
-                        "level1": round(h1, 2),
-                        "level2": round(h2, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline - (h1 - neckline), 2),
-                        "confidence": "Low",
-                        "description": f"Potential Double Top forming @ ${h1:.2f}. Watch neckline ${neckline:.2f}"
-                    })
+            # Prüfe alle Paare, nicht nur die letzten zwei
+            for a in range(len(swing_highs) - 1):
+                for b in range(a + 1, len(swing_highs)):
+                    h1_data = swing_highs[a]
+                    h2_data = swing_highs[b]
+                    h1, h2 = h1_data["price"], h2_data["price"]
+                    idx1, idx2 = h1_data["index"], h2_data["index"]
+                    
+                    # KRITERIUM 1: Mindestabstand zwischen Tops (min 10 Bars)
+                    if idx2 - idx1 < 10:
+                        continue
+                    
+                    # KRITERIUM 2: Ähnliche Höhe (innerhalb 1.5× ATR)
+                    if abs(h1 - h2) > atr * 1.5:
+                        continue
+                    
+                    # KRITERIUM 3: Neckline muss signifikant tiefer sein (min 2× ATR)
+                    neckline = min(lows[idx1:idx2+1])
+                    top_avg = (h1 + h2) / 2
+                    depth = top_avg - neckline
+                    
+                    if depth < atr * 2:
+                        continue
+                    
+                    # KRITERIUM 4: Zweites Top hatte weniger Volume (Divergenz)
+                    vol_confirmation = h2_data["volume"] < h1_data["volume"] * 1.2
+                    
+                    # Preis unter Neckline = bestätigt
+                    if current_price < neckline:
+                        patterns.append({
+                            "pattern": "Double Top",
+                            "emoji": "🔻",
+                            "type": "bearish",
+                            "level1": round(h1, 2),
+                            "level2": round(h2, 2),
+                            "neckline": round(neckline, 2),
+                            "target": round(neckline - depth, 2),
+                            "confidence": "High" if vol_confirmation else "Medium",
+                            "description": f"Double Top @ ${top_avg:.2f} - Neckline ${neckline:.2f} broken. Target: ${neckline - depth:.2f}"
+                        })
+                        break  # Nur das beste Pattern nehmen
+                    elif current_price < top_avg * 0.97 and current_price > neckline:
+                        patterns.append({
+                            "pattern": "Double Top (forming)",
+                            "emoji": "⚠️",
+                            "type": "bearish",
+                            "level1": round(h1, 2),
+                            "level2": round(h2, 2),
+                            "neckline": round(neckline, 2),
+                            "target": round(neckline - depth, 2),
+                            "confidence": "Low",
+                            "description": f"Potential Double Top @ ${top_avg:.2f}. Watch neckline ${neckline:.2f}"
+                        })
+                        break
+                if patterns and patterns[-1]["pattern"].startswith("Double Top"):
+                    break
         
         # === DOUBLE BOTTOM ===
         if len(swing_lows) >= 2:
-            last_two_lows = swing_lows[-2:]
-            l1, l2 = last_two_lows[0]["price"], last_two_lows[1]["price"]
-            
-            if abs(l1 - l2) / l1 < 0.02:
-                neckline = max(highs[last_two_lows[0]["index"]:last_two_lows[1]["index"]+1])
-                
-                if current_price > neckline:
-                    patterns.append({
-                        "pattern": "Double Bottom",
-                        "emoji": "🚀",
-                        "type": "bullish",
-                        "level1": round(l1, 2),
-                        "level2": round(l2, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline + (neckline - l1), 2),
-                        "confidence": "High" if current_price > neckline * 1.01 else "Medium",
-                        "description": f"Double Bottom @ ${l1:.2f} - Bullish Reversal. Target: ${neckline + (neckline - l1):.2f}"
-                    })
-                elif current_price > l1 * 1.02:
-                    patterns.append({
-                        "pattern": "Double Bottom (forming)",
-                        "emoji": "👀",
-                        "type": "bullish",
-                        "level1": round(l1, 2),
-                        "level2": round(l2, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline + (neckline - l1), 2),
-                        "confidence": "Low",
-                        "description": f"Potential Double Bottom forming @ ${l1:.2f}. Watch neckline ${neckline:.2f}"
-                    })
+            for a in range(len(swing_lows) - 1):
+                for b in range(a + 1, len(swing_lows)):
+                    l1_data = swing_lows[a]
+                    l2_data = swing_lows[b]
+                    l1, l2 = l1_data["price"], l2_data["price"]
+                    idx1, idx2 = l1_data["index"], l2_data["index"]
+                    
+                    # KRITERIUM 1: Mindestabstand (min 10 Bars)
+                    if idx2 - idx1 < 10:
+                        continue
+                    
+                    # KRITERIUM 2: Ähnliche Tiefe (innerhalb 1.5× ATR)
+                    if abs(l1 - l2) > atr * 1.5:
+                        continue
+                    
+                    # KRITERIUM 3: Neckline muss signifikant höher sein (min 2× ATR)
+                    neckline = max(highs[idx1:idx2+1])
+                    bottom_avg = (l1 + l2) / 2
+                    depth = neckline - bottom_avg
+                    
+                    if depth < atr * 2:
+                        continue
+                    
+                    # KRITERIUM 4: Volume-Bestätigung
+                    # Idealerweise: höheres Volume beim zweiten Bottom oder beim Breakout
+                    recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else avg_volume
+                    vol_confirmation = recent_vol > avg_volume * 0.8
+                    
+                    # Preis über Neckline = bestätigt
+                    if current_price > neckline:
+                        patterns.append({
+                            "pattern": "Double Bottom",
+                            "emoji": "🚀",
+                            "type": "bullish",
+                            "level1": round(l1, 2),
+                            "level2": round(l2, 2),
+                            "neckline": round(neckline, 2),
+                            "target": round(neckline + depth, 2),
+                            "confidence": "High" if vol_confirmation else "Medium",
+                            "description": f"Double Bottom @ ${bottom_avg:.2f} - Neckline ${neckline:.2f} broken. Target: ${neckline + depth:.2f}"
+                        })
+                        break
+                    elif current_price > bottom_avg + atr and current_price < neckline:
+                        patterns.append({
+                            "pattern": "Double Bottom (forming)",
+                            "emoji": "👀",
+                            "type": "bullish",
+                            "level1": round(l1, 2),
+                            "level2": round(l2, 2),
+                            "neckline": round(neckline, 2),
+                            "target": round(neckline + depth, 2),
+                            "confidence": "Low",
+                            "description": f"Potential Double Bottom @ ${bottom_avg:.2f}. Watch neckline ${neckline:.2f}"
+                        })
+                        break
+                if patterns and any(p["pattern"].startswith("Double Bottom") for p in patterns):
+                    break
         
         # === HEAD & SHOULDERS ===
         if len(swing_highs) >= 3:
-            last_three = swing_highs[-3:]
-            h1, h2, h3 = last_three[0]["price"], last_three[1]["price"], last_three[2]["price"]
-            
-            # Head (h2) muss höher sein als beide Shoulders
-            if h2 > h1 and h2 > h3 and abs(h1 - h3) / h1 < 0.03:
-                neckline = min(lows[last_three[0]["index"]:last_three[2]["index"]+1])
-                
-                if current_price < neckline:
-                    patterns.append({
-                        "pattern": "Head & Shoulders",
-                        "emoji": "🔻🔻",
-                        "type": "bearish",
-                        "left_shoulder": round(h1, 2),
-                        "head": round(h2, 2),
-                        "right_shoulder": round(h3, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline - (h2 - neckline), 2),
-                        "confidence": "High",
-                        "description": f"H&S Complete! Neckline broken. Target: ${neckline - (h2 - neckline):.2f}"
-                    })
-                elif current_price < h3 * 0.98:
-                    patterns.append({
-                        "pattern": "Head & Shoulders (forming)",
-                        "emoji": "⚠️",
-                        "type": "bearish",
-                        "left_shoulder": round(h1, 2),
-                        "head": round(h2, 2),
-                        "right_shoulder": round(h3, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline - (h2 - neckline), 2),
-                        "confidence": "Medium",
-                        "description": f"H&S forming. Watch neckline @ ${neckline:.2f}"
-                    })
+            # Prüfe die letzten 3-5 Swing Highs für H&S
+            for i in range(max(0, len(swing_highs) - 5), len(swing_highs) - 2):
+                for j in range(i + 1, len(swing_highs) - 1):
+                    for k in range(j + 1, len(swing_highs)):
+                        sh1, sh2, sh3 = swing_highs[i], swing_highs[j], swing_highs[k]
+                        h1, h2, h3 = sh1["price"], sh2["price"], sh3["price"]
+                        idx1, idx2, idx3 = sh1["index"], sh2["index"], sh3["index"]
+                        
+                        # Mindestabstand zwischen Schultern
+                        if idx2 - idx1 < 5 or idx3 - idx2 < 5:
+                            continue
+                        
+                        # Head muss höher als beide Shoulders
+                        if not (h2 > h1 and h2 > h3):
+                            continue
+                        
+                        # Head muss mindestens 1× ATR höher sein
+                        if h2 - max(h1, h3) < atr:
+                            continue
+                        
+                        # Shoulders ähnlich hoch (innerhalb 2× ATR)
+                        if abs(h1 - h3) > atr * 2:
+                            continue
+                        
+                        # Neckline
+                        neckline = min(lows[idx1:idx3+1])
+                        
+                        if current_price < neckline:
+                            patterns.append({
+                                "pattern": "Head & Shoulders",
+                                "emoji": "🔻🔻",
+                                "type": "bearish",
+                                "left_shoulder": round(h1, 2),
+                                "head": round(h2, 2),
+                                "right_shoulder": round(h3, 2),
+                                "neckline": round(neckline, 2),
+                                "target": round(neckline - (h2 - neckline), 2),
+                                "confidence": "High",
+                                "description": f"H&S Complete! Neckline ${neckline:.2f} broken. Target: ${neckline - (h2 - neckline):.2f}"
+                            })
+                        elif current_price < h3 * 0.97:
+                            patterns.append({
+                                "pattern": "Head & Shoulders (forming)",
+                                "emoji": "⚠️",
+                                "type": "bearish",
+                                "left_shoulder": round(h1, 2),
+                                "head": round(h2, 2),
+                                "right_shoulder": round(h3, 2),
+                                "neckline": round(neckline, 2),
+                                "target": round(neckline - (h2 - neckline), 2),
+                                "confidence": "Medium",
+                                "description": f"H&S forming. Watch neckline @ ${neckline:.2f}"
+                            })
+                        
+                        if any(p["pattern"].startswith("Head") for p in patterns):
+                            break
+                    if any(p["pattern"].startswith("Head") for p in patterns):
+                        break
+                if any(p["pattern"].startswith("Head") for p in patterns):
+                    break
         
         # === INVERSE HEAD & SHOULDERS ===
         if len(swing_lows) >= 3:
-            last_three = swing_lows[-3:]
-            l1, l2, l3 = last_three[0]["price"], last_three[1]["price"], last_three[2]["price"]
-            
-            # Head (l2) muss tiefer sein als beide Shoulders
-            if l2 < l1 and l2 < l3 and abs(l1 - l3) / l1 < 0.03:
-                neckline = max(highs[last_three[0]["index"]:last_three[2]["index"]+1])
-                
-                if current_price > neckline:
-                    patterns.append({
-                        "pattern": "Inverse Head & Shoulders",
-                        "emoji": "🚀🚀",
-                        "type": "bullish",
-                        "left_shoulder": round(l1, 2),
-                        "head": round(l2, 2),
-                        "right_shoulder": round(l3, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline + (neckline - l2), 2),
-                        "confidence": "High",
-                        "description": f"Inv. H&S Complete! Neckline broken. Target: ${neckline + (neckline - l2):.2f}"
-                    })
-                elif current_price > l3 * 1.02:
-                    patterns.append({
-                        "pattern": "Inverse H&S (forming)",
-                        "emoji": "👀",
-                        "type": "bullish",
-                        "left_shoulder": round(l1, 2),
-                        "head": round(l2, 2),
-                        "right_shoulder": round(l3, 2),
-                        "neckline": round(neckline, 2),
-                        "target": round(neckline + (neckline - l2), 2),
-                        "confidence": "Medium",
-                        "description": f"Inv. H&S forming. Watch neckline @ ${neckline:.2f}"
-                    })
+            for i in range(max(0, len(swing_lows) - 5), len(swing_lows) - 2):
+                for j in range(i + 1, len(swing_lows) - 1):
+                    for k in range(j + 1, len(swing_lows)):
+                        sl1, sl2, sl3 = swing_lows[i], swing_lows[j], swing_lows[k]
+                        l1, l2, l3 = sl1["price"], sl2["price"], sl3["price"]
+                        idx1, idx2, idx3 = sl1["index"], sl2["index"], sl3["index"]
+                        
+                        if idx2 - idx1 < 5 or idx3 - idx2 < 5:
+                            continue
+                        if not (l2 < l1 and l2 < l3):
+                            continue
+                        if min(l1, l3) - l2 < atr:
+                            continue
+                        if abs(l1 - l3) > atr * 2:
+                            continue
+                        
+                        neckline = max(highs[idx1:idx3+1])
+                        
+                        if current_price > neckline:
+                            patterns.append({
+                                "pattern": "Inverse Head & Shoulders",
+                                "emoji": "🚀🚀",
+                                "type": "bullish",
+                                "left_shoulder": round(l1, 2),
+                                "head": round(l2, 2),
+                                "right_shoulder": round(l3, 2),
+                                "neckline": round(neckline, 2),
+                                "target": round(neckline + (neckline - l2), 2),
+                                "confidence": "High",
+                                "description": f"Inv. H&S Complete! Neckline ${neckline:.2f} broken. Target: ${neckline + (neckline - l2):.2f}"
+                            })
+                        elif current_price > l3 + atr:
+                            patterns.append({
+                                "pattern": "Inverse H&S (forming)",
+                                "emoji": "👀",
+                                "type": "bullish",
+                                "left_shoulder": round(l1, 2),
+                                "head": round(l2, 2),
+                                "right_shoulder": round(l3, 2),
+                                "neckline": round(neckline, 2),
+                                "target": round(neckline + (neckline - l2), 2),
+                                "confidence": "Medium",
+                                "description": f"Inv. H&S forming. Watch neckline @ ${neckline:.2f}"
+                            })
+                        
+                        if any(p["pattern"].startswith("Inverse") for p in patterns):
+                            break
+                    if any(p["pattern"].startswith("Inverse") for p in patterns):
+                        break
+                if any(p["pattern"].startswith("Inverse") for p in patterns):
+                    break
         
         # === TRIANGLES ===
-        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-            recent_highs = [h["price"] for h in swing_highs[-3:]]
-            recent_lows = [l["price"] for l in swing_lows[-3:]]
+        if len(swing_highs) >= 3 and len(swing_lows) >= 3:
+            recent_highs = [h["price"] for h in swing_highs[-4:]]
+            recent_lows = [l["price"] for l in swing_lows[-4:]]
             
-            if len(recent_highs) >= 2 and len(recent_lows) >= 2:
+            if len(recent_highs) >= 3 and len(recent_lows) >= 3:
                 high_trend = (recent_highs[-1] - recent_highs[0]) / recent_highs[0]
                 low_trend = (recent_lows[-1] - recent_lows[0]) / recent_lows[0]
                 high_range = (max(recent_highs) - min(recent_highs)) / max(recent_highs)
@@ -3688,7 +3801,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     apex_price = (recent_highs[-1] + recent_lows[-1]) / 2
                     range_pct = (recent_highs[-1] - recent_lows[-1]) / apex_price * 100
                     
-                    if range_pct < 5:  # Converging
+                    if range_pct < 5:
                         patterns.append({
                             "pattern": "Symmetrical Triangle",
                             "emoji": "📐",
@@ -3700,71 +3813,81 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         })
         
         # === FLAGS & PENNANTS ===
+        # Verbessert: Finde den tatsächlichen Pole durch Preisbewegung
         if len(closes) >= 20:
-            # Pole: Starke Bewegung in ersten 30%
-            pole_end = int(len(closes) * 0.3)
-            pole_move = (closes[pole_end] - closes[0]) / closes[0]
+            # Suche nach dem stärksten Move in den Daten
+            best_pole_end = 0
+            best_pole_move = 0
             
-            # Flag/Pennant: Konsolidierung in letzten 70%
-            flag_data = closes[pole_end:]
-            flag_highs = highs[pole_end:]
-            flag_lows = lows[pole_end:]
-            flag_range = max(flag_data) - min(flag_data)
-            flag_range_pct = flag_range / closes[pole_end] if closes[pole_end] > 0 else 0
+            for pole_end in range(5, min(int(len(closes) * 0.5), 20)):
+                move = (closes[pole_end] - closes[0]) / closes[0]
+                if abs(move) > abs(best_pole_move):
+                    best_pole_move = move
+                    best_pole_end = pole_end
             
-            # Check für Kanal (Flag) vs. Konvergenz (Pennant)
-            flag_high_trend = (flag_highs[-1] - flag_highs[0]) / flag_highs[0] if flag_highs[0] > 0 else 0
-            flag_low_trend = (flag_lows[-1] - flag_lows[0]) / flag_lows[0] if flag_lows[0] > 0 else 0
-            
-            # BULL FLAG: Starker Anstieg + leichter Rückgang
-            if pole_move > 0.08 and flag_range_pct < 0.06:
-                if flag_high_trend < 0 and flag_low_trend < 0:  # Paralleler Kanal nach unten
-                    patterns.append({
-                        "pattern": "Bull Flag",
-                        "emoji": "🚩⬆️",
-                        "type": "bullish",
-                        "pole_move": f"{pole_move*100:.1f}%",
-                        "target": round(closes[-1] * (1 + pole_move), 2),
-                        "confidence": "Medium",
-                        "description": f"Bull Flag after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move):.2f}"
-                    })
-                elif flag_high_trend < 0 and flag_low_trend > 0:  # Konvergierend
-                    patterns.append({
-                        "pattern": "Bullish Pennant",
-                        "emoji": "🔺⬆️",
-                        "type": "bullish",
-                        "pole_move": f"{pole_move*100:.1f}%",
-                        "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
-                        "confidence": "Medium",
-                        "description": f"Bullish Pennant after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
-                    })
-            
-            # BEAR FLAG: Starker Abfall + leichte Erholung
-            elif pole_move < -0.08 and flag_range_pct < 0.06:
-                if flag_high_trend > 0 and flag_low_trend > 0:  # Paralleler Kanal nach oben
-                    patterns.append({
-                        "pattern": "Bear Flag",
-                        "emoji": "🚩⬇️",
-                        "type": "bearish",
-                        "pole_move": f"{pole_move*100:.1f}%",
-                        "target": round(closes[-1] * (1 + pole_move), 2),
-                        "confidence": "Medium",
-                        "description": f"Bear Flag after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move):.2f}"
-                    })
-                elif flag_high_trend < 0 and flag_low_trend > 0:  # Konvergierend
-                    patterns.append({
-                        "pattern": "Bearish Pennant",
-                        "emoji": "🔻⬇️",
-                        "type": "bearish",
-                        "pole_move": f"{pole_move*100:.1f}%",
-                        "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
-                        "confidence": "Medium",
-                        "description": f"Bearish Pennant after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
-                    })
+            if best_pole_end > 0 and abs(best_pole_move) > 0.08:
+                pole_end = best_pole_end
+                pole_move = best_pole_move
+                
+                flag_data = closes[pole_end:]
+                flag_highs = highs[pole_end:]
+                flag_lows = lows[pole_end:]
+                
+                if len(flag_data) >= 5:
+                    flag_range = max(flag_data) - min(flag_data)
+                    flag_range_pct = flag_range / closes[pole_end] if closes[pole_end] > 0 else 0
+                    
+                    flag_high_trend = (flag_highs[-1] - flag_highs[0]) / flag_highs[0] if flag_highs[0] > 0 else 0
+                    flag_low_trend = (flag_lows[-1] - flag_lows[0]) / flag_lows[0] if flag_lows[0] > 0 else 0
+                    
+                    # BULL FLAG: Starker Anstieg + leichter Rückgang im Kanal
+                    if pole_move > 0.08 and flag_range_pct < 0.06:
+                        if flag_high_trend < 0 and flag_low_trend < 0:
+                            patterns.append({
+                                "pattern": "Bull Flag",
+                                "emoji": "🚩⬆️",
+                                "type": "bullish",
+                                "pole_move": f"{pole_move*100:.1f}%",
+                                "target": round(closes[-1] * (1 + pole_move), 2),
+                                "confidence": "Medium",
+                                "description": f"Bull Flag after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move):.2f}"
+                            })
+                        elif flag_high_trend < 0 and flag_low_trend > 0:
+                            patterns.append({
+                                "pattern": "Bullish Pennant",
+                                "emoji": "🔺⬆️",
+                                "type": "bullish",
+                                "pole_move": f"{pole_move*100:.1f}%",
+                                "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
+                                "confidence": "Medium",
+                                "description": f"Bullish Pennant after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
+                            })
+                    
+                    # BEAR FLAG: Starker Abfall + leichte Erholung
+                    elif pole_move < -0.08 and flag_range_pct < 0.06:
+                        if flag_high_trend > 0 and flag_low_trend > 0:
+                            patterns.append({
+                                "pattern": "Bear Flag",
+                                "emoji": "🚩⬇️",
+                                "type": "bearish",
+                                "pole_move": f"{pole_move*100:.1f}%",
+                                "target": round(closes[-1] * (1 + pole_move), 2),
+                                "confidence": "Medium",
+                                "description": f"Bear Flag after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move):.2f}"
+                            })
+                        elif flag_high_trend < 0 and flag_low_trend > 0:
+                            patterns.append({
+                                "pattern": "Bearish Pennant",
+                                "emoji": "🔻⬇️",
+                                "type": "bearish",
+                                "pole_move": f"{pole_move*100:.1f}%",
+                                "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
+                                "confidence": "Medium",
+                                "description": f"Bearish Pennant after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
+                            })
         
         # === CUP & HANDLE ===
         if len(closes) >= 30:
-            # Cup: U-förmige Formation in ersten 70%
             cup_end = int(len(closes) * 0.7)
             cup_data = closes[:cup_end]
             
@@ -3777,21 +3900,17 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 bottom_avg = sum(cup_bottom) / len(cup_bottom)
                 right_avg = sum(cup_right) / len(cup_right)
                 
-                # Cup Kriterien: Links hoch, Mitte tief, Rechts wieder hoch
                 if left_avg > bottom_avg and right_avg > bottom_avg:
                     cup_depth = (left_avg - bottom_avg) / left_avg
                     
-                    # Cup sollte 15-35% tief sein
                     if 0.10 < cup_depth < 0.40:
-                        # Handle: Letzten 30%
                         handle_data = closes[cup_end:]
-                        handle_range = (max(handle_data) - min(handle_data)) / max(handle_data)
+                        handle_range = (max(handle_data) - min(handle_data)) / max(handle_data) if max(handle_data) > 0 else 1
                         
-                        # Handle sollte kleiner als Cup sein
                         if handle_range < cup_depth * 0.5:
                             cup_lip = max(left_avg, right_avg)
                             
-                            if current_price > cup_lip * 0.95:  # Nahe am Breakout
+                            if current_price > cup_lip * 0.95:
                                 patterns.append({
                                     "pattern": "Cup & Handle",
                                     "emoji": "☕⬆️",
@@ -3809,14 +3928,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
             recent_lows = [l["price"] for l in swing_lows[-4:]]
             
             if len(recent_highs) >= 3 and len(recent_lows) >= 3:
-                # Trendrichtung beider Linien
                 high_slope = (recent_highs[-1] - recent_highs[0]) / len(recent_highs)
                 low_slope = (recent_lows[-1] - recent_lows[0]) / len(recent_lows)
                 
-                # Konvergenz prüfen
-                are_converging = abs(high_slope - low_slope) < abs(high_slope + low_slope) / 2
+                are_converging = abs(high_slope - low_slope) < abs(high_slope + low_slope) / 2 if (high_slope + low_slope) != 0 else False
                 
-                # RISING WEDGE (bearish): Beide Linien steigen, aber konvergieren
+                # RISING WEDGE (bearish)
                 if high_slope > 0 and low_slope > 0 and are_converging and low_slope > high_slope:
                     patterns.append({
                         "pattern": "Rising Wedge",
@@ -3827,7 +3944,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "description": f"Rising Wedge (bearish) - Target support @ ${recent_lows[0]:.2f}"
                     })
                 
-                # FALLING WEDGE (bullish): Beide Linien fallen, aber konvergieren
+                # FALLING WEDGE (bullish)
                 elif high_slope < 0 and low_slope < 0 and are_converging and high_slope > low_slope:
                     patterns.append({
                         "pattern": "Falling Wedge",
@@ -4555,10 +4672,18 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # ============================================
         # 1. MAJOR SWING POINTS (Wichtigste Wendepunkte)
         # ============================================
-        # Finde signifikante Swings - nicht jeden kleinen Pivot!
-        # Ein Major Swing braucht mindestens X% Bewegung danach
+        # ADAPTIVER min_swing_pct basierend auf ATR
+        # Low-Vol Stocks brauchen niedrigere Schwelle
+        atr_values = []
+        for i in range(1, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            atr_values.append(tr)
+        atr_14 = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
+        atr_pct = atr_14 / current_price if current_price > 0 else 0.02
         
-        min_swing_pct = 0.10  # 10% Bewegung = signifikanter Swing
+        # Min Swing = 3× ATR% (z.B. ATR=2% → braucht 6% Move, ATR=5% → 15%)
+        # Floor bei 4%, Cap bei 15%
+        min_swing_pct = max(0.04, min(0.15, atr_pct * 3))
         
         # Swing Highs
         for i in range(5, len(highs) - 1):
@@ -4626,20 +4751,49 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                         })
         
         # ============================================
-        # 3. FIBONACCI LEVELS (Von Period High zu Low)
+        # 3. FIBONACCI LEVELS (Vom letzten signifikanten Swing)
         # ============================================
+        # Finde den letzten großen Swing für Fibonacci
+        # Nicht immer Period High→Low (das ist falsch bei Seitwärtsmärkten)
+        
+        fib_high = period_high
+        fib_low = period_low
+        
+        # Suche den letzten signifikanten Swing High und Swing Low
+        # in den letzten 60% der Daten
+        recent_start = max(0, len(highs) - int(len(highs) * 0.6))
+        
+        # Letzter signifikanter Swing High
+        for i in range(len(highs) - 2, recent_start, -1):
+            if i >= 5 and highs[i] >= max(highs[max(0,i-5):i]) and highs[i] >= max(highs[i+1:min(len(highs),i+3)]):
+                future_low = min(lows[i+1:min(len(lows), i+15)]) if i+1 < len(lows) else lows[-1]
+                if (highs[i] - future_low) / highs[i] > atr_pct * 2:
+                    fib_high = highs[i]
+                    break
+        
+        # Letzter signifikanter Swing Low
+        for i in range(len(lows) - 2, recent_start, -1):
+            if i >= 5 and lows[i] <= min(lows[max(0,i-5):i]) and lows[i] <= min(lows[i+1:min(len(lows),i+3)]):
+                future_high = max(highs[i+1:min(len(highs), i+15)]) if i+1 < len(highs) else highs[-1]
+                if (future_high - lows[i]) / lows[i] > atr_pct * 2 if lows[i] > 0 else False:
+                    fib_low = lows[i]
+                    break
+        
+        fib_range = fib_high - fib_low
         fib_ratios = [0.236, 0.382, 0.5, 0.618, 0.786]
         
-        for ratio in fib_ratios:
-            fib_price = period_low + price_range * ratio
-            # Nur wenn nicht zu nah am aktuellen Preis
-            if abs(fib_price - current_price) / current_price > 0.03:
-                key_levels.append({
-                    "price": fib_price,
-                    "type": f"Fib {ratio*100:.1f}%",
-                    "strength": 70 if ratio in [0.5, 0.618] else 60,
-                    "is_support": fib_price < current_price
-                })
+        # Nur Fib Levels wenn die Range groß genug ist (min 3× ATR)
+        if fib_range > atr_14 * 3:
+            for ratio in fib_ratios:
+                fib_price = fib_low + fib_range * ratio
+                # Nur wenn nicht zu nah am aktuellen Preis
+                if abs(fib_price - current_price) / current_price > 0.02:
+                    key_levels.append({
+                        "price": fib_price,
+                        "type": f"Fib {ratio*100:.1f}%",
+                        "strength": 70 if ratio in [0.5, 0.618] else 60,
+                        "is_support": fib_price < current_price
+                    })
         
         # ============================================
         # 4. PERIOD HIGH/LOW (Absolute Grenzen)
@@ -4761,18 +4915,18 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         pdl = period_low
         pdc = closes[-1]
         
-        # Fib Levels für separate Anzeige
+        # Fib Levels für separate Anzeige (nutze die verbesserten Swing Punkte)
         fib_levels = {
-            "swing_high": period_high,
-            "swing_low": period_low,
+            "swing_high": fib_high,
+            "swing_low": fib_low,
             "levels": {
-                "0.0": period_low,
-                "0.236": period_low + price_range * 0.236,
-                "0.382": period_low + price_range * 0.382,
-                "0.5": period_low + price_range * 0.5,
-                "0.618": period_low + price_range * 0.618,
-                "0.786": period_low + price_range * 0.786,
-                "1.0": period_high,
+                "0.0": fib_low,
+                "0.236": fib_low + fib_range * 0.236,
+                "0.382": fib_low + fib_range * 0.382,
+                "0.5": fib_low + fib_range * 0.5,
+                "0.618": fib_low + fib_range * 0.618,
+                "0.786": fib_low + fib_range * 0.786,
+                "1.0": fib_high,
             }
         }
         
