@@ -1,23 +1,20 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V67.0 PRO                               ║
+║                        ALPHA STATION V67.1 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 67.0 (AI Chart Analyzer)                                           ║
-║  Date: 03. Februar 2026                                                      ║
+║  Version: 67.1 (PM Watchlist Upgrade)                                        ║
+║  Date: 12. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V67.0 NEW - AI CHART ANALYZER:                                              ║
-║  ✅ EIGENER CHART mit Lightweight Charts (TradingView Engine)                ║
-║  ✅ PATTERN RECOGNITION: Double Top/Bottom, H&S, Triangles, Flags            ║
-║  ✅ AUTOMATISCHE S/R: Support & Resistance aus Pivot Points                  ║
-║  ✅ FIBONACCI LEVELS: Auto-Berechnung der Retracements                       ║
-║  ✅ EMA OVERLAYS: 20/50/200 EMAs automatisch eingezeichnet                   ║
-║  ✅ VOLUME PROFILE: POC, VAH, VAL Integration                                ║
-║  ✅ AI TRADE SETUP: Entry/Stop/Target automatisch generiert                  ║
-║  ✅ R:R BERECHNUNG: Risk-Reward Ratio für jeden Trade                        ║
+║  V67.1 NEW - PM WATCHLIST FIXES:                                             ║
+║  ✅ DST-FIX: PM Session Zeiten korrekt für Sommer/Winter (pytz)             ║
+║  ✅ KATALYSATOR: News-Erkennung (Earnings, FDA, Offering, M&A, etc.)        ║
+║  ✅ ECHTE GAP: PM Open vs PrevClose (nicht Current vs PrevClose)             ║
+║  ✅ VOLUME RATIO: PM Vol vs Avg Daily Vol (zeigt ungewöhnliche Aktivität)    ║
+║  V67.0: AI Chart Analyzer mit Lightweight Charts                             ║
 ║  V66.6: PM Watchlist Complete - News + Float                                 ║
-║  V66.5: Extended PM Watchlist - Echte PM H/L, PDH/PDL, RS vs SPY             ║
+║  V66.5: Extended PM Watchlist - Echte PM H/L, PDH/PDL, RS vs SPY            ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -6438,14 +6435,42 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
 def get_ticker_news(poly_key, ticker, limit=3):
     """
     Holt die neuesten News für einen Ticker via Polygon News API.
-    Returns: List of news items with title, sentiment, published date
+    NEU: Katalysator-Erkennung (Earnings, FDA, Offering, etc.)
+    Returns: List of news items with title, sentiment, published date, catalyst
     """
+    # Katalysator-Keywords nach Kategorie
+    CATALYST_KEYWORDS = {
+        "📊 EARNINGS": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"],
+        "💊 FDA/BIO": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"],
+        "💰 OFFERING": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise"],
+        "🤝 M&A": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"],
+        "📋 CONTRACT": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"],
+        "⚖️ LEGAL": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud"],
+        "📈 UPGRADE": ["upgrade", "price target", "buy rating", "overweight", "outperform"],
+        "📉 DOWNGRADE": ["downgrade", "sell rating", "underweight", "underperform", "cut"],
+        "🔀 SPLIT": ["stock split", "reverse split"],
+        "💵 DIVIDEND": ["dividend", "payout", "distribution"],
+        "👤 INSIDER": ["insider", "CEO buy", "director purchase", "10b5"],
+        "🚀 PRODUCT": ["launch", "release", "new product", "unveil", "announce"],
+    }
+    
+    def detect_catalyst(title):
+        """Erkennt Katalysator-Typ aus News-Titel."""
+        title_lower = title.lower()
+        for catalyst_type, keywords in CATALYST_KEYWORDS.items():
+            for kw in keywords:
+                if kw.lower() in title_lower:
+                    return catalyst_type
+        return None
+    
     try:
         url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit={limit}&apiKey={poly_key}"
         resp = requests.get(url, timeout=5).json()
         results = resp.get("results", [])
         
         news_items = []
+        detected_catalysts = []
+        
         for item in results[:limit]:
             # Parse published date
             pub_date = item.get("published_utc", "")[:10]  # YYYY-MM-DD
@@ -6460,13 +6485,24 @@ def get_ticker_news(poly_key, ticker, limit=3):
                     sentiment_score = insight.get("sentiment_reasoning", "")
                     break
             
+            # Katalysator erkennen
+            title = item.get("title", "")
+            catalyst = detect_catalyst(title)
+            if catalyst and catalyst not in detected_catalysts:
+                detected_catalysts.append(catalyst)
+            
             news_items.append({
-                "title": item.get("title", "")[:80],  # Kürzen
+                "title": title[:80],  # Kürzen
                 "publisher": item.get("publisher", {}).get("name", ""),
                 "published": pub_date,
                 "sentiment": sentiment,
-                "url": item.get("article_url", "")
+                "url": item.get("article_url", ""),
+                "catalyst": catalyst,
             })
+        
+        # Haupt-Katalysator an alle News-Items anhängen
+        for n in news_items:
+            n["all_catalysts"] = detected_catalysts
         
         return news_items
     except Exception:
@@ -6532,6 +6568,7 @@ def get_ticker_details(poly_key, ticker):
 def get_pm_session_bars(poly_key, ticker, date_str):
     """
     Holt die Pre-Market Session Bars (4:00-9:30 ET) via Aggregates API.
+    DST-KORRIGIERT: Nutzt pytz für korrekte ET → UTC Konvertierung.
     Returns: dict mit pm_high, pm_low, pm_volume, pm_open, pm_vwap
     """
     try:
@@ -6543,17 +6580,26 @@ def get_pm_session_bars(poly_key, ticker, date_str):
         if not bars:
             return None
         
-        # PM Session: 4:00-9:30 ET = 09:00-14:30 UTC
-        # Polygon timestamps sind in ms UTC
+        # DST-KORRIGIERT: Berechne PM Session Grenzen dynamisch
+        # 4:00 AM ET und 9:30 AM ET → UTC konvertieren (funktioniert für EST und EDT)
+        et_tz = pytz.timezone('America/New_York')
+        trade_date = datetime.strptime(date_str, "%Y-%m-%d")
+        
+        # PM Start: 4:00 AM ET an diesem Tag
+        pm_start_et = et_tz.localize(trade_date.replace(hour=4, minute=0, second=0))
+        pm_start_utc = pm_start_et.astimezone(pytz.utc)
+        pm_start_ts = pm_start_utc.timestamp()
+        
+        # PM End: 9:30 AM ET an diesem Tag
+        pm_end_et = et_tz.localize(trade_date.replace(hour=9, minute=30, second=0))
+        pm_end_utc = pm_end_et.astimezone(pytz.utc)
+        pm_end_ts = pm_end_utc.timestamp()
+        
+        # Filtere Bars innerhalb PM Session
         pm_bars = []
         for bar in bars:
-            ts = bar.get("t", 0) / 1000  # ms to seconds
-            bar_time = datetime.utcfromtimestamp(ts)
-            hour_utc = bar_time.hour
-            minute = bar_time.minute
-            
-            # 4:00 AM ET = 9:00 UTC, 9:30 AM ET = 14:30 UTC
-            if (hour_utc >= 9 and hour_utc < 14) or (hour_utc == 14 and minute <= 30):
+            bar_ts = bar.get("t", 0) / 1000  # ms to seconds
+            if pm_start_ts <= bar_ts <= pm_end_ts:
                 pm_bars.append(bar)
         
         if not pm_bars:
@@ -6569,12 +6615,14 @@ def get_pm_session_bars(poly_key, ticker, date_str):
         total_value = sum(b.get("vw", b.get("c", 0)) * b.get("v", 0) for b in pm_bars)
         pm_vwap = total_value / pm_volume if pm_volume > 0 else pm_close
         
-        # Erste Bewegung (wann kam der Move?)
+        # Erste Bewegung (wann kam der Move?) - jetzt in ET anzeigen
         first_big_move_time = None
         for bar in pm_bars:
             if abs((bar.get("c", 0) - pm_open) / pm_open * 100) > 2 if pm_open > 0 else False:
                 ts = bar.get("t", 0) / 1000
-                first_big_move_time = datetime.utcfromtimestamp(ts).strftime("%H:%M UTC")
+                move_utc = datetime.utcfromtimestamp(ts).replace(tzinfo=pytz.utc)
+                move_et = move_utc.astimezone(et_tz)
+                first_big_move_time = move_et.strftime("%H:%M ET")
                 break
         
         return {
@@ -6737,8 +6785,11 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                 pdh = prev_day.get("h", prev_close)
                 pdl = prev_day.get("l", prev_close)
                 
-                # Gap berechnen
+                # Gap berechnen (erstmal Schätzung, wird mit echtem PM Open korrigiert)
                 gap_pct = ((current_price - prev_close) / prev_close) * 100
+                
+                # Previous Day Volume für Volume Ratio (Fix 4)
+                prev_day_vol = prev_day.get("v", 0)
                 
                 candidates.append({
                     "ticker": ticker,
@@ -6748,6 +6799,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     "pdh": pdh,
                     "pdl": pdl,
                     "gap_pct": gap_pct,
+                    "prev_day_vol": prev_day_vol,
                     "snapshot_data": t
                 })
                 
@@ -6777,6 +6829,16 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     pm_vwap = pm_data["pm_vwap"]
                     pm_open = pm_data["pm_open"]
                     
+                    # FIX 3: ECHTE Gap-Berechnung (PM Open vs PrevClose)
+                    # Gap = Wie viel hat sich der Preis ÜBER NACHT bewegt (vor jeglichem PM Trading)
+                    real_gap_pct = ((pm_open - prev_close) / prev_close) * 100 if prev_close > 0 else 0
+                    
+                    # FIX 4: Volume Ratio (PM Vol vs Average Daily Vol)
+                    prev_day_vol = cand.get("prev_day_vol", 0)
+                    # PM ist nur ~5.5h vs ~6.5h Regular Session, normalisiere auf volle Session
+                    pm_vol_normalized = pm_volume * (6.5 / 5.5) if pm_volume > 0 else 0
+                    vol_ratio = round(pm_vol_normalized / prev_day_vol, 1) if prev_day_vol > 0 else 0
+                    
                     # PM Range und Position
                     pm_range = pm_high - pm_low if pm_high > pm_low else 0.01
                     pm_position = ((current_price - pm_low) / pm_range) * 100 if pm_range > 0 else 50
@@ -6791,9 +6853,9 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     # ATR% Schätzung (PM Range / Preis)
                     atr_pct = (pm_range / current_price) * 100 if current_price > 0 else 5
                     
-                    # Setup Klassifizierung
+                    # Setup Klassifizierung (mit echtem Gap!)
                     setup_type, setup_emoji, setup_desc = classify_pm_setup(
-                        cand["pm_change"], cand["gap_pct"], pm_position, rs_vs_spy, atr_pct
+                        cand["pm_change"], real_gap_pct, pm_position, rs_vs_spy, atr_pct
                     )
                     
                     # Entry Signal (basierend auf Position)
@@ -6853,9 +6915,10 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         "PrevClose": round(prev_close, 2),
                         "PDH": round(cand["pdh"], 2),
                         "PDL": round(cand["pdl"], 2),
-                        "Gap%": round(cand["gap_pct"], 2),
+                        "Gap%": round(real_gap_pct, 2),  # FIX 3: Echte Gap (PM Open vs PrevClose)
                         "RS_vs_SPY": round(rs_vs_spy, 2),
                         "ATR%": round(atr_pct, 2),
+                        "Vol_Ratio": vol_ratio,  # FIX 4: PM Vol vs Avg Daily Vol
                         "Entry_Signal": entry_signal,
                         "Entry_Detail": entry_detail,
                         "Setup_Type": setup_type,
@@ -6870,6 +6933,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         "Move_Time": pm_data.get("first_move_time", "N/A"),
                         # Placeholder für News und Details (werden später gefüllt)
                         "News": [],
+                        "Catalysts": [],  # FIX 2: Katalysator-Erkennung
                         "Shares_M": 0,
                         "Float_Cat": "UNKNOWN",
                         "Float_Emoji": "❓",
@@ -6897,10 +6961,19 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                 item["Market_Cap_M"] = details["market_cap_millions"]
                 item["Company_Name"] = details["name"]
                 
-                # News (nur Top 10 für News - API intensive)
+                # News + Katalysator-Erkennung (nur Top 10 - API intensive)
                 if i < 10:
                     news = get_ticker_news(poly_key, ticker, limit=2)
                     item["News"] = news
+                    # Extrahiere Katalysatoren aus News
+                    catalysts = []
+                    for n in news:
+                        if n.get("catalyst") and n["catalyst"] not in catalysts:
+                            catalysts.append(n["catalyst"])
+                        for c in n.get("all_catalysts", []):
+                            if c not in catalysts:
+                                catalysts.append(c)
+                    item["Catalysts"] = catalysts
                     
             except Exception:
                 continue
@@ -6955,7 +7028,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                     
                     with col2:
                         # Preis & Levels
-                        st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}")
+                        vol_ratio_str = f" | VolR: **{item.get('Vol_Ratio', 0):.1f}x**" if item.get('Vol_Ratio', 0) > 0 else ""
+                        st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}{vol_ratio_str}")
                         st.caption(f"📊 PM High: **${item['PM_High']:.2f}** | Low: ${item['PM_Low']:.2f} | VWAP: ${item['PM_VWAP']:.2f}")
                         st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
                         st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
@@ -6982,13 +7056,20 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         pos_bar = "🟩" * int(pos/10) + "⬜" * (10 - int(pos/10))
                         st.caption(f"Position: {pos_bar} {pos:.0f}%")
                     
+                    # Katalysator-Zeile (wenn erkannt)
+                    catalysts = item.get('Catalysts', [])
+                    if catalysts:
+                        cat_str = " | ".join(catalysts)
+                        st.markdown(f"🎯 **Katalysator:** {cat_str}")
+                    
                     # News Row (wenn vorhanden)
                     news_list = item.get('News', [])
                     if news_list:
                         news_text = ""
                         for n in news_list[:2]:
                             sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
-                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}... ({n.get('published', '')})\n"
+                            cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
+                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
                         if news_text:
                             st.caption(f"📰 **News:** {news_text}")
                     
@@ -7028,7 +7109,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                             st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
                     
                     with col2:
-                        st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}")
+                        vol_ratio_str = f" | VolR: **{item.get('Vol_Ratio', 0):.1f}x**" if item.get('Vol_Ratio', 0) > 0 else ""
+                        st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}{vol_ratio_str}")
                         st.caption(f"📊 PM High: ${item['PM_High']:.2f} | Low: **${item['PM_Low']:.2f}** | VWAP: ${item['PM_VWAP']:.2f}")
                         st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
                         st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
@@ -7053,13 +7135,20 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         pos_bar = "🟥" * int(pos/10) + "⬜" * (10 - int(pos/10))
                         st.caption(f"Position: {pos_bar} {pos:.0f}%")
                     
+                    # Katalysator-Zeile (wenn erkannt)
+                    catalysts = item.get('Catalysts', [])
+                    if catalysts:
+                        cat_str = " | ".join(catalysts)
+                        st.markdown(f"🎯 **Katalysator:** {cat_str}")
+                    
                     # News Row (wenn vorhanden)
                     news_list = item.get('News', [])
                     if news_list:
                         news_text = ""
                         for n in news_list[:2]:
                             sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
-                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}... ({n.get('published', '')})\n"
+                            cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
+                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
                         if news_text:
                             st.caption(f"📰 **News:** {news_text}")
                     
@@ -7087,8 +7176,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         import pandas as pd
         df = pd.DataFrame(pm_data)
         
-        # Spalten für Anzeige (erweitert mit Float)
-        display_cols = ["Ticker", "PM_Chg%", "PM_Preis", "PM_High", "PM_Low", "Gap%", "RS_vs_SPY", "Shares_M", "Float_Cat", "Setup_Type", "Entry_Signal"]
+        # Spalten für Anzeige (erweitert mit Float + Vol Ratio)
+        display_cols = ["Ticker", "PM_Chg%", "PM_Preis", "PM_High", "PM_Low", "Gap%", "Vol_Ratio", "RS_vs_SPY", "Shares_M", "Float_Cat", "Setup_Type", "Entry_Signal"]
         available_cols = [col for col in display_cols if col in df.columns]
         if available_cols:
             st.dataframe(
@@ -7100,6 +7189,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                     "PM_High": st.column_config.NumberColumn("PM High", format="$%.2f"),
                     "PM_Low": st.column_config.NumberColumn("PM Low", format="$%.2f"),
                     "Gap%": st.column_config.NumberColumn("Gap%", format="%.1f%%"),
+                    "Vol_Ratio": st.column_config.NumberColumn("VolR", format="%.1fx", help="PM Volume vs Avg Daily Volume"),
                     "RS_vs_SPY": st.column_config.NumberColumn("RS SPY", format="%.1f%%"),
                     "Shares_M": st.column_config.NumberColumn("Shares(M)", format="%.1f"),
                     "Float_Cat": st.column_config.TextColumn("Float"),
@@ -7126,7 +7216,9 @@ def display_premarket_watchlist(pm_data, spy_change=0):
             for item in or_break[:10]:
                 direction = "LONG" if item["PM_Chg%"] > 0 else "SHORT"
                 float_info = f" | {item.get('Float_Emoji', '')} {item.get('Shares_M', 0):.0f}M" if item.get('Shares_M', 0) > 0 else ""
-                export_text += f"{item['Ticker']:6} | {direction:5} | {item['PM_Chg%']:+6.1f}% | E: ${item['Entry_Price']:.2f} | S: ${item['Stop_Price']:.2f}{float_info}\n"
+                vol_r = f" | VolR:{item.get('Vol_Ratio', 0):.1f}x" if item.get('Vol_Ratio', 0) > 0 else ""
+                cat_info = f" | {' '.join(item.get('Catalysts', []))}" if item.get('Catalysts') else ""
+                export_text += f"{item['Ticker']:6} | {direction:5} | {item['PM_Chg%']:+6.1f}% | Gap:{item['Gap%']:+.1f}% | E: ${item['Entry_Price']:.2f} | S: ${item['Stop_Price']:.2f}{float_info}{vol_r}{cat_info}\n"
         else:
             export_text += "Keine OR Break Kandidaten\n"
         
