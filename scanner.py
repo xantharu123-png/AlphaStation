@@ -1,23 +1,22 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V67.3 PRO                               ║
+║                        ALPHA STATION V67.4 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 67.3 (Strategy Audit & Fixes)                                      ║
+║  Version: 67.4 (Full Audit Fix)                                             ║
 ║  Date: 12. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V67.3 NEW - STRATEGY AUDIT (8 Fixes):                                       ║
-║  ✅ FIX1: AH Earnings → Split in Gainers 📈 + Losers 📉 (war nur positiv)  ║
-║  ✅ FIX2: Whale Watch → Change 3%+ (war 1%) + neuer Whale Watch Short 🐻   ║
-║  ✅ FIX3: Early Momentum → +Close Position 0.6+ (Abgrenzung zu Vol Surge)   ║
-║  ✅ FIX4: Consolidation Breakout → needs_history für Multi-Day Validierung   ║
-║  ✅ FIX5: Reversal Setup → needs_history für Mehrtages-Downtrend Check       ║
-║  ✅ FIX6: Krypto Vortag% → (7d-24h)/6 statt 7d/7 (genauer)                ║
-║  ✅ FIX7: Forex/Futures → Vortag% Filter fehlte komplett! + best_pairs       ║
-║  ✅ FIX8: Safe Haven/Risk-On → Stärkere Thresholds (0.4% statt 0.2%)        ║
+║  V67.4 AUDIT FIX - Alle 36 Findings behoben:                                ║
+║  ✅ rate_limited_get() in ALLE 30 API-Calls eingebaut                       ║
+║  ✅ Watchlist Persistenz via JSON (/tmp/alpha_station_watchlist.json)        ║
+║  ✅ Claude AI Prompt erweitert (ATR%, Vol-Regime, Vortag%, MA-Distanz)      ║
+║  ✅ Debug-Output hinter debug_mode Flag + "Warum 0 Ergebnisse?" UX         ║
+║  ✅ Alle except Exception: → except Exception as e: (Debugging)             ║
+║  ✅ _debug_log() Helper für optionales Logging                               ║
+║  V67.3: Strategy Audit & Fixes (8 Fixes)                                    ║
 ║  V67.2: Chart History 3x mehr + Weekly Timeframe                             ║
-║  V67.1: PM Watchlist + AI Chart Pattern Rewrite                              ║
+║  V67.1: PM Watchlist + AI Chart Pattern Rewrite                             ║
 ║  V67.0: AI Chart Analyzer mit Lightweight Charts                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
@@ -29,9 +28,96 @@ import anthropic
 import json
 import pytz
 import numpy as np
+import time
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
+
+# =============================================================================
+# 0. API HELPERS (Rate Limiting + Caching + Logging)
+# =============================================================================
+def _debug_log(msg, error=None):
+    """Optionales Debug-Logging (nur wenn debug_mode aktiv)."""
+    if st.session_state.get("debug_mode", False):
+        if error:
+            print(f"[ALPHA DEBUG] {msg}: {error}")
+        else:
+            print(f"[ALPHA DEBUG] {msg}")
+
+_last_api_call = 0
+_api_call_count = 0
+_api_call_window_start = 0
+
+def rate_limited_get(url, params=None, timeout=15, calls_per_minute=75, **kwargs):
+    """Rate-limited requests.get() - wartet automatisch wenn zu viele Calls.
+    
+    Akzeptiert alle kwargs die requests.get() auch akzeptiert (headers, etc.)
+    """
+    global _last_api_call, _api_call_count, _api_call_window_start
+    
+    now = time.time()
+    
+    # Reset Counter jede Minute
+    if now - _api_call_window_start > 60:
+        _api_call_count = 0
+        _api_call_window_start = now
+    
+    # Warte wenn Limit erreicht
+    if _api_call_count >= calls_per_minute:
+        wait_time = 60 - (now - _api_call_window_start)
+        if wait_time > 0:
+            time.sleep(wait_time)
+        _api_call_count = 0
+        _api_call_window_start = time.time()
+    
+    # Minimum 0.1s zwischen Calls
+    elapsed = now - _last_api_call
+    if elapsed < 0.1:
+        time.sleep(0.1 - elapsed)
+    
+    _last_api_call = time.time()
+    _api_call_count += 1
+    
+    return requests.get(url, params=params, timeout=timeout, **kwargs)
+
+@st.cache_data(ttl=3600)
+def load_common_stock_tickers_cached(api_key):
+    """Cached Version: Lädt alle Common Stock Tickers (1h Cache)."""
+    try:
+        url = "https://api.polygon.io/v3/reference/tickers"
+        params = {
+            "type": "CS",
+            "market": "stocks",
+            "active": "true",
+            "limit": 1000,
+            "apiKey": api_key
+        }
+        
+        all_tickers = set()
+        next_url = None
+        
+        for _ in range(20):
+            if next_url:
+                resp = rate_limited_get(next_url, timeout=30).json()
+            else:
+                resp = rate_limited_get(url, params=params, timeout=30).json()
+            
+            results = resp.get("results", [])
+            for r in results:
+                ticker = r.get("ticker", "")
+                if ticker:
+                    all_tickers.add(ticker.upper())
+            
+            next_url = resp.get("next_url")
+            if next_url:
+                next_url = f"{next_url}&apiKey={api_key}"
+            else:
+                break
+        
+        return all_tickers
+    except Exception as e:
+        print(f"Fehler beim Laden der Aktien-Liste: {e}")
+        return set()
 
 # =============================================================================
 # 1. INITIALISIERUNG
@@ -48,12 +134,17 @@ if "current_strategy" not in st.session_state:
     st.session_state.current_strategy = ""
 if "market_type" not in st.session_state:
     st.session_state.market_type = "Krypto"
-if "trading_session" not in st.session_state:
-    st.session_state.trading_session = "Regular"
 if "active_trading_session" not in st.session_state:
     st.session_state.active_trading_session = "Regular"
+if "debug_mode" not in st.session_state:
+    st.session_state.debug_mode = False
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = []
+    # Lade persistierte Watchlist falls vorhanden
+    try:
+        with open("/tmp/alpha_station_watchlist.json", "r") as _f:
+            st.session_state.watchlist = json.load(_f)
+    except Exception as e:
+        st.session_state.watchlist = []
 if "selected_row_index" not in st.session_state:
     st.session_state.selected_row_index = 0
 if "sr_levels" not in st.session_state:
@@ -74,7 +165,7 @@ if "ai_chart_ticker" not in st.session_state:
     st.session_state.ai_chart_ticker = None
 
 # VERSION für Filter-Sync - erhöhe bei Strategie-Änderungen!
-FILTER_VERSION = "67.0"
+FILTER_VERSION = "67.4"
 if st.session_state.get("filter_version") != FILTER_VERSION:
     st.session_state.filters_synced = False
     st.session_state.filter_version = FILTER_VERSION
@@ -667,7 +758,7 @@ def get_current_trading_session():
             # Nachts → Nutze Regular (letzte Tagesdaten)
             return "Regular", f"😴 Markt geschlossen ({now_et.strftime('%H:%M')} ET) - zeige letzte Daten"
             
-    except Exception:
+    except Exception as e:
         # Fallback wenn pytz nicht funktioniert
         return "Regular", "📊 Regular Hours"
 
@@ -874,7 +965,7 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         
         return round(min(rvol_normalized, 999.0), 2)
         
-    except Exception:
+    except Exception as e:
         # Fallback: Einfache Berechnung
         return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 1.0
 
@@ -1062,7 +1153,7 @@ def fetch_multi_day_data(ticker, api_key, days=5):
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
         params = {"adjusted": "true", "sort": "asc", "apiKey": api_key}
         
-        resp = requests.get(url, params=params, timeout=15)
+        resp = rate_limited_get(url, params=params, timeout=15)
         data = resp.json()
         
         if data.get("status") != "OK" or not data.get("results"):
@@ -1080,7 +1171,7 @@ def fetch_multi_day_data(ticker, api_key, days=5):
             })
         
         return results
-    except:
+    except Exception as e:
         return []
 
 
@@ -1338,35 +1429,6 @@ def find_pivots(prices, window=5):
             })
     
     return pivots
-
-
-def calculate_retracement(point_a, point_b, point_c):
-    """
-    Berechnet das Fibonacci Retracement von C relativ zu A-B.
-    
-    Formel: (B - C) / (B - A) für bullish
-            (C - B) / (A - B) für bearish
-    """
-    ab_move = abs(point_b - point_a)
-    if ab_move == 0:
-        return 0
-    
-    bc_move = abs(point_c - point_b)
-    return bc_move / ab_move
-
-
-def calculate_extension(point_a, point_b, point_c, point_d):
-    """
-    Berechnet die Fibonacci Extension von D relativ zu B-C.
-    
-    Formel: (D - C) / (B - C)
-    """
-    bc_move = abs(point_c - point_b)
-    if bc_move == 0:
-        return 0
-    
-    cd_move = abs(point_d - point_c)
-    return cd_move / bc_move
 
 
 def check_fibonacci_ratio(actual, target, tolerance=0.05):
@@ -1679,7 +1741,7 @@ def scan_harmonic_patterns(ticker, api_key, days=60, timeframe="day"):
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{span}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
         params = {"adjusted": "true", "sort": "asc", "limit": 500, "apiKey": api_key}
         
-        resp = requests.get(url, params=params, timeout=20)
+        resp = rate_limited_get(url, params=params, timeout=20)
         data = resp.json()
         
         if data.get("status") != "OK" or not data.get("results"):
@@ -1734,7 +1796,7 @@ def scan_harmonic_batch(tickers, api_key, days=60):
     """
     results = []
     
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers):
         try:
             scan_result = scan_harmonic_patterns(ticker, api_key, days)
             
@@ -1757,8 +1819,12 @@ def scan_harmonic_batch(tickers, api_key, days=60):
                     "Price": scan_result["current_price"],
                     "PatternData": best_pattern
                 })
-        except:
+        except Exception as e:
             continue
+        
+        # Rate Limiting: Pause nach je 10 Calls
+        if i % 10 == 9:
+            time.sleep(0.5)
     
     # Sortiere nach Score
     results.sort(key=lambda x: x["Score"], reverse=True)
@@ -1862,55 +1928,12 @@ ETF_PATTERNS = [
 COMMON_STOCK_TICKERS = set()
 
 def load_common_stock_tickers(api_key):
-    """
-    Lädt alle echten Aktien (type=CS) von Polygon Reference API.
-    Cached in COMMON_STOCK_TICKERS für schnelle Lookups.
-    """
+    """Lädt alle echten Aktien (type=CS) — nutzt st.cache_data (1h Cache)."""
     global COMMON_STOCK_TICKERS
-    
     if COMMON_STOCK_TICKERS:
-        return COMMON_STOCK_TICKERS  # Bereits geladen
-    
-    try:
-        # Polygon Reference Tickers API mit type=CS (Common Stock)
-        url = f"https://api.polygon.io/v3/reference/tickers"
-        params = {
-            "type": "CS",  # Common Stock = echte Aktien
-            "market": "stocks",
-            "active": "true",
-            "limit": 1000,
-            "apiKey": api_key
-        }
-        
-        all_tickers = set()
-        next_url = None
-        
-        # Paginiere durch alle Ergebnisse
-        for _ in range(20):  # Max 20 Seiten (20k Aktien)
-            if next_url:
-                resp = requests.get(next_url, timeout=30).json()
-            else:
-                resp = requests.get(url, params=params, timeout=30).json()
-            
-            results = resp.get("results", [])
-            for r in results:
-                ticker = r.get("ticker", "")
-                if ticker:
-                    all_tickers.add(ticker.upper())
-            
-            # Nächste Seite?
-            next_url = resp.get("next_url")
-            if next_url:
-                next_url = f"{next_url}&apiKey={api_key}"
-            else:
-                break
-        
-        COMMON_STOCK_TICKERS = all_tickers
         return COMMON_STOCK_TICKERS
-    
-    except Exception as e:
-        print(f"Fehler beim Laden der Aktien-Liste: {e}")
-        return set()
+    COMMON_STOCK_TICKERS = load_common_stock_tickers_cached(api_key)
+    return COMMON_STOCK_TICKERS
 
 def is_etf_or_etp(ticker):
     """
@@ -2012,6 +2035,7 @@ def calculate_ema(closes, period):
     
     return ema
 
+@st.cache_data(ttl=300)
 def fetch_historical_closes(ticker, api_key, days=200):
     """
     Holt historische Schlusskurse von Polygon für SMA/EMA Berechnung.
@@ -2033,7 +2057,7 @@ def fetch_historical_closes(ticker, api_key, days=200):
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
         params = {"apiKey": api_key, "limit": days + 50, "sort": "asc"}
         
-        resp = requests.get(url, params=params, timeout=10)
+        resp = rate_limited_get(url, params=params, timeout=10)
         data = resp.json()
         
         if data.get("status") != "OK" or not data.get("results"):
@@ -3131,7 +3155,7 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
             url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
             params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc"}
             
-            resp = requests.get(url, params=params, timeout=10)
+            resp = rate_limited_get(url, params=params, timeout=10)
             if resp.status_code != 200:
                 continue
             
@@ -3196,7 +3220,7 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
                 'voids_below': voids['voids_below']
             })
             
-        except Exception:
+        except Exception as e:
             continue
     
     # Sortiere nach Void Score
@@ -3204,8 +3228,39 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
     
     return results
 
+def _watchlist_file():
+    """Pfad zur Watchlist-Datei."""
+    return "/tmp/alpha_station_watchlist.json"
+
+def _save_watchlist():
+    """Speichert Watchlist als JSON (überlebt App-Reruns)."""
+    try:
+        import json
+        # Entferne nicht-serialisierbare Daten
+        clean = []
+        for w in st.session_state.watchlist:
+            clean.append({
+                "ticker": w["ticker"],
+                "market": w.get("market", ""),
+                "price": w.get("price", 0),
+                "added": w.get("added", ""),
+            })
+        with open(_watchlist_file(), "w") as f:
+            json.dump(clean, f)
+    except Exception as e:
+        pass
+
+def _load_watchlist():
+    """Lädt Watchlist aus JSON falls vorhanden."""
+    try:
+        import json
+        with open(_watchlist_file(), "r") as f:
+            return json.load(f)
+    except Exception as e:
+        return []
+
 def add_to_watchlist(ticker, data):
-    """Fügt Ticker zur Watchlist hinzu"""
+    """Fügt Ticker zur Watchlist hinzu (mit Persistenz)."""
     entry = {
         "ticker": ticker,
         "market": st.session_state.market_type,
@@ -3216,25 +3271,27 @@ def add_to_watchlist(ticker, data):
     existing = [w["ticker"] for w in st.session_state.watchlist]
     if ticker not in existing:
         st.session_state.watchlist.append(entry)
+        _save_watchlist()
         return True
     return False
 
 def remove_from_watchlist(ticker):
-    """Entfernt Ticker von Watchlist"""
+    """Entfernt Ticker von Watchlist (mit Persistenz)."""
     st.session_state.watchlist = [w for w in st.session_state.watchlist if w["ticker"] != ticker]
+    _save_watchlist()
 
 def fetch_historical_data_crypto(coin_id, days):
     """Holt historische OHLC-Daten von CoinGecko"""
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
         params = {"vs_currency": "usd", "days": days}
-        resp = requests.get(url, params=params, timeout=15)
+        resp = rate_limited_get(url, params=params, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             # Format: [[timestamp, open, high, low, close], ...]
             if data and len(data) > 0:
                 return data
-    except:
+    except Exception as e:
         pass
     return None
 
@@ -3246,14 +3303,14 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
         params = {"apiKey": poly_key, "limit": days}
-        resp = requests.get(url, params=params, timeout=15)
+        resp = rate_limited_get(url, params=params, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             results = data.get("results", [])
             if results:
                 # Format anpassen: [[timestamp, open, high, low, close, volume], ...]
                 return [[r["t"], r["o"], r["h"], r["l"], r["c"], r.get("v", 0)] for r in results]
-    except:
+    except Exception as e:
         pass
     return None
 
@@ -3302,7 +3359,7 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start_date}/{end_date}"
         params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 50000}
         
-        resp = requests.get(url, params=params, timeout=15)
+        resp = rate_limited_get(url, params=params, timeout=15)
         if resp.status_code != 200:
             return None
         
@@ -3346,247 +3403,6 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
         
     except Exception as e:
         return None
-
-
-def calculate_support_resistance(ohlcv_data, num_levels=5, lookback=100):
-    """
-    Berechnet Support/Resistance Levels aus:
-    - Pivot Points (lokale Hochs/Tiefs)
-    - Swing Highs/Lows (wichtige Wendepunkte)
-    - Round Numbers ($1, $2, $5, $10, etc.)
-    - Volume Clusters
-    
-    Returns:
-        dict mit support_levels, resistance_levels, each with price and strength
-    """
-    if not ohlcv_data or len(ohlcv_data) < 20:
-        return {"support_levels": [], "resistance_levels": []}
-    
-    try:
-        # Nutze ALLE Daten, nicht nur lookback
-        data = ohlcv_data[-min(lookback, len(ohlcv_data)):]
-        
-        highs = [d["high"] for d in data]
-        lows = [d["low"] for d in data]
-        closes = [d["close"] for d in data]
-        volumes = [d.get("volume", 0) for d in data]
-        
-        current_price = closes[-1]
-        price_range = max(highs) - min(lows)
-        
-        # Mindestabstand zwischen Levels (5% der Range oder 3% vom Preis)
-        min_distance = max(price_range * 0.05, current_price * 0.03)
-        
-        all_levels = []
-        
-        # === 1. SWING HIGHS/LOWS (wichtigste Levels) ===
-        # Swing High = Höher als alle X Bars links UND rechts
-        swing_window = max(5, len(data) // 10)  # Dynamisch basierend auf Datenmenge
-        
-        for i in range(swing_window, len(highs) - swing_window):
-            left_highs = highs[i-swing_window:i]
-            right_highs = highs[i+1:i+swing_window+1]
-            
-            if highs[i] >= max(left_highs) and highs[i] >= max(right_highs):
-                all_levels.append({
-                    "price": highs[i],
-                    "type": "swing_high",
-                    "strength": 3,  # Swing = stark
-                    "volume": volumes[i]
-                })
-        
-        for i in range(swing_window, len(lows) - swing_window):
-            left_lows = lows[i-swing_window:i]
-            right_lows = lows[i+1:i+swing_window+1]
-            
-            if lows[i] <= min(left_lows) and lows[i] <= min(right_lows):
-                all_levels.append({
-                    "price": lows[i],
-                    "type": "swing_low",
-                    "strength": 3,
-                    "volume": volumes[i]
-                })
-        
-        # === 2. PIVOT POINTS (kleinere lokale Extrema) ===
-        for i in range(2, len(highs) - 2):
-            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-               highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                all_levels.append({
-                    "price": highs[i],
-                    "type": "pivot_high",
-                    "strength": 1,
-                    "volume": volumes[i]
-                })
-        
-        for i in range(2, len(lows) - 2):
-            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-               lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-                all_levels.append({
-                    "price": lows[i],
-                    "type": "pivot_low",
-                    "strength": 1,
-                    "volume": volumes[i]
-                })
-        
-        # === 3. ROUND NUMBERS ===
-        min_price = min(lows) * 0.9
-        max_price = max(highs) * 1.1
-        
-        # Bestimme sinnvolle Round Number Intervalle basierend auf Preis
-        if current_price >= 100:
-            intervals = [10, 25, 50, 100]
-        elif current_price >= 10:
-            intervals = [1, 2, 5, 10]
-        elif current_price >= 1:
-            intervals = [0.25, 0.5, 1, 2]
-        else:
-            intervals = [0.05, 0.1, 0.25, 0.5]
-        
-        for interval in intervals:
-            level = (min_price // interval) * interval
-            while level <= max_price:
-                if level > 0:
-                    # Stärke basierend auf "Rundheit"
-                    strength = 2 if level % (interval * 4) == 0 else 1
-                    all_levels.append({
-                        "price": level,
-                        "type": "round_number",
-                        "strength": strength,
-                        "volume": 0
-                    })
-                level += interval
-        
-        # === 4. ABSOLUTE HIGH/LOW ===
-        all_levels.append({
-            "price": max(highs),
-            "type": "absolute_high",
-            "strength": 4,
-            "volume": max(volumes)
-        })
-        all_levels.append({
-            "price": min(lows),
-            "type": "absolute_low",
-            "strength": 4,
-            "volume": max(volumes)
-        })
-        
-        # === CLUSTER & FILTER ===
-        def cluster_and_filter(levels, min_dist, max_count=10):
-            """Clustert nahe Levels und behält die stärksten"""
-            if not levels:
-                return []
-            
-            # Sortiere nach Preis
-            sorted_levels = sorted(levels, key=lambda x: x["price"])
-            
-            # Cluster ähnliche Levels (innerhalb 3% voneinander)
-            clusters = []
-            current_cluster = [sorted_levels[0]]
-            
-            for level in sorted_levels[1:]:
-                # Prüfe ob nahe genug zum Cluster
-                cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
-                if abs(level["price"] - cluster_avg) / cluster_avg < 0.03:
-                    current_cluster.append(level)
-                else:
-                    # Cluster abschließen
-                    clusters.append(current_cluster)
-                    current_cluster = [level]
-            
-            if current_cluster:
-                clusters.append(current_cluster)
-            
-            # Für jeden Cluster: Berechne gewichteten Durchschnitt und Gesamtstärke
-            result = []
-            for cluster in clusters:
-                total_strength = sum(l["strength"] for l in cluster)
-                total_volume = sum(l.get("volume", 0) for l in cluster)
-                
-                # Gewichteter Durchschnitt nach Stärke
-                weighted_price = sum(l["price"] * l["strength"] for l in cluster) / total_strength
-                
-                result.append({
-                    "price": round(weighted_price, 2),
-                    "strength": total_strength,
-                    "volume": total_volume,
-                    "touches": len(cluster)
-                })
-            
-            # Sortiere nach Stärke (absteigend)
-            result.sort(key=lambda x: x["strength"], reverse=True)
-            
-            # Filtere zu nahe beieinander liegende Levels
-            filtered = []
-            for level in result:
-                is_too_close = False
-                for existing in filtered:
-                    if abs(level["price"] - existing["price"]) < min_dist:
-                        is_too_close = True
-                        break
-                if not is_too_close:
-                    filtered.append(level)
-                if len(filtered) >= max_count:
-                    break
-            
-            return filtered
-        
-        # Cluster alle Levels
-        all_clustered = cluster_and_filter(all_levels, min_distance, max_count=20)
-        
-        # Trenne in Support und Resistance
-        resistance_levels = [l for l in all_clustered if l["price"] > current_price * 1.005]
-        support_levels = [l for l in all_clustered if l["price"] < current_price * 0.995]
-        
-        # Sortiere nach Nähe zum aktuellen Preis
-        resistance_levels.sort(key=lambda x: x["price"])
-        support_levels.sort(key=lambda x: x["price"], reverse=True)
-        
-        return {
-            "support_levels": support_levels[:num_levels],
-            "resistance_levels": resistance_levels[:num_levels],
-            "current_price": current_price
-        }
-        
-    except Exception as e:
-        return {"support_levels": [], "resistance_levels": []}
-
-
-def calculate_fibonacci_levels(ohlcv_data, lookback=50):
-    """
-    Berechnet Fibonacci Retracement Levels.
-    """
-    if not ohlcv_data or len(ohlcv_data) < 20:
-        return None
-    
-    try:
-        highs = [d["high"] for d in ohlcv_data[-lookback:]]
-        lows = [d["low"] for d in ohlcv_data[-lookback:]]
-        
-        swing_high = max(highs)
-        swing_low = min(lows)
-        diff = swing_high - swing_low
-        
-        # Fibonacci Levels
-        levels = {
-            "0.0": round(swing_low, 2),
-            "0.236": round(swing_low + diff * 0.236, 2),
-            "0.382": round(swing_low + diff * 0.382, 2),
-            "0.5": round(swing_low + diff * 0.5, 2),
-            "0.618": round(swing_low + diff * 0.618, 2),
-            "0.786": round(swing_low + diff * 0.786, 2),
-            "1.0": round(swing_high, 2),
-            "1.272": round(swing_high + diff * 0.272, 2),
-            "1.618": round(swing_high + diff * 0.618, 2),
-        }
-        
-        return {
-            "swing_high": swing_high,
-            "swing_low": swing_low,
-            "levels": levels
-        }
-    except:
-        return None
-
 
 def detect_chart_patterns(ohlcv_data, lookback=50):
     """
@@ -4122,7 +3938,7 @@ def calculate_vwap(ohlcv_data):
             "lower_1": round(current_vwap - std_dev, 2),
             "lower_2": round(current_vwap - 2 * std_dev, 2),
         }
-    except:
+    except Exception as e:
         return None
 
 
@@ -4177,12 +3993,12 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
                 })
         
         return voids
-    except:
+    except Exception as e:
         return []
 
 
-def calculate_ema(closes, period):
-    """Berechnet EMA für eine Liste von Close-Preisen."""
+def calculate_ema_series(closes, period):
+    """Berechnet EMA-Serie für Chart-Overlay (gibt Liste zurück, nicht Einzelwert)."""
     if len(closes) < period:
         return []
     
@@ -4332,7 +4148,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
     ema_colors = ["#2196F3", "#FF9800", "#E91E63", "#9C27B0"]  # Blue, Orange, Pink, Purple
     
     for i, period in enumerate(ema_periods):
-        ema_values = calculate_ema(closes, period)
+        ema_values = calculate_ema_series(closes, period)
         ema_data = []
         for j, val in enumerate(ema_values):
             if val is not None:
@@ -5249,7 +5065,7 @@ def fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret):
             "APCA-API-SECRET-KEY": alpaca_secret
         }
         
-        resp = requests.get(url, headers=headers, timeout=5)
+        resp = rate_limited_get(url, headers=headers, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             quote = data.get("quote", {})
@@ -5273,7 +5089,7 @@ def fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret):
         
         # Fallback: Latest Trade
         url = f"https://data.alpaca.markets/v2/stocks/{ticker}/trades/latest"
-        resp = requests.get(url, headers=headers, timeout=5)
+        resp = rate_limited_get(url, headers=headers, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             trade = data.get("trade", {})
@@ -5285,7 +5101,7 @@ def fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret):
                     "timestamp": trade.get("t", ""),
                     "source": "Alpaca Realtime"
                 }
-    except:
+    except Exception as e:
         pass
     return None
 
@@ -5303,7 +5119,7 @@ def fetch_realtime_price_polygon(ticker, poly_key):
         url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}"
         params = {"apiKey": poly_key}
         
-        resp = requests.get(url, params=params, timeout=5)
+        resp = rate_limited_get(url, params=params, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             ticker_data = data.get("ticker", {})
@@ -5329,7 +5145,7 @@ def fetch_realtime_price_polygon(ticker, poly_key):
                             ts_seconds = timestamp / 1e9
                             trade_time = datetime.fromtimestamp(ts_seconds)
                             time_str = trade_time.strftime("%H:%M:%S")
-                        except:
+                        except Exception as e:
                             time_str = ""
                     else:
                         time_str = ""
@@ -5343,53 +5159,10 @@ def fetch_realtime_price_polygon(ticker, poly_key):
                         "time": time_str,
                         "source": "Polygon Realtime"
                     }
-    except:
+    except Exception as e:
         pass
     return None
 
-
-def fetch_realtime_batch_alpaca(tickers, alpaca_key, alpaca_secret):
-    """
-    Holt REALTIME Preise für mehrere Ticker von Alpaca.
-    
-    Returns: dict {ticker: price}
-    """
-    try:
-        # Alpaca Snapshots API (Batch)
-        symbols = ",".join(tickers[:50])  # Max 50 pro Request
-        url = f"https://data.alpaca.markets/v2/stocks/snapshots"
-        headers = {
-            "APCA-API-KEY-ID": alpaca_key,
-            "APCA-API-SECRET-KEY": alpaca_secret
-        }
-        params = {"symbols": symbols}
-        
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            
-            prices = {}
-            for ticker, snapshot in data.items():
-                # Letzter Trade
-                latest_trade = snapshot.get("latestTrade", {})
-                price = latest_trade.get("p", 0)
-                
-                if price > 0:
-                    # Berechne Change vs Previous Close
-                    prev_close = snapshot.get("prevDailyBar", {}).get("c", 0)
-                    change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
-                    
-                    prices[ticker] = {
-                        "price": round(price, 2),
-                        "prev_close": round(prev_close, 2),
-                        "change_pct": round(change_pct, 2),
-                        "volume": snapshot.get("dailyBar", {}).get("v", 0)
-                    }
-            
-            return prices
-    except:
-        pass
-    return {}
 
 def calculate_sr_from_historical(ohlc_data, current_price):
     """
@@ -6018,7 +5791,7 @@ def fetch_insider_transactions(finnhub_key, transaction_type="BUY"):
             try:
                 url = f"https://finnhub.io/api/v1/stock/insider-transactions"
                 params = {"symbol": ticker, "token": finnhub_key}
-                resp = requests.get(url, params=params, timeout=5)
+                resp = rate_limited_get(url, params=params, timeout=5)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -6027,7 +5800,7 @@ def fetch_insider_transactions(finnhub_key, transaction_type="BUY"):
                     if transactions:
                         insider_data[ticker] = transactions
                         
-            except:
+            except Exception as e:
                 continue
         
         # Filtern nach BUY oder SELL
@@ -6126,7 +5899,7 @@ def fetch_crypto_data():
             "price_change_percentage": "24h,7d"
         }
         
-        resp = requests.get(url, params=params, timeout=30)
+        resp = rate_limited_get(url, params=params, timeout=30)
         if resp.status_code == 429:
             st.warning("⚠️ CoinGecko Rate Limit. Warte 60 Sekunden.")
             return [], 0, 0
@@ -6207,8 +5980,17 @@ def fetch_crypto_data():
                 # - 5% Turnover = RVOL 0.5
                 if market_cap > 0 and vol_24h > 0:
                     turnover_pct = (vol_24h / market_cap) * 100
-                    # Normalisiere: 10% Turnover = RVOL 1.0
-                    rvol = round(turnover_pct / 10, 2)
+                    # M9: Dynamischer Baseline nach Marktkapitalisierung
+                    # Large Cap (>$10B): 3% Turnover = normal
+                    # Mid Cap ($1B-$10B): 8% Turnover = normal
+                    # Small Cap (<$1B): 15% Turnover = normal
+                    if market_cap > 10_000_000_000:
+                        baseline = 3.0  # Large Cap
+                    elif market_cap > 1_000_000_000:
+                        baseline = 8.0  # Mid Cap
+                    else:
+                        baseline = 15.0  # Small Cap
+                    rvol = round(turnover_pct / baseline, 2)
                     rvol = max(0.1, min(rvol, 50.0))  # Cap bei 50x
                 else:
                     rvol = 1.0
@@ -6315,7 +6097,7 @@ def fetch_crypto_data():
                     "Low": low_24h,
                     "PrevClose": prev_close_approx,
                 })
-            except:
+            except Exception as e:
                 continue
         
         return results, 0, skipped_filter
@@ -6356,8 +6138,8 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
     
     try:
         # Polygon Snapshot API
-        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
-        resp = requests.get(url, timeout=30).json()
+        url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+        resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=30).json()
         tickers = resp.get("tickers", [])
         
         if len(tickers) == 0:
@@ -6700,7 +6482,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     "DollarVol": dollar_volume,
                     "IsLiquid": is_liquid,
                 })
-            except:
+            except Exception as e:
                 continue
         
         return results, skipped_no_price, skipped_filter, debug_stats
@@ -6745,8 +6527,8 @@ def get_ticker_news(poly_key, ticker, limit=3):
         return None
     
     try:
-        url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&limit={limit}&apiKey={poly_key}"
-        resp = requests.get(url, timeout=5).json()
+        url = f"https://api.polygon.io/v2/reference/news"
+        resp = rate_limited_get(url, params={"ticker": ticker, "limit": limit, "apiKey": poly_key}, timeout=5).json()
         results = resp.get("results", [])
         
         news_items = []
@@ -6786,7 +6568,7 @@ def get_ticker_news(poly_key, ticker, limit=3):
             n["all_catalysts"] = detected_catalysts
         
         return news_items
-    except Exception:
+    except Exception as e:
         return []
 
 
@@ -6796,8 +6578,8 @@ def get_ticker_details(poly_key, ticker):
     Returns: dict mit shares_outstanding, market_cap, float_category
     """
     try:
-        url = f"https://api.polygon.io/v3/reference/tickers/{ticker}?apiKey={poly_key}"
-        resp = requests.get(url, timeout=5).json()
+        url = f"https://api.polygon.io/v3/reference/tickers/{ticker}"
+        resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=5).json()
         results = resp.get("results", {})
         
         shares_out = results.get("share_class_shares_outstanding", 0) or results.get("weighted_shares_outstanding", 0)
@@ -6833,7 +6615,7 @@ def get_ticker_details(poly_key, ticker):
             "name": results.get("name", ""),
             "description": results.get("description", "")[:100] if results.get("description") else ""
         }
-    except Exception:
+    except Exception as e:
         return {
             "shares_outstanding": 0,
             "shares_millions": 0,
@@ -6854,8 +6636,8 @@ def get_pm_session_bars(poly_key, ticker, date_str):
     """
     try:
         # 1-Minute Bars für PM Session
-        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{date_str}/{date_str}?adjusted=true&sort=asc&apiKey={poly_key}"
-        resp = requests.get(url, timeout=10).json()
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{date_str}/{date_str}"
+        resp = rate_limited_get(url, params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10).json()
         bars = resp.get("results", [])
         
         if not bars:
@@ -6924,8 +6706,8 @@ def get_pm_session_bars(poly_key, ticker, date_str):
 def get_spy_pm_change(poly_key):
     """Holt SPY Pre-Market Change für Relative Strength Berechnung."""
     try:
-        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/SPY?apiKey={poly_key}"
-        resp = requests.get(url, timeout=10).json()
+        url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/SPY"
+        resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=10).json()
         ticker_data = resp.get("ticker", {})
         
         prev_close = ticker_data.get("prevDay", {}).get("c", 0)
@@ -6934,7 +6716,7 @@ def get_spy_pm_change(poly_key):
         if prev_close > 0 and last_price > 0:
             return ((last_price - prev_close) / prev_close) * 100
         return 0
-    except:
+    except Exception as e:
         return 0
 
 
@@ -6999,8 +6781,8 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
         spy_pm_change = get_spy_pm_change(poly_key)
         
         # 2. Snapshot API für schnelle Filterung
-        url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey={poly_key}"
-        resp = requests.get(url, timeout=30).json()
+        url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+        resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=30).json()
         tickers = resp.get("tickers", [])
         
         if len(tickers) == 0:
@@ -7084,17 +6866,21 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     "snapshot_data": t
                 })
                 
-            except Exception:
+            except Exception as e:
                 continue
         
         # Sortiere nach Change und nimm Top 40 für Detail-Analyse
         candidates.sort(key=lambda x: abs(x["pm_change"]), reverse=True)
-        top_candidates = candidates[:40]
+        top_candidates = candidates[:30]  # Reduziert von 40 für Rate Limiting
         
         # 3. Detaillierte PM Daten für Top-Kandidaten
-        for cand in top_candidates:
+        for idx_pm, cand in enumerate(top_candidates):
             try:
                 ticker = cand["ticker"]
+                
+                # Rate Limiting: Pause nach je 10 Calls
+                if idx_pm > 0 and idx_pm % 10 == 0:
+                    time.sleep(0.5)
                 
                 # Hole echte PM Session Daten
                 pm_data = get_pm_session_bars(poly_key, ticker, today_str)
@@ -7256,7 +7042,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                                 catalysts.append(c)
                     item["Catalysts"] = catalysts
                     
-            except Exception:
+            except Exception as e:
                 continue
         
         return final_results, spy_pm_change
@@ -7777,7 +7563,7 @@ def fetch_futures_data(category):
                 params = {"interval": "1d", "range": "5d"}
                 headers = {"User-Agent": "Mozilla/5.0"}
                 
-                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                resp = rate_limited_get(url, params=params, headers=headers, timeout=10)
                 if resp.status_code != 200:
                     skipped_no_price += 1
                     continue
@@ -7853,7 +7639,7 @@ def fetch_futures_data(category):
                     "FullTicker": ticker,
                 })
                 
-            except Exception:
+            except Exception as e:
                 continue
         
         return results, skipped_no_price, skipped_filter
@@ -7893,7 +7679,7 @@ def fetch_forex_data(category):
                 params = {"interval": "1d", "range": "5d"}
                 headers = {"User-Agent": "Mozilla/5.0"}
                 
-                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                resp = rate_limited_get(url, params=params, headers=headers, timeout=10)
                 if resp.status_code != 200:
                     skipped_no_price += 1
                     continue
@@ -7984,7 +7770,7 @@ def fetch_forex_data(category):
                     "FullTicker": ticker,
                 })
                 
-            except Exception:
+            except Exception as e:
                 continue
         
         return results, skipped_no_price, skipped_filter
@@ -8035,7 +7821,7 @@ def fetch_international_stock_data(exchange_code):
                 }
                 headers = {"User-Agent": "Mozilla/5.0"}
                 
-                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                resp = rate_limited_get(url, params=params, headers=headers, timeout=10)
                 if resp.status_code != 200:
                     skipped_no_price += 1
                     continue
@@ -8182,7 +7968,7 @@ def fetch_international_stock_data(exchange_code):
                     "FullTicker": ticker,
                 })
                 
-            except Exception:
+            except Exception as e:
                 continue
         
         return results, skipped_no_price, skipped_filter
@@ -8194,7 +7980,7 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 # 5. STREAMLIT UI
 # =============================================================================
-st.set_page_config(page_title="Alpha V66.5 Pro", layout="wide")
+st.set_page_config(page_title="Alpha V67.4 Pro", layout="wide")
 
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
@@ -8205,7 +7991,7 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V66.5 Pro")
+    st.title("💎 Alpha V67.4 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
@@ -8338,6 +8124,9 @@ with st.sidebar:
     if auto_refresh:
         st.success(f"⏱️ Refresh alle {refresh_mins} Min")
     
+    # DEBUG MODE
+    st.session_state.debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False), key="debug_toggle")
+    
     # PRE-MARKET WATCHLIST BUTTON (nur für US Aktien)
     if m_type == "Aktien" and st.session_state.get("selected_exchange", "US") == "US":
         session_info = get_current_trading_session()
@@ -8451,8 +8240,9 @@ with st.sidebar:
                         if in_window:
                             st.success(f"✅ Aktuell im optimalen Zeitfenster ({current_utc_hour}:00 UTC)")
                         else:
-                            st.warning(f"⚠️ Außerhalb des optimalen Zeitfensters ({current_utc_hour}:00 UTC)")
-            except:
+                            st.warning(f"⚠️ **Außerhalb des optimalen Zeitfensters** ({current_utc_hour}:00 UTC) — "
+                                       f"Signalqualität ist reduziert. Ergebnisse mit Vorsicht nutzen!")
+            except Exception as e:
                 pass  # Fehler ignorieren
         
         # Best Pairs für Forex
@@ -8568,7 +8358,8 @@ with st.sidebar:
         st.session_state.selected_row_index = 0
         
         # DEBUG: Zeige aktuelle Konfiguration
-        st.caption(f"🔍 Debug: Markt={m_type}, Strategie={st.session_state.get('current_strategy', 'KEINE')}, Filter={st.session_state.active_filters}")
+        if st.session_state.get("debug_mode", False):
+            st.caption(f"🔍 Debug: Markt={m_type}, Strategie={st.session_state.get('current_strategy', 'KEINE')}, Filter={st.session_state.active_filters}")
         
         # Prüfe ob Insider-Strategie gewählt
         current_strat = st.session_state.get("current_strategy", "")
@@ -8789,7 +8580,7 @@ with st.sidebar:
                     status.update(label=f"Schritt 1/3: {len(filtered)} Kandidaten nach Change%-Filter")
                     
                     # Sortiere nach Change% (kleinste Bewegung zuerst = näher am Pullback)
-                    filtered = sorted(filtered, key=lambda x: abs(x.get("Chg%", 0)))[:200]
+                    filtered = sorted(filtered, key=lambda x: abs(x.get("Chg%", 0)))[:80]
                     
                     status.update(label=f"Schritt 2/3: Berechne {ma_type} {ma_period} für {len(filtered)} Aktien...")
                     
@@ -8801,8 +8592,10 @@ with st.sidebar:
                         ticker = candidate["Ticker"]
                         price = candidate["Preis"]
                         
-                        # Hole historische Daten
+                        # Hole historische Daten (mit Rate Limiting)
                         closes = fetch_historical_closes(ticker, poly_key, days=ma_period + 10)
+                        if ma_checked % 10 == 9:
+                            time.sleep(0.5)  # Rate Limiting: Pause nach je 10 Calls
                         
                         if not closes or len(closes) < ma_period:
                             continue
@@ -8857,7 +8650,8 @@ with st.sidebar:
                     status.update(label=f"✅ {len(results)} {ma_type}{ma_period} {direction_text} Setups gefunden", state="complete")
                     
                     # DEBUG INFO
-                    st.caption(f"🔍 Debug: {len(candidates)} Aktien geladen → {len(filtered)} nach Change%-Filter → {ma_checked} MA berechnet → {len(results)} im {ma_distance_max}%-Band")
+                    if st.session_state.get("debug_mode", False):
+                        st.caption(f"🔍 Debug: {len(candidates)} Aktien geladen → {len(filtered)} nach Change%-Filter → {ma_checked} MA berechnet → {len(results)} im {ma_distance_max}%-Band")
                     
                     if len(results) == 0:
                         st.info(f"ℹ️ Keine Aktien gefunden die sich innerhalb von -{1.0}% bis +{ma_distance_max}% der {ma_type}{ma_period} befinden. "
@@ -8937,9 +8731,9 @@ with st.sidebar:
                     poly_key = st.secrets["POLYGON_KEY"]
                     results, snp, sf, debug_stats = fetch_stock_data(poly_key, session=session)
                     
-                    # DEBUG: Zeige Filter-Statistiken wenn 0 Ergebnisse
+                    # Zeige Filter-Statistiken wenn 0 Ergebnisse (hilft bei Troubleshooting)
                     if len(results) == 0 and debug_stats:
-                        with st.expander("🔍 Debug: Warum 0 Ergebnisse?", expanded=True):
+                        with st.expander("❓ Warum 0 Ergebnisse?", expanded=True):
                             st.write(f"**Gesamt geprüfte Aktien:** {debug_stats.get('total_tickers', 0):,}")
                             st.write(f"**Session:** {session}")
                             st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'Keine')}")
@@ -8996,6 +8790,65 @@ with st.sidebar:
                         st.warning(f"⚠️ Keine Ergebnisse für {exchange_name} mit aktuellen Filtern")
                 
                 st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
+                
+                # =============================================================
+                # K1: MULTI-DAY PATTERN VALIDATION (wenn needs_history=True)
+                # =============================================================
+                current_strategies = get_strategies_for_market(m_type)
+                strategy_data = current_strategies.get(st.session_state.get("current_strategy", ""), {})
+                
+                if strategy_data.get("needs_history") and m_type == "Aktien" and exchange == "US":
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        pattern_type = strategy_data.get("pattern_type", "consolidation")
+                        history_days = strategy_data.get("history_days", 5)
+                        
+                        status.update(label=f"📊 Validiere Multi-Day Pattern ({pattern_type})...")
+                        
+                        validated_results = []
+                        checked = 0
+                        for r in st.session_state.scan_results[:30]:  # Max 30 API-Calls
+                            ticker = r.get("Ticker", "")
+                            if not ticker:
+                                continue
+                            
+                            bars = fetch_multi_day_data(ticker, poly_key, days=history_days)
+                            checked += 1
+                            
+                            if bars and len(bars) >= 3:
+                                is_valid, score, details = analyze_multi_day_pattern(bars, pattern_type)
+                                if is_valid and score >= 40:
+                                    r["PatternScore"] = score
+                                    r["PatternDetails"] = details
+                                    validated_results.append(r)
+                            else:
+                                # Keine History = trotzdem behalten aber mit Score 0
+                                r["PatternScore"] = 0
+                                r["PatternDetails"] = ["⚠️ Keine Multi-Day Daten"]
+                                validated_results.append(r)
+                            
+                            if checked % 10 == 0:
+                                time.sleep(0.5)  # Rate Limiting
+                        
+                        if validated_results:
+                            st.session_state.scan_results = sorted(validated_results, key=lambda x: x.get("PatternScore", 0), reverse=True)
+                            status.update(label=f"✅ {len(validated_results)} validierte Patterns (von {len(results)})")
+                        else:
+                            status.update(label=f"⚠️ Keine Ergebnisse nach Multi-Day Validierung")
+                    except Exception as e:
+                        if st.session_state.get("debug_mode"):
+                            st.warning(f"Multi-Day Validierung Fehler: {e}")
+                
+                # K2: SIGNAL SIGNIFICANCE CHECK
+                if m_type == "Aktien" and st.session_state.scan_results:
+                    sig_results = []
+                    for r in st.session_state.scan_results:
+                        atr = r.get("ATR%", 0)
+                        chg = r.get("Chg%", 0)
+                        if atr > 0 and not is_signal_significant(abs(chg), atr, multiplier=1.0):
+                            r["SignalWeak"] = True  # Markiere schwache Signale
+                        sig_results.append(r)
+                    st.session_state.scan_results = sig_results
                 
                 # Session-Info in Status
                 if m_type == "Futures":
@@ -9326,7 +9179,7 @@ with tab_scanner:
                         try:
                             poly_key = st.secrets["POLYGON_KEY"]
                             realtime = fetch_realtime_price_polygon(ticker, poly_key)
-                        except:
+                        except Exception as e:
                             pass
                         
                         # 2. Fallback: Alpaca
@@ -9336,7 +9189,7 @@ with tab_scanner:
                                 alpaca_secret = st.secrets["ALPACA_SECRET"]
                                 if alpaca_key and alpaca_secret:
                                     realtime = fetch_realtime_price_alpaca(ticker, alpaca_key, alpaca_secret)
-                            except:
+                            except Exception as e:
                                 pass
                         
                         if realtime and realtime.get("price", 0) > 0:
@@ -9371,7 +9224,7 @@ with tab_scanner:
                             for t in transactions[:3]:
                                 emoji = "🟢" if t["type"] == "BUY" else "🔴"
                                 st.caption(f"{emoji} {t['name'][:20]}: {t['shares']:,.0f} Aktien (${t['value']:,.0f})")
-                    except:
+                    except Exception as e:
                         pass
                 
                 # Flag Pattern Details anzeigen
@@ -9393,7 +9246,7 @@ with tab_scanner:
                             st.caption("**Pattern-Analyse:**")
                             for detail in flag_details:
                                 st.caption(detail)
-                    except:
+                    except Exception as e:
                         pass
                 
                 # Volatilitäts-Regime und Liquiditäts-Info anzeigen
@@ -9425,7 +9278,7 @@ with tab_scanner:
                                 else:
                                     liq_str = f"${dollar_vol/1000:.0f}K"
                                     st.metric("💧 Liquidität", liq_str, delta="LOW ⚠️", delta_color="inverse")
-                    except:
+                    except Exception as e:
                         pass
                 
                 # =====================================================================
@@ -9565,7 +9418,7 @@ with tab_scanner:
                         else:
                             st.warning(f"⚠️ **OK** - {abs_dist:.1f}% vom {ma_type} entfernt")
                         
-                    except:
+                    except Exception as e:
                         pass
                 
                 # Volume Void Details anzeigen
@@ -9622,7 +9475,7 @@ with tab_scanner:
                             st.caption(f"   Range: ${nearest_void.get('low', 0):.2f} - ${nearest_void.get('high', 0):.2f}")
                             st.caption(f"   Volumen: {nearest_void.get('volume_pct', 0):.0f}% des Durchschnitts")
                         
-                    except:
+                    except Exception as e:
                         pass
                 
                 # Harmonic Pattern Details anzeigen 🦋
@@ -9694,7 +9547,7 @@ with tab_scanner:
                                 with st.expander("📋 Pattern Details"):
                                     for detail in details:
                                         st.caption(detail)
-                    except:
+                    except Exception as e:
                         pass
                 
                 # Watchlist Button
@@ -9748,7 +9601,7 @@ with tab_scanner:
             if m_type == "Aktien":
                 try:
                     poly_key = st.secrets["POLYGON_KEY"]
-                except:
+                except Exception as e:
                     pass
             
             # S/R mit historischen Daten berechnen
@@ -9866,7 +9719,7 @@ with tab_scanner:
                     if m_type == "Aktien":
                         try:
                             poly_key = st.secrets["POLYGON_KEY"]
-                        except:
+                        except Exception as e:
                             pass
                     
                     display, analysis = get_accumulation_display(ticker, m_type, poly_key)
@@ -9959,6 +9812,20 @@ with tab_scanner:
         # TradingView Chart mit dynamischem Interval
         if st.session_state.market_type == "Krypto":
             tv_symbol = f"BINANCE:{st.session_state.selected_symbol}USDT"
+        elif st.session_state.market_type == "Forex":
+            # "EUR/USD" → "FX:EURUSD"
+            tv_symbol = f"FX:{st.session_state.selected_symbol.replace('/', '')}"
+        elif st.session_state.market_type == "Futures":
+            # Futures zu TradingView Format
+            futures_tv_map = {
+                "ES": "CME_MINI:ES1!", "NQ": "CME_MINI:NQ1!", "YM": "CBOT_MINI:YM1!",
+                "RTY": "CME_MINI:RTY1!", "CL": "NYMEX:CL1!", "GC": "COMEX:GC1!",
+                "SI": "COMEX:SI1!", "NG": "NYMEX:NG1!", "ZB": "CBOT:ZB1!",
+                "ZN": "CBOT:ZN1!", "ZC": "CBOT:ZC1!", "ZS": "CBOT:ZS1!",
+                "ZW": "CBOT:ZW1!", "HG": "COMEX:HG1!", "PL": "NYMEX:PL1!",
+                "KC": "ICEUSA:KC1!", "CT": "ICEUSA:CT1!", "SB": "ICEUSA:SB1!",
+            }
+            tv_symbol = futures_tv_map.get(st.session_state.selected_symbol, st.session_state.selected_symbol)
         else:
             tv_symbol = st.session_state.selected_symbol
         
@@ -10018,7 +9885,7 @@ with tab_search:
                 try:
                     # Methode 1: Direkte Suche via Search API
                     search_url = f"https://api.coingecko.com/api/v3/search?query={search_input.lower()}"
-                    search_resp = requests.get(search_url, timeout=15)
+                    search_resp = rate_limited_get(search_url, timeout=15)
                     
                     coin_id = None
                     if search_resp.status_code == 200:
@@ -10044,7 +9911,7 @@ with tab_search:
                             "per_page": 250,
                             "page": 1
                         }
-                        markets_resp = requests.get(markets_url, params=params, timeout=30)
+                        markets_resp = rate_limited_get(markets_url, params=params, timeout=30)
                         if markets_resp.status_code == 200:
                             for coin in markets_resp.json():
                                 if coin.get("symbol", "").upper() == search_input:
@@ -10055,7 +9922,7 @@ with tab_search:
                     if coin_id:
                         detail_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
                         params = {"localization": "false", "tickers": "false", "community_data": "false", "developer_data": "false"}
-                        detail_resp = requests.get(detail_url, params=params, timeout=15)
+                        detail_resp = rate_limited_get(detail_url, params=params, timeout=15)
                         
                         if detail_resp.status_code == 200:
                             coin = detail_resp.json()
@@ -10096,7 +9963,7 @@ with tab_search:
                     poly_key = st.secrets["POLYGON_KEY"]
                     url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{search_input}"
                     params = {"apiKey": poly_key}
-                    resp = requests.get(url, params=params, timeout=15)
+                    resp = rate_limited_get(url, params=params, timeout=15)
                     
                     if resp.status_code == 200:
                         data = resp.json()
@@ -10298,6 +10165,7 @@ with tab_watchlist:
         
         if st.button("🗑️ Alle löschen", type="secondary"):
             st.session_state.watchlist = []
+            _save_watchlist()
             st.rerun()
     else:
         st.info("Noch keine Ticker in der Watchlist. Wähle einen Ticker im Scanner und klicke '⭐ zur Watchlist'")
@@ -10328,14 +10196,15 @@ if analyze_btn:
                 if m_type == "Aktien":
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
-                        news_resp = requests.get(
-                            f"https://api.polygon.io/v2/reference/news?ticker={st.session_state.selected_symbol}&limit=3&apiKey={poly_key}",
+                        news_resp = rate_limited_get(
+                            "https://api.polygon.io/v2/reference/news",
+                            params={"ticker": st.session_state.selected_symbol, "limit": 3, "apiKey": poly_key},
                             timeout=10
                         ).json()
                         news_items = news_resp.get("results", [])
                         if news_items:
                             news_txt = "\n".join([f"- {n.get('title', 'N/A')}" for n in news_items])
-                    except:
+                    except Exception as e:
                         pass
                 
                 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
@@ -10469,6 +10338,13 @@ LIVE-DATEN:
 • RVOL (Volumen-Ratio): {d['RVOL']}x
 • Close Position: {d.get('ClosePos', 0.5)} (0=Tagestief, 1=Tageshoch)
 • Alpha-Score: {d['Alpha']}
+• Vortag Performance: {d.get('Vortag%', 'N/A')}%
+• Gap%: {d.get('Gap%', 'N/A')}%
+• ATR%: {d.get('ATR%', 'N/A')}% (Volatilitäts-Regime: {d.get('VolRegime', 'N/A')})
+• Dollar Volume: ${d.get('DollarVol', 0):,.0f}
+• MA Distanz: {d.get('MA_Distance%', 'N/A')}% ({d.get('MA_Type', '')})
+
+AKTIVE STRATEGIE: {st.session_state.get('current_strategy', 'Keine')}
 
 {sr_text}
 
@@ -10681,7 +10557,7 @@ with tab_moneyflow:
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
                 params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 100}
-                resp = requests.get(url, params=params, timeout=10)
+                resp = rate_limited_get(url, params=params, timeout=10)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -10703,7 +10579,7 @@ with tab_moneyflow:
                             "change": round(change_pct, 2),
                             "price": round(end_price, 2)
                         })
-            except:
+            except Exception as e:
                 continue
         
         return results
@@ -10879,7 +10755,7 @@ with tab_moneyflow:
 st.divider()
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.caption("Alpha Station V65.3 Pro")
+    st.caption("Alpha Station V67.4 Pro")
 with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
