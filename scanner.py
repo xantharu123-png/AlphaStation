@@ -4617,6 +4617,9 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # ============================================
         # ADAPTIVER min_swing_pct basierend auf ATR
         # Low-Vol Stocks brauchen niedrigere Schwelle
+        
+        # Max Proximity: Levels weiter als 35% vom Preis weg sind nutzlos
+        max_distance_pct = 0.35
         atr_values = []
         for i in range(1, len(closes)):
             tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
@@ -4629,32 +4632,46 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         min_swing_pct = max(0.04, min(0.15, atr_pct * 3))
         
         # Swing Highs
+        total_candles = len(highs)
         for i in range(5, len(highs) - 1):
             # Ist dies ein lokales Hoch?
             if highs[i] >= max(highs[max(0,i-5):i]) and highs[i] >= max(highs[i+1:min(len(highs),i+3)]):
+                # Proximity-Check: Level >35% vom Preis weg → überspringen
+                distance_pct = abs(highs[i] - current_price) / current_price if current_price > 0 else 1
+                if distance_pct > max_distance_pct:
+                    continue
+                
                 # Wie weit ist der Preis danach gefallen?
                 future_low = min(lows[i+1:min(len(lows), i+20)]) if i+1 < len(lows) else lows[-1]
                 drop_pct = (highs[i] - future_low) / highs[i]
                 
                 if drop_pct >= min_swing_pct:
+                    recency_bonus = int((i / total_candles) * 15)
+                    proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
                     key_levels.append({
                         "price": highs[i],
                         "type": "Swing High",
-                        "strength": min(90, 60 + int(drop_pct * 100)),
+                        "strength": min(95, 50 + int(drop_pct * 80) + recency_bonus + proximity_bonus),
                         "is_support": highs[i] < current_price
                     })
         
         # Swing Lows
         for i in range(5, len(lows) - 1):
             if lows[i] <= min(lows[max(0,i-5):i]) and lows[i] <= min(lows[i+1:min(len(lows),i+3)]):
+                distance_pct = abs(lows[i] - current_price) / current_price if current_price > 0 else 1
+                if distance_pct > max_distance_pct:
+                    continue
+                
                 future_high = max(highs[i+1:min(len(highs), i+20)]) if i+1 < len(highs) else highs[-1]
                 rally_pct = (future_high - lows[i]) / lows[i] if lows[i] > 0 else 0
                 
                 if rally_pct >= min_swing_pct:
+                    recency_bonus = int((i / total_candles) * 15)
+                    proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
                     key_levels.append({
                         "price": lows[i],
                         "type": "Swing Low",
-                        "strength": min(90, 60 + int(rally_pct * 100)),
+                        "strength": min(95, 50 + int(rally_pct * 80) + recency_bonus + proximity_bonus),
                         "is_support": lows[i] < current_price
                     })
         
@@ -4683,9 +4700,10 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                 sorted_bins = sorted(volume_bins.items(), key=lambda x: x[1], reverse=True)
                 avg_vol = sum(v for _, v in sorted_bins) / len(sorted_bins)
                 
-                # Nur Levels mit überdurchschnittlichem Volume
+                # Nur Levels mit überdurchschnittlichem Volume UND in Proximity-Zone
                 for price, vol in sorted_bins[:5]:
-                    if vol > avg_vol * 1.5:  # 50% über Durchschnitt
+                    distance_pct = abs(price - current_price) / current_price if current_price > 0 else 1
+                    if vol > avg_vol * 1.5 and distance_pct <= max_distance_pct:
                         key_levels.append({
                             "price": price,
                             "type": "High Volume",
@@ -4729,8 +4747,9 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         if fib_range > atr_14 * 3:
             for ratio in fib_ratios:
                 fib_price = fib_low + fib_range * ratio
-                # Nur wenn nicht zu nah am aktuellen Preis
-                if abs(fib_price - current_price) / current_price > 0.02:
+                distance_pct = abs(fib_price - current_price) / current_price if current_price > 0 else 1
+                # Nur wenn nicht zu nah UND nicht zu weit
+                if 0.02 < distance_pct <= max_distance_pct:
                     key_levels.append({
                         "price": fib_price,
                         "type": f"Fib {ratio*100:.1f}%",
@@ -4739,57 +4758,69 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                     })
         
         # ============================================
-        # 4. PERIOD HIGH/LOW (Absolute Grenzen)
+        # 4. PERIOD HIGH/LOW (nur wenn nah genug am Preis!)
         # ============================================
-        key_levels.append({
-            "price": period_high,
-            "type": "Period High",
-            "strength": 95,
-            "is_support": False
-        })
-        key_levels.append({
-            "price": period_low,
-            "type": "Period Low", 
-            "strength": 95,
-            "is_support": True
-        })
+        
+        ph_dist = abs(period_high - current_price) / current_price if current_price > 0 else 1
+        pl_dist = abs(period_low - current_price) / current_price if current_price > 0 else 1
+        
+        if ph_dist <= max_distance_pct:
+            key_levels.append({
+                "price": period_high,
+                "type": "Period High",
+                "strength": 90,
+                "is_support": False
+            })
+        if pl_dist <= max_distance_pct:
+            key_levels.append({
+                "price": period_low,
+                "type": "Period Low", 
+                "strength": 90,
+                "is_support": True
+            })
         
         # ============================================
         # 5. ROUND NUMBERS (Psychologische Levels)
         # ============================================
-        if current_price >= 10:
-            round_step = 5
+        if current_price >= 100:
+            round_step = 10
+        elif current_price >= 10:
+            round_step = 1
         elif current_price >= 1:
             round_step = 0.5
         else:
-            round_step = 0.1
+            round_step = 0.05
         
         round_price = round(current_price / round_step) * round_step
-        for offset in [-2, -1, 1, 2]:
+        for offset in [-3, -2, -1, 1, 2, 3]:
             rp = round_price + offset * round_step
-            if period_low <= rp <= period_high and abs(rp - current_price) / current_price > 0.02:
-                key_levels.append({
-                    "price": rp,
-                    "type": f"Round ${rp:.2f}",
-                    "strength": 65,
-                    "is_support": rp < current_price
-                })
+            distance_pct = abs(rp - current_price) / current_price if current_price > 0 else 1
+            if distance_pct > max_distance_pct or distance_pct < 0.02:
+                continue
+            key_levels.append({
+                "price": rp,
+                "type": f"Round ${rp:.2f}",
+                "strength": 55 + int(max(0, (1 - distance_pct / max_distance_pct)) * 15),
+                "is_support": rp < current_price
+            })
         
         # ============================================
-        # 6. GAP LEVELS (Offene Gaps)
+        # 6. GAP LEVELS (Offene Gaps, nur in Proximity-Zone)
         # ============================================
         for i in range(1, len(ohlcv)):
             prev_close = ohlcv[i-1]["close"]
             curr_open = ohlcv[i]["open"]
             gap_pct = abs(curr_open - prev_close) / prev_close if prev_close > 0 else 0
             
-            # Nur signifikante Gaps (>3%)
-            if gap_pct > 0.03:
-                gap_price = (prev_close + curr_open) / 2
+            gap_price = (prev_close + curr_open) / 2
+            distance_pct = abs(gap_price - current_price) / current_price if current_price > 0 else 1
+            
+            # Nur signifikante Gaps (>2%) innerhalb Proximity-Zone
+            if gap_pct > 0.02 and distance_pct <= max_distance_pct:
                 key_levels.append({
                     "price": gap_price,
                     "type": "Gap",
-                    "strength": 70,
+                    "strength": 65,
                     "is_support": gap_price < current_price
                 })
         
@@ -4839,9 +4870,18 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         supports = [l for l in all_clustered if l["price"] < current_price * 0.98]
         resistances = [l for l in all_clustered if l["price"] > current_price * 1.02]
         
-        # Sortiere nach Stärke und nimm Top 3
-        supports = sorted(supports, key=lambda x: x["strength"], reverse=True)[:3]
-        resistances = sorted(resistances, key=lambda x: x["strength"], reverse=True)[:3]
+        # Filter: Entferne Levels die zu weit weg sind (>35%)
+        supports = [l for l in supports if abs(l["price"] - current_price) / current_price <= max_distance_pct]
+        resistances = [l for l in resistances if abs(l["price"] - current_price) / current_price <= max_distance_pct]
+        
+        # Sortiere nach COMBINED Score: Stärke + Proximity
+        def combined_score(level):
+            distance = abs(level["price"] - current_price) / current_price
+            proximity_factor = max(0.3, 1.0 - distance * 2)
+            return level["strength"] * proximity_factor
+        
+        supports = sorted(supports, key=combined_score, reverse=True)[:3]
+        resistances = sorted(resistances, key=combined_score, reverse=True)[:3]
         
         # Sortiere nach Nähe zum Preis für Anzeige
         supports = sorted(supports, key=lambda x: x["price"], reverse=True)
@@ -5169,13 +5209,14 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     ECHTE S/R-Berechnung mit technischer Analyse.
     
     Methoden:
-    1. Major Swing Points (≥10% Bewegung danach = signifikant!)
+    1. Major Swing Points (dynamischer Threshold basierend auf ATR)
     2. Volume Clusters (wo wurde am meisten gehandelt?)
     3. Fibonacci Retracements (50%, 61.8% = stärkste)
-    4. Period High/Low (absolute Grenzen)
+    4. Recent Consolidation Zones (wo hat der Preis Zeit verbracht?)
     5. Round Numbers (psychologische Levels)
     6. Gap Levels (offene Gaps)
     
+    PROXIMITY BOOST = Levels nah am aktuellen Preis werden bevorzugt!
     CONFLUENCE = mehrere Levels nah beieinander = STÄRKER!
     """
     if not ohlc_data or len(ohlc_data) < 5:
@@ -5201,43 +5242,135 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     if price_range <= 0:
         return calculate_sr_levels_simple(current_price), {}
     
+    # =========================================================================
+    # ATR-basierter dynamischer Swing-Threshold
+    # =========================================================================
+    atr_values = []
+    for i in range(1, min(20, len(closes))):
+        tr = max(
+            highs[-(i)] - lows[-(i)],
+            abs(highs[-(i)] - closes[-(i+1)]) if i+1 <= len(closes) else 0,
+            abs(lows[-(i)] - closes[-(i+1)]) if i+1 <= len(closes) else 0
+        )
+        atr_values.append(tr)
+    
+    atr = sum(atr_values) / len(atr_values) if atr_values else price_range * 0.03
+    atr_pct = atr / current_price if current_price > 0 else 0.03
+    
+    # Dynamischer Threshold: 2x ATR% (minimum 3%, maximum 15%)
+    min_swing_pct = max(0.03, min(0.15, atr_pct * 2))
+    
+    # Max Proximity: Levels weiter als 35% vom Preis weg sind nutzlos
+    max_distance_pct = 0.35
+    
     key_levels = []
     
     # =========================================================================
-    # 1. MAJOR SWING POINTS (nur signifikante Wendepunkte!)
+    # 1. MAJOR SWING POINTS (dynamischer Threshold!)
     # =========================================================================
-    min_swing_pct = 0.10  # 10% Bewegung danach = signifikant
+    lookback = max(3, min(8, total_candles // 15))  # Adaptiver Lookback
     
     # Swing Highs
-    for i in range(5, len(highs) - 1):
-        if highs[i] >= max(highs[max(0,i-5):i]) and highs[i] >= max(highs[i+1:min(len(highs),i+3)]):
+    for i in range(lookback, len(highs) - 2):
+        window_before = highs[max(0, i-lookback):i]
+        window_after = highs[i+1:min(len(highs), i+max(2, lookback//2))]
+        
+        if window_before and window_after and highs[i] >= max(window_before) and highs[i] >= max(window_after):
+            # Prüfe: Wie weit ist der Kurs danach gefallen?
             future_low = min(lows[i+1:min(len(lows), i+20)]) if i+1 < len(lows) else lows[-1]
             drop_pct = (highs[i] - future_low) / highs[i] if highs[i] > 0 else 0
             
+            # Proximity-Check: Ist das Level nah genug am aktuellen Preis?
+            distance_pct = abs(highs[i] - current_price) / current_price
+            if distance_pct > max_distance_pct:
+                continue
+            
             if drop_pct >= min_swing_pct:
+                # Recency-Bonus: Neuere Swing-Points wichtiger
+                recency = i / total_candles  # 0 = alt, 1 = neu
+                recency_bonus = int(recency * 15)
+                
+                # Proximity-Bonus: Näher am Preis = nützlicher
+                proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
+                
                 key_levels.append({
                     "price": highs[i],
                     "type": "Swing High",
-                    "strength": min(90, 60 + int(drop_pct * 100)),
+                    "strength": min(95, 50 + int(drop_pct * 80) + recency_bonus + proximity_bonus),
                     "is_support": highs[i] < current_price
                 })
     
     # Swing Lows
-    for i in range(5, len(lows) - 1):
-        if lows[i] <= min(lows[max(0,i-5):i]) and lows[i] <= min(lows[i+1:min(len(lows),i+3)]):
+    for i in range(lookback, len(lows) - 2):
+        window_before = lows[max(0, i-lookback):i]
+        window_after = lows[i+1:min(len(lows), i+max(2, lookback//2))]
+        
+        if window_before and window_after and lows[i] <= min(window_before) and lows[i] <= min(window_after):
             future_high = max(highs[i+1:min(len(highs), i+20)]) if i+1 < len(highs) else highs[-1]
             rally_pct = (future_high - lows[i]) / lows[i] if lows[i] > 0 else 0
             
+            distance_pct = abs(lows[i] - current_price) / current_price
+            if distance_pct > max_distance_pct:
+                continue
+            
             if rally_pct >= min_swing_pct:
+                recency = i / total_candles
+                recency_bonus = int(recency * 15)
+                proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
+                
                 key_levels.append({
                     "price": lows[i],
                     "type": "Swing Low",
-                    "strength": min(90, 60 + int(rally_pct * 100)),
+                    "strength": min(95, 50 + int(rally_pct * 80) + recency_bonus + proximity_bonus),
                     "is_support": lows[i] < current_price
                 })
     
     # =========================================================================
-    # 2. FIBONACCI LEVELS
+    # 2. RECENT CONSOLIDATION ZONES (wo hat der Preis Zeit verbracht?)
+    # =========================================================================
+    # Teile den Preisbereich in Bins und zähle wie oft der Preis dort war
+    recent_n = min(total_candles, max(30, total_candles // 3))  # Letzte 1/3 der Daten
+    recent_closes = closes[-recent_n:]
+    recent_highs = highs[-recent_n:]
+    recent_lows = lows[-recent_n:]
+    
+    if recent_closes:
+        recent_high = max(recent_highs)
+        recent_low = min(recent_lows)
+        recent_range = recent_high - recent_low
+        
+        if recent_range > 0:
+            num_bins = 20
+            bin_size = recent_range / num_bins
+            bins = {}
+            
+            for j in range(recent_n):
+                mid = (recent_highs[j] + recent_lows[j]) / 2
+                bin_idx = int((mid - recent_low) / bin_size)
+                bin_idx = min(bin_idx, num_bins - 1)
+                bins[bin_idx] = bins.get(bin_idx, 0) + 1
+            
+            # Finde die Top-Bins (> 15% der Bars)
+            threshold = recent_n * 0.15
+            for bin_idx, count in bins.items():
+                if count >= threshold:
+                    zone_price = recent_low + (bin_idx + 0.5) * bin_size
+                    distance_pct = abs(zone_price - current_price) / current_price
+                    
+                    if distance_pct > max_distance_pct or distance_pct < 0.02:
+                        continue
+                    
+                    proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
+                    
+                    key_levels.append({
+                        "price": zone_price,
+                        "type": "Consolidation",
+                        "strength": min(90, 55 + int(count / recent_n * 60) + proximity_bonus),
+                        "is_support": zone_price < current_price
+                    })
+    
+    # =========================================================================
+    # 3. FIBONACCI LEVELS (nur innerhalb der Proximity-Zone)
     # =========================================================================
     fib_levels_dict = {
         "23.6": period_low + price_range * 0.236,
@@ -5248,84 +5381,106 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     }
     
     for fib_name, fib_price in fib_levels_dict.items():
-        if abs(fib_price - current_price) / current_price > 0.03:
-            strength = 75 if fib_name in ["50.0", "61.8"] else 65
-            key_levels.append({
-                "price": fib_price,
-                "type": f"Fib {fib_name}%",
-                "strength": strength,
-                "is_support": fib_price < current_price
-            })
+        distance_pct = abs(fib_price - current_price) / current_price
+        if distance_pct > max_distance_pct or distance_pct < 0.02:
+            continue
+        
+        proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 15)
+        strength = (75 if fib_name in ["50.0", "61.8"] else 60) + proximity_bonus
+        
+        key_levels.append({
+            "price": fib_price,
+            "type": f"Fib {fib_name}%",
+            "strength": min(90, strength),
+            "is_support": fib_price < current_price
+        })
     
     # =========================================================================
-    # 3. PERIOD HIGH/LOW
+    # 4. PERIOD HIGH/LOW (nur wenn nah genug!)
     # =========================================================================
-    key_levels.append({
-        "price": period_high,
-        "type": "Period High",
-        "strength": 95,
-        "is_support": False
-    })
-    key_levels.append({
-        "price": period_low,
-        "type": "Period Low",
-        "strength": 95,
-        "is_support": True
-    })
+    ph_dist = abs(period_high - current_price) / current_price
+    pl_dist = abs(period_low - current_price) / current_price
+    
+    if ph_dist <= max_distance_pct:
+        key_levels.append({
+            "price": period_high,
+            "type": "Period High",
+            "strength": 90,
+            "is_support": False
+        })
+    
+    if pl_dist <= max_distance_pct:
+        key_levels.append({
+            "price": period_low,
+            "type": "Period Low",
+            "strength": 90,
+            "is_support": True
+        })
     
     # =========================================================================
-    # 4. ROUND NUMBERS
+    # 5. ROUND NUMBERS
     # =========================================================================
-    if current_price >= 10:
-        round_step = 5
+    if current_price >= 100:
+        round_step = 10
+    elif current_price >= 10:
+        round_step = 1
     elif current_price >= 1:
         round_step = 0.5
     else:
-        round_step = 0.1
+        round_step = 0.05
     
     round_price = round(current_price / round_step) * round_step
-    for offset in [-2, -1, 1, 2]:
+    for offset in [-3, -2, -1, 1, 2, 3]:
         rp = round_price + offset * round_step
-        if period_low <= rp <= period_high and abs(rp - current_price) / current_price > 0.02:
-            key_levels.append({
-                "price": rp,
-                "type": f"Round ${rp:.2f}",
-                "strength": 65,
-                "is_support": rp < current_price
-            })
+        distance_pct = abs(rp - current_price) / current_price
+        if distance_pct > max_distance_pct or distance_pct < 0.02:
+            continue
+        
+        proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 15)
+        
+        key_levels.append({
+            "price": rp,
+            "type": f"Round ${rp:.2f}",
+            "strength": 55 + proximity_bonus,
+            "is_support": rp < current_price
+        })
     
     # =========================================================================
-    # 5. GAP LEVELS
+    # 6. GAP LEVELS (nur innerhalb der Proximity-Zone)
     # =========================================================================
     for i in range(1, len(closes)):
         prev_close = closes[i-1]
         curr_high = highs[i]
         curr_low = lows[i]
         
+        distance_pct = abs(prev_close - current_price) / current_price
+        if distance_pct > max_distance_pct:
+            continue
+        
         # Gap Up
         if curr_low > prev_close:
             gap_pct = (curr_low - prev_close) / prev_close if prev_close > 0 else 0
-            if gap_pct > 0.03:
+            if gap_pct > 0.02:
                 key_levels.append({
                     "price": prev_close,
                     "type": "Gap Fill",
-                    "strength": 70,
+                    "strength": 65,
                     "is_support": prev_close < current_price
                 })
         
         # Gap Down
         if curr_high < prev_close:
             gap_pct = (prev_close - curr_high) / prev_close if prev_close > 0 else 0
-            if gap_pct > 0.03:
+            if gap_pct > 0.02:
                 key_levels.append({
                     "price": prev_close,
                     "type": "Gap Fill",
-                    "strength": 70,
+                    "strength": 65,
                     "is_support": prev_close < current_price
                 })
     
     # =========================================================================
-    # 6. CLUSTERING MIT CONFLUENCE
+    # 7. CLUSTERING MIT CONFLUENCE
     # =========================================================================
     def cluster_with_confluence(levels, tolerance_pct=0.03):
         if not levels:
@@ -5364,9 +5519,15 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     supports_raw = [l for l in all_clustered if l["price"] < current_price * 0.98]
     resistances_raw = [l for l in all_clustered if l["price"] > current_price * 1.02]
     
-    # Sortiere nach Stärke und nimm Top 3
-    supports_raw = sorted(supports_raw, key=lambda x: x["strength"], reverse=True)[:3]
-    resistances_raw = sorted(resistances_raw, key=lambda x: x["strength"], reverse=True)[:3]
+    # Sortiere nach COMBINED Score: Stärke + Proximity
+    # Proximity-Gewichtung: Nähere Levels sind wichtiger!
+    def combined_score(level):
+        distance = abs(level["price"] - current_price) / current_price
+        proximity_factor = max(0.3, 1.0 - distance * 2)  # Näher = höherer Faktor
+        return level["strength"] * proximity_factor
+    
+    supports_raw = sorted(supports_raw, key=combined_score, reverse=True)[:3]
+    resistances_raw = sorted(resistances_raw, key=combined_score, reverse=True)[:3]
     
     # Sortiere nach Preis für Anzeige
     supports_cleaned = sorted(supports_raw, key=lambda x: x["price"], reverse=True)
@@ -5442,15 +5603,17 @@ def calculate_sr_levels_simple(price):
 def calculate_sr_levels(price, ticker=None, market_type="Krypto", timeframe="4H", poly_key=None):
     """Hauptfunktion: Berechnet S/R-Levels basierend auf Timeframe"""
     
-    # Timeframe zu Tagen mappen
+    # Timeframe zu Tagen mappen — genug Daten für aussagekräftige Swing-Points!
     tf_to_days = {
-        "1H": 1,
-        "4H": 7,
-        "1D": 30,
-        "1W": 90,
-        "1M": 180
+        "5Min": 2,
+        "15Min": 5,
+        "1H": 14,
+        "4H": 60,     # War 7! Braucht mindestens 60 Tage für brauchbare Swing-Points
+        "1D": 120,    # War 30
+        "1W": 365,    # War 90
+        "1M": 730
     }
-    days = tf_to_days.get(timeframe, 7)
+    days = tf_to_days.get(timeframe, 60)
     
     # Versuche historische Daten zu holen
     ohlc_data = None
