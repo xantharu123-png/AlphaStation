@@ -1,27 +1,21 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        ALPHA STATION V67.1 PRO                               ║
+║                        ALPHA STATION V67.2 PRO                               ║
 ║                     Multi-Asset Scanner & Analyzer                           ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: 67.1 (PM Watchlist + AI Chart Fixes)                               ║
+║  Version: 67.2 (Chart History + Weekly TF)                                   ║
 ║  Date: 12. Februar 2026                                                      ║
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  V67.1 NEW - PM WATCHLIST FIXES:                                             ║
-║  ✅ DST-FIX: PM Session Zeiten korrekt für Sommer/Winter (pytz)             ║
-║  ✅ KATALYSATOR: News-Erkennung (Earnings, FDA, Offering, M&A, etc.)        ║
-║  ✅ ECHTE GAP: PM Open vs PrevClose (nicht Current vs PrevClose)             ║
-║  ✅ VOLUME RATIO: PM Vol vs Avg Daily Vol (zeigt ungewöhnliche Aktivität)    ║
-║  V67.1 NEW - AI CHART FIXES:                                                ║
-║  ✅ PATTERN FIX: Double Bottom/Top mit 4 strengen Kriterien                 ║
-║     → Min 10 Bars Abstand, Min 2× ATR Tiefe, ATR-basierte Toleranz          ║
-║     → Volume-Bestätigung, adaptives Swing-Window (5-10)                      ║
-║  ✅ S/R FIX: Adaptiver min_swing_pct (3×ATR statt 10% hardcoded)            ║
-║  ✅ FIB FIX: Letzter signifikanter Swing statt immer Period High/Low         ║
-║  ✅ H&S FIX: Min Abstand + Head muss 1×ATR höher sein                       ║
-║  ✅ FLAG FIX: Erkennt echten Pole durch Preisbewegung statt 30/70 Split      ║
+║  V67.2 NEW - CHART HISTORY FIX:                                              ║
+║  ✅ 1H: 30 Tage → 3 Monate (3× mehr)                                       ║
+║  ✅ 4H: 60 Tage → 6 Monate (3× mehr)                                       ║
+║  ✅ 1D: 1 Jahr → 2 Jahre (2× mehr, ~500 Bars)                              ║
+║  ✅ NEU: 1W Weekly Timeframe (5 Jahre History!)                              ║
+║  ✅ 15m: 10 Tage → 3 Wochen                                                ║
+║  ✅ Dynamische Max-Bars pro Timeframe (statt hardcoded 300)                  ║
+║  V67.1: PM Watchlist DST/Gap/Vol/Katalysator + AI Chart Pattern Rewrite      ║
 ║  V67.0: AI Chart Analyzer mit Lightweight Charts                             ║
-║  V66.6: PM Watchlist Complete - News + Float                                 ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -3153,31 +3147,33 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
     """
     Holt OHLCV Daten für Chart-Darstellung.
     
+    V67.2: Deutlich mehr History + Weekly Timeframe
+    
     Args:
         ticker: Ticker Symbol
         poly_key: Polygon API Key
-        timeframe: "5m", "15m", "1H", "4H", "1D"
-        bars: Anzahl Bars
+        timeframe: "5m", "15m", "1H", "4H", "1D", "1W"
+        bars: Anzahl Bars (wird pro Timeframe angepasst)
         
     Returns:
         List of dicts with time, open, high, low, close, volume
     """
     try:
-        # Timeframe mapping: (multiplier, span, days_back)
-        # Polygon API: /range/{multiplier}/{timespan}/{from}/{to}
-        # Timespans: minute, hour, day, week, month
+        # Timeframe mapping: (multiplier, span, days_back, max_bars)
+        # V67.2: Massiv erhöhte Lookback-Perioden
         tf_map = {
-            "5m": ("5", "minute", 5),      # 5 Tage zurück für 5-min
-            "15m": ("15", "minute", 10),   # 10 Tage zurück für 15-min
-            "1H": ("1", "hour", 30),       # 30 Tage zurück für 1H
-            "4H": ("1", "hour", 60),       # 60 Tage zurück, dann aggregieren zu 4H
-            "1D": ("1", "day", 365),       # 1 Jahr zurück für Daily
+            "5m": ("5", "minute", 7, 500),        # 7 Tage → ~540 Bars
+            "15m": ("15", "minute", 21, 500),      # 3 Wochen → ~540 Bars
+            "1H": ("1", "hour", 90, 500),          # 3 Monate → ~450 Bars
+            "4H": ("1", "hour", 180, 500),         # 6 Monate → ~500 4H Bars
+            "1D": ("1", "day", 730, 500),          # 2 Jahre → ~500 Bars
+            "1W": ("1", "week", 1825, 260),        # 5 Jahre → ~260 Bars
         }
         
         if timeframe not in tf_map:
             timeframe = "1H"
         
-        mult, span, days_back = tf_map[timeframe]
+        mult, span, days_back, max_bars = tf_map[timeframe]
         
         # Berechne Datum-Range
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -3214,8 +3210,10 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
             results = aggregated
         
         # Formatiere für Lightweight Charts
+        # Nutze max_bars als Limit statt dem übergebenen bars Parameter
+        effective_bars = min(max_bars, len(results))
         ohlcv = []
-        for bar in results[-bars:]:
+        for bar in results[-effective_bars:]:
             ohlcv.append({
                 "time": bar["t"] // 1000,  # JavaScript timestamp (seconds)
                 "open": bar["o"],
@@ -4623,27 +4621,37 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     """
     st.subheader(f"🤖 AI Chart Analyzer - {ticker}")
     
-    # Timeframe Selector
-    col_tf1, col_tf2, col_tf3, col_tf4, col_tf5 = st.columns(5)
+    # Timeframe Selector - V67.2: +Weekly für Langzeit-Ansicht
+    tf_cols = st.columns(7)
     
-    timeframes = ["5m", "15m", "1H", "4H", "1D"]
-    tf_labels = ["5 Min", "15 Min", "1 Stunde", "4 Stunden", "1 Tag"]
+    timeframes = ["5m", "15m", "1H", "4H", "1D", "1W"]
+    tf_labels = ["5 Min", "15 Min", "1H", "4H", "Daily", "Weekly"]
+    tf_icons = ["⚡", "⏱️", "🕐", "📊", "📅", "📆"]
     
-    for i, (tf, label) in enumerate(zip(timeframes, tf_labels)):
-        with [col_tf1, col_tf2, col_tf3, col_tf4, col_tf5][i]:
+    for i, (tf, label, icon) in enumerate(zip(timeframes, tf_labels, tf_icons)):
+        with tf_cols[i]:
             current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
-            if st.button(label, key=f"tf_{tf}_{ticker}", 
+            if st.button(f"{icon} {label}", key=f"tf_{tf}_{ticker}", 
                         type="primary" if tf == current_tf else "secondary",
                         use_container_width=True):
                 st.session_state[f"chart_tf_{ticker}"] = tf
                 st.rerun()
+    
+    # Info-Spalte: zeigt wie viel History geladen wird
+    with tf_cols[6]:
+        tf_info = {
+            "5m": "7 Tage", "15m": "3 Wochen", "1H": "3 Monate",
+            "4H": "6 Monate", "1D": "2 Jahre", "1W": "5 Jahre"
+        }
+        current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
+        st.caption(f"📏 {tf_info.get(current_tf, '')}")
     
     # Get current timeframe from session
     current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
     
     # Fetch Data
     with st.spinner(f"📥 Lade {ticker} Chart Daten ({current_tf})..."):
-        ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, current_tf, bars=300)
+        ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, current_tf)
     
     if not ohlcv:
         st.error(f"❌ Keine Chart-Daten für {ticker} im Timeframe {current_tf} verfügbar")
