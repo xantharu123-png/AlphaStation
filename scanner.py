@@ -7110,18 +7110,70 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             entry_signal = "⚠️ BOUNCE"
                             entry_detail = f"Bounce vom Low - Warte auf Schwäche"
                     
-                    # Risk Management Levels
+                    # Risk Management Levels (V67.4 Rewrite)
+                    # Minimum Risk = max(2% vom Preis, PM Range * 0.3)
+                    # Das stellt sicher dass Stops nicht im Noise liegen
+                    min_risk_pct = max(0.02, atr_pct / 100 * 0.8) if atr_pct > 0 else 0.02
+                    min_risk_abs = current_price * min_risk_pct
+                    
                     if cand["pm_change"] > 0:
-                        # Long: Entry über PM High, Stop unter PM Low oder VWAP
+                        # LONG: Entry am PM High, Stop basierend auf PM-Struktur
                         entry_price = pm_high
-                        stop_price = max(pm_vwap, pm_low + (pm_range * 0.25))
+                        
+                        # Stop-Optionen (wähle den sinnvollsten):
+                        stop_candidates = []
+                        
+                        # 1. Unter VWAP (wenn weit genug vom Entry)
+                        if entry_price - pm_vwap > min_risk_abs:
+                            stop_candidates.append(pm_vwap - (pm_range * 0.05))  # Leicht unter VWAP
+                        
+                        # 2. Unter PM Low (konservativ)
+                        stop_candidates.append(pm_low - (pm_range * 0.05))
+                        
+                        # 3. Unter Previous Day Close (bei Gap Ups)
+                        if real_gap_pct > 1.0 and prev_close < entry_price:
+                            stop_candidates.append(prev_close * 0.995)
+                        
+                        # 4. Prozentual (Fallback: 2-3% unter Entry)
+                        stop_candidates.append(entry_price * (1 - max(0.02, min(0.05, atr_pct / 100))))
+                        
+                        # Wähle den Stop der am nächsten am Entry liegt aber >= min_risk
+                        valid_stops = [s for s in stop_candidates if entry_price - s >= min_risk_abs]
+                        if valid_stops:
+                            stop_price = max(valid_stops)  # Nächster gültiger Stop
+                        else:
+                            stop_price = entry_price * (1 - max(0.02, min(0.05, atr_pct / 100)))
+                        
                         risk = entry_price - stop_price
                         target1 = entry_price + (risk * 1.5)  # 1.5R
                         target2 = entry_price + (risk * 2.5)  # 2.5R
                     else:
-                        # Short: Entry unter PM Low, Stop über PM High oder VWAP
+                        # SHORT: Entry am PM Low, Stop basierend auf PM-Struktur
                         entry_price = pm_low
-                        stop_price = min(pm_vwap, pm_high - (pm_range * 0.25))
+                        
+                        stop_candidates = []
+                        
+                        # 1. Über VWAP (wenn weit genug)
+                        if pm_vwap - entry_price > min_risk_abs:
+                            stop_candidates.append(pm_vwap + (pm_range * 0.05))
+                        
+                        # 2. Über PM High (konservativ)
+                        stop_candidates.append(pm_high + (pm_range * 0.05))
+                        
+                        # 3. Über Previous Day Close (bei Gap Downs)
+                        if real_gap_pct < -1.0 and prev_close > entry_price:
+                            stop_candidates.append(prev_close * 1.005)
+                        
+                        # 4. Prozentual (Fallback)
+                        stop_candidates.append(entry_price * (1 + max(0.02, min(0.05, atr_pct / 100))))
+                        
+                        # Nächster gültiger Stop
+                        valid_stops = [s for s in stop_candidates if s - entry_price >= min_risk_abs]
+                        if valid_stops:
+                            stop_price = min(valid_stops)
+                        else:
+                            stop_price = entry_price * (1 + max(0.02, min(0.05, atr_pct / 100)))
+                        
                         risk = stop_price - entry_price
                         target1 = entry_price - (risk * 1.5)
                         target2 = entry_price - (risk * 2.5)
@@ -7315,7 +7367,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         with rm_col4:
                             st.metric("✅ TP2 (2.5R)", f"${item['Target2']:.2f}")
                         
-                        st.caption(f"Risk per Share: ${item['Risk_R']:.2f} | Move Start: {item.get('Move_Time', 'N/A')}")
+                        risk_pct = abs(item['Risk_R'] / item['Entry_Price'] * 100) if item['Entry_Price'] > 0 else 0
+                        st.caption(f"Risk per Share: ${item['Risk_R']:.2f} ({risk_pct:.1f}%) | Move Start: {item.get('Move_Time', 'N/A')}")
                         if item.get('Company_Name'):
                             st.caption(f"🏢 {item['Company_Name']}")
                     
@@ -7393,7 +7446,8 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         with rm_col4:
                             st.metric("✅ TP2 (2.5R)", f"${item['Target2']:.2f}")
                         
-                        st.caption(f"Risk per Share: ${item['Risk_R']:.2f} | Move Start: {item.get('Move_Time', 'N/A')}")
+                        risk_pct = abs(item['Risk_R'] / item['Entry_Price'] * 100) if item['Entry_Price'] > 0 else 0
+                        st.caption(f"Risk per Share: ${item['Risk_R']:.2f} ({risk_pct:.1f}%) | Move Start: {item.get('Move_Time', 'N/A')}")
                         if item.get('Company_Name'):
                             st.caption(f"🏢 {item['Company_Name']}")
                     
