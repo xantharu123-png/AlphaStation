@@ -3482,7 +3482,30 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     if depth < atr * 2:
                         continue
                     
-                    # KRITERIUM 4: Zweites Top hatte weniger Volume (Divergenz)
+                    # KRITERIUM 4: VORHERIGER UPTREND
+                    # Der Kurs VOR dem ersten Top muss tiefer gewesen sein
+                    pre_start = max(0, idx1 - 15)
+                    pre_end = max(0, idx1 - 2)
+                    if pre_end > pre_start:
+                        pre_lows = lows[pre_start:pre_end]
+                        pre_low_avg = sum(pre_lows) / len(pre_lows)
+                        # Vorheriges Level muss deutlich tiefer sein als die Tops
+                        if top_avg - pre_low_avg < atr * 2:
+                            continue
+                    
+                    # KRITERIUM 5: KLARER DIP zwischen den Tops
+                    mid_section = closes[idx1:idx2+1]
+                    if mid_section:
+                        mid_avg = sum(mid_section) / len(mid_section)
+                        # Wenn der Durchschnitt zwischen Tops nahe den Tops liegt → Range, kein M-Pattern
+                        if top_avg - mid_avg < depth * 0.3:
+                            continue
+                    
+                    # KRITERIUM 6: RECENCY
+                    if idx2 < len(data) * 0.3:
+                        continue
+                    
+                    # KRITERIUM 7: Volume-Divergenz (weniger Vol beim 2. Top)
                     vol_confirmation = h2_data["volume"] < h1_data["volume"] * 1.2
                     
                     # Preis unter Neckline = bestätigt
@@ -3540,8 +3563,36 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     if depth < atr * 2:
                         continue
                     
-                    # KRITERIUM 4: Volume-Bestätigung
-                    # Idealerweise: höheres Volume beim zweiten Bottom oder beim Breakout
+                    # KRITERIUM 4: VORHERIGER DOWNTREND
+                    # Der Kurs VOR dem ersten Bottom muss höher gewesen sein
+                    # Mindestens 5 Bars vor Bottom 1 anschauen
+                    pre_start = max(0, idx1 - 15)
+                    pre_end = max(0, idx1 - 2)
+                    if pre_end > pre_start:
+                        pre_highs = highs[pre_start:pre_end]
+                        pre_high_avg = sum(pre_highs) / len(pre_highs)
+                        # Der Durchschnitt vor Bottom 1 muss mindestens 2× ATR höher sein als die Bottoms
+                        # Sonst war es eine Seitwärtsrange, kein Downtrend
+                        if pre_high_avg - bottom_avg < atr * 2:
+                            continue
+                    
+                    # KRITERIUM 5: KLARER RALLY-PEAK zwischen den Bottoms
+                    # Die Neckline muss deutlich über den Bottoms UND über dem
+                    # allgemeinen Preisniveau vor/nach den Bottoms liegen
+                    # Prüfe ob der Bereich zwischen den Bottoms ein klares "V" oder "W" zeigt
+                    mid_section = closes[idx1:idx2+1]
+                    if mid_section:
+                        mid_avg = sum(mid_section) / len(mid_section)
+                        # Wenn der Durchschnitt zwischen den Bottoms nahe den Bottoms liegt,
+                        # ist es eine flache Range, kein W-Pattern
+                        if mid_avg - bottom_avg < depth * 0.3:
+                            continue
+                    
+                    # KRITERIUM 6: RECENCY — zweites Bottom muss in der zweiten Hälfte der Daten sein
+                    if idx2 < len(data) * 0.3:
+                        continue
+                    
+                    # KRITERIUM 7: Volume-Bestätigung
                     recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else avg_volume
                     vol_confirmation = recent_vol > avg_volume * 0.8
                     
@@ -3887,6 +3938,43 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "Medium",
                         "description": f"Falling Wedge (bullish) - Target resistance @ ${recent_highs[0]:.2f}"
                     })
+        
+        # === BASE BREAKOUT ===
+        # Lange Seitwärtsphase + Ausbruch darüber
+        # Typisch für ATEX-artige Setups: Monate flach, dann Gap/Breakout
+        if len(closes) >= 30 and not any(p["pattern"] in ["Double Bottom", "Cup & Handle"] for p in patterns):
+            # Finde die Base: Teile Daten in erste 60% (potenzielle Base) und letzte 40%
+            base_end = int(len(closes) * 0.6)
+            base_data = closes[:base_end]
+            breakout_data = closes[base_end:]
+            
+            if len(base_data) >= 15 and len(breakout_data) >= 5:
+                base_high = max(highs[:base_end])
+                base_low = min(lows[:base_end])
+                base_avg = sum(base_data) / len(base_data)
+                base_range_pct = (base_high - base_low) / base_avg if base_avg > 0 else 1
+                
+                # Base muss eng sein (Range < 25% des Durchschnittspreises)
+                # UND der aktuelle Preis muss deutlich über der Base liegen
+                breakout_pct = (current_price - base_high) / base_high if base_high > 0 else 0
+                
+                if base_range_pct < 0.25 and breakout_pct > 0.05:
+                    # Zusätzlich: Die Mehrzahl der Base-Bars sollte in einer engen Range sein
+                    tight_count = sum(1 for c in base_data if abs(c - base_avg) / base_avg < 0.08)
+                    tight_pct = tight_count / len(base_data)
+                    
+                    if tight_pct > 0.6:
+                        patterns.append({
+                            "pattern": "Base Breakout",
+                            "emoji": "💥⬆️",
+                            "type": "bullish",
+                            "base_low": round(base_low, 2),
+                            "base_high": round(base_high, 2),
+                            "breakout_pct": f"+{breakout_pct*100:.1f}%",
+                            "target": round(base_high + (base_high - base_low), 2),
+                            "confidence": "High" if breakout_pct > 0.10 else "Medium",
+                            "description": f"Base Breakout! Range ${base_low:.2f}-${base_high:.2f}, broke out +{breakout_pct*100:.1f}%. Target: ${base_high + (base_high - base_low):.2f}"
+                        })
         
         return patterns
         
