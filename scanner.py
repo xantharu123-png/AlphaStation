@@ -7385,8 +7385,14 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         spy_color = "🟢" if spy_change >= 0 else "🔴"
         st.info(f"SPY PM: {spy_color} {spy_change:+.2f}%")
     
+    # Auto-Save Setups für Tracker
+    if not st.session_state.get("_pm_setups_saved_today"):
+        saved = _save_pm_setups(pm_data)
+        if saved:
+            st.session_state._pm_setups_saved_today = True
+    
     # Tabs für verschiedene Ansichten
-    tab_long, tab_short, tab_all, tab_export = st.tabs(["🟢 LONG", "🔴 SHORT", "📊 Alle", "📋 Export"])
+    tab_long, tab_short, tab_all, tab_tracker, tab_export = st.tabs(["🟢 LONG", "🔴 SHORT", "📊 Alle", "📈 Tracker", "📋 Export"])
     
     # Aufteilen in Long und Short
     long_candidates = [x for x in pm_data if x["PM_Chg%"] > 0]
@@ -7622,6 +7628,21 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                 hide_index=True,
             )
     
+    # === TRACKER TAB ===
+    with tab_tracker:
+        st.subheader("📈 Setup Tracker — Hat es funktioniert?")
+        st.caption("Verfolge ob die PM Setups im echten Markt funktioniert hätten")
+        
+        try:
+            tracker_poly_key = st.secrets.get("POLYGON_KEY", "")
+        except Exception:
+            tracker_poly_key = ""
+        
+        if tracker_poly_key:
+            display_pm_tracker(tracker_poly_key)
+        else:
+            st.warning("⚠️ Polygon API Key benötigt für Intraday-Auswertung")
+    
     # === EXPORT TAB ===
     with tab_export:
         st.subheader("📋 Copy/Paste Watchlist")
@@ -7696,6 +7717,486 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                - Target 1: 1.5x Risk (nimm 50% Profit)
                - Target 2: 2.5x Risk (Trail Stop)
             """)
+
+
+# =============================================================================
+# PM SETUP TRACKER — Verfolge ob Setups im echten Markt funktioniert hätten
+# =============================================================================
+
+PM_TRACKER_FILE = "/tmp/alpha_station_pm_tracker.json"
+
+def _save_pm_setups(pm_data):
+    """Speichert PM Setups mit Timestamp für späteres Tracking"""
+    try:
+        # Lade bestehende Daten
+        existing = _load_pm_tracker()
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Vereinfache die Setups für JSON
+        simplified = []
+        for item in pm_data:
+            setups_clean = []
+            for s in item.get("Setups", []):
+                setups_clean.append({
+                    "name": s.get("name", ""),
+                    "emoji": s.get("emoji", ""),
+                    "entry": round(s.get("entry", 0), 2),
+                    "stop": round(s.get("stop", 0), 2),
+                    "tp1": round(s.get("tp1", 0), 2),
+                    "tp2": round(s.get("tp2", 0), 2),
+                    "risk": round(s.get("risk", 0), 2),
+                    "risk_pct": round(s.get("risk_pct", 0), 1),
+                })
+            
+            simplified.append({
+                "ticker": item["Ticker"],
+                "direction": "LONG" if item["PM_Chg%"] > 0 else "SHORT",
+                "pm_change": item["PM_Chg%"],
+                "pm_price": item["PM_Preis"],
+                "pm_high": item["PM_High"],
+                "pm_low": item["PM_Low"],
+                "pm_vwap": item["PM_VWAP"],
+                "gap_pct": item.get("Gap%", 0),
+                "setup_type": item.get("Setup_Type", ""),
+                "entry_signal": item.get("Entry_Signal", ""),
+                "primary_idx": item.get("Primary_Idx", 0),
+                "alt_idx": item.get("Alt_Idx", 1),
+                "setups": setups_clean,
+                "results": None,  # Wird nach Auswertung gefüllt
+            })
+        
+        existing[today] = {
+            "date": today,
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "count": len(simplified),
+            "tickers": simplified,
+        }
+        
+        # Behalte nur die letzten 30 Tage
+        sorted_dates = sorted(existing.keys(), reverse=True)[:30]
+        existing = {d: existing[d] for d in sorted_dates}
+        
+        with open(PM_TRACKER_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+        
+        return True
+    except Exception as e:
+        _debug_log("PM Tracker save failed", error=e)
+        return False
+
+
+def _load_pm_tracker():
+    """Lädt alle gespeicherten PM Tracker Daten"""
+    try:
+        with open(PM_TRACKER_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def evaluate_pm_setups(poly_key, date_str, setups_data):
+    """
+    Wertet PM Setups gegen echte Intraday-Daten aus.
+    
+    Holt 5-Minuten Bars für Regular Session (9:30-16:00 ET).
+    Simuliert jedes Setup: Entry getriggert? Stop oder TP1/TP2 zuerst?
+    
+    Returns: Liste von Setup-Ergebnissen
+    """
+    results = []
+    
+    if not setups_data or not poly_key:
+        return results
+    
+    tickers = setups_data.get("tickers", [])
+    
+    for item in tickers[:20]:  # Max 20 Ticker auswerten (API Limit)
+        ticker = item["ticker"]
+        direction = item["direction"]
+        
+        try:
+            # 5-Min Bars für den ganzen Tag holen
+            url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/5/minute/{date_str}/{date_str}"
+            resp = rate_limited_get(url, params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10)
+            
+            if resp.status_code != 200:
+                continue
+            
+            bars = resp.json().get("results", [])
+            if not bars:
+                continue
+            
+            # Filtere Regular Session (9:30-16:00 ET)
+            et_tz = pytz.timezone('America/New_York')
+            trade_date = datetime.strptime(date_str, "%Y-%m-%d")
+            
+            rs_start_et = et_tz.localize(trade_date.replace(hour=9, minute=30))
+            rs_start_ts = rs_start_et.astimezone(pytz.utc).timestamp()
+            rs_end_et = et_tz.localize(trade_date.replace(hour=16, minute=0))
+            rs_end_ts = rs_end_et.astimezone(pytz.utc).timestamp()
+            
+            session_bars = [b for b in bars if rs_start_ts <= b.get("t", 0) / 1000 <= rs_end_ts]
+            
+            if not session_bars:
+                continue
+            
+            # Open und Close des Tages
+            day_open = session_bars[0].get("o", 0)
+            day_close = session_bars[-1].get("c", 0)
+            day_high = max(b.get("h", 0) for b in session_bars)
+            day_low = min(b.get("l", 999999) for b in session_bars)
+            
+            # Evaluiere jedes Setup
+            setup_results = []
+            for si, setup in enumerate(item.get("setups", [])):
+                entry = setup.get("entry", 0)
+                stop = setup.get("stop", 0)
+                tp1 = setup.get("tp1", 0)
+                tp2 = setup.get("tp2", 0)
+                
+                if entry <= 0:
+                    continue
+                
+                # Walk through bars chronologisch
+                entry_hit = False
+                entry_bar_idx = -1
+                stop_hit = False
+                tp1_hit = False
+                tp2_hit = False
+                exit_price = 0
+                exit_reason = "OPEN"  # Noch offen
+                
+                for bi, bar in enumerate(session_bars):
+                    bar_high = bar.get("h", 0)
+                    bar_low = bar.get("l", 999999)
+                    
+                    if not entry_hit:
+                        # Check ob Entry getriggert wird
+                        if direction == "LONG":
+                            if bar_high >= entry:
+                                entry_hit = True
+                                entry_bar_idx = bi
+                        else:  # SHORT
+                            if bar_low <= entry:
+                                entry_hit = True
+                                entry_bar_idx = bi
+                    
+                    elif entry_hit:
+                        # Entry ist aktiv — check Stop und TPs
+                        if direction == "LONG":
+                            # Stop zuerst checken (konservativ)
+                            if bar_low <= stop:
+                                stop_hit = True
+                                exit_price = stop
+                                exit_reason = "STOP"
+                                break
+                            if bar_high >= tp2:
+                                tp2_hit = True
+                                tp1_hit = True
+                                exit_price = tp2
+                                exit_reason = "TP2"
+                                break
+                            if bar_high >= tp1 and not tp1_hit:
+                                tp1_hit = True
+                        else:  # SHORT
+                            if bar_high >= stop:
+                                stop_hit = True
+                                exit_price = stop
+                                exit_reason = "STOP"
+                                break
+                            if bar_low <= tp2:
+                                tp2_hit = True
+                                tp1_hit = True
+                                exit_price = tp2
+                                exit_reason = "TP2"
+                                break
+                            if bar_low <= tp1 and not tp1_hit:
+                                tp1_hit = True
+                
+                # Wenn Trade noch offen: Close at EOD
+                if entry_hit and not stop_hit and not tp2_hit:
+                    exit_price = day_close
+                    if tp1_hit:
+                        exit_reason = "TP1+EOD"
+                    else:
+                        exit_reason = "EOD"
+                
+                # P&L berechnen
+                if entry_hit:
+                    if direction == "LONG":
+                        pnl_dollar = exit_price - entry
+                    else:
+                        pnl_dollar = entry - exit_price
+                    pnl_pct = (pnl_dollar / entry * 100) if entry > 0 else 0
+                    r_multiple = pnl_dollar / setup.get("risk", 1) if setup.get("risk", 0) > 0 else 0
+                else:
+                    pnl_dollar = 0
+                    pnl_pct = 0
+                    r_multiple = 0
+                    exit_reason = "NO ENTRY"
+                
+                setup_results.append({
+                    "setup_name": setup.get("name", ""),
+                    "setup_idx": si,
+                    "is_primary": si == item.get("primary_idx", 0),
+                    "entry": entry,
+                    "stop": stop,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "entry_hit": entry_hit,
+                    "stop_hit": stop_hit,
+                    "tp1_hit": tp1_hit,
+                    "tp2_hit": tp2_hit,
+                    "exit_price": round(exit_price, 2),
+                    "exit_reason": exit_reason,
+                    "pnl_dollar": round(pnl_dollar, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "r_multiple": round(r_multiple, 2),
+                })
+            
+            results.append({
+                "ticker": ticker,
+                "direction": direction,
+                "pm_change": item.get("pm_change", 0),
+                "setup_type": item.get("setup_type", ""),
+                "day_open": round(day_open, 2),
+                "day_close": round(day_close, 2),
+                "day_high": round(day_high, 2),
+                "day_low": round(day_low, 2),
+                "day_change_pct": round((day_close - day_open) / day_open * 100, 2) if day_open > 0 else 0,
+                "setup_results": setup_results,
+            })
+            
+        except Exception as e:
+            _debug_log(f"Tracker eval failed for {ticker}", error=e)
+            continue
+    
+    return results
+
+
+def display_pm_tracker(poly_key):
+    """Zeigt den PM Setup Tracker Tab an"""
+    
+    tracker_data = _load_pm_tracker()
+    
+    if not tracker_data:
+        st.info("📊 Noch keine PM Setups gespeichert. Lade zuerst die PM Watchlist, dann werden Setups automatisch für Tracking gespeichert.")
+        return
+    
+    available_dates = sorted(tracker_data.keys(), reverse=True)
+    
+    # Datum auswählen
+    selected_date = st.selectbox(
+        "📅 Datum auswählen", 
+        available_dates,
+        format_func=lambda d: f"{d} ({tracker_data[d].get('count', 0)} Setups)"
+    )
+    
+    if not selected_date:
+        return
+    
+    day_data = tracker_data[selected_date]
+    
+    st.caption(f"Gespeichert: {day_data.get('saved_at', 'N/A')} | {day_data.get('count', 0)} Ticker")
+    
+    # Check ob bereits ausgewertet
+    tickers = day_data.get("tickers", [])
+    has_results = any(t.get("results") for t in tickers)
+    
+    # Auswertung starten
+    col_eval1, col_eval2 = st.columns([1, 2])
+    with col_eval1:
+        if st.button("🔍 Setups auswerten", key=f"eval_{selected_date}", 
+                     help="Holt Intraday-Daten und prüft ob Entry/Stop/TP getroffen wurden"):
+            with st.spinner(f"⏳ Werte {len(tickers)} Ticker aus..."):
+                eval_results = evaluate_pm_setups(poly_key, selected_date, day_data)
+                
+                if eval_results:
+                    # Speichere Ergebnisse zurück
+                    for result in eval_results:
+                        for ticker_data_item in tickers:
+                            if ticker_data_item["ticker"] == result["ticker"]:
+                                ticker_data_item["results"] = result
+                    
+                    tracker_data[selected_date] = day_data
+                    try:
+                        with open(PM_TRACKER_FILE, "w") as f:
+                            json.dump(tracker_data, f, indent=2)
+                    except Exception as e:
+                        _debug_log("Tracker result save failed", error=e)
+                    
+                    st.success(f"✅ {len(eval_results)} Ticker ausgewertet!")
+                    st.rerun()
+                else:
+                    st.warning("Keine Intraday-Daten verfügbar. Nur für vergangene Handelstage möglich.")
+    
+    with col_eval2:
+        if has_results:
+            st.caption("✅ Bereits ausgewertet — Ergebnisse unten")
+    
+    # Ergebnisse anzeigen
+    if not has_results:
+        # Zeige gespeicherte Setups ohne Auswertung
+        st.markdown("### 📋 Gespeicherte Setups")
+        for t in tickers[:10]:
+            direction_emoji = "🟢" if t["direction"] == "LONG" else "🔴"
+            st.markdown(f"**{direction_emoji} {t['ticker']}** — {t['pm_change']:+.1f}% | {t.get('setup_type', '')} | Signal: {t.get('entry_signal', '')}")
+            for si, s in enumerate(t.get("setups", [])):
+                is_primary = "⭐" if si == t.get("primary_idx", 0) else "  "
+                st.caption(f"{is_primary} {s.get('emoji', '')} {s.get('name', '')}: Entry ${s.get('entry', 0):.2f} | Stop ${s.get('stop', 0):.2f} | TP1 ${s.get('tp1', 0):.2f} | TP2 ${s.get('tp2', 0):.2f}")
+        return
+    
+    # === AUSWERTUNG ANZEIGEN ===
+    evaluated = [t for t in tickers if t.get("results")]
+    
+    if not evaluated:
+        return
+    
+    # Gesamtstatistik
+    st.markdown("### 📊 Ergebnis-Übersicht")
+    
+    # Sammle Stats pro Setup-Typ
+    stats_by_type = {}  # {setup_name: {wins, losses, total_r, count, ...}}
+    all_trades = []
+    
+    for t in evaluated:
+        result = t["results"]
+        for sr in result.get("setup_results", []):
+            sname = sr.get("setup_name", "Unknown")
+            if sname not in stats_by_type:
+                stats_by_type[sname] = {
+                    "count": 0, "entries": 0, "wins": 0, "losses": 0,
+                    "tp1_hits": 0, "tp2_hits": 0, "stops": 0,
+                    "total_r": 0, "total_pnl_pct": 0,
+                    "primary_wins": 0, "primary_count": 0,
+                }
+            
+            stats = stats_by_type[sname]
+            stats["count"] += 1
+            
+            if sr["entry_hit"]:
+                stats["entries"] += 1
+                stats["total_r"] += sr["r_multiple"]
+                stats["total_pnl_pct"] += sr["pnl_pct"]
+                
+                if sr["pnl_pct"] > 0:
+                    stats["wins"] += 1
+                else:
+                    stats["losses"] += 1
+                
+                if sr["tp1_hit"]:
+                    stats["tp1_hits"] += 1
+                if sr["tp2_hit"]:
+                    stats["tp2_hits"] += 1
+                if sr["stop_hit"]:
+                    stats["stops"] += 1
+                
+                if sr.get("is_primary"):
+                    stats["primary_count"] += 1
+                    if sr["pnl_pct"] > 0:
+                        stats["primary_wins"] += 1
+                
+                all_trades.append({
+                    "ticker": t["ticker"],
+                    "direction": t["direction"],
+                    "setup": sname,
+                    "is_primary": sr.get("is_primary", False),
+                    "r_multiple": sr["r_multiple"],
+                    "pnl_pct": sr["pnl_pct"],
+                    "exit_reason": sr["exit_reason"],
+                })
+    
+    # Display Stats Table
+    if stats_by_type:
+        stat_cols = st.columns(len(stats_by_type))
+        for ci, (sname, stats) in enumerate(stats_by_type.items()):
+            with stat_cols[ci % len(stat_cols)]:
+                entries = stats["entries"]
+                win_rate = (stats["wins"] / entries * 100) if entries > 0 else 0
+                avg_r = stats["total_r"] / entries if entries > 0 else 0
+                
+                emoji = "🚀" if "Breakout" in sname or "Breakdown" in sname else "🔄" if "VWAP" in sname or "Rejection" in sname else "📐"
+                
+                st.markdown(f"**{emoji} {sname}**")
+                
+                # Win Rate mit Farbe
+                wr_color = "green" if win_rate >= 50 else "orange" if win_rate >= 40 else "red"
+                st.markdown(f"Win Rate: <span style='color:{wr_color};font-weight:bold;'>{win_rate:.0f}%</span> ({stats['wins']}W / {stats['losses']}L)", unsafe_allow_html=True)
+                
+                st.caption(f"Entries: {entries}/{stats['count']} | Avg R: {avg_r:+.1f}R")
+                st.caption(f"TP1: {stats['tp1_hits']}× | TP2: {stats['tp2_hits']}× | Stops: {stats['stops']}×")
+                
+                if stats["primary_count"] > 0:
+                    prim_wr = stats["primary_wins"] / stats["primary_count"] * 100
+                    st.caption(f"⭐ Als Primary: {prim_wr:.0f}% WR ({stats['primary_count']}×)")
+    
+    # Einzelne Trades
+    st.markdown("### 📝 Einzelne Trades")
+    
+    for t in evaluated:
+        result = t["results"]
+        direction_emoji = "🟢" if t["direction"] == "LONG" else "🔴"
+        day_chg = result.get("day_change_pct", 0)
+        day_color = "green" if day_chg > 0 else "red"
+        
+        with st.expander(f"{direction_emoji} **{t['ticker']}** — PM: {t['pm_change']:+.1f}% | Day: {day_chg:+.1f}%"):
+            st.caption(f"Day Range: ${result['day_low']:.2f} — ${result['day_high']:.2f} | Open: ${result['day_open']:.2f} → Close: ${result['day_close']:.2f}")
+            
+            for sr in result.get("setup_results", []):
+                primary_tag = "⭐" if sr.get("is_primary") else "  "
+                
+                if sr["exit_reason"] == "NO ENTRY":
+                    color = "gray"
+                    result_text = "Entry nicht getriggert"
+                elif sr["exit_reason"] == "STOP":
+                    color = "red"
+                    result_text = f"STOP → ${sr['exit_price']:.2f} ({sr['pnl_pct']:+.1f}% | {sr['r_multiple']:+.1f}R)"
+                elif sr["exit_reason"] == "TP2":
+                    color = "green"
+                    result_text = f"TP2 ✅ → ${sr['exit_price']:.2f} ({sr['pnl_pct']:+.1f}% | {sr['r_multiple']:+.1f}R)"
+                elif sr["exit_reason"] == "TP1+EOD":
+                    color = "green"
+                    result_text = f"TP1 ✅ + EOD → ${sr['exit_price']:.2f} ({sr['pnl_pct']:+.1f}% | {sr['r_multiple']:+.1f}R)"
+                else:
+                    color = "orange" if sr["pnl_pct"] >= 0 else "red"
+                    result_text = f"EOD Close → ${sr['exit_price']:.2f} ({sr['pnl_pct']:+.1f}% | {sr['r_multiple']:+.1f}R)"
+                
+                st.markdown(
+                    f"{primary_tag} **{sr.get('setup_name', '')}**: "
+                    f"Entry ${sr['entry']:.2f} | Stop ${sr['stop']:.2f} → "
+                    f"<span style='color:{color};'>{result_text}</span>",
+                    unsafe_allow_html=True
+                )
+    
+    # Best/Worst Setup Summary
+    if all_trades:
+        st.markdown("### 🏆 Best & Worst")
+        
+        best = max(all_trades, key=lambda x: x["r_multiple"])
+        worst = min(all_trades, key=lambda x: x["r_multiple"])
+        
+        col_best, col_worst = st.columns(2)
+        with col_best:
+            st.success(f"🏆 Best: **{best['ticker']}** {best['setup']} → {best['r_multiple']:+.1f}R ({best['pnl_pct']:+.1f}%)")
+        with col_worst:
+            st.error(f"💀 Worst: **{worst['ticker']}** {worst['setup']} → {worst['r_multiple']:+.1f}R ({worst['pnl_pct']:+.1f}%)")
+        
+        # Avg R for primaries vs alternatives
+        primary_trades = [t for t in all_trades if t["is_primary"]]
+        alt_trades = [t for t in all_trades if not t["is_primary"]]
+        
+        if primary_trades and alt_trades:
+            avg_r_primary = sum(t["r_multiple"] for t in primary_trades) / len(primary_trades)
+            avg_r_alt = sum(t["r_multiple"] for t in alt_trades) / len(alt_trades)
+            
+            st.markdown(f"⭐ **Primary Setups**: Avg {avg_r_primary:+.2f}R ({len(primary_trades)} Trades)")
+            st.markdown(f"🔹 **Alternative Setups**: Avg {avg_r_alt:+.2f}R ({len(alt_trades)} Trades)")
+            
+            if avg_r_primary > avg_r_alt:
+                st.success("✅ Primary Selection schlägt Alternativen!")
+            else:
+                st.warning("⚠️ Alternative Setups wären besser gewesen — Selektion überprüfen!")
 
 
 # =============================================================================
