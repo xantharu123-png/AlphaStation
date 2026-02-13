@@ -7088,95 +7088,193 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         cand["pm_change"], real_gap_pct, pm_position, rs_vs_spy, atr_pct
                     )
                     
-                    # Entry Signal (basierend auf Position)
-                    if cand["pm_change"] > 0:  # Long Kandidat
-                        if pm_position >= 80:
-                            entry_signal = "🎯 OR BREAK"
-                            entry_detail = f"Nah am PM High (${pm_high:.2f}) - Entry bei Break"
-                        elif pm_position >= 50:
-                            entry_signal = "👀 WATCH"
-                            entry_detail = f"Mitte Range - Warte auf Richtung"
-                        else:
-                            entry_signal = "⚠️ PULLBACK"
-                            entry_detail = f"Weit vom High - Warte auf Stärke"
-                    else:  # Short Kandidat
-                        if pm_position <= 20:
-                            entry_signal = "🎯 OR BREAK"
-                            entry_detail = f"Nah am PM Low (${pm_low:.2f}) - Short bei Break"
-                        elif pm_position <= 50:
-                            entry_signal = "👀 WATCH"
-                            entry_detail = f"Mitte Range - Warte auf Richtung"
-                        else:
-                            entry_signal = "⚠️ BOUNCE"
-                            entry_detail = f"Bounce vom Low - Warte auf Schwäche"
+                    # ============================================================
+                    # TRADE SETUPS — Multiple Strategies per Position
+                    # ============================================================
+                    # Statt immer Breakout: Setup-Typ basiert auf PM-Position
+                    # und bietet 2 Setups: Primary + Alternative
+                    #
+                    # LONG:
+                    #   Position >= 75% → Primary: Breakout, Alt: VWAP Pullback
+                    #   Position 40-74% → Primary: VWAP Pullback, Alt: Breakout
+                    #   Position < 40%  → Primary: Support Retest, Alt: VWAP Pullback
+                    #
+                    # Alle Stops: Hard Cap 2-10% Risk
+                    # ============================================================
                     
-                    # Risk Management Levels (V67.4 Rewrite)
-                    # Minimum Risk = max(2% vom Preis, PM Range * 0.3)
-                    # Das stellt sicher dass Stops nicht im Noise liegen
-                    min_risk_pct = max(0.02, atr_pct / 100 * 0.8) if atr_pct > 0 else 0.02
-                    min_risk_abs = current_price * min_risk_pct
+                    min_risk_pct = 0.02   # 2% Floor
+                    max_risk_pct = 0.10   # 10% Ceiling
                     
-                    if cand["pm_change"] > 0:
-                        # LONG: Entry am PM High, Stop basierend auf PM-Struktur
-                        entry_price = pm_high
+                    # Fibonacci Levels der PM Range
+                    fib_382 = pm_low + pm_range * 0.382
+                    fib_500 = pm_low + pm_range * 0.500
+                    fib_618 = pm_low + pm_range * 0.618
+                    
+                    # Helper: Clamp Stop innerhalb 2-10% Risk
+                    def clamp_stop_long(entry, raw_stop):
+                        """Stellt sicher dass Long-Stop im 2-10% Korridor liegt"""
+                        risk = entry - raw_stop
+                        min_r = entry * min_risk_pct
+                        max_r = entry * max_risk_pct
+                        if risk < min_r:
+                            return entry - min_r
+                        elif risk > max_r:
+                            return entry - max_r
+                        return raw_stop
+                    
+                    def clamp_stop_short(entry, raw_stop):
+                        """Stellt sicher dass Short-Stop im 2-10% Korridor liegt"""
+                        risk = raw_stop - entry
+                        min_r = entry * min_risk_pct
+                        max_r = entry * max_risk_pct
+                        if risk < min_r:
+                            return entry + min_r
+                        elif risk > max_r:
+                            return entry + max_r
+                        return raw_stop
+                    
+                    setups = []  # Liste von (name, entry, stop, desc)
+                    
+                    if cand["pm_change"] > 0:  # === LONG ===
                         
-                        # Stop-Optionen (wähle den sinnvollsten):
-                        stop_candidates = []
+                        # Setup 1: BREAKOUT — Entry am PM High
+                        brk_entry = pm_high
+                        brk_stop = clamp_stop_long(brk_entry, pm_vwap - (brk_entry * 0.003))
+                        setups.append({
+                            "name": "Breakout",
+                            "emoji": "🚀",
+                            "desc": f"Entry bei Break über PM High ${pm_high:.2f}",
+                            "entry": brk_entry,
+                            "stop": brk_stop,
+                        })
                         
-                        # 1. Unter VWAP (wenn weit genug vom Entry)
-                        if entry_price - pm_vwap > min_risk_abs:
-                            stop_candidates.append(pm_vwap - (pm_range * 0.05))  # Leicht unter VWAP
+                        # Setup 2: VWAP PULLBACK — Entry am VWAP nach Rücksetzer
+                        vwap_entry = pm_vwap
+                        # Stop unter PM Midpoint oder Fib 38.2%
+                        vwap_raw_stop = min(fib_382, pm_low + pm_range * 0.20)
+                        vwap_stop = clamp_stop_long(vwap_entry, vwap_raw_stop)
+                        setups.append({
+                            "name": "VWAP Pullback",
+                            "emoji": "🔄",
+                            "desc": f"Entry bei Pullback zum VWAP ${pm_vwap:.2f}",
+                            "entry": vwap_entry,
+                            "stop": vwap_stop,
+                        })
                         
-                        # 2. Unter PM Low (konservativ)
-                        stop_candidates.append(pm_low - (pm_range * 0.05))
-                        
-                        # 3. Unter Previous Day Close (bei Gap Ups)
-                        if real_gap_pct > 1.0 and prev_close < entry_price:
-                            stop_candidates.append(prev_close * 0.995)
-                        
-                        # 4. Prozentual (Fallback: 2-3% unter Entry)
-                        stop_candidates.append(entry_price * (1 - max(0.02, min(0.05, atr_pct / 100))))
-                        
-                        # Wähle den Stop der am nächsten am Entry liegt aber >= min_risk
-                        valid_stops = [s for s in stop_candidates if entry_price - s >= min_risk_abs]
-                        if valid_stops:
-                            stop_price = max(valid_stops)  # Nächster gültiger Stop
+                        # Setup 3: SUPPORT RETEST — Entry an PDH oder Fib 61.8%
+                        pdh = cand.get("pdh", 0)
+                        if pdh > 0 and pdh < pm_high and pdh > pm_low:
+                            retest_entry = pdh
+                            retest_label = f"PDH ${pdh:.2f}"
+                        elif fib_618 < pm_high * 0.95:
+                            retest_entry = fib_618
+                            retest_label = f"Fib 61.8% ${fib_618:.2f}"
                         else:
-                            stop_price = entry_price * (1 - max(0.02, min(0.05, atr_pct / 100)))
+                            retest_entry = fib_500
+                            retest_label = f"Fib 50% ${fib_500:.2f}"
                         
-                        risk = entry_price - stop_price
-                        target1 = entry_price + (risk * 1.5)  # 1.5R
-                        target2 = entry_price + (risk * 2.5)  # 2.5R
-                    else:
-                        # SHORT: Entry am PM Low, Stop basierend auf PM-Struktur
-                        entry_price = pm_low
+                        retest_raw_stop = retest_entry - pm_range * 0.20
+                        retest_stop = clamp_stop_long(retest_entry, retest_raw_stop)
+                        setups.append({
+                            "name": "Support Retest",
+                            "emoji": "📐",
+                            "desc": f"Entry bei Retest von {retest_label}",
+                            "entry": retest_entry,
+                            "stop": retest_stop,
+                        })
                         
-                        stop_candidates = []
-                        
-                        # 1. Über VWAP (wenn weit genug)
-                        if pm_vwap - entry_price > min_risk_abs:
-                            stop_candidates.append(pm_vwap + (pm_range * 0.05))
-                        
-                        # 2. Über PM High (konservativ)
-                        stop_candidates.append(pm_high + (pm_range * 0.05))
-                        
-                        # 3. Über Previous Day Close (bei Gap Downs)
-                        if real_gap_pct < -1.0 and prev_close > entry_price:
-                            stop_candidates.append(prev_close * 1.005)
-                        
-                        # 4. Prozentual (Fallback)
-                        stop_candidates.append(entry_price * (1 + max(0.02, min(0.05, atr_pct / 100))))
-                        
-                        # Nächster gültiger Stop
-                        valid_stops = [s for s in stop_candidates if s - entry_price >= min_risk_abs]
-                        if valid_stops:
-                            stop_price = min(valid_stops)
+                        # Wähle Primary + Alternative basierend auf Position
+                        if pm_position >= 75:
+                            primary_idx, alt_idx = 0, 1  # Breakout, VWAP Pullback
+                            entry_signal = "🎯 OR BREAK"
+                        elif pm_position >= 40:
+                            primary_idx, alt_idx = 1, 0  # VWAP Pullback, Breakout
+                            entry_signal = "🔄 PULLBACK"
                         else:
-                            stop_price = entry_price * (1 + max(0.02, min(0.05, atr_pct / 100)))
+                            primary_idx, alt_idx = 2, 1  # Support Retest, VWAP Pullback
+                            entry_signal = "📐 RETEST"
                         
-                        risk = stop_price - entry_price
-                        target1 = entry_price - (risk * 1.5)
-                        target2 = entry_price - (risk * 2.5)
+                        entry_detail = setups[primary_idx]["desc"]
+                    
+                    else:  # === SHORT ===
+                        
+                        # Setup 1: BREAKDOWN — Entry am PM Low
+                        brk_entry = pm_low
+                        brk_stop = clamp_stop_short(brk_entry, pm_vwap + (brk_entry * 0.003))
+                        setups.append({
+                            "name": "Breakdown",
+                            "emoji": "💥",
+                            "desc": f"Entry bei Break unter PM Low ${pm_low:.2f}",
+                            "entry": brk_entry,
+                            "stop": brk_stop,
+                        })
+                        
+                        # Setup 2: VWAP REJECTION — Entry am VWAP nach Bounce
+                        vwap_entry = pm_vwap
+                        vwap_raw_stop = max(fib_618, pm_high - pm_range * 0.20)
+                        vwap_stop = clamp_stop_short(vwap_entry, vwap_raw_stop)
+                        setups.append({
+                            "name": "VWAP Rejection",
+                            "emoji": "🔄",
+                            "desc": f"Short bei Rejection am VWAP ${pm_vwap:.2f}",
+                            "entry": vwap_entry,
+                            "stop": vwap_stop,
+                        })
+                        
+                        # Setup 3: RESISTANCE RETEST
+                        pdl = cand.get("pdl", 0)
+                        if pdl > 0 and pdl > pm_low and pdl < pm_high:
+                            retest_entry = pdl
+                            retest_label = f"PDL ${pdl:.2f}"
+                        elif fib_382 > pm_low * 1.05:
+                            retest_entry = fib_382
+                            retest_label = f"Fib 38.2% ${fib_382:.2f}"
+                        else:
+                            retest_entry = fib_500
+                            retest_label = f"Fib 50% ${fib_500:.2f}"
+                        
+                        retest_raw_stop = retest_entry + pm_range * 0.20
+                        retest_stop = clamp_stop_short(retest_entry, retest_raw_stop)
+                        setups.append({
+                            "name": "Resistance Retest",
+                            "emoji": "📐",
+                            "desc": f"Short bei Retest von {retest_label}",
+                            "entry": retest_entry,
+                            "stop": retest_stop,
+                        })
+                        
+                        if pm_position <= 25:
+                            primary_idx, alt_idx = 0, 1
+                            entry_signal = "🎯 OR BREAK"
+                        elif pm_position <= 60:
+                            primary_idx, alt_idx = 1, 0
+                            entry_signal = "🔄 REJECTION"
+                        else:
+                            primary_idx, alt_idx = 2, 1
+                            entry_signal = "📐 RETEST"
+                        
+                        entry_detail = setups[primary_idx]["desc"]
+                    
+                    # Berechne Targets für alle Setups
+                    for s in setups:
+                        if cand["pm_change"] > 0:
+                            s["risk"] = s["entry"] - s["stop"]
+                            s["tp1"] = s["entry"] + s["risk"] * 1.5
+                            s["tp2"] = s["entry"] + s["risk"] * 2.5
+                        else:
+                            s["risk"] = s["stop"] - s["entry"]
+                            s["tp1"] = s["entry"] - s["risk"] * 1.5
+                            s["tp2"] = s["entry"] - s["risk"] * 2.5
+                        s["risk_pct"] = s["risk"] / s["entry"] * 100 if s["entry"] > 0 else 0
+                    
+                    # Primary Setup für die Hauptanzeige
+                    primary = setups[primary_idx]
+                    alt = setups[alt_idx]
+                    entry_price = primary["entry"]
+                    stop_price = primary["stop"]
+                    risk = primary["risk"]
+                    target1 = primary["tp1"]
+                    target2 = primary["tp2"]
                     
                     # Dollar Volume
                     pm_dollar_vol = current_price * pm_volume
@@ -7211,6 +7309,9 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         "Target1": round(target1, 2),
                         "Target2": round(target2, 2),
                         "Risk_R": round(risk, 2),
+                        "Setups": setups,
+                        "Primary_Idx": primary_idx,
+                        "Alt_Idx": alt_idx,
                         "Direction": "🟢 LONG" if cand["pm_change"] > 0 else "🔴 SHORT",
                         "Move_Time": pm_data.get("first_move_time", "N/A"),
                         # Placeholder für News und Details (werden später gefüllt)
@@ -7356,19 +7457,38 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                             st.caption(f"📰 **News:** {news_text}")
                     
                     # Risk Management Row
-                    with st.expander(f"📐 Trade Setup - {item['Setup_Desc']}"):
-                        rm_col1, rm_col2, rm_col3, rm_col4 = st.columns(4)
-                        with rm_col1:
-                            st.metric("🎯 Entry", f"${item['Entry_Price']:.2f}")
-                        with rm_col2:
-                            st.metric("🛑 Stop", f"${item['Stop_Price']:.2f}")
-                        with rm_col3:
-                            st.metric("✅ TP1 (1.5R)", f"${item['Target1']:.2f}")
-                        with rm_col4:
-                            st.metric("✅ TP2 (2.5R)", f"${item['Target2']:.2f}")
+                    with st.expander(f"📐 Trade Setups — {item.get('Setup_Desc', '')}"):
+                        all_setups = item.get("Setups", [])
+                        primary_idx = item.get("Primary_Idx", 0)
+                        alt_idx = item.get("Alt_Idx", 1)
                         
-                        risk_pct = abs(item['Risk_R'] / item['Entry_Price'] * 100) if item['Entry_Price'] > 0 else 0
-                        st.caption(f"Risk per Share: ${item['Risk_R']:.2f} ({risk_pct:.1f}%) | Move Start: {item.get('Move_Time', 'N/A')}")
+                        for si, setup in enumerate(all_setups):
+                            if si == primary_idx:
+                                label = "⭐ PRIMARY"
+                            elif si == alt_idx:
+                                label = "🔹 ALTERNATIVE"
+                            else:
+                                label = "⚪ OPTION"
+                            
+                            s_risk_pct = setup.get("risk_pct", 0)
+                            rr_ratio = f"1:{setup['risk']:.2f}" if setup.get('risk', 0) > 0 else ""
+                            
+                            st.markdown(f"**{label}: {setup['emoji']} {setup['name']}** — {setup['desc']}")
+                            sc1, sc2, sc3, sc4 = st.columns(4)
+                            with sc1:
+                                st.metric("Entry", f"${setup['entry']:.2f}")
+                            with sc2:
+                                st.metric("Stop", f"${setup['stop']:.2f}")
+                            with sc3:
+                                st.metric("TP1 (1.5R)", f"${setup['tp1']:.2f}")
+                            with sc4:
+                                st.metric("TP2 (2.5R)", f"${setup['tp2']:.2f}")
+                            st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
+                            
+                            if si < len(all_setups) - 1:
+                                st.markdown("---")
+                        
+                        st.caption(f"Move Start: {item.get('Move_Time', 'N/A')}")
                         if item.get('Company_Name'):
                             st.caption(f"🏢 {item['Company_Name']}")
                     
@@ -7435,19 +7555,37 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                         if news_text:
                             st.caption(f"📰 **News:** {news_text}")
                     
-                    with st.expander(f"📐 Trade Setup - {item['Setup_Desc']}"):
-                        rm_col1, rm_col2, rm_col3, rm_col4 = st.columns(4)
-                        with rm_col1:
-                            st.metric("🎯 Entry", f"${item['Entry_Price']:.2f}")
-                        with rm_col2:
-                            st.metric("🛑 Stop", f"${item['Stop_Price']:.2f}")
-                        with rm_col3:
-                            st.metric("✅ TP1 (1.5R)", f"${item['Target1']:.2f}")
-                        with rm_col4:
-                            st.metric("✅ TP2 (2.5R)", f"${item['Target2']:.2f}")
+                    with st.expander(f"📐 Trade Setups — {item.get('Setup_Desc', '')}"):
+                        all_setups = item.get("Setups", [])
+                        primary_idx = item.get("Primary_Idx", 0)
+                        alt_idx = item.get("Alt_Idx", 1)
                         
-                        risk_pct = abs(item['Risk_R'] / item['Entry_Price'] * 100) if item['Entry_Price'] > 0 else 0
-                        st.caption(f"Risk per Share: ${item['Risk_R']:.2f} ({risk_pct:.1f}%) | Move Start: {item.get('Move_Time', 'N/A')}")
+                        for si, setup in enumerate(all_setups):
+                            if si == primary_idx:
+                                label = "⭐ PRIMARY"
+                            elif si == alt_idx:
+                                label = "🔹 ALTERNATIVE"
+                            else:
+                                label = "⚪ OPTION"
+                            
+                            s_risk_pct = setup.get("risk_pct", 0)
+                            
+                            st.markdown(f"**{label}: {setup['emoji']} {setup['name']}** — {setup['desc']}")
+                            sc1, sc2, sc3, sc4 = st.columns(4)
+                            with sc1:
+                                st.metric("Entry", f"${setup['entry']:.2f}")
+                            with sc2:
+                                st.metric("Stop", f"${setup['stop']:.2f}")
+                            with sc3:
+                                st.metric("TP1 (1.5R)", f"${setup['tp1']:.2f}")
+                            with sc4:
+                                st.metric("TP2 (2.5R)", f"${setup['tp2']:.2f}")
+                            st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
+                            
+                            if si < len(all_setups) - 1:
+                                st.markdown("---")
+                        
+                        st.caption(f"Move Start: {item.get('Move_Time', 'N/A')}")
                         if item.get('Company_Name'):
                             st.caption(f"🏢 {item['Company_Name']}")
                     
