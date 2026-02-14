@@ -3976,6 +3976,512 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "description": f"Base Breakout! Range ${base_low:.2f}-${base_high:.2f}, broke out +{breakout_pct*100:.1f}%. Target: ${base_high + (base_high - base_low):.2f}"
                         })
         
+        # === WYCKOFF ACCUMULATION ===
+        # Erkennt die klassische Wyckoff-Akkumulationsphase:
+        # 1. Vorheriger Downtrend → Trading Range
+        # 2. Selling Climax (SC): Hohes Volume am Tief
+        # 3. Automatic Rally (AR): Bounce nach SC → Oberkante Range
+        # 4. Secondary Test (ST): Retest SC-Area mit weniger Volume
+        # 5. Spring: Kurzer Bruch unter Range → schnelle Erholung (Shakeout)
+        # 6. Sign of Strength (SOS): Starker Move über AR mit Volume
+        # 7. Last Point of Support (LPS): Pullback nach SOS
+        
+        if len(closes) >= 40 and not any("Wyckoff" in p.get("pattern", "") for p in patterns):
+            try:
+                # Phase 1: Finde Trading Range
+                # Teile Daten: erste 25% = Potential-Downtrend, 25-75% = Range, letzte 25% = aktuell
+                q1_end = int(len(closes) * 0.25)
+                q3_start = int(len(closes) * 0.75)
+                
+                early_data = closes[:q1_end]
+                range_data = closes[q1_end:q3_start]
+                late_data = closes[q3_start:]
+                
+                range_highs = highs[q1_end:q3_start]
+                range_lows = lows[q1_end:q3_start]
+                range_vols = volumes[q1_end:q3_start]
+                
+                if len(range_data) >= 10 and len(early_data) >= 5 and len(late_data) >= 5:
+                    early_avg = sum(early_data) / len(early_data)
+                    range_avg = sum(range_data) / len(range_data)
+                    range_high = max(range_highs)
+                    range_low = min(range_lows)
+                    range_width = range_high - range_low
+                    range_width_pct = range_width / range_avg if range_avg > 0 else 1
+                    avg_range_vol = sum(range_vols) / len(range_vols) if range_vols else 1
+                    
+                    # === WYCKOFF ACCUMULATION ===
+                    # Voraussetzung: Preis fiel VOR der Range (Downtrend in early_data)
+                    prior_decline = (early_data[0] - min(early_data)) / early_data[0] if early_data[0] > 0 else 0
+                    came_from_above = early_avg > range_avg * 1.02
+                    
+                    if (prior_decline > 0.05 or came_from_above) and range_width_pct < 0.30:
+                        wyckoff_events = []
+                        wyckoff_score = 0
+                        
+                        # Event 1: Selling Climax (SC) — Höchstes Volume nahe dem Tief
+                        sc_idx = None
+                        for ri in range(len(range_data)):
+                            abs_idx = q1_end + ri
+                            if range_vols[ri] > avg_range_vol * 1.8 and range_lows[ri] <= range_low + range_width * 0.15:
+                                sc_idx = ri
+                                wyckoff_events.append(f"SC @ ${range_lows[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
+                                wyckoff_score += 20
+                                break
+                        
+                        # Event 2: Automatic Rally (AR) — Schneller Bounce nach SC
+                        ar_level = None
+                        if sc_idx is not None and sc_idx + 3 < len(range_data):
+                            post_sc = range_highs[sc_idx:min(sc_idx + 8, len(range_highs))]
+                            if post_sc:
+                                ar_level = max(post_sc)
+                                if ar_level > range_low + range_width * 0.5:
+                                    wyckoff_events.append(f"AR @ ${ar_level:.2f}")
+                                    wyckoff_score += 15
+                        
+                        # Event 3: Secondary Test (ST) — Retest SC-Area mit weniger Volume
+                        st_found = False
+                        if sc_idx is not None:
+                            for ri in range(sc_idx + 5, len(range_data)):
+                                if range_lows[ri] <= range_low + range_width * 0.20:
+                                    if range_vols[ri] < range_vols[sc_idx] * 0.8:
+                                        wyckoff_events.append(f"ST @ ${range_lows[ri]:.2f} (lower vol)")
+                                        wyckoff_score += 15
+                                        st_found = True
+                                        break
+                        
+                        # Event 4: Spring — Kurzer Bruch unter Range Low → schnelle Erholung
+                        spring_found = False
+                        for ri in range(max(0, len(range_data) - int(len(range_data) * 0.6)), len(range_data)):
+                            if range_lows[ri] < range_low:
+                                # Check: Preis muss innerhalb 3 Bars wieder in Range sein
+                                if ri + 3 < len(range_data):
+                                    recovery = any(range_data[ri+j] > range_low + range_width * 0.2 for j in range(1, min(4, len(range_data) - ri)))
+                                    if recovery:
+                                        wyckoff_events.append(f"Spring @ ${range_lows[ri]:.2f} (shakeout)")
+                                        wyckoff_score += 25
+                                        spring_found = True
+                                        break
+                        
+                        # Event 5: Sign of Strength (SOS) — Preis bricht über AR/Range High
+                        sos_found = False
+                        late_highs = highs[q3_start:]
+                        late_vols = volumes[q3_start:]
+                        avg_late_vol = sum(late_vols) / len(late_vols) if late_vols else 1
+                        
+                        if current_price > range_high:
+                            wyckoff_events.append(f"SOS: Price ${current_price:.2f} > Range High ${range_high:.2f}")
+                            wyckoff_score += 20
+                            sos_found = True
+                        elif any(h > range_high for h in late_highs):
+                            wyckoff_events.append(f"SOS attempt: Touched ${max(late_highs):.2f}")
+                            wyckoff_score += 10
+                        
+                        # Event 6: Volume-Bestätigung beim Breakout
+                        if sos_found and late_vols:
+                            breakout_vol = max(late_vols[-5:]) if len(late_vols) >= 5 else max(late_vols)
+                            if breakout_vol > avg_range_vol * 1.5:
+                                wyckoff_events.append(f"Volume Confirm: {breakout_vol/avg_range_vol:.1f}x avg")
+                                wyckoff_score += 10
+                        
+                        # Bestimme Phase
+                        if wyckoff_score >= 50:
+                            if sos_found:
+                                phase = "Phase D/E (Markup beginning)"
+                                phase_emoji = "🟢"
+                            elif spring_found:
+                                phase = "Phase C (Spring — bullish shakeout)"
+                                phase_emoji = "🟡"
+                            elif st_found:
+                                phase = "Phase B (Building cause)"
+                                phase_emoji = "🔵"
+                            else:
+                                phase = "Phase A (Selling exhaustion)"
+                                phase_emoji = "⚪"
+                            
+                            confidence = "High" if wyckoff_score >= 70 else "Medium" if wyckoff_score >= 50 else "Low"
+                            
+                            patterns.append({
+                                "pattern": f"Wyckoff Accumulation",
+                                "emoji": "🏦⬆️",
+                                "type": "bullish",
+                                "phase": phase,
+                                "phase_emoji": phase_emoji,
+                                "range_low": round(range_low, 2),
+                                "range_high": round(range_high, 2),
+                                "events": wyckoff_events,
+                                "score": wyckoff_score,
+                                "target": round(range_high + range_width, 2),
+                                "confidence": confidence,
+                                "description": f"Wyckoff Accumulation — {phase}. Range ${range_low:.2f}-${range_high:.2f}. Events: {', '.join(wyckoff_events[:3])}"
+                            })
+                    
+                    # === WYCKOFF DISTRIBUTION ===
+                    # Voraussetzung: Preis stieg VOR der Range (Uptrend in early_data)
+                    prior_rally = (max(early_data) - early_data[0]) / early_data[0] if early_data[0] > 0 else 0
+                    came_from_below = early_avg < range_avg * 0.98
+                    
+                    if (prior_rally > 0.05 or came_from_below) and range_width_pct < 0.30:
+                        wyckoff_events = []
+                        wyckoff_score = 0
+                        
+                        # Event 1: Buying Climax (BC) — Höchstes Volume nahe dem Hoch
+                        bc_idx = None
+                        for ri in range(len(range_data)):
+                            if range_vols[ri] > avg_range_vol * 1.8 and range_highs[ri] >= range_high - range_width * 0.15:
+                                bc_idx = ri
+                                wyckoff_events.append(f"BC @ ${range_highs[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
+                                wyckoff_score += 20
+                                break
+                        
+                        # Event 2: Automatic Reaction (AR)
+                        if bc_idx is not None and bc_idx + 3 < len(range_data):
+                            post_bc = range_lows[bc_idx:min(bc_idx + 8, len(range_lows))]
+                            if post_bc:
+                                ar_level = min(post_bc)
+                                if ar_level < range_high - range_width * 0.5:
+                                    wyckoff_events.append(f"AR @ ${ar_level:.2f}")
+                                    wyckoff_score += 15
+                        
+                        # Event 3: Secondary Test (ST) — Retest BC mit weniger Volume
+                        if bc_idx is not None:
+                            for ri in range(bc_idx + 5, len(range_data)):
+                                if range_highs[ri] >= range_high - range_width * 0.20:
+                                    if range_vols[ri] < range_vols[bc_idx] * 0.8:
+                                        wyckoff_events.append(f"ST @ ${range_highs[ri]:.2f} (lower vol)")
+                                        wyckoff_score += 15
+                                        break
+                        
+                        # Event 4: Upthrust (UT) — Kurzer Bruch über Range High → Failure
+                        for ri in range(max(0, len(range_data) - int(len(range_data) * 0.6)), len(range_data)):
+                            if range_highs[ri] > range_high:
+                                if ri + 3 < len(range_data):
+                                    failure = any(range_data[ri+j] < range_high - range_width * 0.2 for j in range(1, min(4, len(range_data) - ri)))
+                                    if failure:
+                                        wyckoff_events.append(f"UT @ ${range_highs[ri]:.2f} (failed)")
+                                        wyckoff_score += 25
+                                        break
+                        
+                        # Event 5: Sign of Weakness (SOW)
+                        sow_found = False
+                        if current_price < range_low:
+                            wyckoff_events.append(f"SOW: Price ${current_price:.2f} < Range Low ${range_low:.2f}")
+                            wyckoff_score += 20
+                            sow_found = True
+                        elif any(l < range_low for l in lows[q3_start:]):
+                            wyckoff_events.append(f"SOW attempt: Touched ${min(lows[q3_start:]):.2f}")
+                            wyckoff_score += 10
+                        
+                        if wyckoff_score >= 50:
+                            if sow_found:
+                                phase = "Phase D/E (Markdown beginning)"
+                                phase_emoji = "🔴"
+                            else:
+                                phase = "Phase B/C (Distribution in progress)"
+                                phase_emoji = "🟠"
+                            
+                            confidence = "High" if wyckoff_score >= 70 else "Medium"
+                            
+                            patterns.append({
+                                "pattern": f"Wyckoff Distribution",
+                                "emoji": "🏦⬇️",
+                                "type": "bearish",
+                                "phase": phase,
+                                "phase_emoji": phase_emoji,
+                                "range_low": round(range_low, 2),
+                                "range_high": round(range_high, 2),
+                                "events": wyckoff_events,
+                                "score": wyckoff_score,
+                                "target": round(range_low - range_width, 2),
+                                "confidence": confidence,
+                                "description": f"Wyckoff Distribution — {phase}. Range ${range_low:.2f}-${range_high:.2f}. Events: {', '.join(wyckoff_events[:3])}"
+                            })
+            
+            except Exception:
+                pass  # Wyckoff detection failed silently
+        
+        # =================================================================
+        # CANDLESTICK PATTERNS — Letzte 1-3 Kerzen
+        # =================================================================
+        # Nur die letzten Kerzen analysieren (aktuell relevant)
+        # Kontext wichtig: Hammer nur nach Downtrend bullish etc.
+        # =================================================================
+        
+        if len(data) >= 5:
+            try:
+                # Letzte Kerzen
+                c0 = data[-1]  # Aktuellste Kerze
+                c1 = data[-2]  # Vorherige
+                c2 = data[-3]  # Zwei zurück
+                
+                o0, h0, l0, cl0 = c0["high"], c0["high"], c0["low"], c0["close"]
+                o0 = data[-1].get("open", data[-1]["close"])  # Manche Daten haben kein open
+                # Robuster: open aus close der vorherigen Kerze ableiten wenn nötig
+                o0 = c0.get("open", c1["close"])
+                h0, l0, cl0 = c0["high"], c0["low"], c0["close"]
+                
+                o1 = c1.get("open", c2["close"])
+                h1, l1, cl1 = c1["high"], c1["low"], c1["close"]
+                
+                o2 = c2.get("open", data[-4]["close"] if len(data) >= 4 else c2["close"])
+                h2, l2, cl2 = c2["high"], c2["low"], c2["close"]
+                
+                # Body und Shadow Berechnungen
+                body0 = abs(cl0 - o0)
+                body1 = abs(cl1 - o1)
+                body2 = abs(cl2 - o2)
+                
+                range0 = h0 - l0 if h0 > l0 else 0.001
+                range1 = h1 - l1 if h1 > l1 else 0.001
+                range2 = h2 - l2 if h2 > l2 else 0.001
+                
+                upper_shadow0 = h0 - max(cl0, o0)
+                lower_shadow0 = min(cl0, o0) - l0
+                upper_shadow1 = h1 - max(cl1, o1)
+                lower_shadow1 = min(cl1, o1) - l1
+                
+                is_green0 = cl0 > o0
+                is_green1 = cl1 > o1
+                is_green2 = cl2 > o2
+                
+                # Kontext: Mini-Trend der letzten 5-10 Kerzen
+                lookback_trend = closes[-10:-1] if len(closes) >= 11 else closes[:-1]
+                trend_start = lookback_trend[0] if lookback_trend else cl0
+                trend_end = lookback_trend[-1] if lookback_trend else cl0
+                recent_trend = (trend_end - trend_start) / trend_start if trend_start > 0 else 0
+                is_downtrend = recent_trend < -0.02
+                is_uptrend = recent_trend > 0.02
+                
+                # ─── SINGLE CANDLE PATTERNS ───
+                
+                # HAMMER (bullish) — Langer unterer Schatten, kleiner Body oben
+                # Bedingung: nach Downtrend, unterer Schatten ≥ 2x Body, oberer Schatten klein
+                if (is_downtrend and 
+                    lower_shadow0 >= body0 * 2 and 
+                    upper_shadow0 <= body0 * 0.5 and
+                    body0 > range0 * 0.05):  # Nicht komplett Doji
+                    patterns.append({
+                        "pattern": "Hammer",
+                        "emoji": "🔨",
+                        "type": "bullish",
+                        "confidence": "High" if is_green0 else "Medium",
+                        "description": f"Hammer @ ${cl0:.2f} nach Downtrend — Käufer wehren sich am Tief. {'Grüner Body = stärker' if is_green0 else 'Roter Body = Bestätigung abwarten'}"
+                    })
+                
+                # INVERTED HAMMER (bullish) — Langer oberer Schatten, kleiner Body unten, nach Downtrend
+                if (is_downtrend and
+                    upper_shadow0 >= body0 * 2 and
+                    lower_shadow0 <= body0 * 0.5 and
+                    body0 > range0 * 0.05):
+                    patterns.append({
+                        "pattern": "Inverted Hammer",
+                        "emoji": "🔨⬆️",
+                        "type": "bullish",
+                        "confidence": "Medium",
+                        "description": f"Inverted Hammer @ ${cl0:.2f} — Kaufdruck kommt auf, Bestätigung durch nächste grüne Kerze nötig"
+                    })
+                
+                # SHOOTING STAR (bearish) — Wie Inverted Hammer aber nach Uptrend
+                if (is_uptrend and
+                    upper_shadow0 >= body0 * 2 and
+                    lower_shadow0 <= body0 * 0.5 and
+                    body0 > range0 * 0.05):
+                    patterns.append({
+                        "pattern": "Shooting Star",
+                        "emoji": "⭐⬇️",
+                        "type": "bearish",
+                        "confidence": "High" if not is_green0 else "Medium",
+                        "description": f"Shooting Star @ ${cl0:.2f} nach Uptrend — Verkäufer drücken vom Hoch. {'Roter Body = stärker' if not is_green0 else 'Grüner Body = schwächer'}"
+                    })
+                
+                # HANGING MAN (bearish) — Wie Hammer aber nach Uptrend
+                if (is_uptrend and
+                    lower_shadow0 >= body0 * 2 and
+                    upper_shadow0 <= body0 * 0.5 and
+                    body0 > range0 * 0.05):
+                    patterns.append({
+                        "pattern": "Hanging Man",
+                        "emoji": "☠️",
+                        "type": "bearish",
+                        "confidence": "Medium",
+                        "description": f"Hanging Man @ ${cl0:.2f} nach Uptrend — Verkaufsdruck nimmt zu trotz Erholung"
+                    })
+                
+                # DOJI — Sehr kleiner Body, zeigt Unentschlossenheit
+                if body0 <= range0 * 0.10 and range0 > atr * 0.3:
+                    # Dragonfly Doji (langer unterer Schatten)
+                    if lower_shadow0 > range0 * 0.6:
+                        doji_type = "Dragonfly Doji"
+                        doji_emoji = "🐉"
+                        doji_bias = "bullish" if is_downtrend else "neutral"
+                        doji_desc = "Dragonfly Doji — Starke Ablehnung vom Tief"
+                    # Gravestone Doji (langer oberer Schatten)
+                    elif upper_shadow0 > range0 * 0.6:
+                        doji_type = "Gravestone Doji"
+                        doji_emoji = "🪦"
+                        doji_bias = "bearish" if is_uptrend else "neutral"
+                        doji_desc = "Gravestone Doji — Starke Ablehnung vom Hoch"
+                    else:
+                        doji_type = "Doji"
+                        doji_emoji = "➕"
+                        doji_bias = "neutral"
+                        doji_desc = "Doji — Markt unentschlossen, warte auf Richtung"
+                    
+                    patterns.append({
+                        "pattern": doji_type,
+                        "emoji": doji_emoji,
+                        "type": doji_bias,
+                        "confidence": "Medium" if doji_bias != "neutral" else "Low",
+                        "description": f"{doji_desc} @ ${cl0:.2f}"
+                    })
+                
+                # MARUBOZU — Große Kerze fast ohne Schatten (starkes Momentum)
+                if body0 > range0 * 0.85 and body0 > atr * 1.2:
+                    maru_type = "Bullish Marubozu" if is_green0 else "Bearish Marubozu"
+                    maru_emoji = "💪⬆️" if is_green0 else "💪⬇️"
+                    patterns.append({
+                        "pattern": maru_type,
+                        "emoji": maru_emoji,
+                        "type": "bullish" if is_green0 else "bearish",
+                        "confidence": "High",
+                        "description": f"{maru_type} @ ${cl0:.2f} — Starkes Momentum, {'Käufer' if is_green0 else 'Verkäufer'} dominieren komplett"
+                    })
+                
+                # ─── TWO CANDLE PATTERNS ───
+                
+                # BULLISH ENGULFING — Grüne Kerze verschluckt vorherige rote komplett
+                if (not is_green1 and is_green0 and
+                    o0 <= cl1 and cl0 >= o1 and
+                    body0 > body1 * 0.8):
+                    conf = "High" if is_downtrend else "Medium"
+                    patterns.append({
+                        "pattern": "Bullish Engulfing",
+                        "emoji": "🟢⬆️",
+                        "type": "bullish",
+                        "confidence": conf,
+                        "description": f"Bullish Engulfing @ ${cl0:.2f} — Grüne Kerze verschluckt rote. {'Nach Downtrend = starkes Reversal-Signal' if is_downtrend else 'Stärker nach Pullback'}"
+                    })
+                
+                # BEARISH ENGULFING — Rote Kerze verschluckt vorherige grüne komplett
+                if (is_green1 and not is_green0 and
+                    o0 >= cl1 and cl0 <= o1 and
+                    body0 > body1 * 0.8):
+                    conf = "High" if is_uptrend else "Medium"
+                    patterns.append({
+                        "pattern": "Bearish Engulfing",
+                        "emoji": "🔴⬇️",
+                        "type": "bearish",
+                        "confidence": conf,
+                        "description": f"Bearish Engulfing @ ${cl0:.2f} — Rote Kerze verschluckt grüne. {'Nach Uptrend = starkes Reversal-Signal' if is_uptrend else 'Stärker nach Bounce'}"
+                    })
+                
+                # PIERCING LINE (bullish) — Rote Kerze, dann grüne die über 50% der roten schließt
+                if (not is_green1 and is_green0 and is_downtrend and
+                    o0 < cl1 and  # Gap down open
+                    cl0 > o1 - body1 * 0.5 and cl0 < o1):  # Schließt über 50% der roten
+                    patterns.append({
+                        "pattern": "Piercing Line",
+                        "emoji": "🗡️⬆️",
+                        "type": "bullish",
+                        "confidence": "Medium",
+                        "description": f"Piercing Line @ ${cl0:.2f} — Käufer drehen nach Gap Down, Recovery über 50%"
+                    })
+                
+                # DARK CLOUD COVER (bearish) — Gegenteil von Piercing
+                if (is_green1 and not is_green0 and is_uptrend and
+                    o0 > cl1 and  # Gap up open
+                    cl0 < cl1 - body1 * 0.5 and cl0 > o1):  # Schließt unter 50% der grünen
+                    patterns.append({
+                        "pattern": "Dark Cloud Cover",
+                        "emoji": "🌑⬇️",
+                        "type": "bearish",
+                        "confidence": "Medium",
+                        "description": f"Dark Cloud Cover @ ${cl0:.2f} — Verkäufer drehen nach Gap Up, Rückgang über 50%"
+                    })
+                
+                # TWEEZER BOTTOM (bullish) — Zwei Kerzen mit fast gleichem Tief
+                if (is_downtrend and
+                    abs(l0 - l1) <= atr * 0.15 and
+                    not is_green1 and is_green0):
+                    patterns.append({
+                        "pattern": "Tweezer Bottom",
+                        "emoji": "🔧⬆️",
+                        "type": "bullish",
+                        "confidence": "Medium",
+                        "description": f"Tweezer Bottom @ ${l0:.2f} — Doppeltes Tief auf gleichem Level, Support bestätigt"
+                    })
+                
+                # TWEEZER TOP (bearish) — Zwei Kerzen mit fast gleichem Hoch
+                if (is_uptrend and
+                    abs(h0 - h1) <= atr * 0.15 and
+                    is_green1 and not is_green0):
+                    patterns.append({
+                        "pattern": "Tweezer Top",
+                        "emoji": "🔧⬇️",
+                        "type": "bearish",
+                        "confidence": "Medium",
+                        "description": f"Tweezer Top @ ${h0:.2f} — Doppeltes Hoch auf gleichem Level, Resistance bestätigt"
+                    })
+                
+                # ─── THREE CANDLE PATTERNS ───
+                
+                # MORNING STAR (bullish) — Rote Kerze, kleiner Body (Doji/Spinning), grüne Kerze
+                if (not is_green2 and is_green0 and
+                    body2 > atr * 0.5 and body0 > atr * 0.5 and  # Große äußere Kerzen
+                    body1 < body2 * 0.4 and body1 < body0 * 0.4 and  # Kleine Mitte
+                    cl0 > o2 - body2 * 0.5 and  # Grüne schließt über 50% der roten
+                    is_downtrend):
+                    patterns.append({
+                        "pattern": "Morning Star",
+                        "emoji": "🌅⬆️",
+                        "type": "bullish",
+                        "confidence": "High",
+                        "description": f"Morning Star @ ${cl0:.2f} — Klassisches 3-Kerzen Reversal nach Downtrend. Starkes Kaufsignal"
+                    })
+                
+                # EVENING STAR (bearish) — Grüne Kerze, kleiner Body, rote Kerze
+                if (is_green2 and not is_green0 and
+                    body2 > atr * 0.5 and body0 > atr * 0.5 and
+                    body1 < body2 * 0.4 and body1 < body0 * 0.4 and
+                    cl0 < cl2 + body2 * 0.5 and
+                    is_uptrend):
+                    patterns.append({
+                        "pattern": "Evening Star",
+                        "emoji": "🌙⬇️",
+                        "type": "bearish",
+                        "confidence": "High",
+                        "description": f"Evening Star @ ${cl0:.2f} — Klassisches 3-Kerzen Reversal nach Uptrend. Starkes Verkaufssignal"
+                    })
+                
+                # THREE WHITE SOLDIERS (bullish) — Drei aufeinanderfolgende grüne Kerzen
+                if (is_green0 and is_green1 and is_green2 and
+                    cl0 > cl1 > cl2 and  # Steigend
+                    body0 > atr * 0.4 and body1 > atr * 0.4 and body2 > atr * 0.4 and  # Substantielle Bodies
+                    upper_shadow0 < body0 * 0.3):  # Wenig oberer Schatten (Stärke)
+                    patterns.append({
+                        "pattern": "Three White Soldiers",
+                        "emoji": "💂💂💂",
+                        "type": "bullish",
+                        "confidence": "High" if is_downtrend else "Medium",
+                        "description": f"Three White Soldiers — Drei starke grüne Kerzen. {'Reversal nach Downtrend!' if is_downtrend else 'Trendfortsetzung'}"
+                    })
+                
+                # THREE BLACK CROWS (bearish) — Drei aufeinanderfolgende rote Kerzen
+                if (not is_green0 and not is_green1 and not is_green2 and
+                    cl0 < cl1 < cl2 and
+                    body0 > atr * 0.4 and body1 > atr * 0.4 and body2 > atr * 0.4 and
+                    lower_shadow0 < body0 * 0.3):
+                    patterns.append({
+                        "pattern": "Three Black Crows",
+                        "emoji": "🐦‍⬛🐦‍⬛🐦‍⬛",
+                        "type": "bearish",
+                        "confidence": "High" if is_uptrend else "Medium",
+                        "description": f"Three Black Crows — Drei starke rote Kerzen. {'Reversal nach Uptrend!' if is_uptrend else 'Trendfortsetzung'}"
+                    })
+            
+            except Exception:
+                pass  # Candlestick detection failed
+        
         return patterns
         
     except Exception as e:
@@ -5172,7 +5678,21 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         with st.expander("📋 Pattern Details"):
             for p in patterns:
                 st.markdown(f"**{p.get('emoji', '')} {p.get('pattern', '')}**")
-                st.caption(p.get("description", ""))
+                
+                # Wyckoff-spezifische Anzeige
+                if "Wyckoff" in p.get("pattern", ""):
+                    phase_emoji = p.get("phase_emoji", "")
+                    st.markdown(f"{phase_emoji} **Phase:** {p.get('phase', '')}")
+                    st.caption(f"Range: ${p.get('range_low', 0):.2f} — ${p.get('range_high', 0):.2f} | Score: {p.get('score', 0)}/100 | Target: ${p.get('target', 0):.2f}")
+                    
+                    events = p.get("events", [])
+                    if events:
+                        st.markdown("**Erkannte Events:**")
+                        for event in events:
+                            st.caption(f"  ✓ {event}")
+                else:
+                    st.caption(p.get("description", ""))
+                
                 st.divider()
 
 
