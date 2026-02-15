@@ -8808,6 +8808,835 @@ def display_pm_tracker(poly_key):
 
 
 # =============================================================================
+# 🧪 BACKTEST LAB — 6 Monate Strategietest mit echten Daten
+# =============================================================================
+
+BACKTEST_CACHE_FILE = "/tmp/alpha_station_backtest_cache.json"
+BACKTEST_RESULTS_FILE = "/tmp/alpha_station_backtest_results.json"
+
+# Stock-Universum: Liquide Aktien quer durch alle Sektoren
+BACKTEST_UNIVERSE = [
+    # Tech Large Cap
+    "AAPL", "MSFT", "NVDA", "TSLA", "META", "AMZN", "GOOG", "AMD", "INTC", "CRM",
+    # Tech Mid/Growth
+    "PLTR", "SOFI", "SQ", "SNAP", "ROKU", "NET", "SHOP", "COIN",
+    # Finance
+    "JPM", "BAC", "GS",
+    # Healthcare
+    "MRNA", "PFE", "ABBV",
+    # Energy
+    "XOM", "CVX",
+    # Consumer
+    "WMT", "NKE", "COST",
+    # Volatile/Meme
+    "GME", "AMC", "MARA", "RIOT",
+    # Industrial
+    "BA", "CAT",
+    # ETFs
+    "SPY", "QQQ", "IWM"
+]
+
+# Strategie-Definitionen mit klaren Trade-Regeln
+BACKTEST_STRATEGY_RULES = {
+    "Breakout Long": {
+        "direction": "long",
+        "description": "Momentum-Ausbruch: Change >5%, RVOL >2, Close nahe High",
+        "signal": {
+            "change_pct_min": 5.0, "change_pct_max": 50.0,
+            "rvol_min": 2.0,
+            "close_pos_min": 0.65
+        },
+        "entry": "next_open",      # Entry am nächsten Tag Open
+        "stop_pct": 0.05,          # 5% unter Entry
+        "tp1_rr": 1.5,             # TP1 = 1.5:1 R:R
+        "tp2_rr": 2.5,             # TP2 = 2.5:1 R:R
+        "max_hold_days": 3,        # Max 3 Tage halten
+        "min_price": 5.0
+    },
+    "Breakdown Short": {
+        "direction": "short",
+        "description": "Abverkauf: Change <-5%, RVOL >2, Close nahe Low",
+        "signal": {
+            "change_pct_min": -50.0, "change_pct_max": -5.0,
+            "rvol_min": 2.0,
+            "close_pos_max": 0.35
+        },
+        "entry": "next_open",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.5,
+        "max_hold_days": 3,
+        "min_price": 5.0
+    },
+    "Gap Up Momentum": {
+        "direction": "long",
+        "description": "Gap Up >3% + Kurs hält sich oben (Close Pos >0.6)",
+        "signal": {
+            "gap_pct_min": 3.0, "gap_pct_max": 30.0,
+            "close_pos_min": 0.60
+        },
+        "entry": "next_open",
+        "stop_pct": 0.04,          # 4% Stop (enge Gaps)
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.0,
+        "max_hold_days": 2,
+        "min_price": 5.0
+    },
+    "Gap Down Short": {
+        "direction": "short",
+        "description": "Gap Down <-3% + Kurs bleibt unten (Close Pos <0.4)",
+        "signal": {
+            "gap_pct_min": -30.0, "gap_pct_max": -3.0,
+            "close_pos_max": 0.40
+        },
+        "entry": "next_open",
+        "stop_pct": 0.04,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.0,
+        "max_hold_days": 2,
+        "min_price": 5.0
+    },
+    "Dip Buy": {
+        "direction": "long",
+        "description": "Qualitäts-Rücksetzer: -2% bis -8%, normales Volumen (kein Panik-Sell)",
+        "signal": {
+            "change_pct_min": -8.0, "change_pct_max": -2.0,
+            "rvol_max": 2.0
+        },
+        "entry": "at_close",       # Einstieg am Signaltag Close
+        "stop_pct": 0.04,          # 4% Stop
+        "tp1_rr": 1.5,
+        "tp2_rr": 3.0,             # Dip Buys brauchen mehr Raum
+        "max_hold_days": 5,        # Bis 5 Tage halten
+        "min_price": 10.0
+    },
+    "Reversal Hunter": {
+        "direction": "long",
+        "description": "Bounce nach Abverkauf: Vortag <-5%, heute >+3%, hohes Vol",
+        "signal": {
+            "prev_change_pct_max": -5.0,    # Gestern stark gefallen
+            "change_pct_min": 3.0,           # Heute Bounce
+            "rvol_min": 2.0
+        },
+        "entry": "at_close",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.5,
+        "max_hold_days": 3,
+        "min_price": 5.0
+    },
+    "Bull Flag": {
+        "direction": "long",
+        "description": "Starker Vortag (+4%+), heute Konsolidierung (-2% bis +2%), RVOL sinkt",
+        "signal": {
+            "prev_change_pct_min": 4.0,      # Gestern stark gestiegen
+            "change_pct_min": -2.0,           # Heute: enge Range
+            "change_pct_max": 2.0,
+            "rvol_max": 2.0                   # Volumen geht zurück
+        },
+        "entry": "prev_high",                # Entry über Vortags-High (Breakout)
+        "stop_pct": 0.04,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.5,
+        "max_hold_days": 3,
+        "min_price": 5.0
+    },
+    "Volume Surge": {
+        "direction": "long",
+        "description": "Extremes Volumen (RVOL >3) + Aufwärtsbewegung >2%",
+        "signal": {
+            "change_pct_min": 2.0,
+            "rvol_min": 3.0
+        },
+        "entry": "next_open",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.0,
+        "max_hold_days": 3,
+        "min_price": 5.0
+    },
+    "Early Momentum": {
+        "direction": "long",
+        "description": "Starker Tag (+4%+), hohes Vol, Close nahe High → Momentum hält",
+        "signal": {
+            "change_pct_min": 4.0, "change_pct_max": 30.0,
+            "rvol_min": 2.0,
+            "close_pos_min": 0.60
+        },
+        "entry": "at_close",
+        "stop_pct": 0.04,
+        "tp1_rr": 1.0,
+        "tp2_rr": 2.0,
+        "max_hold_days": 2,
+        "min_price": 5.0
+    },
+    "Whale Watch": {
+        "direction": "long",
+        "description": "Extremes Volumen (RVOL >5) mit klarer Richtung (+3%+)",
+        "signal": {
+            "change_pct_min": 3.0,
+            "rvol_min": 5.0
+        },
+        "entry": "next_open",
+        "stop_pct": 0.06,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.0,
+        "max_hold_days": 3,
+        "min_price": 5.0
+    }
+}
+
+
+def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
+    """
+    Holt tägliche OHLCV-Daten von Polygon für Backtesting.
+    
+    Args:
+        poly_key: Polygon API Key
+        ticker: Aktien-Ticker
+        start_date: Start (YYYY-MM-DD)
+        end_date: Ende (YYYY-MM-DD)
+    
+    Returns:
+        Liste von dicts mit date, open, high, low, close, volume
+    """
+    import requests
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
+    params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": poly_key}
+    
+    try:
+        resp = rate_limited_get(url, params=params, timeout=15)
+        data = resp.json()
+        
+        if data.get("status") != "OK" or not data.get("results"):
+            return []
+        
+        bars = []
+        for r in data["results"]:
+            from datetime import datetime
+            ts = r.get("t", 0)
+            dt = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
+            bars.append({
+                "date": dt,
+                "open": r.get("o", 0),
+                "high": r.get("h", 0),
+                "low": r.get("l", 0),
+                "close": r.get("c", 0),
+                "volume": r.get("v", 0),
+                "vwap": r.get("vw", 0)
+            })
+        
+        return bars
+    except Exception as e:
+        return []
+
+
+def compute_daily_metrics(bars, idx):
+    """
+    Berechnet Screening-Metriken für einen Tag.
+    
+    Returns: dict mit change_pct, gap_pct, rvol, close_pos, prev_change_pct
+    """
+    if idx < 1 or idx >= len(bars):
+        return None
+    
+    today = bars[idx]
+    yesterday = bars[idx - 1]
+    
+    if yesterday["close"] <= 0 or today["close"] <= 0:
+        return None
+    
+    # Change % (heute Close vs Gestern Close)
+    change_pct = ((today["close"] - yesterday["close"]) / yesterday["close"]) * 100
+    
+    # Gap % (heute Open vs Gestern Close)
+    gap_pct = ((today["open"] - yesterday["close"]) / yesterday["close"]) * 100
+    
+    # Close Position (wo hat heute geschlossen relativ zur Range)
+    day_range = today["high"] - today["low"]
+    close_pos = (today["close"] - today["low"]) / day_range if day_range > 0 else 0.5
+    
+    # RVOL (Volumen heute vs 20-Tage Durchschnitt)
+    lookback_start = max(0, idx - 20)
+    avg_vol_bars = bars[lookback_start:idx]
+    avg_vol = sum(b["volume"] for b in avg_vol_bars) / len(avg_vol_bars) if avg_vol_bars else 1
+    rvol = today["volume"] / avg_vol if avg_vol > 0 else 1.0
+    
+    # Previous day change %
+    prev_change_pct = 0
+    if idx >= 2:
+        day_before = bars[idx - 2]
+        if day_before["close"] > 0:
+            prev_change_pct = ((yesterday["close"] - day_before["close"]) / day_before["close"]) * 100
+    
+    return {
+        "change_pct": change_pct,
+        "gap_pct": gap_pct,
+        "close_pos": close_pos,
+        "rvol": rvol,
+        "prev_change_pct": prev_change_pct,
+        "price": today["close"],
+        "day_high": today["high"],
+        "day_low": today["low"]
+    }
+
+
+def check_signal(metrics, signal_rules):
+    """
+    Prüft ob die Tages-Metriken die Signal-Bedingungen einer Strategie erfüllen.
+    """
+    if not metrics:
+        return False
+    
+    for key, value in signal_rules.items():
+        if key == "change_pct_min" and metrics["change_pct"] < value:
+            return False
+        if key == "change_pct_max" and metrics["change_pct"] > value:
+            return False
+        if key == "gap_pct_min" and metrics["gap_pct"] < value:
+            return False
+        if key == "gap_pct_max" and metrics["gap_pct"] > value:
+            return False
+        if key == "rvol_min" and metrics["rvol"] < value:
+            return False
+        if key == "rvol_max" and metrics["rvol"] > value:
+            return False
+        if key == "close_pos_min" and metrics["close_pos"] < value:
+            return False
+        if key == "close_pos_max" and metrics["close_pos"] > value:
+            return False
+        if key == "prev_change_pct_min" and metrics["prev_change_pct"] < value:
+            return False
+        if key == "prev_change_pct_max" and metrics["prev_change_pct"] > value:
+            return False
+    
+    return True
+
+
+def simulate_trade(bars, signal_idx, strategy):
+    """
+    Simuliert einen Trade basierend auf Signal-Tag und Strategie-Regeln.
+    
+    Args:
+        bars: Alle täglichen Bars
+        signal_idx: Index des Signal-Tags in bars
+        strategy: Strategie-Definition aus BACKTEST_STRATEGY_RULES
+    
+    Returns:
+        dict mit Trade-Ergebnis oder None
+    """
+    direction = strategy["direction"]
+    entry_type = strategy["entry"]
+    stop_pct = strategy["stop_pct"]
+    tp1_rr = strategy["tp1_rr"]
+    tp2_rr = strategy["tp2_rr"]
+    max_hold = strategy["max_hold_days"]
+    
+    signal_day = bars[signal_idx]
+    
+    # === ENTRY BESTIMMEN ===
+    if entry_type == "next_open":
+        if signal_idx + 1 >= len(bars):
+            return None
+        entry_price = bars[signal_idx + 1]["open"]
+        trade_start_idx = signal_idx + 1
+    elif entry_type == "at_close":
+        entry_price = signal_day["close"]
+        trade_start_idx = signal_idx + 1
+    elif entry_type == "prev_high":
+        # Entry am Vortags-High (Breakout über Consolidation)
+        if signal_idx < 1 or signal_idx + 1 >= len(bars):
+            return None
+        entry_price = bars[signal_idx - 1]["high"]
+        trade_start_idx = signal_idx + 1
+    else:
+        return None
+    
+    if entry_price <= 0:
+        return None
+    
+    # === STOP & TARGETS BERECHNEN ===
+    risk = entry_price * stop_pct
+    
+    if direction == "long":
+        stop_price = entry_price - risk
+        tp1_price = entry_price + risk * tp1_rr
+        tp2_price = entry_price + risk * tp2_rr
+    else:  # short
+        stop_price = entry_price + risk
+        tp1_price = entry_price - risk * tp1_rr
+        tp2_price = entry_price - risk * tp2_rr
+    
+    # === TRADE SIMULIEREN ===
+    exit_price = None
+    exit_reason = None
+    exit_date = None
+    tp1_hit = False
+    bars_held = 0
+    
+    for day_offset in range(max_hold):
+        bar_idx = trade_start_idx + day_offset
+        if bar_idx >= len(bars):
+            break
+        
+        bar = bars[bar_idx]
+        bars_held += 1
+        
+        if direction == "long":
+            # Prüfe ob Entry überhaupt erreicht wird (bei prev_high Entry)
+            if entry_type == "prev_high" and day_offset == 0:
+                if bar["high"] < entry_price:
+                    return None  # Entry nicht erreicht
+            
+            # Stop Check (Low des Tages)
+            if bar["low"] <= stop_price:
+                # Wenn auch TP1 an diesem Tag möglich → konservativ: Stop first
+                if bar["open"] <= stop_price:
+                    exit_price = bar["open"]  # Gapped through stop
+                else:
+                    exit_price = stop_price
+                exit_reason = "STOP"
+                exit_date = bar["date"]
+                break
+            
+            # TP2 Check
+            if bar["high"] >= tp2_price:
+                exit_price = tp2_price
+                exit_reason = "TP2"
+                exit_date = bar["date"]
+                tp1_hit = True
+                break
+            
+            # TP1 Check
+            if bar["high"] >= tp1_price:
+                tp1_hit = True
+        
+        else:  # short
+            if entry_type == "prev_high" and day_offset == 0:
+                if bar["low"] > entry_price:
+                    return None
+            
+            if bar["high"] >= stop_price:
+                if bar["open"] >= stop_price:
+                    exit_price = bar["open"]
+                else:
+                    exit_price = stop_price
+                exit_reason = "STOP"
+                exit_date = bar["date"]
+                break
+            
+            if bar["low"] <= tp2_price:
+                exit_price = tp2_price
+                exit_reason = "TP2"
+                exit_date = bar["date"]
+                tp1_hit = True
+                break
+            
+            if bar["low"] <= tp1_price:
+                tp1_hit = True
+    
+    # Max Hold erreicht → Exit at Close
+    if exit_reason is None:
+        last_bar_idx = min(trade_start_idx + max_hold - 1, len(bars) - 1)
+        exit_price = bars[last_bar_idx]["close"]
+        exit_reason = "TP1+EOD" if tp1_hit else "EOD"
+        exit_date = bars[last_bar_idx]["date"]
+    
+    # === P&L BERECHNEN ===
+    if direction == "long":
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        r_multiple = (exit_price - entry_price) / risk if risk > 0 else 0
+    else:
+        pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+        r_multiple = (entry_price - exit_price) / risk if risk > 0 else 0
+    
+    return {
+        "signal_date": signal_day["date"],
+        "entry_date": bars[trade_start_idx]["date"] if trade_start_idx < len(bars) else signal_day["date"],
+        "exit_date": exit_date,
+        "entry_price": round(entry_price, 2),
+        "stop_price": round(stop_price, 2),
+        "tp1_price": round(tp1_price, 2),
+        "tp2_price": round(tp2_price, 2),
+        "exit_price": round(exit_price, 2),
+        "exit_reason": exit_reason,
+        "pnl_pct": round(pnl_pct, 2),
+        "r_multiple": round(r_multiple, 2),
+        "bars_held": bars_held,
+        "tp1_hit": tp1_hit,
+        "is_winner": pnl_pct > 0
+    }
+
+
+def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progress_callback=None):
+    """
+    Führt vollständigen Backtest über alle Strategien und Ticker durch.
+    
+    Args:
+        poly_key: Polygon API Key
+        strategies: Liste von Strategie-Namen (None = alle)
+        tickers: Liste von Tickern (None = BACKTEST_UNIVERSE)
+        months: Anzahl Monate zurück
+        progress_callback: Funktion für Fortschrittsanzeige
+    
+    Returns:
+        dict mit allen Ergebnissen
+    """
+    import time
+    from datetime import datetime, timedelta
+    
+    if strategies is None:
+        strategies = list(BACKTEST_STRATEGY_RULES.keys())
+    if tickers is None:
+        tickers = BACKTEST_UNIVERSE
+    
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=months * 30 + 30)).strftime("%Y-%m-%d")  # +30 für RVOL Lookback
+    
+    test_start = (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+    
+    all_results = {s: [] for s in strategies}
+    ticker_data_cache = {}
+    
+    total_tickers = len(tickers)
+    
+    for t_idx, ticker in enumerate(tickers):
+        if progress_callback:
+            progress_callback(t_idx / total_tickers, f"📥 {ticker} ({t_idx+1}/{total_tickers})")
+        
+        # Daten holen (mit Cache)
+        if ticker not in ticker_data_cache:
+            bars = fetch_backtest_daily_data(poly_key, ticker, start_date, end_date)
+            if len(bars) < 30:
+                continue
+            ticker_data_cache[ticker] = bars
+            # rate_limited_get handles API rate limiting
+        
+        bars = ticker_data_cache[ticker]
+        
+        # Für jeden Tag: Metriken berechnen und Signale prüfen
+        for idx in range(21, len(bars)):  # Start bei 21 für RVOL-Lookback
+            if bars[idx]["date"] < test_start:
+                continue
+            
+            metrics = compute_daily_metrics(bars, idx)
+            if not metrics:
+                continue
+            
+            # Min-Preis Filter
+            if metrics["price"] <= 0:
+                continue
+            
+            # Jede Strategie prüfen
+            for strat_name in strategies:
+                strat = BACKTEST_STRATEGY_RULES[strat_name]
+                
+                # Preis-Filter
+                min_price = strat.get("min_price", 1.0)
+                if metrics["price"] < min_price:
+                    continue
+                
+                # Signal prüfen
+                if check_signal(metrics, strat["signal"]):
+                    # Trade simulieren
+                    trade = simulate_trade(bars, idx, strat)
+                    if trade:
+                        trade["ticker"] = ticker
+                        trade["strategy"] = strat_name
+                        trade["signal_change_pct"] = round(metrics["change_pct"], 2)
+                        trade["signal_rvol"] = round(metrics["rvol"], 1)
+                        all_results[strat_name].append(trade)
+    
+    if progress_callback:
+        progress_callback(1.0, "✅ Backtest abgeschlossen!")
+    
+    return all_results
+
+
+def compute_backtest_stats(trades):
+    """Berechnet Performance-Statistiken für eine Liste von Trades."""
+    if not trades:
+        return {
+            "total_trades": 0, "winners": 0, "losers": 0, "win_rate": 0,
+            "avg_pnl": 0, "avg_r": 0, "best_r": 0, "worst_r": 0,
+            "avg_hold": 0, "tp1_rate": 0, "tp2_rate": 0, "stop_rate": 0,
+            "profit_factor": 0, "expectancy": 0, "total_r": 0
+        }
+    
+    winners = [t for t in trades if t["is_winner"]]
+    losers = [t for t in trades if not t["is_winner"]]
+    
+    total = len(trades)
+    win_count = len(winners)
+    
+    avg_pnl = sum(t["pnl_pct"] for t in trades) / total
+    avg_r = sum(t["r_multiple"] for t in trades) / total
+    total_r = sum(t["r_multiple"] for t in trades)
+    
+    avg_win = sum(t["pnl_pct"] for t in winners) / len(winners) if winners else 0
+    avg_loss = abs(sum(t["pnl_pct"] for t in losers) / len(losers)) if losers else 1
+    
+    gross_profit = sum(t["r_multiple"] for t in winners) if winners else 0
+    gross_loss = abs(sum(t["r_multiple"] for t in losers)) if losers else 1
+    
+    tp2_count = sum(1 for t in trades if t["exit_reason"] == "TP2")
+    tp1_eod_count = sum(1 for t in trades if t["exit_reason"] == "TP1+EOD")
+    stop_count = sum(1 for t in trades if t["exit_reason"] == "STOP")
+    eod_count = sum(1 for t in trades if t["exit_reason"] == "EOD")
+    
+    return {
+        "total_trades": total,
+        "winners": win_count,
+        "losers": len(losers),
+        "win_rate": round(win_count / total * 100, 1) if total > 0 else 0,
+        "avg_pnl": round(avg_pnl, 2),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "avg_r": round(avg_r, 2),
+        "total_r": round(total_r, 1),
+        "best_r": round(max(t["r_multiple"] for t in trades), 2) if trades else 0,
+        "worst_r": round(min(t["r_multiple"] for t in trades), 2) if trades else 0,
+        "avg_hold": round(sum(t["bars_held"] for t in trades) / total, 1) if total > 0 else 0,
+        "tp1_rate": round((tp2_count + tp1_eod_count) / total * 100, 1) if total > 0 else 0,
+        "tp2_rate": round(tp2_count / total * 100, 1) if total > 0 else 0,
+        "stop_rate": round(stop_count / total * 100, 1) if total > 0 else 0,
+        "eod_rate": round(eod_count / total * 100, 1) if total > 0 else 0,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999,
+        "expectancy": round(avg_r, 2)
+    }
+
+
+def display_backtest_lab(poly_key):
+    """UI für den Backtest Lab Tab."""
+    import streamlit as st
+    import json
+    
+    st.header("🧪 Backtest Lab")
+    st.caption("Teste alle Strategien über 6 Monate mit echten Polygon-Daten")
+    
+    # Einstellungen
+    col_set1, col_set2, col_set3 = st.columns(3)
+    
+    with col_set1:
+        months = st.selectbox("📅 Zeitraum", [1, 3, 6, 9, 12], index=2, format_func=lambda x: f"{x} Monate")
+    
+    with col_set2:
+        strat_options = list(BACKTEST_STRATEGY_RULES.keys())
+        selected_strats = st.multiselect(
+            "📋 Strategien",
+            strat_options,
+            default=strat_options,
+            help="Wähle welche Strategien getestet werden sollen"
+        )
+    
+    with col_set3:
+        universe_size = st.selectbox("🌍 Universum", ["Klein (10)", "Mittel (20)", "Groß (38)"], index=1)
+        if "Klein" in universe_size:
+            tickers = BACKTEST_UNIVERSE[:10]
+        elif "Mittel" in universe_size:
+            tickers = BACKTEST_UNIVERSE[:20]
+        else:
+            tickers = BACKTEST_UNIVERSE
+    
+    st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+    
+    # Strategie-Details anzeigen
+    with st.expander("📖 Strategie-Regeln"):
+        for name, rules in BACKTEST_STRATEGY_RULES.items():
+            if name in selected_strats:
+                direction = "🟢 LONG" if rules["direction"] == "long" else "🔴 SHORT"
+                st.markdown(f"**{direction} {name}**: {rules['description']}")
+                entry = rules['entry'].replace('next_open', 'Nächster Tag Open').replace('at_close', 'Signal-Tag Close').replace('prev_high', 'Vortags-High Breakout')
+                st.caption(f"Entry: {entry} | Stop: {rules['stop_pct']*100:.0f}% | TP1: {rules['tp1_rr']}R | TP2: {rules['tp2_rr']}R | Max Hold: {rules['max_hold_days']}d")
+    
+    # Run Button
+    if st.button("🚀 Backtest starten", type="primary", use_container_width=True):
+        if not selected_strats:
+            st.error("Bitte mindestens eine Strategie auswählen!")
+            return
+        
+        progress_bar = st.progress(0, text="Starte Backtest...")
+        status_text = st.empty()
+        
+        def update_progress(pct, text):
+            progress_bar.progress(min(pct, 1.0), text=text)
+        
+        with st.spinner(f"Lade Daten für {len(tickers)} Ticker über {months} Monate..."):
+            results = run_full_backtest(
+                poly_key,
+                strategies=selected_strats,
+                tickers=tickers,
+                months=months,
+                progress_callback=update_progress
+            )
+        
+        # Ergebnisse in Session State speichern
+        st.session_state["backtest_results"] = results
+        st.session_state["backtest_months"] = months
+        st.session_state["backtest_tickers"] = tickers
+        
+        # Auch auf Disk speichern
+        try:
+            with open(BACKTEST_RESULTS_FILE, "w") as f:
+                json.dump({"results": results, "months": months, "tickers": tickers}, f)
+        except Exception:
+            pass
+    
+    # Ergebnisse laden (aus Session State oder Disk)
+    results = st.session_state.get("backtest_results")
+    if results is None:
+        try:
+            with open(BACKTEST_RESULTS_FILE, "r") as f:
+                saved = json.load(f)
+                results = saved.get("results")
+                st.session_state["backtest_results"] = results
+                st.session_state["backtest_months"] = saved.get("months", 6)
+                st.session_state["backtest_tickers"] = saved.get("tickers", [])
+        except Exception:
+            pass
+    
+    if not results:
+        st.info("🔄 Klicke 'Backtest starten' um die Strategien zu testen.")
+        return
+    
+    # === ERGEBNIS-ANZEIGE ===
+    st.divider()
+    st.subheader("📊 Ergebnisse")
+    
+    total_trades = sum(len(trades) for trades in results.values())
+    total_winners = sum(sum(1 for t in trades if t["is_winner"]) for trades in results.values())
+    total_r = sum(sum(t["r_multiple"] for t in trades) for trades in results.values())
+    
+    st.metric("Gesamt", f"{total_trades} Trades | {total_winners} Wins | {total_r:.1f}R")
+    
+    # === STRATEGIE-VERGLEICH (RANGLISTE) ===
+    st.subheader("🏆 Strategie-Ranking")
+    
+    strat_stats = {}
+    for strat_name, trades in results.items():
+        if trades:
+            strat_stats[strat_name] = compute_backtest_stats(trades)
+    
+    if strat_stats:
+        # Sortiere nach Profit Factor (bestes Risiko/Ertrag-Verhältnis)
+        sorted_strats = sorted(strat_stats.items(), key=lambda x: x[1]["total_r"], reverse=True)
+        
+        for rank, (strat_name, stats) in enumerate(sorted_strats, 1):
+            direction = BACKTEST_STRATEGY_RULES.get(strat_name, {}).get("direction", "long")
+            dir_emoji = "🟢" if direction == "long" else "🔴"
+            
+            # Farbe basierend auf Performance
+            if stats["total_r"] > 5:
+                medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else "✅"
+            elif stats["total_r"] > 0:
+                medal = "🔶"
+            else:
+                medal = "❌"
+            
+            with st.expander(f"{medal} #{rank} {dir_emoji} **{strat_name}** — Win Rate: {stats['win_rate']}% | Total R: {stats['total_r']}R | Trades: {stats['total_trades']}"):
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Win Rate", f"{stats['win_rate']}%")
+                    st.caption(f"{stats['winners']}W / {stats['losers']}L")
+                with col2:
+                    st.metric("Avg R", f"{stats['avg_r']}R")
+                    st.caption(f"Best: {stats['best_r']}R | Worst: {stats['worst_r']}R")
+                with col3:
+                    st.metric("Profit Factor", f"{stats['profit_factor']}")
+                    st.caption(f"Avg Win: +{stats['avg_win']}% | Avg Loss: -{stats['avg_loss']}%")
+                with col4:
+                    st.metric("Total R", f"{stats['total_r']}R")
+                    st.caption(f"Avg Hold: {stats['avg_hold']} Tage")
+                
+                # Exit-Verteilung
+                st.markdown("**Exit-Verteilung:**")
+                exit_cols = st.columns(4)
+                with exit_cols[0]:
+                    st.caption(f"🎯 TP2: {stats['tp2_rate']}%")
+                with exit_cols[1]:
+                    st.caption(f"✅ TP1+EOD: {stats['tp1_rate'] - stats['tp2_rate']:.1f}%")
+                with exit_cols[2]:
+                    st.caption(f"🔴 Stop: {stats['stop_rate']}%")
+                with exit_cols[3]:
+                    st.caption(f"⏰ EOD: {stats['eod_rate']}%")
+                
+                # Einzelne Trades (letzte 10)
+                trades = results[strat_name]
+                if trades:
+                    st.markdown("**Letzte Trades:**")
+                    for trade in sorted(trades, key=lambda x: x["signal_date"], reverse=True)[:10]:
+                        color = "🟢" if trade["is_winner"] else "🔴"
+                        st.caption(
+                            f"{color} {trade['ticker']} | {trade['signal_date']} | "
+                            f"Entry ${trade['entry_price']} → Exit ${trade['exit_price']} | "
+                            f"{trade['exit_reason']} | {trade['pnl_pct']:+.1f}% ({trade['r_multiple']:+.1f}R) | "
+                            f"{trade['bars_held']}d"
+                        )
+    
+    # === TOP TICKER ANALYSE ===
+    st.subheader("📈 Top Ticker Performance")
+    
+    all_trades = []
+    for strat_name, trades in results.items():
+        all_trades.extend(trades)
+    
+    if all_trades:
+        ticker_stats = {}
+        for trade in all_trades:
+            ticker = trade["ticker"]
+            if ticker not in ticker_stats:
+                ticker_stats[ticker] = {"trades": 0, "wins": 0, "total_r": 0}
+            ticker_stats[ticker]["trades"] += 1
+            ticker_stats[ticker]["total_r"] += trade["r_multiple"]
+            if trade["is_winner"]:
+                ticker_stats[ticker]["wins"] += 1
+        
+        sorted_tickers = sorted(ticker_stats.items(), key=lambda x: x[1]["total_r"], reverse=True)
+        
+        col_best, col_worst = st.columns(2)
+        
+        with col_best:
+            st.markdown("**🏆 Beste Ticker:**")
+            for ticker, stats in sorted_tickers[:5]:
+                wr = stats["wins"] / stats["trades"] * 100 if stats["trades"] > 0 else 0
+                st.caption(f"✅ **{ticker}**: {stats['total_r']:+.1f}R | {stats['trades']} Trades | {wr:.0f}% WR")
+        
+        with col_worst:
+            st.markdown("**💀 Schlechteste Ticker:**")
+            for ticker, stats in sorted_tickers[-5:]:
+                wr = stats["wins"] / stats["trades"] * 100 if stats["trades"] > 0 else 0
+                st.caption(f"❌ **{ticker}**: {stats['total_r']:+.1f}R | {stats['trades']} Trades | {wr:.0f}% WR")
+    
+    # === FAZIT ===
+    st.subheader("📋 Fazit")
+    
+    if strat_stats:
+        profitable = [(n, s) for n, s in sorted_strats if s["total_r"] > 0]
+        unprofitable = [(n, s) for n, s in sorted_strats if s["total_r"] <= 0]
+        
+        if profitable:
+            best_name, best_stats = profitable[0]
+            st.success(f"🏆 **Beste Strategie: {best_name}** — {best_stats['win_rate']}% Win Rate, {best_stats['total_r']}R Total, PF {best_stats['profit_factor']}")
+        
+        if len(profitable) > 1:
+            st.info(f"✅ **{len(profitable)} profitable Strategien**: {', '.join(n for n, _ in profitable)}")
+        
+        if unprofitable:
+            st.warning(f"❌ **{len(unprofitable)} unprofitable**: {', '.join(n for n, _ in unprofitable)} — diese Strategien überdenken!")
+        
+        # Empfehlung
+        st.markdown("---")
+        st.markdown("**💡 Empfehlung:**")
+        if profitable:
+            best_pf = max(profitable, key=lambda x: x[1].get("profit_factor", 0))
+            best_wr = max(profitable, key=lambda x: x[1]["win_rate"])
+            st.caption(f"🎯 Bestes Risiko/Ertrag: **{best_pf[0]}** (PF {best_pf[1]['profit_factor']})")
+            st.caption(f"🎯 Höchste Win Rate: **{best_wr[0]}** ({best_wr[1]['win_rate']}%)")
+            st.caption(f"💰 Fokus auf die Top-3 Strategien und vermeide unprofitable Setups")
+
+
+# =============================================================================
 # INTERNATIONALE BÖRSEN - Top Aktien Listen
 # =============================================================================
 INTERNATIONAL_STOCKS = {
@@ -10330,7 +11159,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
-tab_scanner, tab_search, tab_watchlist, tab_moneyflow = st.tabs(["📊 Scanner", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow"])
+tab_scanner, tab_search, tab_watchlist, tab_moneyflow, tab_backtest = st.tabs(["📊 Scanner", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "🧪 Backtest"])
 
 with tab_scanner:
     # PRE-MARKET WATCHLIST ANZEIGE (wenn aktiv)
@@ -12212,6 +13041,18 @@ with tab_moneyflow:
         st.error("❌ POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
     except Exception as e:
         st.error(f"Fehler beim Laden: {e}")
+
+# =============================================================================
+# TAB: BACKTEST LAB
+# =============================================================================
+with tab_backtest:
+    try:
+        bt_poly_key = st.secrets["POLYGON_KEY"]
+        display_backtest_lab(bt_poly_key)
+    except KeyError:
+        st.error("❌ POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
+    except Exception as e:
+        st.error(f"Fehler: {e}")
 
 # -----------------------------------------------------------------------------
 # FOOTER
