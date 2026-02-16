@@ -9752,7 +9752,11 @@ INTERNATIONAL_STOCKS = {
             "TLX", "PAH3", "NOEJ", "SANT", "FAA",
             # SDAX Top
             "S92", "BYW6", "WAC", "VAR1", "AOX", "G24", "DEQ", "HBH", "CLR",
-            "FEV", "MDG", "SBS", "HHFA", "DRW", "AAD", "MOR", "VOS", "ADD", "BSL"
+            "FEV", "MDG", "SBS", "HHFA", "DRW", "AAD", "MOR", "VOS", "ADD", "BSL",
+            # Small Caps / günstige Aktien (unter ~50€)
+            "TUI1", "SDF", "HDD", "BIO3", "WUW", "INH", "DBAN", "TMV", "DTG", "SFQ",
+            "GYC", "DLX", "SZU", "BDT", "SMHN", "RHK", "ACX", "ADV", "CEC",
+            "HAW", "JUN3", "SYZ", "NB2"
         ]
     },
     "UK": {  # London Stock Exchange — FTSE 100 + 250 (ohne US-ADRs)
@@ -9773,21 +9777,32 @@ INTERNATIONAL_STOCKS = {
             "INCH", "TRIG", "VOF", "JEO", "NAS", "AML",
             "WIZZ", "DOCS", "TUI", "STVG", "HGT", "BGFD",
             "IPO", "DIGS", "MGGT", "AGR", "BNKR", "HBR", "IGG",
-            "VCT", "CINE", "DTY", "RSE", "SCT", "FUTR", "VEIL", "BVIC"
+            "VCT", "CINE", "DTY", "RSE", "SCT", "FUTR", "VEIL", "BVIC",
+            # FTSE Small Cap / günstige Aktien
+            "CARD", "MOON", "SHOE", "STEM", "GFRD", "CMCX", "RWS", "PETS", "SHED",
+            "PHP", "BBOX", "FDEV", "CURY", "MTRO", "OXIG", "FSTA", "TRN", "SNWS",
+            "AVON", "MTO", "LUCE", "ITV", "EZJ", "FAN", "DNLM", "MARS", "GENL",
+            "OXB", "TBCG", "OSB", "MONY", "ASHM", "WINE", "TATE", "SSPG", "EDV",
+            "RWA", "SUPR", "PZC", "SRP", "ALFA", "WIX", "BREE", "COST", "RNWH",
+            "WOSG", "ABDN", "AO"
         ]
     },
-    "CH": {  # Schweiz SIX — SMI + SPI Mid (ohne US-ADRs)
+    "CH": {  # Schweiz SIX — SMI + SPI Mid + Small (ohne US-ADRs, Fokus günstig)
         "suffix": ".SW",
         "name": "Schweiz (SIX)",
         "stocks": [
-            # SMI (ohne NESN, ROG, NOVN, UBSG, ZURN, ABBN, SREN, GIVN, LONN, SIKA, CFR, ALC, LOGN, GEBN, HOLN)
+            # SMI ohne US-ADRs (NESN, ROG, NOVN, UBSG, ZURN, ABBN, SREN, GIVN, LONN, SIKA, CFR, ALC, LOGN, GEBN, HOLN)
             "SCMN", "PGHN", "SLHN", "BALN", "SGSN",
-            # SPI Mid/Large
+            # SPI Mid
             "SOON", "TEMN", "VACN", "BARN", "STMN", "SCHP", "LISN", "SIGN",
-            "MBTN", "EMMN", "DKSH", "BUCN", "SANN", "SFZN", "BCVN", "BEKN", "CERN", "TIBN",
-            "COTN", "BELL", "SQN", "MOBN", "HUBN", "GAM", "VIFN", "AUTN",
+            "MBTN", "EMMN", "DKSH", "BUCN", "SFZN", "BCVN", "BEKN", "CERN", "TIBN",
+            "COTN", "BELL", "SQN", "MOBN", "HUBN", "VIFN", "AUTN",
             "ASWN", "ZEHN", "GBMN", "HIAG", "ORON", "BOSN", "SENS", "CLTN",
-            "EFGN", "ARBN", "BANB", "CPHN", "ACCN", "PEHN", "APTS"
+            "EFGN", "ARBN", "BANB", "CPHN", "ACCN", "PEHN", "APTS",
+            # SPI Small / günstige Aktien (unter ~200 CHF)
+            "SANN", "LAND", "MEDX", "PEAN", "IMPN", "BSLN", "OERL", "MIKN", "FTON",
+            "KOMN", "ARYN", "SKAN", "VETN", "SWON", "CALN", "CMBN", "LUKN",
+            "GURN", "MCHN", "BAER", "UBXN", "OFN", "SFPN", "SRAIL", "STGN", "WKBN"
         ]
     },
     "EU": {  # Euronext — CAC 40 + AEX 25 + BEL20 (ohne US-ADRs)
@@ -9806,7 +9821,15 @@ INTERNATIONAL_STOCKS = {
             # BEL20 Top (Brussels)
             "UCB.BR", "SOLB.BR", "ABI.BR", "KBC.BR", "GBLB.BR", "AGS.BR", "ACKB.BR", "COFB.BR",
             # Extra Paris
-            "NEX", "IPS", "AM", "AF", "VK", "RAL"
+            "NEX", "IPS", "AM", "AF", "VK", "RAL",
+            # Paris Small/Mid Cap (günstig)
+            "ATO", "COFA", "MERY", "SMCP", "CBOT", "ELIS", "FNAC", "ICAD", "JCQ",
+            "TFI", "BVI", "DBV", "GET", "JBOG", "LNA", "MAU", "NRG", "OVH", "QDT",
+            "UBI", "WLN", "ELIOR", "NANO", "THEP", "RCO",
+            # Amsterdam Small/Mid Cap
+            "ARCAD.AS", "CRBN.AS", "HEIJM.AS", "JDEP.AS", "OCI.AS", "PHARM.AS",
+            "TWEKA.AS", "WHA.AS", "ALFEN.AS", "BFIT.AS", "CTPNV.AS", "NSI.AS",
+            "TOM2.AS", "VPK.AS"
         ]
     },
     "JP": {  # Tokyo Stock Exchange — Nikkei 225 (ohne US-ADRs)
