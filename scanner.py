@@ -710,8 +710,81 @@ CRYPTO_STRATEGIES = {
     },
 }
 
+# =============================================================================
+# INTERNATIONALE AKTIEN STRATEGIEN 🌍 (angepasste Schwellenwerte!)
+# EU/UK/JP Aktien bewegen sich weniger als US-Aktien → niedrigere Thresholds
+# RVOL wird zur Laufzeit nach Tageszeit normalisiert
+# =============================================================================
+INTERNATIONAL_STRATEGIES = {
+    "🌍 Alle zeigen": {
+        "description": "Alle Aktien der Börse anzeigen — ohne Filter",
+        "filters": {},
+        "logic": "Kein Filter aktiv → zeige alle verfügbaren Aktien"
+    },
+    "🌍 Gewinner": {
+        "description": "Aktien im Plus heute",
+        "filters": {"Change %": (0.5, 100.0)},
+        "logic": "Change > 0.5% = Aufwärtsbewegung"
+    },
+    "🌍 Verlierer": {
+        "description": "Aktien im Minus heute",
+        "filters": {"Change %": (-100.0, -0.5)},
+        "logic": "Change < -0.5% = Abwärtsbewegung"
+    },
+    "🌍 Momentum": {
+        "description": "Stärkste Bewegung (positiv) mit Volumen",
+        "filters": {"Change %": (1.5, 50.0), "RVOL": (0.8, 50.0)},
+        "logic": "Change > 1.5% + RVOL > 0.8 = echtes Kaufinteresse"
+    },
+    "🌍 Breakout": {
+        "description": "Starker Ausbruch nach oben — Close nahe Tageshoch",
+        "filters": {"Change %": (2.0, 50.0), "RVOL": (0.8, 50.0), "Close Position": (0.65, 1.0)},
+        "logic": "Change > 2% + Close nahe High + Volumen = Ausbruch"
+    },
+    "🌍 Breakdown": {
+        "description": "Starker Abverkauf — Close nahe Tagestief",
+        "filters": {"Change %": (-50.0, -2.0), "RVOL": (0.8, 50.0), "Close Position": (0.0, 0.35)},
+        "logic": "Change < -2% + Close nahe Low = Verkaufsdruck"
+    },
+    "🌍 Dip Buy": {
+        "description": "Moderate Schwäche ohne Panik-Volumen — Kaufchance",
+        "filters": {"Change %": (-5.0, -1.0), "RVOL": (0.3, 2.5)},
+        "logic": "Change -1% bis -5% + normales Volumen = Rücksetzer, kein Crash"
+    },
+    "🌍 Volume Spike": {
+        "description": "Überdurchschnittliches Volumen mit Bewegung",
+        "filters": {"Change %": (1.0, 50.0), "RVOL": (1.5, 50.0)},
+        "logic": "RVOL > 1.5 + positive Bewegung = institutionelles Interesse"
+    },
+    "🌍 Reversal": {
+        "description": "Trendumkehr: Vortag stark gefallen, heute Bounce",
+        "filters": {"Vortag %": (-30.0, -2.0), "Change %": (1.0, 30.0)},
+        "logic": "Gestern -2%+, heute Erholung +1%+ = mögliche Wende"
+    },
+    "🌍 Bull Flag": {
+        "description": "Konsolidierung nach starkem Vortag — Momentum-Fortsetzung",
+        "filters": {"Vortag %": (2.0, 20.0), "Change %": (-1.5, 1.5)},
+        "logic": "Starker Vortag (+2%+), heute enge Range = Flagge bildet sich"
+    },
+    "🌍 Bear Flag": {
+        "description": "Konsolidierung nach Abverkauf — Short-Setup",
+        "filters": {"Vortag %": (-20.0, -2.0), "Change %": (-1.5, 1.5)},
+        "logic": "Schwacher Vortag (-2%+), heute enge Range = Bear Flag"
+    },
+    "🌍 Big Movers": {
+        "description": "Größte absolute Bewegungen des Tages",
+        "filters": {"Change %": (3.0, 100.0)},
+        "logic": "Change > 3% = signifikante Bewegung für europäische Verhältnisse"
+    },
+    "🌍 Whale Watch": {
+        "description": "Extremes Volumen — Big Player aktiv",
+        "filters": {"RVOL": (2.5, 50.0), "Change %": (1.0, 100.0)},
+        "logic": "RVOL > 2.5 + positive Richtung = institutionelles Kaufinteresse"
+    },
+}
+
 # Funktion um Strategien basierend auf Markt zu bekommen
-def get_strategies_for_market(market_type):
+def get_strategies_for_market(market_type, exchange="US"):
     """Gibt die passenden Strategien für den gewählten Markt zurück"""
     if market_type == "Krypto":
         return CRYPTO_STRATEGIES
@@ -720,6 +793,8 @@ def get_strategies_for_market(market_type):
     elif market_type == "Forex":
         return FOREX_STRATEGIES
     else:  # Aktien
+        if exchange and exchange != "US":
+            return INTERNATIONAL_STRATEGIES
         return STRATEGIES
 
 # =============================================================================
@@ -10177,8 +10252,48 @@ def fetch_international_stock_data(exchange_code):
                 else:
                     vortag_chg = 0
                 
-                # RVOL
-                rvol = round(today_vol / yesterday_vol, 2) if yesterday_vol > 0 else 1.0
+                # RVOL — Normalisiert nach Tageszeit (Markt evtl. noch offen!)
+                # Problem: Wenn DE-Markt um 11:00 Uhr gescannt wird, ist today_vol
+                # nur ~25% des Tages-Volumens → RVOL sieht aus wie 0.25 statt 1.0
+                from datetime import datetime
+                import pytz
+                
+                # Handelszeiten pro Exchange (Stunden)
+                _exchange_hours = {
+                    "DE": {"tz": "Europe/Berlin", "open_h": 9, "open_m": 0, "close_h": 17, "close_m": 30},
+                    "UK": {"tz": "Europe/London", "open_h": 8, "open_m": 0, "close_h": 16, "close_m": 30},
+                    "CH": {"tz": "Europe/Zurich", "open_h": 9, "open_m": 0, "close_h": 17, "close_m": 30},
+                    "EU": {"tz": "Europe/Paris", "open_h": 9, "open_m": 0, "close_h": 17, "close_m": 30},
+                    "JP": {"tz": "Asia/Tokyo", "open_h": 9, "open_m": 0, "close_h": 15, "close_m": 0},
+                    "HK": {"tz": "Asia/Hong_Kong", "open_h": 9, "open_m": 30, "close_h": 16, "close_m": 0},
+                }
+                
+                raw_rvol = today_vol / yesterday_vol if yesterday_vol > 0 else 1.0
+                
+                # Normalisierung: Wie viel % des Handelstages ist vorbei?
+                day_pct = 1.0  # Default: ganzer Tag (Markt geschlossen)
+                _ex_info = _exchange_hours.get(exchange_code)
+                if _ex_info:
+                    try:
+                        _tz = pytz.timezone(_ex_info["tz"])
+                        _now = datetime.now(_tz)
+                        _now_min = _now.hour * 60 + _now.minute
+                        _open_min = _ex_info["open_h"] * 60 + _ex_info["open_m"]
+                        _close_min = _ex_info["close_h"] * 60 + _ex_info["close_m"]
+                        _total_min = _close_min - _open_min
+                        
+                        if _now_min < _open_min:
+                            day_pct = 0.05  # Vor Eröffnung
+                        elif _now_min >= _close_min:
+                            day_pct = 1.0   # Nach Schluss
+                        else:
+                            _elapsed = _now_min - _open_min
+                            day_pct = max(0.10, _elapsed / _total_min)
+                    except Exception:
+                        day_pct = 1.0
+                
+                # Normalisiertes RVOL: Wenn 25% des Tages vorbei und 25% Vol → RVOL ~1.0
+                rvol = round(raw_rvol / day_pct, 2) if day_pct > 0 else raw_rvol
                 rvol = min(rvol, 999.0)
                 
                 # Close Position
@@ -10450,7 +10565,8 @@ with st.sidebar:
     st.subheader("🎯 Strategie")
     
     # Hole passende Strategien für aktuellen Markt
-    current_strategies = get_strategies_for_market(m_type)
+    _current_exchange = st.session_state.get("selected_exchange", "US")
+    current_strategies = get_strategies_for_market(m_type, exchange=_current_exchange)
     strategy_list = list(current_strategies.keys())
     
     # Info welcher Markt
@@ -11081,13 +11197,16 @@ with st.sidebar:
                     
                     if len(results) == 0:
                         st.warning(f"⚠️ Keine Ergebnisse für {exchange_name} mit aktuellen Filtern")
+                        st.caption(f"💡 Tipp: Wähle **🌍 Alle zeigen** um alle Aktien zu sehen, oder **🌍 Gewinner/Verlierer** für weniger strenge Filter")
+                    elif sf > 0:
+                        st.caption(f"📊 {len(results)} Treffer | {sf} ausgefiltert | RVOL nach Tageszeit normalisiert")
                 
                 st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
                 
                 # =============================================================
                 # K1: MULTI-DAY PATTERN VALIDATION (wenn needs_history=True)
                 # =============================================================
-                current_strategies = get_strategies_for_market(m_type)
+                current_strategies = get_strategies_for_market(m_type, exchange=exchange)
                 strategy_data = current_strategies.get(st.session_state.get("current_strategy", ""), {})
                 
                 if strategy_data.get("needs_history") and m_type == "Aktien" and exchange == "US":
