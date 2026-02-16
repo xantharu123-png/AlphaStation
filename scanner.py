@@ -9733,68 +9733,116 @@ def display_backtest_lab(poly_key):
 
 
 # =============================================================================
-# INTERNATIONALE BÖRSEN - Top Aktien Listen
+# INTERNATIONALE BÖRSEN - NUR Aktien OHNE US-Listing (kein ADR auf NYSE/NASDAQ)
 # =============================================================================
 INTERNATIONAL_STOCKS = {
-    "DE": {  # Deutschland XETRA
+    "DE": {  # Deutschland XETRA — DAX 40 + MDAX + SDAX (ohne US-ADRs)
         "suffix": ".DE",
         "name": "Deutschland (XETRA)",
         "stocks": [
-            "SAP", "SIE", "ALV", "DTE", "BAS", "BAYN", "MRK", "BMW", "VOW3", "MBG",
-            "ADS", "IFX", "DB1", "MUV2", "HEN3", "DPW", "RWE", "EON", "FRE", "HEI",
-            "CON", "BEI", "LIN", "FME", "VNA", "SRT3", "1COV", "MTX", "SY1", "PUM",
-            "ZAL", "ENR", "HFG", "LEG", "AIR", "EVK", "DHER", "RHM", "SHL", "QIA"
+            # DAX 40 (ohne SAP, SIE, ALV, DTE, BAS, BAYN, BMW, VOW3, MBG, ADS, IFX, DB1, MUV2, HEN3, RWE, EON, FRE, FME, HEI, BEI, DBK)
+            "MRK", "DHL", "CON", "LIN", "VNA", "SRT3", "1COV", "MTX", "SY1", "PUM",
+            "ZAL", "ENR", "HFG", "LEG", "AIR", "EVK", "DHER", "RHM", "SHL", "QIA",
+            # MDAX
+            "TKA", "WCH", "BNR", "GXI", "SZG", "AFX", "NDA", "KGX", "G1A",
+            "FPE", "AG1", "HOT", "HAB", "NDX1", "BOSS", "TEG", "VBK",
+            "DUE", "KBX", "BC8", "WAF", "EVD", "GFT", "AT1", "AIXA", "NEM",
+            "JEN", "PSM", "KWS", "ECV", "UTDI", "O2D", "SOW", "PNE", "FNTN", "SAX",
+            "LXS", "CBK", "CE2", "TTK", "GIL", "NCA", "KRN", "KCO",
+            "TLX", "PAH3", "NOEJ", "SANT", "FAA",
+            # SDAX Top
+            "S92", "BYW6", "WAC", "VAR1", "AOX", "G24", "DEQ", "HBH", "CLR",
+            "FEV", "MDG", "SBS", "HHFA", "DRW", "AAD", "MOR", "VOS", "ADD", "BSL"
         ]
     },
-    "UK": {  # London Stock Exchange
+    "UK": {  # London Stock Exchange — FTSE 100 + 250 (ohne US-ADRs)
         "suffix": ".L",
         "name": "UK (London)",
         "stocks": [
-            "SHEL", "AZN", "HSBA", "ULVR", "BP", "GSK", "RIO", "DGE", "BATS", "REL",
-            "LSEG", "NG", "VOD", "PRU", "LLOY", "BARC", "AAL", "BHP", "GLEN", "CRH",
-            "RKT", "IMB", "SSE", "AHT", "ABF", "NWG", "EXPN", "SMT", "III", "WPP",
-            "ANTO", "STAN", "LAND", "SGE", "PSON", "INF", "BA", "JD", "TSCO", "SBRY"
+            # FTSE 100 (ohne SHEL, AZN, HSBA, ULVR, BP, GSK, RIO, DGE, BATS, REL, VOD, PRU, BHP, GLEN, CRH, LSEG, AAL, BA, NXT, STAN, IHG, WPP, FERG, RR)
+            "NG", "LLOY", "BARC", "RKT", "IMB", "SSE", "AHT", "ABF", "NWG", "EXPN",
+            "SMT", "III", "ANTO", "LAND", "SGE", "PSON", "INF", "JD", "TSCO", "SBRY",
+            "RMV", "MNDI", "FRES", "KGF", "WEIR", "PSN", "SMIN", "BNZL", "AV",
+            "CPG", "BKG", "SDR", "HLMA", "ADM", "ITRK", "MRO", "CRDA", "RTO", "TW",
+            "LGEN", "DCC", "BRBY", "IAG", "AUTO", "SGRO", "SN", "WTB", "SPX",
+            "SVT", "EVR", "HMSO", "AVV", "HSX", "DPLM", "FCIT",
+            "ENT", "JMAT", "GBG", "SJP", "CNA", "PHNX",
+            # FTSE 250 Top
+            "HIK", "CCH", "FOUR", "OCDO", "PAGE", "SMWH", "BME", "RSHW",
+            "POL", "RSW", "ASC", "ATST", "TPK", "BOO", "AJB",
+            "INCH", "TRIG", "VOF", "JEO", "NAS", "AML",
+            "WIZZ", "DOCS", "TUI", "STVG", "HGT", "BGFD",
+            "IPO", "DIGS", "MGGT", "AGR", "BNKR", "HBR", "IGG",
+            "VCT", "CINE", "DTY", "RSE", "SCT", "FUTR", "VEIL", "BVIC"
         ]
     },
-    "CH": {  # Schweiz SIX
+    "CH": {  # Schweiz SIX — SMI + SPI Mid (ohne US-ADRs)
         "suffix": ".SW",
         "name": "Schweiz (SIX)",
         "stocks": [
-            "NESN", "ROG", "NOVN", "UBSG", "ZURN", "ABBN", "CSGN", "SREN", "GIVN", "LONN",
-            "SCMN", "SIKA", "GEBN", "PGHN", "CFR", "ALC", "SLHN", "BALN", "SGSN", "LOGN",
-            "SOON", "TEMN", "VACN", "BARN", "HOLN", "SRENH", "STMN", "SCHP", "LISN", "SIGN",
-            "MBTN", "EMMN", "DKSH", "BUCN", "SANN", "SFZN", "BCVN", "BEKN", "CERN", "TIBN"
+            # SMI (ohne NESN, ROG, NOVN, UBSG, ZURN, ABBN, SREN, GIVN, LONN, SIKA, CFR, ALC, LOGN, GEBN, HOLN)
+            "SCMN", "PGHN", "SLHN", "BALN", "SGSN",
+            # SPI Mid/Large
+            "SOON", "TEMN", "VACN", "BARN", "STMN", "SCHP", "LISN", "SIGN",
+            "MBTN", "EMMN", "DKSH", "BUCN", "SANN", "SFZN", "BCVN", "BEKN", "CERN", "TIBN",
+            "COTN", "BELL", "SQN", "MOBN", "HUBN", "GAM", "VIFN", "AUTN",
+            "ASWN", "ZEHN", "GBMN", "HIAG", "ORON", "BOSN", "SENS", "CLTN",
+            "EFGN", "ARBN", "BANB", "CPHN", "ACCN", "PEHN", "APTS"
         ]
     },
-    "EU": {  # Euronext (Paris, Amsterdam)
-        "suffix": ".PA",  # Hauptsächlich Paris
+    "EU": {  # Euronext — CAC 40 + AEX 25 + BEL20 (ohne US-ADRs)
+        "suffix": ".PA",
         "name": "Europa (Euronext)",
         "stocks": [
-            # Frankreich
-            "MC", "OR", "TTE", "SAN", "AIR", "SU", "BNP", "AI", "CS", "DG",
-            "SAF", "RI", "KER", "BN", "VIV", "CA", "CAP", "EN", "GLE", "SGO",
-            # Amsterdam (.AS)
-            "ASML.AS", "INGA.AS", "PHIA.AS", "AD.AS", "HEIA.AS", "UNA.AS", "WKL.AS", "RAND.AS", "DSM.AS", "AKZA.AS"
+            # CAC 40 (ohne MC, OR, TTE, SAN, AIR, SU, BNP, DG, SAF, KER, STM, PUB, VIV, RNO)
+            "AI", "CS", "BN", "CA", "CAP", "EN", "GLE", "SGO",
+            "ML", "LR", "FP", "HO", "EL", "VIE", "URW",
+            "ERF", "ALO", "TKO", "BOL", "ACA", "ALD", "GFC",
+            "ORA", "ENX", "SOI", "RI",
+            # AEX 25 Amsterdam (ohne ASML, INGA, PHIA, UNA, ADYEN, PRX)
+            "AD.AS", "HEIA.AS", "WKL.AS", "RAND.AS", "AKZA.AS",
+            "ABN.AS", "AGN.AS", "BESI.AS", "ASM.AS", "IMCD.AS", "KPN.AS",
+            "AALB.AS", "SBMO.AS", "LIGHT.AS", "FLOW.AS",
+            # BEL20 Top (Brussels)
+            "UCB.BR", "SOLB.BR", "ABI.BR", "KBC.BR", "GBLB.BR", "AGS.BR", "ACKB.BR", "COFB.BR",
+            # Extra Paris
+            "NEX", "IPS", "AM", "AF", "VK", "RAL"
         ]
     },
-    "JP": {  # Tokyo Stock Exchange
+    "JP": {  # Tokyo Stock Exchange — Nikkei 225 (ohne US-ADRs)
         "suffix": ".T",
         "name": "Japan (Tokyo)",
         "stocks": [
-            "7203", "6758", "9984", "8306", "6861", "6501", "7267", "9432", "8035", "4063",
-            "6902", "7974", "8058", "9433", "4502", "6954", "8316", "7751", "3382", "6367",
-            "8801", "4503", "6981", "7201", "9434", "4661", "7270", "6752", "8411", "7733",
-            "5108", "8031", "4519", "6301", "8766", "9020", "4568", "2914", "8802", "6594"
+            # Nikkei 225 Top (ohne 7203/Toyota, 6758/Sony, 9984/SoftBank, 8306/MUFG, 6902/Denso, 6861/Keyence,
+            # 7741/HOYA, 6501/Hitachi, 8316/SMFG, 6098/Recruit, 4063/Shin-Etsu, 6367/Daikin, 9432/NTT,
+            # 4502/Takeda, 7974/Nintendo, 8058/Mitsubishi, 8035/Tokyo Electron, 6954/Fanuc, 4661/Oriental Land,
+            # 6981/Murata, 7267/Honda, 8766/Tokio Marine, 6594/Nidec)
+            "9433", "7751", "3382", "8801", "4503", "7201", "9434", "7270", "6752", "8411", "7733",
+            "5108", "8031", "4519", "6301", "9020", "4568", "2914", "8802",
+            "4452", "6273", "2801", "9983", "6326", "4543", "3407", "7269",
+            "6971", "8591", "2502", "8725", "4901", "6762", "4507", "9022", "4704", "7832",
+            "3289", "4911", "8601", "6103", "9064", "6472", "5401", "8830", "7211", "4578",
+            "9613", "3086", "6503", "2413", "6504", "7731", "4612", "6645", "5802", "5713",
+            "8309", "4755", "8015", "6753", "7011", "7013", "5020", "8053", "4042", "7912",
+            "4188", "8002", "6988", "8267", "6471", "1925", "5201", "2768", "8354", "6479"
         ]
     },
-    "HK": {  # Hong Kong
+    "HK": {  # Hong Kong — Hang Seng (ohne US-ADRs)
         "suffix": ".HK",
         "name": "Hong Kong",
         "stocks": [
-            "0700", "9988", "0005", "1299", "2318", "0939", "1398", "0388", "0941", "0883",
-            "2628", "1211", "0027", "1038", "2382", "0011", "0016", "0001", "0066", "3988",
-            "0267", "0669", "1928", "0175", "0002", "0012", "0003", "0688", "0386", "1113",
-            "0823", "0006", "1997", "0019", "2269", "0960", "1109", "0762", "0017", "2020"
+            # Hang Seng (ohne 0700/Tencent, 9988/Alibaba, 0941/ChinaMobile, 1299/AIA, 2318/PingAn,
+            # 3690/Meituan, 9618/JD, 9888/Baidu, 0005/HSBC, 1810/Xiaomi, 9999/NetEase, 0883/CNOOC,
+            # 2020/ANTA, 0388/HKEX, 1024/KEHoldings, 2269/WuXiBio, 9961/Trip, 9626/Bilibili)
+            "0939", "1398", "2628", "1211", "0027", "1038", "2382", "0011", "0016", "0001",
+            "0066", "3988", "0267", "0669", "1928", "0175", "0002", "0012", "0003", "0688",
+            "0386", "1113", "0823", "0006", "1997", "0019", "0960", "1109", "0762", "0017",
+            "0288", "2331", "2388", "6098", "2007", "1177", "3968", "2313",
+            "1088", "2899", "0857", "1876", "6862", "2688", "1658", "0981",
+            "0868", "1071", "0316", "0992", "2319", "0551", "0241", "0101", "0014", "0836",
+            "1357", "2328", "6060", "1833", "2018", "6186", "0291", "3328", "0778",
+            "1099", "2196", "9633", "0135", "2057", "1093", "0144", "3692", "0293", "0151",
+            "6969", "1972", "0489", "2600", "9698", "0522", "0853", "9926", "6618", "1476"
         ]
     }
 }
