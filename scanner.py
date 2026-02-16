@@ -10050,14 +10050,17 @@ def fetch_forex_data(category):
     results = []
     skipped_no_price = 0
     skipped_filter = 0
+    _debug_log = []  # DEBUG: Per-ticker log
     
     if category not in FOREX_PAIRS:
-        return [], 0, 0
+        _debug_log.append(f"❌ category '{category}' not in FOREX_PAIRS")
+        return [], 0, 0, _debug_log
     
     pairs = FOREX_PAIRS[category]["pairs"]
     
     f = st.session_state.active_filters
     af = st.session_state.additional_filters
+    _debug_log.append(f"📋 {len(pairs)} pairs | f={f} | af_gew={af.get('nur_gewinner')} af_verl={af.get('nur_verlierer')}")
     
     try:
         for ticker, name in pairs:
@@ -10122,6 +10125,7 @@ def fetch_forex_data(category):
                 
                 # Filter-Logik (V67.3: +Vortag%, +best_pairs Filter)
                 match = True
+                _fail_reason = ""
                 
                 # Strategie-spezifische best_pairs Filterung
                 current_strat = st.session_state.get("current_strategy", "")
@@ -10133,11 +10137,22 @@ def fetch_forex_data(category):
                     ticker_clean = ticker.replace("=X", "")
                     if ticker_clean not in best_pairs:
                         match = False
+                        _fail_reason = f"best_pairs filter"
                 
-                if match and "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
-                if match and "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
-                if match and af.get("nur_gewinner") and change <= 0: match = False
-                if match and af.get("nur_verlierer") and change >= 0: match = False
+                if match and "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): 
+                    match = False
+                    _fail_reason = f"Change% {change:.4f} not in {f['Change %']}"
+                if match and "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): 
+                    match = False
+                    _fail_reason = f"Vortag% {vortag_chg:.4f} not in {f['Vortag %']}"
+                if match and af.get("nur_gewinner") and change <= 0: 
+                    match = False
+                    _fail_reason = "nur_gewinner"
+                if match and af.get("nur_verlierer") and change >= 0: 
+                    match = False
+                    _fail_reason = "nur_verlierer"
+                
+                _debug_log.append(f"{'✅' if match else '❌'} {name}: chg={change:+.4f}% vtg={vortag_chg:+.4f}% {'| ' + _fail_reason if _fail_reason else ''}")
                 
                 if not match:
                     skipped_filter += 1
@@ -10159,13 +10174,15 @@ def fetch_forex_data(category):
                 })
                 
             except Exception as e:
+                _debug_log.append(f"💥 {ticker}: {e}")
                 continue
         
-        return results, skipped_no_price, skipped_filter
+        return results, skipped_no_price, skipped_filter, _debug_log
         
     except Exception as e:
+        _debug_log.append(f"💥 OUTER: {e}")
         st.error(f"Forex Fehler: {e}")
-        return [], 0, 0
+        return [], 0, 0, _debug_log
 
 #  KEIN CACHE - Filter kommen aus session_state
 def fetch_international_stock_data(exchange_code):
@@ -10181,15 +10198,21 @@ def fetch_international_stock_data(exchange_code):
     results = []
     skipped_no_price = 0
     skipped_filter = 0
+    _debug_log = []
     
     if exchange_code not in INTERNATIONAL_STOCKS:
-        return [], 0, 0
+        _debug_log.append(f"❌ exchange_code '{exchange_code}' not in INTERNATIONAL_STOCKS")
+        return [], 0, 0, _debug_log
     
     exchange = INTERNATIONAL_STOCKS[exchange_code]
     suffix = exchange["suffix"]
     stocks = exchange["stocks"]
+    _debug_log.append(f"📋 {len(stocks)} stocks, suffix={suffix}")
     
     f = st.session_state.active_filters
+    af = st.session_state.additional_filters
+    _debug_log.append(f"🔍 f={f}")
+    _debug_log.append(f"🔍 af={af}")
     af = st.session_state.additional_filters
     
     try:
@@ -10342,29 +10365,52 @@ def fetch_international_stock_data(exchange_code):
                 
                 # FILTER-LOGIK
                 match = True
+                _fail_reason = ""
                 
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
-                    if not (rvol_min <= rvol <= rvol_max): match = False
+                    if not (rvol_min <= rvol <= rvol_max): 
+                        match = False
+                        _fail_reason = f"RVOL {rvol:.2f} not in ({rvol_min},{rvol_max})"
                 
-                if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
-                if "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): match = False
-                if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): match = False
+                if match and "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): 
+                    match = False
+                    _fail_reason = f"Change% {change:.2f} not in {f['Change %']}"
+                if match and "Vortag %" in f and not (f["Vortag %"][0] <= vortag_chg <= f["Vortag %"][1]): 
+                    match = False
+                    _fail_reason = f"Vortag% {vortag_chg:.2f} not in {f['Vortag %']}"
+                if match and "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): 
+                    match = False
+                    _fail_reason = f"Preis {price:.2f} not in {f['Preis']}"
                 
                 # Close Position - mit None Check
-                if "Close Position" in f:
+                if match and "Close Position" in f:
                     if close_pos is not None:
                         if not (f["Close Position"][0] <= close_pos <= f["Close Position"][1]): 
                             match = False
-                    # Wenn close_pos None ist, ignoriere den Filter
+                            _fail_reason = f"ClosePos {close_pos:.2f} not in {f['Close Position']}"
                 
-                if "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): match = False
-                if "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): match = False
+                if match and "Upper Wick %" in f and not (f["Upper Wick %"][0] <= upper_wick_pct <= f["Upper Wick %"][1]): 
+                    match = False
+                    _fail_reason = f"UpperWick"
+                if match and "Lower Wick %" in f and not (f["Lower Wick %"][0] <= lower_wick_pct <= f["Lower Wick %"][1]): 
+                    match = False
+                    _fail_reason = f"LowerWick"
                 
-                if af.get("preis_min", 0) > 0 and price < af["preis_min"]: match = False
-                if af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: match = False
-                if af.get("nur_gewinner") and change <= 0: match = False
-                if af.get("nur_verlierer") and change >= 0: match = False
+                if match and af.get("preis_min", 0) > 0 and price < af["preis_min"]: 
+                    match = False
+                    _fail_reason = f"af.preis_min {af['preis_min']}"
+                if match and af.get("preis_max", 100000) < 100000 and price > af["preis_max"]: 
+                    match = False
+                    _fail_reason = f"af.preis_max {af['preis_max']}"
+                if match and af.get("nur_gewinner") and change <= 0: 
+                    match = False
+                    _fail_reason = "af.nur_gewinner"
+                if match and af.get("nur_verlierer") and change >= 0: 
+                    match = False
+                    _fail_reason = "af.nur_verlierer"
+                
+                _debug_log.append(f"{'✅' if match else '❌'} {ticker}: €{price:.2f} chg={change:+.2f}% rvol={rvol:.2f} {_fail_reason}")
                 
                 if not match:
                     skipped_filter += 1
@@ -10397,13 +10443,15 @@ def fetch_international_stock_data(exchange_code):
                 })
                 
             except Exception as e:
+                _debug_log.append(f"💥 {ticker}: {e}")
                 continue
         
-        return results, skipped_no_price, skipped_filter
+        return results, skipped_no_price, skipped_filter, _debug_log
         
     except Exception as e:
+        _debug_log.append(f"💥 OUTER: {e}")
         st.error(f"Yahoo Finance Fehler: {e}")
-        return [], 0, 0
+        return [], 0, 0, _debug_log
 
 # =============================================================================
 # 5. STREAMLIT UI
@@ -10789,6 +10837,13 @@ with st.sidebar:
         # Reset Navigation Index für neue Ergebnisse
         st.session_state.selected_row_index = 0
         
+        # === TEMP DEBUG - Zeige immer den Scan-Pfad ===
+        _dbg_m = m_type
+        _dbg_ex = st.session_state.get("selected_exchange", "US")
+        _dbg_strat = st.session_state.get("current_strategy", "KEINE")
+        _dbg_af = st.session_state.active_filters
+        st.info(f"🔍 Scan-Pfad: m_type={_dbg_m} | exchange={_dbg_ex} | strategy={_dbg_strat} | filters={_dbg_af}")
+        
         # DEBUG: Zeige aktuelle Konfiguration
         if st.session_state.get("debug_mode", False):
             st.caption(f"🔍 Debug: Markt={m_type}, Strategie={st.session_state.get('current_strategy', 'KEINE')}, Filter={st.session_state.active_filters}")
@@ -11141,7 +11196,23 @@ with st.sidebar:
                         "EXOTICS": "🌏 Exotic Pairs"
                     }
                     status.update(label=f"Scanne {cat_names.get(forex_cat, forex_cat)}...")
-                    results, snp, sf = fetch_forex_data(forex_cat)
+                    
+                    # DEBUG
+                    with st.expander("🔍 DEBUG: Forex Scan-State", expanded=True):
+                        st.write(f"**Kategorie:** {forex_cat}")
+                        st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'KEINE')}")
+                        st.write(f"**active_filters:** {st.session_state.active_filters}")
+                        st.write(f"**additional_filters:** {st.session_state.additional_filters}")
+                    
+                    results, snp, sf, _forex_debug = fetch_forex_data(forex_cat)
+                    
+                    # DEBUG
+                    with st.expander("🔍 DEBUG: Forex Ergebnis", expanded=True):
+                        st.write(f"**results:** {len(results)}, **skipped_price:** {snp}, **skipped_filter:** {sf}")
+                        if results:
+                            st.write(f"**Erster:** {results[0]}")
+                        for _dl in _forex_debug:
+                            st.text(_dl)
                     
                     if len(results) == 0:
                         st.warning(f"⚠️ Keine Ergebnisse für {cat_names.get(forex_cat)} mit aktuellen Filtern")
@@ -11216,7 +11287,26 @@ with st.sidebar:
                     exchange_name = exchange_names.get(exchange, exchange)
                     status.update(label=f"Scanne {exchange_name}...")
                     
-                    results, snp, sf = fetch_international_stock_data(exchange)
+                    # DEBUG: Zeige State vor Scan
+                    with st.expander("🔍 DEBUG: Scan-State", expanded=True):
+                        st.write(f"**Exchange:** {exchange}")
+                        st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'KEINE')}")
+                        st.write(f"**active_filters:** {st.session_state.active_filters}")
+                        st.write(f"**additional_filters:** {st.session_state.additional_filters}")
+                        st.write(f"**m_type:** {m_type}")
+                        st.write(f"**filter_reset_counter:** {st.session_state.get('filter_reset_counter', 0)}")
+                    
+                    results, snp, sf, _intl_debug = fetch_international_stock_data(exchange)
+                    
+                    # DEBUG: Zeige Ergebnis
+                    with st.expander("🔍 DEBUG: Scan-Ergebnis", expanded=True):
+                        st.write(f"**results:** {len(results)}")
+                        st.write(f"**skipped_no_price:** {snp}")
+                        st.write(f"**skipped_filter:** {sf}")
+                        if results:
+                            st.write(f"**Erster Treffer:** {results[0]}")
+                        for _dl in _intl_debug:
+                            st.text(_dl)
                     
                     if len(results) == 0:
                         st.warning(f"⚠️ Keine Ergebnisse für {exchange_name} mit aktuellen Filtern")
