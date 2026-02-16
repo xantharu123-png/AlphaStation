@@ -850,6 +850,8 @@ def apply_strategy(strategy_name, strategies_dict=None):
             strategies_dict = FUTURES_STRATEGIES
         elif strategy_name in FOREX_STRATEGIES:
             strategies_dict = FOREX_STRATEGIES
+        elif strategy_name in INTERNATIONAL_STRATEGIES:
+            strategies_dict = INTERNATIONAL_STRATEGIES
         else:
             strategies_dict = STRATEGIES  # Aktien als Fallback
     
@@ -10586,8 +10588,8 @@ with st.sidebar:
     if current_saved_strategy in strategy_list:
         default_index = strategy_list.index(current_saved_strategy)
     
-    # WICHTIG: Key muss zum Markt passen, sonst verwirrt Streamlit sich!
-    strat = st.selectbox("Wähle Strategie:", strategy_list, index=default_index, key=f"strategy_select_{m_type}")
+    # WICHTIG: Key muss zum Markt UND Exchange passen, sonst verwirrt Streamlit sich!
+    strat = st.selectbox("Wähle Strategie:", strategy_list, index=default_index, key=f"strategy_select_{m_type}_{_current_exchange}")
     
     # Strategie laden wenn sich Auswahl ändert
     if strat != st.session_state.get("current_strategy", ""):
@@ -11073,7 +11075,7 @@ with st.sidebar:
                     import traceback
                     st.code(traceback.format_exc())
         
-        elif not st.session_state.active_filters:
+        elif not st.session_state.active_filters and not st.session_state.get("current_strategy"):
             st.warning("Erst Strategie laden!")
         else:
             # Trading Session für Aktien (automatisch oder manuell)
