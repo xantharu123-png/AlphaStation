@@ -3524,6 +3524,7 @@ def _fetch_ohlcv_yahoo(ticker, timeframe="1H"):
             "4H":  ("1h",  "730d", 500),    # 2 Jahre 1H → aggregiere zu 4H
             "1D":  ("1d",  "2y",   500),    # 2 Jahre Daily
             "1W":  ("1wk", "5y",   260),    # 5 Jahre Weekly
+            "1M":  ("1mo", "max",  120),    # Max Monthly
         }
         
         if timeframe not in tf_map:
@@ -6577,8 +6578,13 @@ def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
         if market_type == "Krypto":
             coin_id = ticker.lower()
             ohlc_data = fetch_historical_data_crypto(coin_id, days)
-        elif market_type == "Aktien" and poly_key:
-            ohlc_data = fetch_historical_data_stocks(ticker, days, poly_key)
+        elif market_type == "Aktien":
+            # Internationale Aktien: Yahoo (kein poly_key nötig)
+            _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+            if any(ticker.upper().endswith(s) for s in _intl_suffixes):
+                ohlc_data = _fetch_historical_yahoo(ticker, days)
+            elif poly_key:
+                ohlc_data = fetch_historical_data_stocks(ticker, days, poly_key)
         
         if not ohlc_data or len(ohlc_data) < 10:
             result["interpretation"] = "Nicht genug historische Daten"
@@ -12506,6 +12512,9 @@ with tab_scanner:
             with st.expander("📦 Akkumulations-Analyse (Wyckoff)", expanded=False):
                 try:
                     ticker = st.session_state.selected_symbol
+                    # FullTicker für internationale Aktien
+                    if "current_data" in st.session_state:
+                        ticker = st.session_state.current_data.get("FullTicker", ticker)
                     m_type = st.session_state.market_type
                     
                     # Polygon Key für Aktien
@@ -12600,63 +12609,88 @@ with tab_scanner:
                 except Exception as e:
                     st.error(f"Akkumulations-Analyse Fehler: {e}")
             
-            # TradingView Tipp
-            st.info("💡 **Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
+            # TradingView Tipp (nur für US/Krypto — internationale nutzen eigenen Chart)
+            _full_t = st.session_state.current_data.get("FullTicker", "") if "current_data" in st.session_state else ""
+            if not any(_full_t.upper().endswith(s) for s in (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")):
+                st.info("💡 **Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
         
-        # TradingView Chart mit dynamischem Interval
-        if st.session_state.market_type == "Krypto":
-            tv_symbol = f"BINANCE:{st.session_state.selected_symbol}USDT"
-        elif st.session_state.market_type == "Forex":
-            # "EUR/USD" → "FX:EURUSD"
-            tv_symbol = f"FX:{st.session_state.selected_symbol.replace('/', '')}"
-        elif st.session_state.market_type == "Futures":
-            # Futures zu TradingView Format
-            futures_tv_map = {
-                "ES": "CME_MINI:ES1!", "NQ": "CME_MINI:NQ1!", "YM": "CBOT_MINI:YM1!",
-                "RTY": "CME_MINI:RTY1!", "CL": "NYMEX:CL1!", "GC": "COMEX:GC1!",
-                "SI": "COMEX:SI1!", "NG": "NYMEX:NG1!", "ZB": "CBOT:ZB1!",
-                "ZN": "CBOT:ZN1!", "ZC": "CBOT:ZC1!", "ZS": "CBOT:ZS1!",
-                "ZW": "CBOT:ZW1!", "HG": "COMEX:HG1!", "PL": "NYMEX:PL1!",
-                "KC": "ICEUSA:KC1!", "CT": "ICEUSA:CT1!", "SB": "ICEUSA:SB1!",
-            }
-            tv_symbol = futures_tv_map.get(st.session_state.selected_symbol, st.session_state.selected_symbol)
+        # =====================================================
+        # CHART RENDERING
+        # =====================================================
+        # Internationale Aktien: Eigener Lightweight-Chart (Yahoo Finance)
+        # TradingView Widget unterstützt kein Intraday für EU-Börsen
+        _full_ticker = st.session_state.current_data.get("FullTicker", st.session_state.selected_symbol) if "current_data" in st.session_state else st.session_state.selected_symbol
+        _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+        _is_international = any(_full_ticker.upper().endswith(s) for s in _intl_suffixes)
+        
+        if _is_international:
+            # Eigener Chart via Yahoo Finance — alle Timeframes funktionieren
+            with st.spinner(f"📥 Lade {_full_ticker} Chart ({selected_tf})..."):
+                _chart_ohlcv = _fetch_ohlcv_yahoo(_full_ticker, selected_tf)
+            
+            if _chart_ohlcv and len(_chart_ohlcv) > 10:
+                # S/R Levels für Chart-Overlay
+                _sr_for_chart = None
+                if st.session_state.sr_levels["support"] or st.session_state.sr_levels["resistance"]:
+                    _sr_for_chart = st.session_state.sr_levels
+                
+                _chart_html = create_lightweight_chart_html(
+                    ohlcv_data=_chart_ohlcv,
+                    ticker=_full_ticker,
+                    sr_levels=_sr_for_chart,
+                    patterns=None,
+                    fib_levels=None,
+                    ema_periods=[20, 50, 200],
+                    height=400,
+                    show_volume=True
+                )
+                import streamlit.components.v1 as components
+                components.html(_chart_html, height=420)
+                st.caption(f"📊 {len(_chart_ohlcv)} Bars | Yahoo Finance | {selected_tf}")
+            else:
+                st.warning(f"⚠️ Keine Chart-Daten für {_full_ticker} ({selected_tf})")
         else:
-            # Internationale Aktien: Suffix → TradingView Exchange Prefix
-            _sym = st.session_state.selected_symbol
-            _full = st.session_state.current_data.get("FullTicker", _sym) if "current_data" in st.session_state else _sym
-            _tv_exchange_map = {
-                ".DE": "XETR:", ".L": "LSE:", ".SW": "SIX:", ".PA": "EURONEXT:",
-                ".AS": "EURONEXT:", ".BR": "EURONEXT:", ".T": "TSE:", ".HK": "HKEX:"
-            }
-            tv_symbol = _sym
-            for suffix, prefix in _tv_exchange_map.items():
-                if _full.upper().endswith(suffix):
-                    tv_symbol = f"{prefix}{_sym}"
-                    break
-        
-        tv_html = f'''
-        <div style="height:420px; border-radius: 8px; overflow: hidden;">
-            <div id="tv_chart" style="height:100%"></div>
-            <script src="https://s3.tradingview.com/tv.js"></script>
-            <script>
-                new TradingView.widget({{
-                    "autosize": true,
-                    "symbol": "{tv_symbol}",
-                    "interval": "{tv_interval}",
-                    "timezone": "Europe/Berlin",
-                    "theme": "dark",
-                    "style": "1",
-                    "locale": "de_DE",
-                    "enable_publishing": false,
-                    "hide_side_toolbar": false,
-                    "allow_symbol_change": true,
-                    "studies": ["Volume@tv-basicstudies"],
-                    "container_id": "tv_chart"
-                }});
-            </script>
-        </div>
-        '''
-        st.components.v1.html(tv_html, height=420)
+            # US-Aktien, Krypto, Forex, Futures: TradingView Widget
+            if st.session_state.market_type == "Krypto":
+                tv_symbol = f"BINANCE:{st.session_state.selected_symbol}USDT"
+            elif st.session_state.market_type == "Forex":
+                tv_symbol = f"FX:{st.session_state.selected_symbol.replace('/', '')}"
+            elif st.session_state.market_type == "Futures":
+                futures_tv_map = {
+                    "ES": "CME_MINI:ES1!", "NQ": "CME_MINI:NQ1!", "YM": "CBOT_MINI:YM1!",
+                    "RTY": "CME_MINI:RTY1!", "CL": "NYMEX:CL1!", "GC": "COMEX:GC1!",
+                    "SI": "COMEX:SI1!", "NG": "NYMEX:NG1!", "ZB": "CBOT:ZB1!",
+                    "ZN": "CBOT:ZN1!", "ZC": "CBOT:ZC1!", "ZS": "CBOT:ZS1!",
+                    "ZW": "CBOT:ZW1!", "HG": "COMEX:HG1!", "PL": "NYMEX:PL1!",
+                    "KC": "ICEUSA:KC1!", "CT": "ICEUSA:CT1!", "SB": "ICEUSA:SB1!",
+                }
+                tv_symbol = futures_tv_map.get(st.session_state.selected_symbol, st.session_state.selected_symbol)
+            else:
+                tv_symbol = st.session_state.selected_symbol
+            
+            tv_html = f'''
+            <div style="height:420px; border-radius: 8px; overflow: hidden;">
+                <div id="tv_chart" style="height:100%"></div>
+                <script src="https://s3.tradingview.com/tv.js"></script>
+                <script>
+                    new TradingView.widget({{
+                        "autosize": true,
+                        "symbol": "{tv_symbol}",
+                        "interval": "{tv_interval}",
+                        "timezone": "Europe/Berlin",
+                        "theme": "dark",
+                        "style": "1",
+                        "locale": "de_DE",
+                        "enable_publishing": false,
+                        "hide_side_toolbar": false,
+                        "allow_symbol_change": true,
+                        "studies": ["Volume@tv-basicstudies"],
+                        "container_id": "tv_chart"
+                    }});
+                </script>
+            </div>
+            '''
+            st.components.v1.html(tv_html, height=420)
 
 # -----------------------------------------------------------------------------
 # SUCHE TAB - Manuelle Ticker-Suche
@@ -12870,7 +12904,18 @@ with tab_search:
                 if search_market == "Krypto":
                     tv_symbol = f"BINANCE:{search_result['Ticker']}USDT"
                 else:
-                    tv_symbol = search_result['Ticker']
+                    # Internationale Aktien: Exchange-Prefix für TradingView
+                    _sr_sym = search_result['Ticker']
+                    _sr_full = search_result.get('FullTicker', _sr_sym)
+                    _tv_exchange_map = {
+                        ".DE": "XETR:", ".L": "LSE:", ".SW": "SIX:", ".PA": "EURONEXT:",
+                        ".AS": "EURONEXT:", ".BR": "EURONEXT:", ".T": "TSE:", ".HK": "HKEX:"
+                    }
+                    tv_symbol = _sr_sym
+                    for suffix, prefix in _tv_exchange_map.items():
+                        if _sr_full.upper().endswith(suffix):
+                            tv_symbol = f"{prefix}{_sr_sym}"
+                            break
                 
                 tv_html = f'''
                 <div style="height:400px; border-radius: 8px; overflow: hidden;">
