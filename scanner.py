@@ -3392,7 +3392,14 @@ def fetch_historical_data_crypto(coin_id, days):
     return None
 
 def fetch_historical_data_stocks(ticker, days, poly_key):
-    """Holt historische Daten von Polygon"""
+    """Holt historische Daten — Polygon für US, Yahoo für internationale Aktien"""
+    _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+    _is_intl = any(ticker.upper().endswith(s) for s in _intl_suffixes)
+    
+    if _is_intl:
+        return _fetch_historical_yahoo(ticker, days)
+    
+    # US-Aktien: Polygon
     try:
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -3404,11 +3411,71 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
             data = resp.json()
             results = data.get("results", [])
             if results:
-                # Format anpassen: [[timestamp, open, high, low, close, volume], ...]
                 return [[r["t"], r["o"], r["h"], r["l"], r["c"], r.get("v", 0)] for r in results]
     except Exception as e:
         pass
     return None
+
+
+def _fetch_historical_yahoo(ticker, days):
+    """Yahoo Finance historische Daily-Daten für internationale Aktien"""
+    try:
+        # Days to Yahoo range string
+        if days <= 30:
+            yf_range = "1mo"
+        elif days <= 90:
+            yf_range = "3mo"
+        elif days <= 180:
+            yf_range = "6mo"
+        elif days <= 365:
+            yf_range = "1y"
+        elif days <= 730:
+            yf_range = "2y"
+        else:
+            yf_range = "5y"
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"interval": "1d", "range": yf_range}
+        headers = {"User-Agent": "Mozilla/5.0"}
+        
+        resp = rate_limited_get(url, params=params, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return None
+        
+        data = resp.json()
+        chart = data.get("chart", {}).get("result", [])
+        if not chart:
+            return None
+        
+        timestamps = chart[0].get("timestamp", [])
+        indicators = chart[0].get("indicators", {}).get("quote", [{}])[0]
+        
+        opens = indicators.get("open", [])
+        highs = indicators.get("high", [])
+        lows = indicators.get("low", [])
+        closes = indicators.get("close", [])
+        volumes = indicators.get("volume", [])
+        
+        if not timestamps or not closes:
+            return None
+        
+        # Format: [[timestamp_ms, open, high, low, close, volume], ...]
+        result = []
+        for i in range(len(timestamps)):
+            if i >= len(closes) or closes[i] is None:
+                continue
+            result.append([
+                timestamps[i] * 1000,  # seconds → ms für Kompatibilität
+                opens[i] if i < len(opens) and opens[i] is not None else closes[i],
+                highs[i] if i < len(highs) and highs[i] is not None else closes[i],
+                lows[i] if i < len(lows) and lows[i] is not None else closes[i],
+                closes[i],
+                volumes[i] if i < len(volumes) and volumes[i] is not None else 0
+            ])
+        
+        return result if result else None
+    except Exception:
+        return None
 
 
 # =============================================================================
@@ -3419,10 +3486,10 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
     """
     Holt OHLCV Daten für Chart-Darstellung.
     
-    V67.2: Deutlich mehr History + Weekly Timeframe
+    V67.5: Yahoo Finance Fallback für internationale Aktien + Forex + Futures + Krypto
     
     Args:
-        ticker: Ticker Symbol
+        ticker: Ticker Symbol (z.B. "AAPL", "VNA.DE", "EURUSD=X", "BTC-USD")
         poly_key: Polygon API Key
         timeframe: "5m", "15m", "1H", "4H", "1D", "1W"
         bars: Anzahl Bars (wird pro Timeframe angepasst)
@@ -3430,16 +3497,128 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
     Returns:
         List of dicts with time, open, high, low, close, volume
     """
+    # Erkennung: Ist das ein internationaler/Yahoo-Ticker?
+    _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+    _yahoo_patterns = ("=X", "=F", "-USD", "-EUR", "-GBP")
+    _is_yahoo = any(ticker.upper().endswith(s) for s in _intl_suffixes + _yahoo_patterns)
+    
+    # Krypto-Tickers (CoinGecko IDs → Yahoo Format)
+    if not _is_yahoo and ticker.upper() in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "MATIC"):
+        ticker = f"{ticker.upper()}-USD"
+        _is_yahoo = True
+    
+    if _is_yahoo:
+        return _fetch_ohlcv_yahoo(ticker, timeframe)
+    else:
+        return _fetch_ohlcv_polygon(ticker, poly_key, timeframe)
+
+
+def _fetch_ohlcv_yahoo(ticker, timeframe="1H"):
+    """Yahoo Finance OHLCV für internationale Aktien, Forex, Futures, Krypto."""
+    try:
+        # Yahoo Finance interval & range mapping
+        tf_map = {
+            "5m":  ("5m",  "60d",  500),    # 60 Tage 5-min
+            "15m": ("15m", "60d",  500),    # 60 Tage 15-min
+            "1H":  ("1h",  "730d", 500),    # 2 Jahre 1H
+            "4H":  ("1h",  "730d", 500),    # 2 Jahre 1H → aggregiere zu 4H
+            "1D":  ("1d",  "2y",   500),    # 2 Jahre Daily
+            "1W":  ("1wk", "5y",   260),    # 5 Jahre Weekly
+        }
+        
+        if timeframe not in tf_map:
+            timeframe = "1H"
+        
+        yf_interval, yf_range, max_bars = tf_map[timeframe]
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"interval": yf_interval, "range": yf_range}
+        headers = {"User-Agent": "Mozilla/5.0"}
+        
+        resp = rate_limited_get(url, params=params, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return None
+        
+        data = resp.json()
+        chart = data.get("chart", {}).get("result", [])
+        if not chart:
+            return None
+        
+        timestamps = chart[0].get("timestamp", [])
+        indicators = chart[0].get("indicators", {}).get("quote", [{}])[0]
+        
+        opens = indicators.get("open", [])
+        highs = indicators.get("high", [])
+        lows = indicators.get("low", [])
+        closes = indicators.get("close", [])
+        volumes = indicators.get("volume", [])
+        
+        if not timestamps or not closes:
+            return None
+        
+        # Build raw bars (filter None values)
+        raw_bars = []
+        for i in range(len(timestamps)):
+            if i >= len(closes) or closes[i] is None:
+                continue
+            raw_bars.append({
+                "t": timestamps[i],
+                "o": opens[i] if i < len(opens) and opens[i] is not None else closes[i],
+                "h": highs[i] if i < len(highs) and highs[i] is not None else closes[i],
+                "l": lows[i] if i < len(lows) and lows[i] is not None else closes[i],
+                "c": closes[i],
+                "v": volumes[i] if i < len(volumes) and volumes[i] is not None else 0
+            })
+        
+        if not raw_bars:
+            return None
+        
+        # Für 4H: Aggregiere 1H Bars zu 4H
+        if timeframe == "4H":
+            aggregated = []
+            for i in range(0, len(raw_bars), 4):
+                chunk = raw_bars[i:i+4]
+                if chunk:
+                    aggregated.append({
+                        "t": chunk[0]["t"],
+                        "o": chunk[0]["o"],
+                        "h": max(c["h"] for c in chunk),
+                        "l": min(c["l"] for c in chunk),
+                        "c": chunk[-1]["c"],
+                        "v": sum(c.get("v", 0) for c in chunk)
+                    })
+            raw_bars = aggregated
+        
+        # Formatiere für Lightweight Charts
+        effective_bars = min(max_bars, len(raw_bars))
+        ohlcv = []
+        for bar in raw_bars[-effective_bars:]:
+            ohlcv.append({
+                "time": bar["t"],  # Yahoo timestamps sind schon in Sekunden
+                "open": bar["o"],
+                "high": bar["h"],
+                "low": bar["l"],
+                "close": bar["c"],
+                "volume": bar.get("v", 0)
+            })
+        
+        return ohlcv if ohlcv else None
+        
+    except Exception as e:
+        return None
+
+
+def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
+    """Polygon.io OHLCV für US-Aktien."""
     try:
         # Timeframe mapping: (multiplier, span, days_back, max_bars)
-        # V67.2: Massiv erhöhte Lookback-Perioden
         tf_map = {
-            "5m": ("5", "minute", 7, 500),        # 7 Tage → ~540 Bars
-            "15m": ("15", "minute", 21, 500),      # 3 Wochen → ~540 Bars
-            "1H": ("1", "hour", 90, 500),          # 3 Monate → ~450 Bars
-            "4H": ("1", "hour", 180, 500),         # 6 Monate → ~500 4H Bars
-            "1D": ("1", "day", 730, 500),          # 2 Jahre → ~500 Bars
-            "1W": ("1", "week", 1825, 260),        # 5 Jahre → ~260 Bars
+            "5m": ("5", "minute", 7, 500),
+            "15m": ("15", "minute", 21, 500),
+            "1H": ("1", "hour", 90, 500),
+            "4H": ("1", "hour", 180, 500),
+            "1D": ("1", "day", 730, 500),
+            "1W": ("1", "week", 1825, 260),
         }
         
         if timeframe not in tf_map:
@@ -3447,11 +3626,9 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
         
         mult, span, days_back, max_bars = tf_map[timeframe]
         
-        # Berechne Datum-Range
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
         
-        # API Call
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start_date}/{end_date}"
         params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 50000}
         
@@ -3481,13 +3658,11 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
                     })
             results = aggregated
         
-        # Formatiere für Lightweight Charts
-        # Nutze max_bars als Limit statt dem übergebenen bars Parameter
         effective_bars = min(max_bars, len(results))
         ohlcv = []
         for bar in results[-effective_bars:]:
             ohlcv.append({
-                "time": bar["t"] // 1000,  # JavaScript timestamp (seconds)
+                "time": bar["t"] // 1000,  # Polygon ms → seconds
                 "open": bar["o"],
                 "high": bar["h"],
                 "low": bar["l"],
@@ -6326,8 +6501,13 @@ def calculate_sr_levels(price, ticker=None, market_type="Krypto", timeframe="4H"
         coin_id = ticker.lower()
         ohlc_data = fetch_historical_data_crypto(coin_id, days)
     
-    elif market_type == "Aktien" and ticker and poly_key:
-        ohlc_data = fetch_historical_data_stocks(ticker, days, poly_key)
+    elif market_type == "Aktien" and ticker:
+        # Internationale Aktien: Yahoo (kein poly_key nötig)
+        _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+        if any(ticker.upper().endswith(s) for s in _intl_suffixes):
+            ohlc_data = _fetch_historical_yahoo(ticker, days)
+        elif poly_key:
+            ohlc_data = fetch_historical_data_stocks(ticker, days, poly_key)
     
     # Berechne S/R aus historischen Daten oder Fallback
     if ohlc_data:
@@ -12170,7 +12350,8 @@ with tab_scanner:
                 if st.session_state.market_type == "Aktien":
                     if st.button(f"🤖 AI Chart für {row['Ticker']}", use_container_width=True, type="primary"):
                         st.session_state.show_ai_chart = True
-                        st.session_state.ai_chart_ticker = row['Ticker']
+                        # FullTicker für internationale Aktien (z.B. VNA.DE statt VNA)
+                        st.session_state.ai_chart_ticker = row.get('FullTicker', row['Ticker'])
                         st.rerun()
         else:
             st.info("Klicke 'SCAN STARTEN'")
@@ -12214,9 +12395,13 @@ with tab_scanner:
                     pass
             
             # S/R mit historischen Daten berechnen
+            # Für internationale Aktien: FullTicker verwenden (z.B. VNA.DE statt VNA)
+            sr_ticker = ticker
+            if "current_data" in st.session_state:
+                sr_ticker = st.session_state.current_data.get("FullTicker", ticker)
             (supports, resistances), fib_info = calculate_sr_levels(
                 price=current_price,
-                ticker=ticker,
+                ticker=sr_ticker,
                 market_type=m_type,
                 timeframe=selected_tf,
                 poly_key=poly_key
@@ -12436,7 +12621,18 @@ with tab_scanner:
             }
             tv_symbol = futures_tv_map.get(st.session_state.selected_symbol, st.session_state.selected_symbol)
         else:
-            tv_symbol = st.session_state.selected_symbol
+            # Internationale Aktien: Suffix → TradingView Exchange Prefix
+            _sym = st.session_state.selected_symbol
+            _full = st.session_state.current_data.get("FullTicker", _sym) if "current_data" in st.session_state else _sym
+            _tv_exchange_map = {
+                ".DE": "XETR:", ".L": "LSE:", ".SW": "SIX:", ".PA": "EURONEXT:",
+                ".AS": "EURONEXT:", ".BR": "EURONEXT:", ".T": "TSE:", ".HK": "HKEX:"
+            }
+            tv_symbol = _sym
+            for suffix, prefix in _tv_exchange_map.items():
+                if _full.upper().endswith(suffix):
+                    tv_symbol = f"{prefix}{_sym}"
+                    break
         
         tv_html = f'''
         <div style="height:420px; border-radius: 8px; overflow: hidden;">
