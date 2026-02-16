@@ -672,8 +672,8 @@ CRYPTO_STRATEGIES = {
     },
     "Volume Surge": {
         "description": "Erhöhtes Volumen + starke Bewegung",
-        "filters": {"RVOL": (1.0, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 1.0 (überdurchschnittlicher Turnover) + Change > 3%"
+        "filters": {"RVOL": (0.8, 50.0), "Change %": (2.0, 100.0)},
+        "logic": "RVOL > 0.8 (überdurchschnittlicher Turnover) + Change > 2%"
     },
     "Bull Flag": {
         "description": "Bullische Konsolidierung nach Anstieg (⚠️ Vortag% = 24h Kerze)",
@@ -686,34 +686,34 @@ CRYPTO_STRATEGIES = {
         "logic": "Starke 24h-Kerze (-4 bis -25%), heute flach = weitere Schwäche"
     },
     "Breakout Long": {
-        "description": "Ausbruch nach oben mit Volumen",
-        "filters": {"Change %": (5.0, 50.0), "RVOL": (0.8, 20.0), "Close Position": (0.7, 1.0)},
-        "logic": "Close nahe High + erhöhtes Volumen = Stärke"
+        "description": "Ausbruch nach oben — Close nahe Tageshoch",
+        "filters": {"Change %": (3.0, 50.0), "Close Position": (0.6, 1.0)},
+        "logic": "Close nahe High + starke Bewegung = bullischer Ausbruch"
     },
     "Breakdown Short": {
-        "description": "Ausbruch nach unten mit Volumen",
-        "filters": {"Change %": (-50.0, -5.0), "RVOL": (0.8, 20.0), "Close Position": (0.0, 0.3)},
-        "logic": "Close nahe Low + erhöhtes Volumen = Schwäche"
+        "description": "Ausbruch nach unten — Close nahe Tagestief",
+        "filters": {"Change %": (-50.0, -3.0), "Close Position": (0.0, 0.4)},
+        "logic": "Close nahe Low + starke Abwärtsbewegung = Schwäche"
     },
     "Low Cap Rockets 🚀": {
         "description": "Günstige Coins mit explosivem Volumen",
-        "filters": {"Preis": (0.0001, 1.0), "RVOL": (1.5, 50.0), "Change %": (2.0, 100.0)},
+        "filters": {"Preis": (0.0001, 1.0), "RVOL": (0.8, 50.0), "Change %": (2.0, 100.0)},
         "logic": "Coins unter $1 mit überdurchschnittlichem Turnover"
     },
     "Dip Buy": {
-        "description": "Qualitäts-Assets im Rücksetzer ohne Panik",
-        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.2, 1.0)},
+        "description": "Rücksetzer ohne Panik-Volumen",
+        "filters": {"Change %": (-8.0, -2.0), "RVOL": (0.1, 1.5)},
         "logic": "Moderater Rücksetzer ohne Volumen-Panik"
     },
     "Reversal Hunter": {
         "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = 24h Kerze)",
-        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (2.0, 30.0), "RVOL": (0.5, 20.0)},
-        "logic": "Letzte 24h stark negativ (-5% bis -50%), jetzt Käufer (+2%+)"
+        "filters": {"Vortag %": (-50.0, -3.0), "Change %": (1.0, 30.0)},
+        "logic": "Letzte 24h negativ, jetzt Käufer = mögliche Umkehr"
     },
     "Early Momentum": {
         "description": "Starke Bewegung mit erhöhtem Volumen",
-        "filters": {"Change %": (3.0, 30.0), "RVOL": (0.5, 20.0)},
-        "logic": "Positive Bewegung mit überdurchschnittlichem Turnover"
+        "filters": {"Change %": (2.0, 30.0), "RVOL": (0.3, 20.0)},
+        "logic": "Positive Bewegung mit Volumen-Bestätigung"
     },
     "Whale Watch 🐋": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
@@ -6936,29 +6936,42 @@ def fetch_insider_transactions(finnhub_key, transaction_type="BUY"):
 
 
 def fetch_crypto_data():
-    """Holt Krypto-Daten von CoinGecko mit korrektem Vortag"""
+    """Holt Krypto-Daten von CoinGecko mit korrektem Vortag — 500 Coins (2 Seiten)"""
     results = []
     skipped_filter = 0
     
     try:
-        url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd", 
-            "order": "market_cap_desc",
-            "per_page": 250, 
-            "page": 1, 
-            "sparkline": False,
-            # Hole 24h UND 7d change
-            "price_change_percentage": "24h,7d"
-        }
+        all_coins = []
         
-        resp = rate_limited_get(url, params=params, timeout=30)
-        if resp.status_code == 429:
-            st.warning("⚠️ CoinGecko Rate Limit. Warte 60 Sekunden.")
-            return [], 0, 0
+        # Lade 2 Seiten = 500 Coins (Free API Limit ~3 Requests/Minute)
+        for page_num in range(1, 3):
+            url = "https://api.coingecko.com/api/v3/coins/markets"
+            params = {
+                "vs_currency": "usd", 
+                "order": "market_cap_desc",
+                "per_page": 250, 
+                "page": page_num, 
+                "sparkline": False,
+                "price_change_percentage": "24h,7d"
+            }
+            
+            resp = rate_limited_get(url, params=params, timeout=30)
+            if resp.status_code == 429:
+                if page_num == 1:
+                    st.warning("⚠️ CoinGecko Rate Limit. Warte 60 Sekunden.")
+                    return [], 0, 0
+                break  # Page 2 rate limited → benutze nur Page 1
+            
+            page_coins = resp.json()
+            if not isinstance(page_coins, list) or not page_coins:
+                break
+            all_coins.extend(page_coins)
+            
+            if page_num < 2:
+                time.sleep(1.2)  # Rate limit pause zwischen Seiten
         
-        coins = resp.json()
-        if not isinstance(coins, list):
+        coins = all_coins
+        if not coins:
             return [], 0, 0
         
         f = st.session_state.active_filters
@@ -10735,7 +10748,7 @@ with st.sidebar:
     st.session_state.market_type = m_type
     
     if m_type == "Krypto":
-        st.caption("📡 CoinGecko (Top 250) - 24/7")
+        st.caption("📡 CoinGecko (Top 500) - 24/7")
     
     elif m_type == "Futures":
         # FUTURES KATEGORIE-AUSWAHL
