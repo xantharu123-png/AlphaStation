@@ -740,63 +740,63 @@ INTERNATIONAL_STRATEGIES = {
     },
     "🌍 Gewinner": {
         "description": "Aktien im Plus heute",
-        "filters": {"Change %": (0.5, 100.0)},
-        "logic": "Change > 0.5% = Aufwärtsbewegung"
+        "filters": {"Change %": (0.3, 100.0)},
+        "logic": "Change > 0.3% = Aufwärtsbewegung"
     },
     "🌍 Verlierer": {
         "description": "Aktien im Minus heute",
-        "filters": {"Change %": (-100.0, -0.5)},
-        "logic": "Change < -0.5% = Abwärtsbewegung"
+        "filters": {"Change %": (-100.0, -0.3)},
+        "logic": "Change < -0.3% = Abwärtsbewegung"
     },
     "🌍 Momentum": {
-        "description": "Stärkste Bewegung (positiv) mit Volumen",
-        "filters": {"Change %": (1.5, 50.0), "RVOL": (0.8, 50.0)},
-        "logic": "Change > 1.5% + RVOL > 0.8 = echtes Kaufinteresse"
+        "description": "Stärkste positive Bewegung",
+        "filters": {"Change %": (1.0, 50.0)},
+        "logic": "Change > 1% = echtes Momentum für europäische Blue-Chips"
     },
     "🌍 Breakout": {
         "description": "Starker Ausbruch nach oben — Close nahe Tageshoch",
-        "filters": {"Change %": (2.0, 50.0), "RVOL": (0.8, 50.0), "Close Position": (0.65, 1.0)},
-        "logic": "Change > 2% + Close nahe High + Volumen = Ausbruch"
+        "filters": {"Change %": (1.5, 50.0), "Close Position": (0.65, 1.0)},
+        "logic": "Change > 1.5% + Close nahe High = bullischer Ausbruch"
     },
     "🌍 Breakdown": {
         "description": "Starker Abverkauf — Close nahe Tagestief",
-        "filters": {"Change %": (-50.0, -2.0), "RVOL": (0.8, 50.0), "Close Position": (0.0, 0.35)},
-        "logic": "Change < -2% + Close nahe Low = Verkaufsdruck"
+        "filters": {"Change %": (-50.0, -1.5), "Close Position": (0.0, 0.35)},
+        "logic": "Change < -1.5% + Close nahe Low = Verkaufsdruck"
     },
     "🌍 Dip Buy": {
-        "description": "Moderate Schwäche ohne Panik-Volumen — Kaufchance",
-        "filters": {"Change %": (-5.0, -1.0), "RVOL": (0.3, 2.5)},
-        "logic": "Change -1% bis -5% + normales Volumen = Rücksetzer, kein Crash"
+        "description": "Moderate Schwäche — potenzielle Kaufchance",
+        "filters": {"Change %": (-5.0, -0.5)},
+        "logic": "Change -0.5% bis -5% = Rücksetzer bei soliden Aktien"
     },
     "🌍 Volume Spike": {
-        "description": "Überdurchschnittliches Volumen mit Bewegung",
-        "filters": {"Change %": (1.0, 50.0), "RVOL": (1.5, 50.0)},
-        "logic": "RVOL > 1.5 + positive Bewegung = institutionelles Interesse"
+        "description": "Deutlich überdurchschnittliches Volumen (normalisiert nach Tageszeit)",
+        "filters": {"Change %": (0.5, 50.0), "RVOL": (0.4, 50.0)},
+        "logic": "RVOL > 0.4 (normalisiert) + positive Bewegung = erhöhtes Interesse. Bei EU-Aktien selten >1.0 untertags."
     },
     "🌍 Reversal": {
         "description": "Trendumkehr: Vortag stark gefallen, heute Bounce",
-        "filters": {"Vortag %": (-30.0, -2.0), "Change %": (1.0, 30.0)},
-        "logic": "Gestern -2%+, heute Erholung +1%+ = mögliche Wende"
+        "filters": {"Vortag %": (-30.0, -1.5), "Change %": (0.5, 30.0)},
+        "logic": "Gestern -1.5%+, heute Erholung +0.5%+ = mögliche Wende"
     },
     "🌍 Bull Flag": {
         "description": "Konsolidierung nach starkem Vortag — Momentum-Fortsetzung",
-        "filters": {"Vortag %": (2.0, 20.0), "Change %": (-1.5, 1.5)},
-        "logic": "Starker Vortag (+2%+), heute enge Range = Flagge bildet sich"
+        "filters": {"Vortag %": (1.5, 20.0), "Change %": (-1.0, 1.0)},
+        "logic": "Starker Vortag (+1.5%+), heute enge Range = Flagge bildet sich"
     },
     "🌍 Bear Flag": {
         "description": "Konsolidierung nach Abverkauf — Short-Setup",
-        "filters": {"Vortag %": (-20.0, -2.0), "Change %": (-1.5, 1.5)},
-        "logic": "Schwacher Vortag (-2%+), heute enge Range = Bear Flag"
+        "filters": {"Vortag %": (-20.0, -1.5), "Change %": (-1.0, 1.0)},
+        "logic": "Schwacher Vortag (-1.5%+), heute enge Range = Bear Flag"
     },
     "🌍 Big Movers": {
         "description": "Größte absolute Bewegungen des Tages",
-        "filters": {"Change %": (3.0, 100.0)},
-        "logic": "Change > 3% = signifikante Bewegung für europäische Verhältnisse"
+        "filters": {"Change %": (2.0, 100.0)},
+        "logic": "Change > 2% = signifikante Bewegung für europäische Verhältnisse"
     },
     "🌍 Whale Watch": {
-        "description": "Extremes Volumen — Big Player aktiv",
-        "filters": {"RVOL": (2.5, 50.0), "Change %": (1.0, 100.0)},
-        "logic": "RVOL > 2.5 + positive Richtung = institutionelles Kaufinteresse"
+        "description": "Extremes Volumen (normalisiert) — Big Player aktiv",
+        "filters": {"RVOL": (0.5, 50.0)},
+        "logic": "RVOL > 0.5 (normalisiert nach Tageszeit) = deutlich über Durchschnitt"
     },
 }
 
@@ -877,6 +877,7 @@ def apply_strategy(strategy_name, strategies_dict=None):
         st.session_state.active_filters = strategy["filters"].copy()
         st.session_state.current_strategy = strategy_name
         st.session_state.filter_reset_counter = st.session_state.get("filter_reset_counter", 0) + 1
+        st.session_state._strategy_just_applied = True  # Flag: Slider nicht rendern beim nächsten Rerun
         st.session_state.additional_filters = {
             "preis_min": 0.0, "preis_max": 100000.0,
             "nur_gewinner": False, "nur_verlierer": False,
@@ -10743,44 +10744,56 @@ with st.sidebar:
         # Dynamischer Key: Reset bei Strategiewechsel damit Slider neue Werte übernehmen
         _frc = st.session_state.get("filter_reset_counter", 0)
         
-        # Kopie der Filter für Anzeige
-        current_filters = st.session_state.active_filters.copy()
-        updated_filters = {}
-        
-        for filter_name, values in current_filters.items():
-            # Überspringe Insider-Filter (kein Slider)
-            if filter_name == "Insider":
-                updated_filters[filter_name] = values
-                continue
+        # WICHTIG: Wenn gerade Strategie gewechselt wurde, Slider NICHT rendern
+        # weil Streamlit sonst alte Widget-Werte zurückgibt und die Filter überschreibt.
+        # Stattdessen nur die aktuellen Filter-Werte anzeigen.
+        _just_switched = st.session_state.get("_strategy_just_applied", False)
+        if _just_switched:
+            st.session_state._strategy_just_applied = False
+            # Zeige Filter read-only (kein Slider = kein Override)
+            for filter_name, values in st.session_state.active_filters.items():
+                if isinstance(values, (tuple, list)) and len(values) == 2:
+                    st.caption(f"**{filter_name}:** {values[0]} bis {values[1]}")
+            st.caption("🔄 *Filter aktualisiert — nächster Scan nutzt neue Werte*")
+        else:
+            # Kopie der Filter für Anzeige
+            current_filters = st.session_state.active_filters.copy()
+            updated_filters = {}
             
-            # Prüfe ob values ein Tuple mit 2 Elementen ist
-            if not isinstance(values, (tuple, list)) or len(values) != 2:
-                updated_filters[filter_name] = values
-                continue
+            for filter_name, values in current_filters.items():
+                # Überspringe Insider-Filter (kein Slider)
+                if filter_name == "Insider":
+                    updated_filters[filter_name] = values
+                    continue
                 
-            if filter_name == "Close Position":
-                new_val = st.slider(
-                    f"{filter_name}", 0.0, 1.0, (float(values[0]), float(values[1])), 
-                    step=0.05, key=f"slider_{filter_name}_{_frc}"
-                )
-                updated_filters[filter_name] = new_val
-            elif filter_name == "Preis":
-                new_val = st.slider(
-                    f"{filter_name} ($)", 0.0, 10000.0, (float(values[0]), float(values[1])), 
-                    key=f"slider_{filter_name}_{_frc}"
-                )
-                updated_filters[filter_name] = new_val
-            else:
-                min_v = -100.0 if "%" in filter_name else 0.0
-                max_v = 100.0 if "%" in filter_name else 100.0
-                new_val = st.slider(
-                    filter_name, min_v, max_v, (float(values[0]), float(values[1])), 
-                    key=f"slider_{filter_name}_{_frc}"
-                )
-                updated_filters[filter_name] = new_val
-        
-        # Aktualisiere die Filter nach dem Rendern
-        st.session_state.active_filters = updated_filters
+                # Prüfe ob values ein Tuple mit 2 Elementen ist
+                if not isinstance(values, (tuple, list)) or len(values) != 2:
+                    updated_filters[filter_name] = values
+                    continue
+                    
+                if filter_name == "Close Position":
+                    new_val = st.slider(
+                        f"{filter_name}", 0.0, 1.0, (float(values[0]), float(values[1])), 
+                        step=0.05, key=f"slider_{filter_name}_{_frc}"
+                    )
+                    updated_filters[filter_name] = new_val
+                elif filter_name == "Preis":
+                    new_val = st.slider(
+                        f"{filter_name} ($)", 0.0, 10000.0, (float(values[0]), float(values[1])), 
+                        key=f"slider_{filter_name}_{_frc}"
+                    )
+                    updated_filters[filter_name] = new_val
+                else:
+                    min_v = -100.0 if "%" in filter_name else 0.0
+                    max_v = 100.0 if "%" in filter_name else 100.0
+                    new_val = st.slider(
+                        filter_name, min_v, max_v, (float(values[0]), float(values[1])), 
+                        key=f"slider_{filter_name}_{_frc}"
+                    )
+                    updated_filters[filter_name] = new_val
+            
+            # Aktualisiere die Filter nach dem Rendern
+            st.session_state.active_filters = updated_filters
         
         # Zusatzfilter kompakt
         with st.expander("🔧 Zusatzfilter"):
