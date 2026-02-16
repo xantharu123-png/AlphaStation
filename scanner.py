@@ -132,6 +132,8 @@ if "additional_filters" not in st.session_state:
     st.session_state.additional_filters = {}
 if "current_strategy" not in st.session_state:
     st.session_state.current_strategy = ""
+if "filter_reset_counter" not in st.session_state:
+    st.session_state.filter_reset_counter = 0
 if "market_type" not in st.session_state:
     st.session_state.market_type = "Krypto"
 if "active_trading_session" not in st.session_state:
@@ -509,6 +511,11 @@ STRATEGIES = {
 # FUTURES STRATEGIEN 📈
 # =============================================================================
 FUTURES_STRATEGIES = {
+    "📈 Alle zeigen": {
+        "description": "Alle Futures anzeigen — ohne Filter",
+        "filters": {},
+        "logic": "Kein Filter aktiv → zeige alle verfügbaren Futures"
+    },
     # =========================================================================
     # MOMENTUM STRATEGIEN (Any Time)
     # =========================================================================
@@ -572,6 +579,11 @@ FUTURES_STRATEGIES = {
 # FOREX STRATEGIEN 💱
 # =============================================================================
 FOREX_STRATEGIES = {
+    "💱 Alle zeigen": {
+        "description": "Alle Forex-Paare anzeigen — ohne Filter",
+        "filters": {},
+        "logic": "Kein Filter aktiv → zeige alle verfügbaren Paare"
+    },
     # =========================================================================
     # PIP-BASIERTE MOMENTUM STRATEGIEN (Any Time)
     # =========================================================================
@@ -653,6 +665,11 @@ FOREX_STRATEGIES = {
 # Typische Werte: 0.3-0.8 normal, >1.0 erhöht, >2.0 sehr hoch
 # =============================================================================
 CRYPTO_STRATEGIES = {
+    "🌐 Alle zeigen": {
+        "description": "Alle Krypto-Assets anzeigen — ohne Filter",
+        "filters": {},
+        "logic": "Kein Filter aktiv → zeige alle verfügbaren Coins"
+    },
     "Volume Surge": {
         "description": "Erhöhtes Volumen + starke Bewegung",
         "filters": {"RVOL": (1.0, 50.0), "Change %": (3.0, 100.0)},
@@ -859,6 +876,7 @@ def apply_strategy(strategy_name, strategies_dict=None):
         strategy = strategies_dict[strategy_name]
         st.session_state.active_filters = strategy["filters"].copy()
         st.session_state.current_strategy = strategy_name
+        st.session_state.filter_reset_counter = st.session_state.get("filter_reset_counter", 0) + 1
         st.session_state.additional_filters = {
             "preis_min": 0.0, "preis_max": 100000.0,
             "nur_gewinner": False, "nur_verlierer": False,
@@ -10674,6 +10692,9 @@ with st.sidebar:
     if st.session_state.active_filters:
         st.subheader("⚙️ Filter")
         
+        # Dynamischer Key: Reset bei Strategiewechsel damit Slider neue Werte übernehmen
+        _frc = st.session_state.get("filter_reset_counter", 0)
+        
         # Kopie der Filter für Anzeige
         current_filters = st.session_state.active_filters.copy()
         updated_filters = {}
@@ -10692,13 +10713,13 @@ with st.sidebar:
             if filter_name == "Close Position":
                 new_val = st.slider(
                     f"{filter_name}", 0.0, 1.0, (float(values[0]), float(values[1])), 
-                    step=0.05, key=f"slider_{filter_name}_{FILTER_VERSION}"
+                    step=0.05, key=f"slider_{filter_name}_{_frc}"
                 )
                 updated_filters[filter_name] = new_val
             elif filter_name == "Preis":
                 new_val = st.slider(
                     f"{filter_name} ($)", 0.0, 10000.0, (float(values[0]), float(values[1])), 
-                    key=f"slider_{filter_name}_{FILTER_VERSION}"
+                    key=f"slider_{filter_name}_{_frc}"
                 )
                 updated_filters[filter_name] = new_val
             else:
@@ -10706,7 +10727,7 @@ with st.sidebar:
                 max_v = 100.0 if "%" in filter_name else 100.0
                 new_val = st.slider(
                     filter_name, min_v, max_v, (float(values[0]), float(values[1])), 
-                    key=f"slider_{filter_name}_{FILTER_VERSION}"
+                    key=f"slider_{filter_name}_{_frc}"
                 )
                 updated_filters[filter_name] = new_val
         
