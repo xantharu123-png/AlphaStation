@@ -9902,7 +9902,7 @@ FOREX_PAIRS = {
     }
 }
 
-@st.cache_data(ttl=60)  # 1 Minute Cache
+#  KEIN CACHE - Filter kommen aus session_state
 def fetch_futures_data(category):
     """
     Holt Futures-Daten via Yahoo Finance API.
@@ -10018,7 +10018,7 @@ def fetch_futures_data(category):
         st.error(f"Futures Fehler: {e}")
         return [], 0, 0
 
-@st.cache_data(ttl=60)  # 1 Minute Cache
+#  KEIN CACHE - Filter kommen aus session_state
 def fetch_forex_data(category):
     """
     Holt Forex-Daten via Yahoo Finance API.
@@ -10149,7 +10149,7 @@ def fetch_forex_data(category):
         st.error(f"Forex Fehler: {e}")
         return [], 0, 0
 
-@st.cache_data(ttl=60)  # 1 Minute Cache
+#  KEIN CACHE - Filter kommen aus session_state
 def fetch_international_stock_data(exchange_code):
     """
     Holt Aktien-Daten von internationalen Börsen via Yahoo Finance API.
