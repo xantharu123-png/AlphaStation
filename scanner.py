@@ -9343,7 +9343,10 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0
                                min_volume=100000, progress_callback=None):
     """
     Backtest über ALLE US-Aktien mit Grouped Daily Bars.
-    1 API-Call pro Tag → tausende Aktien pro Tag.
+    
+    Zwei-Pass Ansatz:
+    1. Lade alle Tage → baue per-Ticker History auf
+    2. Scanne Signale und simuliere Trades mit vollständiger History
     """
     if strategies is None:
         strategies = list(BACKTEST_STRATEGY_RULES.keys())
@@ -9363,33 +9366,30 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0
     if not trading_days:
         return {s: [] for s in strategies}, 0
     
-    # Per-Ticker Tageshistorie aufbauen
+    # ============================================================
+    # PASS 1: Lade alle Tage und baue per-Ticker History auf
+    # ============================================================
     ticker_history = {}  # ticker → list of bars (chronologisch)
-    all_results = {s: [] for s in strategies}
     total_tickers_seen = set()
     
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
             progress_callback(
-                day_idx / len(trading_days), 
-                f"📅 Tag {day_idx+1}/{len(trading_days)}: {date_str}"
+                (day_idx / len(trading_days)) * 0.7,  # 70% für Laden
+                f"📥 Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
             )
         
-        # Hole ALLE Aktien für diesen Tag
         day_data = fetch_grouped_daily(poly_key, date_str)
         if not day_data:
             continue
         
-        # Für jeden Ticker: Bar zur History hinzufügen
         for ticker, r in day_data.items():
-            # Filter: Nur echte Aktien, keine OTC/Warrants
             if len(ticker) > 5 or "." in ticker:
                 continue
             
             price = r.get("c", 0)
             volume = r.get("v", 0)
             
-            # Min-Filter
             if price < min_price or volume < min_volume:
                 continue
             
@@ -9407,20 +9407,31 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0
             if ticker not in ticker_history:
                 ticker_history[ticker] = []
             ticker_history[ticker].append(bar)
-            
-            # Erst nach 22+ Tagen History (für RVOL Lookback) Signale prüfen
-            bars = ticker_history[ticker]
-            idx = len(bars) - 1
-            
-            if idx < 21 or date_str < test_start:
+    
+    # ============================================================
+    # PASS 2: Signale erkennen + Trades simulieren
+    # (Jetzt hat jeder Ticker seine VOLLSTÄNDIGE History)
+    # ============================================================
+    all_results = {s: [] for s in strategies}
+    tickers_with_data = [t for t, bars in ticker_history.items() if len(bars) >= 30]
+    
+    for t_idx, ticker in enumerate(tickers_with_data):
+        if progress_callback and t_idx % 500 == 0:
+            progress_callback(
+                0.7 + (t_idx / len(tickers_with_data)) * 0.3,  # 30% für Simulation
+                f"🔍 Scanne {ticker} ({t_idx+1}/{len(tickers_with_data)})"
+            )
+        
+        bars = ticker_history[ticker]
+        
+        for idx in range(21, len(bars)):
+            if bars[idx]["date"] < test_start:
                 continue
             
-            # Metriken berechnen
             metrics = compute_daily_metrics(bars, idx)
             if not metrics or metrics["price"] <= 0:
                 continue
             
-            # Jede Strategie prüfen
             for strat_name in strategies:
                 strat = BACKTEST_STRATEGY_RULES[strat_name]
                 if metrics["price"] < strat.get("min_price", 1.0):
@@ -9434,12 +9445,9 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0
                         trade["signal_change_pct"] = round(metrics["change_pct"], 2)
                         trade["signal_rvol"] = round(metrics["rvol"], 1)
                         all_results[strat_name].append(trade)
-        
-        # Memory-Management: Lösche alte History (behalte nur letzte 30 Tage)
-        if day_idx % 20 == 0 and day_idx > 0:
-            for t in list(ticker_history.keys()):
-                if len(ticker_history[t]) > 35:
-                    ticker_history[t] = ticker_history[t][-30:]
+    
+    # Memory aufräumen
+    del ticker_history
     
     if progress_callback:
         progress_callback(1.0, f"✅ Fertig! {len(total_tickers_seen)} Aktien gescannt")
@@ -9868,6 +9876,7 @@ def display_backtest_lab(poly_key):
     if use_grouped:
         st.caption("🔥 **ALLE US-Aktien** — Grouped Daily API scannt tausende Aktien pro Tag")
         st.caption(f"⏱️ Ca. {months * 22} API-Calls ({months * 22 // 5} Min bei Free Tier)")
+        st.caption("📊 Filter: Preis >$2, Volumen >500k/Tag, max 5-Zeichen Ticker")
     else:
         st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     
@@ -9899,7 +9908,7 @@ def display_backtest_lab(poly_key):
                     strategies=selected_strats,
                     months=months,
                     min_price=2.0,
-                    min_volume=100000,
+                    min_volume=500000,  # 500k/Tag min → ~3000-4000 Aktien
                     progress_callback=update_progress
                 )
                 st.session_state["backtest_n_tickers"] = n_tickers
