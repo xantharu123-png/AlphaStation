@@ -7788,40 +7788,74 @@ def get_spy_pm_change(poly_key):
 
 def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0):
     """
-    Klassifiziert das PM Setup in Kategorien.
+    Klassifiziert das PM Setup basierend auf Preis-Aktion + Position.
+    
+    Logik:
+    - pm_change > 0 + Position hoch = Momentum Long ✅
+    - pm_change > 0 + Position tief = Fading, Vorsicht ⚠️
+    - pm_change < 0 + Position tief = Schwäche, Short ✅
+    - pm_change < 0 + Position hoch = Bounced, NICHT shorten ⚠️
+    
     Returns: (setup_type, setup_emoji, setup_description)
     """
-    # GAP & GO: Großer Gap + Hält über Gap Level + Stärke
-    if abs(gap_pct) >= 5 and pm_position >= 70:
-        if pm_change > 0:
-            return ("GAP & GO", "🚀", "Gap Up + Holding High = Momentum Long")
-        else:
-            return ("GAP & FADE", "📉", "Gap Down + Weak = Short Momentum")
+    is_up = pm_change > 0
+    abs_change = abs(pm_change)
+    abs_gap = abs(gap_pct)
     
-    # SQUEEZE POTENTIAL: Große Bewegung + RS stark
-    if abs(pm_change) >= 10 and abs(rs_vs_spy) >= 5:
-        if pm_change > 0:
+    # === STARKE MOVES (>5%) ===
+    if abs_change >= 5:
+        if is_up and pm_position >= 70:
+            # Up + hält oben → Momentum Long
+            if abs_gap >= 5:
+                return ("GAP & GO", "🚀", "Gap Up + Holding High = Momentum Long")
+            return ("MOMENTUM", "🚀", "Strong Move + Holding = Long Momentum")
+        
+        if is_up and pm_position < 40:
+            # Up aber abverkauft → Fading
+            return ("FADING", "⚠️", "Gapped Up but Fading — Caution, kein Long!")
+        
+        if not is_up and pm_position <= 30:
+            # Down + sitzt am Low → Schwäche bestätigt
+            if abs_gap >= 5:
+                return ("GAP & FADE", "📉", "Gap Down + Near Low = Short Momentum")
+            return ("WEAKNESS", "📉", "Strong Selling + Near Low = Short Setup")
+        
+        if not is_up and pm_position >= 60:
+            # Down aber hat recovert → NICHT shorten
+            return ("BOUNCE", "🔄", "Gapped Down but Bounced — Wait for Rejection!")
+        
+        # Mitte der Range bei starkem Move
+        if is_up:
+            return ("CONTESTED", "⚔️", "Strong Up but Mid-Range — Wait for Direction")
+        else:
+            return ("CONTESTED", "⚔️", "Strong Down but Mid-Range — Watch for Break")
+    
+    # === SQUEEZE / EXTREME (>10% + starke RS) ===
+    if abs_change >= 10 and abs(rs_vs_spy) >= 5:
+        if is_up:
             return ("SQUEEZE", "💥", "Extreme Move + Relative Strength = Possible Squeeze")
         else:
             return ("CAPITULATION", "🔻", "Extreme Selling = Watch for Reversal")
     
-    # CONTINUATION: Moderate Bewegung in Trendrichtung
-    if 3 <= abs(pm_change) < 10 and pm_position >= 60:
-        if pm_change > 0:
-            return ("CONTINUATION", "📈", "Steady Uptrend - Wait for Pullback or Break")
-        else:
-            return ("CONTINUATION", "📉", "Steady Downtrend - Wait for Bounce or Break")
+    # === MODERATE MOVES (3-5%) ===
+    if 3 <= abs_change < 5:
+        if is_up and pm_position >= 65:
+            return ("CONTINUATION", "📈", "Steady Uptrend — Wait for Pullback Entry")
+        if is_up and pm_position < 35:
+            return ("FADING", "⚠️", "Moderate Up but Fading — No Long Entry")
+        if not is_up and pm_position <= 35:
+            return ("CONTINUATION", "📉", "Steady Selling — Wait for Bounce or Break")
+        if not is_up and pm_position >= 65:
+            return ("RECOVERY", "🔄", "Down but Recovering — Don't Short Here")
     
-    # REVERSAL WATCH: Große Bewegung aber verliert Momentum
-    if abs(pm_change) >= 5 and pm_position < 40:
-        if pm_change > 0:
-            return ("REVERSAL WATCH", "⚠️", "Gapped Up but Fading - Caution!")
-        else:
-            return ("BOUNCE WATCH", "⚠️", "Gapped Down but Bouncing - Watch!")
-    
-    # RANGE PLAY: Moderate Bewegung, Mitte der Range
-    if 2 <= abs(pm_change) < 5 and 30 <= pm_position <= 70:
-        return ("RANGE", "↔️", "Choppy - Wait for Direction")
+    # === KLEINE MOVES (2-3%) ===
+    if 2 <= abs_change < 3:
+        if 35 <= pm_position <= 65:
+            return ("RANGE", "↔️", "Choppy — Wait for Direction")
+        if is_up and pm_position >= 65:
+            return ("MILD STRENGTH", "📈", "Slight Up Bias — Watch for Catalyst")
+        if not is_up and pm_position <= 35:
+            return ("MILD WEAKNESS", "📉", "Slight Down Bias — Watch for Catalyst")
     
     # DEFAULT
     return ("WATCH", "👀", "Monitor for Setup Development")
@@ -8435,7 +8469,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                     with col3:
                         signal = item['Entry_Signal']
                         if "OR BREAK" in signal:
-                            st.success(signal)
+                            st.error(signal)  # Rot für Short Breakdown
                         elif "WATCH" in signal:
                             st.info(signal)
                         else:
