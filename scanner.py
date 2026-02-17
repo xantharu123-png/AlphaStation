@@ -201,17 +201,17 @@ STRATEGIES = {
     },
     "Breakout Long": {
         "description": "Momentum-Ausbruch mit Volumen-Bestätigung",
-        "filters": {"Change %": (5.0, 50.0), "RVOL": (2.0, 50.0), "Close Position": (0.65, 1.0)},
-        "logic": "Starker Anstieg + hohes Volumen + Close nahe High (0.65 statt 0.75 für frühe Erkennung)"
+        "filters": {"Change %": (3.0, 50.0), "RVOL": (1.5, 50.0), "Close Position": (0.65, 1.0)},
+        "logic": "Anstieg 3%+ mit erhöhtem Volumen + Close nahe High"
     },
     "Breakdown Short": {
         "description": "Abverkauf mit Volumen - Short-Chance",
-        "filters": {"Change %": (-50.0, -5.0), "RVOL": (2.0, 50.0), "Close Position": (0.0, 0.35)},
-        "logic": "Starker Abverkauf + hohes Volumen + Close nahe Low (0.35 statt 0.25 für frühe Erkennung)"
+        "filters": {"Change %": (-50.0, -3.0), "RVOL": (1.5, 50.0), "Close Position": (0.0, 0.35)},
+        "logic": "Abverkauf -3%+ mit erhöhtem Volumen + Close nahe Low"
     },
     "Penny Rockets": {
         "description": "Günstige Aktien mit explosivem Volumen (min $100k Volumen)",
-        "filters": {"Preis": (0.10, 5.0), "RVOL": (3.0, 100.0), "Change %": (5.0, 100.0)},
+        "filters": {"Preis": (0.10, 5.0), "RVOL": (3.0, 100.0), "Change %": (3.0, 100.0)},
         "logic": "Lowcaps unter $5 mit extremem Interesse - NUR liquide!",
         "min_dollar_volume": 100000
     },
@@ -228,18 +228,18 @@ STRATEGIES = {
     },
     "Early Momentum": {
         "description": "Starker Tagesstart mit Volumen - Preis hält sich oben",
-        "filters": {"Change %": (4.0, 30.0), "RVOL": (2.0, 50.0), "Close Position": (0.6, 1.0), "Preis": (5.0, 500.0)},
-        "logic": "Change > 4% + RVOL > 2 + Close nahe High = echtes Momentum (nicht Pump & Dump)"
+        "filters": {"Change %": (3.0, 30.0), "RVOL": (1.5, 50.0), "Close Position": (0.6, 1.0), "Preis": (5.0, 500.0)},
+        "logic": "Change > 3% + RVOL > 1.5 + Close nahe High = echtes Momentum"
     },
     "Whale Watch": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
-        "filters": {"RVOL": (5.0, 100.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 5.0 + Change > 3% = institutionelles Interesse mit klarer Richtung"
+        "filters": {"RVOL": (3.0, 100.0), "Change %": (2.0, 100.0)},
+        "logic": "RVOL > 3.0 + Change > 2% = institutionelles Interesse mit klarer Richtung"
     },
     "Whale Watch Short 🐻": {
         "description": "Extremes Volumen + Abverkauf - Big Player verkaufen",
-        "filters": {"RVOL": (5.0, 100.0), "Change %": (-100.0, -3.0)},
-        "logic": "RVOL > 5.0 + Change < -3% = institutioneller Verkaufsdruck"
+        "filters": {"RVOL": (3.0, 100.0), "Change %": (-100.0, -2.0)},
+        "logic": "RVOL > 3.0 + Change < -2% = institutioneller Verkaufsdruck"
     },
     # =========================================================================
     # PRE-MARKET STRATEGIEN 🌅 - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
