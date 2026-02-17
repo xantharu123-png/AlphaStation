@@ -9295,34 +9295,49 @@ BACKTEST_STRATEGY_RULES = {
 def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
     """
     Holt tägliche OHLCV-Daten von Polygon für Backtesting.
+    Includes retry logic für Rate Limits (429).
     """
     url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
     params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": poly_key}
     
-    try:
-        resp = rate_limited_get(url, params=params, timeout=15)
-        data = resp.json()
-        
-        if data.get("status") != "OK" or not data.get("results"):
-            return []
-        
-        bars = []
-        for r in data["results"]:
-            ts = r.get("t", 0)
-            dt = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
-            bars.append({
-                "date": dt,
-                "open": r.get("o", 0),
-                "high": r.get("h", 0),
-                "low": r.get("l", 0),
-                "close": r.get("c", 0),
-                "volume": r.get("v", 0),
-                "vwap": r.get("vw", 0)
-            })
-        
-        return bars
-    except Exception as e:
-        return []
+    for attempt in range(3):  # Max 3 Versuche
+        try:
+            resp = rate_limited_get(url, params=params, timeout=15)
+            
+            if resp.status_code == 429:
+                # Rate limited → warten und nochmal
+                time.sleep(12 + attempt * 5)
+                continue
+            
+            if resp.status_code != 200:
+                return []
+            
+            data = resp.json()
+            
+            if data.get("status") != "OK" or not data.get("results"):
+                return []
+            
+            bars = []
+            for r in data["results"]:
+                ts = r.get("t", 0)
+                dt = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
+                bars.append({
+                    "date": dt,
+                    "open": r.get("o", 0),
+                    "high": r.get("h", 0),
+                    "low": r.get("l", 0),
+                    "close": r.get("c", 0),
+                    "volume": r.get("v", 0),
+                    "vwap": r.get("vw", 0)
+                })
+            
+            return bars
+        except Exception:
+            if attempt < 2:
+                time.sleep(5)
+            continue
+    
+    return []
 
 
 def fetch_grouped_daily(poly_key, date_str):
@@ -9738,6 +9753,9 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     ticker_data_cache = {}
     
     total_tickers = len(tickers)
+    skipped_no_data = 0
+    skipped_too_short = 0
+    total_signals = 0
     
     for t_idx, ticker in enumerate(tickers):
         if progress_callback:
@@ -9746,10 +9764,13 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
         # Daten holen (mit Cache)
         if ticker not in ticker_data_cache:
             bars = fetch_backtest_daily_data(poly_key, ticker, start_date, end_date)
+            if not bars:
+                skipped_no_data += 1
+                continue
             if len(bars) < 30:
+                skipped_too_short += 1
                 continue
             ticker_data_cache[ticker] = bars
-            # rate_limited_get handles API rate limiting
         
         bars = ticker_data_cache[ticker]
         
@@ -9777,6 +9798,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
                 
                 # Signal prüfen
                 if check_signal(metrics, strat["signal"]):
+                    total_signals += 1
                     # Trade simulieren
                     trade = simulate_trade(bars, idx, strat)
                     if trade:
@@ -9787,7 +9809,8 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
                         all_results[strat_name].append(trade)
     
     if progress_callback:
-        progress_callback(1.0, "✅ Backtest abgeschlossen!")
+        loaded = len(ticker_data_cache)
+        progress_callback(1.0, f"✅ Fertig! {loaded} geladen, {skipped_no_data} keine Daten, {skipped_too_short} zu kurz, {total_signals} Signale")
     
     return all_results
 
@@ -9936,6 +9959,33 @@ def display_backtest_lab(poly_key):
                     progress_callback=update_progress
                 )
                 st.session_state["backtest_n_tickers"] = len(tickers)
+                
+                # Debug-Info anzeigen
+                _total_trades = sum(len(t) for t in results.values())
+                if _total_trades == 0 and tickers:
+                    _dbg_start = (datetime.now() - timedelta(days=months * 30 + 30)).strftime("%Y-%m-%d")
+                    _dbg_end = datetime.now().strftime("%Y-%m-%d")
+                    _dbg_bars = fetch_backtest_daily_data(poly_key, tickers[0], _dbg_start, _dbg_end)
+                    with st.expander("🔍 Debug: 0 Trades — was ist passiert?", expanded=True):
+                        st.write(f"**Test-Ticker:** {tickers[0]} | Zeitraum: {_dbg_start} → {_dbg_end}")
+                        st.write(f"**Bars geladen:** {len(_dbg_bars)}")
+                        if _dbg_bars:
+                            st.write(f"Erster: {_dbg_bars[0]['date']} | Letzter: {_dbg_bars[-1]['date']}")
+                            _test_start_str = (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+                            _sigs = 0
+                            for _i in range(21, len(_dbg_bars)):
+                                if _dbg_bars[_i]["date"] < _test_start_str:
+                                    continue
+                                _m = compute_daily_metrics(_dbg_bars, _i)
+                                if _m:
+                                    for _sn in selected_strats:
+                                        if check_signal(_m, BACKTEST_STRATEGY_RULES[_sn]["signal"]):
+                                            _sigs += 1
+                                            if _sigs <= 3:
+                                                st.write(f"  Signal: {_sn} am {_dbg_bars[_i]['date']} | Chg={_m['change_pct']:.1f}% RVOL={_m['rvol']:.1f} ClosePos={_m['close_pos']:.2f}")
+                            st.write(f"**Signale für {tickers[0]}:** {_sigs}")
+                        else:
+                            st.error(f"⚠️ Polygon liefert KEINE Daten für {tickers[0]}! API-Key prüfen.")
         
         # Ergebnisse in Session State speichern
         st.session_state["backtest_results"] = results
