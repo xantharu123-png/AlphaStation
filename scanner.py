@@ -29,7 +29,7 @@ import json
 import pytz
 import numpy as np
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
@@ -5758,10 +5758,32 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             "current_price": current_price
         }
         
-        # PDH/PDL/PDC
-        pdh = period_high
-        pdl = period_low
-        pdc = closes[-1]
+        # PDH/PDL/PDC — Echte Previous Day Berechnung
+        # Gruppiere Bars nach Datum, finde den vorletzten TAG
+        from collections import defaultdict
+        day_bars = defaultdict(list)
+        for d in ohlcv:
+            ts = d.get("time", 0)
+            if ts > 1e10:  # ms → s
+                ts = ts / 1000
+            try:
+                day_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d") if ts > 0 else "unknown"
+            except Exception:
+                day_str = "unknown"
+            day_bars[day_str].append(d)
+        
+        sorted_days = sorted([k for k in day_bars.keys() if k != "unknown"])
+        
+        if len(sorted_days) >= 2:
+            prev_day_key = sorted_days[-2]  # Vorgestriger Tag
+            prev_bars = day_bars[prev_day_key]
+            pdh = max(b["high"] for b in prev_bars)
+            pdl = min(b["low"] for b in prev_bars)
+            pdc = prev_bars[-1]["close"]
+        else:
+            pdh = period_high
+            pdl = period_low
+            pdc = closes[-1]
         
         # Fib Levels für separate Anzeige (nutze die verbesserten Swing Punkte)
         fib_levels = {
@@ -6108,10 +6130,16 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     
     total_candles = len(ohlc_data)
     
-    # PDH/PDL/PDC (letzte Candle)
-    prev_day_high = highs[-1] if highs else 0
-    prev_day_low = lows[-1] if lows else 0
-    prev_day_close = closes[-1] if closes else 0
+    # PDH/PDL/PDC — Echte Previous Day Berechnung
+    # ohlc_data ist Daily → vorletzte Candle = gestern
+    if total_candles >= 2:
+        prev_day_high = ohlc_data[-2][2]    # Vorletzte Candle High
+        prev_day_low = ohlc_data[-2][3]     # Vorletzte Candle Low
+        prev_day_close = ohlc_data[-2][4]   # Vorletzte Candle Close
+    else:
+        prev_day_high = highs[-1] if highs else 0
+        prev_day_low = lows[-1] if lows else 0
+        prev_day_close = closes[-1] if closes else 0
     
     # Period High und Low
     period_high = max(highs)
