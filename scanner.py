@@ -7992,57 +7992,29 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     )
                     
                     # ============================================================
-                    # TRADE SETUPS — Multiple Strategies per Position
+                    # TRADE SETUPS — Basierend auf ECHTEN Marktstruktur-Leveln
                     # ============================================================
-                    # Statt immer Breakout: Setup-Typ basiert auf PM-Position
-                    # und bietet 2 Setups: Primary + Alternative
-                    #
-                    # LONG:
-                    #   Position >= 75% → Primary: Breakout, Alt: VWAP Pullback
-                    #   Position 40-74% → Primary: VWAP Pullback, Alt: Breakout
-                    #   Position < 40%  → Primary: Support Retest, Alt: VWAP Pullback
-                    #
-                    # Alle Stops: Hard Cap 2-10% Risk
+                    # Stop: Unter echtem Support (PM Low, VWAP, PDH/PDL)
+                    # TP: Nächste Resistenz oder Measured Move
+                    # Kein künstliches 2% Minimum — echte Level bestimmen Risk
                     # ============================================================
                     
-                    min_risk_pct = 0.02   # 2% Floor
-                    max_risk_pct = 0.10   # 10% Ceiling
+                    pdh = cand.get("pdh", 0)
+                    pdl = cand.get("pdl", 0)
                     
-                    # Fibonacci Levels der PM Range
+                    # Fibonacci der PM Range
                     fib_382 = pm_low + pm_range * 0.382
                     fib_500 = pm_low + pm_range * 0.500
                     fib_618 = pm_low + pm_range * 0.618
                     
-                    # Helper: Clamp Stop innerhalb 2-10% Risk
-                    def clamp_stop_long(entry, raw_stop):
-                        """Stellt sicher dass Long-Stop im 2-10% Korridor liegt"""
-                        risk = entry - raw_stop
-                        min_r = entry * min_risk_pct
-                        max_r = entry * max_risk_pct
-                        if risk < min_r:
-                            return entry - min_r
-                        elif risk > max_r:
-                            return entry - max_r
-                        return raw_stop
-                    
-                    def clamp_stop_short(entry, raw_stop):
-                        """Stellt sicher dass Short-Stop im 2-10% Korridor liegt"""
-                        risk = raw_stop - entry
-                        min_r = entry * min_risk_pct
-                        max_r = entry * max_risk_pct
-                        if risk < min_r:
-                            return entry + min_r
-                        elif risk > max_r:
-                            return entry + max_r
-                        return raw_stop
-                    
-                    setups = []  # Liste von (name, entry, stop, desc)
+                    setups = []
                     
                     if cand["pm_change"] > 0:  # === LONG ===
                         
-                        # Setup 1: BREAKOUT — Entry am PM High
+                        # --- Setup 1: BREAKOUT — Entry über PM High ---
                         brk_entry = pm_high
-                        brk_stop = clamp_stop_long(brk_entry, pm_vwap - (brk_entry * 0.003))
+                        # Stop: Unter VWAP (echtes Niveau wo Käufer aktiv waren)
+                        brk_stop = round(pm_vwap - pm_range * 0.05, 2)  # Knapp unter VWAP
                         setups.append({
                             "name": "Breakout",
                             "emoji": "🚀",
@@ -8051,11 +8023,10 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             "stop": brk_stop,
                         })
                         
-                        # Setup 2: VWAP PULLBACK — Entry am VWAP nach Rücksetzer
+                        # --- Setup 2: VWAP PULLBACK — Entry am VWAP ---
                         vwap_entry = pm_vwap
-                        # Stop unter PM Midpoint oder Fib 38.2%
-                        vwap_raw_stop = min(fib_382, pm_low + pm_range * 0.20)
-                        vwap_stop = clamp_stop_long(vwap_entry, vwap_raw_stop)
+                        # Stop: Unter PM Low (echte Struktur-Unterstützung)
+                        vwap_stop = round(pm_low - pm_range * 0.05, 2)  # Knapp unter PM Low
                         setups.append({
                             "name": "VWAP Pullback",
                             "emoji": "🔄",
@@ -8064,20 +8035,18 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             "stop": vwap_stop,
                         })
                         
-                        # Setup 3: SUPPORT RETEST — Entry an PDH oder Fib 61.8%
-                        pdh = cand.get("pdh", 0)
+                        # --- Setup 3: SUPPORT RETEST — Entry an PDH oder Fib ---
                         if pdh > 0 and pdh < pm_high and pdh > pm_low:
                             retest_entry = pdh
                             retest_label = f"PDH ${pdh:.2f}"
-                        elif fib_618 < pm_high * 0.95:
-                            retest_entry = fib_618
-                            retest_label = f"Fib 61.8% ${fib_618:.2f}"
+                            # Stop: Unter PrevClose oder PDL
+                            retest_stop = round(min(prev_close, pdl) - pm_range * 0.05, 2) if pdl > 0 else round(prev_close - pm_range * 0.10, 2)
                         else:
                             retest_entry = fib_500
                             retest_label = f"Fib 50% ${fib_500:.2f}"
+                            # Stop: Unter PM Low
+                            retest_stop = round(pm_low - pm_range * 0.10, 2)
                         
-                        retest_raw_stop = retest_entry - pm_range * 0.20
-                        retest_stop = clamp_stop_long(retest_entry, retest_raw_stop)
                         setups.append({
                             "name": "Support Retest",
                             "emoji": "📐",
@@ -8086,24 +8055,48 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             "stop": retest_stop,
                         })
                         
-                        # Wähle Primary + Alternative basierend auf Position
+                        # Primary/Alt Auswahl basierend auf Position
                         if pm_position >= 75:
-                            primary_idx, alt_idx = 0, 1  # Breakout, VWAP Pullback
+                            primary_idx, alt_idx = 0, 1  # Breakout, VWAP
                             entry_signal = "🎯 OR BREAK"
                         elif pm_position >= 40:
-                            primary_idx, alt_idx = 1, 0  # VWAP Pullback, Breakout
+                            primary_idx, alt_idx = 1, 0  # VWAP, Breakout
                             entry_signal = "🔄 PULLBACK"
                         else:
-                            primary_idx, alt_idx = 2, 1  # Support Retest, VWAP Pullback
+                            primary_idx, alt_idx = 2, 1  # Retest, VWAP
                             entry_signal = "📐 RETEST"
                         
                         entry_detail = setups[primary_idx]["desc"]
+                        
+                        # === TARGETS für LONG ===
+                        for s in setups:
+                            s["risk"] = max(s["entry"] - s["stop"], s["entry"] * 0.005)  # Min 0.5% risk
+                            
+                            # TP1: Measured Move (PM Range von Entry) oder nächste Resistenz
+                            tp1_measured = s["entry"] + pm_range
+                            # TP2: Extended Move (2x PM Range) oder Fib Extension
+                            tp2_extended = s["entry"] + pm_range * 2.0
+                            
+                            # Für Breakout: Mindestens PM Range nach oben
+                            # Für Pullback: PM High ist TP1, darüber TP2
+                            if s["name"] == "Breakout":
+                                s["tp1"] = round(tp1_measured, 2)
+                                s["tp2"] = round(tp2_extended, 2)
+                            elif s["name"] == "VWAP Pullback":
+                                s["tp1"] = round(pm_high, 2)  # PM High als erstes Ziel
+                                s["tp2"] = round(pm_high + pm_range * 0.5, 2)  # Über PM High hinaus
+                            else:  # Support Retest
+                                s["tp1"] = round(pm_high, 2)  # PM High
+                                s["tp2"] = round(pm_high + pm_range * 0.5, 2)
+                            
+                            s["risk_pct"] = s["risk"] / s["entry"] * 100 if s["entry"] > 0 else 0
                     
                     else:  # === SHORT ===
                         
-                        # Setup 1: BREAKDOWN — Entry am PM Low
+                        # --- Setup 1: BREAKDOWN — Entry unter PM Low ---
                         brk_entry = pm_low
-                        brk_stop = clamp_stop_short(brk_entry, pm_vwap + (brk_entry * 0.003))
+                        # Stop: Über VWAP
+                        brk_stop = round(pm_vwap + pm_range * 0.05, 2)
                         setups.append({
                             "name": "Breakdown",
                             "emoji": "💥",
@@ -8112,10 +8105,10 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             "stop": brk_stop,
                         })
                         
-                        # Setup 2: VWAP REJECTION — Entry am VWAP nach Bounce
+                        # --- Setup 2: VWAP REJECTION — Short am VWAP ---
                         vwap_entry = pm_vwap
-                        vwap_raw_stop = max(fib_618, pm_high - pm_range * 0.20)
-                        vwap_stop = clamp_stop_short(vwap_entry, vwap_raw_stop)
+                        # Stop: Über PM High
+                        vwap_stop = round(pm_high + pm_range * 0.05, 2)
                         setups.append({
                             "name": "VWAP Rejection",
                             "emoji": "🔄",
@@ -8124,20 +8117,16 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             "stop": vwap_stop,
                         })
                         
-                        # Setup 3: RESISTANCE RETEST
-                        pdl = cand.get("pdl", 0)
+                        # --- Setup 3: RESISTANCE RETEST ---
                         if pdl > 0 and pdl > pm_low and pdl < pm_high:
                             retest_entry = pdl
                             retest_label = f"PDL ${pdl:.2f}"
-                        elif fib_382 > pm_low * 1.05:
-                            retest_entry = fib_382
-                            retest_label = f"Fib 38.2% ${fib_382:.2f}"
+                            retest_stop = round(max(prev_close, pdh) + pm_range * 0.05, 2) if pdh > 0 else round(prev_close + pm_range * 0.10, 2)
                         else:
                             retest_entry = fib_500
                             retest_label = f"Fib 50% ${fib_500:.2f}"
+                            retest_stop = round(pm_high + pm_range * 0.10, 2)
                         
-                        retest_raw_stop = retest_entry + pm_range * 0.20
-                        retest_stop = clamp_stop_short(retest_entry, retest_raw_stop)
                         setups.append({
                             "name": "Resistance Retest",
                             "emoji": "📐",
@@ -8157,18 +8146,25 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             entry_signal = "📐 RETEST"
                         
                         entry_detail = setups[primary_idx]["desc"]
-                    
-                    # Berechne Targets für alle Setups
-                    for s in setups:
-                        if cand["pm_change"] > 0:
-                            s["risk"] = s["entry"] - s["stop"]
-                            s["tp1"] = s["entry"] + s["risk"] * 1.5
-                            s["tp2"] = s["entry"] + s["risk"] * 2.5
-                        else:
-                            s["risk"] = s["stop"] - s["entry"]
-                            s["tp1"] = s["entry"] - s["risk"] * 1.5
-                            s["tp2"] = s["entry"] - s["risk"] * 2.5
-                        s["risk_pct"] = s["risk"] / s["entry"] * 100 if s["entry"] > 0 else 0
+                        
+                        # === TARGETS für SHORT ===
+                        for s in setups:
+                            s["risk"] = max(s["stop"] - s["entry"], s["entry"] * 0.005)
+                            
+                            tp1_measured = s["entry"] - pm_range
+                            tp2_extended = s["entry"] - pm_range * 2.0
+                            
+                            if s["name"] == "Breakdown":
+                                s["tp1"] = round(tp1_measured, 2)
+                                s["tp2"] = round(tp2_extended, 2)
+                            elif s["name"] == "VWAP Rejection":
+                                s["tp1"] = round(pm_low, 2)
+                                s["tp2"] = round(pm_low - pm_range * 0.5, 2)
+                            else:
+                                s["tp1"] = round(pm_low, 2)
+                                s["tp2"] = round(pm_low - pm_range * 0.5, 2)
+                            
+                            s["risk_pct"] = s["risk"] / s["entry"] * 100 if s["entry"] > 0 else 0
                     
                     # Primary Setup für die Hauptanzeige
                     primary = setups[primary_idx]
@@ -8389,9 +8385,11 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                             with sc2:
                                 st.metric("Stop", f"${setup['stop']:.2f}")
                             with sc3:
-                                st.metric("TP1 (1.5R)", f"${setup['tp1']:.2f}")
+                                _tp1_r = (setup['tp1'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp1'] else 0
+                                st.metric(f"TP1 ({abs(_tp1_r):.1f}R)", f"${setup['tp1']:.2f}")
                             with sc4:
-                                st.metric("TP2 (2.5R)", f"${setup['tp2']:.2f}")
+                                _tp2_r = (setup['tp2'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp2'] else 0
+                                st.metric(f"TP2 ({abs(_tp2_r):.1f}R)", f"${setup['tp2']:.2f}")
                             st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
                             
                             if si < len(all_setups) - 1:
@@ -8486,9 +8484,11 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                             with sc2:
                                 st.metric("Stop", f"${setup['stop']:.2f}")
                             with sc3:
-                                st.metric("TP1 (1.5R)", f"${setup['tp1']:.2f}")
+                                _tp1_r = (setup['tp1'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp1'] else 0
+                                st.metric(f"TP1 ({abs(_tp1_r):.1f}R)", f"${setup['tp1']:.2f}")
                             with sc4:
-                                st.metric("TP2 (2.5R)", f"${setup['tp2']:.2f}")
+                                _tp2_r = (setup['tp2'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp2'] else 0
+                                st.metric(f"TP2 ({abs(_tp2_r):.1f}R)", f"${setup['tp2']:.2f}")
                             st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
                             
                             if si < len(all_setups) - 1:
@@ -9300,21 +9300,33 @@ def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
     url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
     params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": poly_key}
     
-    for attempt in range(3):  # Max 3 Versuche
+    for attempt in range(3):
         try:
             resp = rate_limited_get(url, params=params, timeout=15)
             
             if resp.status_code == 429:
-                # Rate limited → warten und nochmal
                 time.sleep(12 + attempt * 5)
                 continue
             
             if resp.status_code != 200:
+                # Speichere Fehler für Debug-Anzeige
+                _err = f"{ticker}: HTTP {resp.status_code}"
+                try:
+                    _err += f" | {resp.text[:150]}"
+                except:
+                    pass
+                if not hasattr(fetch_backtest_daily_data, '_errors'):
+                    fetch_backtest_daily_data._errors = []
+                fetch_backtest_daily_data._errors = (fetch_backtest_daily_data._errors + [_err])[-5:]
                 return []
             
             data = resp.json()
             
             if data.get("status") != "OK" or not data.get("results"):
+                _err = f"{ticker}: status={data.get('status')} results={data.get('resultsCount',0)} | {data.get('error','')}{data.get('message','')}"
+                if not hasattr(fetch_backtest_daily_data, '_errors'):
+                    fetch_backtest_daily_data._errors = []
+                fetch_backtest_daily_data._errors = (fetch_backtest_daily_data._errors + [_err])[-5:]
                 return []
             
             bars = []
@@ -9330,9 +9342,8 @@ def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
                     "volume": r.get("v", 0),
                     "vwap": r.get("vw", 0)
                 })
-            
             return bars
-        except Exception:
+        except Exception as e:
             if attempt < 2:
                 time.sleep(5)
             continue
@@ -9986,6 +9997,11 @@ def display_backtest_lab(poly_key):
                             st.write(f"**Signale für {tickers[0]}:** {_sigs}")
                         else:
                             st.error(f"⚠️ Polygon liefert KEINE Daten für {tickers[0]}! API-Key prüfen.")
+                            # Zeige gespeicherte API-Fehler
+                            if hasattr(fetch_backtest_daily_data, '_errors') and fetch_backtest_daily_data._errors:
+                                st.write("**API Fehler-Log:**")
+                                for _e in fetch_backtest_daily_data._errors:
+                                    st.code(_e)
         
         # Ergebnisse in Session State speichern
         st.session_state["backtest_results"] = results
