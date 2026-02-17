@@ -9160,7 +9160,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Breakdown Short": {
         "direction": "short",
@@ -9174,7 +9174,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Gap Up Momentum": {
         "direction": "long",
@@ -9188,7 +9188,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 2,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Gap Down Short": {
         "direction": "short",
@@ -9202,27 +9202,27 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 2,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Dip Buy": {
         "direction": "long",
-        "description": "Rücksetzer: -2% bis -8%, kein Panik-Volumen",
+        "description": "Rücksetzer: -3% bis -8%, normales Volumen",
         "signal": {
-            "change_pct_min": -8.0, "change_pct_max": -2.0,
-            "rvol_max": 3.0
+            "change_pct_min": -8.0, "change_pct_max": -3.0,
+            "rvol_max": 2.5
         },
         "entry": "at_close",
         "stop_pct": 0.04,
         "tp1_rr": 1.5,
         "tp2_rr": 3.0,
         "max_hold_days": 5,
-        "min_price": 5.0
+        "min_price": 10.0
     },
     "Reversal Hunter": {
         "direction": "long",
-        "description": "Bounce nach Abverkauf: Vortag <-3%, heute >+2%",
+        "description": "Bounce nach Abverkauf: Vortag <-4%, heute >+2%",
         "signal": {
-            "prev_change_pct_max": -3.0,
+            "prev_change_pct_max": -4.0,
             "change_pct_min": 2.0
         },
         "entry": "at_close",
@@ -9230,7 +9230,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Bull Flag": {
         "direction": "long",
@@ -9245,7 +9245,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Volume Surge": {
         "direction": "long",
@@ -9259,7 +9259,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 3,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Early Momentum": {
         "direction": "long",
@@ -9273,7 +9273,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.0,
         "tp2_rr": 2.0,
         "max_hold_days": 2,
-        "min_price": 2.0
+        "min_price": 5.0
     },
     "Whale Watch": {
         "direction": "long",
@@ -9287,7 +9287,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 3,
-        "min_price": 2.0
+        "min_price": 5.0
     }
 }
 
@@ -9339,7 +9339,7 @@ def fetch_grouped_daily(poly_key, date_str):
         return {}
 
 
-def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0, 
+def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0, 
                                min_volume=100000, progress_callback=None):
     """
     Backtest über ALLE US-Aktien mit Grouped Daily Bars.
@@ -9385,6 +9385,19 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0
         
         for ticker, r in day_data.items():
             if len(ticker) > 5 or "." in ticker:
+                continue
+            
+            # Leveraged/Inverse ETFs und Krypto-ETPs rausfiltern
+            _t = ticker.upper()
+            _skip_prefixes = (
+                "TQQQ","SQQQ","SOXL","SOXS","LABU","LABD","SPXL","SPXS",
+                "UPRO","SPXU","UVXY","SVXY","NUGT","DUST","JNUG","JDST",
+                "FNGU","FNGD","TECL","TECS","BULZ","BERZ","GUSH","DRIP",
+                "FAS","FAZ","UDOW","SDOW","YANG","YINN","ERX","ERY",
+                "XRPT","XXRP","XETH","BITO","GBTC","ETHE","BITW","CONL",
+                "MSOX","BTFX","SOLT","NEBX","AREC","MAXI","TNA","TZA"
+            )
+            if any(_t.startswith(p) for p in _skip_prefixes):
                 continue
             
             price = r.get("c", 0)
@@ -9540,14 +9553,6 @@ def check_signal(metrics, signal_rules):
 def simulate_trade(bars, signal_idx, strategy):
     """
     Simuliert einen Trade basierend auf Signal-Tag und Strategie-Regeln.
-    
-    Args:
-        bars: Alle täglichen Bars
-        signal_idx: Index des Signal-Tags in bars
-        strategy: Strategie-Definition aus BACKTEST_STRATEGY_RULES
-    
-    Returns:
-        dict mit Trade-Ergebnis oder None
     """
     direction = strategy["direction"]
     entry_type = strategy["entry"]
@@ -9568,7 +9573,6 @@ def simulate_trade(bars, signal_idx, strategy):
         entry_price = signal_day["close"]
         trade_start_idx = signal_idx + 1
     elif entry_type == "prev_high":
-        # Entry am Vortags-High (Breakout über Consolidation)
         if signal_idx < 1 or signal_idx + 1 >= len(bars):
             return None
         entry_price = bars[signal_idx - 1]["high"]
@@ -9577,6 +9581,10 @@ def simulate_trade(bars, signal_idx, strategy):
         return None
     
     if entry_price <= 0:
+        return None
+    
+    # === MINDESTENS 1 Folgetag nötig für sinnvolle Simulation ===
+    if trade_start_idx >= len(bars):
         return None
     
     # === STOP & TARGETS BERECHNEN ===
@@ -9673,6 +9681,13 @@ def simulate_trade(bars, signal_idx, strategy):
     else:
         pnl_pct = ((entry_price - exit_price) / entry_price) * 100
         r_multiple = (entry_price - exit_price) / risk if risk > 0 else 0
+    
+    # Cap R-Multiple: Max -3R bei Gap-Through (realistischer Slippage)
+    r_multiple = max(r_multiple, -3.0)
+    
+    # Skip 0-Bar Trades (kein echter Trade)
+    if bars_held == 0:
+        return None
     
     return {
         "signal_date": signal_day["date"],
@@ -9876,7 +9891,7 @@ def display_backtest_lab(poly_key):
     if use_grouped:
         st.caption("🔥 **ALLE US-Aktien** — Grouped Daily API scannt tausende Aktien pro Tag")
         st.caption(f"⏱️ Ca. {months * 22} API-Calls ({months * 22 // 5} Min bei Free Tier)")
-        st.caption("📊 Filter: Preis >$2, Volumen >500k/Tag, max 5-Zeichen Ticker")
+        st.caption("📊 Filter: Preis >$5, Volumen >500k/Tag, keine Leveraged/Inverse ETFs")
     else:
         st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     
@@ -9907,7 +9922,7 @@ def display_backtest_lab(poly_key):
                     poly_key,
                     strategies=selected_strats,
                     months=months,
-                    min_price=2.0,
+                    min_price=5.0,
                     min_volume=500000,  # 500k/Tag min → ~3000-4000 Aktien
                     progress_callback=update_progress
                 )
