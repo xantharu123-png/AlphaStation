@@ -217,14 +217,14 @@ STRATEGIES = {
     },
     "Dip Buy": {
         "description": "Qualitäts-Assets im Rücksetzer ohne Panik (min $500k Volumen)",
-        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.5, 2.0)},
-        "logic": "Moderater Rücksetzer ohne Volumen-Panik = Kaufchance",
+        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.3, 1.5)},
+        "logic": "Moderater Rücksetzer ohne Volumen-Panik (RVOL < 1.5) = Kaufchance",
         "min_dollar_volume": 500000
     },
     "Reversal Hunter": {
         "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
-        "filters": {"Vortag %": (-50.0, -5.0), "Change %": (3.0, 30.0), "RVOL": (2.0, 50.0)},
-        "logic": "Gestern bärische KERZE (Close<Open, -5% bis -50%), heute Käufer (+3%+) mit Volumen"
+        "filters": {"Vortag %": (-50.0, -3.0), "Change %": (2.0, 30.0), "RVOL": (1.5, 50.0)},
+        "logic": "Gestern bärische KERZE (Close<Open, -3%+), heute Käufer (+2%+) mit erhöhtem Volumen"
     },
     "Early Momentum": {
         "description": "Starker Tagesstart mit Volumen - Preis hält sich oben",
@@ -881,7 +881,6 @@ def apply_strategy(strategy_name, strategies_dict=None):
         st.session_state.additional_filters = {
             "preis_min": 0.0, "preis_max": 100000.0,
             "nur_gewinner": False, "nur_verlierer": False,
-            "rvol_override_min": None, "rvol_override_max": None,
         }
         
         # Auto-Switch für PM/AH Strategien (nur bei Aktien-Strategien)
@@ -7071,8 +7070,6 @@ def fetch_crypto_data():
                 # RVOL Filter
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
-                    if af.get("rvol_override_min"): rvol_min = af["rvol_override_min"]
-                    if af.get("rvol_override_max"): rvol_max = af["rvol_override_max"]
                     if not (rvol_min <= rvol <= rvol_max): match = False
                 
                 # Change % (heute)
@@ -7399,7 +7396,10 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 liquidity_strategies = [
                     "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
                     "PM Gainers 🌅", "PM Losers 🌅", "PM Gap & Go 🌅", "PM Penny Movers 🌅",
-                    "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Gainers 🌙📈", "AH Earnings Losers 🌙📉"
+                    "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Gainers 🌙📈", "AH Earnings Losers 🌙📉",
+                    "Volume Surge", "Bull Flag", "Bear Flag", "Breakout Long", "Breakdown Short",
+                    "Early Momentum", "Whale Watch", "Whale Watch Short 🐻",
+                    "Consolidation Breakout 🚀", "Reversal Setup 🪤", "High Volume Churn 📤"
                 ]
                 
                 # PM/AH: Niedrigerer Threshold ($50k) weil weniger Volumen normal ist
@@ -7434,8 +7434,6 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 
                 if "RVOL" in f:
                     rvol_min, rvol_max = f["RVOL"]
-                    if af.get("rvol_override_min"): rvol_min = af["rvol_override_min"]
-                    if af.get("rvol_override_max"): rvol_max = af["rvol_override_max"]
                     if not (rvol_min <= rvol <= rvol_max): 
                         filter_failed = "rvol"
                         debug_stats["skipped_rvol"] += 1
@@ -11385,8 +11383,7 @@ with st.sidebar:
             st.session_state.additional_filters = {
                 "preis_min": preis_min, "preis_max": preis_max,
                 "nur_gewinner": nur_gewinner, "nur_verlierer": nur_verlierer,
-                "rvol_override_min": None, "rvol_override_max": None,
-                "exclude_etfs": exclude_etfs,
+                    "exclude_etfs": exclude_etfs,
                 "min_liquidity": min_liquidity,
             }
     
