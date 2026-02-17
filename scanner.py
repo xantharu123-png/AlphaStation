@@ -9111,173 +9111,183 @@ BACKTEST_RESULTS_FILE = "/tmp/alpha_station_backtest_results.json"
 
 # Stock-Universum: Liquide Aktien quer durch alle Sektoren
 BACKTEST_UNIVERSE = [
-    # Tech Large Cap
+    # === Tech Large Cap (20) ===
     "AAPL", "MSFT", "NVDA", "TSLA", "META", "AMZN", "GOOG", "AMD", "INTC", "CRM",
-    # Tech Mid/Growth
-    "PLTR", "SOFI", "SQ", "SNAP", "ROKU", "NET", "SHOP", "COIN",
-    # Finance
-    "JPM", "BAC", "GS",
-    # Healthcare
-    "MRNA", "PFE", "ABBV",
-    # Energy
-    "XOM", "CVX",
-    # Consumer
-    "WMT", "NKE", "COST",
-    # Volatile/Meme
-    "GME", "AMC", "MARA", "RIOT",
-    # Industrial
-    "BA", "CAT",
-    # ETFs
-    "SPY", "QQQ", "IWM"
+    "AVGO", "ORCL", "ADBE", "CSCO", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC",
+    # === Tech Mid/Growth (20) ===
+    "PLTR", "SOFI", "SQ", "SNAP", "ROKU", "NET", "SHOP", "COIN", "CRWD", "DDOG",
+    "ZS", "SNOW", "ABNB", "UBER", "LYFT", "DASH", "PINS", "U", "RBLX", "HOOD",
+    # === Finance (15) ===
+    "JPM", "BAC", "GS", "MS", "WFC", "C", "SCHW", "BLK", "AXP", "V",
+    "MA", "PYPL", "FIS", "ICE", "CME",
+    # === Healthcare (15) ===
+    "MRNA", "PFE", "ABBV", "JNJ", "UNH", "LLY", "TMO", "ABT", "BMY", "GILD",
+    "AMGN", "REGN", "VRTX", "ISRG", "BIIB",
+    # === Energy (10) ===
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HAL",
+    # === Consumer (15) ===
+    "WMT", "NKE", "COST", "TGT", "HD", "LOW", "SBUX", "MCD", "CMG", "DPZ",
+    "LULU", "DECK", "ROST", "TJX", "DG",
+    # === Industrial (10) ===
+    "BA", "CAT", "DE", "GE", "HON", "UPS", "FDX", "LMT", "RTX", "NOC",
+    # === Volatile/Small Cap (25) ===
+    "GME", "AMC", "MARA", "RIOT", "SMCI", "ARM", "IONQ", "RGTI", "RIVN", "LCID",
+    "PLUG", "FCEL", "SPCE", "OPEN", "WISH", "CLOV", "BB", "NOK", "TLRY", "SNDL",
+    "MSTR", "UPST", "AFRM", "PATH", "AI",
+    # === Biotech/Pharma (15) ===
+    "NVAX", "BNTX", "DNA", "CRSP", "BEAM", "EDIT", "NTLA", "FATE", "SGEN", "ARKG",
+    "EXAS", "HIMS", "DOCS", "ACHR", "JOBY",
+    # === Semiconductor (10) ===
+    "MRVL", "ON", "SWKS", "QRVO", "WOLF", "SMTC", "CRUS", "ALGM", "POWI", "DIOD",
+    # === Real Estate / REITs (10) ===
+    "O", "AMT", "PLD", "SPG", "VICI", "MPW", "IRM", "DLR", "CCI", "EQIX",
+    # === ETFs (10) ===
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "ARKK", "SOXL", "TQQQ"
 ]
 
 # Strategie-Definitionen mit klaren Trade-Regeln
+# V68: Gelockert — alte RVOL-Schwellen (2.0+) waren unrealistisch für Backtest
 BACKTEST_STRATEGY_RULES = {
     "Breakout Long": {
         "direction": "long",
-        "description": "Momentum-Ausbruch: Change >5%, RVOL >2, Close nahe High",
+        "description": "Momentum-Ausbruch: Change >3%, Close nahe High",
         "signal": {
-            "change_pct_min": 5.0, "change_pct_max": 50.0,
-            "rvol_min": 2.0,
-            "close_pos_min": 0.65
-        },
-        "entry": "next_open",      # Entry am nächsten Tag Open
-        "stop_pct": 0.05,          # 5% unter Entry
-        "tp1_rr": 1.5,             # TP1 = 1.5:1 R:R
-        "tp2_rr": 2.5,             # TP2 = 2.5:1 R:R
-        "max_hold_days": 3,        # Max 3 Tage halten
-        "min_price": 5.0
-    },
-    "Breakdown Short": {
-        "direction": "short",
-        "description": "Abverkauf: Change <-5%, RVOL >2, Close nahe Low",
-        "signal": {
-            "change_pct_min": -50.0, "change_pct_max": -5.0,
-            "rvol_min": 2.0,
-            "close_pos_max": 0.35
+            "change_pct_min": 3.0, "change_pct_max": 50.0,
+            "close_pos_min": 0.60
         },
         "entry": "next_open",
         "stop_pct": 0.05,
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 5.0
+        "min_price": 2.0
+    },
+    "Breakdown Short": {
+        "direction": "short",
+        "description": "Abverkauf: Change <-3%, Close nahe Low",
+        "signal": {
+            "change_pct_min": -50.0, "change_pct_max": -3.0,
+            "close_pos_max": 0.40
+        },
+        "entry": "next_open",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.5,
+        "max_hold_days": 3,
+        "min_price": 2.0
     },
     "Gap Up Momentum": {
         "direction": "long",
-        "description": "Gap Up >3% + Kurs hält sich oben (Close Pos >0.6)",
+        "description": "Gap Up >2% + Kurs hält sich oben (Close Pos >0.55)",
         "signal": {
-            "gap_pct_min": 3.0, "gap_pct_max": 30.0,
-            "close_pos_min": 0.60
-        },
-        "entry": "next_open",
-        "stop_pct": 0.04,          # 4% Stop (enge Gaps)
-        "tp1_rr": 1.5,
-        "tp2_rr": 2.0,
-        "max_hold_days": 2,
-        "min_price": 5.0
-    },
-    "Gap Down Short": {
-        "direction": "short",
-        "description": "Gap Down <-3% + Kurs bleibt unten (Close Pos <0.4)",
-        "signal": {
-            "gap_pct_min": -30.0, "gap_pct_max": -3.0,
-            "close_pos_max": 0.40
+            "gap_pct_min": 2.0, "gap_pct_max": 30.0,
+            "close_pos_min": 0.55
         },
         "entry": "next_open",
         "stop_pct": 0.04,
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 2,
-        "min_price": 5.0
+        "min_price": 2.0
+    },
+    "Gap Down Short": {
+        "direction": "short",
+        "description": "Gap Down <-2% + Kurs bleibt unten (Close Pos <0.45)",
+        "signal": {
+            "gap_pct_min": -30.0, "gap_pct_max": -2.0,
+            "close_pos_max": 0.45
+        },
+        "entry": "next_open",
+        "stop_pct": 0.04,
+        "tp1_rr": 1.5,
+        "tp2_rr": 2.0,
+        "max_hold_days": 2,
+        "min_price": 2.0
     },
     "Dip Buy": {
         "direction": "long",
-        "description": "Qualitäts-Rücksetzer: -2% bis -8%, normales Volumen (kein Panik-Sell)",
+        "description": "Rücksetzer: -2% bis -8%, kein Panik-Volumen",
         "signal": {
             "change_pct_min": -8.0, "change_pct_max": -2.0,
-            "rvol_max": 2.0
+            "rvol_max": 3.0
         },
-        "entry": "at_close",       # Einstieg am Signaltag Close
-        "stop_pct": 0.04,          # 4% Stop
+        "entry": "at_close",
+        "stop_pct": 0.04,
         "tp1_rr": 1.5,
-        "tp2_rr": 3.0,             # Dip Buys brauchen mehr Raum
-        "max_hold_days": 5,        # Bis 5 Tage halten
-        "min_price": 10.0
+        "tp2_rr": 3.0,
+        "max_hold_days": 5,
+        "min_price": 5.0
     },
     "Reversal Hunter": {
         "direction": "long",
-        "description": "Bounce nach Abverkauf: Vortag <-5%, heute >+3%, hohes Vol",
+        "description": "Bounce nach Abverkauf: Vortag <-3%, heute >+2%",
         "signal": {
-            "prev_change_pct_max": -5.0,    # Gestern stark gefallen
-            "change_pct_min": 3.0,           # Heute Bounce
-            "rvol_min": 2.0
+            "prev_change_pct_max": -3.0,
+            "change_pct_min": 2.0
         },
         "entry": "at_close",
         "stop_pct": 0.05,
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 5.0
+        "min_price": 2.0
     },
     "Bull Flag": {
         "direction": "long",
-        "description": "Starker Vortag (+4%+), heute Konsolidierung (-2% bis +2%), RVOL sinkt",
+        "description": "Starker Vortag (+3%+), heute Konsolidierung (-2% bis +2%)",
         "signal": {
-            "prev_change_pct_min": 4.0,      # Gestern stark gestiegen
-            "change_pct_min": -2.0,           # Heute: enge Range
-            "change_pct_max": 2.0,
-            "rvol_max": 2.0                   # Volumen geht zurück
+            "prev_change_pct_min": 3.0,
+            "change_pct_min": -2.0,
+            "change_pct_max": 2.0
         },
-        "entry": "prev_high",                # Entry über Vortags-High (Breakout)
+        "entry": "prev_high",
         "stop_pct": 0.04,
         "tp1_rr": 1.5,
         "tp2_rr": 2.5,
         "max_hold_days": 3,
-        "min_price": 5.0
+        "min_price": 2.0
     },
     "Volume Surge": {
         "direction": "long",
-        "description": "Extremes Volumen (RVOL >3) + Aufwärtsbewegung >2%",
+        "description": "Hohes Volumen (RVOL >2) + Aufwärtsbewegung >2%",
         "signal": {
             "change_pct_min": 2.0,
-            "rvol_min": 3.0
+            "rvol_min": 2.0
         },
         "entry": "next_open",
         "stop_pct": 0.05,
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 3,
-        "min_price": 5.0
+        "min_price": 2.0
     },
     "Early Momentum": {
         "direction": "long",
-        "description": "Starker Tag (+4%+), hohes Vol, Close nahe High → Momentum hält",
+        "description": "Starker Tag (+3%+), Close nahe High → Momentum hält",
         "signal": {
-            "change_pct_min": 4.0, "change_pct_max": 30.0,
-            "rvol_min": 2.0,
-            "close_pos_min": 0.60
+            "change_pct_min": 3.0, "change_pct_max": 30.0,
+            "close_pos_min": 0.55
         },
         "entry": "at_close",
         "stop_pct": 0.04,
         "tp1_rr": 1.0,
         "tp2_rr": 2.0,
         "max_hold_days": 2,
-        "min_price": 5.0
+        "min_price": 2.0
     },
     "Whale Watch": {
         "direction": "long",
-        "description": "Extremes Volumen (RVOL >5) mit klarer Richtung (+3%+)",
+        "description": "Extremes Volumen (RVOL >3) mit klarer Richtung (+2%+)",
         "signal": {
-            "change_pct_min": 3.0,
-            "rvol_min": 5.0
+            "change_pct_min": 2.0,
+            "rvol_min": 3.0
         },
         "entry": "next_open",
         "stop_pct": 0.06,
         "tp1_rr": 1.5,
         "tp2_rr": 2.0,
         "max_hold_days": 3,
-        "min_price": 5.0
+        "min_price": 2.0
     }
 }
 
@@ -9285,17 +9295,7 @@ BACKTEST_STRATEGY_RULES = {
 def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
     """
     Holt tägliche OHLCV-Daten von Polygon für Backtesting.
-    
-    Args:
-        poly_key: Polygon API Key
-        ticker: Aktien-Ticker
-        start_date: Start (YYYY-MM-DD)
-        end_date: Ende (YYYY-MM-DD)
-    
-    Returns:
-        Liste von dicts mit date, open, high, low, close, volume
     """
-    import requests
     url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
     params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": poly_key}
     
@@ -9308,7 +9308,6 @@ def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
         
         bars = []
         for r in data["results"]:
-            from datetime import datetime
             ts = r.get("t", 0)
             dt = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
             bars.append({
@@ -9324,6 +9323,128 @@ def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
         return bars
     except Exception as e:
         return []
+
+
+def fetch_grouped_daily(poly_key, date_str):
+    """Holt ALLE US-Aktien für einen Tag (Grouped Daily Bars)."""
+    url = f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{date_str}"
+    params = {"apiKey": poly_key, "adjusted": "true"}
+    try:
+        resp = rate_limited_get(url, params=params, timeout=30)
+        data = resp.json()
+        if data.get("status") == "OK" and data.get("results"):
+            return {r["T"]: r for r in data["results"] if r.get("c", 0) > 0}
+        return {}
+    except:
+        return {}
+
+
+def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=2.0, 
+                               min_volume=100000, progress_callback=None):
+    """
+    Backtest über ALLE US-Aktien mit Grouped Daily Bars.
+    1 API-Call pro Tag → tausende Aktien pro Tag.
+    """
+    if strategies is None:
+        strategies = list(BACKTEST_STRATEGY_RULES.keys())
+    
+    end_dt = datetime.now() - timedelta(days=1)
+    start_dt = end_dt - timedelta(days=months * 30 + 30)  # +30 für RVOL Lookback
+    test_start = (end_dt - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+    
+    # Generiere Handelstage (Mo-Fr)
+    trading_days = []
+    current = start_dt
+    while current <= end_dt:
+        if current.weekday() < 5:
+            trading_days.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    
+    if not trading_days:
+        return {s: [] for s in strategies}, 0
+    
+    # Per-Ticker Tageshistorie aufbauen
+    ticker_history = {}  # ticker → list of bars (chronologisch)
+    all_results = {s: [] for s in strategies}
+    total_tickers_seen = set()
+    
+    for day_idx, date_str in enumerate(trading_days):
+        if progress_callback:
+            progress_callback(
+                day_idx / len(trading_days), 
+                f"📅 Tag {day_idx+1}/{len(trading_days)}: {date_str}"
+            )
+        
+        # Hole ALLE Aktien für diesen Tag
+        day_data = fetch_grouped_daily(poly_key, date_str)
+        if not day_data:
+            continue
+        
+        # Für jeden Ticker: Bar zur History hinzufügen
+        for ticker, r in day_data.items():
+            # Filter: Nur echte Aktien, keine OTC/Warrants
+            if len(ticker) > 5 or "." in ticker:
+                continue
+            
+            price = r.get("c", 0)
+            volume = r.get("v", 0)
+            
+            # Min-Filter
+            if price < min_price or volume < min_volume:
+                continue
+            
+            total_tickers_seen.add(ticker)
+            
+            bar = {
+                "date": date_str,
+                "open": r.get("o", 0),
+                "high": r.get("h", 0),
+                "low": r.get("l", 0),
+                "close": price,
+                "volume": volume,
+            }
+            
+            if ticker not in ticker_history:
+                ticker_history[ticker] = []
+            ticker_history[ticker].append(bar)
+            
+            # Erst nach 22+ Tagen History (für RVOL Lookback) Signale prüfen
+            bars = ticker_history[ticker]
+            idx = len(bars) - 1
+            
+            if idx < 21 or date_str < test_start:
+                continue
+            
+            # Metriken berechnen
+            metrics = compute_daily_metrics(bars, idx)
+            if not metrics or metrics["price"] <= 0:
+                continue
+            
+            # Jede Strategie prüfen
+            for strat_name in strategies:
+                strat = BACKTEST_STRATEGY_RULES[strat_name]
+                if metrics["price"] < strat.get("min_price", 1.0):
+                    continue
+                
+                if check_signal(metrics, strat["signal"]):
+                    trade = simulate_trade(bars, idx, strat)
+                    if trade:
+                        trade["ticker"] = ticker
+                        trade["strategy"] = strat_name
+                        trade["signal_change_pct"] = round(metrics["change_pct"], 2)
+                        trade["signal_rvol"] = round(metrics["rvol"], 1)
+                        all_results[strat_name].append(trade)
+        
+        # Memory-Management: Lösche alte History (behalte nur letzte 30 Tage)
+        if day_idx % 20 == 0 and day_idx > 0:
+            for t in list(ticker_history.keys()):
+                if len(ticker_history[t]) > 35:
+                    ticker_history[t] = ticker_history[t][-30:]
+    
+    if progress_callback:
+        progress_callback(1.0, f"✅ Fertig! {len(total_tickers_seen)} Aktien gescannt")
+    
+    return all_results, len(total_tickers_seen)
 
 
 def compute_daily_metrics(bars, idx):
@@ -9725,15 +9846,30 @@ def display_backtest_lab(poly_key):
         )
     
     with col_set3:
-        universe_size = st.selectbox("🌍 Universum", ["Klein (10)", "Mittel (20)", "Groß (38)"], index=1)
+        universe_size = st.selectbox(
+            "🌍 Universum", 
+            ["Klein (30)", "Mittel (75)", "Groß (175)", "🔥 ALLE US-Aktien"],
+            index=1,
+            help="ALLE US-Aktien nutzt Grouped Daily API (1 Call/Tag → tausende Aktien)"
+        )
         if "Klein" in universe_size:
-            tickers = BACKTEST_UNIVERSE[:10]
+            tickers = BACKTEST_UNIVERSE[:30]
+            use_grouped = False
         elif "Mittel" in universe_size:
-            tickers = BACKTEST_UNIVERSE[:20]
-        else:
+            tickers = BACKTEST_UNIVERSE[:75]
+            use_grouped = False
+        elif "Groß" in universe_size:
             tickers = BACKTEST_UNIVERSE
+            use_grouped = False
+        else:
+            tickers = None  # Grouped mode
+            use_grouped = True
     
-    st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
+    if use_grouped:
+        st.caption("🔥 **ALLE US-Aktien** — Grouped Daily API scannt tausende Aktien pro Tag")
+        st.caption(f"⏱️ Ca. {months * 22} API-Calls ({months * 22 // 5} Min bei Free Tier)")
+    else:
+        st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     
     # Strategie-Details anzeigen
     with st.expander("📖 Strategie-Regeln"):
@@ -9756,24 +9892,36 @@ def display_backtest_lab(poly_key):
         def update_progress(pct, text):
             progress_bar.progress(min(pct, 1.0), text=text)
         
-        with st.spinner(f"Lade Daten für {len(tickers)} Ticker über {months} Monate..."):
-            results = run_full_backtest(
-                poly_key,
-                strategies=selected_strats,
-                tickers=tickers,
-                months=months,
-                progress_callback=update_progress
-            )
+        with st.spinner(f"{'Scanne ALLE US-Aktien' if use_grouped else f'Lade Daten für {len(tickers)} Ticker'} über {months} Monate..."):
+            if use_grouped:
+                results, n_tickers = run_full_backtest_grouped(
+                    poly_key,
+                    strategies=selected_strats,
+                    months=months,
+                    min_price=2.0,
+                    min_volume=100000,
+                    progress_callback=update_progress
+                )
+                st.session_state["backtest_n_tickers"] = n_tickers
+            else:
+                results = run_full_backtest(
+                    poly_key,
+                    strategies=selected_strats,
+                    tickers=tickers,
+                    months=months,
+                    progress_callback=update_progress
+                )
+                st.session_state["backtest_n_tickers"] = len(tickers)
         
         # Ergebnisse in Session State speichern
         st.session_state["backtest_results"] = results
         st.session_state["backtest_months"] = months
-        st.session_state["backtest_tickers"] = tickers
+        st.session_state["backtest_tickers"] = tickers or []
         
         # Auch auf Disk speichern
         try:
             with open(BACKTEST_RESULTS_FILE, "w") as f:
-                json.dump({"results": results, "months": months, "tickers": tickers}, f)
+                json.dump({"results": results, "months": months, "tickers": tickers or []}, f)
         except Exception:
             pass
     
@@ -9801,8 +9949,13 @@ def display_backtest_lab(poly_key):
     total_trades = sum(len(trades) for trades in results.values())
     total_winners = sum(sum(1 for t in trades if t["is_winner"]) for trades in results.values())
     total_r = sum(sum(t["r_multiple"] for t in trades) for trades in results.values())
+    n_tickers = st.session_state.get("backtest_n_tickers", "?")
     
-    st.metric("Gesamt", f"{total_trades} Trades | {total_winners} Wins | {total_r:.1f}R")
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Trades", total_trades)
+    col_m2.metric("Winners", f"{total_winners} ({total_winners/total_trades*100:.0f}%)" if total_trades > 0 else "0")
+    col_m3.metric("Total R", f"{total_r:+.1f}R")
+    col_m4.metric("Aktien", n_tickers)
     
     # === STRATEGIE-VERGLEICH (RANGLISTE) ===
     st.subheader("🏆 Strategie-Ranking")
