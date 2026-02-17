@@ -7397,18 +7397,18 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
                     "PM Gainers 🌅", "PM Losers 🌅", "PM Gap & Go 🌅", "PM Penny Movers 🌅",
                     "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Gainers 🌙📈", "AH Earnings Losers 🌙📉",
-                    "Volume Surge", "Bull Flag", "Bear Flag", "Breakout Long", "Breakdown Short",
-                    "Early Momentum", "Whale Watch", "Whale Watch Short 🐻",
-                    "Consolidation Breakout 🚀", "Reversal Setup 🪤", "High Volume Churn 📤"
+                    "Consolidation Breakout 🚀", "Reversal Setup 🪤"
                 ]
+                # HINWEIS: Breakout Long, Breakdown Short, Volume Surge, Whale Watch etc.
+                # haben bereits RVOL-Filter (2.0+) eingebaut → brauchen keinen extra Liquiditäts-Filter
                 
-                # PM/AH: Niedrigerer Threshold ($50k) weil weniger Volumen normal ist
-                # Regular: Höherer Threshold ($100k) für bessere Qualität
+                # PM/AH: Sehr niedrig ($10k) weil dünn gehandelt
+                # Regular: Moderater Threshold ($25k) für Basis-Liquidität
                 if current_strat in liquidity_strategies:
                     if session in ["Pre-Market", "After-Hours"]:
-                        min_dollar_vol = 50000   # $50k für PM/AH (war $25k)
+                        min_dollar_vol = 10000    # $10k für PM/AH
                     else:
-                        min_dollar_vol = 100000  # $100k für Regular (war $50k)
+                        min_dollar_vol = 25000    # $25k für Regular
                     
                     is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_vol)
                     if not is_liquid:
