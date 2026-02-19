@@ -217,14 +217,14 @@ STRATEGIES = {
     },
     "Dip Buy": {
         "description": "Qualitäts-Assets im Rücksetzer ohne Panik (min $500k Volumen)",
-        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.3, 1.5)},
-        "logic": "Moderater Rücksetzer ohne Volumen-Panik (RVOL < 1.5) = Kaufchance",
+        "filters": {"Preis": (10.0, 100000.0), "Change %": (-8.0, -2.0), "RVOL": (0.6, 1.5)},
+        "logic": "Moderater Rücksetzer mit normalem Volumen (RVOL 0.6-1.5) = Kaufchance, kein Panik-Dump",
         "min_dollar_volume": 500000
     },
     "Reversal Hunter": {
-        "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "description": "Bounce nach roter Kerze — echtes Reversal NUR wenn Stock im Downtrend (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
         "filters": {"Vortag %": (-50.0, -3.0), "Change %": (2.0, 30.0), "RVOL": (1.5, 50.0)},
-        "logic": "Gestern bärische KERZE (Close<Open, -3%+), heute Käufer (+2%+) mit erhöhtem Volumen"
+        "logic": "Gestern bärische KERZE (-3%+), heute Käufer (+2%+). Bei Uptrend = Continuation Dip Buy, bei Downtrend = Reversal"
     },
     "Early Momentum": {
         "description": "Starker Tagesstart mit Volumen - Preis hält sich oben",
@@ -233,13 +233,13 @@ STRATEGIES = {
     },
     "Whale Watch": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
-        "filters": {"RVOL": (3.0, 100.0), "Change %": (2.0, 100.0)},
-        "logic": "RVOL > 3.0 + Change > 2% = institutionelles Interesse mit klarer Richtung"
+        "filters": {"RVOL": (3.0, 100.0), "Change %": (2.0, 100.0), "Close Position": (0.55, 1.0)},
+        "logic": "RVOL > 3.0 + Change > 2% + Close nahe High = echtes Whale Buying (kein Churn)"
     },
     "Whale Watch Short 🐻": {
         "description": "Extremes Volumen + Abverkauf - Big Player verkaufen",
-        "filters": {"RVOL": (3.0, 100.0), "Change %": (-100.0, -2.0)},
-        "logic": "RVOL > 3.0 + Change < -2% = institutioneller Verkaufsdruck"
+        "filters": {"RVOL": (3.0, 100.0), "Change %": (-100.0, -2.0), "Close Position": (0.0, 0.45)},
+        "logic": "RVOL > 3.0 + Change < -2% + Close nahe Low = echtes Whale Selling"
     },
     # =========================================================================
     # PRE-MARKET STRATEGIEN 🌅 - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
@@ -308,14 +308,14 @@ STRATEGIES = {
     # =========================================================================
     "Gap Up": {
         "description": "📈 NUR AKTIEN: Gap nach oben mit Volumen-Bestätigung",
-        "filters": {"Gap %": (2.0, 50.0), "RVOL": (0.5, 100.0)},
-        "logic": "Open > Previous High + Mindest-Volumen = Echtes Gap (nicht Pennystocks)",
+        "filters": {"Gap %": (2.0, 50.0), "RVOL": (1.0, 100.0)},
+        "logic": "Gap Up + mindestens normales Volumen = echtes Interesse (nicht dünn gehandelt)",
         "stocks_only": True
     },
     "Gap Down": {
         "description": "📉 NUR AKTIEN: Gap nach unten mit Volumen-Bestätigung",
-        "filters": {"Gap %": (-50.0, -2.0), "RVOL": (0.5, 100.0)},
-        "logic": "Open < Previous Low + Mindest-Volumen = Echtes Gap",
+        "filters": {"Gap %": (-50.0, -2.0), "RVOL": (1.0, 100.0)},
+        "logic": "Gap Down + normales Volumen = echtes Selling",
         "stocks_only": True
     },
     "Gap Up (High Vol)": {
@@ -702,8 +702,8 @@ CRYPTO_STRATEGIES = {
     },
     "Dip Buy": {
         "description": "Rücksetzer ohne Panik-Volumen",
-        "filters": {"Change %": (-8.0, -2.0), "RVOL": (0.1, 1.5)},
-        "logic": "Moderater Rücksetzer ohne Volumen-Panik"
+        "filters": {"Change %": (-8.0, -2.0), "RVOL": (0.5, 1.5)},
+        "logic": "Moderater Rücksetzer mit normalem Volumen — kein Panik-Dump"
     },
     "Reversal Hunter": {
         "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = 24h Kerze)",
@@ -2219,8 +2219,8 @@ def calculate_breakout_timing(row_data, fib_info=None):
         factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": False, "detail": "Schon weit gelaufen"})
     
     # 2. RSI (wenn verfügbar, sonst anhand von Change% schätzen)
-    # RSI ist oft nicht direkt verfügbar, daher Schätzung basierend auf Move
-    estimated_rsi = 50 + (change_pct * 2.5)  # Grobe Schätzung
+    # ACHTUNG: Nur Tages-Schätzung! Ignoriert vorherigen RSI-Stand.
+    estimated_rsi = 50 + (change_pct * 3)  # Einheitlicher Multiplikator
     if estimated_rsi < 65:
         factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Nicht überkauft"})
         score += 1
@@ -2277,13 +2277,16 @@ def calculate_breakout_timing(row_data, fib_info=None):
         else:
             factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": False, "detail": "Stark überdehnt!"})
     else:
-        # Schätze ATR basierend auf typischer Volatilität (~2-3%)
-        estimated_atr_multiple = change_pct / 2.5
-        if estimated_atr_multiple <= 1.5:
-            factors.append({"name": "ATR (est.)", "value": f"~{estimated_atr_multiple:.1f}x", "ok": True, "detail": "Normal"})
-            score += 1
+        # Kein echtes ATR → Schätze konservativ basierend auf Change%
+        # Durchschnitt US-Aktie: ~2-3% ATR, aber variiert stark
+        if change_pct <= 3:
+            factors.append({"name": "ATR (est.)", "value": "Früh", "ok": True, "detail": "Move noch klein"})
+            score += 0.75
+        elif change_pct <= 6:
+            factors.append({"name": "ATR (est.)", "value": "Moderat", "ok": True, "detail": "Normaler Move"})
+            score += 0.5
         else:
-            factors.append({"name": "ATR (est.)", "value": f"~{estimated_atr_multiple:.1f}x", "ok": False, "detail": "Überdehnt"})
+            factors.append({"name": "ATR (est.)", "value": "Weit", "ok": False, "detail": "Schon weit gelaufen"})
     
     # 6. VOLUME TREND (basierend auf RVOL Stärke)
     if rvol >= 1.5:
@@ -2483,7 +2486,15 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     rvol = row_data.get("RVOL", 1) or 1
     
     # 1. DISTANZ ZUM MA - Näher = besser
-    if ma_distance <= 0.5:
+    # WICHTIG: Wenn kein MA-Daten vorhanden (ma_distance=0 weil nicht befüllt),
+    # vergeben wir neutralen Score statt Maximum
+    has_ma_data = (row_data.get("MA_Distance%") is not None and row_data.get("MA_Distance%") != 0) or \
+                  (row_data.get("MA Distance") is not None and row_data.get("MA Distance") != 0)
+    
+    if not has_ma_data:
+        factors.append({"name": "MA Distanz", "value": "N/A", "ok": True, "detail": "Keine MA-Daten"})
+        score += 0.5  # Neutral statt 1.5 Maximum
+    elif ma_distance <= 0.5:
         factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": True, "detail": "Perfekt am MA"})
         score += 1.5
     elif ma_distance <= 1.0:
@@ -2979,6 +2990,18 @@ def get_timing_assessment(row_data, strategy_name, fib_info=None):
     
     # Mean Reversion / Reversal Strategien
     elif any(x in strategy_upper for x in ["REVERSAL", "MEAN REVERSION", "OVERSOLD", "OVERBOUGHT", "RSI"]):
+        # Trend-Check: Wenn fib_info vorhanden, prüfe ob Stock im Uptrend ist
+        # Stock nahe Period High = kein echtes Reversal → Breakout/Continuation
+        if fib_info:
+            period_high = fib_info.get("period_high", 0)
+            period_low = fib_info.get("period_low", 0)
+            if period_high > period_low > 0:
+                price_for_check = row_data.get("Preis", 0) or row_data.get("Close", 0) or row_data.get("price", 0) or 0
+                if price_for_check > 0:
+                    range_pos = (price_for_check - period_low) / (period_high - period_low)
+                    if range_pos > 0.60:
+                        # Uptrend → Continuation/Breakout Timing statt Reversal
+                        return calculate_breakout_timing(row_data, fib_info)
         is_long = "SHORT" not in strategy_upper and "OVERBOUGHT" not in strategy_upper
         return calculate_reversal_timing(row_data, is_long)
     
@@ -7828,6 +7851,17 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0):
     abs_change = abs(pm_change)
     abs_gap = abs(gap_pct)
     
+    # === SQUEEZE / EXTREME (>10% + starke RS) — VOR dem 5% Block! ===
+    if abs_change >= 10 and abs(rs_vs_spy) >= 5:
+        if is_up and pm_position >= 60:
+            return ("SQUEEZE", "💥", "Extreme Move + Relative Strength = Possible Squeeze")
+        elif is_up and pm_position < 40:
+            return ("FADING", "⚠️", "Extreme Gap but Fading Hard — Caution!")
+        elif not is_up and pm_position <= 40:
+            return ("CAPITULATION", "🔻", "Extreme Selling = Watch for Reversal")
+        elif not is_up and pm_position >= 60:
+            return ("BOUNCE", "🔄", "Extreme Drop but Bounced — Wait!")
+    
     # === STARKE MOVES (>5%) ===
     if abs_change >= 5:
         if is_up and pm_position >= 70:
@@ -7856,13 +7890,6 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0):
         else:
             return ("CONTESTED", "⚔️", "Strong Down but Mid-Range — Watch for Break")
     
-    # === SQUEEZE / EXTREME (>10% + starke RS) ===
-    if abs_change >= 10 and abs(rs_vs_spy) >= 5:
-        if is_up:
-            return ("SQUEEZE", "💥", "Extreme Move + Relative Strength = Possible Squeeze")
-        else:
-            return ("CAPITULATION", "🔻", "Extreme Selling = Watch for Reversal")
-    
     # === MODERATE MOVES (3-5%) ===
     if 3 <= abs_change < 5:
         if is_up and pm_position >= 65:
@@ -7873,6 +7900,11 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0):
             return ("CONTINUATION", "📉", "Steady Selling — Wait for Bounce or Break")
         if not is_up and pm_position >= 65:
             return ("RECOVERY", "🔄", "Down but Recovering — Don't Short Here")
+        # Mid-Range: 35-65% Position bei moderatem Move
+        if is_up:
+            return ("BUILDING", "📈", "Moderate Up, Mid-Range — Watch for Breakout or Fade")
+        else:
+            return ("CONTESTED", "⚔️", "Moderate Down, Mid-Range — Watch for Break or Bounce")
     
     # === KLEINE MOVES (2-3%) ===
     if 2 <= abs_change < 3:
@@ -7882,6 +7914,8 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0):
             return ("MILD STRENGTH", "📈", "Slight Up Bias — Watch for Catalyst")
         if not is_up and pm_position <= 35:
             return ("MILD WEAKNESS", "📉", "Slight Down Bias — Watch for Catalyst")
+        # Fallthrough für 2-3% mit unklarer Position
+        return ("RANGE", "↔️", "Small Move — Wait for Direction")
     
     # DEFAULT
     return ("WATCH", "👀", "Monitor for Setup Development")
@@ -12401,6 +12435,12 @@ with tab_scanner:
                     # Breakout Strategien
                     "Breakout Long": "breakout", "Breakout Short": "breakout", 
                     "Breakout Long (Ultra)": "breakout", "Breakout Short (Ultra)": "breakout",
+                    "Breakdown Short": "breakout",
+                    "Early Momentum": "breakout", "Penny Rockets": "breakout",
+                    "Whale Watch": "breakout", "Whale Watch Short 🐻": "breakout",
+                    "Consolidation Breakout": "breakout",
+                    "Bull Flag": "breakout", "Bear Flag": "breakout",
+                    "Volume Surge": "breakout", "High Volume Churn": "breakout",
                     # Gap Strategien
                     "Gap Up": "gap", "Gap Down": "gap", 
                     "Gap Up (High Vol)": "gap", "Gap Down (High Vol)": "gap",
@@ -12413,6 +12453,10 @@ with tab_scanner:
                     "Mean Reversion Long": "reversal", "Mean Reversion Short": "reversal",
                     "Oversold Bounce": "reversal", "Overbought Short": "reversal",
                     "RSI Oversold": "reversal", "RSI Overbought": "reversal",
+                    "Reversal Hunter": "reversal",
+                    "Reversal Setup 🪤": "reversal",
+                    # Dip Buy = MA Bounce Charakter (Pullback im Trend)
+                    "Dip Buy": "ma_bounce",
                     # Volume Void Strategien
                     "Volume Void Long": "void", "Volume Void Short": "void",
                     # Insider Strategien
@@ -12442,6 +12486,20 @@ with tab_scanner:
                     try:
                         # Hole Fib-Info falls verfügbar
                         fib_info = st.session_state.get("fib_info", {})
+                        
+                        # TREND-ERKENNUNG: Reversal nur wenn Stock tatsächlich im Downtrend
+                        # Prüfe ob Preis in der oberen/unteren Hälfte des Period-Range liegt
+                        if strat_type == "reversal" and fib_info:
+                            period_high = fib_info.get("period_high", 0)
+                            period_low = fib_info.get("period_low", 0)
+                            if period_high > period_low > 0:
+                                current_price_val = row.get("Preis", 0) or row.get("Close", 0) or row.get("price", 0) or 0
+                                if current_price_val > 0:
+                                    range_position = (current_price_val - period_low) / (period_high - period_low)
+                                    if range_position > 0.60:
+                                        # Stock nahe Period High = Uptrend → Das ist KEIN Reversal!
+                                        # Reklassifiziere als Breakout/Continuation
+                                        strat_type = "breakout"
                         
                         # Berechne Strategie-spezifisches Timing
                         timing = get_timing_assessment(row.to_dict(), current_strat, fib_info)
