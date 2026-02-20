@@ -1251,7 +1251,7 @@ def fetch_multi_day_data(ticker, api_key, days=5):
         resp = rate_limited_get(url, params=params, timeout=15)
         data = resp.json()
         
-        if data.get("status") != "OK" or not data.get("results"):
+        if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
             return []
         
         results = []
@@ -1839,7 +1839,7 @@ def scan_harmonic_patterns(ticker, api_key, days=60, timeframe="day"):
         resp = rate_limited_get(url, params=params, timeout=20)
         data = resp.json()
         
-        if data.get("status") != "OK" or not data.get("results"):
+        if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
             return {"error": "No data", "patterns": []}
         
         # Konvertiere zu unserem Format
@@ -2155,7 +2155,7 @@ def fetch_historical_closes(ticker, api_key, days=200):
         resp = rate_limited_get(url, params=params, timeout=10)
         data = resp.json()
         
-        if data.get("status") != "OK" or not data.get("results"):
+        if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
             return None
         
         closes = [bar["c"] for bar in data["results"]]
@@ -9416,7 +9416,7 @@ def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
             
             data = resp.json()
             
-            if data.get("status") != "OK" or not data.get("results"):
+            if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
                 _err = f"{ticker}: status={data.get('status')} results={data.get('resultsCount',0)} | {data.get('error','')}{data.get('message','')}"
                 if not hasattr(fetch_backtest_daily_data, '_errors'):
                     fetch_backtest_daily_data._errors = []
@@ -9452,7 +9452,7 @@ def fetch_grouped_daily(poly_key, date_str):
     try:
         resp = rate_limited_get(url, params=params, timeout=30)
         data = resp.json()
-        if data.get("status") == "OK" and data.get("results"):
+        if data.get("status") in ("OK", "DELAYED") and data.get("results"):
             return {r["T"]: r for r in data["results"] if r.get("c", 0) > 0}
         return {}
     except:
