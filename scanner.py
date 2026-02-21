@@ -1084,16 +1084,19 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         # Fallback: Einfache Berechnung
         return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 1.0
 
-def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, high, low, pattern_type="bull"):
+def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, high, low, pattern_type="bull", prev_high=0, prev_low=0):
     """
     Validiert Bull/Bear Flag Pattern mit zusätzlichen Kriterien:
     
     Bull Flag Kriterien:
-    1. ✅ Vortag: Starker Anstieg (Fahnenstange) 
-    2. ✅ Heute: Seitwärts/leicht runter (Konsolidierung)
-    3. ✅ Volumen sinkt (RVOL < 1.5)
-    4. 🆕 Retracement < 50% der Fahnenstange
-    5. 🆕 Preis über dem 50% Fibonacci Level
+    1. Vortag: Starker Anstieg (Fahnenstange) 
+    2. Heute: Seitwärts/leicht runter (Konsolidierung)
+    3. Volumen sinkt (RVOL < 1.5)
+    4. Retracement < 50% der Fahnenstange
+    
+    LIMITATION: Snapshot API hat nur 1 Tag History.
+    Echte Multi-Day Flags (3-5 Tage Fahnenstange) brauchen den History Scanner.
+    Hier wird nur die gestrige OHLC-Kerze als Flagpole verwendet.
     
     Returns: (is_valid, score, details)
     """
@@ -1104,7 +1107,7 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         # Kriterium 1: Vortag stark positiv (4-25%)
         if 4.0 <= vortag_chg <= 25.0:
             score += 25
-            details.append(f"✅ Fahnenstange: {vortag_chg:+.1f}%")
+            details.append(f"✅ Fahnenstange (1-Day): {vortag_chg:+.1f}%")
         else:
             details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
         
@@ -1129,16 +1132,21 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             details.append(f"❌ Volumen zu hoch: RVOL {rvol:.1f}x")
         
         # Kriterium 4: Fibonacci Retracement Check
-        # Fahnenstange = Vortag Bewegung
-        # Retracement sollte < 50% sein
-        if prev_close > 0 and vortag_chg > 0:
-            # Geschätzter Preis vor dem Move
+        # Fahnenstange = gestrige OHLC Kerze (High - Low), nicht nur Body
+        # Das ist genauer als vortag_chg weil es die volle Range nutzt
+        flagpole = 0
+        if prev_high > 0 and prev_low > 0:
+            flagpole = prev_high - prev_low  # Volle Kerzenrange als Flagpole
+        
+        if flagpole <= 0 and prev_close > 0 and vortag_chg > 0:
+            # Fallback: Berechne aus vortag_chg wenn prev_high/Low fehlen
             price_before_move = prev_close / (1 + vortag_chg/100)
-            move_size = prev_close - price_before_move
-            
-            # Heutiges Retracement (vom High gestern = prev_close zu heutigem Low)
-            retracement = prev_close - low if low > 0 else 0
-            retracement_pct = (retracement / move_size * 100) if move_size > 0 else 0
+            flagpole = prev_close - price_before_move
+        
+        if flagpole > 0 and prev_high > 0:
+            # Retracement = wie weit ist Preis vom gestrigen High gefallen?
+            retracement = prev_high - low if low > 0 else 0
+            retracement_pct = (retracement / flagpole * 100) if flagpole > 0 else 0
             
             if retracement_pct <= 38.2:
                 score += 30
@@ -1155,10 +1163,9 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         is_valid = score >= 60
         
     else:  # Bear Flag
-        # Spiegelbildlich für Bear Flag
         if -25.0 <= vortag_chg <= -4.0:
             score += 25
-            details.append(f"✅ Fahnenstange (Short): {vortag_chg:+.1f}%")
+            details.append(f"✅ Fahnenstange (Short, 1-Day): {vortag_chg:+.1f}%")
         else:
             details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
         
@@ -1180,14 +1187,18 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         else:
             details.append(f"❌ Volumen zu hoch: RVOL {rvol:.1f}x")
         
-        # Retracement für Bear Flag (bounce sollte < 50% sein)
-        if prev_close > 0 and vortag_chg < 0:
+        # Bear Flag Retracement: Bounce von gestern Low zu heute High
+        flagpole = 0
+        if prev_high > 0 and prev_low > 0:
+            flagpole = prev_high - prev_low
+        
+        if flagpole <= 0 and prev_close > 0 and vortag_chg < 0:
             price_before_move = prev_close / (1 + vortag_chg/100)
-            move_size = price_before_move - prev_close  # positiv
-            
-            # Heutiges Retracement (von prev_close zu heutigem High)
-            retracement = high - prev_close if high > 0 else 0
-            retracement_pct = (retracement / move_size * 100) if move_size > 0 else 0
+            flagpole = price_before_move - prev_close
+        
+        if flagpole > 0 and prev_low > 0:
+            retracement = high - prev_low if high > 0 else 0
+            retracement_pct = (retracement / flagpole * 100) if flagpole > 0 else 0
             
             if retracement_pct <= 38.2:
                 score += 30
@@ -1207,8 +1218,12 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
 
 def calculate_atr_from_ohlc(high, low, close, prev_close):
     """
-    Berechnet True Range für eine einzelne Kerze.
-    ATR = Average True Range über mehrere Kerzen
+    Berechnet TRUE RANGE (single bar) — NICHT ATR!
+    
+    HINWEIS: Echtes ATR = Durchschnitt über 14 Perioden.
+    Mit nur einer Kerze können wir nur die True Range berechnen.
+    Das Ergebnis kann an ruhigen Tagen zu niedrig und 
+    an volatilen Tagen zu hoch sein.
     
     True Range = max(
         High - Low,
@@ -1216,22 +1231,52 @@ def calculate_atr_from_ohlc(high, low, close, prev_close):
         |Low - Previous Close|
     )
     
-    Für einen Scanner mit nur Tagesdaten: Wir nutzen die aktuelle Kerze
+    Für echtes ATR: Nutze calculate_atr_14() mit Multi-Bar-Daten.
     """
     if high <= 0 or low <= 0 or close <= 0:
         return 0
     
-    # True Range Komponenten
     tr1 = high - low
     tr2 = abs(high - prev_close) if prev_close > 0 else 0
     tr3 = abs(low - prev_close) if prev_close > 0 else 0
     
     true_range = max(tr1, tr2, tr3)
     
-    # ATR als Prozent vom Preis (für Vergleichbarkeit)
-    atr_pct = (true_range / close) * 100 if close > 0 else 0
+    # True Range als Prozent vom Preis (für Vergleichbarkeit)
+    tr_pct = (true_range / close) * 100 if close > 0 else 0
     
-    return round(atr_pct, 2)
+    return round(tr_pct, 2)
+
+
+def calculate_atr_14(ohlcv_data):
+    """
+    Berechnet echtes 14-Perioden ATR aus OHLCV-Daten.
+    
+    Nutze diese Funktion wenn Multi-Bar-Daten verfügbar sind
+    (z.B. im Chart Analyzer, Harmonic Scanner, Wyckoff Scanner).
+    
+    Returns: ATR als absoluter Wert und als Prozent
+    """
+    if not ohlcv_data or len(ohlcv_data) < 15:
+        return 0, 0
+    
+    true_ranges = []
+    for i in range(1, len(ohlcv_data)):
+        h = ohlcv_data[i]["high"]
+        l = ohlcv_data[i]["low"]
+        pc = ohlcv_data[i-1]["close"]
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        true_ranges.append(tr)
+    
+    # Wilder's Smoothed ATR (wie TradingView)
+    atr = sum(true_ranges[:14]) / 14
+    for tr in true_ranges[14:]:
+        atr = (atr * 13 + tr) / 14
+    
+    current_price = ohlcv_data[-1]["close"]
+    atr_pct = (atr / current_price * 100) if current_price > 0 else 0
+    
+    return round(atr, 4), round(atr_pct, 2)
 
 def is_signal_significant(change_pct, atr_pct, multiplier=1.5):
     """
@@ -2950,17 +2995,17 @@ def calculate_breakout_timing(row_data, fib_info=None):
     else:
         factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": False, "detail": "Schon weit gelaufen"})
     
-    # 2. RSI (wenn verfügbar, sonst anhand von Change% schätzen)
-    # ACHTUNG: Nur Tages-Schätzung! Ignoriert vorherigen RSI-Stand.
-    estimated_rsi = 50 + (change_pct * 3)  # Einheitlicher Multiplikator
-    if estimated_rsi < 65:
-        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Nicht überkauft"})
+    # 2. MOMENTUM (basierend auf heutigem Move — KEIN echtes RSI!)
+    # Echtes RSI braucht 14 Tage History, hier nur Tages-Momentum verfügbar
+    momentum = change_pct  # Einfach: wie weit ist der Move heute?
+    if momentum <= 5:
+        factors.append({"name": "Momentum", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Moderate Bewegung"})
         score += 1
-    elif estimated_rsi < 75:
-        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht erhöht"})
+    elif momentum <= 10:
+        factors.append({"name": "Momentum", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Starke Bewegung"})
         score += 0.5
     else:
-        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Überkauft"})
+        factors.append({"name": "Momentum", "value": f"+{momentum:.1f}%", "ok": False, "detail": "Überdehnt (>10%)"})
     
     # 3. FIBONACCI EXTENSION
     if fib_info and price > 0:
@@ -3256,17 +3301,17 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     else:
         factors.append({"name": "Bounce", "value": f"{change_pct:.1f}%", "ok": False, "detail": "Kein Bounce - Durchbruch?"})
     
-    # 3. RSI ZONE (geschätzt aus Change)
-    # Ideal für Bounce: RSI 40-60 (neutral)
-    estimated_rsi = 50 + (change_pct * 3)
-    if 40 <= estimated_rsi <= 60:
-        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Neutral - Ideal"})
+    # 3. MOMENTUM ZONE (basierend auf heutigem Move — KEIN RSI)
+    # Ideal für Bounce: Moderate Bewegung (±3%)
+    momentum = abs(change_pct)
+    if momentum <= 3:
+        factors.append({"name": "Momentum", "value": f"{change_pct:+.1f}%", "ok": True, "detail": "Moderat — Ideal für Bounce"})
         score += 1
-    elif 35 <= estimated_rsi < 40 or 60 < estimated_rsi <= 65:
-        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht extended"})
+    elif momentum <= 5:
+        factors.append({"name": "Momentum", "value": f"{change_pct:+.1f}%", "ok": True, "detail": "Leicht extended"})
         score += 0.5
     else:
-        factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Überkauft/Überverkauft"})
+        factors.append({"name": "Momentum", "value": f"{change_pct:+.1f}%", "ok": False, "detail": "Zu stark bewegt"})
     
     # 4. VOLUME BESTÄTIGUNG
     if rvol >= 1.5:
@@ -3343,35 +3388,34 @@ def calculate_reversal_timing(row_data, is_long=True):
     rvol = row_data.get("RVOL", 1) or 1
     atr_pct = row_data.get("ATR%", 2.5) or 2.5
     
-    # 1. RSI EXTREM (geschätzt)
-    # Für Mean Reversion brauchen wir extreme RSI-Werte
-    # Bei Selloff: RSI sollte <30 sein für Long-Reversal
-    estimated_rsi = 50 + (change_pct * 3)
+    # 1. SELLOFF-TIEFE (statt fake RSI)
+    # Für Mean Reversion: je tiefer der Drop, desto besser für Long-Reversal
+    momentum = change_pct  # Negativer Wert bei Selloff
     
     if is_long:
-        if estimated_rsi <= 25:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Stark überverkauft"})
+        if momentum <= -8:
+            factors.append({"name": "Selloff", "value": f"{momentum:+.1f}%", "ok": True, "detail": "Starker Selloff — Reversal-Zone"})
             score += 1.5
-        elif estimated_rsi <= 30:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Überverkauft"})
+        elif momentum <= -5:
+            factors.append({"name": "Selloff", "value": f"{momentum:+.1f}%", "ok": True, "detail": "Deutlicher Selloff"})
             score += 1
-        elif estimated_rsi <= 40:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht überverkauft"})
+        elif momentum <= -3:
+            factors.append({"name": "Selloff", "value": f"{momentum:+.1f}%", "ok": True, "detail": "Moderater Rückgang"})
             score += 0.5
         else:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Nicht überverkauft"})
+            factors.append({"name": "Selloff", "value": f"{momentum:+.1f}%", "ok": False, "detail": "Kein echter Selloff"})
     else:  # Short Reversal
-        if estimated_rsi >= 75:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Stark überkauft"})
+        if momentum >= 8:
+            factors.append({"name": "Rally", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Starke Rally — Reversal-Zone"})
             score += 1.5
-        elif estimated_rsi >= 70:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Überkauft"})
+        elif momentum >= 5:
+            factors.append({"name": "Rally", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Deutliche Rally"})
             score += 1
-        elif estimated_rsi >= 60:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": True, "detail": "Leicht überkauft"})
+        elif momentum >= 3:
+            factors.append({"name": "Rally", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Moderate Rally"})
             score += 0.5
         else:
-            factors.append({"name": "RSI (est.)", "value": f"~{estimated_rsi:.0f}", "ok": False, "detail": "Nicht überkauft"})
+            factors.append({"name": "Rally", "value": f"+{momentum:.1f}%", "ok": False, "detail": "Keine echte Rally"})
     
     # 2. ÜBERDEHNUNG (Change vs ATR)
     extension = abs(change_pct) / atr_pct if atr_pct > 0 else 0
@@ -5002,226 +5046,50 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "description": f"Base Breakout! Range ${base_low:.2f}-${base_high:.2f}, broke out +{breakout_pct*100:.1f}%. Target: ${base_high + (base_high - base_low):.2f}"
                         })
         
-        # === WYCKOFF ACCUMULATION ===
-        # Erkennt die klassische Wyckoff-Akkumulationsphase:
-        # 1. Vorheriger Downtrend → Trading Range
-        # 2. Selling Climax (SC): Hohes Volume am Tief
-        # 3. Automatic Rally (AR): Bounce nach SC → Oberkante Range
-        # 4. Secondary Test (ST): Retest SC-Area mit weniger Volume
-        # 5. Spring: Kurzer Bruch unter Range → schnelle Erholung (Shakeout)
-        # 6. Sign of Strength (SOS): Starker Move über AR mit Volume
-        # 7. Last Point of Support (LPS): Pullback nach SOS
+        # === WYCKOFF ACCUMULATION / DISTRIBUTION ===
+        # Delegiert an find_wyckoff_for_chart() mit korrekter SC/BC-Methodik
+        # (alte Version benutzte falsche 25/50/25 Datenaufteilung)
         
-        if len(closes) >= 40 and not any("Wyckoff" in p.get("pattern", "") for p in patterns):
+        if len(closes) >= 60 and not any("Wyckoff" in p.get("pattern", "") for p in patterns):
             try:
-                # Phase 1: Finde Trading Range
-                # Teile Daten: erste 25% = Potential-Downtrend, 25-75% = Range, letzte 25% = aktuell
-                q1_end = int(len(closes) * 0.25)
-                q3_start = int(len(closes) * 0.75)
-                
-                early_data = closes[:q1_end]
-                range_data = closes[q1_end:q3_start]
-                late_data = closes[q3_start:]
-                
-                range_highs = highs[q1_end:q3_start]
-                range_lows = lows[q1_end:q3_start]
-                range_vols = volumes[q1_end:q3_start]
-                
-                if len(range_data) >= 10 and len(early_data) >= 5 and len(late_data) >= 5:
-                    early_avg = sum(early_data) / len(early_data)
-                    range_avg = sum(range_data) / len(range_data)
-                    range_high = max(range_highs)
-                    range_low = min(range_lows)
-                    range_width = range_high - range_low
-                    range_width_pct = range_width / range_avg if range_avg > 0 else 1
-                    avg_range_vol = sum(range_vols) / len(range_vols) if range_vols else 1
+                wyckoff_results = find_wyckoff_for_chart(data)
+                for wr in wyckoff_results:
+                    w_type = wr.get("type", "Accumulation")
+                    w_phase = wr.get("phase", "Phase B")
+                    w_score = wr.get("score", 0)
+                    w_events = wr.get("events", [])
+                    w_rh = wr.get("range_high", 0)
+                    w_rl = wr.get("range_low", 0)
+                    w_rw = w_rh - w_rl if w_rh > w_rl else 0
                     
-                    # === WYCKOFF ACCUMULATION ===
-                    # Voraussetzung: Preis fiel VOR der Range (Downtrend in early_data)
-                    prior_decline = (early_data[0] - min(early_data)) / early_data[0] if early_data[0] > 0 else 0
-                    came_from_above = early_avg > range_avg * 1.02
-                    
-                    if (prior_decline > 0.05 or came_from_above) and range_width_pct < 0.30:
-                        wyckoff_events = []
-                        wyckoff_score = 0
+                    if w_score >= 35:
+                        event_strs = [e["label"] if isinstance(e, dict) else str(e) for e in w_events[:3]]
                         
-                        # Event 1: Selling Climax (SC) — Höchstes Volume nahe dem Tief
-                        sc_idx = None
-                        for ri in range(len(range_data)):
-                            abs_idx = q1_end + ri
-                            if range_vols[ri] > avg_range_vol * 1.8 and range_lows[ri] <= range_low + range_width * 0.15:
-                                sc_idx = ri
-                                wyckoff_events.append(f"SC @ ${range_lows[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
-                                wyckoff_score += 20
-                                break
+                        if w_type == "Accumulation":
+                            phase_emoji = "🟢" if "D" in w_phase else "🟡" if "C" in w_phase else "🔵"
+                            target = round(w_rh + w_rw, 2)
+                            p_type = "bullish"
+                        else:
+                            phase_emoji = "🔴" if "D" in w_phase else "🟠" if "C" in w_phase else "🔵"
+                            target = round(w_rl - w_rw, 2)
+                            p_type = "bearish"
                         
-                        # Event 2: Automatic Rally (AR) — Schneller Bounce nach SC
-                        ar_level = None
-                        if sc_idx is not None and sc_idx + 3 < len(range_data):
-                            post_sc = range_highs[sc_idx:min(sc_idx + 8, len(range_highs))]
-                            if post_sc:
-                                ar_level = max(post_sc)
-                                if ar_level > range_low + range_width * 0.5:
-                                    wyckoff_events.append(f"AR @ ${ar_level:.2f}")
-                                    wyckoff_score += 15
+                        confidence = "High" if w_score >= 70 else "Medium" if w_score >= 50 else "Low"
                         
-                        # Event 3: Secondary Test (ST) — Retest SC-Area mit weniger Volume
-                        st_found = False
-                        if sc_idx is not None:
-                            for ri in range(sc_idx + 5, len(range_data)):
-                                if range_lows[ri] <= range_low + range_width * 0.20:
-                                    if range_vols[ri] < range_vols[sc_idx] * 0.8:
-                                        wyckoff_events.append(f"ST @ ${range_lows[ri]:.2f} (lower vol)")
-                                        wyckoff_score += 15
-                                        st_found = True
-                                        break
-                        
-                        # Event 4: Spring — Kurzer Bruch unter Range Low → schnelle Erholung
-                        spring_found = False
-                        for ri in range(max(0, len(range_data) - int(len(range_data) * 0.6)), len(range_data)):
-                            if range_lows[ri] < range_low:
-                                # Check: Preis muss innerhalb 3 Bars wieder in Range sein
-                                if ri + 3 < len(range_data):
-                                    recovery = any(range_data[ri+j] > range_low + range_width * 0.2 for j in range(1, min(4, len(range_data) - ri)))
-                                    if recovery:
-                                        wyckoff_events.append(f"Spring @ ${range_lows[ri]:.2f} (shakeout)")
-                                        wyckoff_score += 25
-                                        spring_found = True
-                                        break
-                        
-                        # Event 5: Sign of Strength (SOS) — Preis bricht über AR/Range High
-                        sos_found = False
-                        late_highs = highs[q3_start:]
-                        late_vols = volumes[q3_start:]
-                        avg_late_vol = sum(late_vols) / len(late_vols) if late_vols else 1
-                        
-                        if current_price > range_high:
-                            wyckoff_events.append(f"SOS: Price ${current_price:.2f} > Range High ${range_high:.2f}")
-                            wyckoff_score += 20
-                            sos_found = True
-                        elif any(h > range_high for h in late_highs):
-                            wyckoff_events.append(f"SOS attempt: Touched ${max(late_highs):.2f}")
-                            wyckoff_score += 10
-                        
-                        # Event 6: Volume-Bestätigung beim Breakout
-                        if sos_found and late_vols:
-                            breakout_vol = max(late_vols[-5:]) if len(late_vols) >= 5 else max(late_vols)
-                            if breakout_vol > avg_range_vol * 1.5:
-                                wyckoff_events.append(f"Volume Confirm: {breakout_vol/avg_range_vol:.1f}x avg")
-                                wyckoff_score += 10
-                        
-                        # Bestimme Phase
-                        if wyckoff_score >= 50:
-                            if sos_found:
-                                phase = "Phase D/E (Markup beginning)"
-                                phase_emoji = "🟢"
-                            elif spring_found:
-                                phase = "Phase C (Spring — bullish shakeout)"
-                                phase_emoji = "🟡"
-                            elif st_found:
-                                phase = "Phase B (Building cause)"
-                                phase_emoji = "🔵"
-                            else:
-                                phase = "Phase A (Selling exhaustion)"
-                                phase_emoji = "⚪"
-                            
-                            confidence = "High" if wyckoff_score >= 70 else "Medium" if wyckoff_score >= 50 else "Low"
-                            
-                            patterns.append({
-                                "pattern": f"Wyckoff Accumulation",
-                                "emoji": "🏦⬆️",
-                                "type": "bullish",
-                                "phase": phase,
-                                "phase_emoji": phase_emoji,
-                                "range_low": round(range_low, 2),
-                                "range_high": round(range_high, 2),
-                                "events": wyckoff_events,
-                                "score": wyckoff_score,
-                                "target": round(range_high + range_width, 2),
-                                "confidence": confidence,
-                                "description": f"Wyckoff Accumulation — {phase}. Range ${range_low:.2f}-${range_high:.2f}. Events: {', '.join(wyckoff_events[:3])}"
-                            })
-                    
-                    # === WYCKOFF DISTRIBUTION ===
-                    # Voraussetzung: Preis stieg VOR der Range (Uptrend in early_data)
-                    prior_rally = (max(early_data) - early_data[0]) / early_data[0] if early_data[0] > 0 else 0
-                    came_from_below = early_avg < range_avg * 0.98
-                    
-                    if (prior_rally > 0.05 or came_from_below) and range_width_pct < 0.30:
-                        wyckoff_events = []
-                        wyckoff_score = 0
-                        
-                        # Event 1: Buying Climax (BC) — Höchstes Volume nahe dem Hoch
-                        bc_idx = None
-                        for ri in range(len(range_data)):
-                            if range_vols[ri] > avg_range_vol * 1.8 and range_highs[ri] >= range_high - range_width * 0.15:
-                                bc_idx = ri
-                                wyckoff_events.append(f"BC @ ${range_highs[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
-                                wyckoff_score += 20
-                                break
-                        
-                        # Event 2: Automatic Reaction (AR)
-                        if bc_idx is not None and bc_idx + 3 < len(range_data):
-                            post_bc = range_lows[bc_idx:min(bc_idx + 8, len(range_lows))]
-                            if post_bc:
-                                ar_level = min(post_bc)
-                                if ar_level < range_high - range_width * 0.5:
-                                    wyckoff_events.append(f"AR @ ${ar_level:.2f}")
-                                    wyckoff_score += 15
-                        
-                        # Event 3: Secondary Test (ST) — Retest BC mit weniger Volume
-                        if bc_idx is not None:
-                            for ri in range(bc_idx + 5, len(range_data)):
-                                if range_highs[ri] >= range_high - range_width * 0.20:
-                                    if range_vols[ri] < range_vols[bc_idx] * 0.8:
-                                        wyckoff_events.append(f"ST @ ${range_highs[ri]:.2f} (lower vol)")
-                                        wyckoff_score += 15
-                                        break
-                        
-                        # Event 4: Upthrust (UT) — Kurzer Bruch über Range High → Failure
-                        for ri in range(max(0, len(range_data) - int(len(range_data) * 0.6)), len(range_data)):
-                            if range_highs[ri] > range_high:
-                                if ri + 3 < len(range_data):
-                                    failure = any(range_data[ri+j] < range_high - range_width * 0.2 for j in range(1, min(4, len(range_data) - ri)))
-                                    if failure:
-                                        wyckoff_events.append(f"UT @ ${range_highs[ri]:.2f} (failed)")
-                                        wyckoff_score += 25
-                                        break
-                        
-                        # Event 5: Sign of Weakness (SOW)
-                        sow_found = False
-                        if current_price < range_low:
-                            wyckoff_events.append(f"SOW: Price ${current_price:.2f} < Range Low ${range_low:.2f}")
-                            wyckoff_score += 20
-                            sow_found = True
-                        elif any(l < range_low for l in lows[q3_start:]):
-                            wyckoff_events.append(f"SOW attempt: Touched ${min(lows[q3_start:]):.2f}")
-                            wyckoff_score += 10
-                        
-                        if wyckoff_score >= 50:
-                            if sow_found:
-                                phase = "Phase D/E (Markdown beginning)"
-                                phase_emoji = "🔴"
-                            else:
-                                phase = "Phase B/C (Distribution in progress)"
-                                phase_emoji = "🟠"
-                            
-                            confidence = "High" if wyckoff_score >= 70 else "Medium"
-                            
-                            patterns.append({
-                                "pattern": f"Wyckoff Distribution",
-                                "emoji": "🏦⬇️",
-                                "type": "bearish",
-                                "phase": phase,
-                                "phase_emoji": phase_emoji,
-                                "range_low": round(range_low, 2),
-                                "range_high": round(range_high, 2),
-                                "events": wyckoff_events,
-                                "score": wyckoff_score,
-                                "target": round(range_low - range_width, 2),
-                                "confidence": confidence,
-                                "description": f"Wyckoff Distribution — {phase}. Range ${range_low:.2f}-${range_high:.2f}. Events: {', '.join(wyckoff_events[:3])}"
-                            })
+                        patterns.append({
+                            "pattern": f"Wyckoff {w_type}",
+                            "emoji": wr.get("emoji", "🏦"),
+                            "type": p_type,
+                            "phase": w_phase,
+                            "phase_emoji": phase_emoji,
+                            "range_low": round(w_rl, 2),
+                            "range_high": round(w_rh, 2),
+                            "events": event_strs,
+                            "score": w_score,
+                            "target": target,
+                            "confidence": confidence,
+                            "description": f"Wyckoff {w_type} — {w_phase}. Range ${w_rl:.2f}-${w_rh:.2f}. Events: {', '.join(event_strs)}"
+                        })
             
             except Exception:
                 pass  # Wyckoff detection failed silently
@@ -8405,14 +8273,16 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 # Standard Gap vs Close
                 gap_vs_close = ((day_open - prev_close) / prev_close) * 100 if prev_close > 0 else 0
                 
-                # True Gap (was wir aktuell als "Gap %" verwenden)
-                gap_pct = 0
+                # True Gap (Open komplett außerhalb der gestrigen Range)
+                true_gap_pct = 0
                 if prev_high > 0 and prev_low > 0:
                     if day_open > prev_high:
-                        gap_pct = ((day_open - prev_high) / prev_high) * 100
+                        true_gap_pct = ((day_open - prev_high) / prev_high) * 100
                     elif day_open < prev_low:
-                        gap_pct = ((day_open - prev_low) / prev_low) * 100
-                    # Wenn Open innerhalb der Range: gap_pct = 0 (kein True Gap)
+                        true_gap_pct = ((day_open - prev_low) / prev_low) * 100
+                
+                # STANDARD: Gap % = Gap vs Previous Close (was Trader erwarten)
+                gap_pct = gap_vs_close
                 
                 # WICK-Berechnungen
                 # WICHTIG: Morgens ist die Range oft zu klein für zuverlässige Wick-Analyse
@@ -8442,8 +8312,9 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 # aber Polygon Snapshot hat nur 1 Tag History.
                 # 
                 # Interpretation:
-                # - Positiv: Gestern war eine bullische Kerze (Close > Open)
-                # - Negativ: Gestern war eine bärische Kerze (Close < Open)
+                # Vortag% = KERZEN-BODY der gestrigen Session (Close vs Open)
+                # NICHT die Tagesperformance (Close vs PrevDayClose)!
+                # Positiv = bullische Kerze (Close > Open), Negativ = bärische Kerze
                 prev_open = prev.get("o") or 0
                 vortag_chg = round(((prev_close - prev_open) / prev_open) * 100, 2) if prev_open > 0 else 0
                 
@@ -8460,8 +8331,15 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 atr_pct = calculate_atr_from_ohlc(high, low, close, prev_close)
                 volatility_regime, vola_adj = get_volatility_regime(atr_pct)
                 
-                # Liquiditäts-Check (Gemini Fix: Keine Pennystocks mit 100 Aktien)
-                is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_volume=100000)
+                # Liquiditäts-Check
+                # WICHTIG: Pre-Market/After-Hours haben typisch nur 10-20% des Regular-Volumes
+                # Standard $100k Dollar-Vol ist für Extended Sessions zu strikt
+                if session in ["Pre-Market", "After-Hours", "Extended"]:
+                    base_min_dollar_vol = 20000  # $20k für Extended (vs $100k Regular)
+                else:
+                    base_min_dollar_vol = 100000
+                
+                is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_volume=base_min_dollar_vol)
                 
                 # FILTER-LOGIK
                 match = True
@@ -8600,7 +8478,8 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 
                 if current_strategy == "Bull Flag":
                     is_valid, flag_score, flag_details = validate_flag_pattern(
-                        vortag_chg, change, rvol, price, prev_close, high, low, "bull"
+                        vortag_chg, change, rvol, price, prev_close, high, low, "bull",
+                        prev_high=prev_high, prev_low=prev_low
                     )
                     if not is_valid:
                         skipped_filter += 1
@@ -8609,7 +8488,8 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     
                 elif current_strategy == "Bear Flag":
                     is_valid, flag_score, flag_details = validate_flag_pattern(
-                        vortag_chg, change, rvol, price, prev_close, high, low, "bear"
+                        vortag_chg, change, rvol, price, prev_close, high, low, "bear",
+                        prev_high=prev_high, prev_low=prev_low
                     )
                     if not is_valid:
                         skipped_filter += 1
@@ -8622,6 +8502,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     "RVOL": rvol, "Vortag%": vortag_chg,
                     "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5, "Alpha": alpha,
                     "Gap%": round(gap_pct, 2),
+                    "TrueGap%": round(true_gap_pct, 2),
                     "UpperWick%": round(upper_wick_pct, 1),
                     "LowerWick%": round(lower_wick_pct, 1),
                     "FlagScore": flag_score,
