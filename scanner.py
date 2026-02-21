@@ -2145,7 +2145,8 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
             if not is_wide_spread(i):
                 continue
             # SC: Close muss in oberer Haelfte sein (Absorption durch Smart Money)
-            if body_position(i) < 0.35:
+            # 0.45 = Close mindestens nahe Mitte der Kerze (strenger als 0.35)
+            if body_position(i) < 0.45:
                 continue
             prior_high = max(highs[max(0, i-15):i])
             decline_pct = (prior_high - lows[i]) / prior_high if prior_high > 0 else 0
@@ -2202,7 +2203,7 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
                     event_bars["AR"] = {"idx": ar_idx, "price": ar_high, "ts": raw_bars[ar_idx]["t"]}
                     score += 15
                     
-                    # Multiple STs auf abnehmendem Volume
+                    # Multiple STs auf abnehmendem Volume — Tests nahe SUPPORT (SC-Zone)
                     st_count = 0
                     prev_st_vol = sc["vol_ratio"]
                     for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
@@ -2216,6 +2217,22 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
                                 prev_st_vol = vr
                                 st_count += 1
                                 if st_count >= 3:
+                                    break
+                    
+                    # Phase B: Tests nahe RESISTANCE (AR-Zone) — Price rallies TO but fails AT AR
+                    # Wichtig: Volume sollte bei Rallies zur Resistance ABNEHMEN
+                    rt_count = 0
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if highs[i] >= range_high - range_width * 0.20:
+                            hi_vol, vr = is_high_volume(i)
+                            # Rally zur Resistance auf normalem/niedrigem Volume = Schwäche
+                            if not hi_vol or vr < 1.3:
+                                rt_label = f"RT{rt_count + 1}" if rt_count > 0 else "RT"
+                                events.append(f"{rt_label} @ ${highs[i]:.2f} (Resistance Test, Vol {vr:.1f}x)")
+                                event_bars[rt_label] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
+                                score += 5
+                                rt_count += 1
+                                if rt_count >= 2:
                                     break
                     
                     # Volume-Decay in Phase B
@@ -2400,6 +2417,21 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
                                 if st_count >= 3:
                                     break
                     
+                    # Phase B: Tests nahe SUPPORT (AR-Zone) — Drops TO but holds AT AR
+                    # Volume sollte bei Drops zur Support ABNEHMEN
+                    st_support_count = 0
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if lows[i] <= range_low + range_width * 0.20:
+                            hi_vol, vr = is_high_volume(i)
+                            if not hi_vol or vr < 1.3:
+                                st_s_label = f"ST-S{st_support_count + 1}" if st_support_count > 0 else "ST-S"
+                                events.append(f"{st_s_label} @ ${lows[i]:.2f} (Support Test, Vol {vr:.1f}x)")
+                                event_bars[st_s_label] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
+                                score += 5
+                                st_support_count += 1
+                                if st_support_count >= 2:
+                                    break
+                    
                     # UTAD: Break ueber BC-High auf LOW Volume -> Failure
                     utad_idx = None
                     utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
@@ -2552,7 +2584,7 @@ def find_wyckoff_for_chart(ohlcv_data):
                 continue
             if spread(i) < avg_spread(i) * 1.3:
                 continue
-            if body_pos(i) < 0.35:
+            if body_pos(i) < 0.45:
                 continue
             prior_high = max(highs[max(0, i-15):i])
             decline = (prior_high - lows[i]) / prior_high if prior_high > 0 else 0
@@ -2578,12 +2610,58 @@ def find_wyckoff_for_chart(ohlcv_data):
                 if 0.02 < rw / rm < 0.30:
                     events = []
                     score = 0
+                    
+                    # PS (Preliminary Support): VOR SC — erste Kaufreaktion
+                    for i in range(max(5, sc_idx - 20), sc_idx):
+                        av = avg_vol(i)
+                        if av > 0 and volumes[i] > av * 1.5 and closes[i] > opens[i] and body_pos(i) > 0.5:
+                            events.append({"name": "PS", "label": f"PS ${closes[i]:.1f}", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "below"})
+                            score += 5
+                            break
+                    
                     events.append({"name": "SC", "label": f"SC ${rl:.1f}", "time": ohlcv_data[sc_idx]["time"], "price": rl, "pos": "below"})
                     score += 20
                     events.append({"name": "AR", "label": f"AR ${rh:.1f}", "time": ohlcv_data[ar_idx]["time"], "price": rh, "pos": "above"})
                     score += 15
                     
+                    # Multiple STs nahe Support mit abnehmendem Volume
+                    st_count = 0
+                    prev_st_vol = best_sc["vol_r"]
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if lows[i] <= rl + rw * 0.25:
+                            av = avg_vol(i)
+                            vr = volumes[i] / av if av > 0 else 1
+                            if vr < prev_st_vol * 0.9:
+                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
+                                events.append({"name": st_label, "label": f"{st_label} ${lows[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
+                                score += 10 if st_count == 0 else 5
+                                prev_st_vol = vr
+                                st_count += 1
+                                if st_count >= 3:
+                                    break
+                    
+                    # Resistance Tests (Phase B): Rallies to AR zone on weak volume
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if highs[i] >= rh - rw * 0.20:
+                            av = avg_vol(i)
+                            vr = volumes[i] / av if av > 0 else 1
+                            if vr < 1.3:
+                                events.append({"name": "RT", "label": f"RT ${highs[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
+                                score += 5
+                                break
+                    
+                    # Volume-Decay in Phase B
+                    if ar_idx + 20 < n:
+                        early_vol = sum(volumes[ar_idx:ar_idx + 10]) / 10
+                        mid_pt = ar_idx + (n - ar_idx) // 2
+                        if mid_pt + 10 <= n and early_vol > 0:
+                            later_vol = sum(volumes[mid_pt:mid_pt + 10]) / 10
+                            if later_vol < early_vol * 0.75:
+                                events.append({"name": "VolDecay", "label": f"Vol Decay: {later_vol/early_vol:.0%}", "time": ohlcv_data[mid_pt]["time"], "price": rm, "pos": "below"})
+                                score += 5
+                    
                     # Spring on LOW Volume
+                    spring_idx = None
                     spring_start = max(ar_idx + 5, int(sc_idx + (n - sc_idx) * 0.3))
                     for i in range(spring_start, n - 3):
                         if lows[i] < rl:
@@ -2592,25 +2670,52 @@ def find_wyckoff_for_chart(ohlcv_data):
                             if vol_r < 0.85:
                                 for j in range(1, min(6, n - i)):
                                     if closes[i + j] > rl + rw * 0.10:
-                                        events.append({"name": "Spring", "label": f"Spring ${lows[i]:.1f} (Low Vol)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
+                                        spring_idx = i
+                                        events.append({"name": "Spring", "label": f"Spring ${lows[i]:.1f} (Vol {vol_r:.1f}x LOW)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
                                         score += 25
                                         break
                             break
                     
+                    # Test of Spring
+                    if spring_idx and spring_idx + 5 < n:
+                        for i in range(spring_idx + 2, min(spring_idx + 15, n)):
+                            if lows[i] <= lows[spring_idx] + rw * 0.05:
+                                av = avg_vol(i)
+                                vol_r = volumes[i] / av if av > 0 else 1
+                                if vol_r < 0.7:
+                                    events.append({"name": "TestSpring", "label": f"Test Spring ${lows[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
+                                    score += 10
+                                    break
+                    
                     # SOS: Wide Spread UP + High Volume
+                    sos_idx = None
                     for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
                         if closes[i] > rh and closes[i] > opens[i]:
                             av = avg_vol(i)
                             if av > 0 and volumes[i] > av * 1.5 and spread(i) > avg_spread(i) * 1.3:
+                                sos_idx = i
                                 events.append({"name": "SOS", "label": f"SOS ${closes[i]:.1f} (High Vol)", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "above"})
                                 score += 20
                                 break
                     
+                    # LPS: Pullback NACH SOS, hält ÜBER range_high, LOW Volume
+                    if sos_idx and sos_idx + 3 < n:
+                        for i in range(sos_idx + 1, n):
+                            if lows[i] < closes[sos_idx]:
+                                av = avg_vol(i)
+                                vol_r = volumes[i] / av if av > 0 else 1
+                                if lows[i] >= rh - rw * 0.10 and vol_r < 0.9:
+                                    events.append({"name": "LPS", "label": f"LPS ${lows[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
+                                    score += 15
+                                    break
+                    
                     if score >= 35:
-                        phase = "D/E" if current_price > rh else ("C" if any(e["name"] == "Spring" for e in events) else "B")
+                        has_spring = any(e["name"] == "Spring" for e in events)
+                        has_sos = any(e["name"] == "SOS" for e in events)
+                        phase = "D/E" if has_sos or current_price > rh else ("C" if has_spring else "B")
                         entry = rh if current_price < rh else current_price
                         spring_low = min([e["price"] for e in events if e["name"] == "Spring"], default=rl)
-                        stop_price = spring_low - atr * 0.3 if any(e["name"] == "Spring" for e in events) else rl - atr * 0.5
+                        stop_price = spring_low - atr * 0.3 if has_spring else rl - atr * 0.5
                         results.append({
                             "type": "Accumulation", "direction": "LONG", "emoji": "🏦⬆️",
                             "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
@@ -2655,12 +2760,58 @@ def find_wyckoff_for_chart(ohlcv_data):
                 if 0.02 < rw / rm < 0.30:
                     events = []
                     score = 0
+                    
+                    # PSY (Preliminary Supply): VOR BC — erste Verkaufsreaktion
+                    for i in range(max(5, bc_idx - 20), bc_idx):
+                        av = avg_vol(i)
+                        if av > 0 and volumes[i] > av * 1.5 and closes[i] < opens[i] and body_pos(i) < 0.5:
+                            events.append({"name": "PSY", "label": f"PSY ${closes[i]:.1f}", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "above"})
+                            score += 5
+                            break
+                    
                     events.append({"name": "BC", "label": f"BC ${rh:.1f}", "time": ohlcv_data[bc_idx]["time"], "price": rh, "pos": "above"})
                     score += 20
                     events.append({"name": "AR", "label": f"AR ${rl:.1f}", "time": ohlcv_data[ar_idx]["time"], "price": rl, "pos": "below"})
                     score += 15
                     
+                    # Multiple STs nahe Resistance mit abnehmendem Volume
+                    st_count = 0
+                    prev_st_vol = best_bc["vol_r"]
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if highs[i] >= rh - rw * 0.25:
+                            av = avg_vol(i)
+                            vr = volumes[i] / av if av > 0 else 1
+                            if vr < prev_st_vol * 0.9:
+                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
+                                events.append({"name": st_label, "label": f"{st_label} ${highs[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
+                                score += 10 if st_count == 0 else 5
+                                prev_st_vol = vr
+                                st_count += 1
+                                if st_count >= 3:
+                                    break
+                    
+                    # Support Tests (Phase B): Drops to AR zone on weak volume
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if lows[i] <= rl + rw * 0.20:
+                            av = avg_vol(i)
+                            vr = volumes[i] / av if av > 0 else 1
+                            if vr < 1.3:
+                                events.append({"name": "ST-S", "label": f"ST-S ${lows[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
+                                score += 5
+                                break
+                    
+                    # Volume-Decay in Phase B
+                    if ar_idx + 20 < n:
+                        early_vol = sum(volumes[ar_idx:ar_idx + 10]) / 10
+                        mid_pt = ar_idx + (n - ar_idx) // 2
+                        if mid_pt + 10 <= n and early_vol > 0:
+                            later_vol = sum(volumes[mid_pt:mid_pt + 10]) / 10
+                            if later_vol < early_vol * 0.75:
+                                events.append({"name": "VolDecay", "label": f"Vol Decay: {later_vol/early_vol:.0%}", "time": ohlcv_data[mid_pt]["time"], "price": rm, "pos": "above"})
+                                score += 5
+                    
                     # UTAD on LOW Volume
+                    utad_idx = None
                     utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
                     for i in range(utad_start, n - 3):
                         if highs[i] > rh:
@@ -2669,25 +2820,52 @@ def find_wyckoff_for_chart(ohlcv_data):
                             if vol_r < 0.85:
                                 for j in range(1, min(6, n - i)):
                                     if closes[i + j] < rh - rw * 0.10:
-                                        events.append({"name": "UTAD", "label": f"UTAD ${highs[i]:.1f} (Low Vol)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
+                                        utad_idx = i
+                                        events.append({"name": "UTAD", "label": f"UTAD ${highs[i]:.1f} (Vol {vol_r:.1f}x LOW)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
                                         score += 25
                                         break
                             break
                     
+                    # Test of UTAD
+                    if utad_idx and utad_idx + 5 < n:
+                        for i in range(utad_idx + 2, min(utad_idx + 15, n)):
+                            if highs[i] >= highs[utad_idx] - rw * 0.05:
+                                av = avg_vol(i)
+                                vol_r = volumes[i] / av if av > 0 else 1
+                                if vol_r < 0.7:
+                                    events.append({"name": "TestUTAD", "label": f"Test UTAD ${highs[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
+                                    score += 10
+                                    break
+                    
                     # SOW: Wide Spread DOWN + High Volume
+                    sow_idx = None
                     for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
                         if closes[i] < rl and closes[i] < opens[i]:
                             av = avg_vol(i)
                             if av > 0 and volumes[i] > av * 1.5 and spread(i) > avg_spread(i) * 1.3:
+                                sow_idx = i
                                 events.append({"name": "SOW", "label": f"SOW ${closes[i]:.1f} (High Vol)", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "below"})
                                 score += 20
                                 break
                     
+                    # LPSY: Rally nach SOW scheitert nahe Range-Low, Low Volume
+                    if sow_idx and sow_idx + 3 < n:
+                        for i in range(sow_idx + 1, n):
+                            if highs[i] > closes[sow_idx]:
+                                av = avg_vol(i)
+                                vol_r = volumes[i] / av if av > 0 else 1
+                                if highs[i] <= rl + rw * 0.10 and vol_r < 0.9:
+                                    events.append({"name": "LPSY", "label": f"LPSY ${highs[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
+                                    score += 15
+                                    break
+                    
                     if score >= 35:
-                        phase = "D/E" if current_price < rl else ("C" if any(e["name"] == "UTAD" for e in events) else "B")
+                        has_utad = any(e["name"] == "UTAD" for e in events)
+                        has_sow = any(e["name"] == "SOW" for e in events)
+                        phase = "D/E" if has_sow or current_price < rl else ("C" if has_utad else "B")
                         entry = rl if current_price > rl else current_price
                         utad_high = max([e["price"] for e in events if e["name"] == "UTAD"], default=rh)
-                        stop_price = utad_high + atr * 0.3 if any(e["name"] == "UTAD" for e in events) else rh + atr * 0.5
+                        stop_price = utad_high + atr * 0.3 if has_utad else rh + atr * 0.5
                         results.append({
                             "type": "Distribution", "direction": "SHORT", "emoji": "🏦⬇️",
                             "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
