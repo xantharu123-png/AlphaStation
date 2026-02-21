@@ -4652,6 +4652,340 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
     except Exception as e:
         return None
 
+
+# =============================================================================
+# VOLUME IMBALANCE (ICT) — Body-to-Body Gaps & Fair Value Gaps
+# =============================================================================
+# ICT Konzept: Volume Imbalances sind Lücken zwischen den BODIES zweier
+# aufeinanderfolgender Kerzen. Diese Zonen wirken als Preismagneten —
+# der Markt kehrt oft zurück um sie zu füllen (Mitigation).
+#
+# Typen:
+#   VI (Volume Imbalance):  Body-Gap zwischen 2 Kerzen, Wicks können überlappen
+#   FVG (Fair Value Gap):   3-Kerzen-Pattern, Wick von Kerze 1 berührt nicht Wick von Kerze 3
+#   OG (Opening Gap):       Wicks überlappen sich GAR NICHT (stärkstes Signal)
+#
+# Trading:
+#   - Unfilled bullish VI unter dem Preis = potentieller Support / Long Entry
+#   - Unfilled bearish VI über dem Preis = potentielle Resistance / Short Entry
+#   - Preis kehrt in ~70-80% der Fälle zurück um die Zone zu füllen
+#   - Mitigation = Zone wurde vom Preis berührt (gefüllt)
+#   - CE (Consequent Encroachment) = 50% der Zone gefüllt (wichtig für Entries)
+# =============================================================================
+
+def detect_volume_imbalances(ohlcv_data, max_zones=50):
+    """
+    Erkennt Volume Imbalances (VI), Fair Value Gaps (FVG), und Opening Gaps (OG)
+    in OHLCV-Daten. Tracked ob Zonen gefüllt (mitigated) wurden.
+    
+    ICT DEFINITIONEN (korrekt):
+      VI  = Body-to-Body Gap zwischen 2 aufeinanderfolgenden Kerzen (Wicks dürfen überlappen)
+      FVG = 3-Kerzen-Pattern: Gap zwischen High[Kerze 1] und Low[Kerze 3] (wick-basiert)
+      OG  = Wick-to-Wick Gap — Wicks überlappen sich GAR NICHT (stärkstes Signal)
+    
+    WICHTIG: VI und FVG werden GETRENNT erkannt (verschiedene Konzepte).
+    FVG kann OHNE Body-Gap existieren (große Impulse-Kerze in der Mitte).
+    
+    Args:
+        ohlcv_data: Liste von dicts mit keys: open, high, low, close, volume, time
+        max_zones: Maximale Anzahl an Zonen die getrackt werden
+    
+    Returns:
+        dict mit zones, unfilled_bull, unfilled_bear, nearest_bull, nearest_bear, stats
+    """
+    empty_result = {"zones": [], "unfilled_bull": [], "unfilled_bear": [],
+                    "nearest_bull": None, "nearest_bear": None,
+                    "stats": {"total": 0, "filled": 0, "unfilled": 0, "fill_rate": 0,
+                              "bull_unfilled": 0, "bear_unfilled": 0}}
+    
+    if not ohlcv_data or len(ohlcv_data) < 5:
+        return empty_result
+    
+    zones = []
+    n = len(ohlcv_data)
+    current_price = ohlcv_data[-1]["close"]
+    
+    # Durchschnittliche Range und Volume für Filter
+    ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
+    avg_range = sum(ranges) / len(ranges) if ranges else current_price * 0.01
+    # 30% der durchschnittlichen Kerzen-Range als Mindestgröße
+    # Filtert Mikro-Gaps raus die in jedem Trend entstehen
+    min_gap_size = avg_range * 0.30
+    
+    volumes = [d.get("volume", 0) for d in ohlcv_data]
+    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+    
+    # ================================================================
+    # PASS 1a: Volume Imbalances (VI) — 2-Kerzen Body-to-Body Gap
+    # Bedingung: Gap zwischen Bodies + Volume der Impulse-Kerze >= 1.0x avg
+    # ================================================================
+    
+    for i in range(1, n):
+        c_prev = ohlcv_data[i - 1]
+        c_curr = ohlcv_data[i]
+        
+        # Body-Grenzen (max/min für Doji-Safe)
+        body_top_1 = max(c_prev["open"], c_prev["close"])
+        body_bot_1 = min(c_prev["open"], c_prev["close"])
+        body_top_2 = max(c_curr["open"], c_curr["close"])
+        body_bot_2 = min(c_curr["open"], c_curr["close"])
+        
+        # Volume-Filter: Impulse-Kerze muss mindestens durchschnittliches Volume haben
+        impulse_vol = c_curr.get("volume", 0)
+        if avg_vol > 0 and impulse_vol < avg_vol * 1.0:
+            continue  # Kein institutionelles Interesse
+        vol_ratio = impulse_vol / avg_vol if avg_vol > 0 else 1
+        
+        # --- BULLISH VI: Body Kerze 2 startet ÜBER Body Kerze 1 ---
+        if body_bot_2 > body_top_1 + min_gap_size:
+            gap_low = body_top_1
+            gap_high = body_bot_2
+            gap_size = gap_high - gap_low
+            gap_mid = (gap_high + gap_low) / 2
+            gap_pct = (gap_size / gap_low * 100) if gap_low > 0 else 0
+            
+            # OG Check: Wicks überlappen sich gar nicht?
+            wicks_no_overlap = c_prev["high"] < c_curr["low"]
+            zone_type = "OG" if wicks_no_overlap else "VI"
+            strength = 3 if wicks_no_overlap else 1
+            if vol_ratio > 2.0:
+                strength += 1
+            
+            zones.append({
+                "direction": "bullish", "type": zone_type,
+                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
+                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "bar_idx": i, "time": c_curr.get("time", 0),
+                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "filled": False, "ce_filled": False, "fill_bar": None,
+            })
+        
+        # --- BEARISH VI: Body Kerze 2 endet UNTER Body Kerze 1 ---
+        elif body_top_2 < body_bot_1 - min_gap_size:
+            gap_high = body_bot_1
+            gap_low = body_top_2
+            gap_size = gap_high - gap_low
+            gap_mid = (gap_high + gap_low) / 2
+            gap_pct = (gap_size / gap_high * 100) if gap_high > 0 else 0
+            
+            wicks_no_overlap = c_curr["high"] < c_prev["low"]
+            zone_type = "OG" if wicks_no_overlap else "VI"
+            strength = 3 if wicks_no_overlap else 1
+            if vol_ratio > 2.0:
+                strength += 1
+            
+            zones.append({
+                "direction": "bearish", "type": zone_type,
+                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
+                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "bar_idx": i, "time": c_curr.get("time", 0),
+                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "filled": False, "ce_filled": False, "fill_bar": None,
+            })
+    
+    # ================================================================
+    # PASS 1b: Fair Value Gaps (FVG) — 3-Kerzen Wick-Gap (SEPARAT)
+    # FVG Zone = High[Kerze 1] bis Low[Kerze 3] (bullish)
+    #          = Low[Kerze 1] bis High[Kerze 3] (bearish)
+    # UNTERSCHIED zu VI: Wick-basiert, kann ohne Body-Gap existieren!
+    # ================================================================
+    
+    for i in range(2, n):
+        c1 = ohlcv_data[i - 2]  # Kerze 1
+        c2 = ohlcv_data[i - 1]  # Kerze 2 (Impulse)
+        c3 = ohlcv_data[i]      # Kerze 3
+        
+        # Volume der Impulse-Kerze (Kerze 2)
+        impulse_vol = c2.get("volume", 0)
+        if avg_vol > 0 and impulse_vol < avg_vol * 1.0:
+            continue
+        vol_ratio = impulse_vol / avg_vol if avg_vol > 0 else 1
+        
+        # --- BULLISH FVG: High[K1] < Low[K3] ---
+        # Wick von Kerze 1 berührt NICHT Wick von Kerze 3
+        if c1["high"] < c3["low"] - min_gap_size:
+            gap_low = c1["high"]     # Wick-High Kerze 1
+            gap_high = c3["low"]     # Wick-Low Kerze 3
+            gap_size = gap_high - gap_low
+            gap_mid = (gap_high + gap_low) / 2
+            gap_pct = (gap_size / gap_low * 100) if gap_low > 0 else 0
+            
+            strength = 2
+            if vol_ratio > 2.0:
+                strength += 1
+            # Größere FVGs sind stärker
+            if gap_pct > 1.0:
+                strength += 1
+            
+            # Prüfe ob diese Zone nicht schon als VI/OG existiert (Deduplizierung)
+            already_exists = False
+            for z in zones:
+                if (z["bar_idx"] in [i, i-1] and z["direction"] == "bullish" and
+                    abs(z["zone_low"] - gap_low) < gap_size * 0.5):
+                    already_exists = True
+                    # Upgrade zu FVG wenn stärker
+                    if strength > z["strength"]:
+                        z["type"] = "FVG"
+                        z["zone_high"] = round(gap_high, 4)
+                        z["zone_low"] = round(gap_low, 4)
+                        z["zone_mid"] = round(gap_mid, 4)
+                        z["gap_pct"] = round(gap_pct, 2)
+                        z["strength"] = strength
+                    break
+            
+            if not already_exists:
+                zones.append({
+                    "direction": "bullish", "type": "FVG",
+                    "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
+                    "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                    "bar_idx": i, "time": c3.get("time", 0),
+                    "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                    "filled": False, "ce_filled": False, "fill_bar": None,
+                })
+        
+        # --- BEARISH FVG: Low[K1] > High[K3] ---
+        if c1["low"] > c3["high"] + min_gap_size:
+            gap_high = c1["low"]     # Wick-Low Kerze 1
+            gap_low = c3["high"]     # Wick-High Kerze 3
+            gap_size = gap_high - gap_low
+            gap_mid = (gap_high + gap_low) / 2
+            gap_pct = (gap_size / gap_high * 100) if gap_high > 0 else 0
+            
+            strength = 2
+            if vol_ratio > 2.0:
+                strength += 1
+            if gap_pct > 1.0:
+                strength += 1
+            
+            already_exists = False
+            for z in zones:
+                if (z["bar_idx"] in [i, i-1] and z["direction"] == "bearish" and
+                    abs(z["zone_high"] - gap_high) < gap_size * 0.5):
+                    already_exists = True
+                    if strength > z["strength"]:
+                        z["type"] = "FVG"
+                        z["zone_high"] = round(gap_high, 4)
+                        z["zone_low"] = round(gap_low, 4)
+                        z["zone_mid"] = round(gap_mid, 4)
+                        z["gap_pct"] = round(gap_pct, 2)
+                        z["strength"] = strength
+                    break
+            
+            if not already_exists:
+                zones.append({
+                    "direction": "bearish", "type": "FVG",
+                    "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
+                    "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                    "bar_idx": i, "time": c3.get("time", 0),
+                    "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                    "filled": False, "ce_filled": False, "fill_bar": None,
+                })
+    
+    # Sortiere nach bar_idx für korrektes Mitigation-Tracking
+    zones.sort(key=lambda z: z["bar_idx"])
+    
+    # ================================================================
+    # PASS 2: Mitigation — wurde die Zone vom Preis gefüllt?
+    # ================================================================
+    
+    for zone in zones:
+        zone_created = zone["bar_idx"]
+        zh = zone["zone_high"]
+        zl = zone["zone_low"]
+        zm = zone["zone_mid"]
+        
+        for j in range(zone_created + 1, n):
+            bar = ohlcv_data[j]
+            
+            if zone["direction"] == "bullish":
+                # Bullish Zone: Preis muss RUNTER in die Zone fallen
+                if bar["low"] <= zh:  # Preis hat Zone betreten
+                    if bar["low"] <= zm:
+                        zone["ce_filled"] = True  # 50% CE
+                    if bar["low"] <= zl:
+                        zone["filled"] = True  # Komplett gefüllt
+                        zone["fill_bar"] = j
+                        break
+            else:
+                # Bearish Zone: Preis muss HOCH in die Zone steigen
+                if bar["high"] >= zl:  # Preis hat Zone betreten
+                    if bar["high"] >= zm:
+                        zone["ce_filled"] = True
+                    if bar["high"] >= zh:
+                        zone["filled"] = True
+                        zone["fill_bar"] = j
+                        break
+    
+    # ================================================================
+    # PASS 3: Sortiere und klassifiziere
+    # ================================================================
+    
+    zones = zones[-max_zones:]
+    zones.reverse()  # Neueste zuerst
+    
+    unfilled_bull = [z for z in zones if not z["filled"] and z["direction"] == "bullish" and z["zone_high"] < current_price]
+    unfilled_bear = [z for z in zones if not z["filled"] and z["direction"] == "bearish" and z["zone_low"] > current_price]
+    
+    unfilled_bull.sort(key=lambda z: current_price - z["zone_high"])
+    unfilled_bear.sort(key=lambda z: z["zone_low"] - current_price)
+    
+    nearest_bull = unfilled_bull[0] if unfilled_bull else None
+    nearest_bear = unfilled_bear[0] if unfilled_bear else None
+    
+    total = len(zones)
+    filled = sum(1 for z in zones if z["filled"])
+    unfilled = total - filled
+    fill_rate = round(filled / total * 100, 1) if total > 0 else 0
+    
+    return {
+        "zones": zones,
+        "unfilled_bull": unfilled_bull,
+        "unfilled_bear": unfilled_bear,
+        "nearest_bull": nearest_bull,
+        "nearest_bear": nearest_bear,
+        "stats": {
+            "total": total, "filled": filled, "unfilled": unfilled,
+            "fill_rate": fill_rate,
+            "bull_unfilled": len(unfilled_bull),
+            "bear_unfilled": len(unfilled_bear),
+        }
+    }
+
+
+def format_vi_for_display(vi_result, current_price):
+    """
+    Formatiert Volume Imbalance Ergebnisse für die Scanner-Anzeige.
+    
+    Returns:
+        dict mit Display-Feldern für das Scanner-UI
+    """
+    nb = vi_result["nearest_bull"]
+    nbr = vi_result["nearest_bear"]
+    stats = vi_result["stats"]
+    
+    display = {
+        "VI_Total": stats["total"],
+        "VI_Unfilled": stats["unfilled"],
+        "VI_FillRate": stats["fill_rate"],
+    }
+    
+    if nb:
+        dist_pct = round((current_price - nb["zone_high"]) / current_price * 100, 2)
+        display["Bull_VI"] = f"${nb['zone_low']:.2f}-${nb['zone_high']:.2f}"
+        display["Bull_VI_Dist"] = f"{dist_pct:.1f}%"
+        display["Bull_VI_Type"] = nb["type"]
+        display["Bull_VI_Str"] = nb["strength"]
+    
+    if nbr:
+        dist_pct = round((nbr["zone_low"] - current_price) / current_price * 100, 2)
+        display["Bear_VI"] = f"${nbr['zone_low']:.2f}-${nbr['zone_high']:.2f}"
+        display["Bear_VI_Dist"] = f"{dist_pct:.1f}%"
+        display["Bear_VI_Type"] = nbr["type"]
+        display["Bear_VI_Str"] = nbr["strength"]
+    
+    return display
+
+
 def detect_chart_patterns(ohlcv_data, lookback=50):
     """
     Erkennt Chart-Patterns automatisch.
@@ -5553,6 +5887,70 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
             
             except Exception:
                 pass  # Candlestick detection failed
+        
+        # =================================================================
+        # VOLUME IMBALANCES — ICT Body-to-Body Gaps
+        # =================================================================
+        if len(data) >= 20:
+            try:
+                vi_result = detect_volume_imbalances(data)
+                
+                # Zeige die nächsten unfilled Zonen als Pattern
+                for zone in vi_result["unfilled_bull"][:3]:
+                    dist_pct = (current_price - zone["zone_high"]) / current_price * 100 if current_price > 0 else 0
+                    type_label = {"VI": "Volume Imbalance", "FVG": "Fair Value Gap", "OG": "Opening Gap"}[zone["type"]]
+                    str_stars = "⭐" * zone["strength"]
+                    patterns.append({
+                        "pattern": f"Bullish {type_label}",
+                        "emoji": "🟢📊",
+                        "type": "bullish",
+                        "zone_high": zone["zone_high"],
+                        "zone_low": zone["zone_low"],
+                        "zone_mid": zone["zone_mid"],
+                        "gap_pct": zone["gap_pct"],
+                        "vol_ratio": zone["vol_ratio"],
+                        "ce_filled": zone["ce_filled"],
+                        "confidence": "High" if zone["strength"] >= 3 else "Medium" if zone["strength"] >= 2 else "Low",
+                        "description": f"Bullish {zone['type']} @ ${zone['zone_low']:.2f}-${zone['zone_high']:.2f} ({zone['gap_pct']:.1f}% gap). "
+                                       f"Dist: {dist_pct:.1f}% unter Preis. Vol: {zone['vol_ratio']:.1f}x. {str_stars} "
+                                       f"{'CE 50% berührt' if zone['ce_filled'] else 'Unfilled'}"
+                    })
+                
+                for zone in vi_result["unfilled_bear"][:3]:
+                    dist_pct = (zone["zone_low"] - current_price) / current_price * 100 if current_price > 0 else 0
+                    type_label = {"VI": "Volume Imbalance", "FVG": "Fair Value Gap", "OG": "Opening Gap"}[zone["type"]]
+                    str_stars = "⭐" * zone["strength"]
+                    patterns.append({
+                        "pattern": f"Bearish {type_label}",
+                        "emoji": "🔴📊",
+                        "type": "bearish",
+                        "zone_high": zone["zone_high"],
+                        "zone_low": zone["zone_low"],
+                        "zone_mid": zone["zone_mid"],
+                        "gap_pct": zone["gap_pct"],
+                        "vol_ratio": zone["vol_ratio"],
+                        "ce_filled": zone["ce_filled"],
+                        "confidence": "High" if zone["strength"] >= 3 else "Medium" if zone["strength"] >= 2 else "Low",
+                        "description": f"Bearish {zone['type']} @ ${zone['zone_low']:.2f}-${zone['zone_high']:.2f} ({zone['gap_pct']:.1f}% gap). "
+                                       f"Dist: {dist_pct:.1f}% über Preis. Vol: {zone['vol_ratio']:.1f}x. {str_stars} "
+                                       f"{'CE 50% berührt' if zone['ce_filled'] else 'Unfilled'}"
+                    })
+                
+                # Stats als Meta-Info
+                stats = vi_result["stats"]
+                if stats["total"] > 0:
+                    patterns.append({
+                        "pattern": "VI Stats",
+                        "emoji": "📊",
+                        "type": "info",
+                        "confidence": "Info",
+                        "description": f"Volume Imbalances: {stats['total']} total, {stats['unfilled']} unfilled, "
+                                       f"Fill Rate: {stats['fill_rate']:.0f}%. "
+                                       f"Bull Support: {stats['bull_unfilled']}, Bear Resistance: {stats['bear_unfilled']}"
+                    })
+            
+            except Exception:
+                pass
         
         return patterns
         
