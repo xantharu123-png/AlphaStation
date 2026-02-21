@@ -4902,10 +4902,10 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
         # Durchschnitt berechnen
         avg_vol = sum(b["volume"] for b in bins) / len(bins)
         
-        # Voids = Bins mit < 30% des Durchschnitts
+        # Voids = Bins mit < 50% des Durchschnitts (konsistent mit Scanner)
         voids = []
         for bin in bins:
-            if bin["volume"] < avg_vol * 0.3:
+            if bin["volume"] < avg_vol * 0.5:
                 strength = 1 - (bin["volume"] / avg_vol) if avg_vol > 0 else 1
                 voids.append({
                     "price_low": round(bin["low"], 2),
@@ -4918,7 +4918,72 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
         return []
 
 
-def calculate_ema_series(closes, period):
+def find_harmonic_for_chart(ohlcv_data):
+    """
+    Findet Harmonic Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
+    
+    Returns:
+        Liste von Patterns mit XABCD-Koordinaten für Chart-Rendering
+    """
+    if not ohlcv_data or len(ohlcv_data) < 20:
+        return []
+    
+    try:
+        # Konvertiere zu find_pivots Format
+        prices = []
+        for d in ohlcv_data:
+            prices.append({
+                "date": str(d.get("time", "")),
+                "high": d["high"],
+                "low": d["low"],
+                "close": d["close"],
+                "open": d["open"],
+                "volume": d.get("volume", 0)
+            })
+        
+        # Finde Pivots mit window=3 (sensibel genug für alle Timeframes)
+        pivots = find_pivots(prices, window=3)
+        
+        if len(pivots) < 5:
+            return []
+        
+        # Identifiziere Patterns
+        patterns = identify_harmonic_pattern(pivots, prices)
+        
+        if not patterns:
+            return []
+        
+        # Konvertiere zu Chart-Format mit time-Koordinaten
+        chart_patterns = []
+        for pat in patterns[:3]:  # Max 3 Patterns
+            points = []
+            pivot_indices = pat.get("pivot_indices", [])
+            point_labels = ["X", "A", "B", "C", "D"]
+            
+            for idx, label in zip(pivot_indices, point_labels):
+                if idx < len(ohlcv_data):
+                    points.append({
+                        "time": ohlcv_data[idx]["time"],
+                        "price": pat["points"][label],
+                        "label": label
+                    })
+            
+            if len(points) == 5:
+                chart_patterns.append({
+                    "pattern": pat["pattern"],
+                    "emoji": pat["emoji"],
+                    "direction": pat["direction"],
+                    "score": pat["score"],
+                    "matches": pat["matches"],
+                    "points": points,
+                    "ratios": pat["ratios"],
+                    "trade": pat.get("trade", {}),
+                    "success_rate": pat.get("success_rate", 0)
+                })
+        
+        return chart_patterns
+    except Exception as e:
+        return []
     """Berechnet EMA-Serie für Chart-Overlay (gibt Liste zurück, nicht Einzelwert)."""
     if len(closes) < period:
         return []
@@ -5034,7 +5099,7 @@ def generate_ai_chart_analysis(ticker, ohlcv_data, patterns, sr_levels, fib_leve
 
 def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=None, fib_levels=None, 
                                    ema_periods=[20, 50, 100, 200], height=500, show_volume=True,
-                                   vwap_data=None, volume_voids=None, trade_zones=None):
+                                   vwap_data=None, volume_voids=None, trade_zones=None, harmonic_data=None):
     """
     Erstellt HTML für Lightweight Charts mit ALLEN Overlays:
     - Candlesticks + Volume
@@ -5043,6 +5108,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
     - Fibonacci Retracements
     - VWAP + Standard Deviation Bands
     - Volume Voids (orange highlights)
+    - Harmonic Patterns (XABCD ZigZag)
     - Trade Zones (Entry/Stop/Target)
     - Pattern Markers
     
@@ -5174,6 +5240,9 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
     
     # Prepare Volume Voids (for horizontal highlighting)
     voids_json = json.dumps(volume_voids if volume_voids else [])
+    
+    # Prepare Harmonic Pattern data (XABCD zigzag lines)
+    harmonic_json = json.dumps(harmonic_data if harmonic_data else [])
     
     # Prepare Trade Zones
     zones = []
@@ -5429,6 +5498,99 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
             const markers = {markers_json};
             if (markers.length > 0) {{
                 candleSeries.setMarkers(markers);
+            }}
+            
+            // Harmonic Patterns - XABCD ZigZag Lines
+            const harmonicPatterns = {harmonic_json};
+            if (harmonicPatterns.length > 0) {{
+                harmonicPatterns.forEach((pat, patIdx) => {{
+                    const pts = pat.points;
+                    if (pts && pts.length === 5) {{
+                        const isLong = pat.direction === 'LONG';
+                        const lineColor = isLong ? 'rgba(76, 175, 80, 0.9)' : 'rgba(244, 67, 54, 0.9)';
+                        const fillColor = isLong ? 'rgba(76, 175, 80, 0.12)' : 'rgba(244, 67, 54, 0.12)';
+                        
+                        // Draw XABCD zigzag as line series segments
+                        const harmonicLine = chart.addLineSeries({{
+                            color: lineColor,
+                            lineWidth: 2,
+                            lineStyle: 0,
+                            crosshairMarkerVisible: false,
+                            lastValueVisible: false,
+                            priceLineVisible: false,
+                        }});
+                        
+                        const lineData = pts.map(p => ({{ time: p.time, value: p.price }}));
+                        harmonicLine.setData(lineData);
+                        
+                        // Add XABCD markers on candleSeries
+                        const labels = ['X', 'A', 'B', 'C', 'D'];
+                        const harmonicMarkers = pts.map((p, i) => ({{
+                            time: p.time,
+                            position: (i === 0 || i === 2 || i === 4) ? (isLong ? 'belowBar' : 'aboveBar') : (isLong ? 'aboveBar' : 'belowBar'),
+                            color: lineColor,
+                            shape: 'circle',
+                            text: labels[i] + ' $' + p.price.toFixed(1),
+                        }}));
+                        
+                        // Merge with existing markers (sorted by time!)
+                        const allMarkers = [...markers, ...harmonicMarkers].sort((a, b) => {{
+                            if (typeof a.time === 'number' && typeof b.time === 'number') return a.time - b.time;
+                            return String(a.time).localeCompare(String(b.time));
+                        }});
+                        candleSeries.setMarkers(allMarkers);
+                        
+                        // Trade levels from harmonic pattern (dashed lines)
+                        if (pat.trade) {{
+                            if (pat.trade.entry) {{
+                                candleSeries.createPriceLine({{
+                                    price: pat.trade.entry,
+                                    color: 'rgba(76, 175, 80, 0.7)',
+                                    lineWidth: 1,
+                                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                                    axisLabelVisible: true,
+                                    title: 'Entry',
+                                }});
+                            }}
+                            if (pat.trade.stop_loss) {{
+                                candleSeries.createPriceLine({{
+                                    price: pat.trade.stop_loss,
+                                    color: 'rgba(244, 67, 54, 0.7)',
+                                    lineWidth: 1,
+                                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                                    axisLabelVisible: true,
+                                    title: 'Stop',
+                                }});
+                            }}
+                            if (pat.trade.tp1) {{
+                                candleSeries.createPriceLine({{
+                                    price: pat.trade.tp1,
+                                    color: 'rgba(33, 150, 243, 0.7)',
+                                    lineWidth: 1,
+                                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                                    axisLabelVisible: true,
+                                    title: 'TP1',
+                                }});
+                            }}
+                            if (pat.trade.tp2) {{
+                                candleSeries.createPriceLine({{
+                                    price: pat.trade.tp2,
+                                    color: 'rgba(33, 150, 243, 0.5)',
+                                    lineWidth: 1,
+                                    lineStyle: LightweightCharts.LineStyle.Dotted,
+                                    axisLabelVisible: true,
+                                    title: 'TP2',
+                                }});
+                            }}
+                        }}
+                        
+                        // Harmonic indicator badge
+                        const hDiv = document.createElement('div');
+                        hDiv.style.cssText = 'position:absolute;top:' + (8 + patIdx * 22) + 'px;right:10px;background:rgba(0,0,0,0.7);color:' + lineColor + ';padding:2px 8px;border-radius:4px;font-size:12px;z-index:5;';
+                        hDiv.innerHTML = pat.emoji + ' ' + pat.pattern + ' (' + pat.direction + ') ' + pat.matches;
+                        container.appendChild(hDiv);
+                    }}
+                }});
             }}
             
             // Pattern Box
@@ -5865,6 +6027,9 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # Volume Voids
         volume_voids = find_volume_voids_for_chart(ohlcv, num_bins=20)
         
+        # Harmonic Patterns (auf dem aktuellen Timeframe!)
+        harmonic_data = find_harmonic_for_chart(ohlcv)
+        
         # Volume Profile für POC/VAH/VAL
         vp = None
         if len(ohlcv) >= 20:
@@ -5886,7 +6051,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     
     # Display Options - ÜBERSICHTLICHER: Weniger default an
     st.markdown("**⚙️ Chart Optionen:**")
-    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5, col_opt6 = st.columns(6)
+    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5, col_opt6, col_opt7 = st.columns(7)
     with col_opt1:
         show_ema = st.checkbox("📈 EMAs", value=True, key=f"ema_{ticker}_{current_tf}")
     with col_opt2:
@@ -5898,6 +6063,8 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     with col_opt5:
         show_voids = st.checkbox("🕳️ Voids", value=False, key=f"voids_{ticker}_{current_tf}")
     with col_opt6:
+        show_harmonic = st.checkbox("🦋 Harmonic", value=False, key=f"harmonic_{ticker}_{current_tf}")
+    with col_opt7:
         show_zones = st.checkbox("🎯 Zones", value=False, key=f"zones_{ticker}_{current_tf}")
     
     # PDH/PDL/PDC Anzeige
@@ -5922,7 +6089,8 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         show_volume=True,
         vwap_data=vwap_data if show_vwap else None,
         volume_voids=volume_voids if show_voids else None,
-        trade_zones=trade_zones if show_zones else None
+        trade_zones=trade_zones if show_zones else None,
+        harmonic_data=harmonic_data if show_harmonic else None
     )
     
     # Display Chart
@@ -5936,6 +6104,16 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     # === PATTERNS ===
     with col_patterns:
         st.subheader("🔍 Patterns")
+        
+        # Harmonic Patterns (wenn erkannt)
+        if harmonic_data:
+            for hp in harmonic_data[:2]:
+                direction_emoji = "🟢" if hp["direction"] == "LONG" else "🔴"
+                st.success(f"{hp['emoji']} **{hp['pattern']}** {direction_emoji} {hp['direction']}") if hp["direction"] == "LONG" else st.error(f"{hp['emoji']} **{hp['pattern']}** {direction_emoji} {hp['direction']}")
+                st.caption(f"Score: {hp['score']} | Matches: {hp['matches']} | Erfolg: {hp.get('success_rate', '?')}%")
+                if hp.get("trade"):
+                    t = hp["trade"]
+                    st.caption(f"Entry: ${t.get('entry', 0):.2f} | SL: ${t.get('stop_loss', 0):.2f} | TP1: ${t.get('tp1', 0):.2f}")
         
         if patterns:
             for p in patterns[:5]:
@@ -5989,6 +6167,11 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # Volume Voids
         if volume_voids:
             st.caption(f"🕳️ {len(volume_voids)} Volume Voids gefunden")
+        
+        # Harmonic Patterns count
+        if harmonic_data:
+            hp = harmonic_data[0]
+            st.caption(f"🦋 {hp['pattern']} ({hp['direction']}) Score={hp['score']}")
     
     # === TRADE SETUP ===
     with col_trade:
