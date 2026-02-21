@@ -448,6 +448,26 @@ STRATEGIES = {
         "harmonic_direction": "ALL"
     },
     # =========================================================================
+    # WYCKOFF STRATEGIEN 🏦 - Klassische Akkumulations/Distributions-Phasen
+    # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
+    # =========================================================================
+    "Wyckoff Accumulation 🏦⬆️": {
+        "description": "🏦 Wyckoff Akkumulation — Smart Money kauft leise in Trading Range (SC→AR→ST→Spring→SOS)",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "4H-Chart: Selling Climax + Secondary Test + Spring + Sign of Strength → Long",
+        "stocks_only": True,
+        "needs_wyckoff": True,
+        "wyckoff_direction": "LONG"
+    },
+    "Wyckoff Distribution 🏦⬇️": {
+        "description": "🏦 Wyckoff Distribution — Smart Money verkauft leise in Trading Range (BC→AR→ST→UT→SOW)",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "4H-Chart: Buying Climax + Secondary Test + Upthrust + Sign of Weakness → Short",
+        "stocks_only": True,
+        "needs_wyckoff": True,
+        "wyckoff_direction": "SHORT"
+    },
+    # =========================================================================
     # MA BOUNCE STRATEGIEN 📈 - Support/Resistance an Moving Averages
     # =========================================================================
     "SMA 50 Bounce Long 📈": {
@@ -1969,7 +1989,528 @@ def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
     return results
 
 
-def get_volatility_regime(atr_pct):
+def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
+    """
+    Scannt eine Aktie nach Wyckoff Accumulation/Distribution Patterns.
+    
+    Wyckoff Accumulation Phasen:
+      Phase A: Selling Climax (SC) + Automatic Rally (AR) → Stopping des Downtrends
+      Phase B: Secondary Test (ST) + Range Building → Cause wird aufgebaut
+      Phase C: Spring/Shakeout → False Breakdown, Smart Money akkumuliert
+      Phase D: Sign of Strength (SOS) + Last Point of Support (LPS)
+      Phase E: Markup → Breakout mit Volume
+    
+    Wyckoff Distribution Phasen:
+      Phase A: Buying Climax (BC) + Automatic Reaction (AR)
+      Phase B: Secondary Test (ST) + Range Building  
+      Phase C: Upthrust After Distribution (UTAD) → False Breakout
+      Phase D: Sign of Weakness (SOW) + Last Point of Supply (LPSY)
+      Phase E: Markdown → Breakdown
+    
+    Returns:
+        dict mit pattern, phase, events, score, trade levels
+    """
+    try:
+        from datetime import datetime, timedelta
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days + 10)
+        
+        # Polygon API - 4H oder Daily
+        multiplier = 4
+        span = "hour"
+        if timeframe == "day":
+            multiplier = 1
+            span = "day"
+        elif timeframe == "1hour":
+            multiplier = 1
+            span = "hour"
+        
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{span}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        api_limit = 5000 if span == "hour" else 500
+        params = {"adjusted": "true", "sort": "asc", "limit": api_limit, "apiKey": api_key}
+        
+        resp = rate_limited_get(url, params=params, timeout=20)
+        data = resp.json()
+        
+        if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
+            return None
+        
+        bars = data["results"]
+        if len(bars) < 50:
+            return None
+        
+        closes = [b["c"] for b in bars]
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
+        volumes = [b["v"] for b in bars]
+        current_price = closes[-1]
+        
+        # ================================================
+        # SCHRITT 1: Finde Trading Range (adaptive, nicht fixed 25/50/25)
+        # ================================================
+        # Berechne ATR für Range-Width-Normalisierung
+        atr_values = []
+        for i in range(1, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            atr_values.append(tr)
+        atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
+        
+        # Sliding Window: Suche die engste Range von mindestens 30 Bars
+        best_range = None
+        best_range_score = 999
+        min_range_bars = max(30, int(len(bars) * 0.25))
+        
+        for start_idx in range(0, len(bars) - min_range_bars, 5):
+            for end_idx in range(start_idx + min_range_bars, min(start_idx + int(len(bars) * 0.75), len(bars)), 5):
+                seg_highs = highs[start_idx:end_idx]
+                seg_lows = lows[start_idx:end_idx]
+                seg_high = max(seg_highs)
+                seg_low = min(seg_lows)
+                seg_width = seg_high - seg_low
+                seg_avg = sum(closes[start_idx:end_idx]) / (end_idx - start_idx)
+                width_pct = seg_width / seg_avg if seg_avg > 0 else 1
+                
+                # Range muss eng sein (< 25% Breite) aber nicht zu eng (> 3%)
+                if 0.03 < width_pct < 0.25:
+                    # Score: engere Range + mehr Bars = besser
+                    score = width_pct / (end_idx - start_idx) * 100
+                    if score < best_range_score:
+                        best_range_score = score
+                        best_range = (start_idx, end_idx, seg_high, seg_low, seg_avg)
+        
+        if not best_range:
+            return None
+        
+        r_start, r_end, range_high, range_low, range_avg = best_range
+        range_width = range_high - range_low
+        range_bars = bars[r_start:r_end]
+        range_closes = closes[r_start:r_end]
+        range_highs = highs[r_start:r_end]
+        range_lows = lows[r_start:r_end]
+        range_vols = volumes[r_start:r_end]
+        avg_range_vol = sum(range_vols) / len(range_vols) if range_vols else 1
+        
+        # Pre-Range und Post-Range Daten
+        pre_closes = closes[:r_start] if r_start > 5 else closes[:max(5, r_start)]
+        post_closes = closes[r_end:]
+        post_highs = highs[r_end:]
+        post_lows = lows[r_end:]
+        post_vols = volumes[r_end:]
+        
+        results = []
+        
+        # ================================================
+        # ACCUMULATION CHECK
+        # ================================================
+        # Voraussetzung: Preis fiel VOR Range
+        if len(pre_closes) >= 5:
+            pre_decline = (pre_closes[0] - min(pre_closes)) / pre_closes[0] if pre_closes[0] > 0 else 0
+            came_from_above = sum(pre_closes[:len(pre_closes)//2]) / max(1, len(pre_closes)//2) > range_avg * 1.01
+            
+            if pre_decline > 0.03 or came_from_above:
+                events = []
+                score = 0
+                event_bars = {}  # Für Chart-Darstellung: event_name → bar_timestamp
+                
+                # SC: Selling Climax — Höchstes Volume nahe Tief
+                sc_idx = None
+                for ri in range(len(range_closes)):
+                    if range_vols[ri] > avg_range_vol * 1.5 and range_lows[ri] <= range_low + range_width * 0.20:
+                        sc_idx = ri
+                        events.append(f"SC @ ${range_lows[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
+                        event_bars["SC"] = {"idx": r_start + ri, "price": range_lows[ri], "ts": bars[r_start + ri]["t"]}
+                        score += 20
+                        break
+                
+                # AR: Automatic Rally — Bounce nach SC
+                ar_level = None
+                if sc_idx is not None and sc_idx + 3 < len(range_closes):
+                    post_sc = range_highs[sc_idx:min(sc_idx + 10, len(range_highs))]
+                    if post_sc:
+                        ar_idx_local = sc_idx + post_sc.index(max(post_sc))
+                        ar_level = max(post_sc)
+                        if ar_level > range_low + range_width * 0.4:
+                            events.append(f"AR @ ${ar_level:.2f}")
+                            event_bars["AR"] = {"idx": r_start + ar_idx_local, "price": ar_level, "ts": bars[r_start + ar_idx_local]["t"]}
+                            score += 15
+                
+                # ST: Secondary Test — Retest SC-Area mit weniger Volume
+                if sc_idx is not None:
+                    for ri in range(sc_idx + 5, len(range_closes)):
+                        if range_lows[ri] <= range_low + range_width * 0.25:
+                            if range_vols[ri] < range_vols[sc_idx] * 0.85:
+                                events.append(f"ST @ ${range_lows[ri]:.2f} (Vol ↓)")
+                                event_bars["ST"] = {"idx": r_start + ri, "price": range_lows[ri], "ts": bars[r_start + ri]["t"]}
+                                score += 15
+                                break
+                
+                # Spring: False Breakdown — Kurzer Bruch unter Range, schnelle Erholung
+                for ri in range(max(0, int(len(range_closes) * 0.3)), len(range_closes)):
+                    if range_lows[ri] < range_low:
+                        # Check Recovery innerhalb 5 Bars
+                        for j in range(1, min(6, len(range_closes) - ri)):
+                            if range_closes[ri + j] > range_low + range_width * 0.15:
+                                events.append(f"Spring @ ${range_lows[ri]:.2f} (Shakeout)")
+                                event_bars["Spring"] = {"idx": r_start + ri, "price": range_lows[ri], "ts": bars[r_start + ri]["t"]}
+                                score += 25
+                                break
+                        break
+                
+                # SOS: Sign of Strength — Preis über Range High
+                if current_price > range_high:
+                    events.append(f"SOS: ${current_price:.2f} > Range ${range_high:.2f}")
+                    score += 20
+                elif post_highs and max(post_highs) > range_high * 0.99:
+                    events.append(f"SOS Versuch: ${max(post_highs):.2f}")
+                    score += 10
+                
+                # LPS: Last Point of Support — Pullback nach SOS hält über Range Mid
+                if post_closes and min(post_lows) > range_low + range_width * 0.4:
+                    events.append(f"LPS: Support hält bei ${min(post_lows):.2f}")
+                    score += 10
+                
+                # Volume Confirm
+                if post_vols and max(post_vols[-5:] if len(post_vols) >= 5 else post_vols) > avg_range_vol * 1.3:
+                    events.append("Vol Confirm ✓")
+                    score += 5
+                
+                if score >= 40:
+                    # Phase bestimmen
+                    if current_price > range_high:
+                        phase = "Phase D/E — Markup"
+                        phase_short = "D/E"
+                    elif "Spring" in str(events):
+                        phase = "Phase C — Spring (Shakeout)"
+                        phase_short = "C"
+                    elif "ST" in str(event_bars):
+                        phase = "Phase B — Cause Building"
+                        phase_short = "B"
+                    else:
+                        phase = "Phase A — Selling Exhaustion"
+                        phase_short = "A"
+                    
+                    entry = range_high if current_price < range_high else current_price
+                    stop = range_low - atr * 0.5
+                    tp1 = range_high + range_width * 0.5
+                    tp2 = range_high + range_width * 1.0
+                    rr = abs(tp1 - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
+                    
+                    results.append({
+                        "type": "Accumulation",
+                        "direction": "LONG",
+                        "phase": phase,
+                        "phase_short": phase_short,
+                        "score": score,
+                        "events": events,
+                        "event_bars": event_bars,
+                        "range_high": round(range_high, 2),
+                        "range_low": round(range_low, 2),
+                        "range_start_ts": bars[r_start]["t"],
+                        "range_end_ts": bars[min(r_end, len(bars)-1)]["t"],
+                        "entry": round(entry, 2),
+                        "stop": round(stop, 2),
+                        "tp1": round(tp1, 2),
+                        "tp2": round(tp2, 2),
+                        "rr": round(rr, 2),
+                        "current_price": round(current_price, 2),
+                    })
+        
+        # ================================================
+        # DISTRIBUTION CHECK
+        # ================================================
+        if len(pre_closes) >= 5:
+            pre_rally = (max(pre_closes) - pre_closes[0]) / pre_closes[0] if pre_closes[0] > 0 else 0
+            came_from_below = sum(pre_closes[:len(pre_closes)//2]) / max(1, len(pre_closes)//2) < range_avg * 0.99
+            
+            if pre_rally > 0.03 or came_from_below:
+                events = []
+                score = 0
+                event_bars = {}
+                
+                # BC: Buying Climax — Höchstes Volume nahe Hoch
+                bc_idx = None
+                for ri in range(len(range_closes)):
+                    if range_vols[ri] > avg_range_vol * 1.5 and range_highs[ri] >= range_high - range_width * 0.20:
+                        bc_idx = ri
+                        events.append(f"BC @ ${range_highs[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
+                        event_bars["BC"] = {"idx": r_start + ri, "price": range_highs[ri], "ts": bars[r_start + ri]["t"]}
+                        score += 20
+                        break
+                
+                # AR: Automatic Reaction
+                if bc_idx is not None and bc_idx + 3 < len(range_closes):
+                    post_bc = range_lows[bc_idx:min(bc_idx + 10, len(range_lows))]
+                    if post_bc:
+                        ar_idx_local = bc_idx + post_bc.index(min(post_bc))
+                        ar_level = min(post_bc)
+                        if ar_level < range_high - range_width * 0.4:
+                            events.append(f"AR @ ${ar_level:.2f}")
+                            event_bars["AR"] = {"idx": r_start + ar_idx_local, "price": ar_level, "ts": bars[r_start + ar_idx_local]["t"]}
+                            score += 15
+                
+                # ST: Secondary Test nahe BC
+                if bc_idx is not None:
+                    for ri in range(bc_idx + 5, len(range_closes)):
+                        if range_highs[ri] >= range_high - range_width * 0.25:
+                            if range_vols[ri] < range_vols[bc_idx] * 0.85:
+                                events.append(f"ST @ ${range_highs[ri]:.2f} (Vol ↓)")
+                                event_bars["ST"] = {"idx": r_start + ri, "price": range_highs[ri], "ts": bars[r_start + ri]["t"]}
+                                score += 15
+                                break
+                
+                # UTAD: Upthrust After Distribution — False Breakout über Range High
+                for ri in range(max(0, int(len(range_closes) * 0.3)), len(range_closes)):
+                    if range_highs[ri] > range_high:
+                        for j in range(1, min(6, len(range_closes) - ri)):
+                            if range_closes[ri + j] < range_high - range_width * 0.15:
+                                events.append(f"UTAD @ ${range_highs[ri]:.2f} (False Breakout)")
+                                event_bars["UTAD"] = {"idx": r_start + ri, "price": range_highs[ri], "ts": bars[r_start + ri]["t"]}
+                                score += 25
+                                break
+                        break
+                
+                # SOW: Sign of Weakness
+                if current_price < range_low:
+                    events.append(f"SOW: ${current_price:.2f} < Range ${range_low:.2f}")
+                    score += 20
+                elif post_lows and min(post_lows) < range_low * 1.01:
+                    events.append(f"SOW Versuch: ${min(post_lows):.2f}")
+                    score += 10
+                
+                # LPSY: Last Point of Supply
+                if post_closes and max(post_highs) < range_high - range_width * 0.4:
+                    events.append(f"LPSY: Widerstand bei ${max(post_highs):.2f}")
+                    score += 10
+                
+                if score >= 40:
+                    if current_price < range_low:
+                        phase = "Phase D/E — Markdown"
+                        phase_short = "D/E"
+                    elif "UTAD" in str(events):
+                        phase = "Phase C — Upthrust (False Breakout)"
+                        phase_short = "C"
+                    elif "ST" in str(event_bars):
+                        phase = "Phase B — Cause Building"
+                        phase_short = "B"
+                    else:
+                        phase = "Phase A — Buying Exhaustion"
+                        phase_short = "A"
+                    
+                    entry = range_low if current_price > range_low else current_price
+                    stop = range_high + atr * 0.5
+                    tp1 = range_low - range_width * 0.5
+                    tp2 = range_low - range_width * 1.0
+                    rr = abs(entry - tp1) / abs(stop - entry) if abs(stop - entry) > 0 else 0
+                    
+                    results.append({
+                        "type": "Distribution",
+                        "direction": "SHORT",
+                        "phase": phase,
+                        "phase_short": phase_short,
+                        "score": score,
+                        "events": events,
+                        "event_bars": event_bars,
+                        "range_high": round(range_high, 2),
+                        "range_low": round(range_low, 2),
+                        "range_start_ts": bars[r_start]["t"],
+                        "range_end_ts": bars[min(r_end, len(bars)-1)]["t"],
+                        "entry": round(entry, 2),
+                        "stop": round(stop, 2),
+                        "tp1": round(tp1, 2),
+                        "tp2": round(tp2, 2),
+                        "rr": round(rr, 2),
+                        "current_price": round(current_price, 2),
+                    })
+        
+        if not results:
+            return None
+        
+        # Return best result
+        best = max(results, key=lambda x: x["score"])
+        best["ticker"] = ticker
+        return best
+        
+    except Exception as e:
+        return None
+
+
+def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="LONG"):
+    """Scannt mehrere Aktien nach Wyckoff Patterns."""
+    results = []
+    
+    for i, ticker in enumerate(tickers):
+        try:
+            result = scan_wyckoff_single(ticker, api_key, days, timeframe)
+            if result and (direction == "ALL" or result["direction"] == direction):
+                results.append(result)
+        except Exception:
+            continue
+        
+        if i % 10 == 9:
+            time.sleep(0.5)
+    
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
+
+
+def find_wyckoff_for_chart(ohlcv_data):
+    """
+    Findet Wyckoff Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
+    Returns list of Wyckoff patterns mit Koordinaten für Chart-Rendering.
+    """
+    if not ohlcv_data or len(ohlcv_data) < 50:
+        return []
+    
+    try:
+        closes = [d["close"] for d in ohlcv_data]
+        highs = [d["high"] for d in ohlcv_data]
+        lows = [d["low"] for d in ohlcv_data]
+        volumes = [d.get("volume", 0) for d in ohlcv_data]
+        current_price = closes[-1]
+        
+        # ATR
+        atr_values = []
+        for i in range(1, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            atr_values.append(tr)
+        atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
+        
+        # Sliding Window Range Detection
+        best_range = None
+        best_score = 999
+        min_bars = max(20, int(len(ohlcv_data) * 0.2))
+        
+        for si in range(0, len(ohlcv_data) - min_bars, max(1, len(ohlcv_data) // 30)):
+            for ei in range(si + min_bars, min(si + int(len(ohlcv_data) * 0.8), len(ohlcv_data)), max(1, len(ohlcv_data) // 30)):
+                sh = max(highs[si:ei])
+                sl = min(lows[si:ei])
+                sw = sh - sl
+                sa = sum(closes[si:ei]) / (ei - si)
+                wp = sw / sa if sa > 0 else 1
+                if 0.03 < wp < 0.25:
+                    sc = wp / (ei - si) * 100
+                    if sc < best_score:
+                        best_score = sc
+                        best_range = (si, ei, sh, sl, sa)
+        
+        if not best_range:
+            return []
+        
+        r_start, r_end, rh, rl, ra = best_range
+        rw = rh - rl
+        rv = volumes[r_start:r_end]
+        avg_rv = sum(rv) / len(rv) if rv else 1
+        pre_closes = closes[:r_start] if r_start > 3 else []
+        
+        results = []
+        
+        # --- ACCUMULATION ---
+        if len(pre_closes) >= 3:
+            pre_avg = sum(pre_closes) / len(pre_closes)
+            if pre_avg > ra * 1.01 or (pre_closes[0] > min(pre_closes) * 1.03):
+                events = []
+                event_times = {}
+                score = 0
+                
+                for ri in range(r_end - r_start):
+                    idx = r_start + ri
+                    if rv[ri] > avg_rv * 1.5 and lows[idx] <= rl + rw * 0.20:
+                        events.append({"name": "SC", "label": f"SC ${lows[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": lows[idx], "pos": "below"})
+                        score += 20
+                        
+                        # AR
+                        post = highs[idx:min(idx + 10, r_start + len(rv))]
+                        if post:
+                            ar_i = idx + post.index(max(post))
+                            if max(post) > rl + rw * 0.4 and ar_i < len(ohlcv_data):
+                                events.append({"name": "AR", "label": f"AR ${max(post):.1f}", "time": ohlcv_data[ar_i]["time"], "price": max(post), "pos": "above"})
+                                score += 15
+                        break
+                
+                # Spring
+                for ri in range(max(0, (r_end - r_start) // 3), r_end - r_start):
+                    idx = r_start + ri
+                    if lows[idx] < rl:
+                        for j in range(1, min(6, len(ohlcv_data) - idx)):
+                            if closes[idx + j] > rl + rw * 0.15:
+                                events.append({"name": "Spring", "label": f"Spring ${lows[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": lows[idx], "pos": "below"})
+                                score += 25
+                                break
+                        break
+                
+                # SOS
+                if current_price > rh:
+                    events.append({"name": "SOS", "label": f"SOS ${current_price:.1f}", "time": ohlcv_data[-1]["time"], "price": current_price, "pos": "above"})
+                    score += 20
+                
+                if score >= 35:
+                    phase = "D/E" if current_price > rh else ("C" if any(e["name"] == "Spring" for e in events) else "B")
+                    results.append({
+                        "type": "Accumulation", "direction": "LONG", "emoji": "🏦⬆️",
+                        "phase": f"Phase {phase}", "score": score,
+                        "events": events,
+                        "range_high": rh, "range_low": rl,
+                        "range_start_time": ohlcv_data[r_start]["time"],
+                        "range_end_time": ohlcv_data[min(r_end - 1, len(ohlcv_data) - 1)]["time"],
+                        "trade": {"entry": round(rh if current_price < rh else current_price, 2),
+                                  "stop": round(rl - atr * 0.5, 2),
+                                  "tp1": round(rh + rw * 0.5, 2), "tp2": round(rh + rw, 2)}
+                    })
+        
+        # --- DISTRIBUTION ---
+        if len(pre_closes) >= 3:
+            pre_avg = sum(pre_closes) / len(pre_closes)
+            if pre_avg < ra * 0.99 or (max(pre_closes) > pre_closes[0] * 1.03):
+                events = []
+                score = 0
+                
+                for ri in range(r_end - r_start):
+                    idx = r_start + ri
+                    if rv[ri] > avg_rv * 1.5 and highs[idx] >= rh - rw * 0.20:
+                        events.append({"name": "BC", "label": f"BC ${highs[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": highs[idx], "pos": "above"})
+                        score += 20
+                        
+                        post = lows[idx:min(idx + 10, r_start + len(rv))]
+                        if post:
+                            ar_i = idx + post.index(min(post))
+                            if min(post) < rh - rw * 0.4 and ar_i < len(ohlcv_data):
+                                events.append({"name": "AR", "label": f"AR ${min(post):.1f}", "time": ohlcv_data[ar_i]["time"], "price": min(post), "pos": "below"})
+                                score += 15
+                        break
+                
+                # UTAD
+                for ri in range(max(0, (r_end - r_start) // 3), r_end - r_start):
+                    idx = r_start + ri
+                    if highs[idx] > rh:
+                        for j in range(1, min(6, len(ohlcv_data) - idx)):
+                            if closes[idx + j] < rh - rw * 0.15:
+                                events.append({"name": "UTAD", "label": f"UTAD ${highs[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": highs[idx], "pos": "above"})
+                                score += 25
+                                break
+                        break
+                
+                if current_price < rl:
+                    events.append({"name": "SOW", "label": f"SOW ${current_price:.1f}", "time": ohlcv_data[-1]["time"], "price": current_price, "pos": "below"})
+                    score += 20
+                
+                if score >= 35:
+                    phase = "D/E" if current_price < rl else ("C" if any(e["name"] == "UTAD" for e in events) else "B")
+                    results.append({
+                        "type": "Distribution", "direction": "SHORT", "emoji": "🏦⬇️",
+                        "phase": f"Phase {phase}", "score": score,
+                        "events": events,
+                        "range_high": rh, "range_low": rl,
+                        "range_start_time": ohlcv_data[r_start]["time"],
+                        "range_end_time": ohlcv_data[min(r_end - 1, len(ohlcv_data) - 1)]["time"],
+                        "trade": {"entry": round(rl if current_price > rl else current_price, 2),
+                                  "stop": round(rh + atr * 0.5, 2),
+                                  "tp1": round(rl - rw * 0.5, 2), "tp2": round(rl - rw, 2)}
+                    })
+        
+        return results
+    except Exception:
+        return []
     """
     Klassifiziert das aktuelle Volatilitäts-Regime
     
@@ -5109,7 +5650,7 @@ def generate_ai_chart_analysis(ticker, ohlcv_data, patterns, sr_levels, fib_leve
 
 def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=None, fib_levels=None, 
                                    ema_periods=[20, 50, 100, 200], height=500, show_volume=True,
-                                   vwap_data=None, volume_voids=None, trade_zones=None, harmonic_data=None):
+                                   vwap_data=None, volume_voids=None, trade_zones=None, harmonic_data=None, wyckoff_data=None):
     """
     Erstellt HTML für Lightweight Charts mit ALLEN Overlays:
     - Candlesticks + Volume
@@ -5119,6 +5660,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
     - VWAP + Standard Deviation Bands
     - Volume Voids (orange highlights)
     - Harmonic Patterns (XABCD ZigZag)
+    - Wyckoff Patterns (Range Box + Event Markers)
     - Trade Zones (Entry/Stop/Target)
     - Pattern Markers
     
@@ -5253,6 +5795,9 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
     
     # Prepare Harmonic Pattern data (XABCD zigzag lines)
     harmonic_json = json.dumps(harmonic_data if harmonic_data else [])
+    
+    # Prepare Wyckoff Pattern data (range box + event markers)
+    wyckoff_json = json.dumps(wyckoff_data if wyckoff_data else [])
     
     # Prepare Trade Zones
     zones = []
@@ -5600,6 +6145,97 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
                         hDiv.innerHTML = pat.emoji + ' ' + pat.pattern + ' (' + pat.direction + ') ' + pat.matches;
                         container.appendChild(hDiv);
                     }}
+                }});
+            }}
+            
+            // Wyckoff Patterns - Range Box + Event Markers
+            const wyckoffPatterns = {wyckoff_json};
+            if (wyckoffPatterns.length > 0) {{
+                wyckoffPatterns.forEach((wp, wpIdx) => {{
+                    const isLong = wp.direction === 'LONG';
+                    const rangeColor = isLong ? 'rgba(76, 175, 80, 0.08)' : 'rgba(244, 67, 54, 0.08)';
+                    const lineColor = isLong ? 'rgba(76, 175, 80, 0.7)' : 'rgba(244, 67, 54, 0.7)';
+                    
+                    // Range High line (dashed)
+                    candleSeries.createPriceLine({{
+                        price: wp.range_high,
+                        color: lineColor,
+                        lineWidth: 2,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true,
+                        title: 'Range High',
+                    }});
+                    
+                    // Range Low line (dashed)
+                    candleSeries.createPriceLine({{
+                        price: wp.range_low,
+                        color: lineColor,
+                        lineWidth: 2,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true,
+                        title: 'Range Low',
+                    }});
+                    
+                    // Range Mid line (dotted)
+                    const rangeMid = (wp.range_high + wp.range_low) / 2;
+                    candleSeries.createPriceLine({{
+                        price: rangeMid,
+                        color: lineColor.replace('0.7', '0.3'),
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: false,
+                    }});
+                    
+                    // Event markers on chart
+                    if (wp.events && wp.events.length > 0) {{
+                        const wyckoffMarkers = wp.events.filter(e => e.time).map(e => ({{
+                            time: e.time,
+                            position: e.pos === 'above' ? 'aboveBar' : 'belowBar',
+                            color: isLong ? '#4CAF50' : '#F44336',
+                            shape: 'circle',
+                            text: e.label || e.name,
+                        }}));
+                        
+                        // Merge with existing markers
+                        const existingMarkers = candleSeries.markers ? candleSeries.markers() : [];
+                        const allMarkers = [...markers, ...wyckoffMarkers].sort((a, b) => {{
+                            if (typeof a.time === 'number' && typeof b.time === 'number') return a.time - b.time;
+                            return String(a.time).localeCompare(String(b.time));
+                        }});
+                        candleSeries.setMarkers(allMarkers);
+                    }}
+                    
+                    // Trade levels
+                    if (wp.trade) {{
+                        if (wp.trade.entry) {{
+                            candleSeries.createPriceLine({{
+                                price: wp.trade.entry, color: 'rgba(76, 175, 80, 0.6)',
+                                lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+                                axisLabelVisible: true, title: 'Entry',
+                            }});
+                        }}
+                        if (wp.trade.stop) {{
+                            candleSeries.createPriceLine({{
+                                price: wp.trade.stop, color: 'rgba(244, 67, 54, 0.6)',
+                                lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+                                axisLabelVisible: true, title: 'Stop',
+                            }});
+                        }}
+                        if (wp.trade.tp1) {{
+                            candleSeries.createPriceLine({{
+                                price: wp.trade.tp1, color: 'rgba(33, 150, 243, 0.6)',
+                                lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+                                axisLabelVisible: true, title: 'TP1',
+                            }});
+                        }}
+                    }}
+                    
+                    // Wyckoff badge
+                    const wDiv = document.createElement('div');
+                    const badgeTop = 8 + (harmonicPatterns.length * 22) + (wpIdx * 22);
+                    wDiv.style.cssText = 'position:absolute;top:' + badgeTop + 'px;right:10px;background:rgba(0,0,0,0.7);color:' + lineColor + ';padding:2px 8px;border-radius:4px;font-size:12px;z-index:5;';
+                    wDiv.innerHTML = wp.emoji + ' Wyckoff ' + wp.type + ' (' + wp.phase + ') Score=' + wp.score;
+                    container.appendChild(wDiv);
                 }});
             }}
             
@@ -6040,6 +6676,9 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # Harmonic Patterns (auf dem aktuellen Timeframe!)
         harmonic_data = find_harmonic_for_chart(ohlcv)
         
+        # Wyckoff Patterns (auf dem aktuellen Timeframe!)
+        wyckoff_data = find_wyckoff_for_chart(ohlcv)
+        
         # Volume Profile für POC/VAH/VAL
         vp = None
         if len(ohlcv) >= 20:
@@ -6061,7 +6700,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     
     # Display Options - ÜBERSICHTLICHER: Weniger default an
     st.markdown("**⚙️ Chart Optionen:**")
-    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5, col_opt6, col_opt7 = st.columns(7)
+    col_opt1, col_opt2, col_opt3, col_opt4, col_opt5, col_opt6, col_opt7, col_opt8 = st.columns(8)
     with col_opt1:
         show_ema = st.checkbox("📈 EMAs", value=True, key=f"ema_{ticker}_{current_tf}")
     with col_opt2:
@@ -6075,6 +6714,8 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     with col_opt6:
         show_harmonic = st.checkbox("🦋 Harmonic", value=False, key=f"harmonic_{ticker}_{current_tf}")
     with col_opt7:
+        show_wyckoff = st.checkbox("🏦 Wyckoff", value=False, key=f"wyckoff_{ticker}_{current_tf}")
+    with col_opt8:
         show_zones = st.checkbox("🎯 Zones", value=False, key=f"zones_{ticker}_{current_tf}")
     
     # PDH/PDL/PDC Anzeige
@@ -6100,7 +6741,8 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         vwap_data=vwap_data if show_vwap else None,
         volume_voids=volume_voids if show_voids else None,
         trade_zones=trade_zones if show_zones else None,
-        harmonic_data=harmonic_data if show_harmonic else None
+        harmonic_data=harmonic_data if show_harmonic else None,
+        wyckoff_data=wyckoff_data if show_wyckoff else None
     )
     
     # Display Chart
@@ -6124,6 +6766,22 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                 if hp.get("trade"):
                     t = hp["trade"]
                     st.caption(f"Entry: ${t.get('entry', 0):.2f} | SL: ${t.get('stop_loss', 0):.2f} | TP1: ${t.get('tp1', 0):.2f}")
+        
+        # Wyckoff Patterns (wenn erkannt)
+        if wyckoff_data:
+            for wp in wyckoff_data[:2]:
+                direction_emoji = "🟢" if wp["direction"] == "LONG" else "🔴"
+                if wp["direction"] == "LONG":
+                    st.success(f"🏦 **Wyckoff {wp['type']}** {direction_emoji} {wp['phase']}")
+                else:
+                    st.error(f"🏦 **Wyckoff {wp['type']}** {direction_emoji} {wp['phase']}")
+                st.caption(f"Score: {wp['score']} | Range: ${wp['range_low']:.2f}—${wp['range_high']:.2f}")
+                events_str = " → ".join([e['name'] for e in wp.get('events', [])])
+                if events_str:
+                    st.caption(f"Events: {events_str}")
+                if wp.get("trade"):
+                    t = wp["trade"]
+                    st.caption(f"Entry: ${t.get('entry', 0):.2f} | SL: ${t.get('stop', 0):.2f} | TP1: ${t.get('tp1', 0):.2f}")
         
         if patterns:
             for p in patterns[:5]:
@@ -6182,6 +6840,11 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         if harmonic_data:
             hp = harmonic_data[0]
             st.caption(f"🦋 {hp['pattern']} ({hp['direction']}) Score={hp['score']}")
+        
+        # Wyckoff Patterns
+        if wyckoff_data:
+            wp = wyckoff_data[0]
+            st.caption(f"🏦 Wyckoff {wp['type']} ({wp['phase']}) Score={wp['score']}")
     
     # === TRADE SETUP ===
     with col_trade:
@@ -11903,6 +12566,86 @@ with st.sidebar:
                     except Exception as e:
                         st.error(f"Fehler: {e}")
         
+        # =================================================================
+        # WYCKOFF STRATEGIE - Akkumulation/Distribution Scanner
+        # =================================================================
+        elif current_strat in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]:
+            if m_type != "Aktien":
+                st.error("❌ Wyckoff Scanner funktioniert nur für **Aktien**!")
+            else:
+                # Timeframe Selector
+                wtf_col1, wtf_col2 = st.columns([1, 3])
+                with wtf_col1:
+                    wyckoff_tf = st.selectbox(
+                        "🕐 Timeframe",
+                        options=["4H", "Daily", "1H"],
+                        index=0,
+                        key="wyckoff_tf_select",
+                        help="4H = Ideal für Wyckoff (Akkumulation braucht Wochen von Daten)"
+                    )
+                with wtf_col2:
+                    tf_info = {"4H": "~1080 Bars / 6 Monate — Ideal für Wyckoff Phasen",
+                               "Daily": "~120 Bars / 6 Monate — Langfristige Schemen",
+                               "1H": "~1560 Bars / 3 Monate — Kurzfristige Mini-Akkumulation"}
+                    st.info(f"📊 {tf_info.get(wyckoff_tf, '')}")
+                
+                tf_map = {"4H": ("hour", 180), "Daily": ("day", 180), "1H": ("1hour", 90)}
+                api_tf, api_days = tf_map[wyckoff_tf]
+                
+                direction = "LONG" if "Accumulation" in current_strat else "SHORT"
+                
+                with st.status("🏦 Scanne Wyckoff Patterns...") as status:
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        
+                        status.update(label="Hole Top-Aktien für Wyckoff-Analyse...")
+                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
+                        filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
+                        filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:50]
+                        tickers = [c["Ticker"] for c in filtered]
+                        
+                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Wyckoff ({wyckoff_tf}, {api_days}d)...")
+                        
+                        wyckoff_results = scan_wyckoff_batch(tickers, poly_key, days=api_days, timeframe=api_tf, direction=direction)
+                        
+                        results = []
+                        for wr in wyckoff_results:
+                            orig = next((c for c in candidates if c["Ticker"] == wr["ticker"]), {})
+                            phase_label = wr["phase_short"] if "phase_short" in wr else wr["phase"]
+                            
+                            results.append({
+                                "Ticker": wr["ticker"],
+                                "Name": f"🏦 {wr['type']}",
+                                "Preis": wr["current_price"],
+                                "Chg%": orig.get("Chg%", 0),
+                                "RVOL": orig.get("RVOL", 1.0),
+                                "Vortag%": orig.get("Vortag%", 0),
+                                "ClosePos": orig.get("ClosePos", 0.5),
+                                "Alpha": wr["score"],
+                                "Gap%": 0,
+                                "WyckoffType": wr["type"],
+                                "WyckoffPhase": wr["phase"],
+                                "WyckoffScore": wr["score"],
+                                "WyckoffEvents": " → ".join(wr["events"]),
+                                "RangeHigh": wr["range_high"],
+                                "RangeLow": wr["range_low"],
+                                "Entry": wr["entry"],
+                                "StopLoss": wr["stop"],
+                                "TP1": wr["tp1"],
+                                "RiskReward": wr["rr"],
+                            })
+                        
+                        st.session_state.scan_results = results
+                        st.session_state.market_type = "Aktien"
+                        
+                        dir_emoji = "⬆️" if direction == "LONG" else "⬇️"
+                        status.update(label=f"✅ {len(results)} Wyckoff {wr['type'] if results else ''} {dir_emoji} Patterns gefunden", state="complete")
+                        
+                    except KeyError:
+                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    except Exception as e:
+                        st.error(f"Fehler: {e}")
+        
         elif is_insider_strategy:
             # Insider-Scan mit Finnhub
             with st.status("Scanne Insider-Transaktionen...") as status:
@@ -12367,6 +13110,7 @@ with tab_scanner:
     is_insider = st.session_state.current_strategy in ["Insider Buying", "Insider Selling"]
     is_volume_void = st.session_state.current_strategy in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
     is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]
+    is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]
     
     with col_journal:
         st.subheader("📋 Ergebnisse")
@@ -12408,6 +13152,19 @@ with tab_scanner:
                     "VoidScore": st.column_config.NumberColumn("🕳️ Score", format="%d"),
                     "VoidDist%": st.column_config.NumberColumn("Dist%", format="%.1f%%"),
                     "VoidSize%": st.column_config.NumberColumn("Size%", format="%.1f%%"),
+                }
+            elif "WyckoffPhase" in df.columns:
+                # Wyckoff Pattern Anzeige 🏦
+                display_cols = ["Ticker", "Name", "Preis", "WyckoffPhase", "WyckoffScore", "Entry", "StopLoss", "TP1", "RiskReward"]
+                col_config = {
+                    "Name": st.column_config.TextColumn("🏦 Type"),
+                    "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
+                    "WyckoffPhase": st.column_config.TextColumn("Phase"),
+                    "WyckoffScore": st.column_config.NumberColumn("Score", format="%d"),
+                    "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+                    "StopLoss": st.column_config.NumberColumn("SL", format="$%.2f"),
+                    "TP1": st.column_config.NumberColumn("TP1", format="$%.2f"),
+                    "RiskReward": st.column_config.NumberColumn("R:R", format="%.1f"),
                 }
             elif "Pattern" in df.columns and "RiskReward" in df.columns:
                 # Harmonic Pattern Anzeige 🦋
@@ -12991,6 +13748,46 @@ with tab_scanner:
                                     for detail in details:
                                         st.caption(detail)
                     except Exception as e:
+                        pass
+                
+                # Wyckoff Pattern Details anzeigen 🏦
+                if "WyckoffPhase" in df.columns and pd.notna(row.get("WyckoffPhase")):
+                    try:
+                        st.divider()
+                        w_type = row.get("WyckoffType", "")
+                        w_phase = row.get("WyckoffPhase", "")
+                        w_score = row.get("WyckoffScore", 0)
+                        w_events = row.get("WyckoffEvents", "")
+                        
+                        dir_emoji = "⬆️ LONG" if "Accumulation" in w_type else "⬇️ SHORT"
+                        
+                        if w_score >= 70:
+                            st.success(f"🏦 **Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
+                        elif w_score >= 50:
+                            st.info(f"🏦 **Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
+                        else:
+                            st.warning(f"🏦 **Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
+                        
+                        st.caption(f"📍 **Phase:** {w_phase}")
+                        st.caption(f"📏 **Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
+                        
+                        if w_events:
+                            st.caption(f"📋 **Events:** {w_events}")
+                        
+                        col_t1, col_t2 = st.columns(2)
+                        with col_t1:
+                            st.metric("Entry", f"${row.get('Entry', 0):.2f}")
+                            st.metric("Stop Loss", f"${row.get('StopLoss', 0):.2f}")
+                        with col_t2:
+                            st.metric("TP1", f"${row.get('TP1', 0):.2f}")
+                            rr = row.get('RiskReward', 0)
+                            if rr >= 2:
+                                st.success(f"✅ R:R **{rr:.1f}:1**")
+                            elif rr >= 1.5:
+                                st.info(f"📊 R:R **{rr:.1f}:1**")
+                            else:
+                                st.warning(f"⚠️ R:R **{rr:.1f}:1**")
+                    except Exception:
                         pass
                 
                 # Watchlist Button
