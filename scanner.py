@@ -993,29 +993,125 @@ def calculate_close_position(high, low, close, min_range_pct=1.0):
 
 def assess_breakout_health(change_pct, rvol, close_pos, high, low, close, 
                            open_price=None, prev_close=None, prev_high=None, 
-                           prev_low=None, vortag_pct=None, vi_result=None):
+                           prev_low=None, vortag_pct=None, vi_result=None,
+                           atr_pct=None):
     """
     Bewertet die Gesundheit eines Breakouts auf einer Skala von 0-100.
     
-    Gibt zurück:
-      - health_score: 0-100 (0 = definitiv Fake, 100 = perfekter Breakout)
-      - verdict: "STRONG" / "HEALTHY" / "CAUTION" / "WEAK" / "FAKEOUT"
-      - warnings: Liste konkreter Warnungen
-      - signals: Liste positiver Bestätigungen
-      - selloff_risk: "LOW" / "MEDIUM" / "HIGH" / "IMMINENT"
-      - action: Konkrete Handlungsempfehlung
+    ARCHITEKTUR:
+      1. Candle Structure (Wick + Body) — Hauptindikator für Fakeout
+      2. Volume Confirmation (RVOL) — Institutionelles Interesse
+      3. Extension vs. Volatility (Change/ATR) — Überdehnung relativ
+      4. Context (Vortag, VI Zones) — Woher kommt der Breakout?
+      5. Selloff Risk — integriert in Health Score, nicht separat
+    
+    WICHTIG: Close Position wird NICHT separat gewertet, weil sie
+    mathematisch redundant mit Wick-Analyse ist (beides misst wo
+    der Close relativ zum High/Low liegt).
+    
+    Args:
+        change_pct: Prozentuale Veränderung (muss > 0 für Breakout Long)
+        rvol: Relative Volume (None wenn nicht verfügbar)
+        close_pos: Close Position 0-1 (redundant mit Wick, nur für Display)
+        high, low, close: Preis-Daten der aktuellen Kerze
+        open_price: Open der aktuellen Kerze (None wenn nicht verfügbar)
+        prev_close: Vortags-Close (für Gap-Berechnung)
+        prev_high, prev_low: Vortags-High/Low (für Level-Analyse)
+        vortag_pct: Vortags-Veränderung in % (für Multi-Day Kontext)
+        vi_result: Volume Imbalance Ergebnis (für Resistance-Zonen)
+        atr_pct: Average True Range in % (für Volatilitäts-Normalisierung)
+    
+    Returns:
+        dict mit health_score, verdict, warnings, signals, selloff_risk, action
     """
     if change_pct is None or change_pct <= 0:
-        return None  # Kein Breakout — nichts zu bewerten
+        return None
     
     health = 50  # Neutral starten
     warnings = []
     signals = []
+    has_volume_data = rvol is not None
+    is_multi_day_run = vortag_pct is not None and vortag_pct > 3.0
     
     # ================================================================
-    # VOLUME ANALYSE — Wichtigster Indikator
+    # 1. CANDLE STRUCTURE — Wick + Body (HAUPTINDIKATOR)
+    #    Misst: Verkaufsdruck, Conviction, Fakeout-Wahrscheinlichkeit
+    #    ERSETZT Close Position (redundant) — kein Double Counting
     # ================================================================
-    if rvol is not None:
+    candle_analyzed = False
+    upper_wick_pct = 0
+    body_pct = 0
+    
+    if high and low and close and high > low:
+        total_range = high - low
+        
+        # Body-Grenzen bestimmen
+        if open_price and open_price > 0:
+            # Echtes Open vorhanden — beste Daten
+            body_top = max(open_price, close)
+            body_bot = min(open_price, close)
+        elif prev_close and prev_close > 0:
+            # Open nicht vorhanden, prev_close als Proxy
+            # NICHT close/(1+change) — das ignoriert Gaps!
+            estimated_open = prev_close
+            body_top = max(estimated_open, close)
+            body_bot = min(estimated_open, close)
+        else:
+            # Weder Open noch PrevClose — nur High/Low/Close nutzen
+            # Close Position als Proxy: Bullish → Open nahe Low
+            body_top = close
+            body_bot = low  # Konservativer Proxy
+        
+        body_size = body_top - body_bot
+        upper_wick = high - body_top
+        lower_wick = body_bot - low
+        
+        upper_wick_pct = upper_wick / total_range if total_range > 0 else 0
+        body_pct = body_size / total_range if total_range > 0 else 0
+        lower_wick_pct = lower_wick / total_range if total_range > 0 else 0
+        candle_analyzed = True
+        
+        # --- Upper Wick (Verkaufsdruck) ---
+        if upper_wick_pct > 0.45:
+            health -= 20
+            warnings.append(f"🔴 Extremer Docht ({upper_wick_pct:.0%} der Range) — massiver Verkaufsdruck!")
+        elif upper_wick_pct > 0.30:
+            health -= 12
+            warnings.append(f"🔴 Langer Docht ({upper_wick_pct:.0%}) — Verkäufer drücken stark vom High")
+        elif upper_wick_pct > 0.20:
+            health -= 5
+            warnings.append(f"⚠️ Oberer Docht ({upper_wick_pct:.0%}) — leichter Verkaufsdruck")
+        elif upper_wick_pct < 0.08:
+            health += 8
+            signals.append(f"🟢 Kaum Docht ({upper_wick_pct:.0%}) — kein Verkaufsdruck")
+        else:
+            health += 3
+            signals.append(f"🟢 Normaler Docht ({upper_wick_pct:.0%})")
+        
+        # --- Body Size (Conviction) ---
+        if body_pct > 0.75:
+            health += 8
+            signals.append(f"🟢 Großer Body ({body_pct:.0%}) — starke Überzeugung")
+        elif body_pct > 0.55:
+            health += 4
+            signals.append(f"🟢 Solider Body ({body_pct:.0%})")
+        elif body_pct < 0.20:
+            health -= 12
+            warnings.append(f"🔴 Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
+        elif body_pct < 0.35:
+            health -= 5
+            warnings.append(f"⚠️ Kleiner Body ({body_pct:.0%}) — schwache Conviction")
+        
+        # --- Lower Wick (Buying Support) ---
+        # Ein langer Lower Wick bei einem Breakout = Käufer fingen den Dip auf
+        if lower_wick_pct > 0.25 and upper_wick_pct < 0.15:
+            health += 3
+            signals.append(f"🟢 Langer unterer Docht ({lower_wick_pct:.0%}) — Käufer verteidigten das Low")
+    
+    # ================================================================
+    # 2. VOLUME CONFIRMATION — Institutionelles Interesse
+    # ================================================================
+    if has_volume_data:
         if rvol >= 3.0:
             health += 15
             signals.append(f"🟢 Starkes Volume ({rvol:.1f}x) — institutionell getrieben")
@@ -1030,179 +1126,179 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             warnings.append(f"⚠️ Schwaches Volume ({rvol:.1f}x) — Breakout kaum unterstützt")
         else:
             health -= 15
-            warnings.append(f"🔴 LOW VOLUME BREAKOUT ({rvol:.1f}x) — Fakeout-Risiko HOCH!")
+            warnings.append(f"🔴 LOW VOLUME ({rvol:.1f}x) — Fakeout-Risiko HOCH!")
         
-        # Volume Climax = Warnung (alle haben schon gekauft)
-        if rvol >= 5.0:
-            health -= 5
-            warnings.append(f"⚠️ Volume Climax ({rvol:.1f}x) — oft das Top, Profit-Taking erwartet")
-    
-    # ================================================================
-    # CLOSE POSITION — Wo schliesst der Preis?
-    # ================================================================
-    if close_pos is not None:
-        if close_pos >= 0.90:
-            health += 12
-            signals.append(f"🟢 Close am High ({close_pos:.0%}) — Käufer dominieren komplett")
-        elif close_pos >= 0.75:
-            health += 8
-            signals.append(f"🟢 Close nahe High ({close_pos:.0%}) — Trend intakt")
-        elif close_pos >= 0.60:
-            health += 0  # Neutral
-            warnings.append(f"🟡 Close Mitte-High ({close_pos:.0%}) — leichter Verkaufsdruck")
-        elif close_pos >= 0.40:
+        # Volume Climax — NUR gefährlich wenn der Run SCHON LÄUFT
+        # Tag 1 mit RVOL 7x = perfekt (institutioneller Einstieg)
+        # Tag 3+ mit RVOL 7x = alle haben schon gekauft = Top
+        if rvol >= 5.0 and is_multi_day_run:
             health -= 10
-            warnings.append(f"⚠️ Close in der Mitte ({close_pos:.0%}) — Käufer verlieren Kontrolle")
-        else:
-            health -= 20
-            warnings.append(f"🔴 Close nahe Low ({close_pos:.0%}) — REVERSAL-KERZE! Fakeout wahrscheinlich")
+            warnings.append(f"🔴 Volume Climax ({rvol:.1f}x) nach mehrtägigem Run — oft das Top!")
+        elif rvol >= 5.0:
+            # Tag 1 = keine Strafe, nur Info
+            signals.append(f"ℹ️ Extremes Volume ({rvol:.1f}x) — Tag 1 = gut, beobachte Folgetage")
+    else:
+        # Kein Volume-Daten: Score-Ceiling begrenzen (am Ende angewandt)
+        warnings.append("⚠️ Kein Volume-Daten — Breakout-Qualität kann nicht vollständig bewertet werden")
     
     # ================================================================
-    # WICK ANALYSE — Verkaufsdruck messen
+    # 3. EXTENSION — Wie weit, relativ zur normalen Volatilität?
+    #    ATR-normalisiert wenn verfügbar, sonst absolute Schwellen
     # ================================================================
-    if high and low and close and high > low:
-        total_range = high - low
+    if atr_pct and atr_pct > 0:
+        # ATR-normalisiert: Change / ATR = wie viele "normale Tage" Bewegung
+        extension_ratio = change_pct / atr_pct
         
-        if open_price:
-            body_top = max(open_price, close)
-            body_bot = min(open_price, close)
-        else:
-            # Ohne Open schätzen: Close ist aktuell, Open ≈ prev_close oder low + change
-            body_top = close
-            body_bot = close / (1 + change_pct / 100) if change_pct else low
-            body_bot = max(body_bot, low)
-        
-        body_size = body_top - body_bot
-        upper_wick = high - body_top
-        lower_wick = body_bot - low
-        
-        upper_wick_pct = upper_wick / total_range if total_range > 0 else 0
-        body_pct = body_size / total_range if total_range > 0 else 0
-        
-        # Langer oberer Docht = Verkäufer pushten den Preis runter
-        if upper_wick_pct > 0.40:
+        if extension_ratio > 5.0:
             health -= 15
-            warnings.append(f"🔴 Langer Docht ({upper_wick_pct:.0%} der Range) — starker Verkaufsdruck von oben!")
-        elif upper_wick_pct > 0.25:
+            warnings.append(f"🔴 Extrem überdehnt ({extension_ratio:.1f}x ATR, Change {change_pct:+.1f}% vs ATR {atr_pct:.1f}%) — Reversion SEHR wahrscheinlich")
+        elif extension_ratio > 3.0:
             health -= 8
-            warnings.append(f"⚠️ Oberer Docht ({upper_wick_pct:.0%}) — Verkäufer aktiv am High")
-        elif upper_wick_pct < 0.10:
-            health += 5
-            signals.append(f"🟢 Kaum Docht ({upper_wick_pct:.0%}) — kein Verkaufsdruck")
-        
-        # Großer Body = starke Conviction
-        if body_pct > 0.70:
-            health += 5
-            signals.append(f"🟢 Großer Body ({body_pct:.0%}) — starke Überzeugung")
-        elif body_pct < 0.30:
-            health -= 8
-            warnings.append(f"⚠️ Kleiner Body ({body_pct:.0%}) — Doji/Spinning Top → Unentschlossenheit")
+            warnings.append(f"⚠️ Überdehnt ({extension_ratio:.1f}x ATR) — Pullback wahrscheinlich")
+        elif extension_ratio > 2.0:
+            health -= 3
+            warnings.append(f"🟡 Ausgedehnt ({extension_ratio:.1f}x ATR) — etwas gedehnt")
+        elif extension_ratio >= 1.0:
+            health += 3
+            signals.append(f"🟢 Gesunde Extension ({extension_ratio:.1f}x ATR)")
+        else:
+            # Unter 1x ATR = kaum ein Breakout
+            health -= 3
+            warnings.append(f"🟡 Schwache Bewegung (nur {extension_ratio:.1f}x ATR) — kaum ein Breakout")
+    else:
+        # Fallback: Absolute Schwellen (weniger aussagekräftig)
+        if change_pct > 20:
+            health -= 12
+            warnings.append(f"🔴 Stark überdehnt (+{change_pct:.1f}%) — Profit-Taking wahrscheinlich")
+        elif change_pct > 12:
+            health -= 6
+            warnings.append(f"⚠️ Überdehnt (+{change_pct:.1f}%) — Pullback möglich")
+        elif change_pct > 8:
+            health -= 2
+            warnings.append(f"🟡 Ausgedehnte Bewegung (+{change_pct:.1f}%)")
+        elif change_pct >= 3:
+            health += 3
+            signals.append(f"🟢 Gesunde Breakout-Größe (+{change_pct:.1f}%)")
+        else:
+            # 0-3% = kaum ein Breakout
+            signals.append(f"ℹ️ Moderate Bewegung (+{change_pct:.1f}%)")
     
     # ================================================================
-    # OVEREXTENSION — Zu weit zu schnell?
-    # ================================================================
-    if change_pct > 15:
-        health -= 12
-        warnings.append(f"🔴 Stark überdehnt (+{change_pct:.1f}%) — Profit-Taking SEHR wahrscheinlich")
-    elif change_pct > 10:
-        health -= 8
-        warnings.append(f"⚠️ Überdehnt (+{change_pct:.1f}%) — Pullback wahrscheinlich")
-    elif change_pct > 7:
-        health -= 3
-        warnings.append(f"🟡 Ausgedehnte Bewegung (+{change_pct:.1f}%) — etwas gedehnt")
-    elif change_pct >= 3:
-        health += 3
-        signals.append(f"🟢 Gesunde Breakout-Größe (+{change_pct:.1f}%)")
-    
-    # ================================================================
-    # VORHER-KONTEXT — Breakout aus was?
+    # 4. CONTEXT — Woher kommt der Breakout?
     # ================================================================
     if vortag_pct is not None:
-        # Breakout aus enger Konsolidierung = STÄRKSTES Signal
         if -2.0 <= vortag_pct <= 2.0:
             health += 8
             signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
-        # Breakout nach Down-Day = Reversal (kann stark sein, aber riskanter)
         elif vortag_pct < -3.0:
-            health += 0
-            warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein, kein neuer Trend")
-        # Breakout nach Up-Day = Continuation (Trend läuft schon)
+            health += 0  # Neutral — Reversal ist OK aber riskanter
+            warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein")
         elif vortag_pct > 5.0:
-            health -= 5
-            warnings.append(f"⚠️ 2. Tag in Folge stark (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
+            health -= 8
+            warnings.append(f"⚠️ Multi-Day Run (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
+        elif vortag_pct > 2.0:
+            health -= 2
+            warnings.append(f"🟡 Continuation (Vortag {vortag_pct:+.1f}%) — Trend läuft schon")
     
     # ================================================================
-    # VOLUME IMBALANCE CONFLUENCE — Resistance-Zonen voraus?
+    # 5. VOLUME IMBALANCE CONFLUENCE — Resistance voraus?
     # ================================================================
     if vi_result and close:
         unfilled_bear = vi_result.get("unfilled_bear", [])
         if unfilled_bear:
             nearest = unfilled_bear[0]
-            dist_to_resistance = (nearest["zone_low"] - close) / close * 100 if close > 0 else 0
+            dist = (nearest["zone_low"] - close) / close * 100 if close > 0 else 0
             
-            if dist_to_resistance < 1.0:
+            if dist < 1.0:
                 health -= 10
-                warnings.append(f"🔴 Bearish {nearest['type']} Zone nur {dist_to_resistance:.1f}% entfernt "
+                warnings.append(f"🔴 Bearish {nearest['type']} nur {dist:.1f}% entfernt "
                                f"(${nearest['zone_low']:.2f}-${nearest['zone_high']:.2f}) — Resistance!")
-            elif dist_to_resistance < 3.0:
+            elif dist < 3.0:
                 health -= 5
-                warnings.append(f"⚠️ Bearish {nearest['type']} Zone {dist_to_resistance:.1f}% entfernt — potentielle Resistance")
+                warnings.append(f"⚠️ Bearish {nearest['type']} {dist:.1f}% entfernt — potentielle Resistance")
             else:
                 health += 3
-                signals.append(f"🟢 Keine nahe Resistance ({dist_to_resistance:.1f}% bis nächste Zone)")
+                signals.append(f"🟢 Keine nahe Resistance ({dist:.1f}% bis nächste Zone)")
         else:
             health += 3
             signals.append("🟢 Keine unfilled Bearish Zones — freier Weg nach oben")
     
     # ================================================================
-    # ERGEBNIS BERECHNEN
+    # 6. SELLOFF RISK — Integriert in Health (kein separater Score)
+    #    Basiert auf: Multi-Day Extension + Volume Climax + Wick Wachstum
+    # ================================================================
+    selloff_pressure = 0
+    
+    # Overextension + Multi-Day = höchstes Selloff-Risiko
+    if is_multi_day_run:
+        selloff_pressure += 15
+        if change_pct > 8:
+            selloff_pressure += 15  # Noch ein starker Tag nach starkem Vortag
+        if has_volume_data and rvol and rvol > 5.0:
+            selloff_pressure += 20  # Volume Climax nach Run = Top-Signal
+    
+    # Candle zeigt Schwäche
+    if candle_analyzed:
+        if upper_wick_pct > 0.35:
+            selloff_pressure += 15  # Starke Ablehnung vom High
+        if body_pct < 0.25:
+            selloff_pressure += 10  # Kein Momentum mehr
+    
+    # Overextension (relativ zu ATR)
+    if atr_pct and atr_pct > 0 and change_pct / atr_pct > 4.0:
+        selloff_pressure += 15
+    elif change_pct > 15:  # Absolute Fallback
+        selloff_pressure += 15
+    
+    # Selloff-Pressure reduziert Health
+    health -= int(selloff_pressure * 0.3)  # 30% des Selloff-Drucks fließt in Health
+    
+    # ================================================================
+    # ERGEBNIS
     # ================================================================
     health = max(0, min(100, health))
     
-    # Verdict
-    if health >= 80:
+    # Volume-Cap: Ohne Volume-Daten max 65 (Volume ist der wichtigste Indikator)
+    if not has_volume_data:
+        health = min(health, 65)
+    
+    # Verdict — EXHAUSTION und FAKEOUT unterscheiden
+    # EXHAUSTION = Breakout war echt, aber zu weit gelaufen (Multi-Day)
+    # FAKEOUT = Breakout war nie echt (Low Vol, Wick Rejection)
+    is_exhaustion = is_multi_day_run and selloff_pressure >= 30
+    
+    if health >= 75:
         verdict = "STRONG"
         verdict_emoji = "💪🟢"
-    elif health >= 60:
+    elif health >= 55:
         verdict = "HEALTHY"
         verdict_emoji = "✅🟢"
-    elif health >= 45:
+    elif health >= 40:
         verdict = "CAUTION"
         verdict_emoji = "⚠️🟡"
-    elif health >= 30:
-        verdict = "WEAK"
-        verdict_emoji = "⚠️🟠"
+    elif health >= 25:
+        if is_exhaustion:
+            verdict = "EXHAUSTED"
+            verdict_emoji = "🔋🟠"
+        else:
+            verdict = "WEAK"
+            verdict_emoji = "⚠️🟠"
     else:
-        verdict = "FAKEOUT"
-        verdict_emoji = "🚫🔴"
+        if is_exhaustion:
+            verdict = "EXHAUSTED"
+            verdict_emoji = "🔋🔴"
+        else:
+            verdict = "FAKEOUT"
+            verdict_emoji = "🚫🔴"
     
-    # Selloff Risk
-    selloff_score = 0
-    if change_pct and change_pct > 10:
-        selloff_score += 30
-    elif change_pct and change_pct > 7:
-        selloff_score += 15
-    if rvol and rvol > 5.0:
-        selloff_score += 25
-    if close_pos is not None and close_pos < 0.60:
-        selloff_score += 20
-    if close_pos is not None and close_pos < 0.40:
-        selloff_score += 15
-    # Wick-basiert
-    if high and low and close and high > low:
-        uw = (high - max(close, open_price or close)) / (high - low)
-        if uw > 0.30:
-            selloff_score += 20
-    if vortag_pct and vortag_pct > 5.0:
-        selloff_score += 10
-    
-    if selloff_score >= 50:
+    # Selloff Risk Label
+    if selloff_pressure >= 45:
         selloff_risk = "IMMINENT"
         selloff_emoji = "🚨"
-    elif selloff_score >= 30:
+    elif selloff_pressure >= 25:
         selloff_risk = "HIGH"
         selloff_emoji = "🔴"
-    elif selloff_score >= 15:
+    elif selloff_pressure >= 10:
         selloff_risk = "MEDIUM"
         selloff_emoji = "🟡"
     else:
@@ -1212,16 +1308,16 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
     # Action
     if verdict == "FAKEOUT":
         action = "EXIT — Breakout ist wahrscheinlich nicht echt. Sofort raus oder eng absichern."
-    elif selloff_risk == "IMMINENT":
-        action = "TAKE PROFIT — Selloff steht bevor. Gewinne mitnehmen oder Trailing Stop eng setzen."
+    elif verdict == "EXHAUSTED" or selloff_risk == "IMMINENT":
+        action = "TAKE PROFIT — Run ist erschöpft/Selloff steht bevor. Gewinne sichern, Trailing Stop eng."
     elif selloff_risk == "HIGH":
-        action = "TIGHTEN STOP — Stop-Loss auf Breakeven oder knapp darunter ziehen."
+        action = "TIGHTEN STOP — Stop auf Breakeven oder knapp darunter ziehen."
     elif verdict == "WEAK":
         action = "REDUCE SIZE — Position verkleinern, nicht nachlegen."
     elif verdict == "CAUTION":
         action = "HOLD MIT STOP — Halten, aber Stop-Loss nicht vergessen."
     elif verdict == "STRONG":
-        action = "HOLD / ADD — Starker Breakout, Pyramidisieren möglich bei Pullback auf Breakout-Level."
+        action = "HOLD / ADD — Starker Breakout, Pyramidisieren bei Pullback möglich."
     else:
         action = "HOLD — Breakout sieht gesund aus. Stop unter Tageslow."
     
@@ -1231,7 +1327,7 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
         "verdict_emoji": verdict_emoji,
         "selloff_risk": selloff_risk,
         "selloff_risk_emoji": selloff_emoji,
-        "selloff_score": selloff_score,
+        "selloff_pressure": selloff_pressure,
         "warnings": warnings,
         "signals": signals,
         "action": action,
@@ -1240,6 +1336,9 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             "rvol": rvol,
             "close_position": close_pos,
             "vortag_pct": vortag_pct,
+            "atr_pct": atr_pct,
+            "upper_wick_pct": round(upper_wick_pct, 2) if candle_analyzed else None,
+            "body_pct": round(body_pct, 2) if candle_analyzed else None,
         }
     }
 
@@ -9372,7 +9471,8 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                             high=high, low=low, close=price,
                             open_price=None, prev_close=prev_close,
                             prev_high=prev_high, prev_low=prev_low,
-                            vortag_pct=vortag_chg, vi_result=None
+                            vortag_pct=vortag_chg, vi_result=None,
+                            atr_pct=atr_pct
                         )
                 
                 results.append({
