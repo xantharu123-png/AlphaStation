@@ -1523,6 +1523,39 @@ def find_pivots(prices, window=5):
                 'date': prices[i].get('date', '')
             })
     
+    # === EDGE PIVOT: Prüfe letzten Abschnitt (letzte window Bars) ===
+    # Ohne das wird der D-Punkt (Pattern-Completion!) abgeschnitten
+    if len(prices) > window + 1:
+        edge_start = len(prices) - window
+        edge_section = prices[edge_start:]
+        left_section = prices[max(0, edge_start - window):edge_start]
+        
+        if left_section:
+            # Finde höchstes High und niedrigstes Low in den letzten bars
+            edge_high_val = max(p['high'] for p in edge_section)
+            edge_low_val = min(p['low'] for p in edge_section)
+            left_high = max(p['high'] for p in left_section)
+            left_low = min(p['low'] for p in left_section)
+            
+            # Edge Swing High: Höher als alle Bars links davon
+            if edge_high_val > left_high:
+                edge_idx = edge_start + max(range(len(edge_section)), key=lambda k: edge_section[k]['high'])
+                # Nur hinzufügen wenn nicht Duplikat vom letzten Pivot
+                if not pivots or (pivots[-1]['type'] != 'high' or abs(pivots[-1]['price'] - edge_high_val) > 0.01):
+                    pivots.append({
+                        'type': 'high', 'price': edge_high_val,
+                        'index': edge_idx, 'date': prices[edge_idx].get('date', '')
+                    })
+            
+            # Edge Swing Low: Tiefer als alle Bars links davon
+            elif edge_low_val < left_low:
+                edge_idx = edge_start + min(range(len(edge_section)), key=lambda k: edge_section[k]['low'])
+                if not pivots or (pivots[-1]['type'] != 'low' or abs(pivots[-1]['price'] - edge_low_val) > 0.01):
+                    pivots.append({
+                        'type': 'low', 'price': edge_low_val,
+                        'index': edge_idx, 'date': prices[edge_idx].get('date', '')
+                    })
+    
     return pivots
 
 
@@ -1550,10 +1583,10 @@ HARMONIC_PATTERNS = {
         "emoji": "🦋",
         "description": "Klassisches Harmonic Pattern mit hoher Erfolgsrate",
         "ratios": {
-            "AB_XA": (0.618, 0.05),      # AB = 61.8% von XA
-            "BC_AB": (0.382, 0.886, 0.05), # BC = 38.2-88.6% von AB
-            "CD_BC": (1.272, 1.618, 0.05), # CD = 127.2-161.8% von BC
-            "AD_XA": (0.786, 0.05),       # D = 78.6% Retracement von XA
+            "AB_XA": (0.618, 0.08),      # AB = 61.8% von XA (±8%)
+            "BC_AB": (0.382, 0.886, 0.08), # BC = 38.2-88.6% von AB
+            "CD_BC": (1.272, 1.618, 0.10), # CD = 127.2-161.8% von BC
+            "AD_XA": (0.786, 0.08),       # D = 78.6% Retracement von XA
         },
         "success_rate": 70,
         "target_ratios": [0.382, 0.618]  # Profit Targets
@@ -1562,10 +1595,10 @@ HARMONIC_PATTERNS = {
         "emoji": "🦋",
         "description": "Extension Pattern - D geht über X hinaus",
         "ratios": {
-            "AB_XA": (0.786, 0.05),
-            "BC_AB": (0.382, 0.886, 0.05),
-            "CD_BC": (1.618, 2.618, 0.08),
-            "AD_XA": (1.272, 1.618, 0.08),  # D extends beyond X
+            "AB_XA": (0.786, 0.08),
+            "BC_AB": (0.382, 0.886, 0.08),
+            "CD_BC": (1.618, 2.618, 0.12),
+            "AD_XA": (1.272, 1.618, 0.10),  # D extends beyond X
         },
         "success_rate": 65,
         "target_ratios": [0.382, 0.618, 1.0]
@@ -1574,10 +1607,10 @@ HARMONIC_PATTERNS = {
         "emoji": "🦇",
         "description": "Tiefes Retracement Pattern",
         "ratios": {
-            "AB_XA": (0.382, 0.5, 0.05),
-            "BC_AB": (0.382, 0.886, 0.05),
-            "CD_BC": (1.618, 2.618, 0.08),
-            "AD_XA": (0.886, 0.05),
+            "AB_XA": (0.382, 0.5, 0.08),
+            "BC_AB": (0.382, 0.886, 0.08),
+            "CD_BC": (1.618, 2.618, 0.12),
+            "AD_XA": (0.886, 0.08),
         },
         "success_rate": 70,
         "target_ratios": [0.382, 0.618]
@@ -1586,10 +1619,10 @@ HARMONIC_PATTERNS = {
         "emoji": "🦀",
         "description": "Extremes Extension Pattern",
         "ratios": {
-            "AB_XA": (0.382, 0.618, 0.05),
-            "BC_AB": (0.382, 0.886, 0.05),
-            "CD_BC": (2.24, 3.618, 0.10),
-            "AD_XA": (1.618, 0.08),
+            "AB_XA": (0.382, 0.618, 0.08),
+            "BC_AB": (0.382, 0.886, 0.08),
+            "CD_BC": (2.24, 3.618, 0.15),
+            "AD_XA": (1.618, 0.10),
         },
         "success_rate": 60,
         "target_ratios": [0.382, 0.618]
@@ -1598,10 +1631,10 @@ HARMONIC_PATTERNS = {
         "emoji": "🦈",
         "description": "Aggressives Reversal Pattern",
         "ratios": {
-            "AB_XA": (0.446, 0.618, 0.05),
-            "BC_AB": (1.13, 1.618, 0.08),
-            "CD_BC": (1.618, 2.24, 0.08),
-            "AD_XA": (0.886, 1.13, 0.08),
+            "AB_XA": (0.446, 0.618, 0.08),
+            "BC_AB": (1.13, 1.618, 0.10),
+            "CD_BC": (1.618, 2.24, 0.12),
+            "AD_XA": (0.886, 1.13, 0.10),
         },
         "success_rate": 55,
         "target_ratios": [0.5, 0.886]
@@ -1749,7 +1782,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     details.append(f"❌ AD/XA: {ad_retracement:.3f}")
             
             # Pattern gilt als erkannt wenn mindestens 3/4 Verhältnisse stimmen
-            if matches >= 3 and score >= 60:
+            if matches >= 3 and score >= 50:
                 # Berechne Entry, Stop Loss, Take Profits
                 if is_bullish:
                     entry = D
@@ -1807,7 +1840,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
     return patterns_found
 
 
-def scan_harmonic_patterns(ticker, api_key, days=60, timeframe="day"):
+def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
     """
     Scannt eine Aktie nach Harmonic Patterns.
     
@@ -1882,7 +1915,7 @@ def scan_harmonic_patterns(ticker, api_key, days=60, timeframe="day"):
         return {"error": str(e), "patterns": []}
 
 
-def scan_harmonic_batch(tickers, api_key, days=60):
+def scan_harmonic_batch(tickers, api_key, days=180):
     """
     Scannt mehrere Aktien nach Harmonic Patterns.
     
@@ -3111,8 +3144,8 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
             vah = range_high
             val = range_low
         
-        # Identifiziere LVNs (Low Volume Nodes) - Bins mit < 30% des Durchschnitts
-        lvn_threshold = avg_volume * 0.30
+        # Identifiziere LVNs (Low Volume Nodes) - Bins mit < 50% des Durchschnitts
+        lvn_threshold = avg_volume * 0.50
         lvns = []
         
         for i, bin in enumerate(bins):
@@ -3154,7 +3187,7 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
     except Exception as e:
         return None
 
-def find_volume_voids(current_price, volume_profile, min_void_size_pct=2.0):
+def find_volume_voids(current_price, volume_profile, min_void_size_pct=1.0):
     """
     Findet Volume Voids (LVNs) relativ zum aktuellen Preis.
     
@@ -3260,15 +3293,15 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
     """
     results = []
     
-    # Begrenze auf 20 Ticker pro Scan (API-Limits)
-    tickers = tickers[:20]
+    # Begrenze auf 30 Ticker pro Scan (API-Limits)
+    tickers = tickers[:30]
     
     for ticker in tickers:
         try:
-            # Hole 30 Tage historische Daten
+            # Hole 60 Tage historische Daten (mehr = besseres Volume Profile)
             from datetime import timedelta
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=45)
+            start_date = end_date - timedelta(days=90)
             
             url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
             params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc"}
@@ -3294,8 +3327,8 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
                     'volume': bar.get('v', 0)
                 })
             
-            # Berechne Volume Profile
-            vp = calculate_volume_profile(ohlcv, num_bins=15)
+            # Berechne Volume Profile (20 Bins für gute Auflösung)
+            vp = calculate_volume_profile(ohlcv, num_bins=20)
             if not vp:
                 continue
             
@@ -3309,14 +3342,14 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
             
             # Filter nach Direction
             if direction == "long":
-                if not voids['voids_above'] or voids['void_score'] < 25:
+                if not voids['voids_above'] or voids['void_score'] < 15:
                     continue
                 
                 nearest = voids['nearest_void_above']
                 distance_to_void = (nearest['low'] - current_price) / current_price * 100
                 
             else:  # short
-                if not voids['voids_below'] or voids['void_score'] < 20:
+                if not voids['voids_below'] or voids['void_score'] < 10:
                     continue
                 
                 nearest = voids['nearest_void_below']
@@ -9235,8 +9268,8 @@ BACKTEST_UNIVERSE = [
     "MRVL", "ON", "SWKS", "QRVO", "WOLF", "SMTC", "CRUS", "ALGM", "POWI", "DIOD",
     # === Real Estate / REITs (10) ===
     "O", "AMT", "PLD", "SPG", "VICI", "MPW", "IRM", "DLR", "CCI", "EQIX",
-    # === ETFs (10) ===
-    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "ARKK", "SOXL", "TQQQ"
+    # === ETFs (8) ===
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "ARKK"
 ]
 
 # Strategie-Definitionen mit klaren Trade-Regeln
@@ -9275,7 +9308,8 @@ BACKTEST_STRATEGY_RULES = {
         "description": "Gap Up >2% + Kurs hält sich oben (Close Pos >0.55)",
         "signal": {
             "gap_pct_min": 2.0, "gap_pct_max": 30.0,
-            "close_pos_min": 0.55
+            "close_pos_min": 0.55,
+            "rvol_min": 1.0
         },
         "entry": "next_open",
         "stop_pct": 0.04,
@@ -9289,7 +9323,8 @@ BACKTEST_STRATEGY_RULES = {
         "description": "Gap Down <-2% + Kurs bleibt unten (Close Pos <0.45)",
         "signal": {
             "gap_pct_min": -30.0, "gap_pct_max": -2.0,
-            "close_pos_max": 0.45
+            "close_pos_max": 0.45,
+            "rvol_min": 1.0
         },
         "entry": "next_open",
         "stop_pct": 0.04,
@@ -9303,7 +9338,7 @@ BACKTEST_STRATEGY_RULES = {
         "description": "Rücksetzer: -3% bis -8%, normales Volumen",
         "signal": {
             "change_pct_min": -8.0, "change_pct_max": -3.0,
-            "rvol_max": 2.5
+            "rvol_min": 0.6, "rvol_max": 2.5
         },
         "entry": "at_close",
         "stop_pct": 0.04,
@@ -9374,7 +9409,8 @@ BACKTEST_STRATEGY_RULES = {
         "description": "Extremes Volumen (RVOL >3) mit klarer Richtung (+2%+)",
         "signal": {
             "change_pct_min": 2.0,
-            "rvol_min": 3.0
+            "rvol_min": 3.0,
+            "close_pos_min": 0.55
         },
         "entry": "next_open",
         "stop_pct": 0.06,
@@ -9547,6 +9583,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     # ============================================================
     all_results = {s: [] for s in strategies}
     tickers_with_data = [t for t, bars in ticker_history.items() if len(bars) >= 30]
+    seen_signals = set()  # Dedup: max 1 Signal pro Ticker pro Tag
     
     for t_idx, ticker in enumerate(tickers_with_data):
         if progress_callback and t_idx % 500 == 0:
@@ -9571,8 +9608,14 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
                     continue
                 
                 if check_signal(metrics, strat["signal"]):
+                    # Dedup: Max 1 Trade pro Ticker pro Tag
+                    dedup_key = (ticker, bars[idx]["date"])
+                    if dedup_key in seen_signals:
+                        continue
+                    
                     trade = simulate_trade(bars, idx, strat)
                     if trade:
+                        seen_signals.add(dedup_key)
                         trade["ticker"] = ticker
                         trade["strategy"] = strat_name
                         trade["signal_change_pct"] = round(metrics["change_pct"], 2)
@@ -9703,6 +9746,13 @@ def simulate_trade(bars, signal_idx, strategy):
     if entry_price <= 0:
         return None
     
+    # === SLIPPAGE: 0.05% pro Seite (realistisch für Liquid Stocks) ===
+    slippage = 0.0005
+    if direction == "long":
+        entry_price *= (1 + slippage)  # Kaufe leicht höher
+    else:
+        entry_price *= (1 - slippage)  # Shorte leicht tiefer
+    
     # === MINDESTENS 1 Folgetag nötig für sinnvolle Simulation ===
     if trade_start_idx >= len(bars):
         return None
@@ -9751,17 +9801,17 @@ def simulate_trade(bars, signal_idx, strategy):
                 exit_date = bar["date"]
                 break
             
-            # TP2 Check
-            if bar["high"] >= tp2_price:
+            # TP2 Check (nur wenn TP1 schon in VORHERIGEM Bar getroffen)
+            if tp1_hit and bar["high"] >= tp2_price:
                 exit_price = tp2_price
                 exit_reason = "TP2"
                 exit_date = bar["date"]
-                tp1_hit = True
                 break
             
-            # TP1 Check
-            if bar["high"] >= tp1_price:
+            # TP1 Check (muss NACH TP2-Check kommen, damit TP2 erst ab nächstem Bar feuert)
+            if not tp1_hit and bar["high"] >= tp1_price:
                 tp1_hit = True
+                stop_price = entry_price  # Trail Stop auf Breakeven nach TP1!
         
         else:  # short
             if entry_type == "prev_high" and day_offset == 0:
@@ -9777,15 +9827,17 @@ def simulate_trade(bars, signal_idx, strategy):
                 exit_date = bar["date"]
                 break
             
-            if bar["low"] <= tp2_price:
+            # TP2 Check (nur wenn TP1 schon in VORHERIGEM Bar getroffen)
+            if tp1_hit and bar["low"] <= tp2_price:
                 exit_price = tp2_price
                 exit_reason = "TP2"
                 exit_date = bar["date"]
-                tp1_hit = True
                 break
             
-            if bar["low"] <= tp1_price:
+            # TP1 Check (muss NACH TP2-Check kommen, damit TP2 erst ab nächstem Bar feuert)
+            if not tp1_hit and bar["low"] <= tp1_price:
                 tp1_hit = True
+                stop_price = entry_price  # Trail Stop auf Breakeven nach TP1!
     
     # Max Hold erreicht → Exit at Close
     if exit_reason is None:
@@ -9802,8 +9854,8 @@ def simulate_trade(bars, signal_idx, strategy):
         pnl_pct = ((entry_price - exit_price) / entry_price) * 100
         r_multiple = (entry_price - exit_price) / risk if risk > 0 else 0
     
-    # Cap R-Multiple: Max -3R bei Gap-Through (realistischer Slippage)
-    r_multiple = max(r_multiple, -3.0)
+    # Cap R-Multiple: Max -2R bei Gap-Through (realistischer Slippage)
+    r_multiple = max(r_multiple, -2.0)
     
     # Skip 0-Bar Trades (kein echter Trade)
     if bars_held == 0:
@@ -9856,6 +9908,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     
     all_results = {s: [] for s in strategies}
     ticker_data_cache = {}
+    seen_signals = set()  # Dedup: max 1 Signal pro Ticker pro Tag
     
     total_tickers = len(tickers)
     skipped_no_data = 0
@@ -9903,10 +9956,16 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
                 
                 # Signal prüfen
                 if check_signal(metrics, strat["signal"]):
+                    # Dedup: Max 1 Trade pro Ticker pro Tag
+                    dedup_key = (ticker, bars[idx]["date"])
+                    if dedup_key in seen_signals:
+                        continue
+                    
                     total_signals += 1
                     # Trade simulieren
                     trade = simulate_trade(bars, idx, strat)
                     if trade:
+                        seen_signals.add(dedup_key)
                         trade["ticker"] = ticker
                         trade["strategy"] = strat_name
                         trade["signal_change_pct"] = round(metrics["change_pct"], 2)
@@ -10019,7 +10078,7 @@ def display_backtest_lab(poly_key):
     if use_grouped:
         st.caption("🔥 **ALLE US-Aktien** — Grouped Daily API scannt tausende Aktien pro Tag")
         st.caption(f"⏱️ Ca. {months * 22} API-Calls ({months * 22 // 5} Min bei Free Tier)")
-        st.caption("📊 Filter: Preis >$5, Volumen >500k/Tag, keine Leveraged/Inverse ETFs")
+        st.caption("📊 Filter: Preis >$5, Volumen >200k/Tag, keine Leveraged/Inverse ETFs")
     else:
         st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     
@@ -10051,7 +10110,7 @@ def display_backtest_lab(poly_key):
                     strategies=selected_strats,
                     months=months,
                     min_price=5.0,
-                    min_volume=500000,  # 500k/Tag min → ~3000-4000 Aktien
+                    min_volume=200000,  # 200k/Tag min → inkl. Mid/Small Caps
                     progress_callback=update_progress
                 )
                 st.session_state["backtest_n_tickers"] = n_tickers
@@ -11582,10 +11641,10 @@ with st.sidebar:
                         filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:50]
                         tickers = [c["Ticker"] for c in filtered]
                         
-                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns (60 Tage)...")
+                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns (180 Tage)...")
                         
                         # Harmonic Scan
-                        harmonic_results = scan_harmonic_batch(tickers, poly_key, days=60)
+                        harmonic_results = scan_harmonic_batch(tickers, poly_key, days=180)
                         
                         # Filter nach Richtung
                         if direction != "ALL":
