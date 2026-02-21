@@ -5362,6 +5362,446 @@ def format_vi_for_display(vi_result, current_price):
     return display
 
 
+def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=40):
+    """
+    Erkennt Wolfe Wave Patterns (Long und Short) in OHLCV-Daten.
+    
+    WOLFE WAVE REGELN (Bill Wolfe):
+    
+    BULLISH (Falling Wedge → Long):
+      Punkt 1: Swing Low
+      Punkt 2: Swing High nach 1
+      Punkt 3: Tieferer Low als 1 (definiert untere Trendlinie 1→3)
+      Punkt 4: High ZWISCHEN 1 und 2 (bleibt im Kanal)
+      Punkt 5: Fällt UNTER die Linie 1→3 (Überschuss = Sweet Spot Entry)
+      Target:  Linie 1→4 auf Zeitpunkt von Punkt 5 projiziert
+      Stop:    Unter Punkt 5
+    
+    BEARISH (Rising Wedge → Short):
+      Punkt 1: Swing High
+      Punkt 2: Swing Low nach 1
+      Punkt 3: Höherer High als 1 (definiert obere Trendlinie 1→3)
+      Punkt 4: Low ZWISCHEN 1 und 2 (bleibt im Kanal)
+      Punkt 5: Steigt ÜBER die Linie 1→3 (Überschuss = Sweet Spot Entry)
+      Target:  Linie 1→4 auf Zeitpunkt von Punkt 5 projiziert
+      Stop:    Über Punkt 5
+    
+    GEOMETRIE:
+      - Linien 1→3 und 2→4 müssen konvergieren (Wedge-Form)
+      - Punkt 5 muss die Linie 1→3 überschreiten
+      - Überschuss darf nicht zu groß sein (max 150% der Zone-Höhe)
+      - Mindestabstand zwischen Punkten (min_wave_bars)
+      - Punkte müssen zeitlich geordnet sein: 1 < 2 < 3 < 4 < 5
+    
+    Args:
+        ohlcv_data: OHLCV-Daten
+        lookback: Wie viele Bars zurückschauen
+        min_wave_bars: Mindest-Bars zwischen zwei aufeinanderfolgenden Pivots
+        max_wave_bars: Max-Bars zwischen zwei aufeinanderfolgenden Pivots
+    
+    Returns:
+        Liste von erkannten Wolfe Waves mit Entry, Stop, Target, Score
+    """
+    if not ohlcv_data or len(ohlcv_data) < 30:
+        return []
+    
+    data = ohlcv_data[-lookback:] if len(ohlcv_data) > lookback else ohlcv_data
+    n = len(data)
+    
+    highs = [d["high"] for d in data]
+    lows = [d["low"] for d in data]
+    closes = [d["close"] for d in data]
+    volumes = [d.get("volume", 0) for d in data]
+    
+    current_price = closes[-1]
+    avg_range = sum(highs[i] - lows[i] for i in range(n)) / n if n > 0 else 1
+    
+    # ================================================================
+    # SWING POINT DETECTION (mit kleinerem Window für mehr Pivots)
+    # ================================================================
+    swing_window = max(3, min(6, n // 12))
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(swing_window, n - swing_window):
+        if highs[i] >= max(highs[i-swing_window:i]) and highs[i] >= max(highs[i+1:i+swing_window+1]):
+            swing_highs.append({"price": highs[i], "idx": i, "vol": volumes[i]})
+        if lows[i] <= min(lows[i-swing_window:i]) and lows[i] <= min(lows[i+1:i+swing_window+1]):
+            swing_lows.append({"price": lows[i], "idx": i, "vol": volumes[i]})
+    
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return []
+    
+    waves = []
+    
+    # ================================================================
+    # Hilfsfunktion: Linie durch 2 Punkte → Y bei gegebenem X (Bar-Index)
+    # ================================================================
+    def line_y_at(x1, y1, x2, y2, x_target):
+        """Berechnet Y-Wert einer Linie durch (x1,y1) und (x2,y2) bei x_target."""
+        if x2 == x1:
+            return y1
+        slope = (y2 - y1) / (x2 - x1)
+        return y1 + slope * (x_target - x1)
+    
+    # ================================================================
+    # BULLISH WOLFE WAVE — Falling Wedge Entry Long
+    # Punkte: Low1 → High2 → Low3 → High4 → Low5
+    # ================================================================
+    
+    for i1 in range(len(swing_lows)):
+        p1 = swing_lows[i1]
+        
+        # Punkt 2: Nächster Swing High NACH Punkt 1
+        for i2 in range(len(swing_highs)):
+            p2 = swing_highs[i2]
+            if p2["idx"] <= p1["idx"] + min_wave_bars:
+                continue
+            if p2["idx"] > p1["idx"] + max_wave_bars:
+                break
+            
+            # Punkt 3: Nächster Swing Low NACH Punkt 2, TIEFER als Punkt 1
+            for i3 in range(i1 + 1, len(swing_lows)):
+                p3 = swing_lows[i3]
+                if p3["idx"] <= p2["idx"] + min_wave_bars:
+                    continue
+                if p3["idx"] > p2["idx"] + max_wave_bars:
+                    break
+                if p3["price"] >= p1["price"]:
+                    continue  # Punkt 3 muss tiefer als Punkt 1 sein
+                
+                # Punkt 4: Nächster Swing High NACH Punkt 3
+                # Muss ZWISCHEN Punkt 1 und 2 liegen (im Kanal)
+                for i4 in range(i2 + 1, len(swing_highs)):
+                    p4 = swing_highs[i4]
+                    if p4["idx"] <= p3["idx"] + min_wave_bars:
+                        continue
+                    if p4["idx"] > p3["idx"] + max_wave_bars:
+                        break
+                    
+                    # Punkt 4 muss unter Punkt 2 sein (tiefer werdende Highs)
+                    if p4["price"] >= p2["price"]:
+                        continue
+                    
+                    # Punkt 4 muss über Punkt 1 sein (im Kanal)
+                    if p4["price"] <= p1["price"]:
+                        continue
+                    
+                    # Prüfe Konvergenz: Linien 1→3 und 2→4 müssen zusammenlaufen
+                    slope_13 = (p3["price"] - p1["price"]) / (p3["idx"] - p1["idx"]) if p3["idx"] != p1["idx"] else 0
+                    slope_24 = (p4["price"] - p2["price"]) / (p4["idx"] - p2["idx"]) if p4["idx"] != p2["idx"] else 0
+                    
+                    # Beide Slopes müssen negativ sein (fallend) UND konvergieren
+                    # Untere Linie (1→3) fällt stärker als obere Linie (2→4) → konvergiert
+                    if slope_13 >= 0 or slope_24 >= 0:
+                        continue  # Nicht fallend
+                    if slope_13 >= slope_24:
+                        continue  # Nicht konvergierend (untere muss steiler fallen)
+                    
+                    # Punkt 5: Aktueller Preis oder letzter Swing Low UNTER der Linie 1→3
+                    # Suche Punkt 5 NACH Punkt 4
+                    p5_candidates = []
+                    
+                    # Letzter Swing Low nach Punkt 4
+                    for i5 in range(i3 + 1, len(swing_lows)):
+                        p5c = swing_lows[i5]
+                        if p5c["idx"] <= p4["idx"] + min_wave_bars:
+                            continue
+                        if p5c["idx"] > p4["idx"] + max_wave_bars:
+                            break
+                        p5_candidates.append(p5c)
+                    
+                    # Alternativ: Aktueller Preis als Punkt 5 wenn er unter der Linie liegt
+                    if n - 1 > p4["idx"] + min_wave_bars:
+                        p5_candidates.append({"price": min(lows[-3:]), "idx": n - 2, "vol": volumes[-1]})
+                    
+                    for p5 in p5_candidates:
+                        # Linie 1→3 bei Punkt 5 berechnen
+                        line_13_at_5 = line_y_at(p1["idx"], p1["price"], p3["idx"], p3["price"], p5["idx"])
+                        
+                        # Punkt 5 muss UNTER der Linie 1→3 liegen (Überschuss)
+                        overshoot = line_13_at_5 - p5["price"]
+                        
+                        if overshoot <= 0:
+                            continue  # Kein Überschuss = kein Wolfe Wave
+                        
+                        # Überschuss darf nicht zu groß sein
+                        # Max 150% der Kanal-Höhe bei Punkt 5
+                        channel_height = abs(line_y_at(p2["idx"], p2["price"], p4["idx"], p4["price"], p5["idx"]) - line_13_at_5)
+                        if channel_height <= 0:
+                            continue
+                        
+                        overshoot_pct = overshoot / channel_height
+                        if overshoot_pct > 1.5:
+                            continue  # Zu großer Überschuss = Pattern gebrochen
+                        
+                        # Target: Linie 1→4 projiziert auf Punkt 5 Zeit
+                        target = line_y_at(p1["idx"], p1["price"], p4["idx"], p4["price"], p5["idx"])
+                        
+                        # Target muss über Punkt 5 liegen (Profit)
+                        if target <= p5["price"]:
+                            continue
+                        
+                        # Score berechnen
+                        score = 50
+                        
+                        # Symmetrie: Wie gleichmäßig sind die Punkte verteilt?
+                        wave_bars = p5["idx"] - p1["idx"]
+                        spacing_12 = (p2["idx"] - p1["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacing_23 = (p3["idx"] - p2["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacing_34 = (p4["idx"] - p3["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacing_45 = (p5["idx"] - p4["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacings = [spacing_12, spacing_23, spacing_34, spacing_45]
+                        avg_spacing = sum(spacings) / 4
+                        spacing_deviation = sum(abs(s - avg_spacing) for s in spacings) / 4
+                        if spacing_deviation < 0.08:
+                            score += 15  # Sehr gleichmäßig
+                        elif spacing_deviation < 0.15:
+                            score += 8
+                        
+                        # Konvergenz-Qualität: Je stärker die Konvergenz, desto besser
+                        convergence_ratio = abs(slope_13) / abs(slope_24) if slope_24 != 0 else 0
+                        if 1.2 <= convergence_ratio <= 3.0:
+                            score += 10  # Gute Konvergenz
+                        
+                        # Überschuss-Qualität: 20-80% = ideal
+                        if 0.15 <= overshoot_pct <= 0.80:
+                            score += 10  # Idealer Überschuss
+                        elif overshoot_pct < 0.15:
+                            score -= 5   # Kaum Überschuss
+                        
+                        # Punkt 5 nahe am aktuellen Preis (aktuell relevant)
+                        bars_ago = n - 1 - p5["idx"]
+                        if bars_ago <= 3:
+                            score += 10  # Frisch — gerade jetzt Entry
+                        elif bars_ago <= 8:
+                            score += 5   # Noch relevant
+                        else:
+                            score -= 5   # Schon älter
+                        
+                        # Volume bei Punkt 5 (niedriger als Durchschnitt = Exhaustion der Seller)
+                        avg_vol = sum(volumes) / len(volumes) if volumes else 1
+                        if avg_vol > 0 and p5["vol"] < avg_vol * 0.8:
+                            score += 5  # Low Volume am Punkt 5 = Seller erschöpft
+                        
+                        risk = abs(p5["price"] - (p5["price"] - overshoot * 0.5))  # Stop etwas unter P5
+                        reward = abs(target - p5["price"])
+                        rr_ratio = reward / risk if risk > 0 else 0
+                        
+                        if rr_ratio >= 3.0:
+                            score += 10
+                        elif rr_ratio >= 2.0:
+                            score += 5
+                        
+                        score = max(0, min(100, score))
+                        
+                        if score >= 45:
+                            waves.append({
+                                "direction": "bullish",
+                                "pattern": "Wolfe Wave Long",
+                                "points": {
+                                    "p1": {"price": round(p1["price"], 4), "idx": p1["idx"]},
+                                    "p2": {"price": round(p2["price"], 4), "idx": p2["idx"]},
+                                    "p3": {"price": round(p3["price"], 4), "idx": p3["idx"]},
+                                    "p4": {"price": round(p4["price"], 4), "idx": p4["idx"]},
+                                    "p5": {"price": round(p5["price"], 4), "idx": p5["idx"]},
+                                },
+                                "entry": round(p5["price"], 4),
+                                "stop": round(p5["price"] - overshoot * 0.5, 4),
+                                "target": round(target, 4),
+                                "rr_ratio": round(rr_ratio, 1),
+                                "overshoot_pct": round(overshoot_pct * 100, 1),
+                                "score": score,
+                                "confidence": "High" if score >= 75 else "Medium" if score >= 55 else "Low",
+                                "bars_ago": bars_ago,
+                            })
+                            break  # Nur bestes Punkt-5 pro 1-2-3-4 Kombination
+    
+    # ================================================================
+    # BEARISH WOLFE WAVE — Rising Wedge Entry Short
+    # Punkte: High1 → Low2 → High3 → Low4 → High5
+    # ================================================================
+    
+    for i1 in range(len(swing_highs)):
+        p1 = swing_highs[i1]
+        
+        # Punkt 2: Nächster Swing Low NACH Punkt 1
+        for i2 in range(len(swing_lows)):
+            p2 = swing_lows[i2]
+            if p2["idx"] <= p1["idx"] + min_wave_bars:
+                continue
+            if p2["idx"] > p1["idx"] + max_wave_bars:
+                break
+            
+            # Punkt 3: Nächster Swing High NACH Punkt 2, HÖHER als Punkt 1
+            for i3 in range(i1 + 1, len(swing_highs)):
+                p3 = swing_highs[i3]
+                if p3["idx"] <= p2["idx"] + min_wave_bars:
+                    continue
+                if p3["idx"] > p2["idx"] + max_wave_bars:
+                    break
+                if p3["price"] <= p1["price"]:
+                    continue  # Punkt 3 muss höher als Punkt 1 sein
+                
+                # Punkt 4: Nächster Swing Low NACH Punkt 3
+                # Muss ZWISCHEN Punkt 1 und 2 liegen (im Kanal)
+                for i4 in range(i2 + 1, len(swing_lows)):
+                    p4 = swing_lows[i4]
+                    if p4["idx"] <= p3["idx"] + min_wave_bars:
+                        continue
+                    if p4["idx"] > p3["idx"] + max_wave_bars:
+                        break
+                    
+                    # Punkt 4 muss über Punkt 2 sein (steigende Lows)
+                    if p4["price"] <= p2["price"]:
+                        continue
+                    
+                    # Punkt 4 muss unter Punkt 1 sein (im Kanal)
+                    if p4["price"] >= p1["price"]:
+                        continue
+                    
+                    # Prüfe Konvergenz: Linien 1→3 und 2→4 müssen zusammenlaufen
+                    slope_13 = (p3["price"] - p1["price"]) / (p3["idx"] - p1["idx"]) if p3["idx"] != p1["idx"] else 0
+                    slope_24 = (p4["price"] - p2["price"]) / (p4["idx"] - p2["idx"]) if p4["idx"] != p2["idx"] else 0
+                    
+                    # Beide Slopes müssen positiv sein (steigend) UND konvergieren
+                    # Obere Linie (1→3) steigt langsamer als untere Linie (2→4) → konvergiert
+                    if slope_13 <= 0 or slope_24 <= 0:
+                        continue
+                    if slope_13 >= slope_24:
+                        continue  # Nicht konvergierend (obere muss flacher steigen)
+                    
+                    # Punkt 5: High ÜBER der Linie 1→3
+                    p5_candidates = []
+                    
+                    for i5 in range(i3 + 1, len(swing_highs)):
+                        p5c = swing_highs[i5]
+                        if p5c["idx"] <= p4["idx"] + min_wave_bars:
+                            continue
+                        if p5c["idx"] > p4["idx"] + max_wave_bars:
+                            break
+                        p5_candidates.append(p5c)
+                    
+                    if n - 1 > p4["idx"] + min_wave_bars:
+                        p5_candidates.append({"price": max(highs[-3:]), "idx": n - 2, "vol": volumes[-1]})
+                    
+                    for p5 in p5_candidates:
+                        # Linie 1→3 bei Punkt 5
+                        line_13_at_5 = line_y_at(p1["idx"], p1["price"], p3["idx"], p3["price"], p5["idx"])
+                        
+                        # Punkt 5 muss ÜBER der Linie 1→3 liegen (Überschuss)
+                        overshoot = p5["price"] - line_13_at_5
+                        
+                        if overshoot <= 0:
+                            continue
+                        
+                        channel_height = abs(line_13_at_5 - line_y_at(p2["idx"], p2["price"], p4["idx"], p4["price"], p5["idx"]))
+                        if channel_height <= 0:
+                            continue
+                        
+                        overshoot_pct = overshoot / channel_height
+                        if overshoot_pct > 1.5:
+                            continue
+                        
+                        # Target: Linie 1→4 projiziert auf Punkt 5 Zeit
+                        target = line_y_at(p1["idx"], p1["price"], p4["idx"], p4["price"], p5["idx"])
+                        
+                        # Target muss unter Punkt 5 liegen (Profit für Short)
+                        if target >= p5["price"]:
+                            continue
+                        
+                        # Score
+                        score = 50
+                        
+                        wave_bars = p5["idx"] - p1["idx"]
+                        spacing_12 = (p2["idx"] - p1["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacing_23 = (p3["idx"] - p2["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacing_34 = (p4["idx"] - p3["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacing_45 = (p5["idx"] - p4["idx"]) / wave_bars if wave_bars > 0 else 0
+                        spacings = [spacing_12, spacing_23, spacing_34, spacing_45]
+                        avg_spacing = sum(spacings) / 4
+                        spacing_deviation = sum(abs(s - avg_spacing) for s in spacings) / 4
+                        if spacing_deviation < 0.08:
+                            score += 15
+                        elif spacing_deviation < 0.15:
+                            score += 8
+                        
+                        convergence_ratio = abs(slope_24) / abs(slope_13) if slope_13 != 0 else 0
+                        if 1.2 <= convergence_ratio <= 3.0:
+                            score += 10
+                        
+                        if 0.15 <= overshoot_pct <= 0.80:
+                            score += 10
+                        elif overshoot_pct < 0.15:
+                            score -= 5
+                        
+                        bars_ago = n - 1 - p5["idx"]
+                        if bars_ago <= 3:
+                            score += 10
+                        elif bars_ago <= 8:
+                            score += 5
+                        else:
+                            score -= 5
+                        
+                        avg_vol = sum(volumes) / len(volumes) if volumes else 1
+                        if avg_vol > 0 and p5["vol"] < avg_vol * 0.8:
+                            score += 5
+                        
+                        risk = abs(p5["price"] + overshoot * 0.5 - p5["price"])
+                        reward = abs(p5["price"] - target)
+                        rr_ratio = reward / risk if risk > 0 else 0
+                        
+                        if rr_ratio >= 3.0:
+                            score += 10
+                        elif rr_ratio >= 2.0:
+                            score += 5
+                        
+                        score = max(0, min(100, score))
+                        
+                        if score >= 45:
+                            waves.append({
+                                "direction": "bearish",
+                                "pattern": "Wolfe Wave Short",
+                                "points": {
+                                    "p1": {"price": round(p1["price"], 4), "idx": p1["idx"]},
+                                    "p2": {"price": round(p2["price"], 4), "idx": p2["idx"]},
+                                    "p3": {"price": round(p3["price"], 4), "idx": p3["idx"]},
+                                    "p4": {"price": round(p4["price"], 4), "idx": p4["idx"]},
+                                    "p5": {"price": round(p5["price"], 4), "idx": p5["idx"]},
+                                },
+                                "entry": round(p5["price"], 4),
+                                "stop": round(p5["price"] + overshoot * 0.5, 4),
+                                "target": round(target, 4),
+                                "rr_ratio": round(rr_ratio, 1),
+                                "overshoot_pct": round(overshoot_pct * 100, 1),
+                                "score": score,
+                                "confidence": "High" if score >= 75 else "Medium" if score >= 55 else "Low",
+                                "bars_ago": bars_ago,
+                            })
+                            break
+    
+    # ================================================================
+    # DEDUPLIZIERUNG — Nur das beste Pattern pro Richtung/Zeitraum
+    # ================================================================
+    # Sortiere nach Score (beste zuerst)
+    waves.sort(key=lambda w: w["score"], reverse=True)
+    
+    # Entferne Überlappungen: Wenn Punkt 5 innerhalb von 5 Bars
+    final_waves = []
+    for w in waves:
+        p5_idx = w["points"]["p5"]["idx"]
+        is_duplicate = False
+        for fw in final_waves:
+            if fw["direction"] == w["direction"] and abs(fw["points"]["p5"]["idx"] - p5_idx) < 5:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            final_waves.append(w)
+    
+    return final_waves[:4]  # Max 4 Waves (2 bull, 2 bear)
+
+
 def detect_chart_patterns(ohlcv_data, lookback=50):
     """
     Erkennt Chart-Patterns automatisch.
@@ -5981,6 +6421,49 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
             
             except Exception:
                 pass  # Wyckoff detection failed silently
+        
+        # === WOLFE WAVES ===
+        # 5-Punkt-Reversal: Überschuss an Linie 1→3, Target = Linie 1→4
+        
+        if len(data) >= 30:
+            try:
+                wolfe_results = detect_wolfe_waves(data, lookback=len(data), min_wave_bars=3, max_wave_bars=25)
+                for ww in wolfe_results:
+                    pts = ww["points"]
+                    if ww["direction"] == "bullish":
+                        emoji = "🐺🟢"
+                        desc = (f"Wolfe Wave Long — Entry ${ww['entry']:.2f}, "
+                                f"Stop ${ww['stop']:.2f}, Target ${ww['target']:.2f} "
+                                f"(R:R {ww['rr_ratio']:.1f}x). "
+                                f"Überschuss {ww['overshoot_pct']:.0f}% unter Linie 1→3. "
+                                f"Punkte: ${pts['p1']['price']:.2f}→${pts['p2']['price']:.2f}→"
+                                f"${pts['p3']['price']:.2f}→${pts['p4']['price']:.2f}→${pts['p5']['price']:.2f}")
+                    else:
+                        emoji = "🐺🔴"
+                        desc = (f"Wolfe Wave Short — Entry ${ww['entry']:.2f}, "
+                                f"Stop ${ww['stop']:.2f}, Target ${ww['target']:.2f} "
+                                f"(R:R {ww['rr_ratio']:.1f}x). "
+                                f"Überschuss {ww['overshoot_pct']:.0f}% über Linie 1→3. "
+                                f"Punkte: ${pts['p1']['price']:.2f}→${pts['p2']['price']:.2f}→"
+                                f"${pts['p3']['price']:.2f}→${pts['p4']['price']:.2f}→${pts['p5']['price']:.2f}")
+                    
+                    patterns.append({
+                        "pattern": ww["pattern"],
+                        "emoji": emoji,
+                        "type": ww["direction"],
+                        "entry": ww["entry"],
+                        "stop": ww["stop"],
+                        "target": ww["target"],
+                        "rr_ratio": ww["rr_ratio"],
+                        "overshoot_pct": ww["overshoot_pct"],
+                        "score": ww["score"],
+                        "confidence": ww["confidence"],
+                        "bars_ago": ww["bars_ago"],
+                        "points": ww["points"],
+                        "description": desc,
+                    })
+            except Exception:
+                pass
         
         # =================================================================
         # CANDLESTICK PATTERNS — Letzte 1-3 Kerzen
