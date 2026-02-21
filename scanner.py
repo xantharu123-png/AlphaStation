@@ -1865,9 +1865,13 @@ def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
         if timeframe == "hour":
             multiplier = 4
             span = "hour"
+        elif timeframe == "1hour":
+            multiplier = 1
+            span = "hour"
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{span}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
-        params = {"adjusted": "true", "sort": "asc", "limit": 500, "apiKey": api_key}
+        api_limit = 5000 if span == "hour" else 500  # Mehr Bars für Intraday
+        params = {"adjusted": "true", "sort": "asc", "limit": api_limit, "apiKey": api_key}
         
         resp = rate_limited_get(url, params=params, timeout=20)
         data = resp.json()
@@ -1879,7 +1883,7 @@ def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
         prices = []
         for bar in data["results"]:
             prices.append({
-                "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d %H:%M" if span == "hour" else "%Y-%m-%d"),
                 "open": bar["o"],
                 "high": bar["h"],
                 "low": bar["l"],
@@ -1915,9 +1919,15 @@ def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
         return {"error": str(e), "patterns": []}
 
 
-def scan_harmonic_batch(tickers, api_key, days=180):
+def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
     """
     Scannt mehrere Aktien nach Harmonic Patterns.
+    
+    Args:
+        tickers: Liste von Ticker-Symbolen
+        api_key: Polygon API Key
+        days: Anzahl Tage historische Daten
+        timeframe: "day" für Daily, "hour" für 4H (default)
     
     Returns:
         Liste von Aktien mit gefundenen Patterns
@@ -1926,7 +1936,7 @@ def scan_harmonic_batch(tickers, api_key, days=180):
     
     for i, ticker in enumerate(tickers):
         try:
-            scan_result = scan_harmonic_patterns(ticker, api_key, days)
+            scan_result = scan_harmonic_patterns(ticker, api_key, days, timeframe=timeframe)
             
             if scan_result.get("patterns"):
                 # Nimm das beste Pattern
@@ -11800,6 +11810,29 @@ with st.sidebar:
             if m_type != "Aktien":
                 st.error("❌ Harmonic Pattern Scanner funktioniert nur für **Aktien**!")
             else:
+                # Timeframe Selector für Harmonic Scan
+                htf_col1, htf_col2 = st.columns([1, 3])
+                with htf_col1:
+                    harmonic_tf = st.selectbox(
+                        "🕐 Timeframe",
+                        options=["4H", "Daily", "1H"],
+                        index=0,  # 4H = Default (bester TF für Harmonics)
+                        key="harmonic_tf_select",
+                        help="4H = Bester TF für Harmonics (saubere Swings, 1-3 Wochen Pattern)"
+                    )
+                with htf_col2:
+                    tf_info = {"4H": "~1080 Bars (6 Monate) — Ideal für Swing-Patterns", 
+                               "Daily": "~120 Bars (6 Monate) — Langfristige Patterns",
+                               "1H": "~1560 Bars (3 Monate) — Kurzfristige Patterns, mehr Noise"}
+                    st.info(f"📊 {tf_info.get(harmonic_tf, '')}")
+                
+                # Map TF to API parameters
+                tf_map = {"4H": ("hour", 180), "Daily": ("day", 180), "1H": ("hour", 90)}
+                api_tf, api_days = tf_map[harmonic_tf]
+                # For 1H: multiplier=1, for 4H: multiplier=4 (handled in scan_harmonic_patterns)
+                if harmonic_tf == "1H":
+                    api_tf = "1hour"  # Signal to use 1H instead of 4H
+                
                 with st.status("🦋 Scanne Harmonic Patterns...") as status:
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
@@ -11824,10 +11857,10 @@ with st.sidebar:
                         filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:50]
                         tickers = [c["Ticker"] for c in filtered]
                         
-                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns (180 Tage)...")
+                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns ({harmonic_tf}, {api_days}d)...")
                         
                         # Harmonic Scan
-                        harmonic_results = scan_harmonic_batch(tickers, poly_key, days=180)
+                        harmonic_results = scan_harmonic_batch(tickers, poly_key, days=api_days, timeframe=api_tf)
                         
                         # Filter nach Richtung
                         if direction != "ALL":
