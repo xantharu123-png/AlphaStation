@@ -5416,6 +5416,15 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
     current_price = closes[-1]
     avg_range = sum(highs[i] - lows[i] for i in range(n)) / n if n > 0 else 1
     
+    # ATR für Stop-Berechnung (14-Perioden)
+    atr_values = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        atr_values.append(tr)
+    atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else avg_range
+    
+    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+    
     # ================================================================
     # SWING POINT DETECTION (mit kleinerem Window für mehr Pivots)
     # ================================================================
@@ -5484,9 +5493,12 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                     if p4["price"] >= p2["price"]:
                         continue
                     
-                    # Punkt 4 muss über Punkt 1 sein (im Kanal)
-                    if p4["price"] <= p1["price"]:
-                        continue
+                    # Punkt 4 muss ZWISCHEN den Trendlinien liegen (im Kanal)
+                    # Obere Linie (2→?): extrapoliert von P2 in Richtung P4
+                    # Untere Linie (1→3): P4 muss darüber liegen
+                    line_13_at_p4 = line_y_at(p1["idx"], p1["price"], p3["idx"], p3["price"], p4["idx"])
+                    if p4["price"] <= line_13_at_p4:
+                        continue  # P4 liegt unter/auf der unteren Trendlinie = nicht im Kanal
                     
                     # Prüfe Konvergenz: Linien 1→3 und 2→4 müssen zusammenlaufen
                     slope_13 = (p3["price"] - p1["price"]) / (p3["idx"] - p1["idx"]) if p3["idx"] != p1["idx"] else 0
@@ -5581,12 +5593,31 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                             score -= 5   # Schon älter
                         
                         # Volume bei Punkt 5 (niedriger als Durchschnitt = Exhaustion der Seller)
-                        avg_vol = sum(volumes) / len(volumes) if volumes else 1
                         if avg_vol > 0 and p5["vol"] < avg_vol * 0.8:
                             score += 5  # Low Volume am Punkt 5 = Seller erschöpft
                         
-                        risk = abs(p5["price"] - (p5["price"] - overshoot * 0.5))  # Stop etwas unter P5
-                        reward = abs(target - p5["price"])
+                        # Volume Reversal Check: Bars NACH P5 zeigen steigendes Volume?
+                        if p5["idx"] + 2 < n:
+                            post_p5_vols = volumes[p5["idx"]+1:min(p5["idx"]+4, n)]
+                            if post_p5_vols and avg_vol > 0:
+                                avg_post = sum(post_p5_vols) / len(post_p5_vols)
+                                if avg_post > avg_vol * 1.2:
+                                    score += 8  # Steigendes Volume nach P5 = Reversal bestätigt
+                                elif avg_post > p5["vol"] * 1.3:
+                                    score += 5  # Volume nimmt zu vs P5
+                        
+                        # Stop = P5 - 1.5x ATR (realistischer als Overshoot-basiert)
+                        stop_price = p5["price"] - atr * 1.5
+                        risk = abs(p5["price"] - stop_price)
+                        
+                        # Entry = P5 Preis (Pattern zeigt die Zone, Trader wartet auf Bestätigung)
+                        # Wir kennzeichnen es als "Entry Zone" nicht exakten Preis
+                        entry_price = p5["price"]
+                        
+                        # Confirmation Level = Linie 1→3 (Close darüber = Bestätigung)
+                        confirmation_level = line_13_at_5
+                        
+                        reward = abs(target - entry_price)
                         rr_ratio = reward / risk if risk > 0 else 0
                         
                         if rr_ratio >= 3.0:
@@ -5607,8 +5638,9 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                                     "p4": {"price": round(p4["price"], 4), "idx": p4["idx"]},
                                     "p5": {"price": round(p5["price"], 4), "idx": p5["idx"]},
                                 },
-                                "entry": round(p5["price"], 4),
-                                "stop": round(p5["price"] - overshoot * 0.5, 4),
+                                "entry": round(entry_price, 4),
+                                "confirmation": round(confirmation_level, 4),
+                                "stop": round(stop_price, 4),
                                 "target": round(target, 4),
                                 "rr_ratio": round(rr_ratio, 1),
                                 "overshoot_pct": round(overshoot_pct * 100, 1),
@@ -5657,9 +5689,11 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                     if p4["price"] <= p2["price"]:
                         continue
                     
-                    # Punkt 4 muss unter Punkt 1 sein (im Kanal)
-                    if p4["price"] >= p1["price"]:
-                        continue
+                    # Punkt 4 muss ZWISCHEN den Trendlinien liegen (im Kanal)
+                    # Obere Linie (1→3): P4 muss darunter liegen
+                    line_13_at_p4 = line_y_at(p1["idx"], p1["price"], p3["idx"], p3["price"], p4["idx"])
+                    if p4["price"] >= line_13_at_p4:
+                        continue  # P4 liegt über/auf der oberen Trendlinie = nicht im Kanal
                     
                     # Prüfe Konvergenz: Linien 1→3 und 2→4 müssen zusammenlaufen
                     slope_13 = (p3["price"] - p1["price"]) / (p3["idx"] - p1["idx"]) if p3["idx"] != p1["idx"] else 0
@@ -5744,12 +5778,28 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                         else:
                             score -= 5
                         
-                        avg_vol = sum(volumes) / len(volumes) if volumes else 1
-                        if avg_vol > 0 and p5["vol"] < avg_vol * 0.8:
+                        avg_vol_local = avg_vol
+                        if avg_vol_local > 0 and p5["vol"] < avg_vol_local * 0.8:
                             score += 5
                         
-                        risk = abs(p5["price"] + overshoot * 0.5 - p5["price"])
-                        reward = abs(p5["price"] - target)
+                        # Volume Reversal Check: Bars NACH P5 zeigen steigendes Volume?
+                        if p5["idx"] + 2 < n:
+                            post_p5_vols = volumes[p5["idx"]+1:min(p5["idx"]+4, n)]
+                            if post_p5_vols and avg_vol_local > 0:
+                                avg_post = sum(post_p5_vols) / len(post_p5_vols)
+                                if avg_post > avg_vol_local * 1.2:
+                                    score += 8
+                                elif avg_post > p5["vol"] * 1.3:
+                                    score += 5
+                        
+                        # Stop = P5 + 1.5x ATR (realistisch)
+                        stop_price = p5["price"] + atr * 1.5
+                        risk = abs(stop_price - p5["price"])
+                        
+                        entry_price = p5["price"]
+                        confirmation_level = line_13_at_5  # Close darunter = Bestätigung
+                        
+                        reward = abs(entry_price - target)
                         rr_ratio = reward / risk if risk > 0 else 0
                         
                         if rr_ratio >= 3.0:
@@ -5770,8 +5820,9 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                                     "p4": {"price": round(p4["price"], 4), "idx": p4["idx"]},
                                     "p5": {"price": round(p5["price"], 4), "idx": p5["idx"]},
                                 },
-                                "entry": round(p5["price"], 4),
-                                "stop": round(p5["price"] + overshoot * 0.5, 4),
+                                "entry": round(entry_price, 4),
+                                "confirmation": round(confirmation_level, 4),
+                                "stop": round(stop_price, 4),
                                 "target": round(target, 4),
                                 "rr_ratio": round(rr_ratio, 1),
                                 "overshoot_pct": round(overshoot_pct * 100, 1),
@@ -6430,9 +6481,11 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 wolfe_results = detect_wolfe_waves(data, lookback=len(data), min_wave_bars=3, max_wave_bars=25)
                 for ww in wolfe_results:
                     pts = ww["points"]
+                    conf = ww.get("confirmation", 0)
                     if ww["direction"] == "bullish":
                         emoji = "🐺🟢"
-                        desc = (f"Wolfe Wave Long — Entry ${ww['entry']:.2f}, "
+                        desc = (f"Wolfe Wave Long — Entry Zone ${ww['entry']:.2f}, "
+                                f"Bestätigung über ${conf:.2f}, "
                                 f"Stop ${ww['stop']:.2f}, Target ${ww['target']:.2f} "
                                 f"(R:R {ww['rr_ratio']:.1f}x). "
                                 f"Überschuss {ww['overshoot_pct']:.0f}% unter Linie 1→3. "
@@ -6440,7 +6493,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 f"${pts['p3']['price']:.2f}→${pts['p4']['price']:.2f}→${pts['p5']['price']:.2f}")
                     else:
                         emoji = "🐺🔴"
-                        desc = (f"Wolfe Wave Short — Entry ${ww['entry']:.2f}, "
+                        desc = (f"Wolfe Wave Short — Entry Zone ${ww['entry']:.2f}, "
+                                f"Bestätigung unter ${conf:.2f}, "
                                 f"Stop ${ww['stop']:.2f}, Target ${ww['target']:.2f} "
                                 f"(R:R {ww['rr_ratio']:.1f}x). "
                                 f"Überschuss {ww['overshoot_pct']:.0f}% über Linie 1→3. "
@@ -6452,6 +6506,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": emoji,
                         "type": ww["direction"],
                         "entry": ww["entry"],
+                        "confirmation": ww.get("confirmation"),
                         "stop": ww["stop"],
                         "target": ww["target"],
                         "rr_ratio": ww["rr_ratio"],
