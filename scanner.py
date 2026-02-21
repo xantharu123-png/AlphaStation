@@ -1992,23 +1992,28 @@ def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
 def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
     """
     Scannt eine Aktie nach Wyckoff Accumulation/Distribution Patterns.
+    Korrekte Wyckoff-Methodik nach Richard Wyckoff / David Weis:
     
-    Wyckoff Accumulation Phasen:
-      Phase A: Selling Climax (SC) + Automatic Rally (AR) → Stopping des Downtrends
-      Phase B: Secondary Test (ST) + Range Building → Cause wird aufgebaut
-      Phase C: Spring/Shakeout → False Breakdown, Smart Money akkumuliert
-      Phase D: Sign of Strength (SOS) + Last Point of Support (LPS)
-      Phase E: Markup → Breakout mit Volume
+    ACCUMULATION (Schematic #1 & #2):
+      1. PS  (Preliminary Support): Erste Kaufreaktion nach Downtrend, Volume steigt
+      2. SC  (Selling Climax): Wide Spread DOWN + Ultra-High Volume + Close obere Haelfte (Absorption!)
+      3. AR  (Automatic Rally): Schneller Bounce, definiert Oberkante der Range
+      4. ST  (Secondary Test): Retest SC-Zone auf ABNEHMENDEM Volume, Spread enger
+      5. Spring/Shakeout: Kurzer Bruch unter SC-Low auf LOW Volume -> schnelle Recovery
+      6. Test of Spring: Retest Spring-Low auf noch niedrigerem Volume
+      7. SOS (Sign of Strength): Wide Spread UP + HIGH Volume ueber AR-Level
+      8. LPS (Last Point of Support): Pullback auf ABNEHMENDEM Volume, haelt ueber alter Resistance
     
-    Wyckoff Distribution Phasen:
-      Phase A: Buying Climax (BC) + Automatic Reaction (AR)
-      Phase B: Secondary Test (ST) + Range Building  
-      Phase C: Upthrust After Distribution (UTAD) → False Breakout
-      Phase D: Sign of Weakness (SOW) + Last Point of Supply (LPSY)
-      Phase E: Markdown → Breakdown
+    DISTRIBUTION (Schematic #1 & #2):
+      1. PSY (Preliminary Supply): Erste Verkaufsreaktion nach Uptrend
+      2. BC  (Buying Climax): Wide Spread UP + Ultra-High Volume + Close untere Haelfte
+      3. AR  (Automatic Reaction): Schneller Drop, definiert Unterkante der Range
+      4. ST  (Secondary Test): Retest BC-Zone auf abnehmendem Volume
+      5. UTAD (Upthrust After Distribution): Bruch ueber BC-High auf LOW Volume -> Failure
+      6. SOW (Sign of Weakness): Wide Spread DOWN + HIGH Volume unter AR-Level
+      7. LPSY (Last Point of Supply): Rally auf abnehmendem Volume, scheitert unter alter Support
     
-    Returns:
-        dict mit pattern, phase, events, score, trade levels
+    KRITISCH: Volume + Spread (Kerzengroesse) zusammen analysieren!
     """
     try:
         from datetime import datetime, timedelta
@@ -2016,7 +2021,6 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days + 10)
         
-        # Polygon API - 4H oder Daily
         multiplier = 4
         span = "hour"
         if timeframe == "day":
@@ -2036,309 +2040,414 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
         if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
             return None
         
-        bars = data["results"]
-        if len(bars) < 50:
+        raw_bars = data["results"]
+        if len(raw_bars) < 60:
             return None
         
-        closes = [b["c"] for b in bars]
-        highs = [b["h"] for b in bars]
-        lows = [b["l"] for b in bars]
-        volumes = [b["v"] for b in bars]
+        opens = [b["o"] for b in raw_bars]
+        closes = [b["c"] for b in raw_bars]
+        highs = [b["h"] for b in raw_bars]
+        lows = [b["l"] for b in raw_bars]
+        volumes = [b["v"] for b in raw_bars]
         current_price = closes[-1]
+        n = len(closes)
         
-        # ================================================
-        # SCHRITT 1: Finde Trading Range (adaptive, nicht fixed 25/50/25)
-        # ================================================
-        # Berechne ATR für Range-Width-Normalisierung
+        # Helper: Spread (Kerzengroesse) und Body-Position
+        def spread(i):
+            return highs[i] - lows[i]
+        
+        def body_position(i):
+            """Wo schliesst die Kerze relativ zum Range? 0=Low, 1=High"""
+            s = spread(i)
+            return (closes[i] - lows[i]) / s if s > 0 else 0.5
+        
+        def is_wide_spread(i, lookback=20):
+            """Spread > 1.3x Durchschnitt"""
+            start = max(0, i - lookback)
+            avg_spread = sum(spread(j) for j in range(start, i)) / max(1, i - start)
+            return spread(i) > avg_spread * 1.3
+        
+        def is_high_volume(i, lookback=20):
+            """Volume > 1.5x Durchschnitt"""
+            start = max(0, i - lookback)
+            avg_vol = sum(volumes[start:i]) / max(1, i - start)
+            return volumes[i] > avg_vol * 1.5, volumes[i] / max(1, avg_vol)
+        
+        def is_low_volume(i, lookback=20):
+            """Volume < 0.7x Durchschnitt"""
+            start = max(0, i - lookback)
+            avg_vol = sum(volumes[start:i]) / max(1, i - start)
+            return volumes[i] < avg_vol * 0.7, volumes[i] / max(1, avg_vol)
+        
+        # ATR fuer Stop-Berechnung
         atr_values = []
-        for i in range(1, len(closes)):
+        for i in range(1, n):
             tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
             atr_values.append(tr)
         atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
         
-        # Sliding Window: Suche die engste Range von mindestens 30 Bars
-        best_range = None
-        best_range_score = 999
-        min_range_bars = max(30, int(len(bars) * 0.25))
-        
-        for start_idx in range(0, len(bars) - min_range_bars, 5):
-            for end_idx in range(start_idx + min_range_bars, min(start_idx + int(len(bars) * 0.75), len(bars)), 5):
-                seg_highs = highs[start_idx:end_idx]
-                seg_lows = lows[start_idx:end_idx]
-                seg_high = max(seg_highs)
-                seg_low = min(seg_lows)
-                seg_width = seg_high - seg_low
-                seg_avg = sum(closes[start_idx:end_idx]) / (end_idx - start_idx)
-                width_pct = seg_width / seg_avg if seg_avg > 0 else 1
-                
-                # Range muss eng sein (< 25% Breite) aber nicht zu eng (> 3%)
-                if 0.03 < width_pct < 0.25:
-                    # Score: engere Range + mehr Bars = besser
-                    score = width_pct / (end_idx - start_idx) * 100
-                    if score < best_range_score:
-                        best_range_score = score
-                        best_range = (start_idx, end_idx, seg_high, seg_low, seg_avg)
-        
-        if not best_range:
-            return None
-        
-        r_start, r_end, range_high, range_low, range_avg = best_range
-        range_width = range_high - range_low
-        range_bars = bars[r_start:r_end]
-        range_closes = closes[r_start:r_end]
-        range_highs = highs[r_start:r_end]
-        range_lows = lows[r_start:r_end]
-        range_vols = volumes[r_start:r_end]
-        avg_range_vol = sum(range_vols) / len(range_vols) if range_vols else 1
-        
-        # Pre-Range und Post-Range Daten
-        pre_closes = closes[:r_start] if r_start > 5 else closes[:max(5, r_start)]
-        post_closes = closes[r_end:]
-        post_highs = highs[r_end:]
-        post_lows = lows[r_end:]
-        post_vols = volumes[r_end:]
-        
         results = []
+        lookback_end = int(n * 0.5)
         
-        # ================================================
-        # ACCUMULATION CHECK
-        # ================================================
-        # Voraussetzung: Preis fiel VOR Range
-        if len(pre_closes) >= 5:
-            pre_decline = (pre_closes[0] - min(pre_closes)) / pre_closes[0] if pre_closes[0] > 0 else 0
-            came_from_above = sum(pre_closes[:len(pre_closes)//2]) / max(1, len(pre_closes)//2) > range_avg * 1.01
-            
-            if pre_decline > 0.03 or came_from_above:
-                events = []
-                score = 0
-                event_bars = {}  # Für Chart-Darstellung: event_name → bar_timestamp
-                
-                # SC: Selling Climax — Höchstes Volume nahe Tief
-                sc_idx = None
-                for ri in range(len(range_closes)):
-                    if range_vols[ri] > avg_range_vol * 1.5 and range_lows[ri] <= range_low + range_width * 0.20:
-                        sc_idx = ri
-                        events.append(f"SC @ ${range_lows[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
-                        event_bars["SC"] = {"idx": r_start + ri, "price": range_lows[ri], "ts": bars[r_start + ri]["t"]}
-                        score += 20
-                        break
-                
-                # AR: Automatic Rally — Bounce nach SC
-                ar_level = None
-                if sc_idx is not None and sc_idx + 3 < len(range_closes):
-                    post_sc = range_highs[sc_idx:min(sc_idx + 10, len(range_highs))]
-                    if post_sc:
-                        ar_idx_local = sc_idx + post_sc.index(max(post_sc))
-                        ar_level = max(post_sc)
-                        if ar_level > range_low + range_width * 0.4:
-                            events.append(f"AR @ ${ar_level:.2f}")
-                            event_bars["AR"] = {"idx": r_start + ar_idx_local, "price": ar_level, "ts": bars[r_start + ar_idx_local]["t"]}
-                            score += 15
-                
-                # ST: Secondary Test — Retest SC-Area mit weniger Volume
-                if sc_idx is not None:
-                    for ri in range(sc_idx + 5, len(range_closes)):
-                        if range_lows[ri] <= range_low + range_width * 0.25:
-                            if range_vols[ri] < range_vols[sc_idx] * 0.85:
-                                events.append(f"ST @ ${range_lows[ri]:.2f} (Vol ↓)")
-                                event_bars["ST"] = {"idx": r_start + ri, "price": range_lows[ri], "ts": bars[r_start + ri]["t"]}
-                                score += 15
-                                break
-                
-                # Spring: False Breakdown — Kurzer Bruch unter Range, schnelle Erholung
-                for ri in range(max(0, int(len(range_closes) * 0.3)), len(range_closes)):
-                    if range_lows[ri] < range_low:
-                        # Check Recovery innerhalb 5 Bars
-                        for j in range(1, min(6, len(range_closes) - ri)):
-                            if range_closes[ri + j] > range_low + range_width * 0.15:
-                                events.append(f"Spring @ ${range_lows[ri]:.2f} (Shakeout)")
-                                event_bars["Spring"] = {"idx": r_start + ri, "price": range_lows[ri], "ts": bars[r_start + ri]["t"]}
-                                score += 25
-                                break
-                        break
-                
-                # SOS: Sign of Strength — Preis über Range High
-                if current_price > range_high:
-                    events.append(f"SOS: ${current_price:.2f} > Range ${range_high:.2f}")
-                    score += 20
-                elif post_highs and max(post_highs) > range_high * 0.99:
-                    events.append(f"SOS Versuch: ${max(post_highs):.2f}")
-                    score += 10
-                
-                # LPS: Last Point of Support — Pullback nach SOS hält über Range Mid
-                if post_closes and min(post_lows) > range_low + range_width * 0.4:
-                    events.append(f"LPS: Support hält bei ${min(post_lows):.2f}")
-                    score += 10
-                
-                # Volume Confirm
-                if post_vols and max(post_vols[-5:] if len(post_vols) >= 5 else post_vols) > avg_range_vol * 1.3:
-                    events.append("Vol Confirm ✓")
-                    score += 5
-                
-                if score >= 40:
-                    # Phase bestimmen
-                    if current_price > range_high:
-                        phase = "Phase D/E — Markup"
-                        phase_short = "D/E"
-                    elif "Spring" in str(events):
-                        phase = "Phase C — Spring (Shakeout)"
-                        phase_short = "C"
-                    elif "ST" in str(event_bars):
-                        phase = "Phase B — Cause Building"
-                        phase_short = "B"
-                    else:
-                        phase = "Phase A — Selling Exhaustion"
-                        phase_short = "A"
-                    
-                    entry = range_high if current_price < range_high else current_price
-                    stop = range_low - atr * 0.5
-                    tp1 = range_high + range_width * 0.5
-                    tp2 = range_high + range_width * 1.0
-                    rr = abs(tp1 - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
-                    
-                    results.append({
-                        "type": "Accumulation",
-                        "direction": "LONG",
-                        "phase": phase,
-                        "phase_short": phase_short,
-                        "score": score,
-                        "events": events,
-                        "event_bars": event_bars,
-                        "range_high": round(range_high, 2),
-                        "range_low": round(range_low, 2),
-                        "range_start_ts": bars[r_start]["t"],
-                        "range_end_ts": bars[min(r_end, len(bars)-1)]["t"],
-                        "entry": round(entry, 2),
-                        "stop": round(stop, 2),
-                        "tp1": round(tp1, 2),
-                        "tp2": round(tp2, 2),
-                        "rr": round(rr, 2),
-                        "current_price": round(current_price, 2),
-                    })
+        # ================================================================
+        # ACCUMULATION: Suche SC (Selling Climax) — DAS definiert die Range
+        # ================================================================
+        sc_candidates = []
+        for i in range(10, lookback_end):
+            hi_vol, vol_ratio = is_high_volume(i)
+            if not hi_vol or vol_ratio < 1.8:
+                continue
+            if not is_wide_spread(i):
+                continue
+            # SC: Close muss in oberer Haelfte sein (Absorption durch Smart Money)
+            if body_position(i) < 0.35:
+                continue
+            prior_high = max(highs[max(0, i-15):i])
+            decline_pct = (prior_high - lows[i]) / prior_high if prior_high > 0 else 0
+            if decline_pct < 0.05:
+                continue
+            sc_candidates.append({
+                "idx": i, "price": lows[i], "close": closes[i],
+                "vol_ratio": vol_ratio, "decline": decline_pct,
+                "score": vol_ratio * 10 + decline_pct * 100
+            })
         
-        # ================================================
-        # DISTRIBUTION CHECK
-        # ================================================
-        if len(pre_closes) >= 5:
-            pre_rally = (max(pre_closes) - pre_closes[0]) / pre_closes[0] if pre_closes[0] > 0 else 0
-            came_from_below = sum(pre_closes[:len(pre_closes)//2]) / max(1, len(pre_closes)//2) < range_avg * 0.99
+        if sc_candidates:
+            sc_candidates.sort(key=lambda x: x["score"], reverse=True)
+            sc = sc_candidates[0]
+            sc_idx = sc["idx"]
+            sc_low = sc["price"]
             
-            if pre_rally > 0.03 or came_from_below:
-                events = []
-                score = 0
-                event_bars = {}
+            # PS (Preliminary Support): VOR SC — erste Kaufreaktion
+            ps_idx = None
+            for i in range(max(5, sc_idx - 20), sc_idx):
+                hi_vol, vr = is_high_volume(i)
+                if hi_vol and closes[i] > opens[i] and body_position(i) > 0.5:
+                    ps_idx = i
+                    break
+            
+            # AR (Automatic Rally): Hoechster Punkt 3-20 Bars NACH SC
+            ar_idx, ar_high = None, 0
+            for i in range(sc_idx + 2, min(sc_idx + 20, n)):
+                if highs[i] > ar_high:
+                    ar_high = highs[i]
+                    ar_idx = i
+            
+            if ar_idx and ar_high > sc_low:
+                range_low = sc_low
+                range_high = ar_high
+                range_width = range_high - range_low
+                range_mid = (range_high + range_low) / 2
                 
-                # BC: Buying Climax — Höchstes Volume nahe Hoch
-                bc_idx = None
-                for ri in range(len(range_closes)):
-                    if range_vols[ri] > avg_range_vol * 1.5 and range_highs[ri] >= range_high - range_width * 0.20:
-                        bc_idx = ri
-                        events.append(f"BC @ ${range_highs[ri]:.2f} (Vol {range_vols[ri]/avg_range_vol:.1f}x)")
-                        event_bars["BC"] = {"idx": r_start + ri, "price": range_highs[ri], "ts": bars[r_start + ri]["t"]}
-                        score += 20
-                        break
-                
-                # AR: Automatic Reaction
-                if bc_idx is not None and bc_idx + 3 < len(range_closes):
-                    post_bc = range_lows[bc_idx:min(bc_idx + 10, len(range_lows))]
-                    if post_bc:
-                        ar_idx_local = bc_idx + post_bc.index(min(post_bc))
-                        ar_level = min(post_bc)
-                        if ar_level < range_high - range_width * 0.4:
-                            events.append(f"AR @ ${ar_level:.2f}")
-                            event_bars["AR"] = {"idx": r_start + ar_idx_local, "price": ar_level, "ts": bars[r_start + ar_idx_local]["t"]}
-                            score += 15
-                
-                # ST: Secondary Test nahe BC
-                if bc_idx is not None:
-                    for ri in range(bc_idx + 5, len(range_closes)):
-                        if range_highs[ri] >= range_high - range_width * 0.25:
-                            if range_vols[ri] < range_vols[bc_idx] * 0.85:
-                                events.append(f"ST @ ${range_highs[ri]:.2f} (Vol ↓)")
-                                event_bars["ST"] = {"idx": r_start + ri, "price": range_highs[ri], "ts": bars[r_start + ri]["t"]}
-                                score += 15
-                                break
-                
-                # UTAD: Upthrust After Distribution — False Breakout über Range High
-                for ri in range(max(0, int(len(range_closes) * 0.3)), len(range_closes)):
-                    if range_highs[ri] > range_high:
-                        for j in range(1, min(6, len(range_closes) - ri)):
-                            if range_closes[ri + j] < range_high - range_width * 0.15:
-                                events.append(f"UTAD @ ${range_highs[ri]:.2f} (False Breakout)")
-                                event_bars["UTAD"] = {"idx": r_start + ri, "price": range_highs[ri], "ts": bars[r_start + ri]["t"]}
-                                score += 25
-                                break
-                        break
-                
-                # SOW: Sign of Weakness
-                if current_price < range_low:
-                    events.append(f"SOW: ${current_price:.2f} < Range ${range_low:.2f}")
+                if 0.02 < range_width / range_mid < 0.30:
+                    events = []
+                    event_bars = {}
+                    score = 0
+                    
+                    if ps_idx:
+                        events.append(f"PS @ ${closes[ps_idx]:.2f}")
+                        event_bars["PS"] = {"idx": ps_idx, "price": closes[ps_idx], "ts": raw_bars[ps_idx]["t"]}
+                        score += 10
+                    
+                    events.append(f"SC @ ${sc_low:.2f} (Vol {sc['vol_ratio']:.1f}x, Close obere Haelfte)")
+                    event_bars["SC"] = {"idx": sc_idx, "price": sc_low, "ts": raw_bars[sc_idx]["t"]}
                     score += 20
-                elif post_lows and min(post_lows) < range_low * 1.01:
-                    events.append(f"SOW Versuch: ${min(post_lows):.2f}")
-                    score += 10
-                
-                # LPSY: Last Point of Supply
-                if post_closes and max(post_highs) < range_high - range_width * 0.4:
-                    events.append(f"LPSY: Widerstand bei ${max(post_highs):.2f}")
-                    score += 10
-                
-                if score >= 40:
-                    if current_price < range_low:
-                        phase = "Phase D/E — Markdown"
-                        phase_short = "D/E"
-                    elif "UTAD" in str(events):
-                        phase = "Phase C — Upthrust (False Breakout)"
-                        phase_short = "C"
-                    elif "ST" in str(event_bars):
-                        phase = "Phase B — Cause Building"
-                        phase_short = "B"
-                    else:
-                        phase = "Phase A — Buying Exhaustion"
-                        phase_short = "A"
                     
-                    entry = range_low if current_price > range_low else current_price
-                    stop = range_high + atr * 0.5
-                    tp1 = range_low - range_width * 0.5
-                    tp2 = range_low - range_width * 1.0
-                    rr = abs(entry - tp1) / abs(stop - entry) if abs(stop - entry) > 0 else 0
+                    events.append(f"AR @ ${ar_high:.2f}")
+                    event_bars["AR"] = {"idx": ar_idx, "price": ar_high, "ts": raw_bars[ar_idx]["t"]}
+                    score += 15
                     
-                    results.append({
-                        "type": "Distribution",
-                        "direction": "SHORT",
-                        "phase": phase,
-                        "phase_short": phase_short,
-                        "score": score,
-                        "events": events,
-                        "event_bars": event_bars,
-                        "range_high": round(range_high, 2),
-                        "range_low": round(range_low, 2),
-                        "range_start_ts": bars[r_start]["t"],
-                        "range_end_ts": bars[min(r_end, len(bars)-1)]["t"],
-                        "entry": round(entry, 2),
-                        "stop": round(stop, 2),
-                        "tp1": round(tp1, 2),
-                        "tp2": round(tp2, 2),
-                        "rr": round(rr, 2),
-                        "current_price": round(current_price, 2),
-                    })
+                    # Multiple STs auf abnehmendem Volume
+                    st_count = 0
+                    prev_st_vol = sc["vol_ratio"]
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if lows[i] <= range_low + range_width * 0.25:
+                            hi_vol, vr = is_high_volume(i)
+                            if vr < prev_st_vol * 0.9:
+                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
+                                events.append(f"{st_label} @ ${lows[i]:.2f} (Vol {vr:.1f}x)")
+                                event_bars[st_label] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
+                                score += 10 if st_count == 0 else 5
+                                prev_st_vol = vr
+                                st_count += 1
+                                if st_count >= 3:
+                                    break
+                    
+                    # Volume-Decay in Phase B
+                    if ar_idx + 20 < n:
+                        early_range_vol = sum(volumes[ar_idx:ar_idx + 10]) / 10
+                        mid_point = ar_idx + (n - ar_idx) // 2
+                        if mid_point + 10 <= n:
+                            later_range_vol = sum(volumes[mid_point:mid_point + 10]) / 10
+                            if later_range_vol < early_range_vol * 0.75:
+                                events.append(f"Vol Decay: {later_range_vol/early_range_vol:.0%}")
+                                score += 5
+                    
+                    # Spring: Break unter SC-Low auf LOW VOLUME
+                    spring_idx = None
+                    spring_start = max(ar_idx + 5, int(sc_idx + (n - sc_idx) * 0.3))
+                    for i in range(spring_start, n - 3):
+                        if lows[i] < range_low:
+                            low_vol, lvr = is_low_volume(i)
+                            if low_vol or lvr < 0.85:
+                                for j in range(1, min(6, n - i)):
+                                    if closes[i + j] > range_low + range_width * 0.10:
+                                        spring_idx = i
+                                        events.append(f"Spring @ ${lows[i]:.2f} (Vol {lvr:.1f}x LOW)")
+                                        event_bars["Spring"] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
+                                        score += 25
+                                        break
+                            break
+                    
+                    # Test of Spring
+                    if spring_idx and spring_idx + 5 < n:
+                        for i in range(spring_idx + 2, min(spring_idx + 15, n)):
+                            if lows[i] <= lows[spring_idx] + range_width * 0.05:
+                                low_vol, lvr = is_low_volume(i)
+                                if low_vol:
+                                    events.append(f"Test Spring @ ${lows[i]:.2f} (Vol {lvr:.1f}x)")
+                                    event_bars["TestSpring"] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
+                                    score += 10
+                                    break
+                    
+                    # SOS: Wide Spread UP + HIGH Volume ueber AR-Level
+                    sos_idx = None
+                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
+                        if closes[i] > range_high and closes[i] > opens[i]:
+                            hi_vol, vr = is_high_volume(i)
+                            if hi_vol and is_wide_spread(i):
+                                sos_idx = i
+                                events.append(f"SOS @ ${closes[i]:.2f} (Vol {vr:.1f}x, Wide Spread)")
+                                event_bars["SOS"] = {"idx": i, "price": closes[i], "ts": raw_bars[i]["t"]}
+                                score += 20
+                                break
+                    
+                    if not sos_idx and current_price > range_high:
+                        events.append(f"SOS (schwach): ${current_price:.2f} > Range ${range_high:.2f}")
+                        score += 8
+                    
+                    # LPS: Pullback NACH SOS, haelt UEBER range_high, LOW Volume
+                    if sos_idx and sos_idx + 3 < n:
+                        for i in range(sos_idx + 1, n):
+                            if lows[i] < closes[sos_idx]:
+                                low_vol, lvr = is_low_volume(i)
+                                if lows[i] >= range_high - range_width * 0.10:
+                                    if low_vol or lvr < 0.9:
+                                        events.append(f"LPS @ ${lows[i]:.2f} (Vol {lvr:.1f}x)")
+                                        event_bars["LPS"] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
+                                        score += 15
+                                        break
+                    
+                    if score >= 35:
+                        if sos_idx or current_price > range_high * 1.02:
+                            phase = "Phase D/E — Markup beginning"
+                            phase_short = "D/E"
+                        elif spring_idx:
+                            phase = "Phase C — Spring (Smart Money Shakeout)"
+                            phase_short = "C"
+                        elif st_count >= 1:
+                            phase = "Phase B — Cause Building"
+                            phase_short = "B"
+                        else:
+                            phase = "Phase A — Selling Exhaustion"
+                            phase_short = "A"
+                        
+                        if spring_idx:
+                            entry = range_high
+                            stop = lows[spring_idx] - atr * 0.3
+                        else:
+                            entry = range_high
+                            stop = range_low - atr * 0.5
+                        
+                        tp1 = range_high + range_width * 0.75
+                        tp2 = range_high + range_width * 1.5
+                        rr = abs(tp1 - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
+                        
+                        results.append({
+                            "type": "Accumulation", "direction": "LONG",
+                            "phase": phase, "phase_short": phase_short,
+                            "score": min(score, 100), "events": events, "event_bars": event_bars,
+                            "range_high": round(range_high, 2), "range_low": round(range_low, 2),
+                            "range_start_ts": raw_bars[sc_idx]["t"],
+                            "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
+                            "entry": round(entry, 2), "stop": round(stop, 2),
+                            "tp1": round(tp1, 2), "tp2": round(tp2, 2),
+                            "rr": round(rr, 2), "current_price": round(current_price, 2),
+                        })
+        
+        # ================================================================
+        # DISTRIBUTION: Suche BC (Buying Climax)
+        # ================================================================
+        bc_candidates = []
+        for i in range(10, lookback_end):
+            hi_vol, vol_ratio = is_high_volume(i)
+            if not hi_vol or vol_ratio < 1.8:
+                continue
+            if not is_wide_spread(i):
+                continue
+            if body_position(i) > 0.65:
+                continue
+            prior_low = min(lows[max(0, i-15):i])
+            rally_pct = (highs[i] - prior_low) / prior_low if prior_low > 0 else 0
+            if rally_pct < 0.05:
+                continue
+            bc_candidates.append({
+                "idx": i, "price": highs[i], "close": closes[i],
+                "vol_ratio": vol_ratio, "rally": rally_pct,
+                "score": vol_ratio * 10 + rally_pct * 100
+            })
+        
+        if bc_candidates:
+            bc_candidates.sort(key=lambda x: x["score"], reverse=True)
+            bc = bc_candidates[0]
+            bc_idx = bc["idx"]
+            bc_high = bc["price"]
+            
+            psy_idx = None
+            for i in range(max(5, bc_idx - 20), bc_idx):
+                hi_vol, vr = is_high_volume(i)
+                if hi_vol and closes[i] < opens[i] and body_position(i) < 0.5:
+                    psy_idx = i
+                    break
+            
+            ar_idx, ar_low = None, float('inf')
+            for i in range(bc_idx + 2, min(bc_idx + 20, n)):
+                if lows[i] < ar_low:
+                    ar_low = lows[i]
+                    ar_idx = i
+            
+            if ar_idx and ar_low < bc_high:
+                range_high = bc_high
+                range_low = ar_low
+                range_width = range_high - range_low
+                range_mid = (range_high + range_low) / 2
+                
+                if 0.02 < range_width / range_mid < 0.30:
+                    events = []
+                    event_bars = {}
+                    score = 0
+                    
+                    if psy_idx:
+                        events.append(f"PSY @ ${closes[psy_idx]:.2f}")
+                        event_bars["PSY"] = {"idx": psy_idx, "price": closes[psy_idx], "ts": raw_bars[psy_idx]["t"]}
+                        score += 10
+                    
+                    events.append(f"BC @ ${bc_high:.2f} (Vol {bc['vol_ratio']:.1f}x, Close untere Haelfte)")
+                    event_bars["BC"] = {"idx": bc_idx, "price": bc_high, "ts": raw_bars[bc_idx]["t"]}
+                    score += 20
+                    
+                    events.append(f"AR @ ${ar_low:.2f}")
+                    event_bars["AR"] = {"idx": ar_idx, "price": ar_low, "ts": raw_bars[ar_idx]["t"]}
+                    score += 15
+                    
+                    st_count = 0
+                    prev_st_vol = bc["vol_ratio"]
+                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
+                        if highs[i] >= range_high - range_width * 0.25:
+                            hi_vol, vr = is_high_volume(i)
+                            if vr < prev_st_vol * 0.9:
+                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
+                                events.append(f"{st_label} @ ${highs[i]:.2f} (Vol {vr:.1f}x)")
+                                event_bars[st_label] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
+                                score += 10 if st_count == 0 else 5
+                                prev_st_vol = vr
+                                st_count += 1
+                                if st_count >= 3:
+                                    break
+                    
+                    # UTAD: Break ueber BC-High auf LOW Volume -> Failure
+                    utad_idx = None
+                    utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
+                    for i in range(utad_start, n - 3):
+                        if highs[i] > range_high:
+                            low_vol, lvr = is_low_volume(i)
+                            if low_vol or lvr < 0.85:
+                                for j in range(1, min(6, n - i)):
+                                    if closes[i + j] < range_high - range_width * 0.10:
+                                        utad_idx = i
+                                        events.append(f"UTAD @ ${highs[i]:.2f} (Vol {lvr:.1f}x LOW)")
+                                        event_bars["UTAD"] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
+                                        score += 25
+                                        break
+                            break
+                    
+                    # SOW: Wide Spread DOWN + HIGH Volume unter AR-Level
+                    sow_idx = None
+                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
+                        if closes[i] < range_low and closes[i] < opens[i]:
+                            hi_vol, vr = is_high_volume(i)
+                            if hi_vol and is_wide_spread(i):
+                                sow_idx = i
+                                events.append(f"SOW @ ${closes[i]:.2f} (Vol {vr:.1f}x, Wide Spread)")
+                                event_bars["SOW"] = {"idx": i, "price": closes[i], "ts": raw_bars[i]["t"]}
+                                score += 20
+                                break
+                    
+                    if not sow_idx and current_price < range_low:
+                        events.append(f"SOW (schwach): ${current_price:.2f} < Range ${range_low:.2f}")
+                        score += 8
+                    
+                    # LPSY: Rally auf abnehmendem Volume, scheitert unter Range Low
+                    if sow_idx and sow_idx + 3 < n:
+                        for i in range(sow_idx + 1, n):
+                            if highs[i] > closes[sow_idx]:
+                                low_vol, lvr = is_low_volume(i)
+                                if highs[i] <= range_low + range_width * 0.10:
+                                    if low_vol or lvr < 0.9:
+                                        events.append(f"LPSY @ ${highs[i]:.2f} (Vol {lvr:.1f}x)")
+                                        event_bars["LPSY"] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
+                                        score += 15
+                                        break
+                    
+                    if score >= 35:
+                        if sow_idx or current_price < range_low * 0.98:
+                            phase = "Phase D/E — Markdown beginning"
+                            phase_short = "D/E"
+                        elif utad_idx:
+                            phase = "Phase C — UTAD (Failed Breakout)"
+                            phase_short = "C"
+                        elif st_count >= 1:
+                            phase = "Phase B — Cause Building"
+                            phase_short = "B"
+                        else:
+                            phase = "Phase A — Buying Exhaustion"
+                            phase_short = "A"
+                        
+                        if utad_idx:
+                            entry = range_low
+                            stop = highs[utad_idx] + atr * 0.3
+                        else:
+                            entry = range_low
+                            stop = range_high + atr * 0.5
+                        
+                        tp1 = range_low - range_width * 0.75
+                        tp2 = range_low - range_width * 1.5
+                        rr = abs(entry - tp1) / abs(stop - entry) if abs(stop - entry) > 0 else 0
+                        
+                        results.append({
+                            "type": "Distribution", "direction": "SHORT",
+                            "phase": phase, "phase_short": phase_short,
+                            "score": min(score, 100), "events": events, "event_bars": event_bars,
+                            "range_high": round(range_high, 2), "range_low": round(range_low, 2),
+                            "range_start_ts": raw_bars[bc_idx]["t"],
+                            "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
+                            "entry": round(entry, 2), "stop": round(stop, 2),
+                            "tp1": round(tp1, 2), "tp2": round(tp2, 2),
+                            "rr": round(rr, 2), "current_price": round(current_price, 2),
+                        })
         
         if not results:
             return None
-        
-        # Return best result
         best = max(results, key=lambda x: x["score"])
         best["ticker"] = ticker
         return best
-        
-    except Exception as e:
+    except Exception:
         return None
 
 
 def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="LONG"):
     """Scannt mehrere Aktien nach Wyckoff Patterns."""
     results = []
-    
     for i, ticker in enumerate(tickers):
         try:
             result = scan_wyckoff_single(ticker, api_key, days, timeframe)
@@ -2346,184 +2455,223 @@ def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="
                 results.append(result)
         except Exception:
             continue
-        
         if i % 10 == 9:
             time.sleep(0.5)
-    
     results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
 
 def find_wyckoff_for_chart(ohlcv_data):
     """
-    Findet Wyckoff Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
-    Returns list of Wyckoff patterns mit Koordinaten für Chart-Rendering.
+    Findet Wyckoff Patterns direkt aus Chart-OHLCV-Daten.
+    Korrekte Methodik: SC/BC definiert Range, Volume+Spread Analyse.
     """
-    if not ohlcv_data or len(ohlcv_data) < 50:
+    if not ohlcv_data or len(ohlcv_data) < 60:
         return []
     
     try:
+        opens = [d.get("open", d["close"]) for d in ohlcv_data]
         closes = [d["close"] for d in ohlcv_data]
         highs = [d["high"] for d in ohlcv_data]
         lows = [d["low"] for d in ohlcv_data]
         volumes = [d.get("volume", 0) for d in ohlcv_data]
         current_price = closes[-1]
+        n = len(closes)
         
-        # ATR
-        atr_values = []
-        for i in range(1, len(closes)):
+        def spread(i):
+            return highs[i] - lows[i]
+        def body_pos(i):
+            s = spread(i)
+            return (closes[i] - lows[i]) / s if s > 0 else 0.5
+        def avg_spread(i, lb=20):
+            s = max(0, i - lb)
+            return sum(spread(j) for j in range(s, i)) / max(1, i - s)
+        def avg_vol(i, lb=20):
+            s = max(0, i - lb)
+            return sum(volumes[s:i]) / max(1, i - s)
+        
+        atr_vals = []
+        for i in range(1, n):
             tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-            atr_values.append(tr)
-        atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
-        
-        # Sliding Window Range Detection
-        best_range = None
-        best_score = 999
-        min_bars = max(20, int(len(ohlcv_data) * 0.2))
-        
-        for si in range(0, len(ohlcv_data) - min_bars, max(1, len(ohlcv_data) // 30)):
-            for ei in range(si + min_bars, min(si + int(len(ohlcv_data) * 0.8), len(ohlcv_data)), max(1, len(ohlcv_data) // 30)):
-                sh = max(highs[si:ei])
-                sl = min(lows[si:ei])
-                sw = sh - sl
-                sa = sum(closes[si:ei]) / (ei - si)
-                wp = sw / sa if sa > 0 else 1
-                if 0.03 < wp < 0.25:
-                    sc = wp / (ei - si) * 100
-                    if sc < best_score:
-                        best_score = sc
-                        best_range = (si, ei, sh, sl, sa)
-        
-        if not best_range:
-            return []
-        
-        r_start, r_end, rh, rl, ra = best_range
-        rw = rh - rl
-        rv = volumes[r_start:r_end]
-        avg_rv = sum(rv) / len(rv) if rv else 1
-        pre_closes = closes[:r_start] if r_start > 3 else []
+            atr_vals.append(tr)
+        atr = sum(atr_vals[-14:]) / min(14, len(atr_vals)) if atr_vals else current_price * 0.02
         
         results = []
+        lookback_end = int(n * 0.5)
         
-        # --- ACCUMULATION ---
-        if len(pre_closes) >= 3:
-            pre_avg = sum(pre_closes) / len(pre_closes)
-            if pre_avg > ra * 1.01 or (pre_closes[0] > min(pre_closes) * 1.03):
-                events = []
-                event_times = {}
-                score = 0
-                
-                for ri in range(r_end - r_start):
-                    idx = r_start + ri
-                    if rv[ri] > avg_rv * 1.5 and lows[idx] <= rl + rw * 0.20:
-                        events.append({"name": "SC", "label": f"SC ${lows[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": lows[idx], "pos": "below"})
-                        score += 20
-                        
-                        # AR
-                        post = highs[idx:min(idx + 10, r_start + len(rv))]
-                        if post:
-                            ar_i = idx + post.index(max(post))
-                            if max(post) > rl + rw * 0.4 and ar_i < len(ohlcv_data):
-                                events.append({"name": "AR", "label": f"AR ${max(post):.1f}", "time": ohlcv_data[ar_i]["time"], "price": max(post), "pos": "above"})
-                                score += 15
-                        break
-                
-                # Spring
-                for ri in range(max(0, (r_end - r_start) // 3), r_end - r_start):
-                    idx = r_start + ri
-                    if lows[idx] < rl:
-                        for j in range(1, min(6, len(ohlcv_data) - idx)):
-                            if closes[idx + j] > rl + rw * 0.15:
-                                events.append({"name": "Spring", "label": f"Spring ${lows[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": lows[idx], "pos": "below"})
-                                score += 25
-                                break
-                        break
-                
-                # SOS
-                if current_price > rh:
-                    events.append({"name": "SOS", "label": f"SOS ${current_price:.1f}", "time": ohlcv_data[-1]["time"], "price": current_price, "pos": "above"})
-                    score += 20
-                
-                if score >= 35:
-                    phase = "D/E" if current_price > rh else ("C" if any(e["name"] == "Spring" for e in events) else "B")
-                    results.append({
-                        "type": "Accumulation", "direction": "LONG", "emoji": "🏦⬆️",
-                        "phase": f"Phase {phase}", "score": score,
-                        "events": events,
-                        "range_high": rh, "range_low": rl,
-                        "range_start_time": ohlcv_data[r_start]["time"],
-                        "range_end_time": ohlcv_data[min(r_end - 1, len(ohlcv_data) - 1)]["time"],
-                        "trade": {"entry": round(rh if current_price < rh else current_price, 2),
-                                  "stop": round(rl - atr * 0.5, 2),
-                                  "tp1": round(rh + rw * 0.5, 2), "tp2": round(rh + rw, 2)}
-                    })
+        # --- ACCUMULATION: Find SC ---
+        best_sc = None
+        for i in range(10, lookback_end):
+            av = avg_vol(i)
+            if av <= 0 or volumes[i] < av * 1.8:
+                continue
+            if spread(i) < avg_spread(i) * 1.3:
+                continue
+            if body_pos(i) < 0.35:
+                continue
+            prior_high = max(highs[max(0, i-15):i])
+            decline = (prior_high - lows[i]) / prior_high if prior_high > 0 else 0
+            if decline < 0.05:
+                continue
+            sc_score = (volumes[i] / av) * 10 + decline * 100
+            if not best_sc or sc_score > best_sc["score"]:
+                best_sc = {"idx": i, "low": lows[i], "vol_r": volumes[i] / av, "score": sc_score}
         
-        # --- DISTRIBUTION ---
-        if len(pre_closes) >= 3:
-            pre_avg = sum(pre_closes) / len(pre_closes)
-            if pre_avg < ra * 0.99 or (max(pre_closes) > pre_closes[0] * 1.03):
-                events = []
-                score = 0
+        if best_sc:
+            sc_idx = best_sc["idx"]
+            ar_idx, ar_high = None, 0
+            for i in range(sc_idx + 2, min(sc_idx + 20, n)):
+                if highs[i] > ar_high:
+                    ar_high = highs[i]
+                    ar_idx = i
+            
+            if ar_idx and ar_high > best_sc["low"]:
+                rh, rl = ar_high, best_sc["low"]
+                rw = rh - rl
+                rm = (rh + rl) / 2
                 
-                for ri in range(r_end - r_start):
-                    idx = r_start + ri
-                    if rv[ri] > avg_rv * 1.5 and highs[idx] >= rh - rw * 0.20:
-                        events.append({"name": "BC", "label": f"BC ${highs[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": highs[idx], "pos": "above"})
-                        score += 20
-                        
-                        post = lows[idx:min(idx + 10, r_start + len(rv))]
-                        if post:
-                            ar_i = idx + post.index(min(post))
-                            if min(post) < rh - rw * 0.4 and ar_i < len(ohlcv_data):
-                                events.append({"name": "AR", "label": f"AR ${min(post):.1f}", "time": ohlcv_data[ar_i]["time"], "price": min(post), "pos": "below"})
-                                score += 15
-                        break
-                
-                # UTAD
-                for ri in range(max(0, (r_end - r_start) // 3), r_end - r_start):
-                    idx = r_start + ri
-                    if highs[idx] > rh:
-                        for j in range(1, min(6, len(ohlcv_data) - idx)):
-                            if closes[idx + j] < rh - rw * 0.15:
-                                events.append({"name": "UTAD", "label": f"UTAD ${highs[idx]:.1f}", "time": ohlcv_data[idx]["time"], "price": highs[idx], "pos": "above"})
-                                score += 25
-                                break
-                        break
-                
-                if current_price < rl:
-                    events.append({"name": "SOW", "label": f"SOW ${current_price:.1f}", "time": ohlcv_data[-1]["time"], "price": current_price, "pos": "below"})
+                if 0.02 < rw / rm < 0.30:
+                    events = []
+                    score = 0
+                    events.append({"name": "SC", "label": f"SC ${rl:.1f}", "time": ohlcv_data[sc_idx]["time"], "price": rl, "pos": "below"})
                     score += 20
+                    events.append({"name": "AR", "label": f"AR ${rh:.1f}", "time": ohlcv_data[ar_idx]["time"], "price": rh, "pos": "above"})
+                    score += 15
+                    
+                    # Spring on LOW Volume
+                    spring_start = max(ar_idx + 5, int(sc_idx + (n - sc_idx) * 0.3))
+                    for i in range(spring_start, n - 3):
+                        if lows[i] < rl:
+                            av = avg_vol(i)
+                            vol_r = volumes[i] / av if av > 0 else 1
+                            if vol_r < 0.85:
+                                for j in range(1, min(6, n - i)):
+                                    if closes[i + j] > rl + rw * 0.10:
+                                        events.append({"name": "Spring", "label": f"Spring ${lows[i]:.1f} (Low Vol)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
+                                        score += 25
+                                        break
+                            break
+                    
+                    # SOS: Wide Spread UP + High Volume
+                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
+                        if closes[i] > rh and closes[i] > opens[i]:
+                            av = avg_vol(i)
+                            if av > 0 and volumes[i] > av * 1.5 and spread(i) > avg_spread(i) * 1.3:
+                                events.append({"name": "SOS", "label": f"SOS ${closes[i]:.1f} (High Vol)", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "above"})
+                                score += 20
+                                break
+                    
+                    if score >= 35:
+                        phase = "D/E" if current_price > rh else ("C" if any(e["name"] == "Spring" for e in events) else "B")
+                        entry = rh if current_price < rh else current_price
+                        spring_low = min([e["price"] for e in events if e["name"] == "Spring"], default=rl)
+                        stop_price = spring_low - atr * 0.3 if any(e["name"] == "Spring" for e in events) else rl - atr * 0.5
+                        results.append({
+                            "type": "Accumulation", "direction": "LONG", "emoji": "🏦⬆️",
+                            "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
+                            "range_high": rh, "range_low": rl,
+                            "range_start_time": ohlcv_data[sc_idx]["time"],
+                            "range_end_time": ohlcv_data[min(ar_idx + (n - ar_idx) // 2, n - 1)]["time"],
+                            "trade": {"entry": round(entry, 2), "stop": round(stop_price, 2),
+                                      "tp1": round(rh + rw * 0.75, 2), "tp2": round(rh + rw * 1.5, 2)}
+                        })
+        
+        # --- DISTRIBUTION: Find BC ---
+        best_bc = None
+        for i in range(10, lookback_end):
+            av = avg_vol(i)
+            if av <= 0 or volumes[i] < av * 1.8:
+                continue
+            if spread(i) < avg_spread(i) * 1.3:
+                continue
+            if body_pos(i) > 0.65:
+                continue
+            prior_low = min(lows[max(0, i-15):i])
+            rally = (highs[i] - prior_low) / prior_low if prior_low > 0 else 0
+            if rally < 0.05:
+                continue
+            bc_score = (volumes[i] / av) * 10 + rally * 100
+            if not best_bc or bc_score > best_bc["score"]:
+                best_bc = {"idx": i, "high": highs[i], "vol_r": volumes[i] / av, "score": bc_score}
+        
+        if best_bc:
+            bc_idx = best_bc["idx"]
+            ar_idx, ar_low = None, float('inf')
+            for i in range(bc_idx + 2, min(bc_idx + 20, n)):
+                if lows[i] < ar_low:
+                    ar_low = lows[i]
+                    ar_idx = i
+            
+            if ar_idx and ar_low < best_bc["high"]:
+                rh, rl = best_bc["high"], ar_low
+                rw = rh - rl
+                rm = (rh + rl) / 2
                 
-                if score >= 35:
-                    phase = "D/E" if current_price < rl else ("C" if any(e["name"] == "UTAD" for e in events) else "B")
-                    results.append({
-                        "type": "Distribution", "direction": "SHORT", "emoji": "🏦⬇️",
-                        "phase": f"Phase {phase}", "score": score,
-                        "events": events,
-                        "range_high": rh, "range_low": rl,
-                        "range_start_time": ohlcv_data[r_start]["time"],
-                        "range_end_time": ohlcv_data[min(r_end - 1, len(ohlcv_data) - 1)]["time"],
-                        "trade": {"entry": round(rl if current_price > rl else current_price, 2),
-                                  "stop": round(rh + atr * 0.5, 2),
-                                  "tp1": round(rl - rw * 0.5, 2), "tp2": round(rl - rw, 2)}
-                    })
+                if 0.02 < rw / rm < 0.30:
+                    events = []
+                    score = 0
+                    events.append({"name": "BC", "label": f"BC ${rh:.1f}", "time": ohlcv_data[bc_idx]["time"], "price": rh, "pos": "above"})
+                    score += 20
+                    events.append({"name": "AR", "label": f"AR ${rl:.1f}", "time": ohlcv_data[ar_idx]["time"], "price": rl, "pos": "below"})
+                    score += 15
+                    
+                    # UTAD on LOW Volume
+                    utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
+                    for i in range(utad_start, n - 3):
+                        if highs[i] > rh:
+                            av = avg_vol(i)
+                            vol_r = volumes[i] / av if av > 0 else 1
+                            if vol_r < 0.85:
+                                for j in range(1, min(6, n - i)):
+                                    if closes[i + j] < rh - rw * 0.10:
+                                        events.append({"name": "UTAD", "label": f"UTAD ${highs[i]:.1f} (Low Vol)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
+                                        score += 25
+                                        break
+                            break
+                    
+                    # SOW: Wide Spread DOWN + High Volume
+                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
+                        if closes[i] < rl and closes[i] < opens[i]:
+                            av = avg_vol(i)
+                            if av > 0 and volumes[i] > av * 1.5 and spread(i) > avg_spread(i) * 1.3:
+                                events.append({"name": "SOW", "label": f"SOW ${closes[i]:.1f} (High Vol)", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "below"})
+                                score += 20
+                                break
+                    
+                    if score >= 35:
+                        phase = "D/E" if current_price < rl else ("C" if any(e["name"] == "UTAD" for e in events) else "B")
+                        entry = rl if current_price > rl else current_price
+                        utad_high = max([e["price"] for e in events if e["name"] == "UTAD"], default=rh)
+                        stop_price = utad_high + atr * 0.3 if any(e["name"] == "UTAD" for e in events) else rh + atr * 0.5
+                        results.append({
+                            "type": "Distribution", "direction": "SHORT", "emoji": "🏦⬇️",
+                            "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
+                            "range_high": rh, "range_low": rl,
+                            "range_start_time": ohlcv_data[bc_idx]["time"],
+                            "range_end_time": ohlcv_data[min(ar_idx + (n - ar_idx) // 2, n - 1)]["time"],
+                            "trade": {"entry": round(entry, 2), "stop": round(stop_price, 2),
+                                      "tp1": round(rl - rw * 0.75, 2), "tp2": round(rl - rw * 1.5, 2)}
+                        })
         
         return results
     except Exception:
         return []
+
+
+def get_volatility_regime(atr_pct):
     """
     Klassifiziert das aktuelle Volatilitäts-Regime
     
     Returns: (regime_name, filter_adjustment)
     """
     if atr_pct < 1.5:
-        return "LOW", 0.7  # Niedrige Vola: Strengere Filter (70%)
+        return "LOW", 0.7
     elif atr_pct < 3.0:
-        return "NORMAL", 1.0  # Normal: Standard Filter
+        return "NORMAL", 1.0
     elif atr_pct < 5.0:
-        return "HIGH", 1.3  # Hohe Vola: Lockerere Filter (130%)
+        return "HIGH", 1.3
     else:
-        return "EXTREME", 1.5  # Extrem: Sehr lockere Filter (150%)
+        return "EXTREME", 1.5
 
 def validate_liquidity(volume, price, min_dollar_volume=100000):
     """
