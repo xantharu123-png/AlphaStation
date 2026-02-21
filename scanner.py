@@ -966,6 +966,283 @@ def calculate_close_position(high, low, close, min_range_pct=1.0):
     # Clamp auf 0-1 (kann >1 oder <0 sein wenn close außerhalb range)
     return max(0.0, min(1.0, close_pos))
 
+
+# =============================================================================
+# BREAKOUT HEALTH — Fakeout-Erkennung & Exhaustion Detection
+# =============================================================================
+# Bewertet ob ein Breakout ECHT ist oder ob ein Selloff kommt.
+#
+# FAKEOUT-SIGNALE (Breakout ist NICHT echt):
+#   - Low Volume Breakout:  RVOL < 1.5 → kein institutionelles Interesse
+#   - Wick Rejection:       Langer oberer Docht → Verkäufer drücken zurück
+#   - Close Weakness:       Close weit weg vom High → Käufer verlieren Kontrolle
+#   - Gap Risk:             Unfilled bearish VI/FVG direkt über dem Preis
+#
+# EXHAUSTION-SIGNALE (Selloff kommt BALD):
+#   - Overextension:        Zu weit zu schnell (>10% in einer Session)
+#   - Volume Climax:        RVOL > 5x → oft das Top (alle haben schon gekauft)
+#   - Wick Growing:         Oberer Docht wird größer → zunehmender Verkaufsdruck
+#   - Body Shrinking:       Kerze wird kleiner → Momentum lässt nach
+#
+# BESTÄTIGUNGS-SIGNALE (Breakout ist ECHT):
+#   - Volume Confirmation:  RVOL > 2.0 → institutionell getrieben
+#   - Clean Close:          Close nahe High (>85%) → Käufer dominieren
+#   - No Upper Wick:        Wenig Docht → kein Verkaufsdruck
+#   - Prior Base:           Vortag% war flach → Breakout aus Konsolidierung
+# =============================================================================
+
+def assess_breakout_health(change_pct, rvol, close_pos, high, low, close, 
+                           open_price=None, prev_close=None, prev_high=None, 
+                           prev_low=None, vortag_pct=None, vi_result=None):
+    """
+    Bewertet die Gesundheit eines Breakouts auf einer Skala von 0-100.
+    
+    Gibt zurück:
+      - health_score: 0-100 (0 = definitiv Fake, 100 = perfekter Breakout)
+      - verdict: "STRONG" / "HEALTHY" / "CAUTION" / "WEAK" / "FAKEOUT"
+      - warnings: Liste konkreter Warnungen
+      - signals: Liste positiver Bestätigungen
+      - selloff_risk: "LOW" / "MEDIUM" / "HIGH" / "IMMINENT"
+      - action: Konkrete Handlungsempfehlung
+    """
+    if change_pct is None or change_pct <= 0:
+        return None  # Kein Breakout — nichts zu bewerten
+    
+    health = 50  # Neutral starten
+    warnings = []
+    signals = []
+    
+    # ================================================================
+    # VOLUME ANALYSE — Wichtigster Indikator
+    # ================================================================
+    if rvol is not None:
+        if rvol >= 3.0:
+            health += 15
+            signals.append(f"🟢 Starkes Volume ({rvol:.1f}x) — institutionell getrieben")
+        elif rvol >= 2.0:
+            health += 10
+            signals.append(f"🟢 Gutes Volume ({rvol:.1f}x) — bestätigt")
+        elif rvol >= 1.5:
+            health += 5
+            signals.append(f"🟡 Akzeptables Volume ({rvol:.1f}x)")
+        elif rvol >= 1.0:
+            health -= 5
+            warnings.append(f"⚠️ Schwaches Volume ({rvol:.1f}x) — Breakout kaum unterstützt")
+        else:
+            health -= 15
+            warnings.append(f"🔴 LOW VOLUME BREAKOUT ({rvol:.1f}x) — Fakeout-Risiko HOCH!")
+        
+        # Volume Climax = Warnung (alle haben schon gekauft)
+        if rvol >= 5.0:
+            health -= 5
+            warnings.append(f"⚠️ Volume Climax ({rvol:.1f}x) — oft das Top, Profit-Taking erwartet")
+    
+    # ================================================================
+    # CLOSE POSITION — Wo schliesst der Preis?
+    # ================================================================
+    if close_pos is not None:
+        if close_pos >= 0.90:
+            health += 12
+            signals.append(f"🟢 Close am High ({close_pos:.0%}) — Käufer dominieren komplett")
+        elif close_pos >= 0.75:
+            health += 8
+            signals.append(f"🟢 Close nahe High ({close_pos:.0%}) — Trend intakt")
+        elif close_pos >= 0.60:
+            health += 0  # Neutral
+            warnings.append(f"🟡 Close Mitte-High ({close_pos:.0%}) — leichter Verkaufsdruck")
+        elif close_pos >= 0.40:
+            health -= 10
+            warnings.append(f"⚠️ Close in der Mitte ({close_pos:.0%}) — Käufer verlieren Kontrolle")
+        else:
+            health -= 20
+            warnings.append(f"🔴 Close nahe Low ({close_pos:.0%}) — REVERSAL-KERZE! Fakeout wahrscheinlich")
+    
+    # ================================================================
+    # WICK ANALYSE — Verkaufsdruck messen
+    # ================================================================
+    if high and low and close and high > low:
+        total_range = high - low
+        
+        if open_price:
+            body_top = max(open_price, close)
+            body_bot = min(open_price, close)
+        else:
+            # Ohne Open schätzen: Close ist aktuell, Open ≈ prev_close oder low + change
+            body_top = close
+            body_bot = close / (1 + change_pct / 100) if change_pct else low
+            body_bot = max(body_bot, low)
+        
+        body_size = body_top - body_bot
+        upper_wick = high - body_top
+        lower_wick = body_bot - low
+        
+        upper_wick_pct = upper_wick / total_range if total_range > 0 else 0
+        body_pct = body_size / total_range if total_range > 0 else 0
+        
+        # Langer oberer Docht = Verkäufer pushten den Preis runter
+        if upper_wick_pct > 0.40:
+            health -= 15
+            warnings.append(f"🔴 Langer Docht ({upper_wick_pct:.0%} der Range) — starker Verkaufsdruck von oben!")
+        elif upper_wick_pct > 0.25:
+            health -= 8
+            warnings.append(f"⚠️ Oberer Docht ({upper_wick_pct:.0%}) — Verkäufer aktiv am High")
+        elif upper_wick_pct < 0.10:
+            health += 5
+            signals.append(f"🟢 Kaum Docht ({upper_wick_pct:.0%}) — kein Verkaufsdruck")
+        
+        # Großer Body = starke Conviction
+        if body_pct > 0.70:
+            health += 5
+            signals.append(f"🟢 Großer Body ({body_pct:.0%}) — starke Überzeugung")
+        elif body_pct < 0.30:
+            health -= 8
+            warnings.append(f"⚠️ Kleiner Body ({body_pct:.0%}) — Doji/Spinning Top → Unentschlossenheit")
+    
+    # ================================================================
+    # OVEREXTENSION — Zu weit zu schnell?
+    # ================================================================
+    if change_pct > 15:
+        health -= 12
+        warnings.append(f"🔴 Stark überdehnt (+{change_pct:.1f}%) — Profit-Taking SEHR wahrscheinlich")
+    elif change_pct > 10:
+        health -= 8
+        warnings.append(f"⚠️ Überdehnt (+{change_pct:.1f}%) — Pullback wahrscheinlich")
+    elif change_pct > 7:
+        health -= 3
+        warnings.append(f"🟡 Ausgedehnte Bewegung (+{change_pct:.1f}%) — etwas gedehnt")
+    elif change_pct >= 3:
+        health += 3
+        signals.append(f"🟢 Gesunde Breakout-Größe (+{change_pct:.1f}%)")
+    
+    # ================================================================
+    # VORHER-KONTEXT — Breakout aus was?
+    # ================================================================
+    if vortag_pct is not None:
+        # Breakout aus enger Konsolidierung = STÄRKSTES Signal
+        if -2.0 <= vortag_pct <= 2.0:
+            health += 8
+            signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
+        # Breakout nach Down-Day = Reversal (kann stark sein, aber riskanter)
+        elif vortag_pct < -3.0:
+            health += 0
+            warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein, kein neuer Trend")
+        # Breakout nach Up-Day = Continuation (Trend läuft schon)
+        elif vortag_pct > 5.0:
+            health -= 5
+            warnings.append(f"⚠️ 2. Tag in Folge stark (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
+    
+    # ================================================================
+    # VOLUME IMBALANCE CONFLUENCE — Resistance-Zonen voraus?
+    # ================================================================
+    if vi_result and close:
+        unfilled_bear = vi_result.get("unfilled_bear", [])
+        if unfilled_bear:
+            nearest = unfilled_bear[0]
+            dist_to_resistance = (nearest["zone_low"] - close) / close * 100 if close > 0 else 0
+            
+            if dist_to_resistance < 1.0:
+                health -= 10
+                warnings.append(f"🔴 Bearish {nearest['type']} Zone nur {dist_to_resistance:.1f}% entfernt "
+                               f"(${nearest['zone_low']:.2f}-${nearest['zone_high']:.2f}) — Resistance!")
+            elif dist_to_resistance < 3.0:
+                health -= 5
+                warnings.append(f"⚠️ Bearish {nearest['type']} Zone {dist_to_resistance:.1f}% entfernt — potentielle Resistance")
+            else:
+                health += 3
+                signals.append(f"🟢 Keine nahe Resistance ({dist_to_resistance:.1f}% bis nächste Zone)")
+        else:
+            health += 3
+            signals.append("🟢 Keine unfilled Bearish Zones — freier Weg nach oben")
+    
+    # ================================================================
+    # ERGEBNIS BERECHNEN
+    # ================================================================
+    health = max(0, min(100, health))
+    
+    # Verdict
+    if health >= 80:
+        verdict = "STRONG"
+        verdict_emoji = "💪🟢"
+    elif health >= 60:
+        verdict = "HEALTHY"
+        verdict_emoji = "✅🟢"
+    elif health >= 45:
+        verdict = "CAUTION"
+        verdict_emoji = "⚠️🟡"
+    elif health >= 30:
+        verdict = "WEAK"
+        verdict_emoji = "⚠️🟠"
+    else:
+        verdict = "FAKEOUT"
+        verdict_emoji = "🚫🔴"
+    
+    # Selloff Risk
+    selloff_score = 0
+    if change_pct and change_pct > 10:
+        selloff_score += 30
+    elif change_pct and change_pct > 7:
+        selloff_score += 15
+    if rvol and rvol > 5.0:
+        selloff_score += 25
+    if close_pos is not None and close_pos < 0.60:
+        selloff_score += 20
+    if close_pos is not None and close_pos < 0.40:
+        selloff_score += 15
+    # Wick-basiert
+    if high and low and close and high > low:
+        uw = (high - max(close, open_price or close)) / (high - low)
+        if uw > 0.30:
+            selloff_score += 20
+    if vortag_pct and vortag_pct > 5.0:
+        selloff_score += 10
+    
+    if selloff_score >= 50:
+        selloff_risk = "IMMINENT"
+        selloff_emoji = "🚨"
+    elif selloff_score >= 30:
+        selloff_risk = "HIGH"
+        selloff_emoji = "🔴"
+    elif selloff_score >= 15:
+        selloff_risk = "MEDIUM"
+        selloff_emoji = "🟡"
+    else:
+        selloff_risk = "LOW"
+        selloff_emoji = "🟢"
+    
+    # Action
+    if verdict == "FAKEOUT":
+        action = "EXIT — Breakout ist wahrscheinlich nicht echt. Sofort raus oder eng absichern."
+    elif selloff_risk == "IMMINENT":
+        action = "TAKE PROFIT — Selloff steht bevor. Gewinne mitnehmen oder Trailing Stop eng setzen."
+    elif selloff_risk == "HIGH":
+        action = "TIGHTEN STOP — Stop-Loss auf Breakeven oder knapp darunter ziehen."
+    elif verdict == "WEAK":
+        action = "REDUCE SIZE — Position verkleinern, nicht nachlegen."
+    elif verdict == "CAUTION":
+        action = "HOLD MIT STOP — Halten, aber Stop-Loss nicht vergessen."
+    elif verdict == "STRONG":
+        action = "HOLD / ADD — Starker Breakout, Pyramidisieren möglich bei Pullback auf Breakout-Level."
+    else:
+        action = "HOLD — Breakout sieht gesund aus. Stop unter Tageslow."
+    
+    return {
+        "health_score": health,
+        "verdict": verdict,
+        "verdict_emoji": verdict_emoji,
+        "selloff_risk": selloff_risk,
+        "selloff_risk_emoji": selloff_emoji,
+        "selloff_score": selloff_score,
+        "warnings": warnings,
+        "signals": signals,
+        "action": action,
+        "details": {
+            "change_pct": change_pct,
+            "rvol": rvol,
+            "close_position": close_pos,
+            "vortag_pct": vortag_pct,
+        }
+    }
+
 def calculate_alpha_score(rvol, vortag_pct, change_pct):
     """
     Normalisierter Alpha Score 0-100.
@@ -8674,6 +8951,17 @@ def fetch_crypto_data():
                         continue
                     alpha = flag_score
                 
+                # Breakout Health für Crypto
+                breakout_health = None
+                if current_strategy in ("Breakout Long", "Early Momentum", "Whale Watch 🐋"):
+                    if change_24h > 0:
+                        breakout_health = assess_breakout_health(
+                            change_pct=change_24h, rvol=rvol, close_pos=close_pos,
+                            high=high_24h, low=low_24h, close=price,
+                            open_price=None, prev_close=prev_close_approx,
+                            vortag_pct=vortag_chg, vi_result=None
+                        )
+                
                 results.append({
                     "Ticker": ticker, 
                     "Name": coin.get("name", "")[:15],
@@ -8691,6 +8979,7 @@ def fetch_crypto_data():
                     "High": high_24h,
                     "Low": low_24h,
                     "PrevClose": prev_close_approx,
+                    "BreakoutHealth": breakout_health,
                 })
             except Exception as e:
                 continue
@@ -9072,6 +9361,20 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                         continue
                     alpha = flag_score
                 
+                # Breakout Health Assessment für relevante Strategien
+                breakout_health = None
+                if current_strategy in ("Breakout Long", "Early Momentum", "Whale Watch", 
+                                        "Gap Up Momentum", "PM Gainers 🌅",
+                                        "Breakout Long (Ultra)", "Gap Up Momentum (Ultra)"):
+                    if change > 0:
+                        breakout_health = assess_breakout_health(
+                            change_pct=change, rvol=rvol, close_pos=close_pos,
+                            high=high, low=low, close=price,
+                            open_price=None, prev_close=prev_close,
+                            prev_high=prev_high, prev_low=prev_low,
+                            vortag_pct=vortag_chg, vi_result=None
+                        )
+                
                 results.append({
                     "Ticker": ticker_raw, "Name": "",
                     "Preis": round(price, 4), "Chg%": round(change, 2),
@@ -9090,6 +9393,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     "VolRegime": volatility_regime,
                     "DollarVol": dollar_volume,
                     "IsLiquid": is_liquid,
+                    "BreakoutHealth": breakout_health,
                 })
             except Exception as e:
                 continue
@@ -14028,6 +14332,54 @@ with tab_scanner:
                             for detail in flag_details:
                                 st.caption(detail)
                     except Exception as e:
+                        pass
+                
+                # =====================================================================
+                # BREAKOUT HEALTH — Fakeout-Erkennung & Selloff-Risiko
+                # =====================================================================
+                if "BreakoutHealth" in df.columns:
+                    try:
+                        bh = row.get("BreakoutHealth")
+                        if bh and isinstance(bh, dict) and bh.get("health_score") is not None:
+                            st.divider()
+                            
+                            # Header mit Score und Verdict
+                            health = bh["health_score"]
+                            verdict = bh["verdict"]
+                            verdict_emoji = bh["verdict_emoji"]
+                            selloff = bh["selloff_risk"]
+                            selloff_emoji = bh["selloff_risk_emoji"]
+                            
+                            col_health, col_selloff = st.columns(2)
+                            with col_health:
+                                if health >= 60:
+                                    st.success(f"{verdict_emoji} Breakout Health: **{health}/100** ({verdict})")
+                                elif health >= 40:
+                                    st.warning(f"{verdict_emoji} Breakout Health: **{health}/100** ({verdict})")
+                                else:
+                                    st.error(f"{verdict_emoji} Breakout Health: **{health}/100** ({verdict})")
+                            
+                            with col_selloff:
+                                if selloff == "LOW":
+                                    st.success(f"{selloff_emoji} Selloff-Risiko: **{selloff}**")
+                                elif selloff == "MEDIUM":
+                                    st.info(f"{selloff_emoji} Selloff-Risiko: **{selloff}**")
+                                elif selloff == "HIGH":
+                                    st.warning(f"{selloff_emoji} Selloff-Risiko: **{selloff}**")
+                                else:
+                                    st.error(f"{selloff_emoji} Selloff-Risiko: **{selloff}**")
+                            
+                            # Action
+                            st.info(f"💡 **{bh['action']}**")
+                            
+                            # Signals und Warnings
+                            if bh.get("signals"):
+                                for sig in bh["signals"]:
+                                    st.caption(sig)
+                            if bh.get("warnings"):
+                                for warn in bh["warnings"]:
+                                    st.caption(warn)
+                    except Exception:
                         pass
                 
                 # Volatilitäts-Regime und Liquiditäts-Info anzeigen
