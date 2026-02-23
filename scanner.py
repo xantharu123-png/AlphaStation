@@ -525,6 +525,26 @@ STRATEGIES = {
         "ma_approach": "from_above",
         "ma_distance_max": 2.0  # Enger für EMA21
     },
+    # =========================================================================
+    # CONFLUENCE SUPER SIGNAL 🔥 — 10-Kategorien Confluence Engine
+    # Nur Aktien mit ALLEN Bestätigungen → Höchste Trefferquote
+    # =========================================================================
+    "Confluence Long 🔥": {
+        "description": "🔥 SUPER SIGNAL: 10 unabhängige Kategorien müssen bestätigen → Long",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "Volume + Kerze + Trend + Timing + Pattern + Markt + Rel.Stärke + Liquidität + Freiraum + Multi-TF",
+        "stocks_only": True,
+        "needs_confluence": True,
+        "confluence_direction": "long"
+    },
+    "Confluence Short 🔥": {
+        "description": "🔥 SUPER SIGNAL: 10 unabhängige Kategorien müssen bestätigen → Short",
+        "filters": {"Preis": (5.0, 500.0)},
+        "logic": "Volume + Kerze + Trend + Timing + Pattern + Markt + Rel.Stärke + Liquidität + Freiraum + Multi-TF",
+        "stocks_only": True,
+        "needs_confluence": True,
+        "confluence_direction": "short"
+    },
 }
 
 # =============================================================================
@@ -1420,6 +1440,417 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             "body_pct": round(body_pct, 2) if candle_analyzed else None,
         }
     }
+
+
+def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
+                                high, low, prev_close, vortag_pct, atr_pct,
+                                dollar_volume, ohlcv_data=None,
+                                spy_change=None, spy_trend_bullish=None,
+                                direction="long"):
+    """
+    10-Kategorie Confluence Engine — SUPER SIGNAL Erkennung.
+    
+    Jede Kategorie gibt PASS (✅) oder FAIL (❌).
+    Nur wenn genug Kategorien PASS → Signal.
+    
+    KATEGORIEN (alle UNABHÄNGIG voneinander):
+    ─────────────────────────────────────────────────────
+    1. VOLUME          — Institutionelles Interesse (RVOL)
+    2. KERZE           — Fakeout oder echte Überzeugung
+    3. TREND           — EMAs gestapelt/alignt?
+    4. TIMING          — Zu spät oder noch früh?
+    5. PATTERN         — Chart-Pattern, Wyckoff, Base
+    6. MARKT-REGIME    — SPY/QQQ kauft oder crashed?
+    7. RELATIVE STÄRKE — Outperformt Aktie den Markt?
+    8. LIQUIDITÄT      — Genug Volumen zum traden?
+    9. RESISTANCE      — Freiraum nach oben/unten?
+    10. MULTI-TIMEFRAME — Stimmt Weekly mit Daily überein?
+    ─────────────────────────────────────────────────────
+    
+    Args:
+        Basic scan data (from Polygon snapshot)
+        ohlcv_data: OHLCV history für tiefere Analyse (optional)
+        spy_change: SPY Tages-Change% (für Markt-Regime)
+        spy_trend_bullish: SPY über EMA50? (None wenn unbekannt)
+        direction: "long" oder "short"
+        
+    Returns:
+        dict mit categories (10x PASS/FAIL), total_score, signal, details
+    """
+    categories = {}
+    is_long = direction == "long"
+    abs_change = abs(change_pct) if change_pct else 0
+    
+    # ================================================================
+    # 1. VOLUME CONVICTION — Kaufen/Verkaufen Institutionen?
+    # ================================================================
+    if rvol is not None and rvol > 0:
+        if is_long:
+            vol_pass = rvol >= 1.8
+        else:
+            vol_pass = rvol >= 1.5  # Shorts brauchen weniger RVOL
+        
+        categories["volume"] = {
+            "name": "Volume",
+            "emoji": "📊",
+            "pass": vol_pass,
+            "value": f"RVOL {rvol:.1f}x",
+            "detail": "Institutionell" if rvol >= 3.0 else "Bestätigt" if vol_pass else "Schwach"
+        }
+    else:
+        categories["volume"] = {
+            "name": "Volume",
+            "emoji": "📊",
+            "pass": False,
+            "value": "N/A",
+            "detail": "Keine Daten"
+        }
+    
+    # ================================================================
+    # 2. KERZEN-QUALITÄT — Fakeout oder echt?
+    # ================================================================
+    candle_pass = False
+    candle_detail = "Keine Daten"
+    
+    if high and low and high > low:
+        total_range = high - low
+        close_in_range = (price - low) / total_range if total_range > 0 else 0.5
+        
+        if is_long:
+            # Long: Close sollte nahe High sein (>60%), Wick < 30%
+            upper_wick_pct = (high - max(price, prev_close if prev_close and low <= prev_close <= high else price)) / total_range if total_range > 0 else 0
+            upper_wick_pct = max(0, min(1, upper_wick_pct))
+            candle_pass = close_in_range >= 0.60 and upper_wick_pct < 0.30
+            candle_detail = f"Close {close_in_range:.0%} | Wick {upper_wick_pct:.0%}"
+        else:
+            # Short: Close sollte nahe Low sein (<40%)
+            candle_pass = close_in_range <= 0.45
+            candle_detail = f"Close bei {close_in_range:.0%} der Range"
+    
+    categories["candle"] = {
+        "name": "Kerze",
+        "emoji": "🕯️",
+        "pass": candle_pass,
+        "value": candle_detail,
+        "detail": "Stark" if candle_pass else "Schwach/Fakeout"
+    }
+    
+    # ================================================================
+    # 3. TREND ALIGNMENT — EMAs gestapelt?
+    # ================================================================
+    trend_pass = False
+    trend_detail = "Keine History"
+    
+    if ohlcv_data and len(ohlcv_data) >= 50:
+        closes = [d["close"] for d in ohlcv_data]
+        # Verwende letzten OHLCV-Close für EMA-Vergleich (konsistent!)
+        # Der extern übergebene `price` kann ein Snapshot sein der abweicht
+        current_price = closes[-1]
+        
+        # EMA Berechnung
+        def calc_ema(data, period):
+            if len(data) < period:
+                return None
+            ema = sum(data[:period]) / period
+            mult = 2 / (period + 1)
+            for val in data[period:]:
+                ema = (val - ema) * mult + ema
+            return ema
+        
+        ema20 = calc_ema(closes, 20)
+        ema50 = calc_ema(closes, 50)
+        ema200 = calc_ema(closes, 200) if len(closes) >= 200 else None
+        
+        if ema20 and ema50:
+            if is_long:
+                # Long: Price > EMA20 > EMA50 (und optional > EMA200)
+                price_above_20 = current_price > ema20
+                ema20_above_50 = ema20 > ema50
+                if ema200:
+                    trend_pass = price_above_20 and ema20_above_50 and ema50 > ema200
+                    trend_detail = f"{'✅' if trend_pass else '❌'} P>{('>' if ema20_above_50 else '<')}EMA20{('>' if ema20_above_50 else '<')}EMA50{('>' if ema50 > ema200 else '<') if ema200 else ''}{('EMA200' if ema200 else '')}"
+                else:
+                    trend_pass = price_above_20 and ema20_above_50
+                    trend_detail = f"EMA20 {'>' if ema20_above_50 else '<'} EMA50 (kein EMA200)"
+            else:
+                # Short: Price < EMA20 < EMA50
+                price_below_20 = current_price < ema20
+                ema20_below_50 = ema20 < ema50
+                if ema200:
+                    trend_pass = price_below_20 and ema20_below_50 and ema50 < ema200
+                else:
+                    trend_pass = price_below_20 and ema20_below_50
+                trend_detail = f"EMA20 {'<' if ema20_below_50 else '>'} EMA50 {'(bearish)' if trend_pass else '(nicht alignt)'}"
+    
+    categories["trend"] = {
+        "name": "Trend",
+        "emoji": "📈" if is_long else "📉",
+        "pass": trend_pass,
+        "value": trend_detail,
+        "detail": "Alignt" if trend_pass else "Nicht alignt"
+    }
+    
+    # ================================================================
+    # 4. TIMING / EXTENSION — Zu spät oder noch früh?
+    # ================================================================
+    timing_pass = False
+    
+    if atr_pct and atr_pct > 0:
+        extension = abs_change / atr_pct
+        # BEIDE müssen stimmen: ATR-normalisiert UND absolut
+        # Sonst versteckt aufgeblähte ATR (wie BNAI 10%) den überdehten Move
+        atr_ok = extension < 3.5
+        abs_ok = abs_change < 8.0  # +8% ist IMMER weit gelaufen
+        timing_pass = atr_ok and abs_ok
+        timing_detail = f"{extension:.1f}x ATR | {abs_change:.1f}%"
+        if not atr_ok:
+            timing_detail += " (ATR überdehnt)"
+        elif not abs_ok:
+            timing_detail += " (absolut zu weit)"
+    else:
+        timing_pass = abs_change < 10
+        timing_detail = f"{abs_change:.1f}% (kein ATR)"
+    
+    categories["timing"] = {
+        "name": "Timing",
+        "emoji": "⏰",
+        "pass": timing_pass,
+        "value": timing_detail,
+        "detail": "Noch früh" if timing_pass else "Zu spät"
+    }
+    
+    # ================================================================
+    # 5. PATTERN / STRUKTUR — Technische Basis vorhanden?
+    # ================================================================
+    pattern_pass = False
+    pattern_detail = "Keine History"
+    pattern_names = []
+    
+    if ohlcv_data and len(ohlcv_data) >= 30:
+        patterns = detect_chart_patterns(ohlcv_data, lookback=min(80, len(ohlcv_data)))
+        
+        if is_long:
+            bullish_patterns = [p for p in patterns if p.get("type") in ("bullish", "neutral")]
+        else:
+            bullish_patterns = [p for p in patterns if p.get("type") in ("bearish", "neutral")]
+        
+        pattern_pass = len(bullish_patterns) > 0
+        pattern_names = [p.get("pattern", "?") for p in bullish_patterns[:3]]
+        pattern_detail = ", ".join(pattern_names) if pattern_names else "Kein Pattern"
+    
+    categories["pattern"] = {
+        "name": "Pattern",
+        "emoji": "📐",
+        "pass": pattern_pass,
+        "value": pattern_detail,
+        "detail": "Bestätigt" if pattern_pass else "Kein Setup"
+    }
+    
+    # ================================================================
+    # 6. MARKT-REGIME — SPY kauft oder crashed?
+    # ================================================================
+    market_pass = False
+    
+    if spy_change is not None:
+        if is_long:
+            # Long: SPY nicht im Crash (>-1.5%)
+            market_pass = spy_change > -1.5
+        else:
+            # Short: SPY nicht in Rally (<+1.5%)
+            market_pass = spy_change < 1.5
+        
+        # Bonus: Wenn SPY-Trend bekannt
+        if spy_trend_bullish is not None:
+            if is_long and not spy_trend_bullish:
+                market_pass = False  # Gegen den übergeordneten Markt-Trend
+            elif not is_long and spy_trend_bullish:
+                market_pass = False
+        
+        market_detail = f"SPY {spy_change:+.1f}%"
+    else:
+        market_pass = True  # Wenn keine SPY-Daten: nicht bestrafen
+        market_detail = "N/A (neutral)"
+    
+    categories["market"] = {
+        "name": "Markt",
+        "emoji": "🌍",
+        "pass": market_pass,
+        "value": market_detail,
+        "detail": "Unterstützend" if market_pass else "Gegenwind"
+    }
+    
+    # ================================================================
+    # 7. RELATIVE STÄRKE — Outperformt die Aktie den Markt?
+    # ================================================================
+    rs_pass = False
+    
+    if spy_change is not None and change_pct is not None:
+        if is_long:
+            relative = change_pct - spy_change
+            rs_pass = relative > 2.0  # Mindestens 2% stärker als SPY
+        else:
+            relative = spy_change - change_pct
+            rs_pass = relative > 2.0  # Mindestens 2% schwächer als SPY
+        rs_detail = f"{relative:+.1f}% vs SPY"
+    else:
+        rs_pass = abs_change > 3.0  # Fallback: Starke absolute Bewegung
+        rs_detail = f"{abs_change:.1f}% absolut"
+    
+    categories["rel_strength"] = {
+        "name": "Rel. Stärke",
+        "emoji": "💪",
+        "pass": rs_pass,
+        "value": rs_detail,
+        "detail": "Outperformer" if rs_pass else "Schwach vs Markt"
+    }
+    
+    # ================================================================
+    # 8. LIQUIDITÄT — Genug Volumen zum traden?
+    # ================================================================
+    liq_pass = dollar_volume is not None and dollar_volume >= 500000
+    
+    categories["liquidity"] = {
+        "name": "Liquidität",
+        "emoji": "💰",
+        "pass": liq_pass,
+        "value": f"${dollar_volume/1e6:.1f}M" if dollar_volume and dollar_volume >= 1e6 else f"${dollar_volume/1e3:.0f}k" if dollar_volume else "N/A",
+        "detail": "Tradeable" if liq_pass else "Zu dünn"
+    }
+    
+    # ================================================================
+    # 9. RESISTANCE-FREIRAUM — Ist der Weg frei?
+    # ================================================================
+    resistance_pass = False
+    resistance_detail = "Keine History"
+    
+    if ohlcv_data and len(ohlcv_data) >= 20:
+        # Einfacher Check: Ist der aktuelle Preis nahe einem Allzeit-/52W High?
+        # Oder gibt es starke Resistance aus dem Volume Profile?
+        recent_highs = [d["high"] for d in ohlcv_data[-60:]] if len(ohlcv_data) >= 60 else [d["high"] for d in ohlcv_data]
+        max_high = max(recent_highs) if recent_highs else price
+        
+        if is_long:
+            # Long: Preis nahe oder über dem 60-Bar-High = kein Overhead Supply
+            dist_to_high = (max_high - price) / price * 100 if price > 0 else 0
+            if price >= max_high * 0.97:
+                resistance_pass = True
+                resistance_detail = "Nahe/über 60-Bar-High — kein Overhead"
+            elif dist_to_high < 5:
+                resistance_pass = True
+                resistance_detail = f"Nur {dist_to_high:.1f}% bis Hoch"
+            else:
+                resistance_detail = f"{dist_to_high:.1f}% unter Hoch — Overhead Supply"
+        else:
+            # Short: Preis nahe oder unter dem 60-Bar-Low
+            recent_lows = [d["low"] for d in ohlcv_data[-60:]] if len(ohlcv_data) >= 60 else [d["low"] for d in ohlcv_data]
+            min_low = min(recent_lows) if recent_lows else price
+            dist_to_low = (price - min_low) / price * 100 if price > 0 else 0
+            if price <= min_low * 1.03:
+                resistance_pass = True
+                resistance_detail = "Nahe/unter 60-Bar-Low — kein Support"
+            elif dist_to_low < 5:
+                resistance_pass = True
+                resistance_detail = f"Nur {dist_to_low:.1f}% bis Low"
+            else:
+                resistance_detail = f"{dist_to_low:.1f}% über Low — Support darunter"
+    
+    categories["resistance"] = {
+        "name": "Freiraum",
+        "emoji": "🛤️",
+        "pass": resistance_pass,
+        "value": resistance_detail,
+        "detail": "Frei" if resistance_pass else "Blockiert"
+    }
+    
+    # ================================================================
+    # 10. MULTI-TIMEFRAME — Stimmt Weekly mit Daily überein?
+    # ================================================================
+    mtf_pass = False
+    mtf_detail = "Keine History"
+    
+    if ohlcv_data and len(ohlcv_data) >= 20:
+        closes = [d["close"] for d in ohlcv_data]
+        
+        # Weekly Trend: Letzte 5 Bars (= ca 1 Woche) vs. vorherige 5
+        if len(closes) >= 10:
+            recent_5 = sum(closes[-5:]) / 5
+            prev_5 = sum(closes[-10:-5]) / 5
+            weekly_trend_up = recent_5 > prev_5
+            weekly_change = (recent_5 - prev_5) / prev_5 * 100 if prev_5 > 0 else 0
+            
+            # Längerfristig: Letzte 20 Bars vs vorherige 20
+            if len(closes) >= 40:
+                recent_20 = sum(closes[-20:]) / 20
+                prev_20 = sum(closes[-40:-20]) / 20
+                monthly_trend_up = recent_20 > prev_20
+            else:
+                monthly_trend_up = weekly_trend_up
+            
+            if is_long:
+                mtf_pass = weekly_trend_up and monthly_trend_up
+            else:
+                mtf_pass = not weekly_trend_up and not monthly_trend_up
+            
+            mtf_detail = f"Weekly {'↑' if weekly_trend_up else '↓'} {weekly_change:+.1f}% | Monthly {'↑' if monthly_trend_up else '↓'}"
+    
+    categories["multi_tf"] = {
+        "name": "Multi-TF",
+        "emoji": "🔭",
+        "pass": mtf_pass,
+        "value": mtf_detail,
+        "detail": "Alignt" if mtf_pass else "Widerspruch"
+    }
+    
+    # ================================================================
+    # ERGEBNIS — Wie viele Kategorien sind PASS?
+    # ================================================================
+    total_pass = sum(1 for c in categories.values() if c["pass"])
+    total_categories = len(categories)
+    
+    # Signal-Level
+    if total_pass >= 9:
+        signal = "SUPER"
+        signal_emoji = "🔥🔥🔥"
+        signal_color = "green"
+        action = f"FULL SEND {'LONG' if is_long else 'SHORT'} — {total_pass}/10 Kategorien bestätigt!"
+    elif total_pass >= 8:
+        signal = "STARK"
+        signal_emoji = "🔥🔥"
+        signal_color = "green"
+        action = f"STRONG {'LONG' if is_long else 'SHORT'} — {total_pass}/10 bestätigt"
+    elif total_pass >= 7:
+        signal = "GUT"
+        signal_emoji = "🔥"
+        signal_color = "yellow"
+        action = f"{'LONG' if is_long else 'SHORT'} mit normalem Risk — {total_pass}/10"
+    elif total_pass >= 6:
+        signal = "MÖGLICH"
+        signal_emoji = "⚠️"
+        signal_color = "orange"
+        action = f"Kleine Position möglich — nur {total_pass}/10"
+    else:
+        signal = "KEIN TRADE"
+        signal_emoji = "🚫"
+        signal_color = "red"
+        action = f"KEIN TRADE — nur {total_pass}/10 Kategorien"
+    
+    # Confluence Score 0-100
+    confluence_score = int((total_pass / total_categories) * 100)
+    
+    return {
+        "ticker": ticker,
+        "direction": direction,
+        "confluence_score": confluence_score,
+        "total_pass": total_pass,
+        "total_categories": total_categories,
+        "signal": signal,
+        "signal_emoji": signal_emoji,
+        "signal_color": signal_color,
+        "action": action,
+        "categories": categories,
+        "patterns_found": pattern_names,
+    }
+
 
 def calculate_alpha_score(rvol, vortag_pct, change_pct):
     """
@@ -14014,6 +14445,7 @@ with st.sidebar:
         is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
         is_volume_void_strategy = current_strat in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
         is_ma_bounce_strategy = "Bounce" in current_strat and ("SMA" in current_strat or "EMA" in current_strat)
+        is_confluence_strategy = current_strat in ["Confluence Long 🔥", "Confluence Short 🔥"]
         
         # Warnung: Gap-Strategie bei Krypto
         if is_gap_strategy and m_type == "Krypto":
@@ -14266,6 +14698,155 @@ with st.sidebar:
                         
                         dir_emoji = "⬆️" if direction == "LONG" else "⬇️"
                         status.update(label=f"✅ {len(results)} Wyckoff {wr['type'] if results else ''} {dir_emoji} Patterns gefunden", state="complete")
+                        
+                    except KeyError:
+                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    except Exception as e:
+                        st.error(f"Fehler: {e}")
+        
+        elif is_confluence_strategy:
+            if m_type != "Aktien":
+                st.error("❌ Confluence Scanner funktioniert nur für **Aktien**!")
+            else:
+                direction = "long" if "Long" in current_strat else "short"
+                dir_emoji = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+                
+                # Min-Score Selector
+                conf_col1, conf_col2 = st.columns([1, 3])
+                with conf_col1:
+                    min_pass = st.selectbox(
+                        "🎯 Min. Kategorien",
+                        options=[7, 8, 9, 10],
+                        index=1,  # Default: 8/10
+                        key="confluence_min_pass",
+                        help="Minimum PASS-Kategorien: 10=Perfekt (selten), 8=Stark (empfohlen), 7=Gut"
+                    )
+                with conf_col2:
+                    info_map = {
+                        10: "🔥🔥🔥 PERFEKT — Alle 10 Kategorien müssen bestätigen. Extrem selten, aber höchste Trefferquote.",
+                        9: "🔥🔥 SUPER SIGNAL — 9/10 Kategorien. Sehr starke Signale, ~2-5 pro Tag.",
+                        8: "🔥 STARK — 8/10 Kategorien. Gute Balance aus Qualität und Häufigkeit.",
+                        7: "⚠️ GUT — 7/10 Kategorien. Mehr Signale, aber etwas geringere Trefferquote."
+                    }
+                    st.info(info_map.get(min_pass, ""))
+                
+                with st.status(f"🔥 Scanne {dir_emoji} Confluence Signals...") as status:
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        
+                        # ── Phase 1: Snapshot-Filter (schnell, 95% eliminiert) ──
+                        status.update(label="Phase 1: Hole Aktien-Snapshot...")
+                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
+                        
+                        # Pre-Filter: Nur Aktien die überhaupt in Frage kommen
+                        if direction == "long":
+                            pre_filtered = [c for c in candidates 
+                                          if 5 <= c.get("Preis", 0) <= 500
+                                          and c.get("Chg%", 0) > 1.0          # Mindestens +1%
+                                          and (c.get("RVOL", 0) or 0) >= 1.2   # Mindestens etwas Volume
+                                          and (c.get("DollarVol", 0) or 0) >= 300000]  # Liquide
+                        else:
+                            pre_filtered = [c for c in candidates 
+                                          if 5 <= c.get("Preis", 0) <= 500
+                                          and c.get("Chg%", 0) < -1.0
+                                          and (c.get("RVOL", 0) or 0) >= 1.2
+                                          and (c.get("DollarVol", 0) or 0) >= 300000]
+                        
+                        # Sortiere nach Alpha (RVOL + Change), Top N für Deep-Analyse
+                        pre_filtered = sorted(pre_filtered, key=lambda x: abs(x.get("Alpha", 0)), reverse=True)
+                        max_deep = 40  # Max Ticker für OHLCV-Analyse (API-Budget)
+                        deep_candidates = pre_filtered[:max_deep]
+                        
+                        status.update(label=f"Phase 1: {len(pre_filtered)} Kandidaten, Top {len(deep_candidates)} für Deep-Analyse...")
+                        
+                        # ── Phase 2: SPY-Daten holen (1 API Call) ──
+                        status.update(label="Phase 2: Hole SPY/Markt-Daten...")
+                        spy_change = None
+                        spy_trend_bullish = None
+                        try:
+                            spy_ohlcv = fetch_ohlcv_for_chart("SPY", poly_key, timeframe="1D", bars=60)
+                            if spy_ohlcv and len(spy_ohlcv) >= 2:
+                                spy_change = (spy_ohlcv[-1]["close"] - spy_ohlcv[-2]["close"]) / spy_ohlcv[-2]["close"] * 100
+                                # SPY über EMA50?
+                                if len(spy_ohlcv) >= 50:
+                                    spy_closes = [d["close"] for d in spy_ohlcv]
+                                    spy_ema50 = sum(spy_closes[-50:]) / 50
+                                    spy_trend_bullish = spy_ohlcv[-1]["close"] > spy_ema50
+                        except Exception:
+                            pass  # SPY-Daten optional, nicht kritisch
+                        
+                        # ── Phase 3: Deep-Analyse pro Ticker ──
+                        results = []
+                        total = len(deep_candidates)
+                        
+                        for idx, cand in enumerate(deep_candidates):
+                            ticker = cand.get("Ticker", "")
+                            status.update(label=f"Phase 3: Analysiere {ticker} ({idx+1}/{total})...")
+                            
+                            try:
+                                # OHLCV History laden (1D, 200 Bars für EMA200)
+                                ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1D", bars=220)
+                                
+                                # Confluence Score berechnen
+                                conf = calculate_confluence_score(
+                                    ticker=ticker,
+                                    price=cand.get("Preis", 0),
+                                    change_pct=cand.get("Chg%", 0),
+                                    rvol=cand.get("RVOL", None),
+                                    close_pos=cand.get("ClosePos", 0.5),
+                                    high=cand.get("High", 0),
+                                    low=cand.get("Low", 0),
+                                    prev_close=cand.get("PrevClose", 0),
+                                    vortag_pct=cand.get("Vortag%", 0),
+                                    atr_pct=cand.get("ATR%", None),
+                                    dollar_volume=cand.get("DollarVol", None),
+                                    ohlcv_data=ohlcv,
+                                    spy_change=spy_change,
+                                    spy_trend_bullish=spy_trend_bullish,
+                                    direction=direction
+                                )
+                                
+                                # Nur Ergebnisse über Minimum
+                                if conf["total_pass"] >= min_pass:
+                                    # Kategorien als Display-String
+                                    cat_display = " ".join([
+                                        f"{'✅' if c['pass'] else '❌'}{c['emoji']}"
+                                        for c in conf["categories"].values()
+                                    ])
+                                    
+                                    results.append({
+                                        "Ticker": ticker,
+                                        "Name": f"{conf['signal_emoji']} {conf['signal']}",
+                                        "Preis": cand.get("Preis", 0),
+                                        "Chg%": cand.get("Chg%", 0),
+                                        "RVOL": cand.get("RVOL", 0),
+                                        "Vortag%": cand.get("Vortag%", 0),
+                                        "ClosePos": cand.get("ClosePos", 0.5),
+                                        "Alpha": conf["confluence_score"],  # 0-100
+                                        "Gap%": 0,
+                                        "ConfluenceScore": conf["confluence_score"],
+                                        "ConfluencePass": conf["total_pass"],
+                                        "ConfluenceSignal": conf["signal"],
+                                        "ConfluenceAction": conf["action"],
+                                        "ConfluenceCategories": conf["categories"],
+                                        "ConfluenceCatDisplay": cat_display,
+                                        "ConfluencePatterns": ", ".join(conf.get("patterns_found", [])),
+                                        "ConfluenceDirection": direction,
+                                    })
+                            except Exception as e:
+                                continue  # Skip Ticker bei Fehler
+                        
+                        # Sortiere nach Confluence Score (höchste zuerst)
+                        results = sorted(results, key=lambda x: x.get("ConfluencePass", 0), reverse=True)
+                        
+                        st.session_state.scan_results = results
+                        st.session_state.market_type = "Aktien"
+                        
+                        spy_str = f" | SPY {spy_change:+.1f}%" if spy_change is not None else ""
+                        status.update(
+                            label=f"✅ {len(results)} {dir_emoji} Confluence Signals gefunden (≥{min_pass}/10){spy_str}",
+                            state="complete"
+                        )
                         
                     except KeyError:
                         st.error("❌ POLYGON_KEY fehlt in Secrets!")
@@ -14737,6 +15318,7 @@ with tab_scanner:
     is_volume_void = st.session_state.current_strategy in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
     is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]
     is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]
+    is_confluence = st.session_state.current_strategy in ["Confluence Long 🔥", "Confluence Short 🔥"]
     
     with col_journal:
         st.subheader("📋 Ergebnisse")
@@ -14791,6 +15373,17 @@ with tab_scanner:
                     "StopLoss": st.column_config.NumberColumn("SL", format="$%.2f"),
                     "TP1": st.column_config.NumberColumn("TP1", format="$%.2f"),
                     "RiskReward": st.column_config.NumberColumn("R:R", format="%.1f"),
+                }
+            elif "ConfluenceScore" in df.columns:
+                # Confluence Super Signal Anzeige 🔥
+                display_cols = ["Ticker", "Name", "Preis", "Chg%", "RVOL", "ConfluencePass", "ConfluenceCatDisplay"]
+                col_config = {
+                    "Name": st.column_config.TextColumn("Signal"),
+                    "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
+                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+                    "RVOL": st.column_config.NumberColumn("RVOL", format="%.1fx"),
+                    "ConfluencePass": st.column_config.NumberColumn("✅/10", format="%d/10"),
+                    "ConfluenceCatDisplay": st.column_config.TextColumn("Kategorien"),
                 }
             elif "Pattern" in df.columns and "RiskReward" in df.columns:
                 # Harmonic Pattern Anzeige 🦋
@@ -15422,6 +16015,48 @@ with tab_scanner:
                                     for detail in details:
                                         st.caption(detail)
                     except Exception as e:
+                        pass
+                
+                # Confluence Super Signal Details anzeigen 🔥
+                if "ConfluenceScore" in df.columns and pd.notna(row.get("ConfluenceScore")):
+                    try:
+                        st.divider()
+                        conf_pass = row.get("ConfluencePass", 0)
+                        conf_signal = row.get("ConfluenceSignal", "")
+                        conf_action = row.get("ConfluenceAction", "")
+                        conf_dir = row.get("ConfluenceDirection", "long")
+                        conf_cats = row.get("ConfluenceCategories", {})
+                        conf_patterns = row.get("ConfluencePatterns", "")
+                        
+                        dir_emoji = "🟢 LONG" if conf_dir == "long" else "🔴 SHORT"
+                        
+                        if conf_pass >= 9:
+                            st.success(f"🔥🔥🔥 **SUPER SIGNAL** | {dir_emoji} | **{conf_pass}/10** Kategorien")
+                        elif conf_pass >= 8:
+                            st.success(f"🔥🔥 **STARKES SIGNAL** | {dir_emoji} | **{conf_pass}/10** Kategorien")
+                        elif conf_pass >= 7:
+                            st.info(f"🔥 **GUTES SIGNAL** | {dir_emoji} | **{conf_pass}/10** Kategorien")
+                        else:
+                            st.warning(f"⚠️ **{conf_signal}** | {dir_emoji} | **{conf_pass}/10** Kategorien")
+                        
+                        st.caption(f"💡 **Action:** {conf_action}")
+                        
+                        # 10 Kategorien als Grid anzeigen
+                        if isinstance(conf_cats, dict):
+                            # 2 Spalten mit je 5 Kategorien
+                            cat_list = list(conf_cats.values())
+                            col_a, col_b = st.columns(2)
+                            
+                            for i, cat in enumerate(cat_list):
+                                target_col = col_a if i < 5 else col_b
+                                with target_col:
+                                    status_icon = "✅" if cat["pass"] else "❌"
+                                    st.caption(f"{status_icon} {cat['emoji']} **{cat['name']}**: {cat['value']}")
+                        
+                        if conf_patterns:
+                            st.caption(f"📐 **Patterns:** {conf_patterns}")
+                    
+                    except Exception:
                         pass
                 
                 # Wyckoff Pattern Details anzeigen 🏦
