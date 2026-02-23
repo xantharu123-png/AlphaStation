@@ -525,26 +525,6 @@ STRATEGIES = {
         "ma_approach": "from_above",
         "ma_distance_max": 2.0  # Enger für EMA21
     },
-    # =========================================================================
-    # CONFLUENCE SUPER SIGNAL 🔥 — 10-Kategorien Confluence Engine
-    # Nur Aktien mit ALLEN Bestätigungen → Höchste Trefferquote
-    # =========================================================================
-    "Confluence Long 🔥": {
-        "description": "🔥 SUPER SIGNAL: 10 unabhängige Kategorien müssen bestätigen → Long",
-        "filters": {"Preis": (5.0, 500.0)},
-        "logic": "Volume + Kerze + Trend + Timing + Pattern + Markt + Rel.Stärke + Liquidität + Freiraum + Multi-TF",
-        "stocks_only": True,
-        "needs_confluence": True,
-        "confluence_direction": "long"
-    },
-    "Confluence Short 🔥": {
-        "description": "🔥 SUPER SIGNAL: 10 unabhängige Kategorien müssen bestätigen → Short",
-        "filters": {"Preis": (5.0, 500.0)},
-        "logic": "Volume + Kerze + Trend + Timing + Pattern + Markt + Rel.Stärke + Liquidität + Freiraum + Multi-TF",
-        "stocks_only": True,
-        "needs_confluence": True,
-        "confluence_direction": "short"
-    },
 }
 
 # =============================================================================
@@ -16110,6 +16090,109 @@ with tab_scanner:
                                 st.info(f"📊 R:R **{rr:.1f}:1**")
                             else:
                                 st.warning(f"⚠️ R:R **{rr:.1f}:1**")
+                    except Exception:
+                        pass
+                
+                # =====================================================================
+                # 🔥 CONFLUENCE CHECK — Automatisch bei Klick (alle Strategien)
+                # Berechnet 10 unabhängige Kategorien für den gewählten Ticker
+                # =====================================================================
+                if st.session_state.market_type == "Aktien" and "ConfluenceScore" not in df.columns:
+                    try:
+                        ticker_for_conf = str(row["Ticker"])
+                        price_for_conf = row.get("Preis", 0)
+                        change_for_conf = row.get("Chg%", 0)
+                        
+                        # Nur für Aktien mit Preis > $5 (sinnvoller Bereich)
+                        if price_for_conf >= 5:
+                            # Cache Key: Ticker + Preis (ändert sich bei neuem Scan)
+                            cache_key = f"conf_{ticker_for_conf}_{price_for_conf:.2f}"
+                            
+                            # Prüfe ob bereits gecacht
+                            if cache_key not in st.session_state:
+                                try:
+                                    poly_key = st.secrets["POLYGON_KEY"]
+                                    
+                                    # SPY-Daten cachen (1x pro Session)
+                                    if "spy_confluence_data" not in st.session_state:
+                                        try:
+                                            spy_ohlcv = fetch_ohlcv_for_chart("SPY", poly_key, timeframe="1D", bars=60)
+                                            if spy_ohlcv and len(spy_ohlcv) >= 2:
+                                                spy_chg = (spy_ohlcv[-1]["close"] - spy_ohlcv[-2]["close"]) / spy_ohlcv[-2]["close"] * 100
+                                                spy_closes = [d["close"] for d in spy_ohlcv]
+                                                spy_ema50 = sum(spy_closes[-50:]) / 50 if len(spy_closes) >= 50 else None
+                                                spy_bull = spy_ohlcv[-1]["close"] > spy_ema50 if spy_ema50 else None
+                                                st.session_state.spy_confluence_data = {
+                                                    "change": spy_chg, "trend_bullish": spy_bull
+                                                }
+                                            else:
+                                                st.session_state.spy_confluence_data = {"change": None, "trend_bullish": None}
+                                        except Exception:
+                                            st.session_state.spy_confluence_data = {"change": None, "trend_bullish": None}
+                                    
+                                    spy_data = st.session_state.spy_confluence_data
+                                    
+                                    # OHLCV für Ticker laden (1D, 220 Bars für EMA200)
+                                    ohlcv_conf = fetch_ohlcv_for_chart(ticker_for_conf, poly_key, timeframe="1D", bars=220)
+                                    
+                                    # Richtung aus Change bestimmen
+                                    conf_direction = "long" if change_for_conf >= 0 else "short"
+                                    
+                                    # Confluence berechnen
+                                    conf_result = calculate_confluence_score(
+                                        ticker=ticker_for_conf,
+                                        price=price_for_conf,
+                                        change_pct=change_for_conf,
+                                        rvol=row.get("RVOL", None),
+                                        close_pos=row.get("ClosePos", 0.5),
+                                        high=row.get("High", 0),
+                                        low=row.get("Low", 0),
+                                        prev_close=row.get("PrevClose", 0),
+                                        vortag_pct=row.get("Vortag%", 0),
+                                        atr_pct=row.get("ATR%", None),
+                                        dollar_volume=row.get("DollarVol", None),
+                                        ohlcv_data=ohlcv_conf,
+                                        spy_change=spy_data.get("change"),
+                                        spy_trend_bullish=spy_data.get("trend_bullish"),
+                                        direction=conf_direction
+                                    )
+                                    st.session_state[cache_key] = conf_result
+                                except KeyError:
+                                    st.session_state[cache_key] = None
+                                except Exception:
+                                    st.session_state[cache_key] = None
+                            
+                            # Anzeigen
+                            conf_result = st.session_state.get(cache_key)
+                            if conf_result and isinstance(conf_result, dict):
+                                st.divider()
+                                conf_pass = conf_result["total_pass"]
+                                conf_signal = conf_result["signal"]
+                                conf_dir = conf_result["direction"]
+                                dir_emoji = "🟢 LONG" if conf_dir == "long" else "🔴 SHORT"
+                                
+                                # Kompakte Header-Zeile
+                                if conf_pass >= 9:
+                                    st.success(f"🔥 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result['action']}")
+                                elif conf_pass >= 8:
+                                    st.success(f"🔥 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result['action']}")
+                                elif conf_pass >= 7:
+                                    st.info(f"🔥 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result['action']}")
+                                elif conf_pass >= 6:
+                                    st.warning(f"⚠️ Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result['action']}")
+                                else:
+                                    st.error(f"🚫 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result['action']}")
+                                
+                                # 10 Kategorien kompakt als 2x5 Grid
+                                conf_cats = conf_result.get("categories", {})
+                                if conf_cats:
+                                    cat_list = list(conf_cats.values())
+                                    col_a, col_b = st.columns(2)
+                                    for i, cat in enumerate(cat_list):
+                                        target_col = col_a if i < 5 else col_b
+                                        with target_col:
+                                            icon = "✅" if cat["pass"] else "❌"
+                                            st.caption(f"{icon} {cat['emoji']} **{cat['name']}**: {cat['value']}")
                     except Exception:
                         pass
                 
