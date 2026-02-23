@@ -1052,19 +1052,33 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             body_bot = min(open_price, close)
         elif prev_close and prev_close > 0:
             # Open nicht vorhanden, prev_close als Proxy
-            # NICHT close/(1+change) — das ignoriert Gaps!
-            estimated_open = prev_close
-            body_top = max(estimated_open, close)
-            body_bot = min(estimated_open, close)
+            # 🔴 KRITISCH: Wenn prev_close AUSSERHALB [Low, High] liegt,
+            # gab es einen Gap. Dann ist prev_close KEIN guter Open-Proxy,
+            # weil wir nicht wissen wo der Kurs wirklich eröffnet hat.
+            if low <= prev_close <= high:
+                # Prev Close liegt im heutigen Range → brauchbarer Proxy
+                estimated_open = prev_close
+                body_top = max(estimated_open, close)
+                body_bot = min(estimated_open, close)
+            else:
+                # Gap! Prev Close liegt außerhalb → NICHT als Open nutzen
+                # Stattdessen: Close Position als Proxy (wo Close in der Range liegt)
+                # Body ≈ |Close - Midpoint| (konservativ), Wicks aus High/Low
+                body_top = close
+                body_bot = low if close > (high + low) / 2 else close
+                warnings.append(f"⚠️ Gap erkannt (PrevClose ${prev_close:.2f} außerhalb Range ${low:.2f}-${high:.2f}) — Kerzen-Analyse eingeschränkt")
         else:
             # Weder Open noch PrevClose — nur High/Low/Close nutzen
-            # Close Position als Proxy: Bullish → Open nahe Low
             body_top = close
-            body_bot = low  # Konservativer Proxy
+            body_bot = low
+        
+        # Sicherheits-Clamp: Body kann nie größer als Kerze sein
+        body_top = min(body_top, high)
+        body_bot = max(body_bot, low)
         
         body_size = body_top - body_bot
-        upper_wick = high - body_top
-        lower_wick = body_bot - low
+        upper_wick = max(0, high - body_top)
+        lower_wick = max(0, body_bot - low)
         
         upper_wick_pct = upper_wick / total_range if total_range > 0 else 0
         body_pct = body_size / total_range if total_range > 0 else 0
@@ -1089,18 +1103,36 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             signals.append(f"🟢 Normaler Docht ({upper_wick_pct:.0%})")
         
         # --- Body Size (Conviction) ---
-        if body_pct > 0.75:
-            health += 8
-            signals.append(f"🟢 Großer Body ({body_pct:.0%}) — starke Überzeugung")
-        elif body_pct > 0.55:
-            health += 4
-            signals.append(f"🟢 Solider Body ({body_pct:.0%})")
-        elif body_pct < 0.20:
-            health -= 12
-            warnings.append(f"🔴 Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
-        elif body_pct < 0.35:
-            health -= 5
-            warnings.append(f"⚠️ Kleiner Body ({body_pct:.0%}) — schwache Conviction")
+        # 🔴 KRITISCH: Body-RICHTUNG zählt! Ein großer BEARISHER Body
+        # (Close < Open) bei einem Breakout Long = Verkaufsdruck, NICHT Überzeugung!
+        is_bullish_candle = close >= body_bot + body_size * 0.5  # Close in oberer Hälfte
+        if open_price and open_price > 0:
+            is_bullish_candle = close > open_price
+        
+        if is_bullish_candle:
+            if body_pct > 0.75:
+                health += 8
+                signals.append(f"🟢 Großer bullisher Body ({body_pct:.0%}) — starke Überzeugung")
+            elif body_pct > 0.55:
+                health += 4
+                signals.append(f"🟢 Solider bullisher Body ({body_pct:.0%})")
+            elif body_pct < 0.20:
+                health -= 12
+                warnings.append(f"🔴 Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
+            elif body_pct < 0.35:
+                health -= 5
+                warnings.append(f"⚠️ Kleiner Body ({body_pct:.0%}) — schwache Conviction")
+        else:
+            # BEARISH Kerze bei Long-Breakout = Warnung!
+            if body_pct > 0.50:
+                health -= 12
+                warnings.append(f"🔴 Großer bearisher Body ({body_pct:.0%}) — Verkaufsdruck trotz Gap-Up!")
+            elif body_pct > 0.30:
+                health -= 5
+                warnings.append(f"⚠️ Bearisher Body ({body_pct:.0%}) — Käufer verlieren Kontrolle")
+            elif body_pct < 0.20:
+                health -= 12
+                warnings.append(f"🔴 Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
         
         # --- Lower Wick (Buying Support) ---
         # Ein langer Lower Wick bei einem Breakout = Käufer fingen den Dip auf
@@ -1146,25 +1178,59 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
     #    ATR-normalisiert wenn verfügbar, sonst absolute Schwellen
     # ================================================================
     if atr_pct and atr_pct > 0:
-        # ATR-normalisiert: Change / ATR = wie viele "normale Tage" Bewegung
+        # ATR-INFLATION CHECK: Unterscheide Post-Crash (abnormal hoch)
+        # von natürlich volatilen Penny Stocks.
+        # Penny Stocks (<$10) haben NORMAL 5-10% ATR.
+        # Midcap ($10-50) hat normal 2-5% ATR.
+        # Large Cap (>$50) hat normal 0.5-2% ATR.
+        atr_warning_threshold = 8.0  # Default
+        atr_caution_threshold = 5.0
+        if close and close > 0:
+            if close < 10:
+                atr_warning_threshold = 15.0  # Pennys: erst ab 15% warnen
+                atr_caution_threshold = 10.0
+            elif close < 50:
+                atr_warning_threshold = 10.0
+                atr_caution_threshold = 6.0
+        
+        if atr_pct > atr_warning_threshold:
+            health -= 10
+            warnings.append(f"🔴 Extrem volatile Phase (ATR {atr_pct:.1f}%) — Post-Spike/Crash, erhöhtes Risiko!")
+        elif atr_pct > atr_caution_threshold:
+            health -= 5
+            warnings.append(f"⚠️ Hohe Volatilität (ATR {atr_pct:.1f}%) — vorsichtig agieren")
+        
+        # ATR-normalisiert
         extension_ratio = change_pct / atr_pct
         
         if extension_ratio > 5.0:
             health -= 15
-            warnings.append(f"🔴 Extrem überdehnt ({extension_ratio:.1f}x ATR, Change {change_pct:+.1f}% vs ATR {atr_pct:.1f}%) — Reversion SEHR wahrscheinlich")
+            warnings.append(f"🔴 Extrem überdehnt ({extension_ratio:.1f}x ATR) — Reversion SEHR wahrscheinlich")
         elif extension_ratio > 3.0:
             health -= 8
             warnings.append(f"⚠️ Überdehnt ({extension_ratio:.1f}x ATR) — Pullback wahrscheinlich")
         elif extension_ratio > 2.0:
             health -= 3
-            warnings.append(f"🟡 Ausgedehnt ({extension_ratio:.1f}x ATR) — etwas gedehnt")
+            warnings.append(f"🟡 Ausgedehnt ({extension_ratio:.1f}x ATR)")
         elif extension_ratio >= 1.0:
             health += 3
             signals.append(f"🟢 Gesunde Extension ({extension_ratio:.1f}x ATR)")
         else:
-            # Unter 1x ATR = kaum ein Breakout
             health -= 3
-            warnings.append(f"🟡 Schwache Bewegung (nur {extension_ratio:.1f}x ATR) — kaum ein Breakout")
+            warnings.append(f"🟡 Schwache Bewegung (nur {extension_ratio:.1f}x ATR)")
+        
+        # 🔴 ABSOLUTE DISTANZ — Fängt Fälle wo ATR aufgebläht ist
+        # +10% ist IMMER weit gelaufen, egal was ATR sagt
+        # Ein Einstieg bei +12% hat viel schlechteres R:R als bei +3%
+        if change_pct > 20:
+            health -= 15
+            warnings.append(f"🔴 Extreme Distanz +{change_pct:.1f}% — Einstieg hochriskant")
+        elif change_pct > 15:
+            health -= 10
+            warnings.append(f"🔴 Absolute Distanz +{change_pct:.1f}% — weit vom Entry entfernt")
+        elif change_pct > 10:
+            health -= 7
+            warnings.append(f"⚠️ Absolute Distanz +{change_pct:.1f}% — schon weit gelaufen")
     else:
         # Fallback: Absolute Schwellen (weniger aussagekräftig)
         if change_pct > 20:
@@ -1187,9 +1253,22 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
     # 4. CONTEXT — Woher kommt der Breakout?
     # ================================================================
     if vortag_pct is not None:
+        # Volatilitäts-Check: "Konsolidierung" nach einem Crash/Spike
+        # ist KEINE echte Konsolidierung — aber Schwellenwert preis-abhängig
+        vol_threshold = 6.0
+        if close and close > 0 and close < 10:
+            vol_threshold = 12.0  # Pennys sind natürlich volatiler
+        elif close and close > 0 and close < 50:
+            vol_threshold = 8.0
+        is_high_vol_regime = atr_pct and atr_pct > vol_threshold
+        
         if -2.0 <= vortag_pct <= 2.0:
-            health += 8
-            signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
+            if is_high_vol_regime:
+                health -= 3
+                warnings.append(f"⚠️ Flacher Vortag ({vortag_pct:+.1f}%) in volatiler Phase (ATR {atr_pct:.1f}%) — keine echte Konsolidierung")
+            else:
+                health += 8
+                signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
         elif vortag_pct < -3.0:
             health += 0  # Neutral — Reversal ist OK aber riskanter
             warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein")
