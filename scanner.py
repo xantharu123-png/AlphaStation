@@ -1524,8 +1524,11 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
             candle_detail = f"Close {close_in_range:.0%} | Wick {upper_wick_pct:.0%}"
         else:
             # Short: Close sollte nahe Low sein (<40%)
-            candle_pass = close_in_range <= 0.45
-            candle_detail = f"Close bei {close_in_range:.0%} der Range"
+            # UND: Lower Wick darf NICHT zu groß sein (Hammer = bullish rejection)
+            lower_wick_pct = (min(price, prev_close if prev_close and low <= prev_close <= high else price) - low) / total_range if total_range > 0 else 0
+            lower_wick_pct = max(0, min(1, lower_wick_pct))
+            candle_pass = close_in_range <= 0.40 and lower_wick_pct < 0.30
+            candle_detail = f"Close {close_in_range:.0%} | Lower Wick {lower_wick_pct:.0%}"
     
     categories["candle"] = {
         "name": "Kerze",
@@ -1630,12 +1633,13 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
         patterns = detect_chart_patterns(ohlcv_data, lookback=min(80, len(ohlcv_data)))
         
         if is_long:
-            bullish_patterns = [p for p in patterns if p.get("type") in ("bullish", "neutral")]
+            # NUR bullish Patterns! "neutral" (Doji) ist KEINE Bestätigung
+            directional_patterns = [p for p in patterns if p.get("type") == "bullish"]
         else:
-            bullish_patterns = [p for p in patterns if p.get("type") in ("bearish", "neutral")]
+            directional_patterns = [p for p in patterns if p.get("type") == "bearish"]
         
-        pattern_pass = len(bullish_patterns) > 0
-        pattern_names = [p.get("pattern", "?") for p in bullish_patterns[:3]]
+        pattern_pass = len(directional_patterns) > 0
+        pattern_names = [p.get("pattern", "?") for p in directional_patterns[:3]]
         pattern_detail = ", ".join(pattern_names) if pattern_names else "Kein Pattern"
     
     categories["pattern"] = {
@@ -1659,17 +1663,20 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
             # Short: SPY nicht in Rally (<+1.5%)
             market_pass = spy_change < 1.5
         
-        # Bonus: Wenn SPY-Trend bekannt
+        # SPY Trend Override — NUR wenn SPY HEUTE auch in gleicher Richtung ist
+        # Sonst killed man Breakouts in Korrekturen die oft die besten sind
         if spy_trend_bullish is not None:
-            if is_long and not spy_trend_bullish:
-                market_pass = False  # Gegen den übergeordneten Markt-Trend
-            elif not is_long and spy_trend_bullish:
-                market_pass = False
+            if is_long and not spy_trend_bullish and spy_change < 0:
+                market_pass = False  # SPY bearish Trend UND heute rot
+            elif not is_long and spy_trend_bullish and spy_change > 0:
+                market_pass = False  # SPY bullish Trend UND heute grün
         
         market_detail = f"SPY {spy_change:+.1f}%"
     else:
-        market_pass = True  # Wenn keine SPY-Daten: nicht bestrafen
-        market_detail = "N/A (neutral)"
+        # 🔴 Keine SPY-Daten = FAIL, nicht Gratis-PASS
+        # Ohne Markt-Kontext fehlt eine wichtige Bestätigung
+        market_pass = False
+        market_detail = "N/A (keine Daten)"
     
     categories["market"] = {
         "name": "Markt",
@@ -1687,14 +1694,21 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     if spy_change is not None and change_pct is not None:
         if is_long:
             relative = change_pct - spy_change
-            rs_pass = relative > 2.0  # Mindestens 2% stärker als SPY
+            # 🔴 FIX: Aktie muss POSITIV sein UND besser als SPY
+            # Eine Aktie bei -3% ist kein "Outperformer" nur weil SPY -5% ist
+            rs_pass = change_pct > 0 and relative > 2.0
         else:
             relative = spy_change - change_pct
-            rs_pass = relative > 2.0  # Mindestens 2% schwächer als SPY
-        rs_detail = f"{relative:+.1f}% vs SPY"
+            # Short: Aktie muss NEGATIV sein UND schwächer als SPY
+            rs_pass = change_pct < 0 and relative > 2.0
+        rs_detail = f"{relative:+.1f}% vs SPY ({change_pct:+.1f}%)"
     else:
-        rs_pass = abs_change > 3.0  # Fallback: Starke absolute Bewegung
-        rs_detail = f"{abs_change:.1f}% absolut"
+        # Ohne SPY: Stärkere absolute Schwelle
+        if is_long:
+            rs_pass = change_pct is not None and change_pct > 3.0
+        else:
+            rs_pass = change_pct is not None and change_pct < -3.0
+        rs_detail = f"{abs_change:.1f}% absolut (kein SPY)"
     
     categories["rel_strength"] = {
         "name": "Rel. Stärke",
