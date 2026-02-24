@@ -1884,19 +1884,26 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
     KATEGORIEN (aus Snapshot):
     ─────────────────────────────────────────────────────
     1. VOLUME (0-20)      — RVOL: Institutionelles Interesse
-    2. KERZE (0-20)       — Close Position + Wick: Fakeout oder echt?
-    3. TIMING (0-20)      — Extension: Zu spät oder früh?
+    2. KERZE (0-20)       — Close Position + Wick Bonus − Wick Penalty
+    3. TIMING (0-20)      — Extension: Sweet Spot, Early Entry, oder Chase?
     4. LIQUIDITÄT (0-15)  — Dollar Volume: Tradeable?
-    5. MOMENTUM (0-15)    — Richtige Stärke, nicht zu viel/wenig
+    5. MOMENTUM (0-15)    — Richtige Richtung + Stärke (OHNE RVOL, Extension-Penalty)
     6. KONTEXT (0-10)     — Vortag: Konsolidierung = bester Base
     ─────────────────────────────────────────────────────
     = Max 100 Punkte
+    
+    FIXES v2:
+    - Wick Penalty: Grosse gegenläufige Wick bestraft (Hammer/Shooting Star)
+    - Timing: Early Entry (0.2-0.5x ATR) bekommt Punkte statt 0
+    - Timing Fallback: <0.5% Change = 0 Punkte (nicht mehr 8)
+    - Momentum: RVOL rausgenommen (bereits in Kat 1), Extension-Penalty eingebaut
     """
     score = 0
     is_long = direction == "long"
     abs_change = abs(change_pct) if change_pct else 0
     
     # ── 1. VOLUME (0-20) ──
+    # RVOL = einziger Volume-Indikator, wird NUR HIER bewertet
     if rvol is not None and rvol > 0:
         if rvol >= 3.0:
             score += 20   # Institutionell
@@ -1908,48 +1915,85 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
             score += 6
     
     # ── 2. KERZE (0-20) ──
+    # Close Position (0-14): Wo hat die Kerze geschlossen?
+    # Wick Bonus (0-6): Wenig Rejection-Wick = Käufer/Verkäufer halten Preis
+    # Wick Penalty (0 bis -6): Grosse gegenläufige Wick = versteckter Gegendruc
+    candle_score = 0
     if close_pos is not None:
         if is_long:
+            # Close near High = Käufer dominieren
             if close_pos >= 0.80:
-                score += 14
+                candle_score += 14
             elif close_pos >= 0.65:
-                score += 10
+                candle_score += 10
             elif close_pos >= 0.50:
-                score += 5
+                candle_score += 5
             
+            # Bonus: Wenig Upper Wick = kein Rejection von oben
             if upper_wick_pct is not None:
                 if upper_wick_pct < 15:
-                    score += 6
+                    candle_score += 6
                 elif upper_wick_pct < 25:
-                    score += 3
-        else:
-            if close_pos <= 0.20:
-                score += 14
-            elif close_pos <= 0.35:
-                score += 10
-            elif close_pos <= 0.50:
-                score += 5
+                    candle_score += 3
             
+            # NEU: Penalty — Grosse Lower Wick bei Long = Verkaufsdruck war da
+            # Auch wenn Close near High: Hammer-Kerzen sind trügerisch
+            if lower_wick_pct is not None:
+                if lower_wick_pct > 50:
+                    candle_score -= 6   # Hammer — massiver Sell-Off, Recovery fragwürdig
+                elif lower_wick_pct > 30:
+                    candle_score -= 3   # Deutlicher Verkaufsdruck trotz Close near High
+        else:
+            # Short: Close near Low = Verkäufer dominieren
+            if close_pos <= 0.20:
+                candle_score += 14
+            elif close_pos <= 0.35:
+                candle_score += 10
+            elif close_pos <= 0.50:
+                candle_score += 5
+            
+            # Bonus: Wenig Lower Wick = kein Bounce von unten
             if lower_wick_pct is not None:
                 if lower_wick_pct < 15:
-                    score += 6
+                    candle_score += 6
                 elif lower_wick_pct < 25:
-                    score += 3
+                    candle_score += 3
+            
+            # NEU: Penalty — Grosse Upper Wick bei Short = Kaufdruck war da
+            if upper_wick_pct is not None:
+                if upper_wick_pct > 50:
+                    candle_score -= 6   # Shooting Star — Käufer wehren sich massiv
+                elif upper_wick_pct > 30:
+                    candle_score -= 3   # Deutlicher Kaufdruck trotz Close near Low
+    
+    score += max(0, candle_score)  # Kerze-Kategorie nie negativ
     
     # ── 3. TIMING (0-20) ──
+    # Misst ob man early, im Sweet Spot, oder zu spät dran ist
+    # Extension = wie weit hat sich der Preis relativ zur normalen Range bewegt
     if atr_pct and atr_pct > 0:
         extension = abs_change / atr_pct
-        if 0.5 <= extension <= 2.0 and abs_change <= 6:
-            score += 20   # Sweet Spot
+        if abs_change < 0.5:
+            pass  # Zu wenig Bewegung — kein Timing-Score (Rauschen)
+        elif 0.5 <= extension <= 2.0 and abs_change <= 6:
+            score += 20   # Sweet Spot — genug Bewegung, nicht extended
+        elif extension < 0.5:
+            score += 12   # NEU: Early Entry — Move beginnt gerade, noch unbestätigt
         elif extension <= 3.0 and abs_change <= 8:
-            score += 14
+            score += 14   # Leicht extended aber noch tradeable
         elif extension <= 3.5 and abs_change <= 10:
-            score += 7
+            score += 7    # Getting late — nur noch mit starkem Catalyst
+        # else: 0 — Chase territory (>3.5x ATR oder >10%)
     else:
-        if 2 <= abs_change <= 6:
-            score += 15
-        elif abs_change <= 10:
-            score += 8
+        # Fallback ohne ATR (z.B. Krypto) — nur auf abs_change basiert
+        # NEU: <0.5% Change = 0 Punkte (vorher bekam alles ≤10% pauschal 8)
+        if 1.5 <= abs_change <= 6:
+            score += 15   # Guter Move, nicht übertrieben
+        elif 6 < abs_change <= 10:
+            score += 8    # Etwas heiss, aber noch OK
+        elif 0.5 <= abs_change < 1.5:
+            score += 5    # Kaum Bewegung — Ansatz da aber nicht bestätigt
+        # else: 0 — Entweder nichts (<0.5%) oder Chase (>10%)
     
     # ── 4. LIQUIDITÄT (0-15) ──
     if dollar_volume:
@@ -1963,23 +2007,46 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
             score += 3
     
     # ── 5. MOMENTUM QUALITÄT (0-15) ──
-    if change_pct is not None and rvol is not None:
+    # Prüft: Bewegt sich der Preis in die richtige Richtung mit genug Kraft?
+    # NEU: RVOL wird NICHT mehr geprüft (bereits in Kategorie 1 bewertet).
+    #       Vorher: RVOL ≥1.5 war Bedingung für 15 Punkte → doppelte Gewichtung.
+    # NEU: Extension-Penalty — extreme Moves bekommen weniger Momentum-Punkte
+    #       weil die "Qualität" des Momentums bei einem Chase sinkt.
+    momentum_pts = 0
+    if change_pct is not None:
         if is_long:
-            if change_pct > 2 and rvol >= 1.5:
-                score += 15
-            elif change_pct > 1 and rvol >= 1.2:
-                score += 10
+            if change_pct >= 3:
+                momentum_pts = 15   # Starke Überzeugung
+            elif change_pct >= 1.5:
+                momentum_pts = 10   # Solide Bewegung
             elif change_pct > 0:
-                score += 4
+                momentum_pts = 4    # Richtige Richtung, aber schwach
+            # change <= 0 bei Long: 0 Punkte
         else:
-            if change_pct < -2 and rvol >= 1.5:
-                score += 15
-            elif change_pct < -1 and rvol >= 1.2:
-                score += 10
+            if change_pct <= -3:
+                momentum_pts = 15
+            elif change_pct <= -1.5:
+                momentum_pts = 10
             elif change_pct < 0:
-                score += 4
+                momentum_pts = 4
+            # change >= 0 bei Short: 0 Punkte
+        
+        # NEU: Extension-Penalty auf Momentum
+        # Eine Aktie bei +20% hat zwar "Momentum", aber es ist ein Chase.
+        # Timing (Kat 3) gibt schon 0, aber ohne Penalty hier bleibt
+        # Momentum bei vollen 15 → Score wird trotzdem zu hoch.
+        if abs_change >= 20:
+            momentum_pts = min(momentum_pts, 0)    # Extreme Chase — kein Momentum-Credit mehr
+        elif abs_change >= 15:
+            momentum_pts = min(momentum_pts, 3)    # Massiver Chase — nur Richtungs-Credit
+        elif abs_change > 10:
+            momentum_pts = min(momentum_pts, 8)    # Extended — Qualität reduziert
+    
+    score += momentum_pts
     
     # ── 6. KONTEXT / VORTAG (0-10) ──
+    # Wenig Bewegung gestern = Konsolidierung = Base für Breakout
+    # Viel Bewegung gestern = Continuation oder Exhaustion = unsicherer
     if vortag_pct is not None:
         abs_vortag = abs(vortag_pct)
         if abs_vortag < 1.5:
