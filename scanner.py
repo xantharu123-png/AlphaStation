@@ -4160,7 +4160,7 @@ def fetch_historical_closes(ticker, api_key, days=200):
     Args:
         ticker: Aktien-Ticker
         api_key: Polygon API Key
-        days: Anzahl Tage (default 200 für SMA200)
+        days: Anzahl HANDELSTAGE die benötigt werden (z.B. 210 für SMA200)
     
     Returns:
         Liste von Schlusskursen (ältester zuerst) oder None bei Fehler
@@ -4169,10 +4169,15 @@ def fetch_historical_closes(ticker, api_key, days=200):
         from datetime import datetime, timedelta
         
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=days + 50)  # Extra Puffer
+        # BUGFIX: Kalendertage ≠ Handelstage!
+        # 252 Handelstage/Jahr ÷ 365 Kalendertage = Faktor ~1.45
+        # Mit 1.5x + 20 Puffer für Feiertage sind wir sicher
+        # Vorher: days + 50 → bei SMA200 nur 260 Kalendertage = ~179 Handelstage < 200!
+        calendar_days = int(days * 1.5) + 20
+        start_date = end_date - timedelta(days=calendar_days)
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
-        params = {"apiKey": api_key, "limit": days + 50, "sort": "asc"}
+        params = {"apiKey": api_key, "limit": calendar_days, "sort": "asc"}
         
         resp = rate_limited_get(url, params=params, timeout=10)
         data = resp.json()
@@ -14947,8 +14952,9 @@ with st.sidebar:
                     
                     status.update(label=f"Schritt 1/3: {len(candidates)} Aktien geladen, filtere...")
                     
-                    # Basis-Filter: Preis $5-$1000 UND Liquidität >= $10M
-                    MIN_LIQUIDITY = 10_000_000  # $10 Millionen
+                    # Basis-Filter: Preis $5-$1000 UND Liquidität >= $1M
+                    # HINWEIS: $10M war zu restriktiv — Pullback-Aktien haben weniger Volumen als gewöhnlich
+                    MIN_LIQUIDITY = 1_000_000  # $1 Million Dollar Volume
                     candidates = [c for c in candidates 
                                   if 5 <= c.get("Preis", 0) <= 1000 
                                   and c.get("DollarVol", 0) >= MIN_LIQUIDITY]
@@ -14973,6 +14979,8 @@ with st.sidebar:
                     # MA Berechnung für jeden Kandidaten
                     results = []
                     ma_checked = 0
+                    ma_no_data = 0
+                    ma_too_far = 0
                     
                     for candidate in filtered:
                         ticker = candidate["Ticker"]
@@ -14984,6 +14992,7 @@ with st.sidebar:
                             time.sleep(0.5)  # Rate Limiting: Pause nach je 10 Calls
                         
                         if not closes or len(closes) < ma_period:
+                            ma_no_data += 1
                             continue
                         
                         # Berechne MA
@@ -14993,6 +15002,7 @@ with st.sidebar:
                             ma_value = calculate_ema(closes, ma_period)
                         
                         if not ma_value:
+                            ma_no_data += 1
                             continue
                         
                         ma_checked += 1
@@ -15021,10 +15031,12 @@ with st.sidebar:
                             candidate["MA_Type"] = f"{ma_type}{ma_period}"
                             candidate["Alpha"] = round(100 - abs(ma_distance) * 20, 1)  # Näher am MA = höherer Score
                             results.append(candidate)
+                        else:
+                            ma_too_far += 1
                         
                         # Progress Update
                         if ma_checked % 20 == 0:
-                            status.update(label=f"Schritt 2/3: {ma_checked}/{len(filtered)} Aktien geprüft...")
+                            status.update(label=f"Schritt 2/3: {ma_checked}/{len(filtered)} geprüft, {len(results)} Treffer...")
                     
                     # Sortiere nach MA-Distanz (näher = besser)
                     results = sorted(results, key=lambda x: abs(x.get("MA_Distance%", 999)))[:50]
@@ -15035,13 +15047,14 @@ with st.sidebar:
                     direction_text = "Support (Long)" if ma_approach == "from_above" else "Resistance (Short)"
                     status.update(label=f"✅ {len(results)} {ma_type}{ma_period} {direction_text} Setups gefunden", state="complete")
                     
-                    # DEBUG INFO
-                    if st.session_state.get("debug_mode", False):
-                        st.caption(f"🔍 Debug: {len(candidates)} Aktien geladen → {len(filtered)} nach Change%-Filter → {ma_checked} MA berechnet → {len(results)} im {ma_distance_max}%-Band")
+                    # DEBUG INFO — immer anzeigen bei 0 Ergebnissen
+                    debug_msg = f"🔍 Pipeline: {len(candidates)} liquide Aktien → {len(filtered)} Kandidaten → {ma_checked} MA berechnet ({ma_no_data} kein History) → {ma_too_far} zu weit → {len(results)} im Band"
+                    if len(results) == 0 or st.session_state.get("debug_mode", False):
+                        st.caption(debug_msg)
                     
                     if len(results) == 0:
-                        st.info(f"ℹ️ Keine Aktien gefunden die sich innerhalb von -{1.0}% bis +{ma_distance_max}% der {ma_type}{ma_period} befinden. "
-                               f"Versuche später erneut.")
+                        st.info(f"ℹ️ Keine Aktien im {ma_type}{ma_period} Band (−1% bis +{ma_distance_max}%). "
+                               f"{'⚠️ Kein History für alle Aktien — Polygon API Problem?' if ma_no_data > 0 and ma_checked == 0 else 'Versuche später erneut.'}")
                     
                 except KeyError:
                     st.error("❌ POLYGON_KEY fehlt in Secrets!")
