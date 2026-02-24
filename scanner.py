@@ -1872,6 +1872,126 @@ def calculate_alpha_score(rvol, vortag_pct, change_pct):
     
     return round(rvol_score + vortag_score + change_score, 0)
 
+
+def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wick_pct,
+                           vortag_pct, atr_pct, dollar_volume, price, direction="long"):
+    """
+    Setup Quality Score 0-100 — Wie gut ist dieses Setup zum Einstieg?
+    
+    Berechnet aus Snapshot-Daten (KEIN OHLCV nötig = sofort für alle Ergebnisse).
+    Wird für die Sortierung verwendet: Bestes Setup zuerst.
+    
+    KATEGORIEN (aus Snapshot):
+    ─────────────────────────────────────────────────────
+    1. VOLUME (0-20)      — RVOL: Institutionelles Interesse
+    2. KERZE (0-20)       — Close Position + Wick: Fakeout oder echt?
+    3. TIMING (0-20)      — Extension: Zu spät oder früh?
+    4. LIQUIDITÄT (0-15)  — Dollar Volume: Tradeable?
+    5. MOMENTUM (0-15)    — Richtige Stärke, nicht zu viel/wenig
+    6. KONTEXT (0-10)     — Vortag: Konsolidierung = bester Base
+    ─────────────────────────────────────────────────────
+    = Max 100 Punkte
+    """
+    score = 0
+    is_long = direction == "long"
+    abs_change = abs(change_pct) if change_pct else 0
+    
+    # ── 1. VOLUME (0-20) ──
+    if rvol is not None and rvol > 0:
+        if rvol >= 3.0:
+            score += 20   # Institutionell
+        elif rvol >= 2.0:
+            score += 16
+        elif rvol >= 1.5:
+            score += 12
+        elif rvol >= 1.0:
+            score += 6
+    
+    # ── 2. KERZE (0-20) ──
+    if close_pos is not None:
+        if is_long:
+            if close_pos >= 0.80:
+                score += 14
+            elif close_pos >= 0.65:
+                score += 10
+            elif close_pos >= 0.50:
+                score += 5
+            
+            if upper_wick_pct is not None:
+                if upper_wick_pct < 15:
+                    score += 6
+                elif upper_wick_pct < 25:
+                    score += 3
+        else:
+            if close_pos <= 0.20:
+                score += 14
+            elif close_pos <= 0.35:
+                score += 10
+            elif close_pos <= 0.50:
+                score += 5
+            
+            if lower_wick_pct is not None:
+                if lower_wick_pct < 15:
+                    score += 6
+                elif lower_wick_pct < 25:
+                    score += 3
+    
+    # ── 3. TIMING (0-20) ──
+    if atr_pct and atr_pct > 0:
+        extension = abs_change / atr_pct
+        if 0.5 <= extension <= 2.0 and abs_change <= 6:
+            score += 20   # Sweet Spot
+        elif extension <= 3.0 and abs_change <= 8:
+            score += 14
+        elif extension <= 3.5 and abs_change <= 10:
+            score += 7
+    else:
+        if 2 <= abs_change <= 6:
+            score += 15
+        elif abs_change <= 10:
+            score += 8
+    
+    # ── 4. LIQUIDITÄT (0-15) ──
+    if dollar_volume:
+        if dollar_volume >= 5_000_000:
+            score += 15
+        elif dollar_volume >= 1_000_000:
+            score += 12
+        elif dollar_volume >= 500_000:
+            score += 8
+        elif dollar_volume >= 100_000:
+            score += 3
+    
+    # ── 5. MOMENTUM QUALITÄT (0-15) ──
+    if change_pct is not None and rvol is not None:
+        if is_long:
+            if change_pct > 2 and rvol >= 1.5:
+                score += 15
+            elif change_pct > 1 and rvol >= 1.2:
+                score += 10
+            elif change_pct > 0:
+                score += 4
+        else:
+            if change_pct < -2 and rvol >= 1.5:
+                score += 15
+            elif change_pct < -1 and rvol >= 1.2:
+                score += 10
+            elif change_pct < 0:
+                score += 4
+    
+    # ── 6. KONTEXT / VORTAG (0-10) ──
+    if vortag_pct is not None:
+        abs_vortag = abs(vortag_pct)
+        if abs_vortag < 1.5:
+            score += 10   # Konsolidierung → Breakout
+        elif abs_vortag < 3.0:
+            score += 6
+        elif abs_vortag < 5.0:
+            score += 3
+    
+    return min(100, max(0, score))
+
+
 def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
     """
     Berechnet RVOL-at-Time (Intraday-normalisiert)
@@ -10103,6 +10223,17 @@ def fetch_crypto_data():
                             vortag_pct=vortag_chg, vi_result=None
                         )
                 
+                # Setup Score für Krypto
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
+                setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
+                setup_score = calculate_setup_score(
+                    change_pct=change_24h, rvol=rvol, close_pos=close_pos,
+                    upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
+                    vortag_pct=vortag_chg, atr_pct=None,
+                    dollar_volume=vol_24h, price=price,
+                    direction=setup_direction
+                )
+                
                 results.append({
                     "Ticker": ticker, 
                     "Name": coin.get("name", "")[:15],
@@ -10121,6 +10252,7 @@ def fetch_crypto_data():
                     "Low": low_24h,
                     "PrevClose": prev_close_approx,
                     "BreakoutHealth": breakout_health,
+                    "SetupScore": setup_score,
                 })
             except Exception as e:
                 continue
@@ -10517,6 +10649,17 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                             atr_pct=atr_pct
                         )
                 
+                # Setup Score — Richtung aus Strategie ableiten
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
+                setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
+                setup_score = calculate_setup_score(
+                    change_pct=change, rvol=rvol, close_pos=close_pos,
+                    upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
+                    vortag_pct=vortag_chg, atr_pct=atr_pct,
+                    dollar_volume=dollar_volume, price=price,
+                    direction=setup_direction
+                )
+                
                 results.append({
                     "Ticker": ticker_raw, "Name": "",
                     "Preis": round(price, 4), "Chg%": round(change, 2),
@@ -10536,6 +10679,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     "DollarVol": dollar_volume,
                     "IsLiquid": is_liquid,
                     "BreakoutHealth": breakout_health,
+                    "SetupScore": setup_score,
                 })
             except Exception as e:
                 continue
@@ -14471,7 +14615,7 @@ with st.sidebar:
                         filtered = [c for c in candidates if -10 <= c.get("Chg%", 0) <= 5 and 5 <= c.get("Preis", 0) <= 500]
                     
                     # Top 30 nach Alpha Score
-                    filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:30]
+                    filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:30]
                     tickers = [c["Ticker"] for c in filtered]
                     
                     status.update(label=f"Analysiere Volume Profile für {len(tickers)} Aktien...")
@@ -14567,8 +14711,8 @@ with st.sidebar:
                         # Filter: Nur liquide Aktien mit Bewegung
                         filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
                         
-                        # Sortiere nach Alpha Score, nimm Top 50
-                        filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:50]
+                        # Sortiere nach Setup Score (Fallback Alpha), nimm Top 50
+                        filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:50]
                         tickers = [c["Ticker"] for c in filtered]
                         
                         status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns ({harmonic_tf}, {api_days}d)...")
@@ -14652,7 +14796,7 @@ with st.sidebar:
                         status.update(label="Hole Top-Aktien für Wyckoff-Analyse...")
                         candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
                         filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
-                        filtered = sorted(filtered, key=lambda x: x.get("Alpha", 0), reverse=True)[:50]
+                        filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:50]
                         tickers = [c["Ticker"] for c in filtered]
                         
                         status.update(label=f"Analysiere {len(tickers)} Aktien auf Wyckoff ({wyckoff_tf}, {api_days}d)...")
@@ -15002,7 +15146,7 @@ with st.sidebar:
                     elif sf > 0:
                         st.caption(f"📊 {len(results)} Treffer | {sf} ausgefiltert | RVOL nach Tageszeit normalisiert")
                 
-                st.session_state.scan_results = sorted(results, key=lambda x: x["Alpha"], reverse=True)[:50]
+                st.session_state.scan_results = sorted(results, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:50]
                 
                 # =============================================================
                 # K1: MULTI-DAY PATTERN VALIDATION (wenn needs_history=True)
@@ -15246,19 +15390,19 @@ with tab_scanner:
                     "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
                 }
             elif st.session_state.market_type == "Krypto" and "Name" in df.columns:
-                display_cols = ["Ticker", "Name", "Preis", "Chg%", "Alpha"]
+                display_cols = ["Ticker", "Name", "Preis", "Chg%", "SetupScore"]
                 col_config = {
                     "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
                     "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
+                    "SetupScore": st.column_config.ProgressColumn("Setup", min_value=0, max_value=100, format="%d"),
                 }
             else:
-                display_cols = ["Ticker", "Preis", "Chg%", "RVOL", "Alpha"]
+                display_cols = ["Ticker", "Preis", "Chg%", "RVOL", "SetupScore"]
                 col_config = {
                     "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
                     "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
                     "RVOL": st.column_config.NumberColumn("RVOL", format="%.1fx"),
-                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
+                    "SetupScore": st.column_config.ProgressColumn("Setup", min_value=0, max_value=100, format="%d"),
                 }
             
             # Nur vorhandene Spalten anzeigen
@@ -15899,8 +16043,8 @@ with tab_scanner:
                         price_for_conf = row.get("Preis", 0)
                         change_for_conf = row.get("Chg%", 0)
                         
-                        # Nur für Aktien mit Preis > $5 (sinnvoller Bereich)
-                        if price_for_conf >= 5:
+                        # Nur für Aktien mit gültigem Preis
+                        if price_for_conf > 0:
                             # Cache Key: Ticker + Preis (ändert sich bei neuem Scan)
                             cache_key = f"conf_{ticker_for_conf}_{price_for_conf:.2f}"
                             
