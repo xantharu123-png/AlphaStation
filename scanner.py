@@ -33,6 +33,18 @@ from datetime import datetime, timedelta, timezone
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
+# Volume Profile Engine V1.1 (Audit-Fixed)
+try:
+    from volume_profile import (
+        calculate_volume_profile as vp_calculate_profile,
+        analyze_vp_signals as vp_analyze_signals,
+        get_vp_lookback_for_strategy,
+        get_strategy_type_for_scanner
+    )
+    VP_AVAILABLE = True
+except ImportError:
+    VP_AVAILABLE = False
+
 # =============================================================================
 # 0. API HELPERS (Rate Limiting + Caching + Logging)
 # =============================================================================
@@ -4153,17 +4165,22 @@ def calculate_ema(closes, period):
     return ema
 
 @st.cache_data(ttl=300)
-def fetch_historical_closes(ticker, api_key, days=200):
+def fetch_historical_closes(ticker, api_key, days=200, return_ohlcv=False):
     """
     Holt historische Schlusskurse von Polygon für SMA/EMA Berechnung.
+    
+    NEU V1.1: return_ohlcv=True gibt zusätzlich volle OHLCV-Bars zurück
+    für Volume Profile Berechnung — KEIN Extra-API-Call.
     
     Args:
         ticker: Aktien-Ticker
         api_key: Polygon API Key
         days: Anzahl HANDELSTAGE die benötigt werden (z.B. 210 für SMA200)
+        return_ohlcv: Wenn True, gibt (closes, ohlcv_bars) zurück
     
     Returns:
-        Liste von Schlusskursen (ältester zuerst) oder None bei Fehler
+        Wenn return_ohlcv=False: Liste von Schlusskursen (ältester zuerst) oder None
+        Wenn return_ohlcv=True: Tuple (closes, ohlcv_bars) oder (None, None)
     """
     try:
         from datetime import datetime, timedelta
@@ -4183,13 +4200,25 @@ def fetch_historical_closes(ticker, api_key, days=200):
         data = resp.json()
         
         if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
-            return None
+            return (None, None) if return_ohlcv else None
         
         closes = [bar["c"] for bar in data["results"]]
+        
+        if return_ohlcv:
+            ohlcv = [{
+                "open": bar.get("o", 0),
+                "high": bar.get("h", 0),
+                "low": bar.get("l", 0),
+                "close": bar.get("c", 0),
+                "volume": bar.get("v", 0),
+                "time": bar.get("t", 0),
+            } for bar in data["results"]]
+            return closes, ohlcv
+        
         return closes
     
     except Exception as e:
-        return None
+        return (None, None) if return_ohlcv else None
 
 def calculate_ma_distance(price, ma_value):
     """
@@ -14987,8 +15016,16 @@ with st.sidebar:
                         ticker = candidate["Ticker"]
                         price = candidate["Preis"]
                         
-                        # Hole historische Daten (mit Rate Limiting)
-                        closes = fetch_historical_closes(ticker, poly_key, days=ma_period + 10)
+                        # VP Lookback: max(MA-Bedarf, VP-Bedarf) — kein Extra-API-Call
+                        vp_lookback = max(ma_period + 10, get_vp_lookback_for_strategy(current_strat)) if VP_AVAILABLE else ma_period + 10
+                        
+                        # Hole historische Daten MIT OHLCV für Volume Profile
+                        if VP_AVAILABLE:
+                            closes, ohlcv_bars = fetch_historical_closes(ticker, poly_key, days=vp_lookback, return_ohlcv=True)
+                        else:
+                            closes = fetch_historical_closes(ticker, poly_key, days=ma_period + 10)
+                            ohlcv_bars = None
+                        
                         if ma_checked % 10 == 9:
                             time.sleep(0.5)  # Rate Limiting: Pause nach je 10 Calls
                         
@@ -15042,6 +15079,37 @@ with st.sidebar:
                             candidate["MA_Distance%"] = round(ma_distance, 2)
                             candidate["MA_Type"] = f"{ma_type}{ma_period}"
                             candidate["Alpha"] = round(100 - abs(ma_distance) * 20, 1)  # Näher am MA = höherer Score
+                            
+                            # ── Volume Profile Integration (V1.1) ──
+                            vp_data = None
+                            vp_signals = None
+                            vp_summary = "N/A"
+                            if VP_AVAILABLE and ohlcv_bars and len(ohlcv_bars) >= 40:
+                                vp_data = vp_calculate_profile(
+                                    ohlcv_bars, 
+                                    lookback_days=get_vp_lookback_for_strategy(current_strat),
+                                    atr_value=candidate.get("ATR%", None) and price * candidate["ATR%"] / 100
+                                )
+                                if vp_data:
+                                    setup_direction = "short" if ma_approach != "from_above" else "long"
+                                    strat_type = get_strategy_type_for_scanner(current_strat)
+                                    vp_signals = vp_analyze_signals(
+                                        vp_data, price, 
+                                        atr=price * candidate.get("ATR%", 2.0) / 100 if candidate.get("ATR%") else None,
+                                        direction=setup_direction,
+                                        strategy_type=strat_type
+                                    )
+                                    vp_summary = f"VP: {vp_signals.get('summary', 'N/A')}"
+                                    
+                                    # VP Score-Adjustment auf SetupScore anwenden
+                                    if vp_signals and "SetupScore" in candidate:
+                                        vp_adj = vp_signals.get("score_adjustment", 0)
+                                        candidate["SetupScore"] = min(100, max(0, candidate["SetupScore"] + vp_adj))
+                            
+                            candidate["VP"] = vp_data
+                            candidate["VP_Signals"] = vp_signals
+                            candidate["VP_Summary"] = vp_summary
+                            
                             results.append(candidate)
                         else:
                             ma_too_far += 1
@@ -15050,8 +15118,11 @@ with st.sidebar:
                         if ma_checked % 20 == 0:
                             status.update(label=f"Schritt 2/3: {ma_checked}/{len(filtered)} geprüft, {len(results)} Treffer...")
                     
-                    # Sortiere nach MA-Distanz (näher = besser)
-                    results = sorted(results, key=lambda x: abs(x.get("MA_Distance%", 999)))[:50]
+                    # Sortiere nach SetupScore (VP-enhanced) falls vorhanden, sonst MA-Distanz
+                    if results and "SetupScore" in results[0]:
+                        results = sorted(results, key=lambda x: x.get("SetupScore", 0), reverse=True)[:50]
+                    else:
+                        results = sorted(results, key=lambda x: abs(x.get("MA_Distance%", 999)))[:50]
                     
                     st.session_state.scan_results = results
                     st.session_state.market_type = "Aktien"
@@ -15980,6 +16051,29 @@ with tab_scanner:
                         else:
                             st.warning(f"⚠️ **OK** - {abs_dist:.1f}% vom {ma_type} entfernt")
                         
+                    except Exception as e:
+                        pass
+                
+                # ── Volume Profile Details anzeigen (V1.1) ──
+                if VP_AVAILABLE and "VP_Summary" in df.columns:
+                    try:
+                        vp_summary = row.get("VP_Summary", "N/A")
+                        if vp_summary and vp_summary != "N/A":
+                            st.divider()
+                            st.subheader("📊 Volume Profile")
+                            st.caption(vp_summary)
+                            
+                            # VP Signals als Detail-Liste
+                            vp_signals = row.get("VP_Signals") if "VP_Signals" in df.columns else None
+                            if isinstance(vp_signals, dict) and vp_signals.get("signals"):
+                                for sig in vp_signals["signals"]:
+                                    st.text(f"  {sig}")
+                                
+                                adj = vp_signals.get("score_adjustment", 0)
+                                if adj > 0:
+                                    st.success(f"VP Score: +{adj} Punkte")
+                                elif adj < 0:
+                                    st.error(f"VP Score: {adj} Punkte")
                     except Exception as e:
                         pass
                 
