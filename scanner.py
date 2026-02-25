@@ -14981,6 +14981,7 @@ with st.sidebar:
                     ma_checked = 0
                     ma_no_data = 0
                     ma_too_far = 0
+                    ma_debug_log = []  # Debug: Sammle Infos über jeden Ticker
                     
                     for candidate in filtered:
                         ticker = candidate["Ticker"]
@@ -14993,6 +14994,8 @@ with st.sidebar:
                         
                         if not closes or len(closes) < ma_period:
                             ma_no_data += 1
+                            # DEBUG: Logge warum kein History
+                            ma_debug_log.append(f"❌ {ticker}: {len(closes) if closes else 0} Bars (brauche {ma_period})")
                             continue
                         
                         # Berechne MA
@@ -15024,6 +15027,15 @@ with st.sidebar:
                             # Short: Preis nahe am MA (-ma_distance_max% bis +1%)
                             is_valid = -ma_distance_max <= ma_distance <= 1.0
                         
+                        # DEBUG: Logge JEDEN geprüften Ticker
+                        status_icon = "✅" if is_valid else "⛔"
+                        ma_debug_log.append(
+                            f"{status_icon} {ticker}: Preis=${price:.2f} | {ma_type}{ma_period}=${ma_value:.2f} | "
+                            f"Dist={ma_distance:+.2f}% | Bars={len(closes)} | "
+                            f"Band=[{-1.0 if ma_approach == 'from_above' else -ma_distance_max:.1f}% bis "
+                            f"+{ma_distance_max if ma_approach == 'from_above' else 1.0:.1f}%]"
+                        )
+                        
                         if is_valid:
                             # Füge MA-Daten zum Ergebnis hinzu
                             candidate["MA_Value"] = round(ma_value, 2)
@@ -15051,6 +15063,33 @@ with st.sidebar:
                     debug_msg = f"🔍 Pipeline: {len(candidates)} liquide Aktien → {len(filtered)} Kandidaten → {ma_checked} MA berechnet ({ma_no_data} kein History) → {ma_too_far} zu weit → {len(results)} im Band"
                     if len(results) == 0 or st.session_state.get("debug_mode", False):
                         st.caption(debug_msg)
+                    
+                    # DEBUG: Zeige Detail-Log für jeden geprüften Ticker
+                    if ma_debug_log:
+                        with st.expander(f"🔍 MA Debug Log ({len(ma_debug_log)} Ticker)", expanded=(len(results) == 0)):
+                            # Zuerst die Treffer (✅), dann die Abgelehnten (⛔), dann fehlende Daten (❌)
+                            hits = [l for l in ma_debug_log if l.startswith("✅")]
+                            misses = [l for l in ma_debug_log if l.startswith("⛔")]
+                            no_data = [l for l in ma_debug_log if l.startswith("❌")]
+                            
+                            if hits:
+                                st.markdown(f"**✅ Treffer ({len(hits)}):**")
+                                for line in hits:
+                                    st.text(line)
+                            
+                            if misses:
+                                st.markdown(f"**⛔ Zu weit vom MA ({len(misses)}):**")
+                                for line in misses[:20]:  # Max 20 zeigen
+                                    st.text(line)
+                                if len(misses) > 20:
+                                    st.text(f"... und {len(misses) - 20} weitere")
+                            
+                            if no_data:
+                                st.markdown(f"**❌ Kein History ({len(no_data)}):**")
+                                for line in no_data[:10]:
+                                    st.text(line)
+                                if len(no_data) > 10:
+                                    st.text(f"... und {len(no_data) - 10} weitere")
                     
                     if len(results) == 0:
                         st.info(f"ℹ️ Keine Aktien im {ma_type}{ma_period} Band (−1% bis +{ma_distance_max}%). "
