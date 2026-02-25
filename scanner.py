@@ -15397,6 +15397,112 @@ with st.sidebar:
                         sig_results.append(r)
                     st.session_state.scan_results = sig_results
                 
+                # =============================================================
+                # K3: VOLUME PROFILE ENRICHMENT (Standard-Pipeline)
+                # VP für Top-Ergebnisse berechnen und SetupScore anpassen
+                # =============================================================
+                VP_ENRICHMENT_STRATEGIES = {
+                    # Breakout-Typ
+                    "Breakout Long", "Breakdown Short", "Early Momentum",
+                    "Whale Watch", "Whale Watch Short 🐻", "Volume Surge",
+                    "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
+                    "PM Gap & Go 🌅", "Penny Rockets",
+                    # Bounce-Typ  
+                    "Dip Buy", "Reversal Hunter",
+                    # Flag (bekommen auch VP nach Multi-Day)
+                    "Bull Flag", "Bear Flag",
+                    # Breite Strategien
+                    "Breakout Long (Ultra)", "Gap Up Momentum (Ultra)",
+                    "PM Gainers 🌅",
+                }
+                
+                current_strat_vp = st.session_state.get("current_strategy", "")
+                vp_should_run = (
+                    VP_AVAILABLE 
+                    and m_type == "Aktien" 
+                    and exchange == "US"
+                    and current_strat_vp in VP_ENRICHMENT_STRATEGIES
+                    and st.session_state.scan_results
+                )
+                
+                if vp_should_run:
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        strat_type = get_strategy_type_for_scanner(current_strat_vp)
+                        vp_lookback = get_vp_lookback_for_strategy(current_strat_vp)
+                        
+                        # Richtung aus Strategie
+                        SHORT_KW = ["Short", "Bear", "Breakdown", "Losers", "Down"]
+                        vp_direction = "short" if any(kw in current_strat_vp for kw in SHORT_KW) else "long"
+                        
+                        top_results = st.session_state.scan_results[:30]
+                        status.update(label=f"📊 Volume Profile für Top {len(top_results)} Aktien...")
+                        
+                        vp_enriched = 0
+                        for idx, r in enumerate(top_results):
+                            try:
+                                ticker = r.get("Ticker", "")
+                                price = r.get("Preis", 0)
+                                if not ticker or price <= 0:
+                                    continue
+                                
+                                # OHLCV holen (gleicher Endpoint wie fetch_historical_closes)
+                                result = fetch_historical_closes(ticker, poly_key, days=vp_lookback, return_ohlcv=True)
+                                if result is None or not isinstance(result, tuple):
+                                    continue
+                                closes, ohlcv_bars = result
+                                
+                                if not ohlcv_bars or len(ohlcv_bars) < 40:
+                                    continue
+                                
+                                # VP berechnen
+                                atr_val = price * r.get("ATR%", 2.0) / 100 if r.get("ATR%") else None
+                                vp_data = vp_calculate_profile(
+                                    ohlcv_bars, 
+                                    lookback_days=vp_lookback,
+                                    atr_value=atr_val
+                                )
+                                
+                                if vp_data:
+                                    vp_signals = vp_analyze_signals(
+                                        vp_data, price,
+                                        atr=atr_val,
+                                        direction=vp_direction,
+                                        strategy_type=strat_type
+                                    )
+                                    vp_summary = f"VP: {vp_signals.get('summary', 'N/A')}"
+                                    
+                                    # SetupScore anpassen
+                                    if vp_signals and "SetupScore" in r:
+                                        vp_adj = vp_signals.get("score_adjustment", 0)
+                                        r["SetupScore"] = min(100, max(0, r["SetupScore"] + vp_adj))
+                                    
+                                    r["VP"] = vp_data
+                                    r["VP_Signals"] = vp_signals
+                                    r["VP_Summary"] = vp_summary
+                                    vp_enriched += 1
+                                
+                                # Rate Limiting
+                                if (idx + 1) % 10 == 0:
+                                    time.sleep(0.3)
+                                    status.update(label=f"📊 VP: {idx+1}/{len(top_results)} analysiert...")
+                                    
+                            except Exception:
+                                continue
+                        
+                        # Re-sort nach VP-adjustiertem SetupScore
+                        if vp_enriched > 0:
+                            st.session_state.scan_results = sorted(
+                                st.session_state.scan_results,
+                                key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), 
+                                reverse=True
+                            )
+                            status.update(label=f"✅ VP für {vp_enriched}/{len(top_results)} Aktien berechnet")
+                        
+                    except Exception as e:
+                        if st.session_state.get("debug_mode"):
+                            st.warning(f"VP Enrichment Fehler: {e}")
+                
                 # Session-Info in Status
                 if m_type == "Futures":
                     status.update(label=f"✅ {len(st.session_state.scan_results)} Futures Signale", state="complete")
@@ -16613,9 +16719,15 @@ with tab_scanner:
                 except Exception as e:
                     st.error(f"Akkumulations-Analyse Fehler: {e}")
             
-            # TradingView Tipp (nur für US/Krypto — internationale nutzen eigenen Chart)
+            # TradingView Tipp (nur wenn VP Engine NICHT aktiv oder keine VP-Daten)
             _full_t = st.session_state.current_data.get("FullTicker", "") if "current_data" in st.session_state else ""
-            if not any(_full_t.upper().endswith(s) for s in (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")):
+            _has_vp = False
+            try:
+                if VP_AVAILABLE and "VP_Summary" in df.columns:
+                    _has_vp = row.get("VP_Summary") not in (None, "N/A", "")
+            except Exception:
+                pass
+            if not _has_vp and not any(_full_t.upper().endswith(s) for s in (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")):
                 st.info("💡 **Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
         
         # =====================================================
