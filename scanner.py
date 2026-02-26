@@ -3965,7 +3965,18 @@ def find_wyckoff_for_chart(ohlcv_data):
                                       "tp1": round(rl - rw * 0.75, 2), "tp2": round(rl - rw * 1.5, 2)}
                         })
         
-        return results
+        # Filter: Nur Patterns die RELEVANT sind (Range nahe am aktuellen Preis)
+        # PACS Beispiel: Accumulation bei $14-17, Preis jetzt $40 → historisch, nicht zeichnen
+        relevant = []
+        for r in results:
+            rh = r.get("range_high", 0)
+            rl = r.get("range_low", 0)
+            rm = (rh + rl) / 2 if (rh + rl) > 0 else 1
+            dist_pct = abs(current_price - rm) / rm * 100
+            if dist_pct <= 40:
+                relevant.append(r)
+        
+        return relevant
     except Exception:
         return []
 
