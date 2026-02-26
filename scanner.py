@@ -15249,8 +15249,8 @@ with st.sidebar:
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
         # Reset Navigation Index für neue Ergebnisse
         st.session_state.selected_row_index = 0
-        if "ticker_radio" in st.session_state:
-            del st.session_state["ticker_radio"]
+        if "ticker_select_df" in st.session_state:
+            del st.session_state["ticker_select_df"]
         
         # === TEMP DEBUG - Zeige immer den Scan-Pfad ===
         _dbg_m = m_type
@@ -16326,55 +16326,78 @@ with tab_scanner:
                 if st.button("⬆️", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
                     # Sync radio state
-                    if "ticker_radio" in st.session_state:
-                        del st.session_state["ticker_radio"]
+                    if "ticker_select_df" in st.session_state:
+                        del st.session_state["ticker_select_df"]
                     st.rerun()
             with nc2:
                 st.markdown(f"<div style='text-align:center;font-weight:bold;'>#{current_idx + 1}/{num_results}</div>", unsafe_allow_html=True)
             with nc3:
                 if st.button("⬇️", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
-                    if "ticker_radio" in st.session_state:
-                        del st.session_state["ticker_radio"]
+                    if "ticker_select_df" in st.session_state:
+                        del st.session_state["ticker_select_df"]
                     st.rerun()
             
-            # ── Ticker-Labels bauen ──
-            radio_labels = []
-            for i_r in range(num_results):
-                r = df.iloc[i_r]
-                t = str(r.get("Ticker", ""))
-                chg = r.get("Chg%", 0)
-                sign = "+" if chg > 0 else ""
-                # Earnings flag
-                er_flag = ""
-                if "EarningsWarning" in df.columns:
-                    ear = r.get("EarningsWarning")
+            # ── Kompakte Ticker-Tabelle ──
+            # Earnings flags
+            er_col = [""] * num_results
+            if "EarningsWarning" in df.columns:
+                for i_e in range(num_results):
+                    ear = df.iloc[i_e].get("EarningsWarning")
                     if ear and isinstance(ear, dict):
                         level = ear.get("level", "")
                         if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
-                            er_flag = " ⛔"
+                            er_col[i_e] = "⛔"
                         elif level == "TOMORROW":
-                            er_flag = " ⚠️"
+                            er_col[i_e] = "⚠️"
                         elif level == "THIS_WEEK":
-                            er_flag = " 📅"
-                radio_labels.append(f"{t}{er_flag}  {sign}{chg:.1f}%")
+                            er_col[i_e] = "📅"
             
-            # Radio-Selection
-            selected_label = st.radio(
-                "Ticker",
-                radio_labels,
-                index=current_idx,
-                key="ticker_radio",
-                label_visibility="collapsed"
+            markers = [""] * num_results
+            markers[current_idx] = "▶"
+            
+            compact_data = {
+                "": markers,
+                "Ticker": df["Ticker"].tolist(),
+            }
+            has_er = any(e != "" for e in er_col)
+            if has_er:
+                compact_data["ER"] = er_col
+            
+            if "Chg%" in df.columns:
+                compact_data["%"] = [f"{v:+.1f}%" if isinstance(v, (int, float)) else str(v) for v in df["Chg%"].tolist()]
+            
+            if "SetupScore" in df.columns:
+                compact_data["S"] = df["SetupScore"].tolist()
+            
+            df_compact = pd.DataFrame(compact_data)
+            
+            compact_config = {
+                "": st.column_config.TextColumn("", width="small"),
+                "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+                "%": st.column_config.TextColumn("%", width="small"),
+            }
+            if has_er:
+                compact_config["ER"] = st.column_config.TextColumn("ER", width="small")
+            if "S" in compact_data:
+                compact_config["S"] = st.column_config.ProgressColumn("S", min_value=0, max_value=100, format="%d", width="small")
+            
+            sel = st.dataframe(
+                df_compact,
+                on_select="rerun",
+                selection_mode="single-row",
+                hide_index=True,
+                use_container_width=True,
+                height=300,
+                column_config=compact_config
             )
             
-            # Index aus Label ableiten
             selected_row_idx = current_idx
-            if selected_label and selected_label in radio_labels:
-                new_idx = radio_labels.index(selected_label)
-                if new_idx != current_idx:
-                    st.session_state.selected_row_index = new_idx
-                    selected_row_idx = new_idx
+            if sel.selection and sel.selection.rows:
+                clicked_idx = sel.selection.rows[0]
+                if clicked_idx != current_idx:
+                    st.session_state.selected_row_index = clicked_idx
+                    selected_row_idx = clicked_idx
                     st.rerun()
             
             # Zeile verarbeiten
