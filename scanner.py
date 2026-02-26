@@ -1982,7 +1982,7 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
     
     # ── 3. TIMING (0-20) ──
     # Misst ob man early, im Sweet Spot, oder zu spät dran ist
-    # Extension = wie weit hat sich der Preis relativ zur normalen Range bewegt
+    # V2: High-ATR Penalty — bei >8% ATR ist <0.5x extension oft Rauschen, nicht "early entry"
     if atr_pct and atr_pct > 0:
         extension = abs_change / atr_pct
         if abs_change < 0.5:
@@ -1990,7 +1990,14 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
         elif 0.5 <= extension <= 2.0 and abs_change <= 6:
             score += 20   # Sweet Spot — genug Bewegung, nicht extended
         elif extension < 0.5:
-            score += 12   # NEU: Early Entry — Move beginnt gerade, noch unbestätigt
+            # "Early Entry" — aber bei hoher ATR oft nur Rauschen
+            if atr_pct >= 8.0:
+                # High-ATR Stock (wie NAT 10.8%): 0.4x ATR = normales Rauschen
+                score += 4    # Minimal — Move ist nicht signifikant
+            elif atr_pct >= 5.0:
+                score += 8    # Moderate ATR: vielleicht early, vielleicht Noise
+            else:
+                score += 12   # Low-ATR: echtes Early Entry
         elif extension <= 3.0 and abs_change <= 8:
             score += 14   # Leicht extended aber noch tradeable
         elif extension <= 3.5 and abs_change <= 10:
@@ -2019,40 +2026,43 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
             score += 3
     
     # ── 5. MOMENTUM QUALITÄT (0-15) ──
-    # Prüft: Bewegt sich der Preis in die richtige Richtung mit genug Kraft?
-    # NEU: RVOL wird NICHT mehr geprüft (bereits in Kategorie 1 bewertet).
-    #       Vorher: RVOL ≥1.5 war Bedingung für 15 Punkte → doppelte Gewichtung.
-    # NEU: Extension-Penalty — extreme Moves bekommen weniger Momentum-Punkte
-    #       weil die "Qualität" des Momentums bei einem Chase sinkt.
+    # V2: ATR-NORMALISIERT — +4% bei 2% ATR = stark, +4% bei 10% ATR = Rauschen
+    # move_atr_ratio = wie signifikant ist der Move relativ zur normalen Volatilität?
     momentum_pts = 0
     if change_pct is not None:
-        if is_long:
-            if change_pct >= 3:
-                momentum_pts = 15   # Starke Überzeugung
-            elif change_pct >= 1.5:
-                momentum_pts = 10   # Solide Bewegung
-            elif change_pct > 0:
-                momentum_pts = 4    # Richtige Richtung, aber schwach
-            # change <= 0 bei Long: 0 Punkte
-        else:
-            if change_pct <= -3:
-                momentum_pts = 15
-            elif change_pct <= -1.5:
-                momentum_pts = 10
-            elif change_pct < 0:
-                momentum_pts = 4
-            # change >= 0 bei Short: 0 Punkte
+        # ATR-normalisiertes Momentum (primäre Bewertung)
+        move_atr_ratio = abs_change / atr_pct if (atr_pct and atr_pct > 0) else 1.0
         
-        # NEU: Extension-Penalty auf Momentum
-        # Eine Aktie bei +20% hat zwar "Momentum", aber es ist ein Chase.
-        # Timing (Kat 3) gibt schon 0, aber ohne Penalty hier bleibt
-        # Momentum bei vollen 15 → Score wird trotzdem zu hoch.
+        # Ist die Richtung korrekt?
+        direction_ok = (is_long and change_pct > 0) or (not is_long and change_pct < 0)
+        
+        if direction_ok:
+            # ATR-basierte Schwellen (funktioniert für $5 und $500 Aktien)
+            if move_atr_ratio >= 1.5:
+                momentum_pts = 15   # Signifikanter Move (>1.5x ATR) = echtes Momentum
+            elif move_atr_ratio >= 1.0:
+                momentum_pts = 13   # Solider Move (1x ATR) = überzeugend
+            elif move_atr_ratio >= 0.7:
+                momentum_pts = 10   # Guter Move (0.7x ATR) = bestätigt
+            elif move_atr_ratio >= 0.5:
+                momentum_pts = 7    # Moderater Move = Ansatz da
+            elif move_atr_ratio >= 0.3:
+                momentum_pts = 4    # Schwacher Move = kaum über Rauschen
+            else:
+                momentum_pts = 1    # Minimal = nur Richtung stimmt
+            
+            # Absolute Mindest-Schwelle: <0.5% Change ist immer Rauschen
+            if abs_change < 0.5:
+                momentum_pts = 0
+        # Falsche Richtung: 0 Punkte
+        
+        # Extension-Penalty auf Momentum (Chase-Schutz)
         if abs_change >= 20:
-            momentum_pts = min(momentum_pts, 0)    # Extreme Chase — kein Momentum-Credit mehr
+            momentum_pts = min(momentum_pts, 0)
         elif abs_change >= 15:
-            momentum_pts = min(momentum_pts, 3)    # Massiver Chase — nur Richtungs-Credit
+            momentum_pts = min(momentum_pts, 3)
         elif abs_change > 10:
-            momentum_pts = min(momentum_pts, 8)    # Extended — Qualität reduziert
+            momentum_pts = min(momentum_pts, 8)
     
     score += momentum_pts
     

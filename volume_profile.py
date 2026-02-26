@@ -278,6 +278,26 @@ def analyze_vp_signals(vp, current_price, atr=None, direction="long", strategy_t
     poc_dist = current_price - poc
     poc_dist_pct = (poc_dist / poc * 100) if poc > 0 else 0
     
+    # V2: VP STALENESS CHECK — Wenn POC >25% entfernt ist, sind die VP-Daten
+    # aus einem komplett anderen Preisregime und geben keine zuverlässige Bestätigung.
+    # Beispiel: NAT POC $3.43, Preis $5.25 = 53% entfernt → VP ist nutzlos
+    vp_stale = abs(poc_dist_pct) > 25
+    if vp_stale:
+        signals.append(f"⚠️ VP-Daten veraltet — POC {poc_dist_pct:+.0f}% entfernt, anderes Preisregime")
+        # Kein Score-Adjustment bei stale VP — weder Bonus noch Penalty
+        # VP kann weder bestätigen noch widerlegen wenn die Daten aus $3-Range kommen
+        # Return early mit 0 adjustment
+        return {
+            "score_adjustment": 0,
+            "signals": signals,
+            "poc": poc,
+            "va_low": va_low,
+            "va_high": va_high,
+            "hvn_zones": hvn_zones,
+            "lvn_zones": lvn_zones,
+            "summary": f"POC=${poc:.2f}|VA[${va_low:.2f}-${va_high:.2f}] | ⚠️ VP veraltet ({poc_dist_pct:+.0f}%)"
+        }
+    
     if abs(poc_dist) < proximity * 0.5:
         poc_relation = "at"
         signals.append(f"Am POC (${poc:.2f})")
