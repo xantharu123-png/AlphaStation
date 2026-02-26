@@ -15239,6 +15239,8 @@ with st.sidebar:
     if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
         # Reset Navigation Index für neue Ergebnisse
         st.session_state.selected_row_index = 0
+        if "ticker_radio" in st.session_state:
+            del st.session_state["ticker_radio"]
         
         # === TEMP DEBUG - Zeige immer den Scan-Pfad ===
         _dbg_m = m_type
@@ -16219,7 +16221,7 @@ with tab_scanner:
         st.divider()
         st.caption("👇 Normaler Scanner weiterhin verfügbar")
     
-    col_chart, col_journal = st.columns([2, 1])
+    col_chart, col_journal = st.columns([3, 1])
     
     # Prüfe ob Insider-Strategie aktiv
     is_insider = st.session_state.current_strategy in ["Insider Buying", "Insider Selling"]
@@ -16228,10 +16230,7 @@ with tab_scanner:
     is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]
     
     with col_journal:
-        st.subheader("📋 Ergebnisse")
-        if st.session_state.current_strategy:
-            session = st.session_state.get("active_trading_session", "Regular") if st.session_state.market_type == "Aktien" else "24/7"
-            st.caption(f"{st.session_state.current_strategy} | {session}")
+        st.caption(f"📋 **Ergebnisse** — {st.session_state.current_strategy or ''} | {st.session_state.get('active_trading_session', '') if st.session_state.market_type == 'Aktien' else '24/7'}")
         
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
@@ -16271,7 +16270,7 @@ with tab_scanner:
                 df["ER"] = df["EarningsWarning"].apply(_earnings_flag)
             
             # =====================================================================
-            # KOMPAKTE TICKER-LISTE mit Hervorhebung
+            # KOMPAKTE TICKER-LISTE
             # =====================================================================
             num_results = len(df)
             current_idx = st.session_state.selected_row_index
@@ -16291,12 +16290,12 @@ with tab_scanner:
                         function clickBtn(text) {{
                             var btns = window.parent.document.querySelectorAll('button');
                             for (var i = 0; i < btns.length; i++) {{
-                                if ((btns[i].textContent||'').toLowerCase().includes(text)) {{ btns[i].click(); return; }}
+                                if ((btns[i].textContent||'').includes(text)) {{ btns[i].click(); return; }}
                             }}
                         }}
                         function onKey(e) {{
                             var tag = ((window.parent.document.activeElement||{{}}).tagName||'').toLowerCase();
-                            if (tag === 'input' || tag === 'textarea') return;
+                            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
                             var k = e.key.toLowerCase();
                             if ((k==='w'||k==='arrowup') && currentIdx > 0) {{ e.preventDefault(); clickBtn('⬆'); }}
                             if ((k==='e'||k==='arrowdown') && currentIdx < maxIdx) {{ e.preventDefault(); clickBtn('⬇'); }}
@@ -16311,106 +16310,61 @@ with tab_scanner:
             """
             html(keyboard_html, height=0)
             
-            # Navigation: ⬆ #X/Y ⬇
+            # ⬆ #1/46 ⬇
             nc1, nc2, nc3 = st.columns([1, 2, 1])
             with nc1:
                 if st.button("⬆️", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
+                    # Sync radio state
+                    if "ticker_radio" in st.session_state:
+                        del st.session_state["ticker_radio"]
                     st.rerun()
             with nc2:
-                st.markdown(f"<div style='text-align:center;padding:4px 0;font-weight:bold;'>#{current_idx + 1} / {num_results}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center;font-weight:bold;'>#{current_idx + 1}/{num_results}</div>", unsafe_allow_html=True)
             with nc3:
                 if st.button("⬇️", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
+                    if "ticker_radio" in st.session_state:
+                        del st.session_state["ticker_radio"]
                     st.rerun()
             
-            # ── Kompaktes Dataframe: ▶ Ticker ER Chg% ──
-            # Earnings flags
-            er_col = [""] * num_results
-            if "EarningsWarning" in df.columns:
-                for i_e in range(num_results):
-                    ear = df.iloc[i_e].get("EarningsWarning")
+            # ── Ticker-Labels bauen ──
+            radio_labels = []
+            for i_r in range(num_results):
+                r = df.iloc[i_r]
+                t = str(r.get("Ticker", ""))
+                chg = r.get("Chg%", 0)
+                sign = "+" if chg > 0 else ""
+                # Earnings flag
+                er_flag = ""
+                if "EarningsWarning" in df.columns:
+                    ear = r.get("EarningsWarning")
                     if ear and isinstance(ear, dict):
                         level = ear.get("level", "")
                         if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
-                            er_col[i_e] = "⛔"
+                            er_flag = " ⛔"
                         elif level == "TOMORROW":
-                            er_col[i_e] = "⚠️"
+                            er_flag = " ⚠️"
                         elif level == "THIS_WEEK":
-                            er_col[i_e] = "📅"
+                            er_flag = " 📅"
+                radio_labels.append(f"{t}{er_flag}  {sign}{chg:.1f}%")
             
-            # Marker für ausgewählte Zeile
-            markers = [""] * num_results
-            markers[current_idx] = "▶"
-            
-            # Kompakt-DataFrame bauen
-            compact_data = {
-                "": markers,
-                "Ticker": df["Ticker"].tolist(),
-            }
-            # ER nur wenn mindestens 1 Earnings
-            has_er = any(e != "" for e in er_col)
-            if has_er:
-                compact_data["ER"] = er_col
-            
-            # Chg% 
-            if "Chg%" in df.columns:
-                compact_data["Chg%"] = [f"{v:+.1f}%" if isinstance(v, (int, float)) else str(v) for v in df["Chg%"].tolist()]
-            
-            # Score/RVOL als kompakte Spalte
-            score_col = []
-            score_label = "Score"
-            if "SetupScore" in df.columns:
-                score_col = df["SetupScore"].tolist()
-                score_label = "S"
-            elif "RVOL" in df.columns:
-                score_col = [f"{v:.1f}x" if isinstance(v, (int, float)) and v > 0 else "" for v in df["RVOL"].tolist()]
-                score_label = "RV"
-            elif "VoidScore" in df.columns:
-                score_col = df["VoidScore"].tolist()
-                score_label = "VS"
-            elif "Alpha" in df.columns:
-                score_col = df["Alpha"].tolist()
-                score_label = "α"
-            
-            if score_col:
-                compact_data[score_label] = score_col
-            
-            df_compact = pd.DataFrame(compact_data)
-            
-            # Kompakte Anzeige
-            compact_config = {
-                "": st.column_config.TextColumn("", width="small"),
-                "Ticker": st.column_config.TextColumn("Ticker", width="small"),
-                "Chg%": st.column_config.TextColumn("%", width="small"),
-            }
-            if has_er:
-                compact_config["ER"] = st.column_config.TextColumn("ER", width="small")
-            if score_col:
-                if score_label == "S":
-                    compact_config[score_label] = st.column_config.ProgressColumn(score_label, min_value=0, max_value=100, format="%d", width="small")
-                else:
-                    compact_config[score_label] = st.column_config.TextColumn(score_label, width="small")
-            
-            list_height = min(500, max(120, num_results * 35 + 38))
-            
-            sel = st.dataframe(
-                df_compact,
-                on_select="rerun",
-                selection_mode="single-row",
-                hide_index=True,
-                use_container_width=True,
-                height=list_height,
-                column_config=compact_config
+            # Radio-Selection
+            selected_label = st.radio(
+                "Ticker",
+                radio_labels,
+                index=current_idx,
+                key="ticker_radio",
+                label_visibility="collapsed"
             )
             
-            # Auswahl verarbeiten
+            # Index aus Label ableiten
             selected_row_idx = current_idx
-            if sel.selection and sel.selection.rows:
-                clicked_idx = sel.selection.rows[0]
-                if clicked_idx != current_idx:
-                    st.session_state.selected_row_index = clicked_idx
-                    selected_row_idx = clicked_idx
+            if selected_label and selected_label in radio_labels:
+                new_idx = radio_labels.index(selected_label)
+                if new_idx != current_idx:
+                    st.session_state.selected_row_index = new_idx
+                    selected_row_idx = new_idx
                     st.rerun()
             
             # Zeile verarbeiten
