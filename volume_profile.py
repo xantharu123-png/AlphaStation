@@ -458,9 +458,9 @@ def get_vp_lookback_for_strategy(strategy_name):
 def get_strategy_type_for_scanner(strategy_name):
     """Mappt Scanner-Strategienamen auf VP Strategy-Types."""
     s = strategy_name.upper()
-    if "BOUNCE" in s or "DIP" in s or "PULLBACK" in s or "MEAN REVERSION" in s:
+    if any(kw in s for kw in ["BOUNCE", "DIP", "PULLBACK", "MEAN REVERSION", "FLAG", "REVERSAL"]):
         return "bounce"
-    if "BREAKOUT" in s or "MOMENTUM" in s or "SURGE" in s or "GAP" in s or "WHALE" in s:
+    if any(kw in s for kw in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "SURGE", "GAP", "WHALE", "PENNY", "ROCKET", "GAINER", "LOSER"]):
         return "breakout"
     return "default"
 
