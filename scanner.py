@@ -9967,6 +9967,204 @@ def get_accumulation_display(ticker, market_type, poly_key=None):
     return display, analysis
 
 # =============================================================================
+# EARNINGS CALENDAR — Finnhub Earnings Warning System
+# =============================================================================
+
+def fetch_earnings_calendar(finnhub_key, days_ahead=7):
+    """
+    Holt Earnings Calendar von Finnhub für die nächsten X Tage.
+    EIN API-Call für ALLE Earnings — sehr effizient.
+    
+    Returns: Dict {ticker: {"date": "2026-02-26", "hour": "amc", "epsEstimate": 1.5, ...}}
+    hour: "bmo" = Before Market Open, "amc" = After Market Close, "dmh" = During Market Hours
+    """
+    try:
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        
+        # Cache-Check (30 Min gültig, vermeidet doppelte API-Calls)
+        _cache = st.session_state.get("_earnings_cache")
+        _cache_time = st.session_state.get("_earnings_cache_time")
+        if _cache is not None and _cache_time and (today - _cache_time).total_seconds() < 1800:
+            return _cache
+        
+        from_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")  # Gestern (für AMC von gestern)
+        to_date = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        
+        url = "https://finnhub.io/api/v1/calendar/earnings"
+        params = {"from": from_date, "to": to_date, "token": finnhub_key}
+        resp = rate_limited_get(url, params=params, timeout=10)
+        data = resp.json()
+        
+        calendar = {}
+        earnings_list = data.get("earningsCalendar", [])
+        
+        for entry in earnings_list:
+            symbol = entry.get("symbol", "")
+            if not symbol:
+                continue
+            
+            ear_date = entry.get("date", "")
+            hour = entry.get("hour", "")  # bmo, amc, dmh
+            
+            # Nur zukünftige oder heutige Earnings (und gestern AMC)
+            calendar[symbol] = {
+                "date": ear_date,
+                "hour": hour,
+                "epsEstimate": entry.get("epsEstimate"),
+                "revenueEstimate": entry.get("revenueEstimate"),
+                "quarter": entry.get("quarter"),
+                "year": entry.get("year"),
+            }
+        
+        # Cache speichern
+        st.session_state["_earnings_cache"] = calendar
+        st.session_state["_earnings_cache_time"] = today
+        
+        return calendar
+    except Exception:
+        return {}
+
+
+def check_earnings_proximity(ticker, earnings_calendar):
+    """
+    Prüft ob ein Ticker bald Earnings hat.
+    
+    Returns: Dict mit Warnung oder None
+    {
+        "warning": "⚠️ EARNINGS HEUTE (AMC)",
+        "level": "TODAY_AMC",  # TODAY_BMO, TODAY_AMC, TOMORROW, THIS_WEEK
+        "date": "2026-02-26",
+        "hour": "amc",
+        "score_penalty": -15,
+        "details": "Q4 2025 | EPS Est: $1.50"
+    }
+    """
+    if not earnings_calendar or ticker not in earnings_calendar:
+        return None
+    
+    from datetime import datetime, timedelta
+    entry = earnings_calendar[ticker]
+    ear_date_str = entry.get("date", "")
+    hour = entry.get("hour", "")
+    
+    if not ear_date_str:
+        return None
+    
+    try:
+        ear_date = datetime.strptime(ear_date_str, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+        yesterday = today - timedelta(days=1)
+        days_until = (ear_date - today).days
+        
+        # Details String
+        details_parts = []
+        if entry.get("quarter") and entry.get("year"):
+            details_parts.append(f"Q{entry['quarter']} {entry['year']}")
+        if entry.get("epsEstimate"):
+            details_parts.append(f"EPS Est: ${entry['epsEstimate']:.2f}")
+        if entry.get("revenueEstimate"):
+            rev = entry["revenueEstimate"]
+            if rev >= 1e9:
+                details_parts.append(f"Rev Est: ${rev/1e9:.1f}B")
+            elif rev >= 1e6:
+                details_parts.append(f"Rev Est: ${rev/1e6:.0f}M")
+        details = " | ".join(details_parts) if details_parts else ""
+        
+        hour_text = {"bmo": "vor Börsenöffnung", "amc": "nach Börsenschluss", "dmh": "während Handel"}.get(hour, "")
+        hour_short = {"bmo": "BMO", "amc": "AMC", "dmh": "DMH"}.get(hour, "")
+        
+        # Gestern AMC = Earnings sind GERADE passiert (Gap-Risiko heute!)
+        if ear_date == yesterday and hour == "amc":
+            return {
+                "warning": f"🚨 EARNINGS GESTERN AMC — Gap-Risiko!",
+                "level": "YESTERDAY_AMC",
+                "date": ear_date_str,
+                "hour": hour,
+                "score_penalty": -10,
+                "details": details,
+                "hour_text": "gestern nach Börsenschluss",
+            }
+        
+        # Heute
+        if ear_date == today:
+            if hour == "bmo":
+                return {
+                    "warning": f"🚨 EARNINGS HEUTE {hour_short} — {hour_text}!",
+                    "level": "TODAY_BMO",
+                    "date": ear_date_str,
+                    "hour": hour,
+                    "score_penalty": -15,
+                    "details": details,
+                    "hour_text": hour_text,
+                }
+            elif hour == "amc":
+                return {
+                    "warning": f"⛔ EARNINGS HEUTE {hour_short} — {hour_text}!",
+                    "level": "TODAY_AMC",
+                    "date": ear_date_str,
+                    "hour": hour,
+                    "score_penalty": -15,
+                    "details": details,
+                    "hour_text": hour_text,
+                }
+            else:
+                return {
+                    "warning": f"🚨 EARNINGS HEUTE!",
+                    "level": "TODAY",
+                    "date": ear_date_str,
+                    "hour": hour,
+                    "score_penalty": -15,
+                    "details": details,
+                    "hour_text": hour_text or "heute",
+                }
+        
+        # Morgen
+        if ear_date == tomorrow:
+            return {
+                "warning": f"⚠️ EARNINGS MORGEN{' '+hour_short if hour_short else ''}",
+                "level": "TOMORROW",
+                "date": ear_date_str,
+                "hour": hour,
+                "score_penalty": -10,
+                "details": details,
+                "hour_text": f"morgen {hour_text}".strip(),
+            }
+        
+        # Diese Woche (2-5 Tage)
+        if 2 <= days_until <= 5:
+            weekdays = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+            day_name = weekdays[ear_date.weekday()]
+            return {
+                "warning": f"📅 EARNINGS {day_name}{' '+hour_short if hour_short else ''} ({ear_date_str})",
+                "level": "THIS_WEEK",
+                "date": ear_date_str,
+                "hour": hour,
+                "score_penalty": -5,
+                "details": details,
+                "hour_text": f"{day_name} {hour_text}".strip(),
+            }
+        
+        # Nächste Woche (6-7 Tage) — nur Info, kein Penalty
+        if 6 <= days_until <= 7:
+            return {
+                "warning": f"📋 Earnings nächste Woche ({ear_date_str})",
+                "level": "NEXT_WEEK",
+                "date": ear_date_str,
+                "hour": hour,
+                "score_penalty": 0,
+                "details": details,
+                "hour_text": "",
+            }
+        
+        return None
+    
+    except Exception:
+        return None
+
+
+# =============================================================================
 # 4. DATA FETCHING FUNCTIONS
 # =============================================================================
 
@@ -15127,6 +15325,22 @@ with st.sidebar:
                     st.session_state.scan_results = results
                     st.session_state.market_type = "Aktien"
                     
+                    # Earnings Warning für MA Bounce Ergebnisse
+                    try:
+                        finnhub_key = st.secrets.get("FINNHUB_KEY", "")
+                        if finnhub_key and results:
+                            earnings_cal = fetch_earnings_calendar(finnhub_key, days_ahead=7)
+                            if earnings_cal:
+                                for r in results:
+                                    ear_info = check_earnings_proximity(r.get("Ticker", ""), earnings_cal)
+                                    if ear_info:
+                                        r["EarningsWarning"] = ear_info
+                                        penalty = ear_info.get("score_penalty", 0)
+                                        if penalty and "SetupScore" in r:
+                                            r["SetupScore"] = min(100, max(0, r["SetupScore"] + penalty))
+                    except Exception:
+                        pass
+                    
                     direction_text = "Support (Long)" if ma_approach == "from_above" else "Resistance (Short)"
                     status.update(label=f"✅ {len(results)} {ma_type}{ma_period} {direction_text} Setups gefunden", state="complete")
                     
@@ -15503,6 +15717,41 @@ with st.sidebar:
                         if st.session_state.get("debug_mode"):
                             st.warning(f"VP Enrichment Fehler: {e}")
                 
+                # =============================================================
+                # K4: EARNINGS WARNING ENRICHMENT
+                # Prüft ob Scan-Ergebnisse bald Earnings haben
+                # =============================================================
+                if m_type == "Aktien" and st.session_state.scan_results:
+                    try:
+                        finnhub_key = st.secrets.get("FINNHUB_KEY", "")
+                        if finnhub_key:
+                            status.update(label="📅 Prüfe Earnings Calendar...")
+                            earnings_cal = fetch_earnings_calendar(finnhub_key, days_ahead=7)
+                            
+                            if earnings_cal:
+                                earnings_found = 0
+                                for r in st.session_state.scan_results:
+                                    ticker = r.get("Ticker", "")
+                                    ear_info = check_earnings_proximity(ticker, earnings_cal)
+                                    if ear_info:
+                                        r["EarningsWarning"] = ear_info
+                                        earnings_found += 1
+                                        
+                                        # SetupScore-Penalty
+                                        penalty = ear_info.get("score_penalty", 0)
+                                        if penalty and "SetupScore" in r:
+                                            r["SetupScore"] = min(100, max(0, r["SetupScore"] + penalty))
+                                
+                                if earnings_found > 0:
+                                    # Re-sort nach Penalty
+                                    st.session_state.scan_results = sorted(
+                                        st.session_state.scan_results,
+                                        key=lambda x: x.get("SetupScore", x.get("Alpha", 0)),
+                                        reverse=True
+                                    )
+                    except Exception:
+                        pass  # Kein Finnhub Key = kein Earnings Check
+                
                 # Session-Info in Status
                 if m_type == "Futures":
                     status.update(label=f"✅ {len(st.session_state.scan_results)} Futures Signale", state="complete")
@@ -15625,6 +15874,40 @@ with tab_scanner:
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
             
+            # ── Universal Earnings Check (für Pipelines ohne K4) ──
+            if "EarningsWarning" not in df.columns and st.session_state.market_type == "Aktien":
+                try:
+                    finnhub_key = st.secrets.get("FINNHUB_KEY", "")
+                    if finnhub_key:
+                        earnings_cal = fetch_earnings_calendar(finnhub_key, days_ahead=7)
+                        if earnings_cal:
+                            for idx_e in range(len(st.session_state.scan_results)):
+                                r = st.session_state.scan_results[idx_e]
+                                ear_info = check_earnings_proximity(r.get("Ticker", ""), earnings_cal)
+                                if ear_info:
+                                    r["EarningsWarning"] = ear_info
+                                    penalty = ear_info.get("score_penalty", 0)
+                                    if penalty and "SetupScore" in r:
+                                        r["SetupScore"] = min(100, max(0, r["SetupScore"] + penalty))
+                            # DataFrame neu erstellen mit Earnings-Daten
+                            df = pd.DataFrame(st.session_state.scan_results)
+                except Exception:
+                    pass
+            
+            # Earnings-Marker als separate Spalte (Ticker nicht verändern!)
+            if "EarningsWarning" in df.columns:
+                def _earnings_flag(ear):
+                    if ear and isinstance(ear, dict):
+                        level = ear.get("level", "")
+                        if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
+                            return "⛔ER"
+                        elif level == "TOMORROW":
+                            return "⚠️ER"
+                        elif level == "THIS_WEEK":
+                            return "📅ER"
+                    return ""
+                df["ER"] = df["EarningsWarning"].apply(_earnings_flag)
+            
             # Verschiedene Spalten je nach Strategie
             if is_insider and "BuyValue" in df.columns:
                 # Insider-Anzeige
@@ -15703,6 +15986,14 @@ with tab_scanner:
             
             # Nur vorhandene Spalten anzeigen
             display_cols = [c for c in display_cols if c in df.columns]
+            
+            # Earnings-Spalte einfügen (nach Ticker, vor Preis)
+            if "ER" in df.columns and any(df["ER"] != ""):
+                if "ER" not in display_cols:
+                    # Nach Ticker einfügen
+                    idx = display_cols.index("Ticker") + 1 if "Ticker" in display_cols else 0
+                    display_cols.insert(idx, "ER")
+                    col_config["ER"] = st.column_config.TextColumn("ER", width="small")
             
             # =====================================================================
             # NAVIGATION MIT VISUELLER MARKIERUNG
@@ -15880,6 +16171,54 @@ with tab_scanner:
                                 st.caption(f"📡 Live: ${rt_price:.2f} ✓{time_info}")
                     except Exception as e:
                         pass  # Fehler ignorieren
+                
+                # ═══════════════════════════════════════════════════════
+                # ⚠️ EARNINGS WARNING — GANZ OBEN, VOR ALLEM ANDEREN!
+                # ═══════════════════════════════════════════════════════
+                if "EarningsWarning" in df.columns:
+                    try:
+                        ear_warn = row.get("EarningsWarning")
+                        if ear_warn and isinstance(ear_warn, dict):
+                            level = ear_warn.get("level", "")
+                            warning_text = ear_warn.get("warning", "")
+                            details = ear_warn.get("details", "")
+                            penalty = ear_warn.get("score_penalty", 0)
+                            
+                            # Prominente Warnung je nach Level
+                            if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
+                                st.error(f"⛔ **{warning_text}**")
+                                if details:
+                                    st.error(f"📊 {details}")
+                                if level == "TODAY_AMC":
+                                    st.error("🚫 **NICHT KAUFEN!** Earnings heute nach Börsenschluss — "
+                                            "massiver Gap-Risk morgen. Position VOR Close schliessen oder absichern!")
+                                elif level == "TODAY_BMO":
+                                    st.error("🚫 **VORSICHT!** Earnings heute vor Eröffnung — "
+                                            "Preis kann sich durch Earnings massiv verändert haben!")
+                                elif level == "YESTERDAY_AMC":
+                                    st.error("🚫 **ACHTUNG!** Earnings gestern AMC — "
+                                            "heutiger Preis enthält Earnings-Reaktion!")
+                                if penalty:
+                                    st.caption(f"SetupScore: {penalty:+d} Punkte wegen Earnings-Risiko")
+                            
+                            elif level == "TOMORROW":
+                                st.warning(f"⚠️ **{warning_text}**")
+                                if details:
+                                    st.caption(f"📊 {details}")
+                                st.warning("⚠️ Position-Sizing reduzieren oder vor Earnings schliessen!")
+                                if penalty:
+                                    st.caption(f"SetupScore: {penalty:+d} Punkte")
+                            
+                            elif level == "THIS_WEEK":
+                                st.info(f"📅 **{warning_text}**")
+                                if details:
+                                    st.caption(f"📊 {details}")
+                                st.caption("💡 Earnings diese Woche — Haltezeit berücksichtigen!")
+                            
+                            elif level == "NEXT_WEEK":
+                                st.caption(f"📋 {warning_text}")
+                    except Exception:
+                        pass
                 
                 # Insider Details anzeigen
                 if is_insider and "Transactions" in df.columns:
