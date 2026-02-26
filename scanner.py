@@ -7889,6 +7889,22 @@ def generate_ai_chart_analysis(ticker, ohlcv_data, patterns, sr_levels, fib_leve
     return analysis
 
 
+def calculate_ema_series(data, period):
+    """Berechnet EMA-Serie für eine Liste von Werten. Returns Liste gleicher Länge (None für ungenügend Daten)."""
+    if not data or period <= 0:
+        return [None] * len(data)
+    result = [None] * len(data)
+    multiplier = 2 / (period + 1)
+    # Seed: SMA der ersten 'period' Werte
+    if len(data) < period:
+        return result
+    sma = sum(data[:period]) / period
+    result[period - 1] = sma
+    for i in range(period, len(data)):
+        result[i] = (data[i] - result[i - 1]) * multiplier + result[i - 1]
+    return result
+
+
 def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=None, fib_levels=None, 
                                    ema_periods=[20, 50, 100, 200], height=500, show_volume=True,
                                    vwap_data=None, volume_voids=None, trade_zones=None, harmonic_data=None, wyckoff_data=None):
