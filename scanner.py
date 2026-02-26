@@ -11218,87 +11218,356 @@ def get_spy_pm_change(poly_key):
         return 0
 
 
-def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0):
+def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_ratio, 
+                                shares_m=0, float_cat="UNKNOWN", has_catalyst=False,
+                                pm_price=0, pm_vwap=0):
     """
-    Klassifiziert das PM Setup basierend auf Preis-Aktion + Position.
+    PM Quality Score V2 (0-100) — Wie tradeable ist dieses Setup?
     
-    Logik:
-    - pm_change > 0 + Position hoch = Momentum Long ✅
-    - pm_change > 0 + Position tief = Fading, Vorsicht ⚠️
-    - pm_change < 0 + Position tief = Schwäche, Short ✅
-    - pm_change < 0 + Position hoch = Bounced, NICHT shorten ⚠️
+    V2 Verbesserungen:
+    - PM MOMENTUM (Change - Gap) = tatsächliches PM-Kaufverhalten
+    - VWAP-Relation = institutionelle Bestätigung
+    - FADING-Widerspruch-Penalty = starker Move + schwache Position = Trap
+    - DEAD VOLUME Kill = VolR < 0.2 → Score-Cap bei 25
+    - Warning Flags für sofortige Problemerkennung
+    
+    Kombiniert:
+    1. MOVE + PM MOMENTUM (0-25) — Stärke + tatsächliche PM-Käufe
+    2. POSITION + VWAP (0-20)    — Wo in der PM Range + VWAP Bestätigung
+    3. VOLUME (0-25)             — Volume Ratio als Bestätigung
+    4. RELATIVE STRENGTH (0-15)  — RS vs SPY
+    5. CATALYST / FLOAT (0-15)   — Katalysator + Float-Kategorie
+    6. PENALTIES (-5 bis -20)    — Fading, Contradiction, Dead Volume
+    
+    Returns: (score, breakdown_dict, confidence_level)
+    """
+    score = 0
+    breakdown = {}
+    warnings = []  # Sofort sichtbare Probleme
+    is_up = pm_change > 0
+    abs_change = abs(pm_change)
+    
+    # PM Momentum = Change - Gap → wie viel ist IN der PM-Session passiert?
+    # Gap +5%, Change +5% → PM Momentum = 0% (nur Gap, kein PM-Kauf)
+    # Gap +2%, Change +5% → PM Momentum = +3% (aktives Kaufen im PM!)
+    pm_momentum = pm_change - gap_pct  # Positiv = PM-Käufe, Negativ = PM-Verkäufe
+    abs_pm_momentum = abs(pm_momentum)
+    # Momentum in die richtige Richtung? (Long: positiv, Short: negativ)
+    momentum_aligned = (is_up and pm_momentum > 0) or (not is_up and pm_momentum < 0)
+    
+    # ── 1. MOVE + PM MOMENTUM (0-25) ──
+    move_score = 0
+    
+    # Basis: Absolute Veränderung (wie vorher)
+    if abs_change >= 10:
+        move_score = 16
+    elif abs_change >= 7:
+        move_score = 14
+    elif abs_change >= 5:
+        move_score = 11
+    elif abs_change >= 3:
+        move_score = 8
+    elif abs_change >= 2:
+        move_score = 5
+    else:
+        move_score = 2
+    
+    # PM Momentum Bonus/Penalty (max ±9)
+    # Aktives Kaufen/Verkaufen im PM ist WICHTIGER als nur ein Gap
+    if momentum_aligned:
+        if abs_pm_momentum >= 3:
+            move_score += 9   # Starkes PM Buying/Selling
+        elif abs_pm_momentum >= 1.5:
+            move_score += 6
+        elif abs_pm_momentum >= 0.5:
+            move_score += 3
+        # PM Momentum < 0.5% → kein Bonus (nur Gap, kein PM-Interesse)
+    else:
+        # PM Momentum GEGEN die Richtung = Fade!
+        if abs_pm_momentum >= 2:
+            move_score -= 5   # PM verkauft den Gap ab
+            warnings.append("PM fading")
+        elif abs_pm_momentum >= 1:
+            move_score -= 3
+    
+    move_score = max(0, min(move_score, 25))
+    breakdown["move"] = round(move_score, 1)
+    breakdown["pm_momentum"] = round(pm_momentum, 2)
+    score += move_score
+    
+    # ── 2. POSITION + VWAP (0-20) ──
+    pos_score = 0
+    if is_up:
+        # Long: Position oben = stark
+        if pm_position >= 80:
+            pos_score = 16
+        elif pm_position >= 65:
+            pos_score = 13
+        elif pm_position >= 50:
+            pos_score = 8
+        elif pm_position >= 35:
+            pos_score = 3
+        else:
+            pos_score = 0   # Fading → Null
+    else:
+        # Short: Position unten = stark
+        if pm_position <= 20:
+            pos_score = 16
+        elif pm_position <= 35:
+            pos_score = 13
+        elif pm_position <= 50:
+            pos_score = 8
+        elif pm_position <= 65:
+            pos_score = 3
+        else:
+            pos_score = 0
+    
+    # VWAP Bestätigung (max +4)
+    # Preis über VWAP bei Long = institutionelle Käufer, unter VWAP bei Short = Schwäche
+    if pm_price > 0 and pm_vwap > 0:
+        vwap_dist_pct = ((pm_price - pm_vwap) / pm_vwap) * 100
+        if is_up:
+            if vwap_dist_pct >= 1.0:
+                pos_score += 4   # Deutlich über VWAP → bestätigt
+            elif vwap_dist_pct >= 0:
+                pos_score += 2   # Knapp über VWAP → OK
+            else:
+                pos_score -= 2   # Unter VWAP bei Long → Warnung
+                warnings.append("unter VWAP")
+        else:
+            if vwap_dist_pct <= -1.0:
+                pos_score += 4
+            elif vwap_dist_pct <= 0:
+                pos_score += 2
+            else:
+                pos_score -= 2
+                warnings.append("über VWAP")
+    
+    pos_score = max(0, min(pos_score, 20))
+    breakdown["position"] = round(pos_score, 1)
+    score += pos_score
+    
+    # ── 3. VOLUME QUALITÄT (0-25) — KRITISCH! ──
+    vol_score = 0
+    if vol_ratio >= 3.0:
+        vol_score = 25  # Massives Volume
+    elif vol_ratio >= 2.0:
+        vol_score = 22
+    elif vol_ratio >= 1.5:
+        vol_score = 18
+    elif vol_ratio >= 1.0:
+        vol_score = 14
+    elif vol_ratio >= 0.5:
+        vol_score = 8
+    elif vol_ratio >= 0.3:
+        vol_score = 4   # Dünn
+    elif vol_ratio >= 0.2:
+        vol_score = 2   # Sehr dünn
+        warnings.append("⚠️ dünnes Volume")
+    else:
+        vol_score = 0   # DEAD Volume
+        warnings.append("🚫 kaum Volume")
+    breakdown["volume"] = round(vol_score, 1)
+    score += vol_score
+    
+    # ── 4. RELATIVE STRENGTH (0-15) ──
+    rs_score = 0
+    if is_up:
+        if rs_vs_spy >= 5:
+            rs_score = 15
+        elif rs_vs_spy >= 3:
+            rs_score = 12
+        elif rs_vs_spy >= 1:
+            rs_score = 8
+        elif rs_vs_spy >= 0:
+            rs_score = 4
+        else:
+            rs_score = 0
+    else:
+        if rs_vs_spy <= -5:
+            rs_score = 15
+        elif rs_vs_spy <= -3:
+            rs_score = 12
+        elif rs_vs_spy <= -1:
+            rs_score = 8
+        elif rs_vs_spy <= 0:
+            rs_score = 4
+        else:
+            rs_score = 0
+    breakdown["rs"] = round(rs_score, 1)
+    score += rs_score
+    
+    # ── 5. CATALYST + FLOAT (0-15) ──
+    cat_score = 0
+    if has_catalyst:
+        cat_score += 8
+    
+    if float_cat in ("NANO", "MICRO") and abs_change >= 5:
+        cat_score += 7
+    elif float_cat in ("NANO", "MICRO"):
+        cat_score += 4
+    elif float_cat in ("SMALL",):
+        cat_score += 3
+    elif float_cat in ("MEDIUM",):
+        cat_score += 2
+    elif float_cat in ("LARGE", "MEGA"):
+        cat_score += 1
+    
+    cat_score = min(cat_score, 15)
+    breakdown["catalyst_float"] = round(cat_score, 1)
+    score += cat_score
+    
+    # ══════════════════════════════════════════════════════════
+    # ── 6. PENALTIES — Widersprüche und Killsignale ──
+    # ══════════════════════════════════════════════════════════
+    penalty = 0
+    
+    # FADING CONTRADICTION: Starker Move + schwache Position = TRAP
+    # +7% Long aber Position 25% = Leute verkaufen den Gap → gefährlich!
+    if is_up and abs_change >= 5 and pm_position < 35:
+        fading_penalty = -12
+        penalty += fading_penalty
+        warnings.append("🔻 FADING: Starker Gap wird abverkauft!")
+    elif not is_up and abs_change >= 5 and pm_position > 65:
+        fading_penalty = -12
+        penalty += fading_penalty
+        warnings.append("🔺 BOUNCE: Gap Down wird aufgekauft!")
+    
+    # STALE GAP: Gap aber kein PM Momentum = keiner interessiert sich
+    if abs_change >= 3 and abs_pm_momentum < 0.3:
+        stale_penalty = -5
+        penalty += stale_penalty
+        warnings.append("💤 Staler Gap: Kein PM-Interesse")
+    
+    # DEAD VOLUME KILL: VolR < 0.2 → Score gecapped bei 25
+    # Egal wie gut alles andere aussieht — ohne Volume ist nichts zuverlässig
+    is_dead_volume = vol_ratio < 0.2
+    
+    breakdown["penalty"] = penalty
+    score += penalty
+    
+    # ── FINAL SCORE ──
+    score = max(0, min(round(score), 100))
+    
+    # Dead Volume Cap — NACH allen Berechnungen
+    if is_dead_volume:
+        score = min(score, 25)
+        warnings.insert(0, "🚫 DEAD VOLUME — Score gecapped!")
+    
+    # Confidence Level
+    if score >= 75:
+        confidence = "🟢 HIGH"
+    elif score >= 55:
+        confidence = "🟡 MEDIUM"
+    elif score >= 35:
+        confidence = "🟠 LOW"
+    else:
+        confidence = "🔴 AVOID"
+    
+    breakdown["warnings"] = warnings
+    
+    return score, breakdown, confidence
+
+
+def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0, vol_ratio=1.0, float_cat="UNKNOWN"):
+    """
+    Klassifiziert das PM Setup basierend auf Preis-Aktion + Position + Volume.
+    
+    V2: Jetzt mit Volume Ratio und Float-Awareness:
+    - vol_ratio < 0.3 → ⚠️ THIN suffix (unzuverlässig)
+    - Low Float + >10% Move → SQUEEZE statt MOMENTUM
     
     Returns: (setup_type, setup_emoji, setup_description)
     """
     is_up = pm_change > 0
     abs_change = abs(pm_change)
     abs_gap = abs(gap_pct)
+    is_thin = vol_ratio < 0.3  # Dünnes Volume = unzuverlässig
+    is_low_float = float_cat in ("NANO", "MICRO")
+    
+    # === THIN VOLUME OVERRIDE — Bei sehr dünnem Volume Setup abstufen ===
+    # Wird am Ende angewendet, hier nur Flag setzen
     
     # === SQUEEZE / EXTREME (>10% + starke RS) — VOR dem 5% Block! ===
     if abs_change >= 10 and abs(rs_vs_spy) >= 5:
         if is_up and pm_position >= 60:
-            return ("SQUEEZE", "💥", "Extreme Move + Relative Strength = Possible Squeeze")
+            if is_low_float:
+                label = ("SQUEEZE", "💥", "Low Float Squeeze! Extreme Move + RS — Parabolic Potential")
+            else:
+                label = ("SQUEEZE", "💥", "Extreme Move + Relative Strength = Possible Squeeze")
         elif is_up and pm_position < 40:
-            return ("FADING", "⚠️", "Extreme Gap but Fading Hard — Caution!")
+            label = ("FADING", "⚠️", "Extreme Gap but Fading Hard — Caution!")
         elif not is_up and pm_position <= 40:
-            return ("CAPITULATION", "🔻", "Extreme Selling = Watch for Reversal")
+            label = ("CAPITULATION", "🔻", "Extreme Selling = Watch for Reversal")
         elif not is_up and pm_position >= 60:
-            return ("BOUNCE", "🔄", "Extreme Drop but Bounced — Wait!")
+            label = ("BOUNCE", "🔄", "Extreme Drop but Bounced — Wait!")
+        else:
+            label = ("CONTESTED", "⚔️", "Extreme Move but Indecisive — Wait!")
+        
+        if is_thin:
+            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+        return label
     
     # === STARKE MOVES (>5%) ===
     if abs_change >= 5:
         if is_up and pm_position >= 70:
-            # Up + hält oben → Momentum Long
+            if is_low_float and abs_change >= 7:
+                label = ("SQUEEZE", "💥", "Low Float + Strong Hold = Squeeze Setup")
+            elif abs_gap >= 5:
+                label = ("GAP & GO", "🚀", "Gap Up + Holding High = Momentum Long")
+            else:
+                label = ("MOMENTUM", "🚀", "Strong Move + Holding = Long Momentum")
+        elif is_up and pm_position < 40:
+            label = ("FADING", "⚠️", "Gapped Up but Fading — Caution, kein Long!")
+        elif not is_up and pm_position <= 30:
             if abs_gap >= 5:
-                return ("GAP & GO", "🚀", "Gap Up + Holding High = Momentum Long")
-            return ("MOMENTUM", "🚀", "Strong Move + Holding = Long Momentum")
-        
-        if is_up and pm_position < 40:
-            # Up aber abverkauft → Fading
-            return ("FADING", "⚠️", "Gapped Up but Fading — Caution, kein Long!")
-        
-        if not is_up and pm_position <= 30:
-            # Down + sitzt am Low → Schwäche bestätigt
-            if abs_gap >= 5:
-                return ("GAP & FADE", "📉", "Gap Down + Near Low = Short Momentum")
-            return ("WEAKNESS", "📉", "Strong Selling + Near Low = Short Setup")
-        
-        if not is_up and pm_position >= 60:
-            # Down aber hat recovert → NICHT shorten
-            return ("BOUNCE", "🔄", "Gapped Down but Bounced — Wait for Rejection!")
-        
-        # Mitte der Range bei starkem Move
-        if is_up:
-            return ("CONTESTED", "⚔️", "Strong Up but Mid-Range — Wait for Direction")
+                label = ("GAP & FADE", "📉", "Gap Down + Near Low = Short Momentum")
+            else:
+                label = ("WEAKNESS", "📉", "Strong Selling + Near Low = Short Setup")
+        elif not is_up and pm_position >= 60:
+            label = ("BOUNCE", "🔄", "Gapped Down but Bounced — Wait for Rejection!")
+        elif is_up:
+            label = ("CONTESTED", "⚔️", "Strong Up but Mid-Range — Wait for Direction")
         else:
-            return ("CONTESTED", "⚔️", "Strong Down but Mid-Range — Watch for Break")
+            label = ("CONTESTED", "⚔️", "Strong Down but Mid-Range — Watch for Break")
+        
+        if is_thin:
+            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+        return label
     
     # === MODERATE MOVES (3-5%) ===
     if 3 <= abs_change < 5:
         if is_up and pm_position >= 65:
-            return ("CONTINUATION", "📈", "Steady Uptrend — Wait for Pullback Entry")
-        if is_up and pm_position < 35:
-            return ("FADING", "⚠️", "Moderate Up but Fading — No Long Entry")
-        if not is_up and pm_position <= 35:
-            return ("CONTINUATION", "📉", "Steady Selling — Wait for Bounce or Break")
-        if not is_up and pm_position >= 65:
-            return ("RECOVERY", "🔄", "Down but Recovering — Don't Short Here")
-        # Mid-Range: 35-65% Position bei moderatem Move
-        if is_up:
-            return ("BUILDING", "📈", "Moderate Up, Mid-Range — Watch for Breakout or Fade")
+            label = ("CONTINUATION", "📈", "Steady Uptrend — Wait for Pullback Entry")
+        elif is_up and pm_position < 35:
+            label = ("FADING", "⚠️", "Moderate Up but Fading — No Long Entry")
+        elif not is_up and pm_position <= 35:
+            label = ("CONTINUATION", "📉", "Steady Selling — Wait for Bounce or Break")
+        elif not is_up and pm_position >= 65:
+            label = ("RECOVERY", "🔄", "Down but Recovering — Don't Short Here")
+        elif is_up:
+            label = ("BUILDING", "📈", "Moderate Up, Mid-Range — Watch for Breakout or Fade")
         else:
-            return ("CONTESTED", "⚔️", "Moderate Down, Mid-Range — Watch for Break or Bounce")
+            label = ("CONTESTED", "⚔️", "Moderate Down, Mid-Range — Watch for Break or Bounce")
+        
+        if is_thin:
+            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+        return label
     
     # === KLEINE MOVES (2-3%) ===
     if 2 <= abs_change < 3:
         if 35 <= pm_position <= 65:
-            return ("RANGE", "↔️", "Choppy — Wait for Direction")
-        if is_up and pm_position >= 65:
-            return ("MILD STRENGTH", "📈", "Slight Up Bias — Watch for Catalyst")
-        if not is_up and pm_position <= 35:
-            return ("MILD WEAKNESS", "📉", "Slight Down Bias — Watch for Catalyst")
-        # Fallthrough für 2-3% mit unklarer Position
-        return ("RANGE", "↔️", "Small Move — Wait for Direction")
+            label = ("RANGE", "↔️", "Choppy — Wait for Direction")
+        elif is_up and pm_position >= 65:
+            label = ("MILD STRENGTH", "📈", "Slight Up Bias — Watch for Catalyst")
+        elif not is_up and pm_position <= 35:
+            label = ("MILD WEAKNESS", "📉", "Slight Down Bias — Watch for Catalyst")
+        else:
+            label = ("RANGE", "↔️", "Small Move — Wait for Direction")
+        
+        if is_thin:
+            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+        return label
     
     # DEFAULT
     return ("WATCH", "👀", "Monitor for Setup Development")
@@ -11463,9 +11732,10 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     # ATR% Schätzung (PM Range / Preis)
                     atr_pct = (pm_range / current_price) * 100 if current_price > 0 else 5
                     
-                    # Setup Klassifizierung (mit echtem Gap!)
+                    # Setup Klassifizierung (mit echtem Gap + Volume Ratio!)
                     setup_type, setup_emoji, setup_desc = classify_pm_setup(
-                        cand["pm_change"], real_gap_pct, pm_position, rs_vs_spy, atr_pct
+                        cand["pm_change"], real_gap_pct, pm_position, rs_vs_spy, atr_pct,
+                        vol_ratio=vol_ratio
                     )
                     
                     # ============================================================
@@ -11720,6 +11990,16 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                 item["Market_Cap_M"] = details["market_cap_millions"]
                 item["Company_Name"] = details["name"]
                 
+                # Re-Classify mit Float-Info (SQUEEZE bei Low Float!)
+                setup_type, setup_emoji, setup_desc = classify_pm_setup(
+                    item["PM_Chg%"], item["Gap%"], item["PM_Position"], item["RS_vs_SPY"],
+                    item.get("ATR%", 5.0), vol_ratio=item.get("Vol_Ratio", 1.0),
+                    float_cat=item["Float_Cat"]
+                )
+                item["Setup_Type"] = setup_type
+                item["Setup_Emoji"] = setup_emoji
+                item["Setup_Desc"] = setup_desc
+                
                 # News + Katalysator-Erkennung (nur Top 10 - API intensive)
                 if i < 10:
                     news = get_ticker_news(poly_key, ticker, limit=2)
@@ -11737,11 +12017,283 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
             except Exception as e:
                 continue
         
+        # 5. QUALITY SCORE für alle Results (braucht Float + Catalysts)
+        for item in final_results:
+            has_catalyst = len(item.get("Catalysts", [])) > 0
+            pm_score, pm_breakdown, pm_confidence = calculate_pm_quality_score(
+                pm_change=item["PM_Chg%"],
+                gap_pct=item["Gap%"],
+                pm_position=item["PM_Position"],
+                rs_vs_spy=item["RS_vs_SPY"],
+                vol_ratio=item.get("Vol_Ratio", 0),
+                shares_m=item.get("Shares_M", 0),
+                float_cat=item.get("Float_Cat", "UNKNOWN"),
+                has_catalyst=has_catalyst,
+                pm_price=item.get("PM_Preis", 0),
+                pm_vwap=item.get("PM_VWAP", 0)
+            )
+            item["PM_Score"] = pm_score
+            item["PM_Breakdown"] = pm_breakdown
+            item["PM_Confidence"] = pm_confidence
+        
+        # 6. EARNINGS CHECK — Finnhub Calendar (cached 30min)
+        try:
+            finnhub_key = st.secrets.get("FINNHUB_KEY", "")
+            if finnhub_key:
+                earnings_cal = fetch_earnings_calendar(finnhub_key, days_ahead=7)
+                if earnings_cal:
+                    for item in final_results:
+                        ear_info = check_earnings_proximity(item["Ticker"], earnings_cal)
+                        if ear_info:
+                            item["EarningsWarning"] = ear_info
+                            # Score Penalty
+                            penalty = ear_info.get("score_penalty", 0)
+                            item["PM_Score"] = max(0, item["PM_Score"] + penalty)
+                            # Update Confidence nach Penalty
+                            s = item["PM_Score"]
+                            if s >= 75:
+                                item["PM_Confidence"] = "🟢 HIGH"
+                            elif s >= 55:
+                                item["PM_Confidence"] = "🟡 MEDIUM"
+                            elif s >= 35:
+                                item["PM_Confidence"] = "🟠 LOW"
+                            else:
+                                item["PM_Confidence"] = "🔴 AVOID"
+        except Exception:
+            pass  # Earnings sind optional, kein Absturz
+        
+        # 7. Sortiere nach PM_Score (statt nur Change%)
+        final_results.sort(key=lambda x: x.get("PM_Score", 0), reverse=True)
+        
         return final_results, spy_pm_change
         
     except Exception as e:
         st.error(f"PM Watchlist Fehler: {e}")
         return [], 0
+
+
+def _render_pm_item(item, direction="long"):
+    """
+    Renders a single PM watchlist item with Quality Score, Earnings Warning, and all metrics.
+    Used by both LONG and SHORT tabs to avoid code duplication.
+    """
+    is_long = direction == "long"
+    
+    with st.container():
+        # ── EARNINGS WARNING — Top of card, BEFORE everything else ──
+        ear_info = item.get("EarningsWarning")
+        if ear_info:
+            level = ear_info.get("level", "")
+            if level in ("TODAY_AMC", "TODAY_BMO", "TODAY"):
+                st.error(f"⛔ {ear_info['warning']} — {ear_info.get('details', '')}")
+            elif level == "YESTERDAY_AMC":
+                st.warning(f"🚨 {ear_info['warning']} — {ear_info.get('details', '')}")
+            elif level == "TOMORROW":
+                st.warning(f"⚠️ {ear_info['warning']} — {ear_info.get('details', '')}")
+            elif level == "THIS_WEEK":
+                st.info(f"📅 Earnings diese Woche: {ear_info.get('date', '')} — {ear_info.get('details', '')}")
+        
+        # ── Header Row ──
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col1:
+            # Ticker + Score Badge
+            pm_score = item.get("PM_Score", 0)
+            confidence = item.get("PM_Confidence", "🟡 MEDIUM")
+            
+            # Score Color
+            if pm_score >= 75:
+                score_color = "#22c55e"  # green
+            elif pm_score >= 55:
+                score_color = "#eab308"  # yellow
+            elif pm_score >= 35:
+                score_color = "#f97316"  # orange
+            else:
+                score_color = "#ef4444"  # red
+            
+            st.markdown(
+                f"## {item['Ticker']} "
+                f"<span style='background:{score_color};color:white;padding:2px 8px;border-radius:12px;"
+                f"font-size:16px;font-weight:bold;vertical-align:middle;'>{pm_score}</span>",
+                unsafe_allow_html=True
+            )
+            
+            change_color = "green" if item['PM_Chg%'] > 0 else "red"
+            sign = "+" if item['PM_Chg%'] > 0 else ""
+            st.markdown(f"**<span style='color:{change_color};font-size:24px;'>{sign}{item['PM_Chg%']:.1f}%</span>**", unsafe_allow_html=True)
+            st.caption(f"{item['Setup_Emoji']} {item['Setup_Type']}")
+            # Float Info
+            if item.get('Shares_M', 0) > 0:
+                st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
+        
+        with col2:
+            # Preis & Levels
+            vol_ratio = item.get('Vol_Ratio', 0)
+            vol_ratio_str = ""
+            if vol_ratio > 0:
+                if vol_ratio < 0.3:
+                    vol_ratio_str = f" | VolR: **⚠️ {vol_ratio:.1f}x** (DÜNN!)"
+                elif vol_ratio < 0.5:
+                    vol_ratio_str = f" | VolR: **{vol_ratio:.1f}x** (niedrig)"
+                elif vol_ratio >= 2.0:
+                    vol_ratio_str = f" | VolR: **🔥 {vol_ratio:.1f}x**"
+                else:
+                    vol_ratio_str = f" | VolR: **{vol_ratio:.1f}x**"
+            
+            st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}{vol_ratio_str}")
+            
+            if is_long:
+                st.caption(f"📊 PM High: **${item['PM_High']:.2f}** | Low: ${item['PM_Low']:.2f} | VWAP: ${item['PM_VWAP']:.2f}")
+            else:
+                st.caption(f"📊 PM High: ${item['PM_High']:.2f} | Low: **${item['PM_Low']:.2f}** | VWAP: ${item['PM_VWAP']:.2f}")
+            
+            # Gap + PM Momentum (NEU V2)
+            pm_mom = item.get("PM_Breakdown", {}).get("pm_momentum", 0)
+            if pm_mom != 0:
+                mom_sign = "+" if pm_mom > 0 else ""
+                mom_color = "green" if ((is_long and pm_mom > 0) or (not is_long and pm_mom < 0)) else "red"
+                mom_emoji = "🟢" if mom_color == "green" else "🔴"
+                st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | PM Momentum: **{mom_emoji} {mom_sign}{pm_mom:.1f}%** | RS: {item['RS_vs_SPY']:+.1f}%")
+            else:
+                st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
+            st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
+            
+            # Market Cap
+            if item.get('Market_Cap_M', 0) > 0:
+                mcap = item['Market_Cap_M']
+                if mcap >= 1000:
+                    st.caption(f"💵 MCap: ${mcap/1000:.1f}B")
+                else:
+                    st.caption(f"💵 MCap: ${mcap:.0f}M")
+        
+        with col3:
+            # Entry Signal
+            signal = item['Entry_Signal']
+            if "OR BREAK" in signal:
+                if is_long:
+                    st.success(signal)
+                else:
+                    st.error(signal)
+            elif "WATCH" in signal:
+                st.info(signal)
+            else:
+                st.warning(signal)
+            
+            # Confidence Badge
+            st.caption(f"**{confidence}**")
+            
+            # Position Meter
+            pos = item['PM_Position']
+            if is_long:
+                pos_bar = "🟩" * int(pos/10) + "⬜" * (10 - int(pos/10))
+            else:
+                filled = 10 - int(pos/10)
+                pos_bar = "⬜" * int(pos/10) + "🟥" * filled
+            st.caption(f"Position: {pos_bar} {pos:.0f}%")
+        
+        # ── WARNINGS — Sofort sichtbare Probleme ──
+        warnings_list = item.get("PM_Breakdown", {}).get("warnings", [])
+        if warnings_list:
+            warn_str = " • ".join(warnings_list)
+            st.markdown(f"<div style='background:#fef2f2;border-left:4px solid #ef4444;padding:4px 10px;margin:4px 0;border-radius:4px;font-size:13px;'>"
+                       f"⚠️ {warn_str}</div>", unsafe_allow_html=True)
+        
+        # ── Katalysator-Zeile ──
+        catalysts = item.get('Catalysts', [])
+        if catalysts:
+            cat_str = " | ".join(catalysts)
+            st.markdown(f"🎯 **Katalysator:** {cat_str}")
+        
+        # ── News Row ──
+        news_list = item.get('News', [])
+        if news_list:
+            news_text = ""
+            for n in news_list[:2]:
+                sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
+                cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
+                news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
+            if news_text:
+                st.caption(f"📰 **News:** {news_text}")
+        
+        # ── Trade Setups + Score Breakdown Expander ──
+        with st.expander(f"📐 Trade Setups — {item.get('Setup_Desc', '')}"):
+            # Score Breakdown V2
+            breakdown = item.get("PM_Breakdown", {})
+            if breakdown:
+                bc1, bc2, bc3, bc4, bc5 = st.columns(5)
+                with bc1:
+                    m_score = breakdown.get('move', 0)
+                    pm_mom = breakdown.get('pm_momentum', 0)
+                    m_label = f"Move"
+                    if abs(pm_mom) >= 0.5:
+                        m_label += f" ({pm_mom:+.1f}%)"
+                    st.metric(m_label, f"{m_score:.0f}/25")
+                with bc2:
+                    st.metric("Pos+VWAP", f"{breakdown.get('position', 0):.0f}/20")
+                with bc3:
+                    v_score = breakdown.get('volume', 0)
+                    v_label = "Volume" if v_score >= 8 else "⚠️ Volume"
+                    st.metric(v_label, f"{v_score:.0f}/25")
+                with bc4:
+                    st.metric("RS", f"{breakdown.get('rs', 0):.0f}/15")
+                with bc5:
+                    st.metric("Cat/Float", f"{breakdown.get('catalyst_float', 0):.0f}/15")
+                
+                # Penalty anzeigen (wenn vorhanden)
+                total_penalty = breakdown.get("penalty", 0)
+                if total_penalty < 0:
+                    st.caption(f"🔻 Penalty: **{total_penalty}** Punkte (Fading/Stale/Contradiction)")
+                
+                # Earnings Penalty anzeigen
+                if ear_info:
+                    penalty = ear_info.get("score_penalty", 0)
+                    st.caption(f"⚠️ Earnings Penalty: {penalty} Punkte")
+                
+                st.markdown("---")
+            
+            # Trade Setups
+            all_setups = item.get("Setups", [])
+            primary_idx = item.get("Primary_Idx", 0)
+            alt_idx = item.get("Alt_Idx", 1)
+            
+            for si, setup in enumerate(all_setups):
+                if si == primary_idx:
+                    label = "⭐ PRIMARY"
+                elif si == alt_idx:
+                    label = "🔹 ALTERNATIVE"
+                else:
+                    label = "⚪ OPTION"
+                
+                s_risk_pct = setup.get("risk_pct", 0)
+                
+                st.markdown(f"**{label}: {setup['emoji']} {setup['name']}** — {setup['desc']}")
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                with sc1:
+                    st.metric("Entry", f"${setup['entry']:.2f}")
+                with sc2:
+                    st.metric("Stop", f"${setup['stop']:.2f}")
+                with sc3:
+                    if is_long:
+                        _tp_r = (setup['tp1'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp1'] else 0
+                    else:
+                        _tp_r = (setup['entry'] - setup['tp1']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp1'] else 0
+                    st.metric(f"TP1 ({abs(_tp_r):.1f}R)", f"${setup['tp1']:.2f}")
+                with sc4:
+                    if is_long:
+                        _tp2_r = (setup['tp2'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp2'] else 0
+                    else:
+                        _tp2_r = (setup['entry'] - setup['tp2']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp2'] else 0
+                    st.metric(f"TP2 ({abs(_tp2_r):.1f}R)", f"${setup['tp2']:.2f}")
+                st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
+                
+                if si < len(all_setups) - 1:
+                    st.markdown("---")
+            
+            st.caption(f"Move Start: {item.get('Move_Time', 'N/A')}")
+            if item.get('Company_Name'):
+                st.caption(f"🏢 {item['Company_Name']}")
+        
+        st.divider()
 
 
 def display_premarket_watchlist(pm_data, spy_change=0):
@@ -11753,13 +12305,23 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         st.warning("⏳ Keine Pre-Market Mover gefunden. PM Session: 4:00-9:30 AM ET")
         return
     
-    # Header mit SPY Info
-    col_header1, col_header2 = st.columns([2, 1])
+    # Header mit SPY Info + Score Distribution
+    col_header1, col_header2, col_header3 = st.columns([2, 1, 2])
     with col_header1:
         st.success(f"📋 **{len(pm_data)} Pre-Market Setups** gefunden")
     with col_header2:
         spy_color = "🟢" if spy_change >= 0 else "🔴"
         st.info(f"SPY PM: {spy_color} {spy_change:+.2f}%")
+    with col_header3:
+        n_high = sum(1 for x in pm_data if x.get("PM_Score", 0) >= 75)
+        n_med = sum(1 for x in pm_data if 55 <= x.get("PM_Score", 0) < 75)
+        n_low = sum(1 for x in pm_data if 35 <= x.get("PM_Score", 0) < 55)
+        n_avoid = sum(1 for x in pm_data if x.get("PM_Score", 0) < 35)
+        n_earn = sum(1 for x in pm_data if x.get("EarningsWarning"))
+        score_str = f"🟢{n_high} 🟡{n_med} 🟠{n_low} 🔴{n_avoid}"
+        if n_earn > 0:
+            score_str += f" | ⚠️ER:{n_earn}"
+        st.caption(f"**Scores:** {score_str}")
     
     # Auto-Save Setups für Tracker
     if not st.session_state.get("_pm_setups_saved_today"):
@@ -11778,105 +12340,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
     with tab_long:
         if long_candidates:
             for item in long_candidates[:12]:
-                with st.container():
-                    # Header Row
-                    col1, col2, col3 = st.columns([1, 2, 1])
-                    
-                    with col1:
-                        st.markdown(f"## {item['Ticker']}")
-                        change_color = "green" if item['PM_Chg%'] > 0 else "red"
-                        st.markdown(f"**<span style='color:{change_color};font-size:24px;'>+{item['PM_Chg%']:.1f}%</span>**", unsafe_allow_html=True)
-                        st.caption(f"{item['Setup_Emoji']} {item['Setup_Type']}")
-                        # Float Info
-                        if item.get('Shares_M', 0) > 0:
-                            st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
-                    
-                    with col2:
-                        # Preis & Levels
-                        vol_ratio_str = f" | VolR: **{item.get('Vol_Ratio', 0):.1f}x**" if item.get('Vol_Ratio', 0) > 0 else ""
-                        st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}{vol_ratio_str}")
-                        st.caption(f"📊 PM High: **${item['PM_High']:.2f}** | Low: ${item['PM_Low']:.2f} | VWAP: ${item['PM_VWAP']:.2f}")
-                        st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
-                        st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
-                        # Market Cap
-                        if item.get('Market_Cap_M', 0) > 0:
-                            mcap = item['Market_Cap_M']
-                            if mcap >= 1000:
-                                st.caption(f"💵 MCap: ${mcap/1000:.1f}B")
-                            else:
-                                st.caption(f"💵 MCap: ${mcap:.0f}M")
-                    
-                    with col3:
-                        # Entry Signal
-                        signal = item['Entry_Signal']
-                        if "OR BREAK" in signal:
-                            st.success(signal)
-                        elif "WATCH" in signal:
-                            st.info(signal)
-                        else:
-                            st.warning(signal)
-                        
-                        # Position Meter
-                        pos = item['PM_Position']
-                        pos_bar = "🟩" * int(pos/10) + "⬜" * (10 - int(pos/10))
-                        st.caption(f"Position: {pos_bar} {pos:.0f}%")
-                    
-                    # Katalysator-Zeile (wenn erkannt)
-                    catalysts = item.get('Catalysts', [])
-                    if catalysts:
-                        cat_str = " | ".join(catalysts)
-                        st.markdown(f"🎯 **Katalysator:** {cat_str}")
-                    
-                    # News Row (wenn vorhanden)
-                    news_list = item.get('News', [])
-                    if news_list:
-                        news_text = ""
-                        for n in news_list[:2]:
-                            sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
-                            cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
-                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
-                        if news_text:
-                            st.caption(f"📰 **News:** {news_text}")
-                    
-                    # Risk Management Row
-                    with st.expander(f"📐 Trade Setups — {item.get('Setup_Desc', '')}"):
-                        all_setups = item.get("Setups", [])
-                        primary_idx = item.get("Primary_Idx", 0)
-                        alt_idx = item.get("Alt_Idx", 1)
-                        
-                        for si, setup in enumerate(all_setups):
-                            if si == primary_idx:
-                                label = "⭐ PRIMARY"
-                            elif si == alt_idx:
-                                label = "🔹 ALTERNATIVE"
-                            else:
-                                label = "⚪ OPTION"
-                            
-                            s_risk_pct = setup.get("risk_pct", 0)
-                            rr_ratio = f"1:{setup['risk']:.2f}" if setup.get('risk', 0) > 0 else ""
-                            
-                            st.markdown(f"**{label}: {setup['emoji']} {setup['name']}** — {setup['desc']}")
-                            sc1, sc2, sc3, sc4 = st.columns(4)
-                            with sc1:
-                                st.metric("Entry", f"${setup['entry']:.2f}")
-                            with sc2:
-                                st.metric("Stop", f"${setup['stop']:.2f}")
-                            with sc3:
-                                _tp1_r = (setup['tp1'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp1'] else 0
-                                st.metric(f"TP1 ({abs(_tp1_r):.1f}R)", f"${setup['tp1']:.2f}")
-                            with sc4:
-                                _tp2_r = (setup['tp2'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp2'] else 0
-                                st.metric(f"TP2 ({abs(_tp2_r):.1f}R)", f"${setup['tp2']:.2f}")
-                            st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
-                            
-                            if si < len(all_setups) - 1:
-                                st.markdown("---")
-                        
-                        st.caption(f"Move Start: {item.get('Move_Time', 'N/A')}")
-                        if item.get('Company_Name'):
-                            st.caption(f"🏢 {item['Company_Name']}")
-                    
-                    st.divider()
+                _render_pm_item(item, direction="long")
         else:
             st.info("Keine Long Kandidaten im PM")
     
@@ -11884,98 +12348,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
     with tab_short:
         if short_candidates:
             for item in short_candidates[:12]:
-                with st.container():
-                    col1, col2, col3 = st.columns([1, 2, 1])
-                    
-                    with col1:
-                        st.markdown(f"## {item['Ticker']}")
-                        st.markdown(f"**<span style='color:red;font-size:24px;'>{item['PM_Chg%']:.1f}%</span>**", unsafe_allow_html=True)
-                        st.caption(f"{item['Setup_Emoji']} {item['Setup_Type']}")
-                        # Float Info
-                        if item.get('Shares_M', 0) > 0:
-                            st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
-                    
-                    with col2:
-                        vol_ratio_str = f" | VolR: **{item.get('Vol_Ratio', 0):.1f}x**" if item.get('Vol_Ratio', 0) > 0 else ""
-                        st.markdown(f"**💰 ${item['PM_Preis']:.2f}** | Vol: {item['PM_Vol']:,.0f}{vol_ratio_str}")
-                        st.caption(f"📊 PM High: ${item['PM_High']:.2f} | Low: **${item['PM_Low']:.2f}** | VWAP: ${item['PM_VWAP']:.2f}")
-                        st.caption(f"📈 Gap: {item['Gap%']:+.1f}% | RS vs SPY: {item['RS_vs_SPY']:+.1f}%")
-                        st.caption(f"📉 PDH: ${item['PDH']:.2f} | PDL: ${item['PDL']:.2f}")
-                        # Market Cap
-                        if item.get('Market_Cap_M', 0) > 0:
-                            mcap = item['Market_Cap_M']
-                            if mcap >= 1000:
-                                st.caption(f"💵 MCap: ${mcap/1000:.1f}B")
-                            else:
-                                st.caption(f"💵 MCap: ${mcap:.0f}M")
-                    
-                    with col3:
-                        signal = item['Entry_Signal']
-                        if "OR BREAK" in signal:
-                            st.error(signal)  # Rot für Short Breakdown
-                        elif "WATCH" in signal:
-                            st.info(signal)
-                        else:
-                            st.warning(signal)
-                        
-                        pos = item['PM_Position']
-                        pos_bar = "🟥" * int(pos/10) + "⬜" * (10 - int(pos/10))
-                        st.caption(f"Position: {pos_bar} {pos:.0f}%")
-                    
-                    # Katalysator-Zeile (wenn erkannt)
-                    catalysts = item.get('Catalysts', [])
-                    if catalysts:
-                        cat_str = " | ".join(catalysts)
-                        st.markdown(f"🎯 **Katalysator:** {cat_str}")
-                    
-                    # News Row (wenn vorhanden)
-                    news_list = item.get('News', [])
-                    if news_list:
-                        news_text = ""
-                        for n in news_list[:2]:
-                            sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
-                            cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
-                            news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
-                        if news_text:
-                            st.caption(f"📰 **News:** {news_text}")
-                    
-                    with st.expander(f"📐 Trade Setups — {item.get('Setup_Desc', '')}"):
-                        all_setups = item.get("Setups", [])
-                        primary_idx = item.get("Primary_Idx", 0)
-                        alt_idx = item.get("Alt_Idx", 1)
-                        
-                        for si, setup in enumerate(all_setups):
-                            if si == primary_idx:
-                                label = "⭐ PRIMARY"
-                            elif si == alt_idx:
-                                label = "🔹 ALTERNATIVE"
-                            else:
-                                label = "⚪ OPTION"
-                            
-                            s_risk_pct = setup.get("risk_pct", 0)
-                            
-                            st.markdown(f"**{label}: {setup['emoji']} {setup['name']}** — {setup['desc']}")
-                            sc1, sc2, sc3, sc4 = st.columns(4)
-                            with sc1:
-                                st.metric("Entry", f"${setup['entry']:.2f}")
-                            with sc2:
-                                st.metric("Stop", f"${setup['stop']:.2f}")
-                            with sc3:
-                                _tp1_r = (setup['tp1'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp1'] else 0
-                                st.metric(f"TP1 ({abs(_tp1_r):.1f}R)", f"${setup['tp1']:.2f}")
-                            with sc4:
-                                _tp2_r = (setup['tp2'] - setup['entry']) / setup['risk'] if setup.get('risk', 0) > 0 and setup['entry'] != setup['tp2'] else 0
-                                st.metric(f"TP2 ({abs(_tp2_r):.1f}R)", f"${setup['tp2']:.2f}")
-                            st.caption(f"Risk: ${setup['risk']:.2f} ({s_risk_pct:.1f}%)")
-                            
-                            if si < len(all_setups) - 1:
-                                st.markdown("---")
-                        
-                        st.caption(f"Move Start: {item.get('Move_Time', 'N/A')}")
-                        if item.get('Company_Name'):
-                            st.caption(f"🏢 {item['Company_Name']}")
-                    
-                    st.divider()
+                _render_pm_item(item, direction="short")
         else:
             st.info("Keine Short Kandidaten im PM")
     
@@ -11984,14 +12357,16 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         import pandas as pd
         df = pd.DataFrame(pm_data)
         
-        # Spalten für Anzeige (erweitert mit Float + Vol Ratio)
-        display_cols = ["Ticker", "PM_Chg%", "PM_Preis", "PM_High", "PM_Low", "Gap%", "Vol_Ratio", "RS_vs_SPY", "Shares_M", "Float_Cat", "Setup_Type", "Entry_Signal"]
+        # Spalten für Anzeige (erweitert mit Score + Confidence)
+        display_cols = ["Ticker", "PM_Score", "PM_Confidence", "PM_Chg%", "PM_Preis", "PM_High", "PM_Low", "Gap%", "Vol_Ratio", "RS_vs_SPY", "Shares_M", "Float_Cat", "Setup_Type", "Entry_Signal"]
         available_cols = [col for col in display_cols if col in df.columns]
         if available_cols:
             st.dataframe(
                 df[available_cols],
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker"),
+                    "PM_Score": st.column_config.ProgressColumn("Score", format="%d", min_value=0, max_value=100),
+                    "PM_Confidence": st.column_config.TextColumn("Conf.", help="🟢HIGH 🟡MED 🟠LOW 🔴AVOID"),
                     "PM_Chg%": st.column_config.NumberColumn("PM Chg%", format="%.1f%%"),
                     "PM_Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
                     "PM_High": st.column_config.NumberColumn("PM High", format="$%.2f"),
