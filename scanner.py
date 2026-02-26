@@ -16230,21 +16230,8 @@ with tab_scanner:
     with col_journal:
         st.subheader("📋 Ergebnisse")
         if st.session_state.current_strategy:
-            # Session-Info für Aktien
-            if st.session_state.market_type == "Aktien":
-                session = st.session_state.get("active_trading_session", "Regular")
-                session_emoji = {
-                    "Regular": "🟢",
-                    "Pre-Market": "🌅",
-                    "After-Hours": "🌙",
-                    "Extended": "📊"
-                }
-                st.caption(f"{st.session_state.current_strategy} | {st.session_state.market_type} | {session_emoji.get(session, '')} {session}")
-                
-                # Info: Realtime mit Polygon Paid
-                st.caption("📡 Mit Polygon Starter: **Realtime** | Free: ~15min verzögert")
-            else:
-                st.caption(f"{st.session_state.current_strategy} | {st.session_state.market_type} | 24/7")
+            session = st.session_state.get("active_trading_session", "Regular") if st.session_state.market_type == "Aktien" else "24/7"
+            st.caption(f"{st.session_state.current_strategy} | {session}")
         
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
@@ -16283,209 +16270,142 @@ with tab_scanner:
                     return ""
                 df["ER"] = df["EarningsWarning"].apply(_earnings_flag)
             
-            # Verschiedene Spalten je nach Strategie
-            if is_insider and "BuyValue" in df.columns:
-                # Insider-Anzeige
-                display_cols = ["Ticker", "BuyCount", "BuyValue", "SellCount", "SellValue"]
-                col_config = {
-                    "BuyCount": st.column_config.NumberColumn("🟢 Käufe", format="%d"),
-                    "BuyValue": st.column_config.NumberColumn("🟢 Wert", format="$%,.0f"),
-                    "SellCount": st.column_config.NumberColumn("🔴 Verkäufe", format="%d"),
-                    "SellValue": st.column_config.NumberColumn("🔴 Wert", format="$%,.0f"),
-                }
-            elif is_volume_void and "VoidScore" in df.columns:
-                # Volume Void Anzeige
-                display_cols = ["Ticker", "Preis", "VoidScore", "VoidDist%", "VoidSize%"]
-                col_config = {
-                    "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
-                    "VoidScore": st.column_config.NumberColumn("🕳️ Score", format="%d"),
-                    "VoidDist%": st.column_config.NumberColumn("Dist%", format="%.1f%%"),
-                    "VoidSize%": st.column_config.NumberColumn("Size%", format="%.1f%%"),
-                }
-            elif "WyckoffPhase" in df.columns:
-                # Wyckoff Pattern Anzeige 🏦
-                display_cols = ["Ticker", "Name", "Preis", "WyckoffPhase", "WyckoffScore", "Entry", "StopLoss", "TP1", "RiskReward"]
-                col_config = {
-                    "Name": st.column_config.TextColumn("🏦 Type"),
-                    "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
-                    "WyckoffPhase": st.column_config.TextColumn("Phase"),
-                    "WyckoffScore": st.column_config.NumberColumn("Score", format="%d"),
-                    "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
-                    "StopLoss": st.column_config.NumberColumn("SL", format="$%.2f"),
-                    "TP1": st.column_config.NumberColumn("TP1", format="$%.2f"),
-                    "RiskReward": st.column_config.NumberColumn("R:R", format="%.1f"),
-                }
-            elif "Pattern" in df.columns and "RiskReward" in df.columns:
-                # Harmonic Pattern Anzeige 🦋
-                display_cols = ["Ticker", "Pattern", "Direction", "Entry", "StopLoss", "TP1", "RiskReward"]
-                col_config = {
-                    "Pattern": st.column_config.TextColumn("🦋 Pattern"),
-                    "Direction": st.column_config.TextColumn("📈"),
-                    "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
-                    "StopLoss": st.column_config.NumberColumn("SL", format="$%.2f"),
-                    "TP1": st.column_config.NumberColumn("TP1", format="$%.2f"),
-                    "RiskReward": st.column_config.NumberColumn("R:R", format="%.1f"),
-                }
-            elif st.session_state.market_type == "Futures" and "Name" in df.columns:
-                # Futures Anzeige
-                display_cols = ["Ticker", "Name", "Preis", "Chg%", "Alpha"]
-                col_config = {
-                    "Preis": st.column_config.NumberColumn("Preis", format="%.2f"),
-                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
-                }
-            elif st.session_state.market_type == "Forex" and "Pips" in df.columns:
-                # Forex Anzeige mit Pips
-                display_cols = ["Ticker", "Preis", "Chg%", "Pips", "Alpha"]
-                col_config = {
-                    "Preis": st.column_config.NumberColumn("Preis", format="%.5f"),
-                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.3f%%"),
-                    "Pips": st.column_config.NumberColumn("Pips", format="%.1f"),
-                    "Alpha": st.column_config.NumberColumn("Alpha", format="%.0f⭐"),
-                }
-            elif st.session_state.market_type == "Krypto" and "Name" in df.columns:
-                display_cols = ["Ticker", "Name", "Preis", "Chg%", "SetupScore"]
-                col_config = {
-                    "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
-                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-                    "SetupScore": st.column_config.ProgressColumn("Setup", min_value=0, max_value=100, format="%d"),
-                }
-            else:
-                display_cols = ["Ticker", "Preis", "Chg%", "RVOL", "SetupScore"]
-                col_config = {
-                    "Preis": st.column_config.NumberColumn("Preis", format="$%.4f"),
-                    "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-                    "RVOL": st.column_config.NumberColumn("RVOL", format="%.1fx"),
-                    "SetupScore": st.column_config.ProgressColumn("Setup", min_value=0, max_value=100, format="%d"),
-                }
-            
-            # Nur vorhandene Spalten anzeigen
-            display_cols = [c for c in display_cols if c in df.columns]
-            
-            # Earnings-Spalte einfügen (nach Ticker, vor Preis)
-            if "ER" in df.columns and any(df["ER"] != ""):
-                if "ER" not in display_cols:
-                    # Nach Ticker einfügen
-                    idx = display_cols.index("Ticker") + 1 if "Ticker" in display_cols else 0
-                    display_cols.insert(idx, "ER")
-                    col_config["ER"] = st.column_config.TextColumn("ER", width="small")
-            
             # =====================================================================
-            # NAVIGATION MIT VISUELLER MARKIERUNG
+            # KOMPAKTE TICKER-LISTE mit Hervorhebung
             # =====================================================================
             num_results = len(df)
             current_idx = st.session_state.selected_row_index
             
-            # Begrenze Index auf gültige Werte
+            # Begrenze Index
             if current_idx >= num_results:
                 current_idx = max(0, num_results - 1)
                 st.session_state.selected_row_index = current_idx
             
-            # =====================================================================
-            # KEYBOARD NAVIGATION (W/E Tasten)
-            # =====================================================================
-            # Methode 1: Verstecktes HTML Component für Keyboard Events
+            # Keyboard Navigation (W/E)
             from streamlit.components.v1 import html
-            
             keyboard_html = f"""
-            <div id="keyboard-nav-container" style="height:0;overflow:hidden;">
+            <div style="height:0;overflow:hidden;">
                 <script>
-                    // Keyboard Navigation für Alpha Station
                     (function() {{
-                        var currentIdx = {current_idx};
-                        var maxIdx = {num_results - 1};
-                        
-                        function findAndClickButton(searchText) {{
-                            // Suche im Parent-Dokument (Streamlit App)
-                            var doc = window.parent.document;
-                            var buttons = doc.querySelectorAll('button');
-                            for (var i = 0; i < buttons.length; i++) {{
-                                var btn = buttons[i];
-                                var text = (btn.textContent || btn.innerText || '').toLowerCase();
-                                if (text.includes(searchText.toLowerCase())) {{
-                                    btn.click();
-                                    return true;
-                                }}
+                        var currentIdx = {current_idx}, maxIdx = {num_results - 1};
+                        function clickBtn(text) {{
+                            var btns = window.parent.document.querySelectorAll('button');
+                            for (var i = 0; i < btns.length; i++) {{
+                                if ((btns[i].textContent||'').toLowerCase().includes(text)) {{ btns[i].click(); return; }}
                             }}
-                            return false;
                         }}
-                        
-                        function handleKeyDown(e) {{
-                            // Prüfe ob Input fokussiert
-                            var activeEl = window.parent.document.activeElement;
-                            var tag = activeEl ? activeEl.tagName.toLowerCase() : '';
+                        function onKey(e) {{
+                            var tag = ((window.parent.document.activeElement||{{}}).tagName||'').toLowerCase();
                             if (tag === 'input' || tag === 'textarea') return;
-                            
-                            var key = e.key.toLowerCase();
-                            
-                            if ((key === 'w' || key === 'arrowup') && currentIdx > 0) {{
-                                e.preventDefault();
-                                findAndClickButton('vorherige');
-                            }}
-                            
-                            if ((key === 'e' || key === 'arrowdown') && currentIdx < maxIdx) {{
-                                e.preventDefault();
-                                findAndClickButton('nächste');
-                            }}
+                            var k = e.key.toLowerCase();
+                            if ((k==='w'||k==='arrowup') && currentIdx > 0) {{ e.preventDefault(); clickBtn('⬆'); }}
+                            if ((k==='e'||k==='arrowdown') && currentIdx < maxIdx) {{ e.preventDefault(); clickBtn('⬇'); }}
                         }}
-                        
-                        // Event Listener auf Parent-Dokument
-                        try {{
-                            window.parent.document.removeEventListener('keydown', window.parent.alphaKeyHandler);
-                            window.parent.alphaKeyHandler = handleKeyDown;
-                            window.parent.document.addEventListener('keydown', handleKeyDown);
-                        }} catch(err) {{
-                            // Fallback: Listener auf dieses Dokument
-                            document.addEventListener('keydown', handleKeyDown);
-                        }}
+                        try {{ window.parent.document.removeEventListener('keydown', window.parent._alphaNav);
+                               window.parent._alphaNav = onKey;
+                               window.parent.document.addEventListener('keydown', onKey);
+                        }} catch(err) {{ document.addEventListener('keydown', onKey); }}
                     }})();
                 </script>
             </div>
             """
             html(keyboard_html, height=0)
             
-            # Navigation Buttons mit eindeutigen Keys
-            nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
-            with nav_col1:
-                prev_disabled = current_idx <= 0
-                if st.button("⬆️ Vorherige (W)", key="nav_prev_btn", disabled=prev_disabled, use_container_width=True):
+            # Navigation: ⬆ #X/Y ⬇
+            nc1, nc2, nc3 = st.columns([1, 2, 1])
+            with nc1:
+                if st.button("⬆️", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
                     st.rerun()
-            with nav_col2:
-                next_disabled = current_idx >= num_results - 1
-                if st.button("⬇️ Nächste (E)", key="nav_next_btn", disabled=next_disabled, use_container_width=True):
+            with nc2:
+                st.markdown(f"<div style='text-align:center;padding:4px 0;font-weight:bold;'>#{current_idx + 1} / {num_results}</div>", unsafe_allow_html=True)
+            with nc3:
+                if st.button("⬇️", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
                     st.rerun()
-            with nav_col3:
-                st.markdown(f"**#{current_idx + 1}** / {num_results}")
             
-            st.caption("💡 Tastatur: **W** oder **↑** = Vorherige | **E** oder **↓** = Nächste")
+            # ── Kompaktes Dataframe: ▶ Ticker ER Chg% ──
+            # Earnings flags
+            er_col = [""] * num_results
+            if "EarningsWarning" in df.columns:
+                for i_e in range(num_results):
+                    ear = df.iloc[i_e].get("EarningsWarning")
+                    if ear and isinstance(ear, dict):
+                        level = ear.get("level", "")
+                        if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
+                            er_col[i_e] = "⛔"
+                        elif level == "TOMORROW":
+                            er_col[i_e] = "⚠️"
+                        elif level == "THIS_WEEK":
+                            er_col[i_e] = "📅"
             
-            # Erstelle Kopie des DataFrames mit visueller Markierung
-            df_display = df[display_cols].copy()
+            # Marker für ausgewählte Zeile
+            markers = [""] * num_results
+            markers[current_idx] = "▶"
             
-            # Füge Marker-Spalte hinzu (→ für aktuelle Zeile)
-            markers = [""] * len(df_display)
-            markers[current_idx] = "→"
-            df_display.insert(0, "▶", markers)
+            # Kompakt-DataFrame bauen
+            compact_data = {
+                "": markers,
+                "Ticker": df["Ticker"].tolist(),
+            }
+            # ER nur wenn mindestens 1 Earnings
+            has_er = any(e != "" for e in er_col)
+            if has_er:
+                compact_data["ER"] = er_col
             
-            # Dataframe anzeigen (ohne selection_mode für bessere Kompatibilität)
+            # Chg% 
+            if "Chg%" in df.columns:
+                compact_data["Chg%"] = [f"{v:+.1f}%" if isinstance(v, (int, float)) else str(v) for v in df["Chg%"].tolist()]
+            
+            # Score/RVOL als kompakte Spalte
+            score_col = []
+            score_label = "Score"
+            if "SetupScore" in df.columns:
+                score_col = df["SetupScore"].tolist()
+                score_label = "S"
+            elif "RVOL" in df.columns:
+                score_col = [f"{v:.1f}x" if isinstance(v, (int, float)) and v > 0 else "" for v in df["RVOL"].tolist()]
+                score_label = "RV"
+            elif "VoidScore" in df.columns:
+                score_col = df["VoidScore"].tolist()
+                score_label = "VS"
+            elif "Alpha" in df.columns:
+                score_col = df["Alpha"].tolist()
+                score_label = "α"
+            
+            if score_col:
+                compact_data[score_label] = score_col
+            
+            df_compact = pd.DataFrame(compact_data)
+            
+            # Kompakte Anzeige
+            compact_config = {
+                "": st.column_config.TextColumn("", width="small"),
+                "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+                "Chg%": st.column_config.TextColumn("%", width="small"),
+            }
+            if has_er:
+                compact_config["ER"] = st.column_config.TextColumn("ER", width="small")
+            if score_col:
+                if score_label == "S":
+                    compact_config[score_label] = st.column_config.ProgressColumn(score_label, min_value=0, max_value=100, format="%d", width="small")
+                else:
+                    compact_config[score_label] = st.column_config.TextColumn(score_label, width="small")
+            
+            list_height = min(500, max(120, num_results * 35 + 38))
+            
             sel = st.dataframe(
-                df_display, 
-                on_select="rerun", 
+                df_compact,
+                on_select="rerun",
                 selection_mode="single-row",
-                hide_index=True, 
+                hide_index=True,
                 use_container_width=True,
-                column_config={
-                    "▶": st.column_config.TextColumn("", width="small"),
-                    **col_config
-                }
+                height=list_height,
+                column_config=compact_config
             )
             
             # Auswahl verarbeiten
-            selected_row_idx = current_idx  # Default: aktuelle Navigation
-            
-            # Bei Klick auf Dataframe: überschreibe mit geklickter Zeile
+            selected_row_idx = current_idx
             if sel.selection and sel.selection.rows:
                 clicked_idx = sel.selection.rows[0]
                 if clicked_idx != current_idx:
