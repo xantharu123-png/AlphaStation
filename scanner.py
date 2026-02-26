@@ -16353,11 +16353,7 @@ with tab_scanner:
                         elif level == "THIS_WEEK":
                             er_col[i_e] = "📅"
             
-            markers = [""] * num_results
-            markers[current_idx] = "▶"
-            
             compact_data = {
-                "": markers,
                 "Ticker": df["Ticker"].tolist(),
             }
             has_er = any(e != "" for e in er_col)
@@ -16373,7 +16369,6 @@ with tab_scanner:
             df_compact = pd.DataFrame(compact_data)
             
             compact_config = {
-                "": st.column_config.TextColumn("", width="small"),
                 "Ticker": st.column_config.TextColumn("Ticker", width="small"),
                 "%": st.column_config.TextColumn("%", width="small"),
             }
