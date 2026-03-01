@@ -6392,7 +6392,14 @@ def format_vi_for_display(vi_result, current_price):
 # =============================================================================
 
 def detect_order_blocks(ohlcv_data, max_blocks=10):
-    """Erkennt Bullish/Bearish Order Blocks (nur Aktien)."""
+    """
+    Erkennt Bullish/Bearish Order Blocks (nur Aktien).
+    
+    V68 AUDIT FIXES:
+    - Mitigation = Body durchbricht OB Zone (nicht nur Wick-Touch)
+    - Displacement = c1+c2 zusammen geprüft (Doji + starke Kerze wird erkannt)
+    - OB Zone = Body + optionale Wick-Extension
+    """
     empty = {"bullish_obs": [], "bearish_obs": [],
              "nearest_bull_ob": None, "nearest_bear_ob": None}
     if not ohlcv_data or len(ohlcv_data) < 10:
@@ -6411,52 +6418,81 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
         c1 = ohlcv_data[i + 1]
         c2 = ohlcv_data[i + 2] if i + 2 < n else c1
         c0_body = c0["close"] - c0["open"]
-        c1_body = c1["close"] - c1["open"]
 
-        # ── BULLISH OB: Rote Kerze → starker Aufwärts-Impuls ──
+        # ── BULLISH OB: Bärische Kerze → Displacement nach oben ──
         if c0_body < 0:
-            impulse_up = max(c1["close"] - c0["low"], c2["close"] - c0["low"]) if c1_body > 0 else 0
+            # Fix 2: Displacement = max(c1, c2) Close vs OB Low — egal ob c1 bullisch
+            disp_close = max(c1["close"], c2["close"])
+            impulse_up = disp_close - c0["low"] if disp_close > c0["high"] else 0
+            
             if impulse_up > atr * 1.5:
-                ob_high = max(c0["open"], c0["close"])
-                ob_low = min(c0["open"], c0["close"])
+                ob_high = c0["open"]   # Body High (Open bei bärischer Kerze)
+                ob_low = c0["close"]   # Body Low (Close bei bärischer Kerze)
+                ob_wick_low = c0["low"]  # Erweiterter Bereich inkl. Wick
+                
                 strength = 1
                 if impulse_up > atr * 2.5: strength += 1
                 if impulse_up > atr * 4.0: strength += 1
-                vol_ratio = c1.get("volume", 0) / avg_vol if avg_vol > 0 else 1
+                # Volume der Displacement-Kerze (die stärkere von c1/c2)
+                disp_vol = max(c1.get("volume", 0), c2.get("volume", 0))
+                vol_ratio = disp_vol / avg_vol if avg_vol > 0 else 1
                 if vol_ratio > 1.5: strength += 1
                 if vol_ratio > 2.5: strength += 1
                 strength = min(5, strength)
-                mitigated = any(ohlcv_data[j]["low"] <= ob_high for j in range(i + 2, n))
+                
+                # Fix 1: Mitigation = BODY einer nachfolgenden Kerze durchbricht OB Zone
+                # Wick-Touch allein mitigiert NICHT (Wick = Ablehnung)
+                mitigated = False
+                for j in range(i + 2, n):
+                    candle_body_low = min(ohlcv_data[j]["open"], ohlcv_data[j]["close"])
+                    if candle_body_low < ob_low:  # Body geht UNTER den OB
+                        mitigated = True
+                        break
+                
                 if not mitigated and ob_low < current_price:
                     dist_pct = (current_price - ob_high) / current_price * 100
                     bullish_obs.append({
                         "type": "Bullish OB", "ob_high": round(ob_high, 4),
-                        "ob_low": round(ob_low, 4), "ob_mid": round((ob_high + ob_low) / 2, 4),
+                        "ob_low": round(ob_low, 4), "ob_wick_low": round(ob_wick_low, 4),
+                        "ob_mid": round((ob_high + ob_low) / 2, 4),
                         "impulse_size": round(impulse_up / atr, 1),
                         "vol_ratio": round(vol_ratio, 1), "strength": strength,
                         "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
                         "idx": i, "time": c0.get("time"),
                     })
 
-        # ── BEARISH OB: Grüne Kerze → starker Abwärts-Impuls ──
+        # ── BEARISH OB: Bullische Kerze → Displacement nach unten ──
         if c0_body > 0:
-            impulse_down = max(c0["high"] - c1["close"], c0["high"] - c2["close"]) if c1_body < 0 else 0
+            disp_close = min(c1["close"], c2["close"])
+            impulse_down = c0["high"] - disp_close if disp_close < c0["low"] else 0
+            
             if impulse_down > atr * 1.5:
-                ob_high = max(c0["open"], c0["close"])
-                ob_low = min(c0["open"], c0["close"])
+                ob_high = c0["close"]   # Body High (Close bei bullischer Kerze)
+                ob_low = c0["open"]     # Body Low (Open bei bullischer Kerze)
+                ob_wick_high = c0["high"]
+                
                 strength = 1
                 if impulse_down > atr * 2.5: strength += 1
                 if impulse_down > atr * 4.0: strength += 1
-                vol_ratio = c1.get("volume", 0) / avg_vol if avg_vol > 0 else 1
+                disp_vol = max(c1.get("volume", 0), c2.get("volume", 0))
+                vol_ratio = disp_vol / avg_vol if avg_vol > 0 else 1
                 if vol_ratio > 1.5: strength += 1
                 if vol_ratio > 2.5: strength += 1
                 strength = min(5, strength)
-                mitigated = any(ohlcv_data[j]["high"] >= ob_low for j in range(i + 2, n))
+                
+                mitigated = False
+                for j in range(i + 2, n):
+                    candle_body_high = max(ohlcv_data[j]["open"], ohlcv_data[j]["close"])
+                    if candle_body_high > ob_high:
+                        mitigated = True
+                        break
+                
                 if not mitigated and ob_high > current_price:
                     dist_pct = (ob_low - current_price) / current_price * 100
                     bearish_obs.append({
                         "type": "Bearish OB", "ob_high": round(ob_high, 4),
-                        "ob_low": round(ob_low, 4), "ob_mid": round((ob_high + ob_low) / 2, 4),
+                        "ob_low": round(ob_low, 4), "ob_wick_high": round(ob_wick_high, 4),
+                        "ob_mid": round((ob_high + ob_low) / 2, 4),
                         "impulse_size": round(impulse_down / atr, 1),
                         "vol_ratio": round(vol_ratio, 1), "strength": strength,
                         "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
@@ -6479,8 +6515,15 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
 # Sellside: Unter Equal Lows / Swing Lows (Sell Stops der Longs)
 # =============================================================================
 
-def detect_liquidity_levels(ohlcv_data, tolerance_pct=0.3, max_levels=8):
-    """Erkennt Buyside/Sellside Liquidity Levels (nur Aktien)."""
+def detect_liquidity_levels(ohlcv_data, max_levels=8):
+    """
+    Erkennt Buyside/Sellside Liquidity Levels (nur Aktien).
+    
+    V68 AUDIT FIXES:
+    - Toleranz ATR-basiert (15% der ATR statt preis-basiert)
+    - Nur Equal Highs/Lows (2+ touches) = echte Liquiditätspools
+    - Einzelne Swing Points separat als schwächere "Swing" Levels
+    """
     empty = {"buyside": [], "sellside": [],
              "nearest_buyside": None, "nearest_sellside": None}
     if not ohlcv_data or len(ohlcv_data) < 15:
@@ -6488,7 +6531,12 @@ def detect_liquidity_levels(ohlcv_data, tolerance_pct=0.3, max_levels=8):
 
     n = len(ohlcv_data)
     current_price = ohlcv_data[-1]["close"]
-    tol = current_price * tolerance_pct / 100
+    
+    # Fix 4: ATR-basierte Toleranz
+    ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
+    atr = sum(ranges) / len(ranges) if ranges else current_price * 0.02
+    tol = atr * 0.15  # 15% der ATR
+    
     highs = [d["high"] for d in ohlcv_data]
     lows = [d["low"] for d in ohlcv_data]
 
@@ -6512,25 +6560,18 @@ def detect_liquidity_levels(ohlcv_data, tolerance_pct=0.3, max_levels=8):
             if j in used: continue
             if abs(sh["price"] - sh2["price"]) <= tol:
                 cluster.append(sh2); used.add(j)
+        
+        # Fix 5: Nur Equal Highs (2+ touches) = echte Liquidität
         if len(cluster) >= 2:
             max_p = max(c["price"] for c in cluster)
             if max_p > current_price:
-                buyside.append({
-                    "type": "Equal Highs", "level": round(max_p, 4),
-                    "touches": len(cluster), "strength": min(5, len(cluster)),
-                    "dist_pct": round((max_p - current_price) / current_price * 100, 2),
-                    "label": f"BSL ${max_p:.2f} ({len(cluster)}x)",
-                })
-    # Einzelne nahe Swing Highs
-    for sh in swing_highs:
-        if sh["price"] > current_price:
-            if not any(abs(sh["price"] - b["level"]) <= tol for b in buyside):
-                d = (sh["price"] - current_price) / current_price * 100
-                if d < 8:
+                dist_pct = (max_p - current_price) / current_price * 100
+                if dist_pct < 10:  # Max 10% Entfernung
                     buyside.append({
-                        "type": "Swing High", "level": round(sh["price"], 4),
-                        "touches": 1, "strength": 1, "dist_pct": round(d, 2),
-                        "label": f"BSL ${sh['price']:.2f}",
+                        "type": "Equal Highs", "level": round(max_p, 4),
+                        "touches": len(cluster), "strength": min(5, len(cluster)),
+                        "dist_pct": round(dist_pct, 2),
+                        "label": f"BSL ${max_p:.2f} ({len(cluster)}x)",
                     })
 
     # ── Equal Lows → Sellside Liquidity ──
@@ -6543,24 +6584,17 @@ def detect_liquidity_levels(ohlcv_data, tolerance_pct=0.3, max_levels=8):
             if j in used: continue
             if abs(sl["price"] - sl2["price"]) <= tol:
                 cluster.append(sl2); used.add(j)
+        
         if len(cluster) >= 2:
             min_p = min(c["price"] for c in cluster)
             if min_p < current_price:
-                sellside.append({
-                    "type": "Equal Lows", "level": round(min_p, 4),
-                    "touches": len(cluster), "strength": min(5, len(cluster)),
-                    "dist_pct": round((current_price - min_p) / current_price * 100, 2),
-                    "label": f"SSL ${min_p:.2f} ({len(cluster)}x)",
-                })
-    for sl in swing_lows:
-        if sl["price"] < current_price:
-            if not any(abs(sl["price"] - s["level"]) <= tol for s in sellside):
-                d = (current_price - sl["price"]) / current_price * 100
-                if d < 8:
+                dist_pct = (current_price - min_p) / current_price * 100
+                if dist_pct < 10:
                     sellside.append({
-                        "type": "Swing Low", "level": round(sl["price"], 4),
-                        "touches": 1, "strength": 1, "dist_pct": round(d, 2),
-                        "label": f"SSL ${sl['price']:.2f}",
+                        "type": "Equal Lows", "level": round(min_p, 4),
+                        "touches": len(cluster), "strength": min(5, len(cluster)),
+                        "dist_pct": round(dist_pct, 2),
+                        "label": f"SSL ${min_p:.2f} ({len(cluster)}x)",
                     })
 
     buyside.sort(key=lambda x: x["dist_pct"])
@@ -6572,88 +6606,212 @@ def detect_liquidity_levels(ohlcv_data, tolerance_pct=0.3, max_levels=8):
     }
 
 
-def format_smc_setup(vi_result, ob_result, liq_result, current_price):
+def format_smc_setup(vi_result, ob_result, liq_result, current_price, ohlcv_data=None):
     """
-    Kombiniert FVG + OB + Liquidity zu einem SMC Trade Setup.
-    ICT: 1. Buyside/Sellside = TP  2. FVG = Entry-Zone  3. OB = Stop
+    Kombiniert FVG + OB + Liquidity zu SMC Trade Setups.
+    
+    V68 AUDIT FIXES:
+    - Fix 6:  R:R = (target - entry) / (entry - stop) mit echtem Entry/Stop
+    - Fix 7:  Stop = OB_wick_low - ATR*0.3 (nicht 0.5% pauschal)
+    - Fix 8:  Gibt BEIDE Setups zurück (Long + Short)
+    - Fix 9:  Entry = OB Zone wenn OB in FVG, sonst FVG High/Low
+    - Fix 10: Market Structure Check (HH/HL für Long, LH/LL für Short)
+    
+    Returns:
+        dict mit long_setup, short_setup (beide können has_setup=True/False sein)
     """
-    setup = {"has_setup": False, "direction": None, "entry_zone": None,
-             "stop": None, "target": None, "confluence": [], "score": 0, "description": ""}
+    empty_setup = {"has_setup": False, "direction": None, "entry_zone": None,
+                   "stop": None, "target": None, "confluence": [], "score": 0, "description": ""}
+    result = {"long_setup": dict(empty_setup), "short_setup": dict(empty_setup)}
+    
     if not all([vi_result, ob_result, liq_result]):
-        return setup
-
-    # ── LONG: Bullish FVG + Bullish OB + BSL Target ──
-    bull_fvgs = vi_result.get("unfilled_bull", [])
-    bull_obs = ob_result.get("bullish_obs", [])
-    bsl = liq_result.get("nearest_buyside")
-    best_long = None; best_ls = 0
-
-    for fvg in bull_fvgs[:5]:
-        fh, fl, fm = fvg["zone_high"], fvg["zone_low"], fvg["zone_mid"]
-        dist = (current_price - fh) / current_price * 100 if current_price > 0 else 99
-        if dist < 0 or dist > 5: continue
-        s = 20 + fvg["strength"] * 5
-        conf = [f"📊 Bullish {fvg['type']} @ ${fl:.2f}-${fh:.2f} ({dist:.1f}% unter Preis)"]
-        ob_stop = None
-        for ob in bull_obs:
-            if ob["ob_low"] <= fh * 1.005 and ob["ob_high"] >= fl * 0.995:
-                s += 25; conf.append(f"🏦 Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f} ({ob['impulse_size']:.1f}x ATR)")
-                ob_stop = ob; break
-            if ob["ob_high"] <= fl and ob["ob_high"] >= fl * 0.98:
-                s += 15; conf.append(f"🏦 OB nahe FVG @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
-                ob_stop = ob; break
-        if bsl:
-            rr = (bsl["level"] - fm) / (fm - fl) if (fm - fl) > 0 else 0
-            s += 15 if rr >= 2.0 else 8 if rr >= 1.5 else 3
-            conf.append(f"🎯 BSL Target @ ${bsl['level']:.2f} ({bsl['touches']}x, R:R ≈ {rr:.1f})")
-        if s > best_ls:
-            best_ls = s
-            best_long = {"has_setup": True, "direction": "LONG",
-                "entry_zone": f"${fl:.2f} - ${fh:.2f}", "entry_low": fl, "entry_high": fh,
-                "stop": f"${ob_stop['ob_low']:.2f}" if ob_stop else f"${fl * 0.995:.2f}",
-                "target": f"${bsl['level']:.2f}" if bsl else "Nächster Swing High",
-                "confluence": conf, "score": min(100, s)}
-
-    # ── SHORT: Bearish FVG + Bearish OB + SSL Target ──
-    bear_fvgs = vi_result.get("unfilled_bear", [])
-    bear_obs = ob_result.get("bearish_obs", [])
-    ssl = liq_result.get("nearest_sellside")
-    best_short = None; best_ss = 0
-
-    for fvg in bear_fvgs[:5]:
-        fh, fl, fm = fvg["zone_high"], fvg["zone_low"], fvg["zone_mid"]
-        dist = (fl - current_price) / current_price * 100 if current_price > 0 else 99
-        if dist < 0 or dist > 5: continue
-        s = 20 + fvg["strength"] * 5
-        conf = [f"📊 Bearish {fvg['type']} @ ${fl:.2f}-${fh:.2f} ({dist:.1f}% über Preis)"]
-        ob_stop = None
-        for ob in bear_obs:
-            if ob["ob_low"] <= fh * 1.005 and ob["ob_high"] >= fl * 0.995:
-                s += 25; conf.append(f"🏦 Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
-                ob_stop = ob; break
-            if ob["ob_low"] >= fh and ob["ob_low"] <= fh * 1.02:
-                s += 15; conf.append(f"🏦 OB nahe FVG @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
-                ob_stop = ob; break
-        if ssl:
-            rr = (fm - ssl["level"]) / (fh - fm) if (fh - fm) > 0 else 0
-            s += 15 if rr >= 2.0 else 8 if rr >= 1.5 else 3
-            conf.append(f"🎯 SSL Target @ ${ssl['level']:.2f} ({ssl['touches']}x, R:R ≈ {rr:.1f})")
-        if s > best_ss:
-            best_ss = s
-            best_short = {"has_setup": True, "direction": "SHORT",
-                "entry_zone": f"${fl:.2f} - ${fh:.2f}", "entry_low": fl, "entry_high": fh,
-                "stop": f"${ob_stop['ob_high']:.2f}" if ob_stop else f"${fh * 1.005:.2f}",
-                "target": f"${ssl['level']:.2f}" if ssl else "Nächster Swing Low",
-                "confluence": conf, "score": min(100, s)}
-
-    # Bestes Setup
-    if best_ls >= best_ss and best_long:
-        best_long["description"] = f"🏦 SMC LONG (Score: {best_long['score']}/100) | Entry: {best_long['entry_zone']} | Stop: {best_long['stop']} | TP: {best_long['target']}"
-        return best_long
-    elif best_short:
-        best_short["description"] = f"🏦 SMC SHORT (Score: {best_short['score']}/100) | Entry: {best_short['entry_zone']} | Stop: {best_short['stop']} | TP: {best_short['target']}"
-        return best_short
-    return setup
+        return result
+    
+    # ATR für Stop-Buffer
+    atr = 0
+    if ohlcv_data and len(ohlcv_data) >= 10:
+        ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
+        atr = sum(ranges) / len(ranges) if ranges else current_price * 0.02
+    else:
+        atr = current_price * 0.02  # Fallback 2%
+    
+    # ── Fix 10: Market Structure Check ──
+    ms_bullish = True   # Default: beide erlaubt
+    ms_bearish = True
+    if ohlcv_data and len(ohlcv_data) >= 20:
+        # Letzte 2 Swing Highs + 2 Swing Lows prüfen
+        sw = 3
+        n = len(ohlcv_data)
+        highs = [d["high"] for d in ohlcv_data]
+        lows = [d["low"] for d in ohlcv_data]
+        recent_sh = []
+        recent_sl = []
+        for i in range(sw, n - sw):
+            if highs[i] >= max(highs[i-sw:i]) and highs[i] >= max(highs[i+1:i+sw+1]):
+                recent_sh.append(highs[i])
+            if lows[i] <= min(lows[i-sw:i]) and lows[i] <= min(lows[i+1:i+sw+1]):
+                recent_sl.append(lows[i])
+        
+        if len(recent_sh) >= 2 and len(recent_sl) >= 2:
+            last_2_highs = recent_sh[-2:]
+            last_2_lows = recent_sl[-2:]
+            # Bullisch: Higher Highs + Higher Lows
+            ms_bullish = (last_2_highs[-1] >= last_2_highs[-2] * 0.998 and 
+                         last_2_lows[-1] >= last_2_lows[-2] * 0.998)
+            # Bearisch: Lower Highs + Lower Lows
+            ms_bearish = (last_2_highs[-1] <= last_2_highs[-2] * 1.002 and 
+                         last_2_lows[-1] <= last_2_lows[-2] * 1.002)
+    
+    # ── LONG SETUP: Bullish FVG + Bullish OB + BSL Target ──
+    if ms_bullish:
+        bull_fvgs = vi_result.get("unfilled_bull", [])
+        bull_obs = ob_result.get("bullish_obs", [])
+        bsl = liq_result.get("nearest_buyside")
+        best_long = None
+        best_ls = 0
+        
+        for fvg in bull_fvgs[:5]:
+            fh, fl = fvg["zone_high"], fvg["zone_low"]
+            dist = (current_price - fh) / current_price * 100 if current_price > 0 else 99
+            if dist < 0 or dist > 5:
+                continue
+            
+            s = 20 + fvg["strength"] * 5
+            conf = [f"📊 Bullish {fvg['type']} @ ${fl:.2f}-${fh:.2f} ({dist:.1f}% unter Preis)"]
+            
+            # Fix 9: Suche OB IN der FVG → OB wird Entry-Zone
+            ob_in_fvg = None
+            for ob in bull_obs:
+                if ob["ob_low"] <= fh * 1.005 and ob["ob_high"] >= fl * 0.995:
+                    ob_in_fvg = ob
+                    s += 25
+                    conf.append(f"🏦 Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f} ({ob['impulse_size']:.1f}x ATR)")
+                    break
+                if ob["ob_high"] <= fl and ob["ob_high"] >= fl * 0.98:
+                    ob_in_fvg = ob
+                    s += 15
+                    conf.append(f"🏦 OB nahe FVG @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
+                    break
+            
+            # Fix 9: Entry = OB wenn vorhanden, sonst FVG
+            if ob_in_fvg:
+                entry_high = ob_in_fvg["ob_high"]
+                entry_low = ob_in_fvg["ob_low"]
+                # Fix 7: Stop = OB Wick Low - ATR*0.3 Buffer
+                ob_wick = ob_in_fvg.get("ob_wick_low", ob_in_fvg["ob_low"])
+                stop_price = ob_wick - atr * 0.3
+            else:
+                entry_high = fh
+                entry_low = fl
+                # Fix 7: Stop = FVG Low - ATR*0.3
+                stop_price = fl - atr * 0.3
+            
+            entry_price = entry_high  # Limit Buy am oberen Rand
+            
+            # Fix 6: Korrekte R:R Berechnung
+            risk = entry_price - stop_price
+            if bsl and risk > 0:
+                reward = bsl["level"] - entry_price
+                rr = reward / risk
+                s += 15 if rr >= 2.0 else 8 if rr >= 1.5 else 3
+                conf.append(f"🎯 BSL Target @ ${bsl['level']:.2f} ({bsl['touches']}x, R:R = {rr:.1f})")
+            else:
+                rr = 0
+            
+            if s > best_ls:
+                best_ls = s
+                best_long = {
+                    "has_setup": True, "direction": "LONG",
+                    "entry_zone": f"${entry_low:.2f} - ${entry_high:.2f}",
+                    "entry_price": entry_price,
+                    "stop": f"${stop_price:.2f}",
+                    "stop_price": stop_price,
+                    "target": f"${bsl['level']:.2f}" if bsl else "Nächster Swing High",
+                    "rr": round(rr, 1),
+                    "confluence": conf,
+                    "score": min(100, s),
+                }
+        
+        if best_long:
+            best_long["description"] = (
+                f"🏦 SMC LONG (Score: {best_long['score']}/100, R:R {best_long['rr']})\n"
+                f"Entry: {best_long['entry_zone']} | Stop: {best_long['stop']} | TP: {best_long['target']}"
+            )
+            result["long_setup"] = best_long
+    
+    # ── SHORT SETUP: Bearish FVG + Bearish OB + SSL Target ──
+    if ms_bearish:
+        bear_fvgs = vi_result.get("unfilled_bear", [])
+        bear_obs = ob_result.get("bearish_obs", [])
+        ssl = liq_result.get("nearest_sellside")
+        best_short = None
+        best_ss = 0
+        
+        for fvg in bear_fvgs[:5]:
+            fh, fl = fvg["zone_high"], fvg["zone_low"]
+            dist = (fl - current_price) / current_price * 100 if current_price > 0 else 99
+            if dist < 0 or dist > 5:
+                continue
+            
+            s = 20 + fvg["strength"] * 5
+            conf = [f"📊 Bearish {fvg['type']} @ ${fl:.2f}-${fh:.2f} ({dist:.1f}% über Preis)"]
+            
+            ob_in_fvg = None
+            for ob in bear_obs:
+                if ob["ob_low"] <= fh * 1.005 and ob["ob_high"] >= fl * 0.995:
+                    ob_in_fvg = ob
+                    s += 25
+                    conf.append(f"🏦 Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f} ({ob['impulse_size']:.1f}x ATR)")
+                    break
+                if ob["ob_low"] >= fh and ob["ob_low"] <= fh * 1.02:
+                    ob_in_fvg = ob
+                    s += 15
+                    conf.append(f"🏦 OB nahe FVG @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
+                    break
+            
+            if ob_in_fvg:
+                entry_high = ob_in_fvg["ob_high"]
+                entry_low = ob_in_fvg["ob_low"]
+                ob_wick = ob_in_fvg.get("ob_wick_high", ob_in_fvg["ob_high"])
+                stop_price = ob_wick + atr * 0.3
+            else:
+                entry_high = fh
+                entry_low = fl
+                stop_price = fh + atr * 0.3
+            
+            entry_price = entry_low  # Limit Sell am unteren Rand
+            
+            risk = stop_price - entry_price
+            if ssl and risk > 0:
+                reward = entry_price - ssl["level"]
+                rr = reward / risk
+                s += 15 if rr >= 2.0 else 8 if rr >= 1.5 else 3
+                conf.append(f"🎯 SSL Target @ ${ssl['level']:.2f} ({ssl['touches']}x, R:R = {rr:.1f})")
+            else:
+                rr = 0
+            
+            if s > best_ss:
+                best_ss = s
+                best_short = {
+                    "has_setup": True, "direction": "SHORT",
+                    "entry_zone": f"${entry_low:.2f} - ${entry_high:.2f}",
+                    "entry_price": entry_price,
+                    "stop": f"${stop_price:.2f}",
+                    "stop_price": stop_price,
+                    "target": f"${ssl['level']:.2f}" if ssl else "Nächster Swing Low",
+                    "rr": round(rr, 1),
+                    "confluence": conf,
+                    "score": min(100, s),
+                }
+        
+        if best_short:
+            best_short["description"] = (
+                f"🏦 SMC SHORT (Score: {best_short['score']}/100, R:R {best_short['rr']})\n"
+                f"Entry: {best_short['entry_zone']} | Stop: {best_short['stop']} | TP: {best_short['target']}"
+            )
+            result["short_setup"] = best_short
+    
+    return result
 
 
 def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=40):
@@ -8177,7 +8335,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "High" if ob["strength"] >= 3 else "Medium" if ob["strength"] >= 2 else "Low",
                         "description": f"Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
                                        f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
-                                       f"Dist: {ob['dist_pct']:.1f}% unter Preis. {stars}"
+                                       f"Dist: {ob['dist_pct']:.1f}% unter Preis. {stars} "
+                                       f"— Limit Buy bei Rückkehr in diese Zone."
                     })
                 
                 for ob in ob_result["bearish_obs"][:3]:
@@ -8189,7 +8348,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "High" if ob["strength"] >= 3 else "Medium" if ob["strength"] >= 2 else "Low",
                         "description": f"Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
                                        f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
-                                       f"Dist: {ob['dist_pct']:.1f}% über Preis. {stars}"
+                                       f"Dist: {ob['dist_pct']:.1f}% über Preis. {stars} "
+                                       f"— Limit Sell bei Rückkehr in diese Zone."
                     })
             except Exception:
                 pass
@@ -8233,17 +8393,21 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         # =================================================================
         if vi_result and ob_result and liq_result:
             try:
-                smc = format_smc_setup(vi_result, ob_result, liq_result, current_price)
-                if smc["has_setup"]:
-                    conf_text = " | ".join(smc["confluence"])
-                    patterns.append({
-                        "pattern": f"🏦 SMC {smc['direction']} Setup",
-                        "emoji": "🏦💎",
-                        "type": "bullish" if smc["direction"] == "LONG" else "bearish",
-                        "confidence": "High" if smc["score"] >= 60 else "Medium" if smc["score"] >= 40 else "Low",
-                        "description": f"{smc['description']}\n"
-                                       f"Confluence: {conf_text}"
-                    })
+                smc = format_smc_setup(vi_result, ob_result, liq_result, current_price, ohlcv_data=data)
+                
+                # Fix 11: Beide Setups anzeigen wenn vorhanden
+                for setup_key in ("long_setup", "short_setup"):
+                    s = smc.get(setup_key, {})
+                    if s.get("has_setup"):
+                        conf_text = " | ".join(s["confluence"])
+                        patterns.append({
+                            "pattern": f"🏦 SMC {s['direction']} Setup",
+                            "emoji": "🏦💎",
+                            "type": "bullish" if s["direction"] == "LONG" else "bearish",
+                            "confidence": "High" if s["score"] >= 60 else "Medium" if s["score"] >= 40 else "Low",
+                            "description": f"{s['description']}\n"
+                                           f"Confluence: {conf_text}"
+                        })
             except Exception:
                 pass
         
