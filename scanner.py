@@ -749,59 +749,59 @@ CRYPTO_STRATEGIES = {
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Coins"
     },
     "Volume Surge": {
-        "description": "Erhoehtes Volumen + starke Bewegung",
-        "filters": {"RVOL": (1.3, 50.0), "Change %": (2.0, 100.0)},
-        "logic": "RVOL > 1.3 (ueberdurchschnittlich) + Change > 2% = echtes Interesse"
+        "description": "Deutlich erhoehtes Volumen + starke Bewegung",
+        "filters": {"RVOL": (1.5, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 1.5 (Turnover deutlich ueber Baseline) + Change > 3% = echtes Interesse"
     },
     "Bull Flag": {
-        "description": "Bullische Konsolidierung nach Anstieg",
-        "filters": {"Vortag %": (1.5, 30.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.3)},
-        "logic": "Starke Vortags-Bewegung (+1.5%+), heute flach mit sinkendem Volumen"
+        "description": "Bullische Konsolidierung nach Aufwärtstrend (⚠️ Vortag = 6d-Ø)",
+        "filters": {"Vortag %": (0.5, 30.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
+        "logic": "6d-Trend positiv (avg >0.5%/Tag), heute flach mit sinkendem Volumen"
     },
     "Bear Flag": {
-        "description": "Baerische Konsolidierung nach Abverkauf",
-        "filters": {"Vortag %": (-30.0, -1.5), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.3)},
-        "logic": "Starke Vortags-Bewegung (-1.5%+), heute flach = weitere Schwaeche"
+        "description": "Baerische Konsolidierung nach Abwärtstrend (⚠️ Vortag = 6d-Ø)",
+        "filters": {"Vortag %": (-30.0, -0.5), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
+        "logic": "6d-Trend negativ (avg <-0.5%/Tag), heute flach = weitere Schwaeche"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben — Close nahe Tageshoch",
-        "filters": {"Change %": (3.0, 50.0), "Close Position": (0.6, 1.0)},
-        "logic": "Close nahe High + starke Bewegung = bullischer Ausbruch"
+        "filters": {"Change %": (4.0, 80.0), "Close Position": (0.65, 1.0)},
+        "logic": "Close nahe High + starke Bewegung (>4% weil Crypto volatiler) = bullischer Ausbruch"
     },
     "Breakdown Short": {
         "description": "Ausbruch nach unten — Close nahe Tagestief",
-        "filters": {"Change %": (-50.0, -3.0), "Close Position": (0.0, 0.4)},
-        "logic": "Close nahe Low + starke Abwärtsbewegung = Schwäche"
+        "filters": {"Change %": (-80.0, -4.0), "Close Position": (0.0, 0.35)},
+        "logic": "Close nahe Low + starke Abwaertsbewegung (>4%) = Schwaeche"
     },
     "Low Cap Rockets 🚀": {
         "description": "Günstige Coins mit explosivem Volumen",
-        "filters": {"Preis": (0.0001, 1.0), "RVOL": (1.2, 50.0), "Change %": (2.0, 100.0)},
-        "logic": "Coins unter $1 mit ueberdurchschnittlichem Turnover"
+        "filters": {"Preis": (0.0001, 1.0), "RVOL": (1.5, 50.0), "Change %": (5.0, 100.0)},
+        "logic": "Coins unter $1 mit RVOL > 1.5 + >5% Move = echte Explosion, kein Noise"
     },
     "Dip Buy": {
         "description": "Rücksetzer ohne Panik-Volumen",
-        "filters": {"Change %": (-8.0, -2.0), "RVOL": (0.5, 1.5)},
-        "logic": "Moderater Rücksetzer mit normalem Volumen — kein Panik-Dump"
+        "filters": {"Change %": (-12.0, -3.0), "RVOL": (0.3, 1.5)},
+        "logic": "Moderater Crypto-Ruecksetzer (-3% bis -12%) mit normalem Volumen"
     },
     "Reversal Hunter": {
-        "description": "Trendumkehr nach starkem Abverkauf (⚠️ Vortag% = 24h Kerze)",
-        "filters": {"Vortag %": (-50.0, -3.0), "Change %": (1.0, 30.0)},
-        "logic": "Letzte 24h negativ, jetzt Käufer = mögliche Umkehr"
+        "description": "Trendumkehr nach Abwärtstrend (⚠️ Vortag = 6d-Ø)",
+        "filters": {"Vortag %": (-50.0, -1.0), "Change %": (2.0, 50.0)},
+        "logic": "6d-Trend negativ (avg >-1%/Tag), heute Kaeufer (+2%+) = moegliche Umkehr"
     },
     "Early Momentum": {
         "description": "Starke Bewegung mit erhoehtem Volumen",
-        "filters": {"Change %": (1.5, 30.0), "RVOL": (0.8, 20.0)},
-        "logic": "Positive Bewegung mit Volumen-Bestaetigung"
+        "filters": {"Change %": (3.0, 40.0), "RVOL": (1.0, 20.0)},
+        "logic": "Positive Crypto-Bewegung >3% mit Volumen-Bestaetigung (RVOL >= 1.0)"
     },
     "Whale Watch 🐋": {
-        "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
-        "filters": {"RVOL": (2.0, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
+        "description": "Extremes Volumen MIT klarer Richtung — Big Player aktiv",
+        "filters": {"RVOL": (2.5, 50.0), "Change %": (5.0, 100.0)},
+        "logic": "RVOL > 2.5 + Change > 5% = echte Whale Activity, kein normaler Tag"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
-        "filters": {"Change %": (-2.0, 2.0), "RVOL": (0.5, 2.0)},
-        "logic": "Seitwärts + leicht erhöhtes Volumen = jemand sammelt"
+        "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.2, 3.0)},
+        "logic": "Seitwaerts + erhoehtes Volumen (RVOL 1.2-3.0) = jemand sammelt"
     },
 }
 
@@ -2137,6 +2137,162 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
             score += 6
         elif abs_vortag < 5.0:
             score += 3
+    
+    return min(100, max(0, score))
+
+
+def calculate_setup_score_crypto(change_pct, rvol, close_pos, upper_wick_pct, lower_wick_pct,
+                                  vortag_pct, vol_24h, price, market_cap, direction="long"):
+    """
+    Setup Quality Score 0-100 für KRYPTO — Separate Funktion, Aktien-Score unangetastet.
+    
+    UNTERSCHIEDE vs Aktien-Score:
+    ─────────────────────────────────────────────────────
+    1. VOLUME (0-20)      — RVOL (Turnover-basiert)
+    2. KERZE (0-20)       — Gleich wie Aktien
+    3. TIMING (0-20)      — Market-Cap-basierte ATR-Schätzung
+    4. LIQUIDITÄT (0-15)  — Crypto-Schwellen ($100M+ für max)
+    5. MOMENTUM (0-15)    — ATR-normalisiert mit geschätzter ATR
+    6. KONTEXT (0-10)     — Angepasst für 6d-Durchschnitts-Vortag
+    ─────────────────────────────────────────────────────
+    
+    Geschätzte tägliche Volatilität (ATR%) nach Market Cap:
+    - BTC/ETH (>$100B):     2-3% daily
+    - Large Cap (>$10B):    3-5% daily
+    - Mid Cap ($1B-$10B):   5-8% daily
+    - Small Cap ($100M-$1B): 7-12% daily
+    - Micro Cap (<$100M):   10-20%+ daily
+    """
+    score = 0
+    is_long = direction == "long"
+    abs_change = abs(change_pct) if change_pct else 0
+    mc = market_cap or 0
+    
+    # Geschätzte tägliche ATR basierend auf Market Cap Tier
+    if mc > 100_000_000_000:
+        est_atr = 2.5    # BTC/ETH — typ. 1.5-3.5%
+    elif mc > 10_000_000_000:
+        est_atr = 4.0    # Large Cap (SOL, BNB, XRP)
+    elif mc > 1_000_000_000:
+        est_atr = 6.5    # Mid Cap
+    elif mc > 100_000_000:
+        est_atr = 9.5    # Small Cap
+    else:
+        est_atr = 15.0   # Micro Cap
+    
+    # ── 1. VOLUME (0-20) ──
+    if rvol is not None and rvol > 0:
+        if rvol >= 3.0:
+            score += 20
+        elif rvol >= 2.0:
+            score += 16
+        elif rvol >= 1.5:
+            score += 12
+        elif rvol >= 1.0:
+            score += 6
+        elif rvol >= 0.7:
+            score += 3    # Leicht unter Durchschnitt — minimal
+    
+    # ── 2. KERZE (0-20) ──
+    candle_score = 0
+    if close_pos is not None:
+        if is_long:
+            if close_pos >= 0.80: candle_score += 14
+            elif close_pos >= 0.65: candle_score += 10
+            elif close_pos >= 0.50: candle_score += 5
+            if upper_wick_pct is not None:
+                if upper_wick_pct < 15: candle_score += 6
+                elif upper_wick_pct < 25: candle_score += 3
+            if lower_wick_pct is not None:
+                if lower_wick_pct > 50: candle_score -= 6
+                elif lower_wick_pct > 30: candle_score -= 3
+        else:
+            if close_pos <= 0.20: candle_score += 14
+            elif close_pos <= 0.35: candle_score += 10
+            elif close_pos <= 0.50: candle_score += 5
+            if lower_wick_pct is not None:
+                if lower_wick_pct < 15: candle_score += 6
+                elif lower_wick_pct < 25: candle_score += 3
+            if upper_wick_pct is not None:
+                if upper_wick_pct > 50: candle_score -= 6
+                elif upper_wick_pct > 30: candle_score -= 3
+    score += max(0, candle_score)
+    
+    # ── 3. TIMING (0-20) — Market-Cap-aware ATR ──
+    extension = abs_change / est_atr if est_atr > 0 else 1.0
+    if abs_change < 0.3:
+        pass  # Kein Signal
+    elif 0.5 <= extension <= 2.0:
+        score += 20   # Sweet Spot — signifikanter Move, nicht überdehnt
+    elif 0.3 <= extension < 0.5:
+        score += 8    # Early — Move beginnt, nicht bestätigt
+    elif extension < 0.3:
+        score += 2    # Rauschen für diese Coin-Grösse
+    elif extension <= 3.0:
+        score += 14   # Leicht extended
+    elif extension <= 4.0:
+        score += 7    # Getting late
+    # >4.0x ATR: 0 = Chase
+    
+    # ── 4. LIQUIDITÄT (0-15) — Crypto-Schwellen ──
+    if vol_24h:
+        if vol_24h >= 100_000_000:
+            score += 15   # $100M+ = Tier-1
+        elif vol_24h >= 20_000_000:
+            score += 13   # $20M+ = gut
+        elif vol_24h >= 5_000_000:
+            score += 10   # $5M+ = OK
+        elif vol_24h >= 1_000_000:
+            score += 6    # $1M+ = dünn
+        elif vol_24h >= 100_000:
+            score += 2    # Sehr dünn
+    
+    # ── 5. MOMENTUM (0-15) — ATR-normalisiert ──
+    momentum_pts = 0
+    if change_pct is not None:
+        move_atr_ratio = abs_change / est_atr if est_atr > 0 else 0
+        direction_ok = (is_long and change_pct > 0) or (not is_long and change_pct < 0)
+        
+        if direction_ok:
+            if move_atr_ratio >= 1.5:
+                momentum_pts = 15
+            elif move_atr_ratio >= 1.0:
+                momentum_pts = 12
+            elif move_atr_ratio >= 0.7:
+                momentum_pts = 9
+            elif move_atr_ratio >= 0.5:
+                momentum_pts = 6
+            elif move_atr_ratio >= 0.3:
+                momentum_pts = 3
+            else:
+                momentum_pts = 1
+            if abs_change < 0.3:
+                momentum_pts = 0
+        
+        # Chase-Penalty (Crypto-Schwellen höher als Aktien)
+        if abs_change >= 40:
+            momentum_pts = min(momentum_pts, 0)
+        elif abs_change >= 25:
+            momentum_pts = min(momentum_pts, 3)
+        elif abs_change > 15:
+            momentum_pts = min(momentum_pts, 8)
+    
+    score += momentum_pts
+    
+    # ── 6. KONTEXT (0-10) — Angepasst für 6d-Average ──
+    # vortag_pct bei Crypto = 6-Tage geometrisches Mittel pro Tag
+    # <0.8%/Tag avg = ruhige Phase, >3%/Tag avg = sehr volatil
+    if vortag_pct is not None:
+        abs_vortag = abs(vortag_pct)
+        if abs_vortag < 0.8:
+            score += 10   # Ruhige Phase — bestes Breakout-Setup
+        elif abs_vortag < 1.5:
+            score += 7    # Normal
+        elif abs_vortag < 3.0:
+            score += 4    # Erhöhte Volatilität
+        elif abs_vortag < 5.0:
+            score += 2    # Sehr volatil
+        # >5%/Tag avg: 0 = extremes Umfeld
     
     return min(100, max(0, score))
 
@@ -10704,14 +10860,14 @@ def fetch_crypto_data():
                             vortag_pct=vortag_chg, vi_result=None
                         )
                 
-                # Setup Score für Krypto
+                # Setup Score für Krypto — CRYPTO-SPEZIFISCH (nicht Aktien-Score!)
                 SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
-                setup_score = calculate_setup_score(
+                setup_score = calculate_setup_score_crypto(
                     change_pct=change_24h, rvol=rvol, close_pos=close_pos,
                     upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
-                    vortag_pct=vortag_chg, atr_pct=None,
-                    dollar_volume=vol_24h, price=price,
+                    vortag_pct=vortag_chg, vol_24h=vol_24h, price=price,
+                    market_cap=market_cap,
                     direction=setup_direction
                 )
                 
