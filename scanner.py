@@ -10861,6 +10861,27 @@ def fetch_crypto_data():
                             vortag_pct=vortag_chg, vi_result=None,
                             market_type="Krypto", market_cap=market_cap
                         )
+                        
+                        # V68: 7d-Trend Korrektur
+                        # Problem: 6d-avg kann ~0% sein obwohl 7d = -10%
+                        # (z.B. 6 Tage -11%, heute +1% → avg≈-0.1%/Tag → "ruhige Phase")
+                        # Der rohe 7d-Change fängt das auf
+                        if breakout_health and change_7d < -5:
+                            bh = breakout_health
+                            penalty = 20 if change_7d < -15 else 15 if change_7d < -10 else 10
+                            bh["health_score"] = max(10, bh["health_score"] - penalty)
+                            bh["warnings"].append(
+                                f"🔴 7d-Trend: {change_7d:+.1f}% — Bounce im Abwärtstrend, kein echter Breakout"
+                            )
+                            # Verdict neu berechnen
+                            h = bh["health_score"]
+                            if h >= 75: bh["verdict"], bh["verdict_emoji"] = "STRONG", "💪🟢"
+                            elif h >= 55: bh["verdict"], bh["verdict_emoji"] = "HEALTHY", "✅🟢"
+                            elif h >= 40: bh["verdict"], bh["verdict_emoji"] = "CAUTION", "⚠️🟡"
+                            elif h >= 25: bh["verdict"], bh["verdict_emoji"] = "WEAK", "⚠️🟠"
+                            else: bh["verdict"], bh["verdict_emoji"] = "FAKEOUT", "🚫🔴"
+                            if h < 40:
+                                bh["action"] = "KEIN ENTRY — 7d-Trend negativ, wahrscheinlich nur Bounce."
                 
                 # Setup Score für Krypto — CRYPTO-SPEZIFISCH
                 SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
