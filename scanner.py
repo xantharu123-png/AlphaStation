@@ -132,6 +132,52 @@ def load_common_stock_tickers_cached(api_key):
         return set()
 
 # =============================================================================
+# CRYPTO SYMBOL VALIDATOR FOR TRADINGVIEW
+# =============================================================================
+def get_binance_tradingview_symbol(coin_symbol):
+    """
+    Convert CoinGecko symbol to TradingView BINANCE pair.
+
+    Handles:
+    - Stablecoins (USDT, USDC, BUSD, DAI, TUSD, etc.) → Use BNB or ETH instead
+    - Symbols with different Binance names (MIOTA → IOTA)
+    - Missing USDT pairs → Try BUSD or other alternatives
+
+    Args:
+        coin_symbol: CoinGecko symbol (e.g., "BTC", "ETH", "USDT", "MIOTA")
+
+    Returns:
+        TradingView symbol ready for BINANCE: prefix (e.g., "BTCUSDT", "ETHUSDT")
+    """
+    if not coin_symbol:
+        return "BTCUSDT"  # Safe fallback
+
+    coin_symbol = coin_symbol.upper().strip()
+
+    # Mapping for symbols that differ between CoinGecko and Binance
+    special_mappings = {
+        "MIOTA": "IOTA",        # IOTA token
+        "IOT": "IOTA",          # Alternative
+        "XDG": "DOGE",          # Dogecoin alternative
+        "VET": "VET",           # Vechain
+        "ONE": "ONE",           # Harmony
+        "SCRT": "SCRT",         # Secret
+        "RUNE": "RUNE",         # Thorchain
+    }
+
+    # Stablecoins - use major trading pairs instead
+    stablecoins = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USDN", "USDP", "GUSD", "PAX"}
+    if coin_symbol in stablecoins:
+        # Use BNBUSDT or ETHUSDT instead of problematic pairs
+        return "BNBUSDT"
+
+    # Apply special mappings
+    symbol = special_mappings.get(coin_symbol, coin_symbol)
+
+    # Default: SYMBOL + USDT
+    return f"{symbol}USDT"
+
+# =============================================================================
 # 1. INITIALISIERUNG
 # =============================================================================
 if "selected_symbol" not in st.session_state:
@@ -703,19 +749,19 @@ CRYPTO_STRATEGIES = {
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Coins"
     },
     "Volume Surge": {
-        "description": "Erhöhtes Volumen + starke Bewegung",
-        "filters": {"RVOL": (0.8, 50.0), "Change %": (2.0, 100.0)},
-        "logic": "RVOL > 0.8 (überdurchschnittlicher Turnover) + Change > 2%"
+        "description": "Erhoehtes Volumen + starke Bewegung",
+        "filters": {"RVOL": (1.5, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 1.5 (deutlich ueberdurchschnittlich) + Change > 3% = echtes Interesse"
     },
     "Bull Flag": {
-        "description": "Bullische Konsolidierung nach Anstieg (⚠️ Vortag% = 24h Kerze)",
-        "filters": {"Vortag %": (4.0, 25.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 0.8)},
-        "logic": "Starke 24h-Kerze (+4-25%), heute flach mit sinkendem Volumen"
+        "description": "Bullische Konsolidierung nach Anstieg",
+        "filters": {"Vortag %": (2.5, 30.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.2)},
+        "logic": "Starke Vortags-Bewegung (+2.5%+), heute flach mit sinkendem Volumen"
     },
     "Bear Flag": {
-        "description": "Bärische Konsolidierung nach Abverkauf (⚠️ Vortag% = 24h Kerze)",
-        "filters": {"Vortag %": (-25.0, -4.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 0.8)},
-        "logic": "Starke 24h-Kerze (-4 bis -25%), heute flach = weitere Schwäche"
+        "description": "Baerische Konsolidierung nach Abverkauf",
+        "filters": {"Vortag %": (-30.0, -2.5), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.2)},
+        "logic": "Starke Vortags-Bewegung (-2.5%+), heute flach = weitere Schwaeche"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben — Close nahe Tageshoch",
@@ -749,8 +795,8 @@ CRYPTO_STRATEGIES = {
     },
     "Whale Watch 🐋": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
-        "filters": {"RVOL": (2.0, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
+        "filters": {"RVOL": (2.5, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 2.5 + Change > 3% = Whale Activity mit klarer Richtung"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
@@ -1244,22 +1290,24 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             health -= 7
             warnings.append(f"⚠️ Absolute Distanz +{change_pct:.1f}% — schon weit gelaufen")
     else:
-        # Fallback: Absolute Schwellen (weniger aussagekräftig)
-        if change_pct > 20:
+        # Fallback: Absolute Schwellen (ohne ATR, z.B. Krypto)
+        # V67.5: Schwellen angehoben — Krypto bewegt sich typisch staerker als Aktien
+        if change_pct > 30:
             health -= 12
-            warnings.append(f"🔴 Stark überdehnt (+{change_pct:.1f}%) — Profit-Taking wahrscheinlich")
-        elif change_pct > 12:
+            warnings.append(f"🔴 Stark ueberdehnt (+{change_pct:.1f}%) — Profit-Taking wahrscheinlich")
+        elif change_pct > 18:
             health -= 6
-            warnings.append(f"⚠️ Überdehnt (+{change_pct:.1f}%) — Pullback möglich")
-        elif change_pct > 8:
+            warnings.append(f"⚠️ Ueberdehnt (+{change_pct:.1f}%) — Pullback moeglich")
+        elif change_pct > 12:
             health -= 2
             warnings.append(f"🟡 Ausgedehnte Bewegung (+{change_pct:.1f}%)")
         elif change_pct >= 3:
             health += 3
-            signals.append(f"🟢 Gesunde Breakout-Größe (+{change_pct:.1f}%)")
-        else:
-            # 0-3% = kaum ein Breakout
+            signals.append(f"🟢 Gesunde Breakout-Groesse (+{change_pct:.1f}%)")
+        elif change_pct >= 1.5:
             signals.append(f"ℹ️ Moderate Bewegung (+{change_pct:.1f}%)")
+        else:
+            signals.append(f"ℹ️ Schwache Bewegung (+{change_pct:.1f}%)")
     
     # ================================================================
     # 4. CONTEXT — Woher kommt der Breakout?
@@ -1860,28 +1908,35 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
 def calculate_alpha_score(rvol, vortag_pct, change_pct):
     """
-    Normalisierter Alpha Score 0-100.
-    
-    Gewichtung:
-    - RVOL (Volumen-Interesse): max 30 Punkte
-    - Vortag% (Trend-Kontext): max 35 Punkte  
-    - Change% (Heutige Stärke): max 35 Punkte
-    
-    RVOL Skala: 1.0 = normal, 2.0 = doppelt, 5.0+ = extrem
-    Change Skala: 5% = moderat, 10%+ = stark
+    Normalisierter Alpha Score 0-100. V67.5 — Nicht-lineare Kurven.
+
+    Gewichtung (rebalanciert):
+    - RVOL (Volumen-Interesse):  max 35 Punkte  (Volume = wichtigster Indikator)
+    - Change% (Heutige Staerke): max 35 Punkte
+    - Vortag% (Trend-Kontext):   max 30 Punkte  (approximiert, daher weniger Gewicht)
+
+    V67.5 FIXES:
+    - Nicht-lineares Scoring: Erste 50% kommen schnell, dann Diminishing Returns
+      (RVOL 2x ist VIEL wichtiger als RVOL 4x vs 5x)
+    - RVOL Cap bei 8x statt 5x (Krypto hat oft hoehere Spitzen)
+    - Volumen als wichtigster Faktor gewichtet (35 statt 30)
     """
-    # RVOL: 0-5 mapped zu 0-30 Punkte (cap bei 5x)
-    rvol_capped = min(max(rvol, 0), 5)
-    rvol_score = (rvol_capped / 5) * 30
-    
-    # Vortag%: 0-15% mapped zu 0-35 Punkte
-    vortag_abs = min(abs(vortag_pct), 15)
-    vortag_score = (vortag_abs / 15) * 35
-    
-    # Change%: 0-15% mapped zu 0-35 Punkte
-    change_abs = min(abs(change_pct), 15)
-    change_score = (change_abs / 15) * 35
-    
+    import math
+
+    # RVOL: 0-8x → 0-35 Punkte (logarithmisch — schneller Anstieg, dann flacher)
+    rvol_safe = min(max(rvol or 0, 0), 8)
+    # log(1+x) normalisiert: log(9) ≈ 2.197
+    rvol_score = (math.log(1 + rvol_safe) / math.log(9)) * 35
+
+    # Change%: 0-20% → 0-35 Punkte (sqrt — moderate Moves zaehlen mehr)
+    change_abs = min(abs(change_pct or 0), 20)
+    # sqrt(20) ≈ 4.47
+    change_score = (math.sqrt(change_abs) / math.sqrt(20)) * 35
+
+    # Vortag%: 0-15% → 0-30 Punkte (linear — approximierte Daten, weniger Gewicht)
+    vortag_abs = min(abs(vortag_pct or 0), 15)
+    vortag_score = (vortag_abs / 15) * 30
+
     return round(rvol_score + vortag_score + change_score, 0)
 
 
@@ -2005,14 +2060,19 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
         # else: 0 — Chase territory (>3.5x ATR oder >10%)
     else:
         # Fallback ohne ATR (z.B. Krypto) — nur auf abs_change basiert
-        # NEU: <0.5% Change = 0 Punkte (vorher bekam alles ≤10% pauschal 8)
-        if 1.5 <= abs_change <= 6:
-            score += 15   # Guter Move, nicht übertrieben
-        elif 6 < abs_change <= 10:
-            score += 8    # Etwas heiss, aber noch OK
-        elif 0.5 <= abs_change < 1.5:
-            score += 5    # Kaum Bewegung — Ansatz da aber nicht bestätigt
-        # else: 0 — Entweder nichts (<0.5%) oder Chase (>10%)
+        # V67.5: Krypto hat hoehere typische Moves → Schwellen angepasst
+        # BTC typisch 1-3% daily, Altcoins 3-8% daily
+        if 2.0 <= abs_change <= 8.0:
+            score += 15   # Sweet Spot fuer Krypto
+        elif 8.0 < abs_change <= 15.0:
+            score += 10   # Etwas heiss, aber bei Krypto normal
+        elif 1.0 <= abs_change < 2.0:
+            score += 7    # Moderate Bewegung
+        elif 15.0 < abs_change <= 25.0:
+            score += 4    # Chase Territory, aber bei Krypto moeglich
+        elif 0.5 <= abs_change < 1.0:
+            score += 3    # Kaum Bewegung
+        # else: 0 — Entweder nichts (<0.5%) oder extrem (>25%)
     
     # ── 4. LIQUIDITÄT (0-15) ──
     if dollar_volume:
@@ -2193,14 +2253,18 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
     score = 0
     
     if pattern_type == "bull":
-        # Kriterium 1: Vortag stark positiv (4-25%)
-        if 4.0 <= vortag_chg <= 25.0:
+        # Kriterium 1: Vortag stark positiv
+        # V67.5: Threshold gesenkt (2.5% statt 4%) — viele echte Flags haben kleinere Poles
+        if 4.0 <= vortag_chg <= 30.0:
             score += 25
-            details.append(f"✅ Fahnenstange (1-Day): {vortag_chg:+.1f}%")
+            details.append(f"✅ Starke Fahnenstange: {vortag_chg:+.1f}%")
+        elif 2.5 <= vortag_chg < 4.0:
+            score += 15
+            details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
         else:
             details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
-        
-        # Kriterium 2: Heute seitwärts (-2% bis +2%)
+
+        # Kriterium 2: Heute seitwaerts (-2% bis +2%)
         if -2.0 <= change_today <= 2.0:
             score += 20
             details.append(f"✅ Konsolidierung: {change_today:+.1f}%")
@@ -2209,14 +2273,17 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             details.append(f"⚠️ Leichte Konsolidierung: {change_today:+.1f}%")
         else:
             details.append(f"❌ Keine Konsolidierung: {change_today:+.1f}%")
-        
-        # Kriterium 3: Volumen sinkt
-        if rvol <= 1.0:
+
+        # Kriterium 3: Volumen sinkt (Konsolidierung = weniger Aktivitaet)
+        if rvol <= 0.8:
             score += 25
             details.append(f"✅ Volumen sinkt stark: RVOL {rvol:.1f}x")
-        elif rvol <= 1.5:
+        elif rvol <= 1.2:
             score += 15
             details.append(f"✅ Volumen sinkt: RVOL {rvol:.1f}x")
+        elif rvol <= 1.8:
+            score += 8
+            details.append(f"⚠️ Volumen leicht erhoeht: RVOL {rvol:.1f}x")
         else:
             details.append(f"❌ Volumen zu hoch: RVOL {rvol:.1f}x")
         
@@ -2249,15 +2316,21 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             else:
                 details.append(f"❌ Zu tiefes Retracement: {retracement_pct:.1f}%")
         
-        is_valid = score >= 60
-        
+        # V67.5: Threshold von 60 auf 50 gesenkt — mit moderatem Flagpole (15)
+        # + Konsolidierung (20) + Volumen (15) = 50, das sollte reichen
+        is_valid = score >= 50
+
     else:  # Bear Flag
-        if -25.0 <= vortag_chg <= -4.0:
+        # V67.5: Threshold gesenkt (-2.5% statt -4%)
+        if -30.0 <= vortag_chg <= -4.0:
             score += 25
-            details.append(f"✅ Fahnenstange (Short, 1-Day): {vortag_chg:+.1f}%")
+            details.append(f"✅ Starke Fahnenstange (Short): {vortag_chg:+.1f}%")
+        elif -4.0 < vortag_chg <= -2.5:
+            score += 15
+            details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
         else:
             details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
-        
+
         if -2.0 <= change_today <= 2.0:
             score += 20
             details.append(f"✅ Konsolidierung: {change_today:+.1f}%")
@@ -2266,13 +2339,16 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             details.append(f"⚠️ Leichte Konsolidierung: {change_today:+.1f}%")
         else:
             details.append(f"❌ Keine Konsolidierung: {change_today:+.1f}%")
-        
-        if rvol <= 1.0:
+
+        if rvol <= 0.8:
             score += 25
             details.append(f"✅ Volumen sinkt stark: RVOL {rvol:.1f}x")
-        elif rvol <= 1.5:
+        elif rvol <= 1.2:
             score += 15
             details.append(f"✅ Volumen sinkt: RVOL {rvol:.1f}x")
+        elif rvol <= 1.8:
+            score += 8
+            details.append(f"⚠️ Volumen leicht erhoeht: RVOL {rvol:.1f}x")
         else:
             details.append(f"❌ Volumen zu hoch: RVOL {rvol:.1f}x")
         
@@ -2301,8 +2377,9 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             else:
                 details.append(f"❌ Zu starker Bounce: {retracement_pct:.1f}%")
         
-        is_valid = score >= 60
-    
+        # V67.5: Threshold von 60 auf 50 gesenkt (analog Bull Flag)
+        is_valid = score >= 50
+
     return is_valid, score, details
 
 def calculate_atr_from_ohlc(high, low, close, prev_close):
@@ -5473,6 +5550,55 @@ def remove_from_watchlist(ticker):
     """Entfernt Ticker von Watchlist (mit Persistenz)."""
     st.session_state.watchlist = [w for w in st.session_state.watchlist if w["ticker"] != ticker]
     _save_watchlist()
+
+@st.cache_data(ttl=86400)
+def _resolve_coingecko_id(symbol):
+    """
+    V67.5: Mappt Krypto-Symbol (BTC, ETH) auf CoinGecko coin_id (bitcoin, ethereum).
+    CoinGecko API braucht den vollen ID, nicht das Boersen-Symbol.
+    Cached fuer 24h da sich IDs nicht aendern.
+    """
+    # Bekannte Top-Coins (spart API-Call)
+    known_ids = {
+        "BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin",
+        "SOL": "solana", "XRP": "ripple", "ADA": "cardano",
+        "DOGE": "dogecoin", "DOT": "polkadot", "AVAX": "avalanche-2",
+        "MATIC": "matic-network", "LINK": "chainlink", "UNI": "uniswap",
+        "SHIB": "shiba-inu", "LTC": "litecoin", "ATOM": "cosmos",
+        "XLM": "stellar", "NEAR": "near", "FIL": "filecoin",
+        "APT": "aptos", "ARB": "arbitrum", "OP": "optimism",
+        "SUI": "sui", "SEI": "sei-network", "TIA": "celestia",
+        "INJ": "injective-protocol", "FET": "fetch-ai", "RENDER": "render-token",
+        "PEPE": "pepe", "WIF": "dogwifcoin", "BONK": "bonk",
+        "FLOKI": "floki", "TRX": "tron", "TON": "the-open-network",
+        "ICP": "internet-computer", "HBAR": "hedera-hashgraph",
+        "VET": "vechain", "ALGO": "algorand", "FTM": "fantom",
+        "SAND": "the-sandbox", "MANA": "decentraland", "AXS": "axie-infinity",
+        "AAVE": "aave", "MKR": "maker", "CRV": "curve-dao-token",
+        "LDO": "lido-dao", "RPL": "rocket-pool", "SNX": "havven",
+        "COMP": "compound-governance-token", "SUSHI": "sushi",
+        "1INCH": "1inch", "ENS": "ethereum-name-service",
+        "IMX": "immutable-x", "GMT": "stepn", "APE": "apecoin",
+    }
+    sym = symbol.upper().strip()
+    if sym in known_ids:
+        return known_ids[sym]
+
+    # Fallback: CoinGecko Search API
+    try:
+        search_url = f"https://api.coingecko.com/api/v3/search?query={sym.lower()}"
+        resp = rate_limited_get(search_url, timeout=10)
+        if resp.status_code == 200:
+            coins = resp.json().get("coins", [])
+            for c in coins:
+                if c.get("symbol", "").upper() == sym:
+                    return c.get("id", sym.lower())
+            if coins:
+                return coins[0].get("id", sym.lower())
+    except Exception:
+        pass
+    return sym.lower()
+
 
 def fetch_historical_data_crypto(coin_id, days):
     """Holt historische OHLC-Daten von CoinGecko"""
@@ -9783,7 +9909,9 @@ def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
         ohlc_data = None
         
         if market_type == "Krypto":
-            coin_id = ticker.lower()
+            # V67.5 FIX: CoinGecko braucht den vollen coin_id ("bitcoin"), nicht Symbol ("btc")
+            # Versuche zuerst symbol-to-id Mapping ueber Search API
+            coin_id = _resolve_coingecko_id(ticker)
             ohlc_data = fetch_historical_data_crypto(coin_id, days)
         elif market_type == "Aktien":
             # Internationale Aktien: Yahoo (kein poly_key nötig)
@@ -9858,6 +9986,7 @@ def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
             obv_score = 5  # Distribution möglich
         
         # 3. Volume Trend (max 20 Punkte)
+        vol_change = 0  # V67.5 FIX: Default damit vol_change immer definiert ist
         if len(volumes) >= 10:
             first_half_vol = sum(volumes[:len(volumes)//2])
             second_half_vol = sum(volumes[len(volumes)//2:])
@@ -10391,21 +10520,33 @@ def fetch_crypto_data():
                 # HEUTE: 24h Change
                 change_24h = coin.get("price_change_percentage_24h") or 0
                 
-                # VORTAG BERECHNUNG (VERBESSERT V67.3):
+                # VORTAG BERECHNUNG (V67.5 FIX — MULTIPLIKATIV):
                 # CoinGecko liefert kein einzelnes "gestern" - wir approximieren:
-                # Vortag ≈ (7d_change - 24h_change) / 6
-                # Das gibt den Durchschnitt der 6 Tage VOR heute (ohne heute)
-                # Besser als vorher: 7d/7 hat heute mit reingerechnet
+                # Prozentuale Aenderungen sind MULTIPLIKATIV, nicht additiv!
+                # 7d_multiplier = (1 + 7d%/100), 24h_multiplier = (1 + 24h%/100)
+                # 6d_multiplier = 7d_mul / 24h_mul
+                # Vortag ≈ Durchschnittliche taegliche Aenderung der 6 Tage VOR heute
                 change_7d = (
-                    coin.get("price_change_percentage_7d_in_currency") or 
-                    coin.get("price_change_percentage_7d") or 
+                    coin.get("price_change_percentage_7d_in_currency") or
+                    coin.get("price_change_percentage_7d") or
                     0
                 )
-                
-                if change_7d != 0:
-                    # Entferne heutige Bewegung aus dem 7d-Durchschnitt
-                    remaining_6d = change_7d - change_24h
-                    vortag_chg = round(remaining_6d / 6, 2)
+
+                if change_7d != 0 and change_24h != -100:
+                    # Multiplikative Berechnung (korrekt fuer Prozente)
+                    mul_7d = 1 + change_7d / 100
+                    mul_24h = 1 + change_24h / 100
+                    if mul_24h > 0:
+                        mul_6d = mul_7d / mul_24h  # 6-Tage Performance ohne heute
+                        # Durchschnittliche taegliche Aenderung ueber 6 Tage
+                        # Geometrisches Mittel: mul_6d^(1/6) - 1
+                        if mul_6d > 0:
+                            avg_daily_mul = mul_6d ** (1/6)
+                            vortag_chg = round((avg_daily_mul - 1) * 100, 2)
+                        else:
+                            vortag_chg = round((mul_6d - 1) * 100 / 6, 2)
+                    else:
+                        vortag_chg = 0
                 else:
                     vortag_chg = 0
                 
@@ -10422,8 +10563,9 @@ def fetch_crypto_data():
                 candle_range = high_24h - low_24h if high_24h > low_24h else 0
                 range_pct = (candle_range / low_24h * 100) if low_24h > 0 else 0
                 
-                # Nur Wick berechnen wenn genug Range (min 0.5%)
-                if range_pct >= 0.5 and candle_range > 0:
+                # Nur Wick berechnen wenn genug Range
+                # Krypto: 0.2% Minimum (niedriger als Aktien, da 24h-Kerzen)
+                if range_pct >= 0.2 and candle_range > 0:
                     body_top = max(open_price, price)
                     body_bottom = min(open_price, price)
                     upper_wick_pct = ((high_24h - body_top) / candle_range) * 100
@@ -10431,43 +10573,44 @@ def fetch_crypto_data():
                 else:
                     upper_wick_pct = 0
                     lower_wick_pct = 0
-                
+
                 # GAP % - KRYPTO HAT KEINE ECHTEN GAPS (24/7 Markt)
                 # Wir setzen es auf None damit der Filter weiß dass es nicht anwendbar ist
                 gap_pct = None  # Explizit None für "nicht verfügbar"
                 
-                # RVOL Berechnung (Krypto-spezifisch)
+                # RVOL Berechnung (Krypto-spezifisch) — V67.5 REVIDIERT
                 # WICHTIG: CoinGecko liefert kein historisches Durchschnittsvolumen!
-                # Wir verwenden "Turnover Ratio" = Vol24h / MarketCap als Proxy
-                # 
-                # Interpretation:
-                # - Turnover < 5%: Niedriges relatives Volumen
-                # - Turnover 5-15%: Normales Volumen
-                # - Turnover > 15%: Hohes relatives Volumen
-                # 
-                # Wir normalisieren zu RVOL-ähnlicher Skala:
-                # - 10% Turnover = RVOL 1.0 (Baseline)
-                # - 20% Turnover = RVOL 2.0
-                # - 5% Turnover = RVOL 0.5
+                # Wir verwenden "Turnover Ratio" = Vol24h / MarketCap als Proxy.
+                #
+                # Baselines basierend auf typischen Krypto-Turnover-Daten:
+                #   - BTC/ETH (>$100B): ~2-4% Turnover normal
+                #   - Large Cap L1s (>$10B): ~5-8% Turnover normal
+                #   - Mid Cap ($1B-$10B): ~8-15% Turnover normal
+                #   - Small Cap ($100M-$1B): ~15-30% Turnover normal
+                #   - Micro Cap (<$100M): ~20-50%+ Turnover normal
+                #
+                # RVOL 1.0 = durchschnittliches Tagesvolumen fuer diese Kategorie
                 if market_cap > 0 and vol_24h > 0:
                     turnover_pct = (vol_24h / market_cap) * 100
-                    # M9: Dynamischer Baseline nach Marktkapitalisierung
-                    # Large Cap (>$10B): 3% Turnover = normal
-                    # Mid Cap ($1B-$10B): 8% Turnover = normal
-                    # Small Cap (<$1B): 15% Turnover = normal
-                    if market_cap > 10_000_000_000:
-                        baseline = 3.0  # Large Cap
+                    # Feinere Baseline-Staffelung nach Marktkapitalisierung
+                    if market_cap > 100_000_000_000:
+                        baseline = 3.0   # Mega Cap (BTC, ETH)
+                    elif market_cap > 10_000_000_000:
+                        baseline = 6.0   # Large Cap (SOL, BNB, XRP)
                     elif market_cap > 1_000_000_000:
-                        baseline = 8.0  # Mid Cap
+                        baseline = 12.0  # Mid Cap
+                    elif market_cap > 100_000_000:
+                        baseline = 20.0  # Small Cap
                     else:
-                        baseline = 15.0  # Small Cap
+                        baseline = 35.0  # Micro Cap — hoher Turnover ist normal
                     rvol = round(turnover_pct / baseline, 2)
                     rvol = max(0.1, min(rvol, 50.0))  # Cap bei 50x
                 else:
                     rvol = 1.0
                 
-                close_pos = calculate_close_position(high_24h, low_24h, price)
-                
+                # Krypto: Niedrigerer min_range_pct (0.3%) da viele Coins kleinere Ranges haben
+                close_pos = calculate_close_position(high_24h, low_24h, price, min_range_pct=0.3)
+
                 # =====================================================
                 # FILTER-LOGIK (KRYPTO-SPEZIFISCH)
                 # =====================================================
@@ -16330,6 +16473,37 @@ with tab_scanner:
                                 if ((btns[i].textContent||'').includes(text)) {{ btns[i].click(); return; }}
                             }}
                         }}
+                        function scrollDataframeToRow(rowIdx) {{
+                            try {{
+                                var doc = window.parent.document;
+                                // Methode 1: Streamlit Glide Data Grid (neuere Versionen)
+                                var glideCanvases = doc.querySelectorAll('[data-testid="stDataFrame"] .dvn-scroller');
+                                if (glideCanvases.length > 0) {{
+                                    var scroller = glideCanvases[0];
+                                    var rowHeight = 35;
+                                    var targetScroll = Math.max(0, (rowIdx * rowHeight) - (scroller.clientHeight / 2));
+                                    scroller.scrollTop = targetScroll;
+                                    return;
+                                }}
+                                // Methode 2: role=grid (aeltere Versionen)
+                                var grids = doc.querySelectorAll('[role="grid"], [class*="dataframe"]');
+                                for (var dc = 0; dc < grids.length; dc++) {{
+                                    var rows = grids[dc].querySelectorAll('[role="row"]');
+                                    if (rows.length > rowIdx + 1) {{
+                                        rows[rowIdx + 1].scrollIntoView({{ behavior: "smooth", block: "nearest" }});
+                                        return;
+                                    }}
+                                }}
+                                // Methode 3: Generischer Scroll-Container
+                                var containers = doc.querySelectorAll('[data-testid="stDataFrame"]');
+                                if (containers.length > 0) {{
+                                    var c = containers[0];
+                                    var scrollEl = c.querySelector('[style*="overflow"]') || c;
+                                    var rowH = 35;
+                                    scrollEl.scrollTop = Math.max(0, (rowIdx * rowH) - (scrollEl.clientHeight / 2));
+                                }}
+                            }} catch(e) {{ }}
+                        }}
                         function onKey(e) {{
                             var tag = ((window.parent.document.activeElement||{{}}).tagName||'').toLowerCase();
                             if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
@@ -16341,6 +16515,10 @@ with tab_scanner:
                                window.parent._alphaNav = onKey;
                                window.parent.document.addEventListener('keydown', onKey);
                         }} catch(err) {{ document.addEventListener('keydown', onKey); }}
+
+                        // Auto-scroll to current row on load (mit Retry fuer langsames Rendering)
+                        setTimeout(function() {{ scrollDataframeToRow({current_idx}); }}, 150);
+                        setTimeout(function() {{ scrollDataframeToRow({current_idx}); }}, 500);
                     }})();
                 </script>
             </div>
@@ -17411,7 +17589,7 @@ with tab_scanner:
         else:
             # US-Aktien, Krypto, Forex, Futures: TradingView Widget
             if st.session_state.market_type == "Krypto":
-                tv_symbol = f"BINANCE:{st.session_state.selected_symbol}USDT"
+                tv_symbol = f"BINANCE:{get_binance_tradingview_symbol(st.session_state.selected_symbol)}"
             elif st.session_state.market_type == "Forex":
                 tv_symbol = f"FX:{st.session_state.selected_symbol.replace('/', '')}"
             elif st.session_state.market_type == "Futures":
@@ -17659,9 +17837,9 @@ with tab_search:
                 # Chart direkt anzeigen
                 st.divider()
                 st.subheader(f"📊 Chart: {search_result['Ticker']}")
-                
+
                 if search_market == "Krypto":
-                    tv_symbol = f"BINANCE:{search_result['Ticker']}USDT"
+                    tv_symbol = f"BINANCE:{get_binance_tradingview_symbol(search_result['Ticker'])}"
                 else:
                     # Internationale Aktien: Exchange-Prefix für TradingView
                     _sr_sym = search_result['Ticker']

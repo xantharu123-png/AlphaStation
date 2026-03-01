@@ -170,7 +170,10 @@ def _calculate_value_area(volume_bins, poc_bin, price_low, bin_size, total_volum
             va_low_bin -= 1
             accumulated += vol_down
     
-    return price_low + (va_high_bin + 1) * bin_size, price_low + va_low_bin * bin_size
+    # VA High = obere Kante des hoechsten Bins, VA Low = untere Kante des niedrigsten Bins
+    va_high_price = price_low + (va_high_bin + 1) * bin_size
+    va_low_price = price_low + va_low_bin * bin_size
+    return va_high_price, va_low_price
 
 
 def _find_hvn_smoothed(volume_bins, poc_volume, price_low, bin_size, poc_bin,
@@ -291,10 +294,13 @@ def analyze_vp_signals(vp, current_price, atr=None, direction="long", strategy_t
             "score_adjustment": 0,
             "signals": signals,
             "poc": poc,
+            "poc_relation": "stale",
+            "va_position": "unknown",
             "va_low": va_low,
             "va_high": va_high,
-            "hvn_zones": hvn_zones,
-            "lvn_zones": lvn_zones,
+            "near_hvn_support": False,
+            "near_hvn_resistance": False,
+            "in_lvn_zone": False,
             "summary": f"POC=${poc:.2f}|VA[${va_low:.2f}-${va_high:.2f}] | ⚠️ VP veraltet ({poc_dist_pct:+.0f}%)"
         }
     
