@@ -750,18 +750,18 @@ CRYPTO_STRATEGIES = {
     },
     "Volume Surge": {
         "description": "Erhoehtes Volumen + starke Bewegung",
-        "filters": {"RVOL": (1.5, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 1.5 (deutlich ueberdurchschnittlich) + Change > 3% = echtes Interesse"
+        "filters": {"RVOL": (1.3, 50.0), "Change %": (2.0, 100.0)},
+        "logic": "RVOL > 1.3 (ueberdurchschnittlich) + Change > 2% = echtes Interesse"
     },
     "Bull Flag": {
         "description": "Bullische Konsolidierung nach Anstieg",
-        "filters": {"Vortag %": (2.5, 30.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.2)},
-        "logic": "Starke Vortags-Bewegung (+2.5%+), heute flach mit sinkendem Volumen"
+        "filters": {"Vortag %": (1.5, 30.0), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.3)},
+        "logic": "Starke Vortags-Bewegung (+1.5%+), heute flach mit sinkendem Volumen"
     },
     "Bear Flag": {
         "description": "Baerische Konsolidierung nach Abverkauf",
-        "filters": {"Vortag %": (-30.0, -2.5), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.2)},
-        "logic": "Starke Vortags-Bewegung (-2.5%+), heute flach = weitere Schwaeche"
+        "filters": {"Vortag %": (-30.0, -1.5), "Change %": (-2.0, 2.0), "RVOL": (0.1, 1.3)},
+        "logic": "Starke Vortags-Bewegung (-1.5%+), heute flach = weitere Schwaeche"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben — Close nahe Tageshoch",
@@ -775,8 +775,8 @@ CRYPTO_STRATEGIES = {
     },
     "Low Cap Rockets 🚀": {
         "description": "Günstige Coins mit explosivem Volumen",
-        "filters": {"Preis": (0.0001, 1.0), "RVOL": (0.8, 50.0), "Change %": (2.0, 100.0)},
-        "logic": "Coins unter $1 mit überdurchschnittlichem Turnover"
+        "filters": {"Preis": (0.0001, 1.0), "RVOL": (1.2, 50.0), "Change %": (2.0, 100.0)},
+        "logic": "Coins unter $1 mit ueberdurchschnittlichem Turnover"
     },
     "Dip Buy": {
         "description": "Rücksetzer ohne Panik-Volumen",
@@ -789,14 +789,14 @@ CRYPTO_STRATEGIES = {
         "logic": "Letzte 24h negativ, jetzt Käufer = mögliche Umkehr"
     },
     "Early Momentum": {
-        "description": "Starke Bewegung mit erhöhtem Volumen",
-        "filters": {"Change %": (2.0, 30.0), "RVOL": (0.3, 20.0)},
-        "logic": "Positive Bewegung mit Volumen-Bestätigung"
+        "description": "Starke Bewegung mit erhoehtem Volumen",
+        "filters": {"Change %": (1.5, 30.0), "RVOL": (0.8, 20.0)},
+        "logic": "Positive Bewegung mit Volumen-Bestaetigung"
     },
     "Whale Watch 🐋": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
-        "filters": {"RVOL": (2.5, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 2.5 + Change > 3% = Whale Activity mit klarer Richtung"
+        "filters": {"RVOL": (2.0, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
@@ -10592,17 +10592,19 @@ def fetch_crypto_data():
                 # RVOL 1.0 = durchschnittliches Tagesvolumen fuer diese Kategorie
                 if market_cap > 0 and vol_24h > 0:
                     turnover_pct = (vol_24h / market_cap) * 100
-                    # Feinere Baseline-Staffelung nach Marktkapitalisierung
+                    # Baseline = typischer Tages-Turnover (%) fuer diese Kategorie
+                    # RVOL 1.0 bedeutet "normales Volumen fuer diese Groesse"
+                    # Quelle: empirische Mediane aus CoinGecko Top-500
                     if market_cap > 100_000_000_000:
-                        baseline = 3.0   # Mega Cap (BTC, ETH)
+                        baseline = 2.0   # Mega Cap (BTC, ETH) — typ. 1.5-3%
                     elif market_cap > 10_000_000_000:
-                        baseline = 6.0   # Large Cap (SOL, BNB, XRP)
+                        baseline = 3.5   # Large Cap (SOL, BNB, XRP) — typ. 2.5-5%
                     elif market_cap > 1_000_000_000:
-                        baseline = 12.0  # Mid Cap
+                        baseline = 5.0   # Mid Cap — typ. 3-7%
                     elif market_cap > 100_000_000:
-                        baseline = 20.0  # Small Cap
+                        baseline = 8.0   # Small Cap — typ. 5-12%
                     else:
-                        baseline = 35.0  # Micro Cap — hoher Turnover ist normal
+                        baseline = 12.0  # Micro Cap — typ. 8-20%
                     rvol = round(turnover_pct / baseline, 2)
                     rvol = max(0.1, min(rvol, 50.0))  # Cap bei 50x
                 else:
