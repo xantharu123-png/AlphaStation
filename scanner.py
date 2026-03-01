@@ -6383,6 +6383,279 @@ def format_vi_for_display(vi_result, current_price):
     return display
 
 
+# =============================================================================
+# ICT ORDER BLOCKS (OB) — Institutionelle Entry-Zonen
+# =============================================================================
+# Bullish OB: Letzte bärische Kerze VOR starkem Aufwärts-Impuls
+# Bearish OB: Letzte bullische Kerze VOR starkem Abwärts-Impuls
+# Zone = Body der Gegenkerze. Preis kehrt oft zurück um OB zu "mitigieren".
+# =============================================================================
+
+def detect_order_blocks(ohlcv_data, max_blocks=10):
+    """Erkennt Bullish/Bearish Order Blocks (nur Aktien)."""
+    empty = {"bullish_obs": [], "bearish_obs": [],
+             "nearest_bull_ob": None, "nearest_bear_ob": None}
+    if not ohlcv_data or len(ohlcv_data) < 10:
+        return empty
+
+    n = len(ohlcv_data)
+    current_price = ohlcv_data[-1]["close"]
+    ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
+    atr = sum(ranges) / len(ranges) if ranges else current_price * 0.02
+    avg_vol = sum(d.get("volume", 0) for d in ohlcv_data) / n if n > 0 else 1
+    bullish_obs = []
+    bearish_obs = []
+
+    for i in range(1, n - 2):
+        c0 = ohlcv_data[i]
+        c1 = ohlcv_data[i + 1]
+        c2 = ohlcv_data[i + 2] if i + 2 < n else c1
+        c0_body = c0["close"] - c0["open"]
+        c1_body = c1["close"] - c1["open"]
+
+        # ── BULLISH OB: Rote Kerze → starker Aufwärts-Impuls ──
+        if c0_body < 0:
+            impulse_up = max(c1["close"] - c0["low"], c2["close"] - c0["low"]) if c1_body > 0 else 0
+            if impulse_up > atr * 1.5:
+                ob_high = max(c0["open"], c0["close"])
+                ob_low = min(c0["open"], c0["close"])
+                strength = 1
+                if impulse_up > atr * 2.5: strength += 1
+                if impulse_up > atr * 4.0: strength += 1
+                vol_ratio = c1.get("volume", 0) / avg_vol if avg_vol > 0 else 1
+                if vol_ratio > 1.5: strength += 1
+                if vol_ratio > 2.5: strength += 1
+                strength = min(5, strength)
+                mitigated = any(ohlcv_data[j]["low"] <= ob_high for j in range(i + 2, n))
+                if not mitigated and ob_low < current_price:
+                    dist_pct = (current_price - ob_high) / current_price * 100
+                    bullish_obs.append({
+                        "type": "Bullish OB", "ob_high": round(ob_high, 4),
+                        "ob_low": round(ob_low, 4), "ob_mid": round((ob_high + ob_low) / 2, 4),
+                        "impulse_size": round(impulse_up / atr, 1),
+                        "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                        "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
+                        "idx": i, "time": c0.get("time"),
+                    })
+
+        # ── BEARISH OB: Grüne Kerze → starker Abwärts-Impuls ──
+        if c0_body > 0:
+            impulse_down = max(c0["high"] - c1["close"], c0["high"] - c2["close"]) if c1_body < 0 else 0
+            if impulse_down > atr * 1.5:
+                ob_high = max(c0["open"], c0["close"])
+                ob_low = min(c0["open"], c0["close"])
+                strength = 1
+                if impulse_down > atr * 2.5: strength += 1
+                if impulse_down > atr * 4.0: strength += 1
+                vol_ratio = c1.get("volume", 0) / avg_vol if avg_vol > 0 else 1
+                if vol_ratio > 1.5: strength += 1
+                if vol_ratio > 2.5: strength += 1
+                strength = min(5, strength)
+                mitigated = any(ohlcv_data[j]["high"] >= ob_low for j in range(i + 2, n))
+                if not mitigated and ob_high > current_price:
+                    dist_pct = (ob_low - current_price) / current_price * 100
+                    bearish_obs.append({
+                        "type": "Bearish OB", "ob_high": round(ob_high, 4),
+                        "ob_low": round(ob_low, 4), "ob_mid": round((ob_high + ob_low) / 2, 4),
+                        "impulse_size": round(impulse_down / atr, 1),
+                        "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                        "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
+                        "idx": i, "time": c0.get("time"),
+                    })
+
+    bullish_obs.sort(key=lambda x: abs(x["dist_pct"]))
+    bearish_obs.sort(key=lambda x: abs(x["dist_pct"]))
+    return {
+        "bullish_obs": bullish_obs[:max_blocks], "bearish_obs": bearish_obs[:max_blocks],
+        "nearest_bull_ob": bullish_obs[0] if bullish_obs else None,
+        "nearest_bear_ob": bearish_obs[0] if bearish_obs else None,
+    }
+
+
+# =============================================================================
+# ICT LIQUIDITY LEVELS — Buyside / Sellside
+# =============================================================================
+# Buyside: Über Equal Highs / Swing Highs (Buy Stops der Shorts)
+# Sellside: Unter Equal Lows / Swing Lows (Sell Stops der Longs)
+# =============================================================================
+
+def detect_liquidity_levels(ohlcv_data, tolerance_pct=0.3, max_levels=8):
+    """Erkennt Buyside/Sellside Liquidity Levels (nur Aktien)."""
+    empty = {"buyside": [], "sellside": [],
+             "nearest_buyside": None, "nearest_sellside": None}
+    if not ohlcv_data or len(ohlcv_data) < 15:
+        return empty
+
+    n = len(ohlcv_data)
+    current_price = ohlcv_data[-1]["close"]
+    tol = current_price * tolerance_pct / 100
+    highs = [d["high"] for d in ohlcv_data]
+    lows = [d["low"] for d in ohlcv_data]
+
+    # Swing Highs & Lows (3-bar Pivot)
+    sw = 3
+    swing_highs = []
+    swing_lows = []
+    for i in range(sw, n - sw):
+        if highs[i] >= max(highs[i-sw:i]) and highs[i] >= max(highs[i+1:i+sw+1]):
+            swing_highs.append({"price": highs[i], "idx": i, "time": ohlcv_data[i].get("time")})
+        if lows[i] <= min(lows[i-sw:i]) and lows[i] <= min(lows[i+1:i+sw+1]):
+            swing_lows.append({"price": lows[i], "idx": i, "time": ohlcv_data[i].get("time")})
+
+    # ── Equal Highs → Buyside Liquidity ──
+    buyside = []
+    used = set()
+    for i, sh in enumerate(swing_highs):
+        if i in used: continue
+        cluster = [sh]; used.add(i)
+        for j, sh2 in enumerate(swing_highs):
+            if j in used: continue
+            if abs(sh["price"] - sh2["price"]) <= tol:
+                cluster.append(sh2); used.add(j)
+        if len(cluster) >= 2:
+            max_p = max(c["price"] for c in cluster)
+            if max_p > current_price:
+                buyside.append({
+                    "type": "Equal Highs", "level": round(max_p, 4),
+                    "touches": len(cluster), "strength": min(5, len(cluster)),
+                    "dist_pct": round((max_p - current_price) / current_price * 100, 2),
+                    "label": f"BSL ${max_p:.2f} ({len(cluster)}x)",
+                })
+    # Einzelne nahe Swing Highs
+    for sh in swing_highs:
+        if sh["price"] > current_price:
+            if not any(abs(sh["price"] - b["level"]) <= tol for b in buyside):
+                d = (sh["price"] - current_price) / current_price * 100
+                if d < 8:
+                    buyside.append({
+                        "type": "Swing High", "level": round(sh["price"], 4),
+                        "touches": 1, "strength": 1, "dist_pct": round(d, 2),
+                        "label": f"BSL ${sh['price']:.2f}",
+                    })
+
+    # ── Equal Lows → Sellside Liquidity ──
+    sellside = []
+    used = set()
+    for i, sl in enumerate(swing_lows):
+        if i in used: continue
+        cluster = [sl]; used.add(i)
+        for j, sl2 in enumerate(swing_lows):
+            if j in used: continue
+            if abs(sl["price"] - sl2["price"]) <= tol:
+                cluster.append(sl2); used.add(j)
+        if len(cluster) >= 2:
+            min_p = min(c["price"] for c in cluster)
+            if min_p < current_price:
+                sellside.append({
+                    "type": "Equal Lows", "level": round(min_p, 4),
+                    "touches": len(cluster), "strength": min(5, len(cluster)),
+                    "dist_pct": round((current_price - min_p) / current_price * 100, 2),
+                    "label": f"SSL ${min_p:.2f} ({len(cluster)}x)",
+                })
+    for sl in swing_lows:
+        if sl["price"] < current_price:
+            if not any(abs(sl["price"] - s["level"]) <= tol for s in sellside):
+                d = (current_price - sl["price"]) / current_price * 100
+                if d < 8:
+                    sellside.append({
+                        "type": "Swing Low", "level": round(sl["price"], 4),
+                        "touches": 1, "strength": 1, "dist_pct": round(d, 2),
+                        "label": f"SSL ${sl['price']:.2f}",
+                    })
+
+    buyside.sort(key=lambda x: x["dist_pct"])
+    sellside.sort(key=lambda x: x["dist_pct"])
+    return {
+        "buyside": buyside[:max_levels], "sellside": sellside[:max_levels],
+        "nearest_buyside": buyside[0] if buyside else None,
+        "nearest_sellside": sellside[0] if sellside else None,
+    }
+
+
+def format_smc_setup(vi_result, ob_result, liq_result, current_price):
+    """
+    Kombiniert FVG + OB + Liquidity zu einem SMC Trade Setup.
+    ICT: 1. Buyside/Sellside = TP  2. FVG = Entry-Zone  3. OB = Stop
+    """
+    setup = {"has_setup": False, "direction": None, "entry_zone": None,
+             "stop": None, "target": None, "confluence": [], "score": 0, "description": ""}
+    if not all([vi_result, ob_result, liq_result]):
+        return setup
+
+    # ── LONG: Bullish FVG + Bullish OB + BSL Target ──
+    bull_fvgs = vi_result.get("unfilled_bull", [])
+    bull_obs = ob_result.get("bullish_obs", [])
+    bsl = liq_result.get("nearest_buyside")
+    best_long = None; best_ls = 0
+
+    for fvg in bull_fvgs[:5]:
+        fh, fl, fm = fvg["zone_high"], fvg["zone_low"], fvg["zone_mid"]
+        dist = (current_price - fh) / current_price * 100 if current_price > 0 else 99
+        if dist < 0 or dist > 5: continue
+        s = 20 + fvg["strength"] * 5
+        conf = [f"📊 Bullish {fvg['type']} @ ${fl:.2f}-${fh:.2f} ({dist:.1f}% unter Preis)"]
+        ob_stop = None
+        for ob in bull_obs:
+            if ob["ob_low"] <= fh * 1.005 and ob["ob_high"] >= fl * 0.995:
+                s += 25; conf.append(f"🏦 Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f} ({ob['impulse_size']:.1f}x ATR)")
+                ob_stop = ob; break
+            if ob["ob_high"] <= fl and ob["ob_high"] >= fl * 0.98:
+                s += 15; conf.append(f"🏦 OB nahe FVG @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
+                ob_stop = ob; break
+        if bsl:
+            rr = (bsl["level"] - fm) / (fm - fl) if (fm - fl) > 0 else 0
+            s += 15 if rr >= 2.0 else 8 if rr >= 1.5 else 3
+            conf.append(f"🎯 BSL Target @ ${bsl['level']:.2f} ({bsl['touches']}x, R:R ≈ {rr:.1f})")
+        if s > best_ls:
+            best_ls = s
+            best_long = {"has_setup": True, "direction": "LONG",
+                "entry_zone": f"${fl:.2f} - ${fh:.2f}", "entry_low": fl, "entry_high": fh,
+                "stop": f"${ob_stop['ob_low']:.2f}" if ob_stop else f"${fl * 0.995:.2f}",
+                "target": f"${bsl['level']:.2f}" if bsl else "Nächster Swing High",
+                "confluence": conf, "score": min(100, s)}
+
+    # ── SHORT: Bearish FVG + Bearish OB + SSL Target ──
+    bear_fvgs = vi_result.get("unfilled_bear", [])
+    bear_obs = ob_result.get("bearish_obs", [])
+    ssl = liq_result.get("nearest_sellside")
+    best_short = None; best_ss = 0
+
+    for fvg in bear_fvgs[:5]:
+        fh, fl, fm = fvg["zone_high"], fvg["zone_low"], fvg["zone_mid"]
+        dist = (fl - current_price) / current_price * 100 if current_price > 0 else 99
+        if dist < 0 or dist > 5: continue
+        s = 20 + fvg["strength"] * 5
+        conf = [f"📊 Bearish {fvg['type']} @ ${fl:.2f}-${fh:.2f} ({dist:.1f}% über Preis)"]
+        ob_stop = None
+        for ob in bear_obs:
+            if ob["ob_low"] <= fh * 1.005 and ob["ob_high"] >= fl * 0.995:
+                s += 25; conf.append(f"🏦 Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
+                ob_stop = ob; break
+            if ob["ob_low"] >= fh and ob["ob_low"] <= fh * 1.02:
+                s += 15; conf.append(f"🏦 OB nahe FVG @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}")
+                ob_stop = ob; break
+        if ssl:
+            rr = (fm - ssl["level"]) / (fh - fm) if (fh - fm) > 0 else 0
+            s += 15 if rr >= 2.0 else 8 if rr >= 1.5 else 3
+            conf.append(f"🎯 SSL Target @ ${ssl['level']:.2f} ({ssl['touches']}x, R:R ≈ {rr:.1f})")
+        if s > best_ss:
+            best_ss = s
+            best_short = {"has_setup": True, "direction": "SHORT",
+                "entry_zone": f"${fl:.2f} - ${fh:.2f}", "entry_low": fl, "entry_high": fh,
+                "stop": f"${ob_stop['ob_high']:.2f}" if ob_stop else f"${fh * 1.005:.2f}",
+                "target": f"${ssl['level']:.2f}" if ssl else "Nächster Swing Low",
+                "confluence": conf, "score": min(100, s)}
+
+    # Bestes Setup
+    if best_ls >= best_ss and best_long:
+        best_long["description"] = f"🏦 SMC LONG (Score: {best_long['score']}/100) | Entry: {best_long['entry_zone']} | Stop: {best_long['stop']} | TP: {best_long['target']}"
+        return best_long
+    elif best_short:
+        best_short["description"] = f"🏦 SMC SHORT (Score: {best_short['score']}/100) | Entry: {best_short['entry_zone']} | Stop: {best_short['stop']} | TP: {best_short['target']}"
+        return best_short
+    return setup
+
+
 def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=40):
     """
     Erkennt Wolfe Wave Patterns (Long und Short) in OHLCV-Daten.
@@ -7884,6 +8157,93 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                        f"Bull Support: {stats['bull_unfilled']}, Bear Resistance: {stats['bear_unfilled']}"
                     })
             
+            except Exception:
+                pass
+        
+        # =================================================================
+        # ORDER BLOCKS — ICT Institutionelle Entry-Zonen (nur Aktien)
+        # =================================================================
+        ob_result = None
+        if len(data) >= 20:
+            try:
+                ob_result = detect_order_blocks(data)
+                
+                for ob in ob_result["bullish_obs"][:3]:
+                    stars = "⭐" * ob["strength"]
+                    patterns.append({
+                        "pattern": "Bullish Order Block",
+                        "emoji": "🏦🟢",
+                        "type": "bullish",
+                        "confidence": "High" if ob["strength"] >= 3 else "Medium" if ob["strength"] >= 2 else "Low",
+                        "description": f"Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
+                                       f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
+                                       f"Dist: {ob['dist_pct']:.1f}% unter Preis. {stars}"
+                    })
+                
+                for ob in ob_result["bearish_obs"][:3]:
+                    stars = "⭐" * ob["strength"]
+                    patterns.append({
+                        "pattern": "Bearish Order Block",
+                        "emoji": "🏦🔴",
+                        "type": "bearish",
+                        "confidence": "High" if ob["strength"] >= 3 else "Medium" if ob["strength"] >= 2 else "Low",
+                        "description": f"Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
+                                       f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
+                                       f"Dist: {ob['dist_pct']:.1f}% über Preis. {stars}"
+                    })
+            except Exception:
+                pass
+        
+        # =================================================================
+        # LIQUIDITY LEVELS — Buyside / Sellside (nur Aktien)
+        # =================================================================
+        liq_result = None
+        if len(data) >= 20:
+            try:
+                liq_result = detect_liquidity_levels(data)
+                
+                for lv in liq_result["buyside"][:3]:
+                    stars = "⭐" * lv["strength"]
+                    patterns.append({
+                        "pattern": f"Buyside Liquidity ({lv['type']})",
+                        "emoji": "🎯⬆️",
+                        "type": "info",
+                        "confidence": "High" if lv["touches"] >= 3 else "Medium" if lv["touches"] >= 2 else "Low",
+                        "description": f"BSL @ ${lv['level']:.2f} ({lv['touches']}x touches). "
+                                       f"Dist: {lv['dist_pct']:.1f}% über Preis. {stars} "
+                                       f"Buy Stops der Shorts liegen hier — potentieller TP für Longs."
+                    })
+                
+                for lv in liq_result["sellside"][:3]:
+                    stars = "⭐" * lv["strength"]
+                    patterns.append({
+                        "pattern": f"Sellside Liquidity ({lv['type']})",
+                        "emoji": "🎯⬇️",
+                        "type": "info",
+                        "confidence": "High" if lv["touches"] >= 3 else "Medium" if lv["touches"] >= 2 else "Low",
+                        "description": f"SSL @ ${lv['level']:.2f} ({lv['touches']}x touches). "
+                                       f"Dist: {lv['dist_pct']:.1f}% unter Preis. {stars} "
+                                       f"Sell Stops der Longs liegen hier — potentieller TP für Shorts."
+                    })
+            except Exception:
+                pass
+        
+        # =================================================================
+        # SMC SETUP — FVG + OB + Liquidity kombiniert (nur Aktien)
+        # =================================================================
+        if vi_result and ob_result and liq_result:
+            try:
+                smc = format_smc_setup(vi_result, ob_result, liq_result, current_price)
+                if smc["has_setup"]:
+                    conf_text = " | ".join(smc["confluence"])
+                    patterns.append({
+                        "pattern": f"🏦 SMC {smc['direction']} Setup",
+                        "emoji": "🏦💎",
+                        "type": "bullish" if smc["direction"] == "LONG" else "bearish",
+                        "confidence": "High" if smc["score"] >= 60 else "Medium" if smc["score"] >= 40 else "Low",
+                        "description": f"{smc['description']}\n"
+                                       f"Confluence: {conf_text}"
+                    })
             except Exception:
                 pass
         
