@@ -10854,13 +10854,52 @@ def fetch_crypto_data():
                 breakout_health = None
                 if current_strategy in ("Breakout Long", "Early Momentum", "Whale Watch 🐋"):
                     if change_24h > 0:
-                        breakout_health = assess_breakout_health(
-                            change_pct=change_24h, rvol=rvol, close_pos=close_pos,
-                            high=high_24h, low=low_24h, close=price,
-                            open_price=None, prev_close=prev_close_approx,
-                            vortag_pct=vortag_chg, vi_result=None,
-                            market_type="Krypto", market_cap=market_cap
-                        )
+                        # V68: Trend-Guard — kein "Breakout" wenn 6d-Trend klar negativ
+                        # ARB-Problem: Coin fällt seit Wochen, +1.5% Bounce ≠ Breakout
+                        # Prüfe ob Close nahe 24h-High oder nahe 24h-Low
+                        range_24h = high_24h - low_24h if high_24h > low_24h else 0
+                        price_in_range = (price - low_24h) / range_24h if range_24h > 0 else 0.5
+                        
+                        is_fake_breakout = False
+                        # Wenn 6d-Trend negativ UND Preis in unterer Hälfte der Range
+                        # → Dead Cat Bounce, kein Breakout
+                        if vortag_chg < -0.5 and price_in_range < 0.4:
+                            is_fake_breakout = True
+                        # Wenn Change winzig relativ zur geschätzten ATR → kein Breakout
+                        mc_temp = market_cap or 0
+                        if mc_temp > 100_000_000_000: ea_temp = 2.5
+                        elif mc_temp > 10_000_000_000: ea_temp = 4.0
+                        elif mc_temp > 1_000_000_000: ea_temp = 6.5
+                        elif mc_temp > 100_000_000: ea_temp = 9.5
+                        else: ea_temp = 15.0
+                        if change_24h / ea_temp < 0.4:
+                            is_fake_breakout = True  # Move < 0.4x ATR = Rauschen
+                        
+                        if not is_fake_breakout:
+                            breakout_health = assess_breakout_health(
+                                change_pct=change_24h, rvol=rvol, close_pos=close_pos,
+                                high=high_24h, low=low_24h, close=price,
+                                open_price=None, prev_close=prev_close_approx,
+                                vortag_pct=vortag_chg, vi_result=None,
+                                market_type="Krypto", market_cap=market_cap
+                            )
+                        else:
+                            # Explizit als Nicht-Breakout markieren
+                            breakout_health = {
+                                "health_score": 15,
+                                "verdict": "KEIN BREAKOUT",
+                                "verdict_emoji": "🚫🔴",
+                                "selloff_risk": "N/A",
+                                "selloff_risk_emoji": "⚪",
+                                "selloff_pressure": 0,
+                                "warnings": [
+                                    f"🔴 Kein echter Breakout — 6d-Trend {vortag_chg:+.1f}%/Tag, Preis in unterer Range ({price_in_range:.0%})" 
+                                    if vortag_chg < -0.5 else
+                                    f"🔴 Bewegung zu klein ({change_24h/ea_temp:.1f}x est.ATR) — Rauschen, kein Breakout"
+                                ],
+                                "signals": [],
+                                "action": "KEIN ENTRY — Bounce im Abwärtstrend, kein echter Breakout."
+                            }
                 
                 # Setup Score für Krypto — CRYPTO-SPEZIFISCH
                 SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
