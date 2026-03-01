@@ -749,59 +749,59 @@ CRYPTO_STRATEGIES = {
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Coins"
     },
     "Volume Surge": {
-        "description": "Deutlich erhoehtes Volumen + starke Bewegung",
+        "description": "Erhoehtes Volumen + starke Bewegung",
         "filters": {"RVOL": (1.5, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 1.5 (Turnover deutlich ueber Baseline) + Change > 3% = echtes Interesse"
+        "logic": "RVOL > 1.5 (deutlich über Baseline) + Change > 3% = echtes Interesse"
     },
     "Bull Flag": {
-        "description": "Bullische Konsolidierung nach Aufwärtstrend (⚠️ Vortag = 6d-Ø)",
+        "description": "Konsolidierung nach Aufwärtstrend (⚠️ Vortag = 6d Tagesdurchschnitt)",
         "filters": {"Vortag %": (0.5, 30.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
-        "logic": "6d-Trend positiv (avg >0.5%/Tag), heute flach mit sinkendem Volumen"
+        "logic": "6d-Trend positiv (avg >+0.5%/Tag ≈ +3%/Woche), heute flach, Volumen sinkt"
     },
     "Bear Flag": {
-        "description": "Baerische Konsolidierung nach Abwärtstrend (⚠️ Vortag = 6d-Ø)",
+        "description": "Konsolidierung nach Abwärtstrend (⚠️ Vortag = 6d Tagesdurchschnitt)",
         "filters": {"Vortag %": (-30.0, -0.5), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
-        "logic": "6d-Trend negativ (avg <-0.5%/Tag), heute flach = weitere Schwaeche"
+        "logic": "6d-Trend negativ (avg <-0.5%/Tag), heute flach = Bären sammeln Kraft"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben — Close nahe Tageshoch",
         "filters": {"Change %": (4.0, 80.0), "Close Position": (0.65, 1.0)},
-        "logic": "Close nahe High + starke Bewegung (>4% weil Crypto volatiler) = bullischer Ausbruch"
+        "logic": "Close nahe High + starke Bewegung = bullischer Ausbruch"
     },
     "Breakdown Short": {
         "description": "Ausbruch nach unten — Close nahe Tagestief",
         "filters": {"Change %": (-80.0, -4.0), "Close Position": (0.0, 0.35)},
-        "logic": "Close nahe Low + starke Abwaertsbewegung (>4%) = Schwaeche"
+        "logic": "Close nahe Low + starke Abwärtsbewegung = Schwäche"
     },
     "Low Cap Rockets 🚀": {
-        "description": "Günstige Coins mit explosivem Volumen",
-        "filters": {"Preis": (0.0001, 1.0), "RVOL": (1.5, 50.0), "Change %": (5.0, 100.0)},
-        "logic": "Coins unter $1 mit RVOL > 1.5 + >5% Move = echte Explosion, kein Noise"
+        "description": "Small/Micro Cap mit explosivem Volumen & Bewegung",
+        "filters": {"MarketCap": (0, 500_000_000), "RVOL": (1.2, 50.0), "Change %": (5.0, 100.0)},
+        "logic": "MCap < $500M + RVOL > 1.2 + Change > 5% = echte Small-Cap-Explosion"
     },
     "Dip Buy": {
         "description": "Rücksetzer ohne Panik-Volumen",
-        "filters": {"Change %": (-12.0, -3.0), "RVOL": (0.3, 1.5)},
-        "logic": "Moderater Crypto-Ruecksetzer (-3% bis -12%) mit normalem Volumen"
+        "filters": {"Change %": (-15.0, -3.0), "RVOL": (0.3, 1.5)},
+        "logic": "Moderater Rücksetzer mit normalem Volumen — kein Panik-Dump"
     },
     "Reversal Hunter": {
-        "description": "Trendumkehr nach Abwärtstrend (⚠️ Vortag = 6d-Ø)",
+        "description": "Trendumkehr nach Abwärtstrend (⚠️ Vortag = 6d Tagesdurchschnitt)",
         "filters": {"Vortag %": (-50.0, -1.0), "Change %": (2.0, 50.0)},
-        "logic": "6d-Trend negativ (avg >-1%/Tag), heute Kaeufer (+2%+) = moegliche Umkehr"
+        "logic": "6d-Trend negativ (avg <-1%/Tag ≈ -6%/Woche), heute Käufer (+2%) = mögliche Wende"
     },
     "Early Momentum": {
         "description": "Starke Bewegung mit erhoehtem Volumen",
         "filters": {"Change %": (3.0, 40.0), "RVOL": (1.0, 20.0)},
-        "logic": "Positive Crypto-Bewegung >3% mit Volumen-Bestaetigung (RVOL >= 1.0)"
+        "logic": "Positive Bewegung mit Volumen-Bestaetigung"
     },
     "Whale Watch 🐋": {
-        "description": "Extremes Volumen MIT klarer Richtung — Big Player aktiv",
+        "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
         "filters": {"RVOL": (2.5, 50.0), "Change %": (5.0, 100.0)},
-        "logic": "RVOL > 2.5 + Change > 5% = echte Whale Activity, kein normaler Tag"
+        "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
     },
     "Accumulation 📦": {
         "description": "Leise Akkumulation bei stabilem Preis",
         "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.2, 3.0)},
-        "logic": "Seitwaerts + erhoehtes Volumen (RVOL 1.2-3.0) = jemand sammelt"
+        "logic": "Seitwärts + leicht erhöhtes Volumen = jemand sammelt"
     },
 }
 
@@ -1052,7 +1052,7 @@ def calculate_close_position(high, low, close, min_range_pct=1.0):
 def assess_breakout_health(change_pct, rvol, close_pos, high, low, close, 
                            open_price=None, prev_close=None, prev_high=None, 
                            prev_low=None, vortag_pct=None, vi_result=None,
-                           atr_pct=None):
+                           atr_pct=None, market_type="Aktien", market_cap=None):
     """
     Bewertet die Gesundheit eines Breakouts auf einer Skala von 0-100.
     
@@ -1089,7 +1089,8 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
     warnings = []
     signals = []
     has_volume_data = rvol is not None
-    is_multi_day_run = vortag_pct is not None and vortag_pct > 3.0
+    multi_day_thresh = 1.5 if market_type == "Krypto" else 3.0
+    is_multi_day_run = vortag_pct is not None and vortag_pct > multi_day_thresh
     
     # ================================================================
     # 1. CANDLE STRUCTURE — Wick + Body (HAUPTINDIKATOR)
@@ -1290,54 +1291,77 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             health -= 7
             warnings.append(f"⚠️ Absolute Distanz +{change_pct:.1f}% — schon weit gelaufen")
     else:
-        # Fallback: Absolute Schwellen (ohne ATR, z.B. Krypto)
-        # V67.5: Schwellen angehoben — Krypto bewegt sich typisch staerker als Aktien
-        if change_pct > 30:
-            health -= 12
-            warnings.append(f"🔴 Stark ueberdehnt (+{change_pct:.1f}%) — Profit-Taking wahrscheinlich")
-        elif change_pct > 18:
-            health -= 6
-            warnings.append(f"⚠️ Ueberdehnt (+{change_pct:.1f}%) — Pullback moeglich")
-        elif change_pct > 12:
-            health -= 2
-            warnings.append(f"🟡 Ausgedehnte Bewegung (+{change_pct:.1f}%)")
-        elif change_pct >= 3:
-            health += 3
-            signals.append(f"🟢 Gesunde Breakout-Groesse (+{change_pct:.1f}%)")
-        elif change_pct >= 1.5:
-            signals.append(f"ℹ️ Moderate Bewegung (+{change_pct:.1f}%)")
+        # V68: Crypto bekommt geschätzte ATR
+        if market_type == "Krypto" and market_cap and market_cap > 0:
+            mc = market_cap
+            if mc > 100_000_000_000: est_atr = 2.5
+            elif mc > 10_000_000_000: est_atr = 4.0
+            elif mc > 1_000_000_000: est_atr = 6.5
+            elif mc > 100_000_000: est_atr = 9.5
+            else: est_atr = 15.0
+            ext_r = change_pct / est_atr
+            if ext_r > 4.0:
+                health -= 12
+                warnings.append(f"🔴 Überdehnt ({ext_r:.1f}x est.ATR)")
+            elif ext_r > 2.5:
+                health -= 6
+                warnings.append(f"⚠️ Ausgedehnt ({ext_r:.1f}x est.ATR)")
+            elif ext_r >= 0.7:
+                health += 3
+                signals.append(f"🟢 Gesunde Extension ({ext_r:.1f}x est.ATR)")
+            else:
+                signals.append(f"ℹ️ Moderate Bewegung ({ext_r:.1f}x est.ATR)")
         else:
-            signals.append(f"ℹ️ Schwache Bewegung (+{change_pct:.1f}%)")
+            if change_pct > 20:
+                health -= 12
+                warnings.append(f"🔴 Stark überdehnt (+{change_pct:.1f}%)")
+            elif change_pct > 12:
+                health -= 6
+                warnings.append(f"⚠️ Überdehnt (+{change_pct:.1f}%)")
+            elif change_pct >= 3:
+                health += 3
+                signals.append(f"🟢 Gesunde Breakout-Grösse (+{change_pct:.1f}%)")
+            else:
+                signals.append(f"ℹ️ Moderate Bewegung (+{change_pct:.1f}%)")
     
     # ================================================================
     # 4. CONTEXT — Woher kommt der Breakout?
     # ================================================================
     if vortag_pct is not None:
-        # Volatilitäts-Check: "Konsolidierung" nach einem Crash/Spike
-        # ist KEINE echte Konsolidierung — aber Schwellenwert preis-abhängig
-        vol_threshold = 6.0
-        if close and close > 0 and close < 10:
-            vol_threshold = 12.0  # Pennys sind natürlich volatiler
-        elif close and close > 0 and close < 50:
-            vol_threshold = 8.0
-        is_high_vol_regime = atr_pct and atr_pct > vol_threshold
-        
-        if -2.0 <= vortag_pct <= 2.0:
-            if is_high_vol_regime:
-                health -= 3
-                warnings.append(f"⚠️ Flacher Vortag ({vortag_pct:+.1f}%) in volatiler Phase (ATR {atr_pct:.1f}%) — keine echte Konsolidierung")
-            else:
+        if market_type == "Krypto":
+            if -0.5 <= vortag_pct <= 0.5:
                 health += 8
-                signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
-        elif vortag_pct < -3.0:
-            health += 0  # Neutral — Reversal ist OK aber riskanter
-            warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein")
-        elif vortag_pct > 5.0:
-            health -= 8
-            warnings.append(f"⚠️ Multi-Day Run (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
-        elif vortag_pct > 2.0:
-            health -= 2
-            warnings.append(f"🟡 Continuation (Vortag {vortag_pct:+.1f}%) — Trend läuft schon")
+                signals.append(f"🟢 Breakout aus ruhiger Phase ({vortag_pct:+.1f}%/Tag avg)")
+            elif vortag_pct < -1.5:
+                warnings.append(f"🟡 Reversal nach Abwärtstrend ({vortag_pct:+.1f}%/Tag)")
+            elif vortag_pct > 2.5:
+                health -= 8
+                warnings.append(f"⚠️ Heisser Trend ({vortag_pct:+.1f}%/Tag) — Erschöpfung")
+            elif vortag_pct > 1.0:
+                health -= 2
+                warnings.append(f"🟡 Continuation ({vortag_pct:+.1f}%/Tag)")
+        else:
+            vol_threshold = 6.0
+            if close and close > 0 and close < 10:
+                vol_threshold = 12.0
+            elif close and close > 0 and close < 50:
+                vol_threshold = 8.0
+            is_high_vol_regime = atr_pct and atr_pct > vol_threshold
+            if -2.0 <= vortag_pct <= 2.0:
+                if is_high_vol_regime:
+                    health -= 3
+                    warnings.append(f"⚠️ Flacher Vortag ({vortag_pct:+.1f}%) in volatiler Phase (ATR {atr_pct:.1f}%) — keine echte Konsolidierung")
+                else:
+                    health += 8
+                    signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
+            elif vortag_pct < -3.0:
+                warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein")
+            elif vortag_pct > 5.0:
+                health -= 8
+                warnings.append(f"⚠️ Multi-Day Run (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
+            elif vortag_pct > 2.0:
+                health -= 2
+                warnings.append(f"🟡 Continuation (Vortag {vortag_pct:+.1f}%) — Trend läuft schon")
     
     # ================================================================
     # 5. VOLUME IMBALANCE CONFLUENCE — Resistance voraus?
@@ -2143,158 +2167,104 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
 
 def calculate_setup_score_crypto(change_pct, rvol, close_pos, upper_wick_pct, lower_wick_pct,
                                   vortag_pct, vol_24h, price, market_cap, direction="long"):
-    """
-    Setup Quality Score 0-100 für KRYPTO — Separate Funktion, Aktien-Score unangetastet.
-    
-    UNTERSCHIEDE vs Aktien-Score:
-    ─────────────────────────────────────────────────────
-    1. VOLUME (0-20)      — RVOL (Turnover-basiert)
-    2. KERZE (0-20)       — Gleich wie Aktien
-    3. TIMING (0-20)      — Market-Cap-basierte ATR-Schätzung
-    4. LIQUIDITÄT (0-15)  — Crypto-Schwellen ($100M+ für max)
-    5. MOMENTUM (0-15)    — ATR-normalisiert mit geschätzter ATR
-    6. KONTEXT (0-10)     — Angepasst für 6d-Durchschnitts-Vortag
-    ─────────────────────────────────────────────────────
-    
-    Geschätzte tägliche Volatilität (ATR%) nach Market Cap:
-    - BTC/ETH (>$100B):     2-3% daily
-    - Large Cap (>$10B):    3-5% daily
-    - Mid Cap ($1B-$10B):   5-8% daily
-    - Small Cap ($100M-$1B): 7-12% daily
-    - Micro Cap (<$100M):   10-20%+ daily
-    """
+    """Setup Quality Score 0-100 für KRYPTO. Aktien-Score bleibt unverändert."""
     score = 0
     is_long = direction == "long"
     abs_change = abs(change_pct) if change_pct else 0
     mc = market_cap or 0
-    
-    # Geschätzte tägliche ATR basierend auf Market Cap Tier
-    if mc > 100_000_000_000:
-        est_atr = 2.5    # BTC/ETH — typ. 1.5-3.5%
-    elif mc > 10_000_000_000:
-        est_atr = 4.0    # Large Cap (SOL, BNB, XRP)
-    elif mc > 1_000_000_000:
-        est_atr = 6.5    # Mid Cap
-    elif mc > 100_000_000:
-        est_atr = 9.5    # Small Cap
-    else:
-        est_atr = 15.0   # Micro Cap
-    
-    # ── 1. VOLUME (0-20) ──
+    if mc > 100_000_000_000:   est_atr = 2.5
+    elif mc > 10_000_000_000:  est_atr = 4.0
+    elif mc > 1_000_000_000:   est_atr = 6.5
+    elif mc > 100_000_000:     est_atr = 9.5
+    else:                      est_atr = 15.0
+    # 1. VOLUME (0-20)
     if rvol is not None and rvol > 0:
-        if rvol >= 3.0:
-            score += 20
-        elif rvol >= 2.0:
-            score += 16
-        elif rvol >= 1.5:
-            score += 12
-        elif rvol >= 1.0:
-            score += 6
-        elif rvol >= 0.7:
-            score += 3    # Leicht unter Durchschnitt — minimal
-    
-    # ── 2. KERZE (0-20) ──
-    candle_score = 0
+        if rvol >= 3.0:   score += 20
+        elif rvol >= 2.0: score += 16
+        elif rvol >= 1.5: score += 12
+        elif rvol >= 1.0: score += 6
+        elif rvol >= 0.7: score += 3
+    # 2. KERZE (0-20)
+    c = 0
     if close_pos is not None:
         if is_long:
-            if close_pos >= 0.80: candle_score += 14
-            elif close_pos >= 0.65: candle_score += 10
-            elif close_pos >= 0.50: candle_score += 5
+            if close_pos >= 0.80: c += 14
+            elif close_pos >= 0.65: c += 10
+            elif close_pos >= 0.50: c += 5
             if upper_wick_pct is not None:
-                if upper_wick_pct < 15: candle_score += 6
-                elif upper_wick_pct < 25: candle_score += 3
+                if upper_wick_pct < 15: c += 6
+                elif upper_wick_pct < 25: c += 3
             if lower_wick_pct is not None:
-                if lower_wick_pct > 50: candle_score -= 6
-                elif lower_wick_pct > 30: candle_score -= 3
+                if lower_wick_pct > 50: c -= 6
+                elif lower_wick_pct > 30: c -= 3
         else:
-            if close_pos <= 0.20: candle_score += 14
-            elif close_pos <= 0.35: candle_score += 10
-            elif close_pos <= 0.50: candle_score += 5
+            if close_pos <= 0.20: c += 14
+            elif close_pos <= 0.35: c += 10
+            elif close_pos <= 0.50: c += 5
             if lower_wick_pct is not None:
-                if lower_wick_pct < 15: candle_score += 6
-                elif lower_wick_pct < 25: candle_score += 3
+                if lower_wick_pct < 15: c += 6
+                elif lower_wick_pct < 25: c += 3
             if upper_wick_pct is not None:
-                if upper_wick_pct > 50: candle_score -= 6
-                elif upper_wick_pct > 30: candle_score -= 3
-    score += max(0, candle_score)
-    
-    # ── 3. TIMING (0-20) — Market-Cap-aware ATR ──
-    extension = abs_change / est_atr if est_atr > 0 else 1.0
-    if abs_change < 0.3:
-        pass  # Kein Signal
-    elif 0.5 <= extension <= 2.0:
-        score += 20   # Sweet Spot — signifikanter Move, nicht überdehnt
-    elif 0.3 <= extension < 0.5:
-        score += 8    # Early — Move beginnt, nicht bestätigt
-    elif extension < 0.3:
-        score += 2    # Rauschen für diese Coin-Grösse
-    elif extension <= 3.0:
-        score += 14   # Leicht extended
-    elif extension <= 4.0:
-        score += 7    # Getting late
-    # >4.0x ATR: 0 = Chase
-    
-    # ── 4. LIQUIDITÄT (0-15) — Crypto-Schwellen ──
+                if upper_wick_pct > 50: c -= 6
+                elif upper_wick_pct > 30: c -= 3
+    score += max(0, c)
+    # 3. TIMING (0-20)
+    ext = abs_change / est_atr if est_atr > 0 else 1.0
+    if abs_change < 0.3: pass
+    elif 0.5 <= ext <= 2.0: score += 20
+    elif 0.3 <= ext < 0.5:  score += 8
+    elif ext < 0.3:         score += 2
+    elif ext <= 3.0:        score += 14
+    elif ext <= 4.0:        score += 7
+    # 4. LIQUIDITÄT (0-15)
     if vol_24h:
-        if vol_24h >= 100_000_000:
-            score += 15   # $100M+ = Tier-1
-        elif vol_24h >= 20_000_000:
-            score += 13   # $20M+ = gut
-        elif vol_24h >= 5_000_000:
-            score += 10   # $5M+ = OK
-        elif vol_24h >= 1_000_000:
-            score += 6    # $1M+ = dünn
-        elif vol_24h >= 100_000:
-            score += 2    # Sehr dünn
-    
-    # ── 5. MOMENTUM (0-15) — ATR-normalisiert ──
-    momentum_pts = 0
+        if vol_24h >= 100_000_000:   score += 15
+        elif vol_24h >= 20_000_000:  score += 13
+        elif vol_24h >= 5_000_000:   score += 10
+        elif vol_24h >= 1_000_000:   score += 6
+        elif vol_24h >= 100_000:     score += 2
+    # 5. MOMENTUM (0-15)
+    m = 0
     if change_pct is not None:
-        move_atr_ratio = abs_change / est_atr if est_atr > 0 else 0
-        direction_ok = (is_long and change_pct > 0) or (not is_long and change_pct < 0)
-        
-        if direction_ok:
-            if move_atr_ratio >= 1.5:
-                momentum_pts = 15
-            elif move_atr_ratio >= 1.0:
-                momentum_pts = 12
-            elif move_atr_ratio >= 0.7:
-                momentum_pts = 9
-            elif move_atr_ratio >= 0.5:
-                momentum_pts = 6
-            elif move_atr_ratio >= 0.3:
-                momentum_pts = 3
-            else:
-                momentum_pts = 1
-            if abs_change < 0.3:
-                momentum_pts = 0
-        
-        # Chase-Penalty (Crypto-Schwellen höher als Aktien)
-        if abs_change >= 40:
-            momentum_pts = min(momentum_pts, 0)
-        elif abs_change >= 25:
-            momentum_pts = min(momentum_pts, 3)
-        elif abs_change > 15:
-            momentum_pts = min(momentum_pts, 8)
-    
-    score += momentum_pts
-    
-    # ── 6. KONTEXT (0-10) — Angepasst für 6d-Average ──
-    # vortag_pct bei Crypto = 6-Tage geometrisches Mittel pro Tag
-    # <0.8%/Tag avg = ruhige Phase, >3%/Tag avg = sehr volatil
+        mar = abs_change / est_atr if est_atr > 0 else 0
+        d_ok = (is_long and change_pct > 0) or (not is_long and change_pct < 0)
+        if d_ok:
+            if mar >= 1.5:   m = 15
+            elif mar >= 1.0: m = 12
+            elif mar >= 0.7: m = 9
+            elif mar >= 0.5: m = 6
+            elif mar >= 0.3: m = 3
+            else:            m = 1
+            if abs_change < 0.3: m = 0
+        if abs_change >= 40:   m = min(m, 0)
+        elif abs_change >= 25: m = min(m, 3)
+        elif abs_change > 15:  m = min(m, 8)
+    score += m
+    # 6. KONTEXT (0-10) — 6d-avg
     if vortag_pct is not None:
-        abs_vortag = abs(vortag_pct)
-        if abs_vortag < 0.8:
-            score += 10   # Ruhige Phase — bestes Breakout-Setup
-        elif abs_vortag < 1.5:
-            score += 7    # Normal
-        elif abs_vortag < 3.0:
-            score += 4    # Erhöhte Volatilität
-        elif abs_vortag < 5.0:
-            score += 2    # Sehr volatil
-        # >5%/Tag avg: 0 = extremes Umfeld
-    
+        av = abs(vortag_pct)
+        if av < 0.8:   score += 10
+        elif av < 1.5: score += 7
+        elif av < 3.0: score += 4
+        elif av < 5.0: score += 2
     return min(100, max(0, score))
+
+
+def calculate_alpha_score_crypto(rvol, vortag_pct, change_pct, market_cap):
+    """Alpha Score 0-100 für KRYPTO — Market-Cap-aware."""
+    import math
+    mc = market_cap or 0
+    if mc > 100_000_000_000:   est_atr = 2.5
+    elif mc > 10_000_000_000:  est_atr = 4.0
+    elif mc > 1_000_000_000:   est_atr = 6.5
+    elif mc > 100_000_000:     est_atr = 9.5
+    else:                      est_atr = 15.0
+    rvol_safe = min(max(rvol or 0, 0), 8)
+    rvol_score = (math.log(1 + rvol_safe) / math.log(9)) * 35
+    atr_ratio = min(abs(change_pct or 0) / est_atr, 3.0) if est_atr > 0 else 0
+    change_score = (math.sqrt(atr_ratio) / math.sqrt(3.0)) * 35
+    vortag_score = (min(abs(vortag_pct or 0), 5.0) / 5.0) * 30
+    return round(rvol_score + vortag_score + change_score, 0)
 
 
 def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
@@ -2389,7 +2359,7 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         # Fallback: Einfache Berechnung
         return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 1.0
 
-def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, high, low, pattern_type="bull", prev_high=0, prev_low=0):
+def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, high, low, pattern_type="bull", prev_high=0, prev_low=0, market_type="Aktien"):
     """
     Validiert Bull/Bear Flag Pattern mit zusätzlichen Kriterien:
     
@@ -2407,24 +2377,36 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
     """
     details = []
     score = 0
+    is_crypto = market_type == "Krypto"
     
     if pattern_type == "bull":
-        # Kriterium 1: Vortag stark positiv
-        # V67.5: Threshold gesenkt (2.5% statt 4%) — viele echte Flags haben kleinere Poles
-        if 4.0 <= vortag_chg <= 30.0:
-            score += 25
-            details.append(f"✅ Starke Fahnenstange: {vortag_chg:+.1f}%")
-        elif 2.5 <= vortag_chg < 4.0:
-            score += 15
-            details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
+        # Kriterium 1: Vorheriger Aufwärtstrend
+        if is_crypto:
+            if vortag_chg >= 1.5:
+                score += 25
+                details.append(f"✅ Starker 6d-Trend: {vortag_chg:+.1f}%/Tag (≈{vortag_chg*6:+.0f}%/Wo)")
+            elif vortag_chg >= 0.5:
+                score += 15
+                details.append(f"✅ Moderater 6d-Trend: {vortag_chg:+.1f}%/Tag")
+            else:
+                details.append(f"❌ Kein Aufwärtstrend: {vortag_chg:+.1f}%/Tag avg")
         else:
-            details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
+            if 4.0 <= vortag_chg <= 30.0:
+                score += 25
+                details.append(f"✅ Starke Fahnenstange: {vortag_chg:+.1f}%")
+            elif 2.5 <= vortag_chg < 4.0:
+                score += 15
+                details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
+            else:
+                details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
 
-        # Kriterium 2: Heute seitwaerts (-2% bis +2%)
-        if -2.0 <= change_today <= 2.0:
+        # Kriterium 2: Konsolidierung
+        consol_tight = 3.0 if is_crypto else 2.0
+        consol_wide = 5.0 if is_crypto else 4.0
+        if -consol_tight <= change_today <= consol_tight:
             score += 20
             details.append(f"✅ Konsolidierung: {change_today:+.1f}%")
-        elif -4.0 <= change_today <= 4.0:
+        elif -consol_wide <= change_today <= consol_wide:
             score += 10
             details.append(f"⚠️ Leichte Konsolidierung: {change_today:+.1f}%")
         else:
@@ -2477,20 +2459,31 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         is_valid = score >= 50
 
     else:  # Bear Flag
-        # V67.5: Threshold gesenkt (-2.5% statt -4%)
-        if -30.0 <= vortag_chg <= -4.0:
-            score += 25
-            details.append(f"✅ Starke Fahnenstange (Short): {vortag_chg:+.1f}%")
-        elif -4.0 < vortag_chg <= -2.5:
-            score += 15
-            details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
+        if is_crypto:
+            if vortag_chg <= -1.5:
+                score += 25
+                details.append(f"✅ Starker Abwärtstrend: {vortag_chg:+.1f}%/Tag (≈{vortag_chg*6:+.0f}%/Wo)")
+            elif vortag_chg <= -0.5:
+                score += 15
+                details.append(f"✅ Moderater Abwärtstrend: {vortag_chg:+.1f}%/Tag")
+            else:
+                details.append(f"❌ Kein Abwärtstrend: {vortag_chg:+.1f}%/Tag avg")
         else:
-            details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
+            if -30.0 <= vortag_chg <= -4.0:
+                score += 25
+                details.append(f"✅ Starke Fahnenstange (Short): {vortag_chg:+.1f}%")
+            elif -4.0 < vortag_chg <= -2.5:
+                score += 15
+                details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
+            else:
+                details.append(f"❌ Fahnenstange schwach: {vortag_chg:+.1f}%")
 
-        if -2.0 <= change_today <= 2.0:
+        consol_tight = 3.0 if is_crypto else 2.0
+        consol_wide = 5.0 if is_crypto else 4.0
+        if -consol_tight <= change_today <= consol_tight:
             score += 20
             details.append(f"✅ Konsolidierung: {change_today:+.1f}%")
-        elif -4.0 <= change_today <= 4.0:
+        elif -consol_wide <= change_today <= consol_wide:
             score += 10
             details.append(f"⚠️ Leichte Konsolidierung: {change_today:+.1f}%")
         else:
@@ -10751,16 +10744,17 @@ def fetch_crypto_data():
                     # Baseline = typischer Tages-Turnover (%) fuer diese Kategorie
                     # RVOL 1.0 bedeutet "normales Volumen fuer diese Groesse"
                     # Quelle: empirische Mediane aus CoinGecko Top-500
+                    # V68: Baselines für Small/Micro GESENKT
                     if market_cap > 100_000_000_000:
-                        baseline = 2.0   # Mega Cap (BTC, ETH) — typ. 1.5-3%
+                        baseline = 2.5   # Mega Cap (BTC, ETH)
                     elif market_cap > 10_000_000_000:
-                        baseline = 3.5   # Large Cap (SOL, BNB, XRP) — typ. 2.5-5%
+                        baseline = 4.0   # Large Cap (SOL, BNB)
                     elif market_cap > 1_000_000_000:
-                        baseline = 5.0   # Mid Cap — typ. 3-7%
+                        baseline = 5.5   # Mid Cap
                     elif market_cap > 100_000_000:
-                        baseline = 8.0   # Small Cap — typ. 5-12%
+                        baseline = 7.0   # Small Cap (von 8)
                     else:
-                        baseline = 12.0  # Micro Cap — typ. 8-20%
+                        baseline = 8.0   # Micro Cap (von 12!)
                     rvol = round(turnover_pct / baseline, 2)
                     rvol = max(0.1, min(rvol, 50.0))  # Cap bei 50x
                 else:
@@ -10790,6 +10784,11 @@ def fetch_crypto_data():
                 # Preis
                 if "Preis" in f and not (f["Preis"][0] <= price <= f["Preis"][1]): 
                     match = False
+                
+                # MarketCap Filter (z.B. Low Cap Rockets)
+                if "MarketCap" in f:
+                    mc_min, mc_max = f["MarketCap"]
+                    if not (mc_min <= market_cap <= mc_max): match = False
                 
                 # Close Position - mit None Check (falls Range zu klein)
                 if "Close Position" in f:
@@ -10821,7 +10820,7 @@ def fetch_crypto_data():
                     continue
                 
                 ticker = coin.get("symbol", "").upper()
-                alpha = calculate_alpha_score(rvol, vortag_chg, change_24h)
+                alpha = calculate_alpha_score_crypto(rvol, vortag_chg, change_24h, market_cap)
                 
                 # Flag-Pattern Validierung für Krypto
                 flag_score = 0
@@ -10833,7 +10832,8 @@ def fetch_crypto_data():
                 
                 if current_strategy == "Bull Flag":
                     is_valid, flag_score, flag_details = validate_flag_pattern(
-                        vortag_chg, change_24h, rvol, price, prev_close_approx, high_24h, low_24h, "bull"
+                        vortag_chg, change_24h, rvol, price, prev_close_approx, high_24h, low_24h, "bull",
+                        market_type="Krypto"
                     )
                     if not is_valid:
                         skipped_filter += 1
@@ -10842,7 +10842,8 @@ def fetch_crypto_data():
                     
                 elif current_strategy == "Bear Flag":
                     is_valid, flag_score, flag_details = validate_flag_pattern(
-                        vortag_chg, change_24h, rvol, price, prev_close_approx, high_24h, low_24h, "bear"
+                        vortag_chg, change_24h, rvol, price, prev_close_approx, high_24h, low_24h, "bear",
+                        market_type="Krypto"
                     )
                     if not is_valid:
                         skipped_filter += 1
@@ -10857,18 +10858,18 @@ def fetch_crypto_data():
                             change_pct=change_24h, rvol=rvol, close_pos=close_pos,
                             high=high_24h, low=low_24h, close=price,
                             open_price=None, prev_close=prev_close_approx,
-                            vortag_pct=vortag_chg, vi_result=None
+                            vortag_pct=vortag_chg, vi_result=None,
+                            market_type="Krypto", market_cap=market_cap
                         )
                 
-                # Setup Score für Krypto — CRYPTO-SPEZIFISCH (nicht Aktien-Score!)
+                # Setup Score für Krypto — CRYPTO-SPEZIFISCH
                 SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
                 setup_score = calculate_setup_score_crypto(
                     change_pct=change_24h, rvol=rvol, close_pos=close_pos,
                     upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
                     vortag_pct=vortag_chg, vol_24h=vol_24h, price=price,
-                    market_cap=market_cap,
-                    direction=setup_direction
+                    market_cap=market_cap, direction=setup_direction
                 )
                 
                 results.append({
