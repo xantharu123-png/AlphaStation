@@ -12596,11 +12596,14 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                     # Gap = Wie viel hat sich der Preis ÜBER NACHT bewegt (vor jeglichem PM Trading)
                     real_gap_pct = ((pm_open - prev_close) / prev_close) * 100 if prev_close > 0 else 0
                     
-                    # FIX 4: Volume Ratio (PM Vol vs Average Daily Vol)
+                    # FIX 4: Volume Ratio (PM Vol vs erwartetes PM-Volumen)
                     prev_day_vol = cand.get("prev_day_vol", 0)
-                    # PM ist nur ~5.5h vs ~6.5h Regular Session, normalisiere auf volle Session
-                    pm_vol_normalized = pm_volume * (6.5 / 5.5) if pm_volume > 0 else 0
-                    vol_ratio = round(pm_vol_normalized / prev_day_vol, 1) if prev_day_vol > 0 else 0
+                    # PRE-MARKET Volume ist typisch nur 5-10% des Regular-Day-Volumens.
+                    # Vergleich PM_Vol vs ganzen Tag waere unfair (0.05-0.1x = immer "DEAD").
+                    # Stattdessen: Vergleiche PM_Vol mit erwartetem PM-Anteil (8% des Tages).
+                    # VolR 1.0 = normales PM-Volume fuer diese Aktie.
+                    expected_pm_vol = prev_day_vol * 0.08 if prev_day_vol > 0 else 0
+                    vol_ratio = round(pm_volume / expected_pm_vol, 1) if expected_pm_vol > 0 else 1.0
                     
                     # PM Range und Position
                     pm_range = pm_high - pm_low if pm_high > pm_low else 0.01
@@ -12909,7 +12912,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                 gap_pct=item["Gap%"],
                 pm_position=item["PM_Position"],
                 rs_vs_spy=item["RS_vs_SPY"],
-                vol_ratio=item.get("Vol_Ratio", 0),
+                vol_ratio=item.get("Vol_Ratio", 1.0),
                 shares_m=item.get("Shares_M", 0),
                 float_cat=item.get("Float_Cat", "UNKNOWN"),
                 has_catalyst=has_catalyst,
