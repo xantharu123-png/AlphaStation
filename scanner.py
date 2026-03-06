@@ -45,6 +45,248 @@ try:
 except ImportError:
     VP_AVAILABLE = False
 
+# Interactive Brokers TWS Integration V1.0
+try:
+    from ib_insync import IB, Stock, Future, Forex, Crypto, LimitOrder, StopOrder, Order
+    import nest_asyncio
+    nest_asyncio.apply()
+    IB_INSYNC_AVAILABLE = True
+except ImportError:
+    IB_INSYNC_AVAILABLE = False
+
+# =============================================================================
+# INTERACTIVE BROKERS TWS — Connection & Order Management
+# =============================================================================
+@st.cache_resource
+def _get_ib_state():
+    """Cached IB connection state — survives Streamlit reruns."""
+    return {"ib": None, "connected": False, "error": None, "connect_time": None}
+
+def ib_connect(host="127.0.0.1", port=7497, client_id=1):
+    """Connect to TWS. Returns True on success."""
+    if not IB_INSYNC_AVAILABLE:
+        return False
+    state = _get_ib_state()
+    # Already connected?
+    if state["connected"] and state["ib"]:
+        try:
+            state["ib"].isConnected()
+            if state["ib"].isConnected():
+                return True
+        except Exception:
+            pass
+    # New connection
+    try:
+        ib = IB()
+        ib.connect(host, port, clientId=client_id, timeout=5)
+        state["ib"] = ib
+        state["connected"] = True
+        state["error"] = None
+        state["connect_time"] = datetime.now()
+        return True
+    except ConnectionRefusedError:
+        state["connected"] = False
+        state["error"] = "TWS nicht gestartet! Starte TWS/IB Gateway zuerst."
+        return False
+    except Exception as e:
+        state["connected"] = False
+        state["error"] = str(e)[:100]
+        return False
+
+def ib_disconnect():
+    """Gracefully disconnect from TWS."""
+    state = _get_ib_state()
+    if state["ib"]:
+        try:
+            state["ib"].disconnect()
+        except Exception:
+            pass
+    state["ib"] = None
+    state["connected"] = False
+    state["error"] = None
+
+def ib_is_connected():
+    """Check if TWS connection is alive."""
+    state = _get_ib_state()
+    if not state["connected"] or not state["ib"]:
+        return False
+    try:
+        return state["ib"].isConnected()
+    except Exception:
+        state["connected"] = False
+        return False
+
+def ib_get_contract(ticker, market_type, exchange="US"):
+    """Create IB contract object based on market type."""
+    if not IB_INSYNC_AVAILABLE:
+        return None
+    try:
+        if market_type == "Aktien":
+            if exchange == "US":
+                return Stock(ticker, "SMART", "USD")
+            elif exchange == "DE":
+                return Stock(ticker.replace(".DE", ""), "IBIS", "EUR")
+            elif exchange == "UK":
+                return Stock(ticker.replace(".L", ""), "LSE", "GBP")
+            else:
+                return Stock(ticker, "SMART", "USD")
+        elif market_type == "Futures":
+            # Common futures mapping
+            futures_map = {
+                "ES": ("ES", "CME"), "NQ": ("NQ", "CME"), "YM": ("YM", "CBOT"),
+                "CL": ("CL", "NYMEX"), "GC": ("GC", "COMEX"), "SI": ("SI", "COMEX"),
+                "ZB": ("ZB", "CBOT"), "ZN": ("ZN", "CBOT"), "VX": ("VIX", "CFE"),
+                "RTY": ("RTY", "CME"), "6E": ("EUR", "CME"), "6J": ("JPY", "CME"),
+            }
+            base = ticker.split("=")[0] if "=" in ticker else ticker
+            if base in futures_map:
+                sym, exch = futures_map[base]
+                return Future(sym, exchange=exch)
+            return Future(base, exchange="CME")
+        elif market_type == "Forex":
+            if len(ticker) >= 6:
+                pair = ticker.replace("/", "").replace(".", "")
+                return Forex(pair[:3] + pair[3:6])
+            return None
+        elif market_type == "Krypto":
+            crypto_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "AVAX": "AVAX"}
+            sym = ticker.split("-")[0].split("/")[0].upper()
+            if sym in crypto_map:
+                return Crypto(sym, "PAXOS", "USD")
+            return None
+    except Exception as e:
+        _debug_log(f"IB contract creation failed: {ticker}", e)
+    return None
+
+def ib_calc_shares(price, size_value, size_type="Shares"):
+    """Calculate number of shares from dollar amount or direct shares."""
+    if size_type == "Dollar":
+        if price <= 0:
+            return 0
+        return max(1, int(size_value / price))
+    return max(1, int(size_value))
+
+def ib_submit_bracket(ticker, entry, sl, tp_list, shares, direction, market_type, exchange="US"):
+    """
+    Submit bracket order to TWS with transmit=False.
+    User must confirm in TWS manually.
+
+    Returns: dict with success, message, order_ids
+    """
+    if not ib_is_connected():
+        return {"success": False, "message": "Nicht mit TWS verbunden!", "order_ids": []}
+
+    state = _get_ib_state()
+    ib = state["ib"]
+
+    # Create contract
+    contract = ib_get_contract(ticker, market_type, exchange)
+    if not contract:
+        return {"success": False, "message": f"Ticker '{ticker}' nicht erkannt!", "order_ids": []}
+
+    # Qualify contract
+    try:
+        qualified = ib.qualifyContracts(contract)
+        if not qualified:
+            return {"success": False, "message": f"Contract nicht gefunden: {ticker}", "order_ids": []}
+    except Exception as e:
+        return {"success": False, "message": f"Contract-Fehler: {str(e)[:80]}", "order_ids": []}
+
+    # Validate levels
+    if direction == "LONG":
+        if sl >= entry:
+            return {"success": False, "message": "Stop-Loss muss unter Entry liegen (LONG)!", "order_ids": []}
+        for tp in tp_list:
+            if tp and tp <= entry:
+                return {"success": False, "message": "Take-Profit muss über Entry liegen (LONG)!", "order_ids": []}
+    else:  # SHORT
+        if sl <= entry:
+            return {"success": False, "message": "Stop-Loss muss über Entry liegen (SHORT)!", "order_ids": []}
+        for tp in tp_list:
+            if tp and tp >= entry:
+                return {"success": False, "message": "Take-Profit muss unter Entry liegen (SHORT)!", "order_ids": []}
+
+    try:
+        # Main action
+        main_action = "BUY" if direction == "LONG" else "SELL"
+        exit_action = "SELL" if direction == "LONG" else "BUY"
+
+        # Parent order — Limit at entry price
+        parent = Order(
+            action=main_action,
+            orderType="LMT",
+            lmtPrice=round(entry, 2),
+            totalQuantity=shares,
+            transmit=False
+        )
+        parent_trade = ib.placeOrder(contract, parent)
+        parent_id = parent_trade.order.orderId
+
+        # Stop Loss order
+        stop_order = Order(
+            action=exit_action,
+            orderType="STP",
+            auxPrice=round(sl, 2),
+            totalQuantity=shares,
+            parentId=parent_id,
+            transmit=False
+        )
+        stop_trade = ib.placeOrder(contract, stop_order)
+
+        # Take Profit orders
+        tp_clean = [tp for tp in tp_list if tp and tp > 0]
+        order_ids = [parent_id, stop_trade.order.orderId]
+
+        if len(tp_clean) == 1:
+            # Single TP — all shares
+            tp_order = Order(
+                action=exit_action,
+                orderType="LMT",
+                lmtPrice=round(tp_clean[0], 2),
+                totalQuantity=shares,
+                parentId=parent_id,
+                transmit=False  # Last child still False — user confirms in TWS
+            )
+            tp_trade = ib.placeOrder(contract, tp_order)
+            order_ids.append(tp_trade.order.orderId)
+        elif len(tp_clean) >= 2:
+            # Split shares between TP1 and TP2
+            tp1_shares = shares // 2
+            tp2_shares = shares - tp1_shares
+
+            tp1_order = Order(
+                action=exit_action,
+                orderType="LMT",
+                lmtPrice=round(tp_clean[0], 2),
+                totalQuantity=tp1_shares,
+                parentId=parent_id,
+                transmit=False
+            )
+            tp1_trade = ib.placeOrder(contract, tp1_order)
+            order_ids.append(tp1_trade.order.orderId)
+
+            tp2_order = Order(
+                action=exit_action,
+                orderType="LMT",
+                lmtPrice=round(tp_clean[1], 2),
+                totalQuantity=tp2_shares,
+                parentId=parent_id,
+                transmit=False
+            )
+            tp2_trade = ib.placeOrder(contract, tp2_order)
+            order_ids.append(tp2_trade.order.orderId)
+
+        ib.sleep(0.3)  # Brief wait for TWS to process
+
+        return {
+            "success": True,
+            "message": f"Bracket Order in TWS bereit! {len(order_ids)} Orders warten auf Bestätigung.",
+            "order_ids": order_ids,
+            "parent_id": parent_id
+        }
+    except Exception as e:
+        return {"success": False, "message": f"Order-Fehler: {str(e)[:100]}", "order_ids": []}
+
 # =============================================================================
 # 0. API HELPERS (Rate Limiting + Caching + Logging)
 # =============================================================================
@@ -198,6 +440,17 @@ if "active_trading_session" not in st.session_state:
     st.session_state.active_trading_session = "Regular"
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = False
+# IBKR TWS Session State
+if "ib_port" not in st.session_state:
+    st.session_state.ib_port = 7497  # 7497=Paper, 7496=Live
+if "ib_position_size" not in st.session_state:
+    st.session_state.ib_position_size = 100
+if "ib_size_type" not in st.session_state:
+    st.session_state.ib_size_type = "Shares"
+if "ib_orders_log" not in st.session_state:
+    st.session_state.ib_orders_log = []
+if "ib_show_form" not in st.session_state:
+    st.session_state.ib_show_form = None  # None or ticker string
 if "watchlist" not in st.session_state:
     # Lade persistierte Watchlist falls vorhanden
     try:
@@ -16674,7 +16927,65 @@ with st.sidebar:
     
     # DEBUG MODE
     st.session_state.debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False), key="debug_toggle")
-    
+
+    # =================================================================
+    # INTERACTIVE BROKERS TWS
+    # =================================================================
+    st.divider()
+    st.subheader("🤖 IBKR TWS")
+
+    if not IB_INSYNC_AVAILABLE:
+        st.warning("ib_insync nicht installiert")
+    else:
+        # Connection status + button
+        col_ib_s, col_ib_b = st.columns([2, 1])
+        with col_ib_s:
+            if ib_is_connected():
+                state = _get_ib_state()
+                uptime = ""
+                if state.get("connect_time"):
+                    delta = datetime.now() - state["connect_time"]
+                    uptime = f" ({delta.seconds // 60}m)"
+                st.success(f"🟢 Connected{uptime}")
+            else:
+                st.error("🔴 Offline")
+                err = _get_ib_state().get("error")
+                if err:
+                    st.caption(f"⚠️ {err}")
+        with col_ib_b:
+            if ib_is_connected():
+                if st.button("🔌 Trennen", use_container_width=True, key="ib_disconnect"):
+                    ib_disconnect()
+                    st.rerun()
+            else:
+                if st.button("🔌 Connect", use_container_width=True, key="ib_connect"):
+                    success = ib_connect(port=st.session_state.ib_port)
+                    if success:
+                        st.rerun()
+
+        with st.expander("⚙️ TWS Settings"):
+            ib_port = st.selectbox("Port", [7497, 7496], index=0 if st.session_state.ib_port == 7497 else 1, key="ib_port_sel")
+            st.session_state.ib_port = ib_port
+            if ib_port == 7496:
+                st.warning("⚠️ LIVE Trading Port!")
+
+            st.divider()
+            ib_size_type = st.radio("Position Size", ["Shares", "Dollar"], horizontal=True, key="ib_size_type_sel")
+            st.session_state.ib_size_type = ib_size_type
+
+            if ib_size_type == "Shares":
+                ib_size = st.number_input("Anzahl Shares", min_value=1, max_value=10000, value=st.session_state.ib_position_size, step=10, key="ib_size_val")
+            else:
+                ib_size = st.number_input("Dollar Betrag ($)", min_value=100, max_value=500000, value=st.session_state.ib_position_size, step=100, key="ib_size_val")
+            st.session_state.ib_position_size = ib_size
+
+        # Last orders
+        if st.session_state.ib_orders_log:
+            with st.expander(f"📋 Orders ({len(st.session_state.ib_orders_log)})"):
+                for o in st.session_state.ib_orders_log[-5:][::-1]:
+                    icon = "🟢" if o["direction"] == "LONG" else "🔴"
+                    st.caption(f"{icon} {o['ticker']} {o['direction']} @ ${o['entry']:.2f} — {o['time']}")
+
     # PRE-MARKET WATCHLIST BUTTON (nur für US Aktien)
     if m_type == "Aktien" and st.session_state.get("selected_exchange", "US") == "US":
         session_info = get_current_trading_session()
@@ -18979,20 +19290,107 @@ with tab_scanner:
                     except Exception:
                         pass
                 
-                # Watchlist Button
-                if st.button(f"⭐ {row['Ticker']} zur Watchlist", use_container_width=True):
-                    if add_to_watchlist(row["Ticker"], row.to_dict()):
-                        st.success(f"✅ {row['Ticker']} hinzugefügt!")
-                    else:
-                        st.info("Bereits in Watchlist")
-                
-                # AI CHART BUTTON
-                if st.session_state.market_type == "Aktien":
-                    if st.button(f"🤖 AI Chart für {row['Ticker']}", use_container_width=True, type="primary"):
-                        st.session_state.show_ai_chart = True
-                        # FullTicker für internationale Aktien (z.B. VNA.DE statt VNA)
-                        st.session_state.ai_chart_ticker = row.get('FullTicker', row['Ticker'])
-                        st.rerun()
+                # ACTION BUTTONS ROW
+                _btn_cols = st.columns(3)
+                with _btn_cols[0]:
+                    if st.button(f"⭐ Watchlist", use_container_width=True, key=f"wl_{idx}"):
+                        if add_to_watchlist(row["Ticker"], row.to_dict()):
+                            st.success(f"✅ {row['Ticker']} hinzugefügt!")
+                        else:
+                            st.info("Bereits in Watchlist")
+                with _btn_cols[1]:
+                    if st.session_state.market_type == "Aktien":
+                        if st.button(f"🤖 AI Chart", use_container_width=True, type="primary", key=f"ai_{idx}"):
+                            st.session_state.show_ai_chart = True
+                            st.session_state.ai_chart_ticker = row.get('FullTicker', row['Ticker'])
+                            st.rerun()
+                with _btn_cols[2]:
+                    _ib_live = IB_INSYNC_AVAILABLE and ib_is_connected()
+                    if st.button(f"📤 IBKR", use_container_width=True, key=f"ib_{idx}", disabled=not _ib_live,
+                                 help=None if _ib_live else ("Verbinde TWS in der Sidebar" if IB_INSYNC_AVAILABLE else "ib_insync nicht installiert")):
+                        if _ib_live:
+                            st.session_state.ib_show_form = row['Ticker']
+
+                # IBKR ORDER FORM (appears when button clicked)
+                if st.session_state.get("ib_show_form") == row['Ticker']:
+                    with st.container(border=True):
+                        st.caption(f"📤 **Order für {row['Ticker']}** an TWS senden")
+
+                        # Check for pre-calculated levels
+                        has_entry = row.get("Entry") and float(row.get("Entry", 0)) > 0
+                        has_sl = row.get("StopLoss") and float(row.get("StopLoss", 0)) > 0
+                        has_tp = (row.get("TP1") and float(row.get("TP1", 0)) > 0) or (row.get("TP2") and float(row.get("TP2", 0)) > 0)
+                        has_auto = has_entry and has_sl and has_tp
+
+                        current_price = float(row.get("Preis", 0))
+
+                        # Direction
+                        _dir_default = 0  # LONG
+                        if "Short" in str(st.session_state.get("current_strategy", "")) or "Breakdown" in str(st.session_state.get("current_strategy", "")) or "Bear" in str(st.session_state.get("current_strategy", "")):
+                            _dir_default = 1
+                        if row.get("BI_Direction") == "SHORT":
+                            _dir_default = 1
+
+                        _fc1, _fc2 = st.columns(2)
+                        with _fc1:
+                            _direction = st.radio("Richtung", ["LONG", "SHORT"], index=_dir_default, horizontal=True, key=f"ibdir_{row['Ticker']}")
+                        with _fc2:
+                            _size_label = f"Shares" if st.session_state.ib_size_type == "Shares" else f"$ Betrag"
+                            _shares_input = st.number_input(_size_label, value=st.session_state.ib_position_size, min_value=1, key=f"ibsz_{row['Ticker']}")
+
+                        # Entry / SL / TP fields
+                        _fc3, _fc4, _fc5, _fc6 = st.columns(4)
+                        with _fc3:
+                            _entry = st.number_input("Entry $", value=float(row.get("Entry", current_price)), format="%.2f", min_value=0.01, key=f"ibe_{row['Ticker']}")
+                        with _fc4:
+                            _sl_default = float(row.get("StopLoss", current_price * (0.97 if _direction == "LONG" else 1.03)))
+                            _sl = st.number_input("Stop-Loss $", value=_sl_default, format="%.2f", min_value=0.01, key=f"ibs_{row['Ticker']}")
+                        with _fc5:
+                            _tp1_default = float(row.get("TP1", current_price * (1.05 if _direction == "LONG" else 0.95)))
+                            _tp1 = st.number_input("TP1 $", value=_tp1_default, format="%.2f", min_value=0.01, key=f"ibt1_{row['Ticker']}")
+                        with _fc6:
+                            _tp2_val = float(row.get("TP2", 0))
+                            _tp2 = st.number_input("TP2 $ (opt)", value=_tp2_val, format="%.2f", min_value=0.0, key=f"ibt2_{row['Ticker']}")
+
+                        # R:R display
+                        _risk = abs(_entry - _sl) if abs(_entry - _sl) > 0 else 0.01
+                        _reward = abs(_tp1 - _entry)
+                        _rr = _reward / _risk if _risk > 0 else 0
+                        _rr_color = "🟢" if _rr >= 2 else ("🟡" if _rr >= 1 else "🔴")
+                        _final_shares = ib_calc_shares(_entry, _shares_input, st.session_state.ib_size_type)
+
+                        st.caption(f"{_rr_color} R:R = **{_rr:.1f}:1** | {_final_shares} Shares | Risk: ${_risk * _final_shares:.0f}")
+
+                        # Send / Cancel buttons
+                        _sc1, _sc2 = st.columns(2)
+                        with _sc1:
+                            if st.button("✅ An TWS senden", use_container_width=True, type="primary", key=f"ibsend_{row['Ticker']}"):
+                                _tp_list = [_tp1]
+                                if _tp2 > 0:
+                                    _tp_list.append(_tp2)
+                                result = ib_submit_bracket(
+                                    ticker=row.get("FullTicker", row["Ticker"]),
+                                    entry=_entry, sl=_sl, tp_list=_tp_list,
+                                    shares=_final_shares, direction=_direction,
+                                    market_type=st.session_state.market_type,
+                                    exchange=st.session_state.get("selected_exchange", "US")
+                                )
+                                if result["success"]:
+                                    st.success(f"✅ {result['message']}")
+                                    st.session_state.ib_orders_log.append({
+                                        "ticker": row["Ticker"], "direction": _direction,
+                                        "entry": _entry, "sl": _sl, "tp1": _tp1,
+                                        "shares": _final_shares,
+                                        "ids": result["order_ids"],
+                                        "time": datetime.now().strftime("%H:%M:%S")
+                                    })
+                                    st.session_state.ib_show_form = None
+                                else:
+                                    st.error(f"❌ {result['message']}")
+                        with _sc2:
+                            if st.button("❌ Abbrechen", use_container_width=True, key=f"ibcancel_{row['Ticker']}"):
+                                st.session_state.ib_show_form = None
+                                st.rerun()
         else:
             st.info("Klicke 'SCAN STARTEN'")
     
