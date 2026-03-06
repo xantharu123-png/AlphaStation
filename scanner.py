@@ -2469,10 +2469,10 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             else:
                 details.append(f"❌ Kein Abwärtstrend: {vortag_chg:+.1f}%/Tag avg")
         else:
-            if -30.0 <= vortag_chg <= -4.0:
+            if -30.0 <= vortag_chg < -4.0:
                 score += 25
                 details.append(f"✅ Starke Fahnenstange (Short): {vortag_chg:+.1f}%")
-            elif -4.0 < vortag_chg <= -2.5:
+            elif -4.0 <= vortag_chg <= -2.5:
                 score += 15
                 details.append(f"✅ Moderate Fahnenstange: {vortag_chg:+.1f}%")
             else:
@@ -2750,6 +2750,23 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
                 score += 25
                 details.append(f"Konsolidierung: {recent_range:.1f}% Bewegung")
 
+    elif pattern_type == "bear_flag":
+        if len(bars) >= 4:
+            # Flagpole: Starker Abwaertsimpuls in den ersten Tagen
+            pole_move = ((bars[-3]["close"] - bars[0]["close"]) / bars[0]["close"]) * 100
+            if pole_move <= -5:
+                score += 30
+                details.append(f"Fahnenstange (Short): {pole_move:+.1f}%")
+            elif pole_move <= -3:
+                score += 15
+                details.append(f"Schwache Fahnenstange: {pole_move:+.1f}%")
+
+            # Konsolidierung: Letzte 2 Tage sollten eng sein
+            recent_range = abs(daily_changes[-1]) + abs(daily_changes[-2]) if len(daily_changes) >= 2 else 0
+            if recent_range < 4:
+                score += 25
+                details.append(f"Konsolidierung: {recent_range:.1f}% Bewegung")
+
     elif pattern_type == "consolidation_breakout":
         # V67.5: Fixe Baseline + bessere Volatilitaets-Berechnung
         if len(bars) >= 5:
@@ -2962,64 +2979,6 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
                 score += 15
                 details.append(f"Stabile Highs: ~${second_half_high:.2f}")
 
-    elif pattern_type == "consolidation_breakout":
-        # V67.5: Fixe Baseline + bessere Volatilitaets-Berechnung
-        if len(bars) >= 5:
-            pre_bars = bars[:-1]
-            pre_price = pre_bars[-1]["close"]
-            pre_highs = [b["high"] for b in pre_bars]
-            pre_lows = [b["low"] for b in pre_bars]
-            pre_range_pct = ((max(pre_highs) - min(pre_lows)) / pre_price) * 100 if pre_price > 0 else 99
-
-            # Kriterium 1: Enge Range VOR Breakout (max 30)
-            if pre_range_pct < 5:
-                score += 30
-                details.append(f"Sehr enge Range: {pre_range_pct:.1f}% ueber {len(pre_bars)} Tage")
-            elif pre_range_pct < 8:
-                score += 20
-                details.append(f"Enge Range: {pre_range_pct:.1f}%")
-            elif pre_range_pct < 12:
-                score += 10
-                details.append(f"Moderate Range: {pre_range_pct:.1f}%")
-
-            # Kriterium 2: Intraday-Ranges klein (max 25)
-            pre_daily_ranges = daily_ranges[:-1] if len(daily_ranges) > 1 else daily_ranges
-            avg_pre_range = sum(pre_daily_ranges) / len(pre_daily_ranges) if pre_daily_ranges else 99
-            if avg_pre_range < 2.0:
-                score += 25
-                details.append(f"Ruhige Vortage: {avg_pre_range:.1f}% avg Range/Tag")
-            elif avg_pre_range < 3.5:
-                score += 15
-                details.append(f"Moderate Vortage: {avg_pre_range:.1f}%")
-
-            # Kriterium 3: Volumen-Explosion am Breakout-Tag (max 25)
-            pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
-            breakout_vol = volumes[-1]
-            vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
-
-            if vol_ratio > 3.0:
-                score += 25
-                details.append(f"Volumen-Explosion: {vol_ratio:.1f}x vs Vortage")
-            elif vol_ratio > 2.0:
-                score += 18
-                details.append(f"Starkes Volumen: {vol_ratio:.1f}x")
-            elif vol_ratio > 1.3:
-                score += 8
-                details.append(f"Leicht erhoehtes Volumen: {vol_ratio:.1f}x")
-
-            # Kriterium 4: Vol sank VOR Breakout (max 20)
-            if len(volumes) >= 5:
-                first_half_vol = sum(volumes[:len(volumes)//2]) / max(1, len(volumes)//2)
-                pre_half_vol = sum(volumes[len(volumes)//2:-1]) / max(1, len(volumes)//2 - 1)
-                if first_half_vol > 0 and pre_half_vol < first_half_vol * 0.8:
-                    score += 20
-                    details.append(f"Vol sank vor Breakout: {pre_half_vol/first_half_vol:.1f}x")
-                elif first_half_vol > 0 and pre_half_vol < first_half_vol:
-                    score += 10
-                    details.append(f"Vol stabil vor Breakout")
-        else:
-            details.append("Nicht genug Daten (min. 5 Tage)")
-    
     elif pattern_type == "reversal_setup":
         # Prüfe ob es einen mehrtägigen Downtrend gab VOR dem heutigen Reversal
         if len(bars) >= 3:
@@ -3074,6 +3033,7 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     threshold_map = {
         "consolidation": 35,
         "bull_flag": 35,
+        "bear_flag": 35,
         "consolidation_breakout": 40,
         "churn": 45,
         "wyckoff_accumulation": 50,   # Hoehere Schwelle — weniger False Positives
@@ -15515,63 +15475,71 @@ def fetch_futures_data(category):
     af = st.session_state.additional_filters
     
     try:
+        # Get current strategy name for VIX filtering
+        current_strategy = st.session_state.get("current_strategy", "")
+
         for ticker, name in contracts:
             try:
+                # VIX Spike nur fuer VIX-Futures
+                if "VIX" in current_strategy and "VIX" not in ticker.upper() and "VX" not in ticker.upper():
+                    skipped_filter += 1
+                    continue
+
                 # Yahoo Finance API Query
                 url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
                 params = {"interval": "1d", "range": "5d"}
                 headers = {"User-Agent": "Mozilla/5.0"}
-                
+
                 resp = rate_limited_get(url, params=params, headers=headers, timeout=10)
                 if resp.status_code != 200:
                     skipped_no_price += 1
                     continue
-                
+
                 data = resp.json()
                 chart = data.get("chart", {}).get("result", [])
                 if not chart:
                     skipped_no_price += 1
                     continue
-                
+
                 quote = chart[0]
                 meta = quote.get("meta", {})
                 indicators = quote.get("indicators", {}).get("quote", [{}])[0]
-                
+
                 price = meta.get("regularMarketPrice", 0)
                 prev_close = meta.get("previousClose") or meta.get("chartPreviousClose", 0)
-                
+
                 if price <= 0:
                     skipped_no_price += 1
                     continue
-                
+
                 # OHLCV
                 closes = [c for c in indicators.get("close", []) if c is not None]
                 highs = [h for h in indicators.get("high", []) if h is not None]
                 lows = [l for l in indicators.get("low", []) if l is not None]
                 volumes = [v for v in indicators.get("volume", []) if v is not None]
-                
+
                 if len(closes) < 2:
                     skipped_no_price += 1
                     continue
-                
+
                 yesterday_close = closes[-2] if len(closes) >= 2 else prev_close
                 today_high = highs[-1] if highs else price
                 today_low = lows[-1] if lows else price
                 today_vol = volumes[-1] if volumes else 0
                 yesterday_vol = volumes[-2] if len(volumes) >= 2 else today_vol
-                
+
                 change = ((price - yesterday_close) / yesterday_close * 100) if yesterday_close > 0 else 0
-                
+
                 if len(closes) >= 3:
                     vortag_chg = ((yesterday_close - closes[-3]) / closes[-3] * 100) if closes[-3] > 0 else 0
                 else:
                     vortag_chg = 0
-                
+
                 rvol = round(today_vol / yesterday_vol, 2) if yesterday_vol > 0 else 1.0
                 rvol = min(rvol, 999.0)
-                
+
                 close_pos = calculate_close_position(today_high, today_low, price)
-                
+
                 # Filter-Logik (V67.3: +Vortag% Filter - fehlte komplett!)
                 match = True
                 if "Change %" in f and not (f["Change %"][0] <= change <= f["Change %"][1]): match = False
@@ -16806,7 +16774,30 @@ with st.sidebar:
                         
                         if ma_distance is None:
                             continue
-                        
+
+                        # Trend-Validierung: MA muss in richtige Richtung zeigen
+                        ma_trend_valid = True
+                        if len(closes) >= ma_period + 5:
+                            if ma_type == "SMA":
+                                ma_5ago = calculate_sma(closes[:-5], ma_period)
+                            else:
+                                ma_5ago = calculate_ema(closes[:-5], ma_period)
+
+                            if ma_5ago and ma_value:
+                                ma_slope = ((ma_value - ma_5ago) / ma_5ago) * 100
+                                if ma_approach == "from_above" and ma_slope < -0.5:
+                                    # Long bounce but MA is falling > 0.5% = invalid
+                                    ma_trend_valid = False
+                                    ma_debug_log.append(f"⛔ {ticker}: MA faellt ({ma_slope:+.2f}%) - kein Long Bounce")
+                                elif ma_approach == "from_below" and ma_slope > 0.5:
+                                    # Short bounce but MA is rising > 0.5% = invalid
+                                    ma_trend_valid = False
+                                    ma_debug_log.append(f"⛔ {ticker}: MA steigt ({ma_slope:+.2f}%) - kein Short Bounce")
+
+                        if not ma_trend_valid:
+                            ma_too_far += 1
+                            continue
+
                         # Prüfe ob Setup gültig ist
                         is_valid = False
                         
