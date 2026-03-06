@@ -3178,12 +3178,36 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     tp2 = D - (D - C) * 0.618
                     tp3 = C
                     direction = "SHORT"
-                
+
+                # ── DISTANZ-CHECK: Wie weit ist Entry vom aktuellen Preis? ──
+                current = prices[-1]["close"]
+                entry_distance_pct = abs(entry - current) / current * 100 if current > 0 else 0
+
+                # Score-Abzug basierend auf Distanz
+                # 0-5%: kein Abzug (Pattern ist aktuell)
+                # 5-10%: -15 (Pattern wird alt)
+                # 10-20%: -30 (Pattern ist abgelaufen)
+                # >20%: -50 (Pattern ist komplett irrelevant)
+                distance_penalty = 0
+                if entry_distance_pct > 20:
+                    distance_penalty = 50
+                    details.append(f"🚫 Entry {entry_distance_pct:.0f}% vom Preis — ABGELAUFEN")
+                elif entry_distance_pct > 10:
+                    distance_penalty = 30
+                    details.append(f"⚠️ Entry {entry_distance_pct:.0f}% vom Preis — veraltet")
+                elif entry_distance_pct > 5:
+                    distance_penalty = 15
+                    details.append(f"🟡 Entry {entry_distance_pct:.1f}% vom Preis")
+
+                adjusted_score = max(0, score - distance_penalty)
+
                 patterns_found.append({
                     "pattern": pattern_name,
                     "emoji": pattern_def["emoji"],
                     "direction": direction,
-                    "score": score,
+                    "score": adjusted_score,
+                    "raw_score": score,
+                    "entry_distance_pct": round(entry_distance_pct, 1),
                     "matches": f"{matches}/{total_checks}",
                     "success_rate": pattern_def["success_rate"],
                     "details": details,
@@ -10294,13 +10318,44 @@ def calculate_sr_from_historical(ohlc_data, current_price):
             "strength": 90,
             "is_support": False
         })
-    
+
     if pl_dist <= max_distance_pct:
         key_levels.append({
             "price": period_low,
             "type": "Period Low",
             "strength": 90,
             "is_support": True
+        })
+
+    # =========================================================================
+    # 4b. PREVIOUS DAY HIGH/LOW/CLOSE (wichtigste Intraday-Levels!)
+    # =========================================================================
+    pdh_dist = abs(prev_day_high - current_price) / current_price if current_price > 0 else 1
+    pdl_dist = abs(prev_day_low - current_price) / current_price if current_price > 0 else 1
+    pdc_dist = abs(prev_day_close - current_price) / current_price if current_price > 0 else 1
+
+    if pdh_dist <= max_distance_pct and pdh_dist >= 0.005:
+        key_levels.append({
+            "price": prev_day_high,
+            "type": "PDH",
+            "strength": 85,
+            "is_support": prev_day_high < current_price
+        })
+
+    if pdl_dist <= max_distance_pct and pdl_dist >= 0.005:
+        key_levels.append({
+            "price": prev_day_low,
+            "type": "PDL",
+            "strength": 85,
+            "is_support": prev_day_low < current_price
+        })
+
+    if pdc_dist <= max_distance_pct and pdc_dist >= 0.01:
+        key_levels.append({
+            "price": prev_day_close,
+            "type": "PDC",
+            "strength": 80,
+            "is_support": prev_day_close < current_price
         })
     
     # =========================================================================
@@ -17784,13 +17839,23 @@ with tab_scanner:
                             
                             dir_emoji = "⬆️ LONG" if direction == "LONG" else "⬇️ SHORT"
                             
-                            if score >= 80:
-                                st.success(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100")
-                            elif score >= 60:
-                                st.info(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100")
+                            # Distanz-Warnung wenn Entry weit vom Preis
+                            entry_dist = pattern_data.get("entry_distance_pct", 0)
+                            dist_warning = ""
+                            if entry_dist > 20:
+                                dist_warning = " | 🚫 ABGELAUFEN"
+                            elif entry_dist > 10:
+                                dist_warning = " | ⚠️ VERALTET"
+                            elif entry_dist > 5:
+                                dist_warning = f" | 🟡 Entry {entry_dist:.0f}% entfernt"
+
+                            if score >= 80 and entry_dist <= 10:
+                                st.success(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100{dist_warning}")
+                            elif score >= 60 and entry_dist <= 20:
+                                st.info(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100{dist_warning}")
                             else:
-                                st.warning(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100")
-                            
+                                st.warning(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100{dist_warning}")
+
                             st.caption(f"📊 Historische Erfolgsrate: **{success_rate}%**")
                             
                             # XABCD Punkte
