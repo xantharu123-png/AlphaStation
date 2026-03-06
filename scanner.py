@@ -513,7 +513,7 @@ STRATEGIES = {
     # =========================================================================
     "Breakout Imminent Long 🔮⬆️": {
         "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach OBEN",
-        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 2.0)},
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.3, 2.0)},
         "logic": "ATR-Squeeze + Vol Dry-Up + OBV steigt + ADX dreht + Higher Lows + Inst. Akkumulation",
         "needs_history": True,
         "pattern_type": "breakout_imminent_long",
@@ -521,7 +521,7 @@ STRATEGIES = {
     },
     "Breakout Imminent Short 🔮⬇️": {
         "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach UNTEN",
-        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 2.0)},
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.3, 2.0)},
         "logic": "ATR-Squeeze + Vol Dry-Up + OBV faellt + ADX dreht + Lower Highs + Inst. Distribution",
         "needs_history": True,
         "pattern_type": "breakout_imminent_short",
@@ -3137,14 +3137,16 @@ def calculate_adx(bars, period=14):
     for i in range(period, len(dx_list)):
         adx = (adx * (period - 1) + dx_list[i]) / period
 
-    # ADX von 5 Bars vorher
+    # ADX von 5 Bars vorher: Berechne ADX bis zum 5.-letzten DX-Wert
     adx_prev = None
     if len(dx_list) >= period + 5:
         adx_prev = sum(dx_list[:period]) / period
-        for i in range(period, len(dx_list) - 5):
+        # Smoothe bis zum 5.-letzten DX-Wert (= ADX Stand von vor ~5 Bars)
+        end_idx = len(dx_list) - 5
+        for i in range(period, end_idx):
             adx_prev = (adx_prev * (period - 1) + dx_list[i]) / period
 
-    return round(adx, 1), round(adx_prev, 1) if adx_prev else None
+    return round(adx, 1), round(adx_prev, 1) if adx_prev is not None else None
 
 
 def calculate_rsi_from_bars(bars, period=14):
@@ -3173,6 +3175,8 @@ def calculate_rsi_from_bars(bars, period=14):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
+    if avg_loss == 0 and avg_gain == 0:
+        return 50.0  # Neutral — keine Bewegung
     if avg_loss == 0:
         return 100.0
 
@@ -3219,12 +3223,13 @@ def analyze_breakout_imminent(bars, direction="long"):
         if b["close"] > 0:
             daily_ranges.append((b["high"] - b["low"]) / b["close"] * 100)
 
-    if len(daily_ranges) >= 10:
-        first_half_atr = sum(daily_ranges[:len(daily_ranges)//2]) / (len(daily_ranges)//2)
-        second_half_atr = sum(daily_ranges[len(daily_ranges)//2:]) / (len(daily_ranges) - len(daily_ranges)//2)
+    if len(daily_ranges) >= 15:
+        # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage (sensitiver als Halbierung)
+        recent_atr = sum(daily_ranges[-5:]) / 5
+        prior_atr = sum(daily_ranges[-20:-5]) / max(1, len(daily_ranges[-20:-5]))
 
-        if first_half_atr > 0:
-            atr_ratio = second_half_atr / first_half_atr
+        if prior_atr > 0:
+            atr_ratio = recent_atr / prior_atr
             if atr_ratio < 0.5:
                 score += 10
                 details.append(f"🔥 ATR-Squeeze extrem: {atr_ratio:.2f}x (Ranges halbiert)")
@@ -3241,12 +3246,13 @@ def analyze_breakout_imminent(bars, direction="long"):
     # SIGNAL 2: VOLUME DRY-UP — max 10 Punkte
     # Volumen sinkt systematisch = Erschoepfung beider Seiten
     # ===================================================================
-    if len(volumes) >= 8:
-        first_third_vol = sum(volumes[:n//3]) / max(1, n//3)
-        last_third_vol = sum(volumes[-(n//3):]) / max(1, n//3)
+    if len(volumes) >= 15:
+        # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage
+        recent_vol = sum(volumes[-5:]) / 5
+        prior_vol = sum(volumes[-20:-5]) / max(1, len(volumes[-20:-5]))
 
-        if first_third_vol > 0:
-            vol_decline = last_third_vol / first_third_vol
+        if prior_vol > 0:
+            vol_decline = recent_vol / prior_vol
             if vol_decline < 0.5:
                 score += 10
                 details.append(f"🔥 Vol Dry-Up extrem: {vol_decline:.2f}x")
@@ -3341,7 +3347,7 @@ def analyze_breakout_imminent(bars, direction="long"):
         min_range_low = min(min_range_low, lows[i])
         total_range = ((max_range_high - min_range_low) / current_price) * 100 if current_price > 0 else 99
 
-        if total_range < 10:  # Range < 10% gilt als Konsolidierung
+        if total_range < 6:  # Range < 6% gilt als echte Konsolidierung
             range_days += 1
         else:
             break
@@ -3368,22 +3374,22 @@ def analyze_breakout_imminent(bars, direction="long"):
         range_size = range_high - range_low
 
         if range_size > 0:
-            threshold_upper = range_high - range_size * 0.15  # Top 15% der Range
-            threshold_lower = range_low + range_size * 0.15   # Bottom 15%
+            threshold_upper = range_high - range_size * 0.10  # Top 10% der Range (strenger)
+            threshold_lower = range_low + range_size * 0.10   # Bottom 10%
 
             upper_tests = sum(1 for h in highs[-range_days:] if h >= threshold_upper)
             lower_tests = sum(1 for l in lows[-range_days:] if l <= threshold_lower)
 
-            if direction == "long" and upper_tests >= 3:
+            if direction == "long" and upper_tests >= 4:
                 score += 10
                 details.append(f"🔥 {upper_tests}x Resistance getestet → wird schwaecher")
-            elif direction == "long" and upper_tests >= 2:
+            elif direction == "long" and upper_tests >= 3:
                 score += 5
                 details.append(f"✅ {upper_tests}x Resistance getestet")
-            elif direction == "short" and lower_tests >= 3:
+            elif direction == "short" and lower_tests >= 4:
                 score += 10
                 details.append(f"🔥 {lower_tests}x Support getestet → wird schwaecher")
-            elif direction == "short" and lower_tests >= 2:
+            elif direction == "short" and lower_tests >= 3:
                 score += 5
                 details.append(f"✅ {lower_tests}x Support getestet")
             else:
@@ -3419,7 +3425,7 @@ def analyze_breakout_imminent(bars, direction="long"):
         distri_days = 0  # Close down + vol > avg
 
         for i in range(1, n):
-            if volumes[i] > avg_vol * 1.1:  # Ueberdurchschnittliches Vol
+            if volumes[i] > avg_vol * 1.5:  # Deutlich ueberdurchschnittliches Vol
                 if closes[i] > closes[i-1]:
                     accum_days += 1
                 elif closes[i] < closes[i-1]:
@@ -3488,16 +3494,16 @@ def analyze_breakout_imminent(bars, direction="long"):
                 lower_highs += 1
         lh_pct = lower_highs / max(1, len(recent_highs) - 1)
 
-        if direction == "long" and hl_pct >= 0.6:
+        if direction == "long" and hl_pct >= 0.65:
             score += 10
             details.append(f"🔥 Higher Lows: {hl_pct:.0%} der Tage = Bullen kontrollieren")
-        elif direction == "long" and hl_pct >= 0.4:
+        elif direction == "long" and hl_pct >= 0.50:
             score += 5
             details.append(f"✅ Tendenz Higher Lows: {hl_pct:.0%}")
-        elif direction == "short" and lh_pct >= 0.6:
+        elif direction == "short" and lh_pct >= 0.65:
             score += 10
             details.append(f"🔥 Lower Highs: {lh_pct:.0%} der Tage = Baeren kontrollieren")
-        elif direction == "short" and lh_pct >= 0.4:
+        elif direction == "short" and lh_pct >= 0.50:
             score += 5
             details.append(f"✅ Tendenz Lower Highs: {lh_pct:.0%}")
         else:
@@ -3543,13 +3549,13 @@ def analyze_breakout_imminent(bars, direction="long"):
         variance = sum((c - mean_price) ** 2 for c in recent_closes) / len(recent_closes)
         std_dev_pct = ((variance ** 0.5) / mean_price) * 100 if mean_price > 0 else 99
 
-        if std_dev_pct < 1.0:
+        if std_dev_pct < 1.5:
             score += 10
             details.append(f"🔥 Extreme Kompression: StdDev {std_dev_pct:.2f}%")
-        elif std_dev_pct < 2.0:
+        elif std_dev_pct < 2.5:
             score += 7
             details.append(f"✅ Starke Kompression: StdDev {std_dev_pct:.2f}%")
-        elif std_dev_pct < 3.0:
+        elif std_dev_pct < 4.0:
             score += 3
             details.append(f"⚠️ Moderate Kompression: StdDev {std_dev_pct:.2f}%")
         else:
@@ -17531,10 +17537,10 @@ with st.sidebar:
                                     candidate["TP1"] = round(range_high + range_size, 2)  # 1x Range
                                     candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # 1.618x Range
                                 else:
-                                    candidate["Entry"] = round(range_low * 0.995, 2)
-                                    candidate["StopLoss"] = round(range_high * 1.01, 2)
-                                    candidate["TP1"] = round(range_low - range_size, 2)
-                                    candidate["TP2"] = round(range_low - range_size * 1.618, 2)
+                                    candidate["Entry"] = round(range_low * 0.998, 2)  # 0.2% unter Range fuer Bestaetigung
+                                    candidate["StopLoss"] = round(range_high * 1.02, 2)  # 2% ueber Range (weiter fuer Breakout-Risiko)
+                                    candidate["TP1"] = round(range_low - range_size, 2)  # 1x Measured Move
+                                    candidate["TP2"] = round(range_low - range_size * 1.618, 2)  # Fib Extension
 
                                 risk = abs(candidate["Entry"] - candidate["StopLoss"])
                                 reward = abs(candidate["TP1"] - candidate["Entry"])
@@ -17737,12 +17743,14 @@ with st.sidebar:
                 current_strategies = get_strategies_for_market(m_type, exchange=exchange)
                 strategy_data = current_strategies.get(st.session_state.get("current_strategy", ""), {})
                 
-                if strategy_data.get("needs_history") and m_type == "Aktien" and exchange == "US":
+                # SKIP K1 fuer Breakout Imminent — wird in eigenem elif-Block verarbeitet
+                pattern_type_k1 = strategy_data.get("pattern_type", "")
+                if strategy_data.get("needs_history") and m_type == "Aktien" and exchange == "US" and not pattern_type_k1.startswith("breakout_imminent"):
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
-                        pattern_type = strategy_data.get("pattern_type", "consolidation")
+                        pattern_type = pattern_type_k1 or "consolidation"
                         history_days = strategy_data.get("history_days", 5)
-                        
+
                         status.update(label=f"📊 Validiere Multi-Day Pattern ({pattern_type})...")
                         
                         validated_results = []
