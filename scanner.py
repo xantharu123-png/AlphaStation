@@ -12926,7 +12926,8 @@ CATALYST_KEYWORDS = {
     "⚖️ LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
     "📈 UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
     "📉 DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
-    "🔀 SPLIT": {"keywords": ["stock split", "reverse split"], "sentiment": "neutral"},
+    "🚨 REVERSE SPLIT": {"keywords": ["reverse split", "reverse stock split", "r/s"], "sentiment": "bearish"},
+    "🔀 STOCK SPLIT": {"keywords": ["stock split", "forward split"], "sentiment": "bullish"},
     "💵 DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
     "👤 INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
     "🚀 PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
@@ -12934,8 +12935,8 @@ CATALYST_KEYWORDS = {
 }
 
 # Bearish catalysts → Score-Penalty statt Bonus!
-BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY"}
-BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT"}
+BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY", "🚨 REVERSE SPLIT"}
+BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT", "🔀 STOCK SPLIT"}
 
 def _detect_catalyst(title):
     """Erkennt Katalysator-Typ aus News-Titel."""
