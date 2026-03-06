@@ -765,17 +765,17 @@ STRATEGIES = {
     # RSI Drift, Higher Lows/Lower Highs, Resilience, Bollinger-Squeeze
     # =========================================================================
     "Breakout Imminent Long 🔮⬆️": {
-        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach OBEN",
+        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach OBEN (min 3% Range, R:R ≥1.0)",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.3, 2.0)},
-        "logic": "ATR-Squeeze + Vol Dry-Up + OBV steigt + ADX dreht + Higher Lows + Inst. Akkumulation",
+        "logic": "ATR-Squeeze + Vol Dry-Up + OBV steigt + ADX dreht + Higher Lows + Inst. Akkumulation | Score ≥65/120",
         "needs_history": True,
         "pattern_type": "breakout_imminent_long",
         "history_days": 30
     },
     "Breakout Imminent Short 🔮⬇️": {
-        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach UNTEN",
+        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach UNTEN (min 3% Range, R:R ≥1.0)",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.3, 2.0)},
-        "logic": "ATR-Squeeze + Vol Dry-Up + OBV faellt + ADX dreht + Lower Highs + Inst. Distribution",
+        "logic": "ATR-Squeeze + Vol Dry-Up + OBV faellt + ADX dreht + Lower Highs + Inst. Distribution | Score ≥60/120",
         "needs_history": True,
         "pattern_type": "breakout_imminent_short",
         "history_days": 30
@@ -3824,8 +3824,8 @@ def analyze_breakout_imminent(bars, direction="long"):
     total_signals = len(details)
     direction_confidence = round((directional_signals / max(1, total_signals)) * 100)
 
-    # Threshold: Long 55, Short 50 (Short ist schwerer zu predicten)
-    threshold = 55 if direction == "long" else 50
+    # Threshold: Long 65, Short 60 — nur starke Setups durchlassen
+    threshold = 65 if direction == "long" else 60
     is_valid = score >= threshold
 
     return is_valid, score, max_score, details, direction_confidence
@@ -17835,8 +17835,8 @@ with st.sidebar:
 
                         status.update(label=f"Schritt 1/3: {len(candidates)} flache Aktien gefiltert")
 
-                        # Sortiere nach niedrigstem RVOL zuerst (Ruhe = potentieller Breakout)
-                        candidates = sorted(candidates, key=lambda x: abs(x.get("Chg%", 0)))[:100]
+                        # Sortiere nach DollarVol (höchste Liquidität = bessere Trades)
+                        candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)[:100]
 
                         status.update(label=f"Schritt 2/3: Analysiere {min(len(candidates), 60)} Aktien mit 12 Signalen...")
 
@@ -17859,6 +17859,22 @@ with st.sidebar:
                             is_valid, score, max_score, details, confidence = analyze_breakout_imminent(bars, direction=bi_direction)
 
                             if is_valid:
+                                # Range berechnen
+                                range_high = max(b["high"] for b in bars[-15:])
+                                range_low = min(b["low"] for b in bars[-15:])
+                                range_size = range_high - range_low
+                                range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+
+                                # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 3% sein!
+                                # Unter 3% = tote Aktie, kein echter Breakout-Kandidat
+                                if range_pct < 3.0:
+                                    continue
+
+                                # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.5% sein
+                                avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
+                                if avg_daily_range < 0.5:
+                                    continue
+
                                 candidate["Alpha"] = score
                                 candidate["BI_Score"] = score
                                 candidate["BI_MaxScore"] = max_score
@@ -17866,20 +17882,19 @@ with st.sidebar:
                                 candidate["BI_Confidence"] = confidence
                                 candidate["BI_Direction"] = bi_direction.upper()
 
-                                # Entry/SL/TP basierend auf Range
-                                range_high = max(b["high"] for b in bars[-15:])
-                                range_low = min(b["low"] for b in bars[-15:])
-                                range_size = range_high - range_low
+                                # Entry/SL/TP basierend auf Range — mit ATR-basiertem Risiko
+                                # ATR für realistischere SL-Berechnung
+                                atr_5 = sum((b["high"] - b["low"]) for b in bars[-5:]) / 5
 
                                 if bi_direction == "long":
-                                    candidate["Entry"] = round(range_high * 1.005, 2)  # 0.5% ueber Range
-                                    candidate["StopLoss"] = round(range_low * 0.99, 2)  # 1% unter Range
-                                    candidate["TP1"] = round(range_high + range_size, 2)  # 1x Range
-                                    candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # 1.618x Range
+                                    candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)  # Knapp über Range-High
+                                    candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)  # 1.5x ATR unter Entry
+                                    candidate["TP1"] = round(range_high + range_size * 0.75, 2)  # 75% Measured Move
+                                    candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # Fib Extension
                                 else:
-                                    candidate["Entry"] = round(range_low * 0.998, 2)  # 0.2% unter Range fuer Bestaetigung
-                                    candidate["StopLoss"] = round(range_high * 1.02, 2)  # 2% ueber Range (weiter fuer Breakout-Risiko)
-                                    candidate["TP1"] = round(range_low - range_size, 2)  # 1x Measured Move
+                                    candidate["Entry"] = round(range_low - atr_5 * 0.1, 2)  # Knapp unter Range-Low
+                                    candidate["StopLoss"] = round(range_low + atr_5 * 1.5, 2)  # 1.5x ATR über Entry
+                                    candidate["TP1"] = round(range_low - range_size * 0.75, 2)  # 75% Measured Move
                                     candidate["TP2"] = round(range_low - range_size * 1.618, 2)  # Fib Extension
 
                                 risk = abs(candidate["Entry"] - candidate["StopLoss"])
@@ -17887,6 +17902,10 @@ with st.sidebar:
                                 candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
                                 candidate["RangeHigh"] = round(range_high, 2)
                                 candidate["RangeLow"] = round(range_low, 2)
+
+                                # ⚠️ QUALITÄTS-FILTER: R:R muss mindestens 1.0 sein!
+                                if candidate["RiskReward"] < 1.0:
+                                    continue
 
                                 results.append(candidate)
 
