@@ -506,6 +506,28 @@ STRATEGIES = {
         "harmonic_direction": "ALL"
     },
     # =========================================================================
+    # BREAKOUT IMMINENT 🔮 - Multi-Signal Composite Breakout Prediction
+    # Kombiniert 12 Faktoren: ATR-Squeeze, Vol Dry-Up, OBV-Divergenz, ADX,
+    # Close Clustering, Range Duration, Boundary Tests, Institutional Days,
+    # RSI Drift, Higher Lows/Lower Highs, Resilience, Bollinger-Squeeze
+    # =========================================================================
+    "Breakout Imminent Long 🔮⬆️": {
+        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach OBEN",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 2.0)},
+        "logic": "ATR-Squeeze + Vol Dry-Up + OBV steigt + ADX dreht + Higher Lows + Inst. Akkumulation",
+        "needs_history": True,
+        "pattern_type": "breakout_imminent_long",
+        "history_days": 30
+    },
+    "Breakout Imminent Short 🔮⬇️": {
+        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach UNTEN",
+        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 2.0)},
+        "logic": "ATR-Squeeze + Vol Dry-Up + OBV faellt + ADX dreht + Lower Highs + Inst. Distribution",
+        "needs_history": True,
+        "pattern_type": "breakout_imminent_short",
+        "history_days": 30
+    },
+    # =========================================================================
     # WYCKOFF STRATEGIEN 🏦 - Klassische Akkumulations/Distributions-Phasen
     # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
     # =========================================================================
@@ -3043,6 +3065,511 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     threshold = threshold_map.get(pattern_type, 40)
     is_valid = score >= threshold
     return is_valid, score, details
+
+
+# =============================================================================
+# BREAKOUT IMMINENT SCANNER 🔮 — Multi-Signal Composite Prediction
+# Kombiniert 12 Faktoren um bevorstehende Breakouts vorherzusagen
+# =============================================================================
+
+def calculate_adx(bars, period=14):
+    """
+    Berechnet ADX (Average Directional Index) aus OHLC-Daten.
+    ADX < 20 = kein Trend (Konsolidierung), ADX steigend von <20 = Breakout beginnt.
+
+    Returns: (adx_value, adx_prev) oder (None, None) wenn nicht genug Daten
+    """
+    if not bars or len(bars) < period + 2:
+        return None, None
+
+    plus_dm_list = []
+    minus_dm_list = []
+    tr_list = []
+
+    for i in range(1, len(bars)):
+        high = bars[i]["high"]
+        low = bars[i]["low"]
+        prev_high = bars[i-1]["high"]
+        prev_low = bars[i-1]["low"]
+        prev_close = bars[i-1]["close"]
+
+        # True Range
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_list.append(tr)
+
+        # Directional Movement
+        up_move = high - prev_high
+        down_move = prev_low - low
+
+        plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+        minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+
+    if len(tr_list) < period:
+        return None, None
+
+    # Smoothed averages (Wilder's smoothing)
+    atr = sum(tr_list[:period]) / period
+    plus_dm_avg = sum(plus_dm_list[:period]) / period
+    minus_dm_avg = sum(minus_dm_list[:period]) / period
+
+    dx_list = []
+
+    for i in range(period, len(tr_list)):
+        atr = (atr * (period - 1) + tr_list[i]) / period
+        plus_dm_avg = (plus_dm_avg * (period - 1) + plus_dm_list[i]) / period
+        minus_dm_avg = (minus_dm_avg * (period - 1) + minus_dm_list[i]) / period
+
+        plus_di = (plus_dm_avg / atr * 100) if atr > 0 else 0
+        minus_di = (minus_dm_avg / atr * 100) if atr > 0 else 0
+
+        di_sum = plus_di + minus_di
+        dx = (abs(plus_di - minus_di) / di_sum * 100) if di_sum > 0 else 0
+        dx_list.append(dx)
+
+    if len(dx_list) < period:
+        return None, None
+
+    # ADX = smoothed DX
+    adx = sum(dx_list[:period]) / period
+    for i in range(period, len(dx_list)):
+        adx = (adx * (period - 1) + dx_list[i]) / period
+
+    # ADX von 5 Bars vorher
+    adx_prev = None
+    if len(dx_list) >= period + 5:
+        adx_prev = sum(dx_list[:period]) / period
+        for i in range(period, len(dx_list) - 5):
+            adx_prev = (adx_prev * (period - 1) + dx_list[i]) / period
+
+    return round(adx, 1), round(adx_prev, 1) if adx_prev else None
+
+
+def calculate_rsi_from_bars(bars, period=14):
+    """
+    Berechnet RSI aus OHLC-Bars.
+    Returns: RSI-Wert (0-100) oder None
+    """
+    if not bars or len(bars) < period + 1:
+        return None
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(bars)):
+        change = bars[i]["close"] - bars[i-1]["close"]
+        gains.append(max(0, change))
+        losses.append(max(0, -change))
+
+    if len(gains) < period:
+        return None
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi, 1)
+
+
+def analyze_breakout_imminent(bars, direction="long"):
+    """
+    🔮 BREAKOUT IMMINENT — Multi-Signal Composite Prediction
+
+    Kombiniert 12 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
+    Jeder Faktor gibt 0-10 Punkte. Maximum: 120 Punkte.
+    Threshold: 55 (Long) / 50 (Short — schwerer zu predicten)
+
+    Args:
+        bars: Liste von OHLC-Dicts (min 15 Tage, ideal 30)
+        direction: "long" oder "short"
+
+    Returns:
+        (is_valid, score, max_score, details, direction_confidence)
+    """
+    if not bars or len(bars) < 10:
+        return False, 0, 120, ["Nicht genug Daten (min 10 Tage)"], 0
+
+    score = 0
+    details = []
+    n = len(bars)
+
+    closes = [b["close"] for b in bars]
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    volumes = [b["volume"] for b in bars]
+
+    current_price = closes[-1]
+
+    # ===================================================================
+    # SIGNAL 1: VOLATILITAETS-KONTRAKTION (ATR Squeeze) — max 10 Punkte
+    # ATR schrumpft ueber die letzten Tage = Energie baut sich auf
+    # ===================================================================
+    daily_ranges = []
+    for b in bars:
+        if b["close"] > 0:
+            daily_ranges.append((b["high"] - b["low"]) / b["close"] * 100)
+
+    if len(daily_ranges) >= 10:
+        first_half_atr = sum(daily_ranges[:len(daily_ranges)//2]) / (len(daily_ranges)//2)
+        second_half_atr = sum(daily_ranges[len(daily_ranges)//2:]) / (len(daily_ranges) - len(daily_ranges)//2)
+
+        if first_half_atr > 0:
+            atr_ratio = second_half_atr / first_half_atr
+            if atr_ratio < 0.5:
+                score += 10
+                details.append(f"🔥 ATR-Squeeze extrem: {atr_ratio:.2f}x (Ranges halbiert)")
+            elif atr_ratio < 0.7:
+                score += 7
+                details.append(f"✅ ATR-Squeeze stark: {atr_ratio:.2f}x")
+            elif atr_ratio < 0.85:
+                score += 4
+                details.append(f"⚠️ ATR leicht sinkend: {atr_ratio:.2f}x")
+            else:
+                details.append(f"❌ Kein ATR-Squeeze: {atr_ratio:.2f}x")
+
+    # ===================================================================
+    # SIGNAL 2: VOLUME DRY-UP — max 10 Punkte
+    # Volumen sinkt systematisch = Erschoepfung beider Seiten
+    # ===================================================================
+    if len(volumes) >= 8:
+        first_third_vol = sum(volumes[:n//3]) / max(1, n//3)
+        last_third_vol = sum(volumes[-(n//3):]) / max(1, n//3)
+
+        if first_third_vol > 0:
+            vol_decline = last_third_vol / first_third_vol
+            if vol_decline < 0.5:
+                score += 10
+                details.append(f"🔥 Vol Dry-Up extrem: {vol_decline:.2f}x")
+            elif vol_decline < 0.7:
+                score += 7
+                details.append(f"✅ Vol sinkt deutlich: {vol_decline:.2f}x")
+            elif vol_decline < 0.85:
+                score += 4
+                details.append(f"⚠️ Vol leicht sinkend: {vol_decline:.2f}x")
+            else:
+                details.append(f"❌ Kein Vol Dry-Up: {vol_decline:.2f}x")
+
+    # ===================================================================
+    # SIGNAL 3: OBV-DIVERGENZ — max 10 Punkte
+    # OBV steigt/faellt waehrend Preis flat = Smart Money positioniert sich
+    # ===================================================================
+    obv = [0]
+    for i in range(1, n):
+        if closes[i] > closes[i-1]:
+            obv.append(obv[-1] + volumes[i])
+        elif closes[i] < closes[i-1]:
+            obv.append(obv[-1] - volumes[i])
+        else:
+            obv.append(obv[-1])
+
+    # Preis-Trend vs OBV-Trend
+    price_change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
+    price_flat = abs(price_change_pct) < 5  # Preis relativ flat
+
+    if len(obv) >= 6 and price_flat:
+        mid = len(obv) // 2
+        early_obv = sum(obv[:mid]) / mid
+        late_obv = sum(obv[mid:]) / (len(obv) - mid)
+        obv_rising = late_obv > early_obv * 1.05
+        obv_falling = late_obv < early_obv * 0.95
+
+        if direction == "long" and obv_rising:
+            score += 10
+            details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt")
+        elif direction == "short" and obv_falling:
+            score += 10
+            details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt")
+        elif direction == "long" and obv_falling:
+            details.append(f"❌ OBV faellt = eher Short")
+        elif direction == "short" and obv_rising:
+            details.append(f"❌ OBV steigt = eher Long")
+        else:
+            score += 3
+            details.append(f"⚠️ OBV neutral")
+
+    # ===================================================================
+    # SIGNAL 4: CLOSE POSITION CLUSTERING — max 10 Punkte
+    # Closes clustern nahe High (bullish) oder Low (bearish)
+    # ===================================================================
+    if n >= 5:
+        recent_close_positions = []
+        for b in bars[-5:]:
+            rng = b["high"] - b["low"]
+            if rng > 0:
+                cp = (b["close"] - b["low"]) / rng
+                recent_close_positions.append(cp)
+
+        if recent_close_positions:
+            avg_cp = sum(recent_close_positions) / len(recent_close_positions)
+
+            if direction == "long" and avg_cp > 0.7:
+                score += 10
+                details.append(f"🔥 Closes clustern nahe Highs: {avg_cp:.0%}")
+            elif direction == "long" and avg_cp > 0.55:
+                score += 5
+                details.append(f"✅ Closes leicht bullisch: {avg_cp:.0%}")
+            elif direction == "short" and avg_cp < 0.3:
+                score += 10
+                details.append(f"🔥 Closes clustern nahe Lows: {avg_cp:.0%}")
+            elif direction == "short" and avg_cp < 0.45:
+                score += 5
+                details.append(f"✅ Closes leicht baerisch: {avg_cp:.0%}")
+            else:
+                details.append(f"⚠️ Close Position neutral: {avg_cp:.0%}")
+
+    # ===================================================================
+    # SIGNAL 5: RANGE DURATION — max 10 Punkte
+    # Laengere Konsolidierung = staerkerer Breakout
+    # ===================================================================
+    # Zaehle aufeinanderfolgende Tage in enger Range (vom Ende rueckwaerts)
+    range_days = 0
+    max_range_high = highs[-1]
+    min_range_low = lows[-1]
+
+    for i in range(n - 2, -1, -1):
+        max_range_high = max(max_range_high, highs[i])
+        min_range_low = min(min_range_low, lows[i])
+        total_range = ((max_range_high - min_range_low) / current_price) * 100 if current_price > 0 else 99
+
+        if total_range < 10:  # Range < 10% gilt als Konsolidierung
+            range_days += 1
+        else:
+            break
+
+    if range_days >= 15:
+        score += 10
+        details.append(f"🔥 Lange Konsolidierung: {range_days} Tage")
+    elif range_days >= 10:
+        score += 7
+        details.append(f"✅ Solide Konsolidierung: {range_days} Tage")
+    elif range_days >= 6:
+        score += 4
+        details.append(f"⚠️ Kurze Konsolidierung: {range_days} Tage")
+    else:
+        details.append(f"❌ Keine Konsolidierung: {range_days} Tage")
+
+    # ===================================================================
+    # SIGNAL 6: RANGE BOUNDARY TESTS — max 10 Punkte
+    # Mehrfache Tests der Grenze = Widerstand wird schwaecher
+    # ===================================================================
+    if range_days >= 5:
+        range_high = max(highs[-range_days:])
+        range_low = min(lows[-range_days:])
+        range_size = range_high - range_low
+
+        if range_size > 0:
+            threshold_upper = range_high - range_size * 0.15  # Top 15% der Range
+            threshold_lower = range_low + range_size * 0.15   # Bottom 15%
+
+            upper_tests = sum(1 for h in highs[-range_days:] if h >= threshold_upper)
+            lower_tests = sum(1 for l in lows[-range_days:] if l <= threshold_lower)
+
+            if direction == "long" and upper_tests >= 3:
+                score += 10
+                details.append(f"🔥 {upper_tests}x Resistance getestet → wird schwaecher")
+            elif direction == "long" and upper_tests >= 2:
+                score += 5
+                details.append(f"✅ {upper_tests}x Resistance getestet")
+            elif direction == "short" and lower_tests >= 3:
+                score += 10
+                details.append(f"🔥 {lower_tests}x Support getestet → wird schwaecher")
+            elif direction == "short" and lower_tests >= 2:
+                score += 5
+                details.append(f"✅ {lower_tests}x Support getestet")
+            else:
+                details.append(f"⚠️ Wenig Boundary-Tests (Upper: {upper_tests}, Lower: {lower_tests})")
+
+    # ===================================================================
+    # SIGNAL 7: ADX TURNING UP — max 10 Punkte
+    # ADX < 20 + steigend = neuer Trend beginnt JETZT
+    # ===================================================================
+    adx, adx_prev = calculate_adx(bars)
+
+    if adx is not None:
+        if adx < 20 and adx_prev and adx > adx_prev:
+            score += 10
+            details.append(f"🔥 ADX Wende: {adx_prev:.0f}→{adx:.0f} (unter 20 + steigend = Breakout!)")
+        elif adx < 25 and adx_prev and adx > adx_prev:
+            score += 6
+            details.append(f"✅ ADX steigend: {adx_prev:.0f}→{adx:.0f}")
+        elif adx < 20:
+            score += 3
+            details.append(f"⚠️ ADX niedrig ({adx:.0f}) aber nicht steigend")
+        else:
+            details.append(f"❌ ADX bereits hoch: {adx:.0f} (Trend laeuft schon)")
+
+    # ===================================================================
+    # SIGNAL 8: INSTITUTIONAL ACCUMULATION/DISTRIBUTION DAYS — max 10 Punkte
+    # Tage mit Close Up + Vol > Avg = Inst. Buying
+    # ===================================================================
+    if n >= 10:
+        avg_vol = sum(volumes) / n
+
+        accum_days = 0  # Close up + vol > avg
+        distri_days = 0  # Close down + vol > avg
+
+        for i in range(1, n):
+            if volumes[i] > avg_vol * 1.1:  # Ueberdurchschnittliches Vol
+                if closes[i] > closes[i-1]:
+                    accum_days += 1
+                elif closes[i] < closes[i-1]:
+                    distri_days += 1
+
+        if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
+            score += 10
+            details.append(f"🔥 Institutionelle Akkumulation: {accum_days} Akku vs {distri_days} Distri")
+        elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
+            score += 6
+            details.append(f"✅ Akkumulation: {accum_days} vs {distri_days} Tage")
+        elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
+            score += 10
+            details.append(f"🔥 Institutionelle Distribution: {distri_days} Distri vs {accum_days} Akku")
+        elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
+            score += 6
+            details.append(f"✅ Distribution: {distri_days} vs {accum_days} Tage")
+        else:
+            details.append(f"⚠️ Gemischte Inst-Aktivitaet: {accum_days} Akku / {distri_days} Distri")
+
+    # ===================================================================
+    # SIGNAL 9: RSI DRIFT — max 10 Punkte
+    # RSI driftet ueber 55 (bullisch) oder unter 45 (baerisch) waehrend
+    # Preis noch flat ist = Momentum baut sich unsichtbar auf
+    # ===================================================================
+    rsi = calculate_rsi_from_bars(bars)
+
+    if rsi is not None and price_flat:
+        if direction == "long" and 55 <= rsi <= 65:
+            score += 10
+            details.append(f"🔥 RSI-Drift bullisch: {rsi:.0f} (Momentum baut auf)")
+        elif direction == "long" and 50 <= rsi < 55:
+            score += 5
+            details.append(f"✅ RSI leicht bullisch: {rsi:.0f}")
+        elif direction == "short" and 35 <= rsi <= 45:
+            score += 10
+            details.append(f"🔥 RSI-Drift baerisch: {rsi:.0f} (Schwaeche baut auf)")
+        elif direction == "short" and 45 < rsi <= 50:
+            score += 5
+            details.append(f"✅ RSI leicht baerisch: {rsi:.0f}")
+        elif 40 <= rsi <= 60:
+            score += 2
+            details.append(f"⚠️ RSI neutral: {rsi:.0f}")
+        else:
+            details.append(f"❌ RSI extrem: {rsi:.0f}")
+
+    # ===================================================================
+    # SIGNAL 10: HIGHER LOWS / LOWER HIGHS IN RANGE — max 10 Punkte
+    # Zeigt welche Seite die Kontrolle gewinnt
+    # ===================================================================
+    if range_days >= 6:
+        recent_lows = lows[-range_days:]
+        recent_highs = highs[-range_days:]
+
+        # Higher Lows Check (bullisch)
+        higher_lows = 0
+        for i in range(1, len(recent_lows)):
+            if recent_lows[i] > recent_lows[i-1]:
+                higher_lows += 1
+        hl_pct = higher_lows / max(1, len(recent_lows) - 1)
+
+        # Lower Highs Check (baerisch)
+        lower_highs = 0
+        for i in range(1, len(recent_highs)):
+            if recent_highs[i] < recent_highs[i-1]:
+                lower_highs += 1
+        lh_pct = lower_highs / max(1, len(recent_highs) - 1)
+
+        if direction == "long" and hl_pct >= 0.6:
+            score += 10
+            details.append(f"🔥 Higher Lows: {hl_pct:.0%} der Tage = Bullen kontrollieren")
+        elif direction == "long" and hl_pct >= 0.4:
+            score += 5
+            details.append(f"✅ Tendenz Higher Lows: {hl_pct:.0%}")
+        elif direction == "short" and lh_pct >= 0.6:
+            score += 10
+            details.append(f"🔥 Lower Highs: {lh_pct:.0%} der Tage = Baeren kontrollieren")
+        elif direction == "short" and lh_pct >= 0.4:
+            score += 5
+            details.append(f"✅ Tendenz Lower Highs: {lh_pct:.0%}")
+        else:
+            details.append(f"⚠️ Keine klare Struktur (HL: {hl_pct:.0%}, LH: {lh_pct:.0%})")
+
+    # ===================================================================
+    # SIGNAL 11: RELATIVE STAERKE vs MARKT — max 10 Punkte
+    # Wird im Scanner-Loop befuellt (spy_change als Parameter)
+    # Hier nur Platzhalter-Score basierend auf eigener Preis-Resilience
+    # ===================================================================
+    # Statt SPY-Vergleich: Prüfe ob Aktie sich in Range haelt trotz Volatilitaet
+    if n >= 10:
+        negative_days = sum(1 for i in range(1, n) if closes[i] < closes[i-1])
+        recovery_days = 0
+        for i in range(2, n):
+            if closes[i-1] < closes[i-2] and closes[i] > closes[i-1]:
+                recovery_days += 1
+
+        resilience = recovery_days / max(1, negative_days)
+
+        if direction == "long" and resilience > 0.7:
+            score += 10
+            details.append(f"🔥 Hohe Resilience: {resilience:.0%} Recovery nach Dips")
+        elif direction == "long" and resilience > 0.5:
+            score += 5
+            details.append(f"✅ Gute Resilience: {resilience:.0%}")
+        elif direction == "short" and resilience < 0.3:
+            score += 10
+            details.append(f"🔥 Schwache Resilience: {resilience:.0%} = Verkaufsdruck")
+        elif direction == "short" and resilience < 0.5:
+            score += 5
+            details.append(f"✅ Maessige Resilience: {resilience:.0%}")
+        else:
+            details.append(f"⚠️ Resilience neutral: {resilience:.0%}")
+
+    # ===================================================================
+    # SIGNAL 12: TIGHT RANGE COMPRESSION (Bollinger-Squeeze Proxy) — max 10 Punkte
+    # Standardabweichung der Closes schrumpft auf Minimum
+    # ===================================================================
+    if n >= 10:
+        recent_closes = closes[-10:]
+        mean_price = sum(recent_closes) / len(recent_closes)
+        variance = sum((c - mean_price) ** 2 for c in recent_closes) / len(recent_closes)
+        std_dev_pct = ((variance ** 0.5) / mean_price) * 100 if mean_price > 0 else 99
+
+        if std_dev_pct < 1.0:
+            score += 10
+            details.append(f"🔥 Extreme Kompression: StdDev {std_dev_pct:.2f}%")
+        elif std_dev_pct < 2.0:
+            score += 7
+            details.append(f"✅ Starke Kompression: StdDev {std_dev_pct:.2f}%")
+        elif std_dev_pct < 3.0:
+            score += 3
+            details.append(f"⚠️ Moderate Kompression: StdDev {std_dev_pct:.2f}%")
+        else:
+            details.append(f"❌ Keine Kompression: StdDev {std_dev_pct:.2f}%")
+
+    # ===================================================================
+    # FINAL SCORE + RICHTUNGS-KONFIDENZ
+    # ===================================================================
+    max_score = 120
+
+    # Richtungs-Konfidenz: Wie viele Signale zeigen in die richtige Richtung?
+    directional_signals = sum(1 for d in details if "🔥" in d or "✅" in d)
+    total_signals = len(details)
+    direction_confidence = round((directional_signals / max(1, total_signals)) * 100)
+
+    # Threshold: Long 55, Short 50 (Short ist schwerer zu predicten)
+    threshold = 55 if direction == "long" else 50
+    is_valid = score >= threshold
+
+    return is_valid, score, max_score, details, direction_confidence
 
 
 # =============================================================================
@@ -16406,6 +16933,7 @@ with st.sidebar:
         is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
         is_volume_void_strategy = current_strat in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
         is_ma_bounce_strategy = "Bounce" in current_strat and ("SMA" in current_strat or "EMA" in current_strat)
+        is_breakout_imminent = "Breakout Imminent" in current_strat
         
         # Warnung: Gap-Strategie bei Krypto
         if is_gap_strategy and m_type == "Krypto":
@@ -16933,7 +17461,111 @@ with st.sidebar:
                     st.error(f"Fehler beim MA Bounce Scan: {e}")
                     import traceback
                     st.code(traceback.format_exc())
-        
+
+        # =================================================================
+        # BREAKOUT IMMINENT 🔮 - Multi-Signal Composite Prediction
+        # =================================================================
+        elif is_breakout_imminent:
+            if m_type != "Aktien":
+                st.error("❌ Breakout Imminent Scanner funktioniert aktuell nur für **Aktien**!")
+            else:
+                bi_direction = "long" if "Long" in current_strat else "short"
+                dir_emoji = "⬆️" if bi_direction == "long" else "⬇️"
+
+                with st.status(f"🔮 Scanne Breakout Imminent {dir_emoji}...") as status:
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+
+                        # Schritt 1: Hole ALLE Aktien (ungefiltert) — wir brauchen die flachen!
+                        status.update(label="Schritt 1/3: Hole alle Aktien...")
+                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+
+                        # Basis-Filter: Preis $5-$500, Liquiditaet > $500k, FLACHE Bewegung
+                        candidates = [c for c in candidates
+                                      if 5 <= c.get("Preis", 0) <= 500
+                                      and c.get("DollarVol", 0) >= 500_000
+                                      and -3 <= c.get("Chg%", 0) <= 3
+                                      and c.get("RVOL", 1.0) <= 2.0]
+
+                        status.update(label=f"Schritt 1/3: {len(candidates)} flache Aktien gefiltert")
+
+                        # Sortiere nach niedrigstem RVOL zuerst (Ruhe = potentieller Breakout)
+                        candidates = sorted(candidates, key=lambda x: abs(x.get("Chg%", 0)))[:100]
+
+                        status.update(label=f"Schritt 2/3: Analysiere {min(len(candidates), 60)} Aktien mit 12 Signalen...")
+
+                        results = []
+                        checked = 0
+
+                        for candidate in candidates[:60]:  # Max 60 API-Calls
+                            ticker = candidate["Ticker"]
+
+                            bars = fetch_multi_day_data(ticker, poly_key, days=30)
+                            checked += 1
+
+                            if checked % 10 == 0:
+                                status.update(label=f"Schritt 2/3: {checked}/{min(len(candidates), 60)} analysiert | {len(results)} Treffer...")
+                                time.sleep(0.5)  # Rate Limiting
+
+                            if not bars or len(bars) < 10:
+                                continue
+
+                            is_valid, score, max_score, details, confidence = analyze_breakout_imminent(bars, direction=bi_direction)
+
+                            if is_valid:
+                                candidate["Alpha"] = score
+                                candidate["BI_Score"] = score
+                                candidate["BI_MaxScore"] = max_score
+                                candidate["BI_Details"] = details
+                                candidate["BI_Confidence"] = confidence
+                                candidate["BI_Direction"] = bi_direction.upper()
+
+                                # Entry/SL/TP basierend auf Range
+                                range_high = max(b["high"] for b in bars[-15:])
+                                range_low = min(b["low"] for b in bars[-15:])
+                                range_size = range_high - range_low
+
+                                if bi_direction == "long":
+                                    candidate["Entry"] = round(range_high * 1.005, 2)  # 0.5% ueber Range
+                                    candidate["StopLoss"] = round(range_low * 0.99, 2)  # 1% unter Range
+                                    candidate["TP1"] = round(range_high + range_size, 2)  # 1x Range
+                                    candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # 1.618x Range
+                                else:
+                                    candidate["Entry"] = round(range_low * 0.995, 2)
+                                    candidate["StopLoss"] = round(range_high * 1.01, 2)
+                                    candidate["TP1"] = round(range_low - range_size, 2)
+                                    candidate["TP2"] = round(range_low - range_size * 1.618, 2)
+
+                                risk = abs(candidate["Entry"] - candidate["StopLoss"])
+                                reward = abs(candidate["TP1"] - candidate["Entry"])
+                                candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
+                                candidate["RangeHigh"] = round(range_high, 2)
+                                candidate["RangeLow"] = round(range_low, 2)
+
+                                results.append(candidate)
+
+                        # Sortiere nach Score (hoechster zuerst)
+                        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:25]
+
+                        st.session_state.scan_results = results
+                        st.session_state.market_type = "Aktien"
+
+                        status.update(
+                            label=f"✅ {len(results)} Breakout Imminent {dir_emoji} Setups gefunden (von {checked} analysiert)",
+                            state="complete"
+                        )
+
+                        if len(results) == 0:
+                            st.info(f"ℹ️ Keine unmittelbaren Breakout-Setups gefunden. "
+                                   f"{checked} Aktien analysiert — aktuell konsolidiert keiner mit genug Signalen.")
+
+                    except KeyError:
+                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    except Exception as e:
+                        st.error(f"Fehler beim Breakout Imminent Scan: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+
         elif not st.session_state.active_filters and not st.session_state.get("current_strategy"):
             st.warning("Erst Strategie laden!")
         else:
@@ -17398,6 +18030,7 @@ with tab_scanner:
     is_volume_void = st.session_state.current_strategy in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
     is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]
     is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]
+    is_bi = "Breakout Imminent" in st.session_state.current_strategy
     
     with col_journal:
         st.caption(f"📋 **Ergebnisse** — {st.session_state.current_strategy or ''} | {st.session_state.get('active_trading_session', '') if st.session_state.market_type == 'Aktien' else '24/7'}")
@@ -18134,6 +18767,68 @@ with tab_scanner:
                         pass
                 
                 # Wyckoff Pattern Details anzeigen 🏦
+                # =====================================================================
+                # 🔮 BREAKOUT IMMINENT — Detail-Anzeige
+                # =====================================================================
+                if is_bi and "BI_Score" in df.columns:
+                    try:
+                        bi_score = row.get("BI_Score", 0)
+                        bi_max = row.get("BI_MaxScore", 120)
+                        bi_conf = row.get("BI_Confidence", 0)
+                        bi_details = row.get("BI_Details", [])
+                        bi_dir = row.get("BI_Direction", "LONG")
+
+                        st.divider()
+                        dir_label = "⬆️ LONG" if bi_dir == "LONG" else "⬇️ SHORT"
+
+                        # Score-basierte Farbe
+                        if bi_score >= 80:
+                            st.success(f"🔮 **Breakout Imminent** {dir_label} | Score: **{bi_score}/{bi_max}** | Konfidenz: {bi_conf}%")
+                        elif bi_score >= 65:
+                            st.info(f"🔮 **Breakout Imminent** {dir_label} | Score: **{bi_score}/{bi_max}** | Konfidenz: {bi_conf}%")
+                        else:
+                            st.warning(f"🔮 **Breakout Imminent** {dir_label} | Score: **{bi_score}/{bi_max}** | Konfidenz: {bi_conf}%")
+
+                        # Signal-Details
+                        if isinstance(bi_details, list):
+                            fire_signals = [d for d in bi_details if "🔥" in str(d)]
+                            ok_signals = [d for d in bi_details if "✅" in str(d)]
+                            weak_signals = [d for d in bi_details if "⚠️" in str(d) or "❌" in str(d)]
+
+                            if fire_signals:
+                                st.caption("**🔥 Starke Signale:**")
+                                for s in fire_signals:
+                                    st.caption(f"  {s}")
+                            if ok_signals:
+                                st.caption("**✅ Positive Signale:**")
+                                for s in ok_signals:
+                                    st.caption(f"  {s}")
+                            if weak_signals:
+                                with st.expander("⚠️ Schwache/Fehlende Signale"):
+                                    for s in weak_signals:
+                                        st.caption(f"  {s}")
+
+                        # Range + Entry/SL/TP
+                        st.caption(f"📏 **Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
+
+                        col_t1, col_t2 = st.columns(2)
+                        with col_t1:
+                            st.metric("Entry", f"${row.get('Entry', 0):.2f}")
+                            st.metric("Stop Loss", f"${row.get('StopLoss', 0):.2f}")
+                        with col_t2:
+                            st.metric("TP1 (1x Range)", f"${row.get('TP1', 0):.2f}")
+                            st.metric("TP2 (1.618x)", f"${row.get('TP2', 0):.2f}")
+
+                        rr = row.get('RiskReward', 0)
+                        if rr >= 2:
+                            st.success(f"✅ R:R **{rr:.1f}:1**")
+                        elif rr >= 1.5:
+                            st.info(f"📊 R:R **{rr:.1f}:1**")
+                        else:
+                            st.warning(f"⚠️ R:R **{rr:.1f}:1**")
+                    except Exception:
+                        pass
+
                 if "WyckoffPhase" in df.columns and pd.notna(row.get("WyckoffPhase")):
                     try:
                         st.divider()
