@@ -12921,27 +12921,33 @@ def get_ticker_news(poly_key, ticker, limit=3):
     NEU: Katalysator-Erkennung (Earnings, FDA, Offering, etc.)
     Returns: List of news items with title, sentiment, published date, catalyst
     """
-    # Katalysator-Keywords nach Kategorie
+    # Katalysator-Keywords nach Kategorie + Sentiment-Klassifikation
+    # sentiment: "bullish", "bearish", "neutral" (bestimmt Score-Effekt)
     CATALYST_KEYWORDS = {
-        "📊 EARNINGS": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"],
-        "💊 FDA/BIO": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"],
-        "💰 OFFERING": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise"],
-        "🤝 M&A": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"],
-        "📋 CONTRACT": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"],
-        "⚖️ LEGAL": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud"],
-        "📈 UPGRADE": ["upgrade", "price target", "buy rating", "overweight", "outperform"],
-        "📉 DOWNGRADE": ["downgrade", "sell rating", "underweight", "underperform", "cut"],
-        "🔀 SPLIT": ["stock split", "reverse split"],
-        "💵 DIVIDEND": ["dividend", "payout", "distribution"],
-        "👤 INSIDER": ["insider", "CEO buy", "director purchase", "10b5"],
-        "🚀 PRODUCT": ["launch", "release", "new product", "unveil", "announce"],
+        "📊 EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
+        "💊 FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
+        "🚨 OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
+        "🤝 M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
+        "📋 CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
+        "⚖️ LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
+        "📈 UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
+        "📉 DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
+        "🔀 SPLIT": {"keywords": ["stock split", "reverse split"], "sentiment": "neutral"},
+        "💵 DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
+        "👤 INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
+        "🚀 PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
+        "🔻 BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
     }
-    
+
+    # Bearish catalysts → Score-Penalty statt Bonus!
+    BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY"}
+    BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT"}
+
     def detect_catalyst(title):
         """Erkennt Katalysator-Typ aus News-Titel."""
         title_lower = title.lower()
-        for catalyst_type, keywords in CATALYST_KEYWORDS.items():
-            for kw in keywords:
+        for catalyst_type, cat_data in CATALYST_KEYWORDS.items():
+            for kw in cat_data["keywords"]:
                 if kw.lower() in title_lower:
                     return catalyst_type
         return None
@@ -13140,9 +13146,9 @@ def get_spy_pm_change(poly_key):
         return 0
 
 
-def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_ratio, 
+def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_ratio,
                                 shares_m=0, float_cat="UNKNOWN", has_catalyst=False,
-                                pm_price=0, pm_vwap=0):
+                                pm_price=0, pm_vwap=0, **kwargs):
     """
     PM Quality Score V2 (0-100) — Wie tradeable ist dieses Setup?
     
@@ -13321,8 +13327,20 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
     
     # ── 5. CATALYST + FLOAT (0-15) ──
     cat_score = 0
-    if has_catalyst:
+    # Katalysator-Bewertung: Bullish = Bonus, Bearish = PENALTY!
+    _catalysts_list = kwargs.get("catalysts", []) if "catalysts" in kwargs else []
+    _has_bearish_cat = any(c in BEARISH_CATALYSTS for c in _catalysts_list)
+    _has_bullish_cat = any(c in BULLISH_CATALYSTS for c in _catalysts_list)
+    if _has_bearish_cat:
+        # Offering, Lawsuit, Downgrade → WARNUNG statt Bonus!
+        cat_score -= 5
+        _bear_cats = [c for c in _catalysts_list if c in BEARISH_CATALYSTS]
+        warnings.append(f"🚨 BEARISH Katalysator: {', '.join(_bear_cats)} — Vorsicht!")
+    elif has_catalyst and _has_bullish_cat:
         cat_score += 8
+    elif has_catalyst:
+        # Neutral catalyst (Earnings, FDA, Split) — moderate Bonus
+        cat_score += 4
     
     if float_cat in ("NANO", "MICRO") and abs_change >= 5:
         cat_score += 7
@@ -13944,7 +13962,8 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
         
         # 5. QUALITY SCORE für alle Results (braucht Float + Catalysts)
         for item in final_results:
-            has_catalyst = len(item.get("Catalysts", [])) > 0
+            _item_catalysts = item.get("Catalysts", [])
+            has_catalyst = len(_item_catalysts) > 0
             pm_score, pm_breakdown, pm_confidence = calculate_pm_quality_score(
                 pm_change=item["PM_Chg%"],
                 gap_pct=item["Gap%"],
@@ -13955,7 +13974,8 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                 float_cat=item.get("Float_Cat", "UNKNOWN"),
                 has_catalyst=has_catalyst,
                 pm_price=item.get("PM_Preis", 0),
-                pm_vwap=item.get("PM_VWAP", 0)
+                pm_vwap=item.get("PM_VWAP", 0),
+                catalysts=_item_catalysts
             )
             item["PM_Score"] = pm_score
             item["PM_Breakdown"] = pm_breakdown
@@ -14123,11 +14143,18 @@ def _render_pm_item(item, direction="long"):
             st.markdown(f"<div style='background:#fef2f2;border-left:4px solid #ef4444;padding:4px 10px;margin:4px 0;border-radius:4px;font-size:13px;'>"
                        f"⚠️ {warn_str}</div>", unsafe_allow_html=True)
         
-        # ── Katalysator-Zeile ──
+        # ── Katalysator-Zeile (mit Bearish-Warnung) ──
         catalysts = item.get('Catalysts', [])
         if catalysts:
-            cat_str = " | ".join(catalysts)
-            st.markdown(f"🎯 **Katalysator:** {cat_str}")
+            _bear_cats = [c for c in catalysts if c in BEARISH_CATALYSTS]
+            _bull_cats = [c for c in catalysts if c not in BEARISH_CATALYSTS]
+            if _bear_cats:
+                bear_str = " | ".join(_bear_cats)
+                st.markdown(f"<div style='background:#fef2f2;border-left:4px solid #ef4444;padding:4px 10px;margin:4px 0;border-radius:4px;font-size:13px;'>"
+                           f"🚨 <b>BEARISH Katalysator:</b> {bear_str} — Vorsicht bei Long!</div>", unsafe_allow_html=True)
+            if _bull_cats:
+                bull_str = " | ".join(_bull_cats)
+                st.markdown(f"🎯 **Katalysator:** {bull_str}")
         
         # ── News Row ──
         news_list = item.get('News', [])
