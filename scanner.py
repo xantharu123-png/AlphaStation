@@ -12915,42 +12915,43 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
 # PRE-MARKET WATCHLIST - ERWEITERTE PM ANALYSE V2
 # =============================================================================
 
+# Katalysator-Keywords nach Kategorie + Sentiment-Klassifikation
+# sentiment: "bullish", "bearish", "neutral" (bestimmt Score-Effekt)
+CATALYST_KEYWORDS = {
+    "📊 EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
+    "💊 FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
+    "🚨 OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
+    "🤝 M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
+    "📋 CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
+    "⚖️ LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
+    "📈 UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
+    "📉 DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
+    "🔀 SPLIT": {"keywords": ["stock split", "reverse split"], "sentiment": "neutral"},
+    "💵 DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
+    "👤 INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
+    "🚀 PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
+    "🔻 BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
+}
+
+# Bearish catalysts → Score-Penalty statt Bonus!
+BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY"}
+BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT"}
+
+def _detect_catalyst(title):
+    """Erkennt Katalysator-Typ aus News-Titel."""
+    title_lower = title.lower()
+    for catalyst_type, cat_data in CATALYST_KEYWORDS.items():
+        for kw in cat_data["keywords"]:
+            if kw.lower() in title_lower:
+                return catalyst_type
+    return None
+
 def get_ticker_news(poly_key, ticker, limit=3):
     """
     Holt die neuesten News für einen Ticker via Polygon News API.
     NEU: Katalysator-Erkennung (Earnings, FDA, Offering, etc.)
     Returns: List of news items with title, sentiment, published date, catalyst
     """
-    # Katalysator-Keywords nach Kategorie + Sentiment-Klassifikation
-    # sentiment: "bullish", "bearish", "neutral" (bestimmt Score-Effekt)
-    CATALYST_KEYWORDS = {
-        "📊 EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
-        "💊 FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
-        "🚨 OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
-        "🤝 M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
-        "📋 CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
-        "⚖️ LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
-        "📈 UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
-        "📉 DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
-        "🔀 SPLIT": {"keywords": ["stock split", "reverse split"], "sentiment": "neutral"},
-        "💵 DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
-        "👤 INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
-        "🚀 PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
-        "🔻 BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
-    }
-
-    # Bearish catalysts → Score-Penalty statt Bonus!
-    BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY"}
-    BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT"}
-
-    def detect_catalyst(title):
-        """Erkennt Katalysator-Typ aus News-Titel."""
-        title_lower = title.lower()
-        for catalyst_type, cat_data in CATALYST_KEYWORDS.items():
-            for kw in cat_data["keywords"]:
-                if kw.lower() in title_lower:
-                    return catalyst_type
-        return None
     
     try:
         url = f"https://api.polygon.io/v2/reference/news"
@@ -12976,7 +12977,7 @@ def get_ticker_news(poly_key, ticker, limit=3):
             
             # Katalysator erkennen
             title = item.get("title", "")
-            catalyst = detect_catalyst(title)
+            catalyst = _detect_catalyst(title)
             if catalyst and catalyst not in detected_catalysts:
                 detected_catalysts.append(catalyst)
             
