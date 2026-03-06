@@ -19322,20 +19322,20 @@ with tab_scanner:
                 # ACTION BUTTONS ROW
                 _btn_cols = st.columns(3)
                 with _btn_cols[0]:
-                    if st.button(f"⭐ Watchlist", use_container_width=True, key=f"wl_{idx}"):
+                    if st.button(f"⭐ Watchlist", use_container_width=True, key=f"wl_{selected_row_idx}"):
                         if add_to_watchlist(row["Ticker"], row.to_dict()):
                             st.success(f"✅ {row['Ticker']} hinzugefügt!")
                         else:
                             st.info("Bereits in Watchlist")
                 with _btn_cols[1]:
                     if st.session_state.market_type == "Aktien":
-                        if st.button(f"🤖 AI Chart", use_container_width=True, type="primary", key=f"ai_{idx}"):
+                        if st.button(f"🤖 AI Chart", use_container_width=True, type="primary", key=f"ai_{selected_row_idx}"):
                             st.session_state.show_ai_chart = True
                             st.session_state.ai_chart_ticker = row.get('FullTicker', row['Ticker'])
                             st.rerun()
                 with _btn_cols[2]:
                     _ib_live = IB_INSYNC_AVAILABLE and ib_is_connected()
-                    if st.button(f"📤 IBKR", use_container_width=True, key=f"ib_{idx}", disabled=not _ib_live,
+                    if st.button(f"📤 IBKR", use_container_width=True, key=f"ib_{selected_row_idx}", disabled=not _ib_live,
                                  help=None if _ib_live else ("Verbinde TWS in der Sidebar" if IB_INSYNC_AVAILABLE else "ib_insync nicht installiert")):
                         if _ib_live:
                             st.session_state.ib_show_form = row['Ticker']
