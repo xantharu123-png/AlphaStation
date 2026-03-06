@@ -433,12 +433,12 @@ STRATEGIES = {
         "history_days": 5
     },
     "Consolidation Breakout 🚀": {
-        "description": "📦→🚀 Ausbruch aus MEHRTÄGIGER enger Range mit Volumen (⚠️ Vortag% = Kerze)",
-        "filters": {"Change %": (3.0, 30.0), "Vortag %": (-2.5, 2.5), "RVOL": (2.0, 50.0)},
-        "logic": "Mehrtägige enge Range + heute Ausbruch (+3%+) mit hohem Volumen",
+        "description": "📦→🚀 Ausbruch aus mehrtaegiger enger Range mit Volumen-Explosion",
+        "filters": {"Change %": (1.5, 50.0), "Vortag %": (-3.0, 3.0), "RVOL": (1.5, 50.0)},
+        "logic": "Mehrtaegige enge Range + heute Ausbruch (+1.5%+) mit erhoehtem Volumen",
         "needs_history": True,
         "pattern_type": "consolidation_breakout",
-        "history_days": 5
+        "history_days": 15
     },
     "Reversal Setup 🪤": {
         "description": "📦 Mehrtägiger Abverkauf + heute bullische Umkehr (⚠️ Vortag% = Kerze)",
@@ -454,12 +454,12 @@ STRATEGIES = {
         "logic": "Enge Range + niedriges Volumen = echte Ruhe vor dem Sturm (Richtung unklar)"
     },
     "High Volume Churn 📤": {
-        "description": "📤 Hohes Volumen ohne Preisfortschritt = mögliche Verteilung",
-        "filters": {"Change %": (-3.0, 3.0), "RVOL": (2.5, 50.0)},
-        "logic": "Hohes Volumen (RVOL > 2.5) + enge Range = jemand akkumuliert/distribuiert",
+        "description": "📤 Hohes Volumen ohne Preisfortschritt = Smart Money akkumuliert/distribuiert",
+        "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.8, 50.0)},
+        "logic": "Hohes Volumen (RVOL > 1.8) + enge Tagesrange (<2%) = Churn-Aktivitaet",
         "needs_history": True,
-        "pattern_type": "accumulation",
-        "history_days": 5
+        "pattern_type": "churn",
+        "history_days": 10
     },
     # =========================================================================
     # VOLUME VOID STRATEGIEN 🕳️ - Low Volume Node Scanner
@@ -510,20 +510,20 @@ STRATEGIES = {
     # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
     # =========================================================================
     "Wyckoff Accumulation 🏦⬆️": {
-        "description": "🏦 Wyckoff Akkumulation — Smart Money kauft leise in Trading Range (SC→AR→ST→Spring→SOS)",
-        "filters": {"Preis": (5.0, 500.0)},
-        "logic": "4H-Chart: Selling Climax + Secondary Test + Spring + Sign of Strength → Long",
-        "stocks_only": True,
-        "needs_wyckoff": True,
-        "wyckoff_direction": "LONG"
+        "description": "🏦 Wyckoff Akkumulation — Smart Money kauft leise in Trading Range",
+        "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
+        "logic": "Daily: Enge Range + abnehmendes Volumen + OBV-Divergenz = Akkumulation",
+        "needs_history": True,
+        "pattern_type": "wyckoff_accumulation",
+        "history_days": 30
     },
     "Wyckoff Distribution 🏦⬇️": {
-        "description": "🏦 Wyckoff Distribution — Smart Money verkauft leise in Trading Range (BC→AR→ST→UT→SOW)",
-        "filters": {"Preis": (5.0, 500.0)},
-        "logic": "4H-Chart: Buying Climax + Secondary Test + Upthrust + Sign of Weakness → Short",
-        "stocks_only": True,
-        "needs_wyckoff": True,
-        "wyckoff_direction": "SHORT"
+        "description": "🏦 Wyckoff Distribution — Smart Money verkauft leise in Trading Range",
+        "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
+        "logic": "Daily: Enge Range + abnehmendes Volumen + OBV-Divergenz = Distribution",
+        "needs_history": True,
+        "pattern_type": "wyckoff_distribution",
+        "history_days": 30
     },
     # =========================================================================
     # MA BOUNCE STRATEGIEN 📈 - Support/Resistance an Moving Averages
@@ -2623,7 +2623,9 @@ def fetch_multi_day_data(ticker, api_key, days=5):
         from datetime import datetime, timedelta
         
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=days + 5)  # Extra Buffer für Wochenenden
+        # Buffer fuer Wochenenden + Feiertage: ~1.5x fuer kurze, ~1.4x fuer laengere Zeitraeume
+        buffer = max(7, int(days * 0.5))
+        start_date = end_date - timedelta(days=days + buffer)
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
         params = {"adjusted": "true", "sort": "asc", "apiKey": api_key}
@@ -2653,146 +2655,370 @@ def fetch_multi_day_data(ticker, api_key, days=5):
 def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     """
     Analysiert Multi-Day Patterns basierend auf historischen Daten.
-    
+    V67.5: Komplett ueberarbeitete Berechnung und neue Pattern-Types.
+
     Pattern Types:
-    - consolidation: Enge Range über mehrere Tage (Breakout Setup)
+    - consolidation: Enge Range ueber mehrere Tage (Breakout Setup)
     - bull_flag: Starker Anstieg gefolgt von enger Konsolidierung
-    - bear_flag: Starker Abfall gefolgt von enger Konsolidierung
-    - accumulation: Seitwärts mit steigendem Volumen am Ende
-    
+    - consolidation_breakout: Mehrtaegige enge Range + Breakout heute
+    - churn: Hohes Volumen ohne Preisfortschritt (Smart Money Aktivitaet)
+    - wyckoff_accumulation: Range + abnehmendes Vol + OBV steigend = Akkumulation
+    - wyckoff_distribution: Range + abnehmendes Vol + OBV fallend = Distribution
+
     Returns: (is_valid, score, details)
     """
     if len(bars) < 3:
-        return False, 0, ["❌ Nicht genug Daten (min. 3 Tage)"]
-    
+        return False, 0, ["Nicht genug Daten (min. 3 Tage)"]
+
     details = []
     score = 0
-    
-    # Berechne tägliche Änderungen
+
+    # ── Basis-Berechnungen (fuer alle Patterns) ──
+    # FIX: current_price statt bars[0] als Baseline!
+    current_price = bars[-1]["close"]
+
     daily_changes = []
     for i in range(1, len(bars)):
         chg = ((bars[i]["close"] - bars[i-1]["close"]) / bars[i-1]["close"]) * 100
         daily_changes.append(chg)
-    
-    # Berechne Gesamt-Range der letzten Tage
+
     all_highs = [b["high"] for b in bars]
     all_lows = [b["low"] for b in bars]
-    total_range_pct = ((max(all_highs) - min(all_lows)) / bars[0]["close"]) * 100
-    
-    # Durchschnittliches Volumen
+    total_range_pct = ((max(all_highs) - min(all_lows)) / current_price) * 100
+
     volumes = [b["volume"] for b in bars]
-    avg_vol = sum(volumes) / len(volumes)
-    recent_vol = volumes[-1]
+    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+    recent_vol = volumes[-1] if volumes else 0
     vol_trend = recent_vol / avg_vol if avg_vol > 0 else 1.0
-    
+
+    # Intraday-Range pro Tag (High-Low)/Close — besserer Volatilitaets-Indikator
+    daily_ranges = []
+    for b in bars:
+        dr = ((b["high"] - b["low"]) / b["close"]) * 100 if b["close"] > 0 else 0
+        daily_ranges.append(dr)
+    avg_daily_range = sum(daily_ranges) / len(daily_ranges) if daily_ranges else 0
+
+    # OBV (On-Balance Volume) — steigend = Akkumulation, fallend = Distribution
+    obv = [0]
+    for i in range(1, len(bars)):
+        if bars[i]["close"] > bars[i-1]["close"]:
+            obv.append(obv[-1] + volumes[i])
+        elif bars[i]["close"] < bars[i-1]["close"]:
+            obv.append(obv[-1] - volumes[i])
+        else:
+            obv.append(obv[-1])
+
+    # OBV Trend: Vergleiche erste vs zweite Haelfte
+    obv_trend = 0
+    if len(obv) >= 4:
+        mid = len(obv) // 2
+        early_obv_avg = sum(obv[:mid]) / mid
+        late_obv_avg = sum(obv[mid:]) / (len(obv) - mid)
+        obv_trend = late_obv_avg - early_obv_avg  # positiv = Akkumulation
+
     if pattern_type == "consolidation":
-        # Enge Range über mehrere Tage
+        # Enge Range ueber mehrere Tage
         if total_range_pct < 8:
             score += 30
-            details.append(f"✅ Enge Range: {total_range_pct:.1f}% über {len(bars)} Tage")
+            details.append(f"Enge Range: {total_range_pct:.1f}% ueber {len(bars)} Tage")
         elif total_range_pct < 12:
             score += 15
-            details.append(f"⚠️ Moderate Range: {total_range_pct:.1f}%")
+            details.append(f"Moderate Range: {total_range_pct:.1f}%")
         else:
-            details.append(f"❌ Range zu groß: {total_range_pct:.1f}%")
-        
-        # Volumen sollte sinken
+            details.append(f"Range zu gross: {total_range_pct:.1f}%")
+
+        # Volumen sollte sinken (zeigt Erschoepfung = Breakout kommt)
         if vol_trend < 0.8:
             score += 20
-            details.append(f"✅ Volumen sinkt: {vol_trend:.2f}x")
+            details.append(f"Volumen sinkt: {vol_trend:.2f}x")
         elif vol_trend < 1.2:
             score += 10
-            details.append(f"⚠️ Volumen stabil: {vol_trend:.2f}x")
-        else:
-            details.append(f"❌ Volumen steigt: {vol_trend:.2f}x")
-    
+            details.append(f"Volumen stabil: {vol_trend:.2f}x")
+
     elif pattern_type == "bull_flag":
-        # Erster Teil: Starker Anstieg (Fahnenstange)
         if len(bars) >= 4:
             pole_move = ((bars[-3]["close"] - bars[0]["close"]) / bars[0]["close"]) * 100
-            
             if pole_move >= 5:
                 score += 30
-                details.append(f"✅ Fahnenstange: {pole_move:+.1f}%")
+                details.append(f"Fahnenstange: {pole_move:+.1f}%")
             elif pole_move >= 3:
                 score += 15
-                details.append(f"⚠️ Schwache Fahnenstange: {pole_move:+.1f}%")
-            else:
-                details.append(f"❌ Keine Fahnenstange: {pole_move:+.1f}%")
-            
-            # Letzten 2 Tage: Konsolidierung
+                details.append(f"Schwache Fahnenstange: {pole_move:+.1f}%")
+
             recent_range = abs(daily_changes[-1]) + abs(daily_changes[-2]) if len(daily_changes) >= 2 else 0
             if recent_range < 4:
                 score += 25
-                details.append(f"✅ Konsolidierung: {recent_range:.1f}% Bewegung")
-            else:
-                details.append(f"❌ Keine Konsolidierung: {recent_range:.1f}%")
-    
-    elif pattern_type == "accumulation":
-        # Seitwärts mit steigendem Volumen am Ende
-        if total_range_pct < 10:
-            score += 20
-            details.append(f"✅ Seitwärtsphase: {total_range_pct:.1f}%")
-        
-        # Volumen steigt zum Ende
-        if len(volumes) >= 3:
-            early_vol = sum(volumes[:len(volumes)//2]) / (len(volumes)//2)
-            late_vol = sum(volumes[len(volumes)//2:]) / (len(volumes) - len(volumes)//2)
-            
-            if late_vol > early_vol * 1.3:
-                score += 30
-                details.append(f"✅ Volumen-Akkumulation: {late_vol/early_vol:.1f}x")
-            elif late_vol > early_vol:
-                score += 15
-                details.append(f"⚠️ Leichte Volumen-Zunahme: {late_vol/early_vol:.1f}x")
-    
+                details.append(f"Konsolidierung: {recent_range:.1f}% Bewegung")
+
     elif pattern_type == "consolidation_breakout":
-        # Prüfe ob die Tage VOR dem Breakout eng waren
-        # Letzter Tag = heute (Breakout) → prüfe nur die Tage davor
-        if len(bars) >= 4:
-            pre_breakout_bars = bars[:-1]  # Alles außer heute
-            pre_highs = [b["high"] for b in pre_breakout_bars]
-            pre_lows = [b["low"] for b in pre_breakout_bars]
-            pre_range_pct = ((max(pre_highs) - min(pre_lows)) / pre_breakout_bars[0]["close"]) * 100
-            
-            # Kriterium 1: Enge Range VOR dem Breakout
-            if pre_range_pct < 6:
-                score += 35
-                details.append(f"✅ Enge Vorbreakout-Range: {pre_range_pct:.1f}% über {len(pre_breakout_bars)} Tage")
-            elif pre_range_pct < 10:
+        # V67.5: Fixe Baseline + bessere Volatilitaets-Berechnung
+        if len(bars) >= 5:
+            pre_bars = bars[:-1]  # Alles ausser heute
+            pre_price = pre_bars[-1]["close"]  # FIX: letzter Pre-Close als Baseline
+            pre_highs = [b["high"] for b in pre_bars]
+            pre_lows = [b["low"] for b in pre_bars]
+            pre_range_pct = ((max(pre_highs) - min(pre_lows)) / pre_price) * 100 if pre_price > 0 else 99
+
+            # Kriterium 1: Enge Range VOR Breakout (max 30 Punkte)
+            if pre_range_pct < 5:
+                score += 30
+                details.append(f"Sehr enge Range: {pre_range_pct:.1f}% ueber {len(pre_bars)} Tage")
+            elif pre_range_pct < 8:
                 score += 20
-                details.append(f"⚠️ Moderate Vorbreakout-Range: {pre_range_pct:.1f}%")
-            else:
-                details.append(f"❌ Range vor Breakout zu groß: {pre_range_pct:.1f}%")
-            
-            # Kriterium 2: Tägliche Änderungen waren klein
-            pre_changes = [abs(c) for c in daily_changes[:-1]]  # Ohne heute
-            if pre_changes:
-                avg_daily_change = sum(pre_changes) / len(pre_changes)
-                if avg_daily_change < 2.0:
-                    score += 25
-                    details.append(f"✅ Ruhige Vortage: ∅{avg_daily_change:.1f}% tgl. Bewegung")
-                elif avg_daily_change < 3.5:
-                    score += 10
-                    details.append(f"⚠️ Moderate Vortage: ∅{avg_daily_change:.1f}%")
-                else:
-                    details.append(f"❌ Volatile Vortage: ∅{avg_daily_change:.1f}%")
-            
-            # Kriterium 3: Volumen war niedrig vor dem Breakout, steigt am Breakout-Tag
+                details.append(f"Enge Range: {pre_range_pct:.1f}%")
+            elif pre_range_pct < 12:
+                score += 10
+                details.append(f"Moderate Range: {pre_range_pct:.1f}%")
+
+            # Kriterium 2: Intraday-Ranges klein (High-Low pro Tag) (max 25 Punkte)
+            pre_daily_ranges = daily_ranges[:-1] if len(daily_ranges) > 1 else daily_ranges
+            avg_pre_range = sum(pre_daily_ranges) / len(pre_daily_ranges) if pre_daily_ranges else 99
+            if avg_pre_range < 2.0:
+                score += 25
+                details.append(f"Ruhige Vortage: {avg_pre_range:.1f}% avg Range/Tag")
+            elif avg_pre_range < 3.5:
+                score += 15
+                details.append(f"Moderate Vortage: {avg_pre_range:.1f}% avg Range/Tag")
+            elif avg_pre_range < 5.0:
+                score += 5
+                details.append(f"Leicht volatile Vortage: {avg_pre_range:.1f}%")
+
+            # Kriterium 3: Volumen-Explosion am Breakout-Tag (max 25 Punkte)
             pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
             breakout_vol = volumes[-1]
             vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
-            
-            if vol_ratio > 2.0:
-                score += 20
-                details.append(f"✅ Volumen-Explosion: {vol_ratio:.1f}x vs Vortage")
+
+            if vol_ratio > 3.0:
+                score += 25
+                details.append(f"Volumen-Explosion: {vol_ratio:.1f}x vs Vortage")
+            elif vol_ratio > 2.0:
+                score += 18
+                details.append(f"Starkes Volumen: {vol_ratio:.1f}x")
             elif vol_ratio > 1.3:
-                score += 10
-                details.append(f"⚠️ Leicht erhöhtes Volumen: {vol_ratio:.1f}x")
-            else:
-                details.append(f"❌ Kein Volumen-Anstieg: {vol_ratio:.1f}x")
+                score += 8
+                details.append(f"Leicht erhoehtes Volumen: {vol_ratio:.1f}x")
+
+            # Kriterium 4: Volumen sank VOR Breakout (Erschoepfung) (max 20 Punkte)
+            if len(volumes) >= 5:
+                first_half_vol = sum(volumes[:len(volumes)//2]) / (len(volumes)//2)
+                pre_half_vol = sum(volumes[len(volumes)//2:-1]) / max(1, len(volumes)//2 - 1)
+                if first_half_vol > 0 and pre_half_vol < first_half_vol * 0.8:
+                    score += 20
+                    details.append(f"Vol sank vor Breakout: {pre_half_vol/first_half_vol:.1f}x")
+                elif first_half_vol > 0 and pre_half_vol < first_half_vol * 1.0:
+                    score += 10
+                    details.append(f"Vol stabil vor Breakout")
         else:
-            details.append("❌ Nicht genug Daten für Breakout-Validierung")
+            details.append("Nicht genug Daten (min. 5 Tage)")
+
+    elif pattern_type == "churn":
+        # V67.5: NEUER Pattern-Type fuer High Volume Churn
+        # Churn = Hohes Volumen + Preis bewegt sich kaum = Smart Money tauscht Haende
+        n = len(bars)
+
+        # Kriterium 1: Enge Tagesrange trotz hohem Volumen (max 30 Punkte)
+        if avg_daily_range < 2.0:
+            score += 30
+            details.append(f"Sehr enge Ranges: {avg_daily_range:.1f}% avg/Tag")
+        elif avg_daily_range < 3.5:
+            score += 20
+            details.append(f"Enge Ranges: {avg_daily_range:.1f}% avg/Tag")
+        elif avg_daily_range < 5.0:
+            score += 10
+            details.append(f"Moderate Ranges: {avg_daily_range:.1f}% avg/Tag")
+
+        # Kriterium 2: Hohes SUSTAINED Volumen (nicht nur ein Tag) (max 30 Punkte)
+        # Zaehle Tage mit ueberdurchschnittlichem Vol
+        high_vol_days = sum(1 for v in volumes if v > avg_vol * 1.2)
+        high_vol_pct = high_vol_days / n if n > 0 else 0
+        if high_vol_pct >= 0.6:
+            score += 30
+            details.append(f"Sustained High Vol: {high_vol_days}/{n} Tage > Avg")
+        elif high_vol_pct >= 0.4:
+            score += 20
+            details.append(f"Moderate High Vol: {high_vol_days}/{n} Tage > Avg")
+        elif high_vol_pct >= 0.2:
+            score += 10
+            details.append(f"Vereinzelt High Vol: {high_vol_days}/{n} Tage")
+
+        # Kriterium 3: Gesamtbewegung ist minimal (max 20 Punkte)
+        net_change = ((bars[-1]["close"] - bars[0]["close"]) / bars[0]["close"]) * 100 if bars[0]["close"] > 0 else 0
+        if abs(net_change) < 2:
+            score += 20
+            details.append(f"Netto-Bewegung minimal: {net_change:+.1f}%")
+        elif abs(net_change) < 4:
+            score += 10
+            details.append(f"Netto-Bewegung moderat: {net_change:+.1f}%")
+
+        # Kriterium 4: OBV Richtung (gibt Hinweis auf Akku vs Distri) (max 20 Punkte)
+        if obv_trend > 0:
+            score += 20
+            details.append(f"OBV steigend = Akkumulation")
+        elif obv_trend < 0:
+            score += 15
+            details.append(f"OBV fallend = Distribution")
+        else:
+            score += 5
+            details.append(f"OBV neutral")
+
+    elif pattern_type == "wyckoff_accumulation":
+        # V67.5: NEUER Pattern-Type — Wyckoff Akkumulation mit Daily-Daten
+        # Akkumulation = Range + abnehmendes Volumen + OBV steigt (Smart Money kauft)
+        n = len(bars)
+
+        # Kriterium 1: Trading Range vorhanden (max 25 Punkte)
+        if total_range_pct < 15:
+            score += 25
+            details.append(f"Trading Range: {total_range_pct:.1f}% ueber {n} Tage")
+        elif total_range_pct < 25:
+            score += 15
+            details.append(f"Weite Range: {total_range_pct:.1f}%")
+        elif total_range_pct < 35:
+            score += 5
+            details.append(f"Sehr weite Range: {total_range_pct:.1f}%")
+
+        # Kriterium 2: Volumen nimmt ab (Erschoepfung des Verkaufsdrucks) (max 25 Punkte)
+        if n >= 6:
+            first_third_vol = sum(volumes[:n//3]) / max(1, n//3)
+            last_third_vol = sum(volumes[-(n//3):]) / max(1, n//3)
+            vol_decline = last_third_vol / first_third_vol if first_third_vol > 0 else 1
+
+            if vol_decline < 0.7:
+                score += 25
+                details.append(f"Vol stark abnehmend: {vol_decline:.2f}x")
+            elif vol_decline < 0.9:
+                score += 15
+                details.append(f"Vol leicht abnehmend: {vol_decline:.2f}x")
+            elif vol_decline < 1.1:
+                score += 5
+                details.append(f"Vol stabil: {vol_decline:.2f}x")
+
+        # Kriterium 3: OBV steigt (Smart Money kauft in die Schwaeche) (max 25 Punkte)
+        if obv_trend > 0:
+            # OBV steigt waehrend Preis seitwaerts = AKKUMULATION
+            score += 25
+            details.append(f"OBV STEIGT trotz Range = Akkumulation!")
+        else:
+            details.append(f"OBV faellt = keine Akkumulation erkennbar")
+
+        # Kriterium 4: Preis haelt sich ueber Support (keine neuen Tiefs) (max 25 Punkte)
+        if n >= 10:
+            mid_idx = n // 2
+            first_half_low = min(b["low"] for b in bars[:mid_idx])
+            second_half_low = min(b["low"] for b in bars[mid_idx:])
+            # Higher Lows = bullisch
+            if second_half_low > first_half_low * 1.01:
+                score += 25
+                details.append(f"Higher Lows: ${second_half_low:.2f} > ${first_half_low:.2f}")
+            elif second_half_low >= first_half_low * 0.98:
+                score += 15
+                details.append(f"Stabile Lows: ~${second_half_low:.2f}")
+            else:
+                score += 5
+                details.append(f"Neue Lows: ${second_half_low:.2f} < ${first_half_low:.2f}")
+
+    elif pattern_type == "wyckoff_distribution":
+        # V67.5: NEUER Pattern-Type — Wyckoff Distribution mit Daily-Daten
+        # Distribution = Range + abnehmendes Volumen + OBV faellt (Smart Money verkauft)
+        n = len(bars)
+
+        # Kriterium 1: Trading Range vorhanden (max 25)
+        if total_range_pct < 15:
+            score += 25
+            details.append(f"Trading Range: {total_range_pct:.1f}% ueber {n} Tage")
+        elif total_range_pct < 25:
+            score += 15
+            details.append(f"Weite Range: {total_range_pct:.1f}%")
+
+        # Kriterium 2: Volumen nimmt ab (max 25)
+        if n >= 6:
+            first_third_vol = sum(volumes[:n//3]) / max(1, n//3)
+            last_third_vol = sum(volumes[-(n//3):]) / max(1, n//3)
+            vol_decline = last_third_vol / first_third_vol if first_third_vol > 0 else 1
+
+            if vol_decline < 0.7:
+                score += 25
+                details.append(f"Vol stark abnehmend: {vol_decline:.2f}x")
+            elif vol_decline < 0.9:
+                score += 15
+                details.append(f"Vol leicht abnehmend: {vol_decline:.2f}x")
+
+        # Kriterium 3: OBV FAELLT (Smart Money verkauft) (max 25)
+        if obv_trend < 0:
+            score += 25
+            details.append(f"OBV FAELLT trotz Range = Distribution!")
+        else:
+            details.append(f"OBV steigt = keine Distribution erkennbar")
+
+        # Kriterium 4: Lower Highs (Schwaeche am Top) (max 25)
+        if n >= 10:
+            mid_idx = n // 2
+            first_half_high = max(b["high"] for b in bars[:mid_idx])
+            second_half_high = max(b["high"] for b in bars[mid_idx:])
+            if second_half_high < first_half_high * 0.99:
+                score += 25
+                details.append(f"Lower Highs: ${second_half_high:.2f} < ${first_half_high:.2f}")
+            elif second_half_high <= first_half_high * 1.02:
+                score += 15
+                details.append(f"Stabile Highs: ~${second_half_high:.2f}")
+
+    elif pattern_type == "consolidation_breakout":
+        # V67.5: Fixe Baseline + bessere Volatilitaets-Berechnung
+        if len(bars) >= 5:
+            pre_bars = bars[:-1]
+            pre_price = pre_bars[-1]["close"]
+            pre_highs = [b["high"] for b in pre_bars]
+            pre_lows = [b["low"] for b in pre_bars]
+            pre_range_pct = ((max(pre_highs) - min(pre_lows)) / pre_price) * 100 if pre_price > 0 else 99
+
+            # Kriterium 1: Enge Range VOR Breakout (max 30)
+            if pre_range_pct < 5:
+                score += 30
+                details.append(f"Sehr enge Range: {pre_range_pct:.1f}% ueber {len(pre_bars)} Tage")
+            elif pre_range_pct < 8:
+                score += 20
+                details.append(f"Enge Range: {pre_range_pct:.1f}%")
+            elif pre_range_pct < 12:
+                score += 10
+                details.append(f"Moderate Range: {pre_range_pct:.1f}%")
+
+            # Kriterium 2: Intraday-Ranges klein (max 25)
+            pre_daily_ranges = daily_ranges[:-1] if len(daily_ranges) > 1 else daily_ranges
+            avg_pre_range = sum(pre_daily_ranges) / len(pre_daily_ranges) if pre_daily_ranges else 99
+            if avg_pre_range < 2.0:
+                score += 25
+                details.append(f"Ruhige Vortage: {avg_pre_range:.1f}% avg Range/Tag")
+            elif avg_pre_range < 3.5:
+                score += 15
+                details.append(f"Moderate Vortage: {avg_pre_range:.1f}%")
+
+            # Kriterium 3: Volumen-Explosion am Breakout-Tag (max 25)
+            pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
+            breakout_vol = volumes[-1]
+            vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
+
+            if vol_ratio > 3.0:
+                score += 25
+                details.append(f"Volumen-Explosion: {vol_ratio:.1f}x vs Vortage")
+            elif vol_ratio > 2.0:
+                score += 18
+                details.append(f"Starkes Volumen: {vol_ratio:.1f}x")
+            elif vol_ratio > 1.3:
+                score += 8
+                details.append(f"Leicht erhoehtes Volumen: {vol_ratio:.1f}x")
+
+            # Kriterium 4: Vol sank VOR Breakout (max 20)
+            if len(volumes) >= 5:
+                first_half_vol = sum(volumes[:len(volumes)//2]) / max(1, len(volumes)//2)
+                pre_half_vol = sum(volumes[len(volumes)//2:-1]) / max(1, len(volumes)//2 - 1)
+                if first_half_vol > 0 and pre_half_vol < first_half_vol * 0.8:
+                    score += 20
+                    details.append(f"Vol sank vor Breakout: {pre_half_vol/first_half_vol:.1f}x")
+                elif first_half_vol > 0 and pre_half_vol < first_half_vol:
+                    score += 10
+                    details.append(f"Vol stabil vor Breakout")
+        else:
+            details.append("Nicht genug Daten (min. 5 Tage)")
     
     elif pattern_type == "reversal_setup":
         # Prüfe ob es einen mehrtägigen Downtrend gab VOR dem heutigen Reversal
@@ -2844,7 +3070,18 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
         else:
             details.append("❌ Nicht genug Daten für Reversal-Validierung")
     
-    is_valid = score >= 40
+    # V67.5: Pattern-spezifische Schwellen (max Score variiert pro Type)
+    threshold_map = {
+        "consolidation": 35,
+        "bull_flag": 35,
+        "consolidation_breakout": 40,
+        "churn": 45,
+        "wyckoff_accumulation": 50,   # Hoehere Schwelle — weniger False Positives
+        "wyckoff_distribution": 50,
+        "reversal_setup": 40,
+    }
+    threshold = threshold_map.get(pattern_type, 40)
+    is_valid = score >= threshold
     return is_valid, score, details
 
 
@@ -16896,9 +17133,9 @@ with st.sidebar:
                             checked += 1
                             
                             if bars and len(bars) >= 3:
-                                is_valid, score, details = analyze_multi_day_pattern(bars, pattern_type)
-                                if is_valid and score >= 40:
-                                    r["PatternScore"] = score
+                                is_valid, pat_score, details = analyze_multi_day_pattern(bars, pattern_type)
+                                if is_valid:
+                                    r["PatternScore"] = pat_score
                                     r["PatternDetails"] = details
                                     validated_results.append(r)
                             else:
