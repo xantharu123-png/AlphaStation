@@ -4230,20 +4230,21 @@ def analyze_breakout_imminent(bars, direction="long"):
     directional_signals = sum(1 for d in details if "🔥" in d or "✅" in d)
     direction_confidence = round((directional_signals / 20) * 100)
 
-    # Grade System
-    if score >= 170:
-        grade = "S"  # 🏆 ELITE
-    elif score >= 140:
-        grade = "A"  # 🔥 STARK
-    elif score >= 110:
-        grade = "B"  # ✅ SOLIDE
+    # Grade System (recalibriert — alte Werte waren unrealistisch hoch)
+    # Max realistisch erreichbar: ~140-150 Punkte (70-75% der Signale)
+    if score >= 140:
+        grade = "S"  # 🏆 ELITE — 14+ von 20 Signalen
+    elif score >= 120:
+        grade = "A"  # 🔥 STARK — 12+ von 20 Signalen
+    elif score >= 100:
+        grade = "B"  # ✅ SOLIDE — 10+ von 20 Signalen
     elif score >= 80:
-        grade = "C"  # ⚠️ WATCHLIST
+        grade = "C"  # ⚠️ WATCHLIST — 8+ von 20 Signalen
     else:
         grade = "D"  # ❌ SCHWACH
 
-    # Threshold: Long 100, Short 90 (50%/45% von 200)
-    threshold = 100 if direction == "long" else 90
+    # Threshold: Long 85, Short 80 (42.5%/40% von 200)
+    threshold = 85 if direction == "long" else 80
     is_valid = score >= threshold
 
     return is_valid, score, max_score, details, direction_confidence, grade
@@ -15871,8 +15872,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if not is_valid:
                 continue
 
-            # Grade-Filter: Nur B+ traden (C = Watchlist, D = Skip)
-            if grade not in ("S", "A", "B"):
+            # Grade-Filter: C+ traden (Close-Entry filtert Fake-Breakouts)
+            if grade == "D":
                 continue
 
             # Qualitäts-Filter (identisch zum Live-Scanner)
@@ -21905,9 +21906,9 @@ Das fortschrittlichste Setup im Scanner. Kombiniert **20 unabhängige Signale** 
 20. **Close Position Clustering** — Closes nahe Highs (Long) / Lows (Short) → Bias bestätigt
 
 **Grade-System:**
-- 🏆 **S-Tier** (≥170): ELITE SETUP — höchste Wahrscheinlichkeit
-- 🔥 **A-Tier** (≥140): STARK — sehr guter Kandidat
-- ✅ **B-Tier** (≥110): SOLIDE — tradeworthy
+- 🏆 **S-Tier** (≥140): ELITE SETUP — höchste Wahrscheinlichkeit
+- 🔥 **A-Tier** (≥120): STARK — sehr guter Kandidat
+- ✅ **B-Tier** (≥100): SOLIDE — tradeworthy
 - ⚠️ **C-Tier** (≥80): WATCHLIST — beobachten
 
 **Schwellenwerte:** Long ≥100 Punkte, Short ≥90 Punkte. Nutzt 30 Tage History.
