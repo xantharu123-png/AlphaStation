@@ -15724,8 +15724,374 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     
     if progress_callback:
         progress_callback(1.0, f"✅ Fertig! {len(total_tickers_seen)} Aktien gescannt")
-    
+
     return all_results, len(total_tickers_seen)
+
+
+def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
+                        min_price=5.0, min_volume=200000, progress_callback=None):
+    """
+    🔮 Breakout Imminent V2 Backtest — Rolling-Window Analyse.
+
+    Für jeden Tag im Backtest-Zeitraum:
+    1. Nimm 30-Tage Fenster als Input für analyze_breakout_imminent()
+    2. Bei gültigem Signal → berechne Entry/SL/TP (identisch zum Live-Scanner)
+    3. Simuliere Trade über die nächsten Tage
+    4. Tracke Ergebnis nach Grade (S/A/B/C)
+
+    Args:
+        poly_key: Polygon API Key
+        direction: "long" oder "short"
+        months: Backtest-Zeitraum in Monaten
+        max_tickers: Maximal analysierte Ticker (Performance-Limit)
+        min_price: Mindestpreis Filter
+        min_volume: Mindestvolumen/Tag Filter
+        progress_callback: (pct, text) Callback für UI
+
+    Returns:
+        dict mit trades, stats_by_grade, summary
+    """
+    end_dt = datetime.now() - timedelta(days=1)
+    start_dt = end_dt - timedelta(days=months * 30 + 45)  # +45 für 30-Tage-Fenster
+    test_start = (end_dt - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+
+    # Generiere Handelstage (Mo-Fr)
+    trading_days = []
+    current = start_dt
+    while current <= end_dt:
+        if current.weekday() < 5:
+            trading_days.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+
+    if not trading_days:
+        return {"trades": [], "stats_by_grade": {}, "summary": {}, "n_tickers": 0}
+
+    # ============================================================
+    # PASS 1: Lade alle Tage und baue per-Ticker History auf
+    # ============================================================
+    ticker_history = {}
+    total_tickers_seen = set()
+
+    for day_idx, date_str in enumerate(trading_days):
+        if progress_callback:
+            progress_callback(
+                (day_idx / len(trading_days)) * 0.5,
+                f"📥 Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
+            )
+
+        day_data = fetch_grouped_daily(poly_key, date_str)
+        if not day_data:
+            continue
+
+        for ticker, r in day_data.items():
+            if len(ticker) > 5 or "." in ticker:
+                continue
+
+            _t = ticker.upper()
+            _skip_prefixes = (
+                "TQQQ","SQQQ","SOXL","SOXS","LABU","LABD","SPXL","SPXS",
+                "UPRO","SPXU","UVXY","SVXY","NUGT","DUST","JNUG","JDST",
+                "FNGU","FNGD","TECL","TECS","BULZ","BERZ","GUSH","DRIP",
+                "FAS","FAZ","UDOW","SDOW","YANG","YINN","ERX","ERY",
+                "XRPT","XXRP","XETH","BITO","GBTC","ETHE","BITW","CONL",
+                "MSOX","BTFX","SOLT","NEBX","AREC","MAXI","TNA","TZA"
+            )
+            if any(_t.startswith(p) for p in _skip_prefixes):
+                continue
+
+            price = r.get("c", 0)
+            volume = r.get("v", 0)
+            if price < min_price or volume < min_volume:
+                continue
+
+            total_tickers_seen.add(ticker)
+            bar = {
+                "date": date_str,
+                "open": r.get("o", 0),
+                "high": r.get("h", 0),
+                "low": r.get("l", 0),
+                "close": price,
+                "volume": volume,
+                "time": date_str,
+            }
+            if ticker not in ticker_history:
+                ticker_history[ticker] = []
+            ticker_history[ticker].append(bar)
+
+    # Sortiere nach Volumen und nimm Top N
+    ticker_avg_vol = {}
+    for t, bars_list in ticker_history.items():
+        if len(bars_list) >= 35:
+            ticker_avg_vol[t] = sum(b["volume"] for b in bars_list[-20:]) / 20
+
+    sorted_tickers = sorted(ticker_avg_vol.keys(), key=lambda t: ticker_avg_vol[t], reverse=True)
+    tickers_to_test = sorted_tickers[:max_tickers]
+
+    # ============================================================
+    # PASS 2: Rolling-Window Breakout Imminent Analyse + Trade Sim
+    # ============================================================
+    all_trades = []
+    signals_found = 0
+    cooldown = {}  # ticker → last signal date (vermeidet Doppel-Signale)
+
+    for t_idx, ticker in enumerate(tickers_to_test):
+        if progress_callback and t_idx % 20 == 0:
+            progress_callback(
+                0.5 + (t_idx / len(tickers_to_test)) * 0.5,
+                f"🔍 Analysiere {ticker} ({t_idx+1}/{len(tickers_to_test)}) | {signals_found} Signale"
+            )
+
+        bars = ticker_history[ticker]
+
+        # Für jeden Tag ab test_start: 30-Bar Fenster → BI V2 Analyse
+        for idx in range(30, len(bars)):
+            if bars[idx]["date"] < test_start:
+                continue
+
+            # Cooldown: Min 10 Tage zwischen Signalen pro Ticker
+            if ticker in cooldown:
+                last_sig_idx = cooldown[ticker]
+                if idx - last_sig_idx < 10:
+                    continue
+
+            # 30-Bar Rolling Window
+            window = bars[idx-30:idx]
+
+            is_valid, bi_score, bi_max, details, confidence, grade = analyze_breakout_imminent(window, direction=direction)
+
+            if not is_valid:
+                continue
+
+            # Qualitäts-Filter (identisch zum Live-Scanner)
+            range_high = max(b["high"] for b in window[-15:])
+            range_low = min(b["low"] for b in window[-15:])
+            range_size = range_high - range_low
+            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+
+            if range_pct < 2.0:
+                continue
+
+            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in window[-10:] if b["close"] > 0) / 10
+            if avg_daily_range < 0.3:
+                continue
+
+            # Entry/SL/TP berechnen (identisch zum Live-Scanner)
+            atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
+
+            if direction == "long":
+                entry_price = round(range_high + atr_5 * 0.1, 4)
+                stop_price = round(range_high - atr_5 * 1.5, 4)
+                tp1_price = round(range_high + range_size * 0.75, 4)
+                tp2_price = round(range_high + range_size * 1.618, 4)
+            else:
+                entry_price = round(range_low - atr_5 * 0.1, 4)
+                stop_price = round(range_low + atr_5 * 1.5, 4)
+                tp1_price = round(range_low - range_size * 0.75, 4)
+                tp2_price = round(range_low - range_size * 1.618, 4)
+
+            risk = abs(entry_price - stop_price)
+            reward = abs(tp1_price - entry_price)
+            rr = round(reward / risk, 2) if risk > 0 else 0
+
+            if rr < 1.0:
+                continue
+
+            if entry_price <= 0 or stop_price <= 0:
+                continue
+
+            signals_found += 1
+            cooldown[ticker] = idx
+
+            # === TRADE SIMULIEREN ===
+            # Entry = nächster Tag, wenn Preis das Entry-Level erreicht
+            max_hold = 15  # Max 15 Tage halten
+            slippage = 0.001  # 0.1% Slippage
+
+            trade_result = {
+                "ticker": ticker,
+                "signal_date": bars[idx-1]["date"],  # Signal am letzten Bar des Windows
+                "grade": grade,
+                "score": bi_score,
+                "max_score": bi_max,
+                "confidence": confidence,
+                "direction": direction.upper(),
+                "entry_target": entry_price,
+                "stop_target": stop_price,
+                "tp1_target": tp1_price,
+                "tp2_target": tp2_price,
+                "rr_planned": rr,
+                "range_pct": round(range_pct, 1),
+            }
+
+            # Simuliere: Suche Entry in den Folgetagen
+            entry_filled = False
+            actual_entry = None
+            entry_date = None
+            exit_price = None
+            exit_reason = None
+            exit_date = None
+            tp1_hit = False
+            bars_held = 0
+
+            for day_offset in range(1, max_hold + 1):
+                future_idx = idx + day_offset
+                if future_idx >= len(bars):
+                    break
+
+                future_bar = bars[future_idx]
+
+                if not entry_filled:
+                    # Prüfe ob Entry erreicht wird
+                    if direction == "long" and future_bar["high"] >= entry_price:
+                        actual_entry = entry_price * (1 + slippage)
+                        entry_filled = True
+                        entry_date = future_bar["date"]
+                        bars_held = 0
+                    elif direction == "short" and future_bar["low"] <= entry_price:
+                        actual_entry = entry_price * (1 - slippage)
+                        entry_filled = True
+                        entry_date = future_bar["date"]
+                        bars_held = 0
+                    elif day_offset >= 5:
+                        # Entry nicht erreicht nach 5 Tagen → abbrechen
+                        break
+                    continue
+
+                bars_held += 1
+
+                # Prüfe Stop und Target
+                if direction == "long":
+                    if future_bar["low"] <= stop_price:
+                        exit_price = stop_price * (1 - slippage)
+                        exit_reason = "STOP"
+                        exit_date = future_bar["date"]
+                        break
+                    if future_bar["high"] >= tp1_price and not tp1_hit:
+                        tp1_hit = True
+                    if future_bar["high"] >= tp2_price:
+                        exit_price = tp2_price * (1 - slippage)
+                        exit_reason = "TP2"
+                        exit_date = future_bar["date"]
+                        break
+                else:  # short
+                    if future_bar["high"] >= stop_price:
+                        exit_price = stop_price * (1 + slippage)
+                        exit_reason = "STOP"
+                        exit_date = future_bar["date"]
+                        break
+                    if future_bar["low"] <= tp1_price and not tp1_hit:
+                        tp1_hit = True
+                    if future_bar["low"] <= tp2_price:
+                        exit_price = tp2_price * (1 + slippage)
+                        exit_reason = "TP2"
+                        exit_date = future_bar["date"]
+                        break
+
+            # Trade-Ende: TP1 als Exit wenn TP2 nicht erreicht
+            if entry_filled and exit_price is None:
+                if tp1_hit:
+                    exit_price = tp1_price * (1 - slippage if direction == "long" else 1 + slippage)
+                    exit_reason = "TP1"
+                    exit_date = bars[min(idx + max_hold, len(bars)-1)]["date"]
+                elif entry_filled:
+                    # Max Hold → Exit at Close
+                    last_idx = min(idx + max_hold, len(bars)-1)
+                    exit_price = bars[last_idx]["close"]
+                    exit_reason = "MAX_HOLD"
+                    exit_date = bars[last_idx]["date"]
+
+            if not entry_filled or actual_entry is None or exit_price is None:
+                trade_result["outcome"] = "NO_FILL"
+                trade_result["pnl_pct"] = 0
+                trade_result["r_multiple"] = 0
+                trade_result["is_winner"] = False
+            else:
+                if direction == "long":
+                    pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100
+                else:
+                    pnl_pct = ((actual_entry - exit_price) / actual_entry) * 100
+
+                r_multiple = round(pnl_pct / (risk / actual_entry * 100), 2) if risk > 0 else 0
+
+                trade_result["actual_entry"] = round(actual_entry, 2)
+                trade_result["exit_price"] = round(exit_price, 2)
+                trade_result["entry_date"] = entry_date
+                trade_result["exit_date"] = exit_date
+                trade_result["exit_reason"] = exit_reason
+                trade_result["bars_held"] = bars_held
+                trade_result["tp1_hit"] = tp1_hit
+                trade_result["pnl_pct"] = round(pnl_pct, 2)
+                trade_result["r_multiple"] = r_multiple
+                trade_result["is_winner"] = pnl_pct > 0
+                trade_result["outcome"] = exit_reason
+
+            all_trades.append(trade_result)
+
+    # ============================================================
+    # STATISTIKEN nach Grade
+    # ============================================================
+    stats_by_grade = {}
+    for g in ["S", "A", "B", "C", "D"]:
+        grade_trades = [t for t in all_trades if t["grade"] == g and t.get("outcome") != "NO_FILL"]
+        if not grade_trades:
+            continue
+
+        winners = [t for t in grade_trades if t["is_winner"]]
+        losers = [t for t in grade_trades if not t["is_winner"]]
+
+        total_pnl = sum(t["pnl_pct"] for t in grade_trades)
+        avg_pnl = total_pnl / len(grade_trades) if grade_trades else 0
+        avg_winner = sum(t["pnl_pct"] for t in winners) / len(winners) if winners else 0
+        avg_loser = sum(t["pnl_pct"] for t in losers) / len(losers) if losers else 0
+
+        win_rate = len(winners) / len(grade_trades) * 100 if grade_trades else 0
+
+        # Profit Factor
+        gross_profit = sum(t["pnl_pct"] for t in winners)
+        gross_loss = abs(sum(t["pnl_pct"] for t in losers))
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0
+
+        # Avg R
+        avg_r = sum(t["r_multiple"] for t in grade_trades) / len(grade_trades) if grade_trades else 0
+
+        tp1_hits = sum(1 for t in grade_trades if t.get("tp1_hit", False))
+        tp2_hits = sum(1 for t in grade_trades if t.get("outcome") == "TP2")
+
+        stats_by_grade[g] = {
+            "total": len(grade_trades),
+            "winners": len(winners),
+            "losers": len(losers),
+            "win_rate": round(win_rate, 1),
+            "avg_pnl": round(avg_pnl, 2),
+            "avg_winner": round(avg_winner, 2),
+            "avg_loser": round(avg_loser, 2),
+            "total_pnl": round(total_pnl, 2),
+            "profit_factor": profit_factor,
+            "avg_r": round(avg_r, 2),
+            "tp1_rate": round(tp1_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
+            "tp2_rate": round(tp2_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
+        }
+
+    filled_trades = [t for t in all_trades if t.get("outcome") != "NO_FILL"]
+    summary = {
+        "total_signals": signals_found,
+        "total_filled": len(filled_trades),
+        "no_fill": len(all_trades) - len(filled_trades),
+        "win_rate": round(sum(1 for t in filled_trades if t["is_winner"]) / len(filled_trades) * 100, 1) if filled_trades else 0,
+        "avg_pnl": round(sum(t["pnl_pct"] for t in filled_trades) / len(filled_trades), 2) if filled_trades else 0,
+        "total_pnl": round(sum(t["pnl_pct"] for t in filled_trades), 2) if filled_trades else 0,
+        "n_tickers": len(tickers_to_test),
+        "n_tickers_total": len(total_tickers_seen),
+        "direction": direction,
+        "months": months,
+    }
+
+    del ticker_history
+
+    if progress_callback:
+        progress_callback(1.0, f"✅ BI V2 Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
+
+    return {"trades": all_trades, "stats_by_grade": stats_by_grade, "summary": summary}
 
 
 def compute_daily_metrics(bars, idx):
@@ -16135,8 +16501,134 @@ def display_backtest_lab(poly_key):
     import json
     
     st.header("🧪 Backtest Lab")
-    st.caption("Teste alle Strategien über 6 Monate mit echten Polygon-Daten")
-    
+    st.caption("Teste Strategien über historische Daten mit echten Polygon-Daten")
+
+    # === MODUS: Standard vs BI V2 ===
+    bt_mode = st.radio("Backtest-Modus", ["📊 Standard Strategien", "🔮 Breakout Imminent V2"],
+                        horizontal=True, key="bt_mode_radio")
+
+    # =================================================================
+    # 🔮 BREAKOUT IMMINENT V2 BACKTEST
+    # =================================================================
+    if bt_mode == "🔮 Breakout Imminent V2":
+        st.subheader("🔮 Breakout Imminent V2 — Historischer Backtest")
+        st.caption("Rollt ein 30-Tage-Fenster über den gesamten Zeitraum und sucht nach BI V2 Signalen")
+
+        col_b1, col_b2, col_b3 = st.columns(3)
+        with col_b1:
+            bi_months = st.selectbox("📅 Zeitraum", [1, 3, 6], index=2, format_func=lambda x: f"{x} Monate", key="bi_months")
+        with col_b2:
+            bi_direction = st.selectbox("📈 Richtung", ["long", "short"], key="bi_dir")
+        with col_b3:
+            bi_max_tickers = st.selectbox("🎯 Aktien (Top nach Vol)", [50, 100, 200, 500], index=1, key="bi_max")
+
+        st.caption(f"⏱️ Geschätzte Dauer: ~{bi_months * 22 // 5 + bi_max_tickers // 20} Min (Grouped Daily + Analyse)")
+
+        if st.button("🚀 BI V2 Backtest starten", type="primary", use_container_width=True, key="bi_bt_start"):
+            progress_bar = st.progress(0, text="Starte BI V2 Backtest...")
+
+            def update_progress(pct, text):
+                progress_bar.progress(min(pct, 1.0), text=text)
+
+            with st.spinner(f"Analysiere {bi_max_tickers} Aktien über {bi_months} Monate..."):
+                bi_results = run_bi_v2_backtest(
+                    poly_key,
+                    direction=bi_direction,
+                    months=bi_months,
+                    max_tickers=bi_max_tickers,
+                    min_price=5.0,
+                    min_volume=200000,
+                    progress_callback=update_progress
+                )
+
+            st.session_state["bi_backtest_results"] = bi_results
+
+        # Ergebnisse anzeigen
+        bi_results = st.session_state.get("bi_backtest_results")
+        if bi_results:
+            summary = bi_results["summary"]
+            stats = bi_results["stats_by_grade"]
+            trades = bi_results["trades"]
+
+            st.divider()
+            st.subheader("📊 Ergebnisse")
+
+            # Summary Metrics
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            with col_s1:
+                st.metric("Signale gefunden", summary["total_signals"])
+            with col_s2:
+                st.metric("Trades ausgefuehrt", summary["total_filled"])
+            with col_s3:
+                st.metric("Win Rate", f"{summary['win_rate']}%")
+            with col_s4:
+                _total_pnl = summary["total_pnl"]
+                st.metric("Total P&L", f"{_total_pnl:+.1f}%", delta_color="normal" if _total_pnl >= 0 else "inverse")
+
+            st.caption(f"📈 Richtung: {summary['direction'].upper()} | ⏱️ {summary['months']} Monate | 🎯 {summary['n_tickers']} Aktien analysiert (von {summary['n_tickers_total']} gefiltert)")
+
+            # Grade Breakdown
+            if stats:
+                st.divider()
+                st.subheader("🏆 Performance nach Grade")
+
+                grade_emojis = {"S": "🏆", "A": "🔥", "B": "✅", "C": "⚠️", "D": "❌"}
+
+                for g in ["S", "A", "B", "C", "D"]:
+                    if g not in stats:
+                        continue
+                    s = stats[g]
+                    emoji = grade_emojis.get(g, "")
+
+                    with st.expander(f"{emoji} Grade {g} — {s['total']} Trades | Win Rate: {s['win_rate']}% | Avg P&L: {s['avg_pnl']:+.2f}% | PF: {s['profit_factor']}", expanded=(g in ("S", "A"))):
+                        col_g1, col_g2, col_g3, col_g4, col_g5 = st.columns(5)
+                        with col_g1:
+                            st.metric("Trades", s["total"])
+                            st.metric("Winners", s["winners"])
+                        with col_g2:
+                            st.metric("Win Rate", f"{s['win_rate']}%")
+                            st.metric("Losers", s["losers"])
+                        with col_g3:
+                            st.metric("Avg Winner", f"+{s['avg_winner']:.2f}%")
+                            st.metric("Avg Loser", f"{s['avg_loser']:.2f}%")
+                        with col_g4:
+                            st.metric("Profit Factor", f"{s['profit_factor']}")
+                            st.metric("Avg R", f"{s['avg_r']:.2f}R")
+                        with col_g5:
+                            st.metric("TP1 Rate", f"{s['tp1_rate']}%")
+                            st.metric("TP2 Rate", f"{s['tp2_rate']}%")
+
+                        st.metric("Total P&L", f"{s['total_pnl']:+.2f}%")
+
+            # Trade-Liste
+            if trades:
+                st.divider()
+                filled = [t for t in trades if t.get("outcome") != "NO_FILL"]
+                if filled:
+                    st.subheader(f"📋 Trade-Liste ({len(filled)} Trades)")
+                    _trade_df_data = []
+                    for t in sorted(filled, key=lambda x: x.get("pnl_pct", 0), reverse=True):
+                        _trade_df_data.append({
+                            "Ticker": t["ticker"],
+                            "Datum": t.get("signal_date", ""),
+                            "Grade": t["grade"],
+                            "Score": f"{t['score']}/{t['max_score']}",
+                            "Entry": f"${t.get('actual_entry', 0):.2f}",
+                            "Exit": f"${t.get('exit_price', 0):.2f}",
+                            "P&L": f"{t['pnl_pct']:+.2f}%",
+                            "R": f"{t['r_multiple']:.1f}R",
+                            "Exit Grund": t.get("outcome", ""),
+                            "Tage": t.get("bars_held", 0),
+                        })
+                    st.dataframe(_trade_df_data, use_container_width=True)
+        else:
+            st.info("🔄 Klicke 'BI V2 Backtest starten' um die Strategie zu testen.")
+
+        return  # BI V2 Modus → nicht weitermachen mit Standard
+
+    # =================================================================
+    # 📊 STANDARD STRATEGIEN BACKTEST (original code below)
+    # =================================================================
     # Einstellungen
     col_set1, col_set2, col_set3 = st.columns(3)
     
