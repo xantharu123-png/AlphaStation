@@ -15871,6 +15871,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if not is_valid:
                 continue
 
+            # Grade-Filter: Nur B+ traden (C = Watchlist, D = Skip)
+            if grade not in ("S", "A", "B"):
+                continue
+
             # Qualitäts-Filter (identisch zum Live-Scanner)
             range_high = max(b["high"] for b in window[-15:])
             range_low = min(b["low"] for b in window[-15:])
@@ -15952,14 +15956,15 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 future_bar = bars[future_idx]
 
                 if not entry_filled:
-                    # Prüfe ob Entry erreicht wird
-                    if direction == "long" and future_bar["high"] >= entry_price:
-                        actual_entry = entry_price * (1 + slippage)
+                    # CLOSE-based Entry: Aktie muss ÜBER dem Entry-Level SCHLIESSEN
+                    # (nicht nur intraday darüber wicken — das sind Fake-Breakouts!)
+                    if direction == "long" and future_bar["close"] >= entry_price:
+                        actual_entry = future_bar["close"] * (1 + slippage)
                         entry_filled = True
                         entry_date = future_bar["date"]
                         bars_held = 0
-                    elif direction == "short" and future_bar["low"] <= entry_price:
-                        actual_entry = entry_price * (1 - slippage)
+                    elif direction == "short" and future_bar["close"] <= entry_price:
+                        actual_entry = future_bar["close"] * (1 - slippage)
                         entry_filled = True
                         entry_date = future_bar["date"]
                         bars_held = 0
@@ -16045,9 +16050,14 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                     exit_reason = "TP1_PARTIAL"
                     exit_date = bars[last_idx]["date"]
                 elif entry_filled:
-                    # Max Hold → Exit at Close
+                    # Max Hold → Exit at Close, aber min Breakeven wenn im Plus
                     last_idx = min(idx + max_hold, len(bars)-1)
-                    exit_price = bars[last_idx]["close"]
+                    close_price = bars[last_idx]["close"]
+                    if direction == "long":
+                        # Wenn Close unter Entry → raus bei Entry (Breakeven)
+                        exit_price = max(close_price, actual_entry) if tp1_hit else close_price
+                    else:
+                        exit_price = min(close_price, actual_entry) if tp1_hit else close_price
                     exit_reason = "MAX_HOLD"
                     exit_date = bars[last_idx]["date"]
 
