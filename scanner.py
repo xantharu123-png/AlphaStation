@@ -15967,8 +15967,23 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 "range_pct": round(range_pct, 1),
             }
 
-            # === VOLUME AVERAGE für Breakout-Confirmation (Minervini: 40%+ über Avg) ===
+            # === VOLUME AVERAGE für Breakout-Confirmation (Minervini-light: 15%+ über Avg) ===
             avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20 if len(window) >= 20 else sum(b["volume"] for b in window) / len(window)
+
+            # === TREND CONFIRMATION (Weinstein Stage 2 Filter) ===
+            # 20-Tage-MA muss in Richtung des Trades zeigen
+            ma_20_current = sum(c for c in closes[-20:]) / 20 if len(closes) >= 20 else sum(closes) / len(closes)
+            ma_20_prev = sum(c for c in closes[-25:-5]) / 20 if len(closes) >= 25 else ma_20_current
+            if direction == "long":
+                trend_ok = ma_20_current > ma_20_prev  # MA steigt = bullischer Trend
+                price_above_ma = window[-1]["close"] > ma_20_current  # Preis über MA
+            else:
+                trend_ok = ma_20_current < ma_20_prev  # MA fällt = bärischer Trend
+                price_above_ma = window[-1]["close"] < ma_20_current  # Preis unter MA
+
+            # Trend muss stimmen ODER Preis muss auf richtiger Seite des MA sein
+            if not (trend_ok or price_above_ma):
+                continue  # Counter-Trend Trade → Skip
 
             # 3-Phase Simulation:
             # Phase 1: Breakout bestätigt (Close über/unter Range + ATR-Threshold + Volume)
@@ -15995,8 +16010,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 # === PHASE 1: Breakout-Bestätigung ===
                 if not breakout_confirmed:
-                    # Minervini/O'Neil Volume Confirmation: Breakout-Day Volume >= 1.4x Avg
-                    vol_ok = future_bar["volume"] >= avg_vol_20 * 1.4
+                    # Volume Confirmation: Breakout-Day Volume >= 1.15x Avg (gelockert von 1.4x)
+                    vol_ok = future_bar["volume"] >= avg_vol_20 * 1.15
 
                     if direction == "long" and future_bar["close"] > breakout_level + breakout_threshold and vol_ok:
                         breakout_confirmed = True
@@ -16072,9 +16087,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                     else:
                         if tp1_possible and not tp1_hit:
                             tp1_hit = True
-                            # FIX #7: Stop auf Mitte zwischen Entry und TP1 (Lock-in Gewinn)
-                            midpoint = (actual_entry + tp1_price) / 2
-                            current_stop = midpoint
+                            # Trail-Stop auf 66% zwischen Entry und TP1 (sichert mehr Gewinn)
+                            trail_level = actual_entry + (tp1_price - actual_entry) * 0.66
+                            current_stop = trail_level
                         if tp2_possible:
                             exit_price = tp2_price * (1 - slippage)
                             exit_reason = "TP2"
@@ -16103,9 +16118,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                     else:
                         if tp1_possible and not tp1_hit:
                             tp1_hit = True
-                            # FIX #7: Stop auf Mitte Entry↔TP1
-                            midpoint = (actual_entry + tp1_price) / 2
-                            current_stop = midpoint
+                            # Trail-Stop auf 66% zwischen Entry und TP1 (Short)
+                            trail_level = actual_entry - (actual_entry - tp1_price) * 0.66
+                            current_stop = trail_level
                         if tp2_possible:
                             exit_price = tp2_price * (1 + slippage)
                             exit_reason = "TP2"
