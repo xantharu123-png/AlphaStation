@@ -3625,12 +3625,12 @@ def analyze_breakout_imminent(bars, direction="long"):
                 score += 4
                 details.append(f"⚠️ OBV neutral")
         else:
-            # Preis nicht flat — OBV-Richtung trotzdem bewerten (gute Mittelstufe)
+            # Preis nicht flat — OBV-Richtung trotzdem bewerten
             if direction == "long" and obv_rising:
-                score += 10
+                score += 7
                 details.append(f"✅ OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
             elif direction == "short" and obv_falling:
-                score += 10
+                score += 7
                 details.append(f"✅ OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
             else:
                 details.append(f"⚠️ OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
@@ -3744,10 +3744,10 @@ def analyze_breakout_imminent(bars, direction="long"):
             score += 14
             details.append(f"🔥 ADX Wende: {adx_prev:.0f}→{adx:.0f} (unter 20 + steigend = Breakout!)")
         elif adx < 25 and adx_prev and adx > adx_prev:
-            score += 11
+            score += 9
             details.append(f"✅ ADX steigend: {adx_prev:.0f}→{adx:.0f}")
         elif adx < 20:
-            score += 6
+            score += 4
             details.append(f"⚠️ ADX niedrig ({adx:.0f}) aber nicht steigend")
         else:
             details.append(f"❌ ADX bereits hoch: {adx:.0f} (Trend laeuft schon)")
@@ -3773,13 +3773,13 @@ def analyze_breakout_imminent(bars, direction="long"):
             score += 14
             details.append(f"🔥 Institutionelle Akkumulation: {accum_days} Akku vs {distri_days} Distri")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
-            score += 11
+            score += 9
             details.append(f"✅ Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
             score += 14
             details.append(f"🔥 Institutionelle Distribution: {distri_days} Distri vs {accum_days} Akku")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
-            score += 11
+            score += 9
             details.append(f"✅ Distribution: {distri_days} vs {accum_days} Tage")
         else:
             details.append(f"⚠️ Gemischte Inst-Aktivitaet: {accum_days} Akku / {distri_days} Distri")
@@ -3881,13 +3881,13 @@ def analyze_breakout_imminent(bars, direction="long"):
             score += 14
             details.append(f"🔥 Hohe Resilience: {resilience:.0%} Recovery nach Dips [Minervini RS!]")
         elif direction == "long" and resilience > 0.5:
-            score += 10
+            score += 7
             details.append(f"✅ Gute Resilience: {resilience:.0%}")
         elif direction == "short" and resilience < 0.3:
             score += 14
             details.append(f"🔥 Schwache Resilience: {resilience:.0%} = Verkaufsdruck")
         elif direction == "short" and resilience < 0.5:
-            score += 10
+            score += 7
             details.append(f"✅ Maessige Resilience: {resilience:.0%}")
         else:
             details.append(f"⚠️ Resilience neutral: {resilience:.0%}")
@@ -4000,10 +4000,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                     score += 14
                     details.append(f"🔥 Bullish OB nahe Breakout-Level = institutionelles Kaufinteresse!")
                 elif near_support:
-                    score += 11
+                    score += 9
                     details.append(f"✅ Bullish OB stuetzt Range-Low = Demand Zone")
                 else:
-                    score += 6
+                    score += 4
                     details.append(f"⚠️ Bullish OBs vorhanden ({len(bull_obs)}x) aber nicht in Naehe")
             else:
                 details.append(f"❌ Keine Bullish Order Blocks")
@@ -4016,10 +4016,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                     score += 14
                     details.append(f"🔥 Bearish OB nahe Breakdown-Level = institutioneller Verkaufsdruck!")
                 elif near_resistance:
-                    score += 11
+                    score += 9
                     details.append(f"✅ Bearish OB deckt Range-High = Supply Zone")
                 else:
-                    score += 6
+                    score += 4
                     details.append(f"⚠️ Bearish OBs vorhanden ({len(bear_obs)}x) aber nicht in Naehe")
             else:
                 details.append(f"❌ Keine Bearish Order Blocks")
@@ -4074,7 +4074,7 @@ def analyze_breakout_imminent(bars, direction="long"):
                 score += 14
                 details.append(f"🔥 Buyside Liquidity {near_liq[0]['price']:.2f} knapp ueber Range = Stop-Hunt Potential")
             elif liq_data["buyside"]:
-                score += 8
+                score += 5
                 details.append(f"✅ Buyside Liq vorhanden ({len(liq_data['buyside'])} Levels)")
             else:
                 details.append(f"⚠️ Keine Buyside Liquidity erkannt")
@@ -4084,7 +4084,7 @@ def analyze_breakout_imminent(bars, direction="long"):
                 score += 14
                 details.append(f"🔥 Sellside Liquidity {near_liq[0]['price']:.2f} knapp unter Range = Stop-Hunt Potential")
             elif liq_data["sellside"]:
-                score += 8
+                score += 5
                 details.append(f"✅ Sellside Liq vorhanden ({len(liq_data['sellside'])} Levels)")
             else:
                 details.append(f"⚠️ Keine Sellside Liquidity erkannt")
@@ -16037,8 +16037,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 # === PHASE 1: Breakout-Bestätigung ===
                 if not breakout_confirmed:
-                    # Volume Confirmation: Breakout-Day Volume >= 1.15x Avg (gelockert von 1.4x)
-                    vol_ok = future_bar["volume"] >= avg_vol_20 * 1.15
+                    # Volume Confirmation: Breakout-Day Volume >= 1.4x Avg (Minervini Original)
+                    vol_ok = future_bar["volume"] >= avg_vol_20 * 1.4
 
                     if direction == "long" and future_bar["close"] > breakout_level + breakout_threshold and vol_ok:
                         breakout_confirmed = True
