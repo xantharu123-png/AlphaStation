@@ -15903,20 +15903,20 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
 
             if direction == "long":
-                breakout_level = round(range_high, 4)          # Breakout-Bestätigung
-                retest_entry = round(range_high + atr_5 * 0.05, 4)  # Entry knapp über Range
-                stop_price = round(range_low - atr_5 * 0.3, 4)     # Stop unter Range-Low
-                tp1_price = round(range_high + range_size * 1.0, 4)  # TP1 = 1x Range über High
-                tp2_price = round(range_high + range_size * 2.0, 4)  # TP2 = 2x Range
+                breakout_level = round(range_high, 4)
+                retest_entry = round(range_high, 4)                    # Entry am alten Widerstand (= neuer Support)
+                stop_price = round(range_high - atr_5 * 0.75, 4)      # Enger Stop unter Breakout-Level
+                tp1_price = round(range_high + range_size * 1.0, 4)    # TP1 = 1x Range
+                tp2_price = round(range_high + range_size * 2.0, 4)    # TP2 = 2x Range
             else:
                 breakout_level = round(range_low, 4)
-                retest_entry = round(range_low - atr_5 * 0.05, 4)
-                stop_price = round(range_high + atr_5 * 0.3, 4)
+                retest_entry = round(range_low, 4)
+                stop_price = round(range_low + atr_5 * 0.75, 4)
                 tp1_price = round(range_low - range_size * 1.0, 4)
                 tp2_price = round(range_low - range_size * 2.0, 4)
 
-            risk = abs(retest_entry - stop_price)
-            reward = abs(tp1_price - retest_entry)
+            risk = abs(retest_entry - stop_price)  # = ATR × 0.75 (eng!)
+            reward = abs(tp1_price - retest_entry)  # = range_size (gross!)
             rr = round(reward / risk, 2) if risk > 0 else 0
 
             if rr < 1.5:  # Minimum 1.5:1 R:R (Retest gibt uns besseres R:R)
