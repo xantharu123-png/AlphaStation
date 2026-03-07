@@ -3485,17 +3485,26 @@ def calculate_stochastic(bars, k_period=14, d_period=3):
 
 def analyze_breakout_imminent(bars, direction="long"):
     """
-    🔮 BREAKOUT IMMINENT V2 — 20-Signal Composite Prediction
+    🔮 BREAKOUT IMMINENT V2.1 — 20-Signal Composite Prediction (Pro-Reweighted)
 
     Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
-    Jeder Faktor gibt 0-10 Punkte. Maximum: 200 Punkte.
+    Maximum: 200 Punkte — aber GEWICHTET nach Trader-Wisdom:
 
-    Signalgruppen:
-    🔋 ENERGIE (1-4): ATR Squeeze, Vol Dry-Up, Bollinger Compression, Candle Compression
-    📊 MOMENTUM (5-8): RSI Drift, MACD Divergenz, Stochastic, ADX
-    🏦 SMART MONEY (9-12): OBV Divergenz, Inst. Accumulation, Order Blocks, Liquidity
-    📐 STRUKTUR (13-16): Range Duration, Boundary Tests, Higher Lows, Fib Confluence
-    🎯 TARGETS (17-20): Vol Profile Void, FVG Proximity, Relative Stärke, Close Clustering
+    BOOSTED (Smart Money / Momentum — diese Signale unterscheiden echte Breakouts):
+      OBV Divergenz (13), ADX Turning (14), Inst. Accumulation (14),
+      Relative Strength (14), Order Blocks (14), Liquidity Pools (14)
+
+    CUT (Dead Stock Indicators — hohe Scores bei toten Aktien):
+      ATR Squeeze (6), Vol Dry-Up (5), Range Duration (5),
+      Tight Compression (6), Body Compression (5)
+
+    NEUTRAL (unveraendert bei 10):
+      Close Clustering, Boundary Tests, RSI Drift, Higher Lows,
+      MACD Histogram, Stochastic, FVG Proximity, Fib Confluence,
+      Volume Profile Void
+
+    Basiert auf: Minervini SEPA/VCP, O'Neil CANSLIM, Turtle Traders,
+    Weinstein Stage Analysis, Van Tharp Position Sizing, Wyckoff
 
     Args:
         bars: Liste von OHLC-Dicts (min 15 Tage, ideal 30)
@@ -3519,8 +3528,8 @@ def analyze_breakout_imminent(bars, direction="long"):
     current_price = closes[-1]
 
     # ===================================================================
-    # SIGNAL 1: VOLATILITAETS-KONTRAKTION (ATR Squeeze) — max 10 Punkte
-    # ATR schrumpft ueber die letzten Tage = Energie baut sich auf
+    # SIGNAL 1: VOLATILITAETS-KONTRAKTION (ATR Squeeze) — max 6 Punkte [CUT]
+    # ATR schrumpft = Energie baut sich auf, ABER auch bei toten Aktien!
     # ===================================================================
     daily_ranges = []
     for b in bars:
@@ -3535,13 +3544,13 @@ def analyze_breakout_imminent(bars, direction="long"):
         if prior_atr > 0:
             atr_ratio = recent_atr / prior_atr
             if atr_ratio < 0.5:
-                score += 10
+                score += 6
                 details.append(f"🔥 ATR-Squeeze extrem: {atr_ratio:.2f}x (Ranges halbiert)")
             elif atr_ratio < 0.7:
-                score += 7
+                score += 4
                 details.append(f"✅ ATR-Squeeze stark: {atr_ratio:.2f}x")
             elif atr_ratio < 0.85:
-                score += 4
+                score += 2
                 details.append(f"⚠️ ATR leicht sinkend: {atr_ratio:.2f}x")
             else:
                 details.append(f"❌ Kein ATR-Squeeze: {atr_ratio:.2f}x")
@@ -3551,8 +3560,8 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("❌ ATR-Squeeze: Nicht genug Daten (min 15 Tage)")
 
     # ===================================================================
-    # SIGNAL 2: VOLUME DRY-UP — max 10 Punkte
-    # Volumen sinkt systematisch = Erschoepfung beider Seiten
+    # SIGNAL 2: VOLUME DRY-UP — max 5 Punkte [CUT]
+    # Volumen sinkt = Erschoepfung, ABER auch bei vergessenen Aktien!
     # ===================================================================
     if len(volumes) >= 15:
         # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage
@@ -3562,13 +3571,13 @@ def analyze_breakout_imminent(bars, direction="long"):
         if prior_vol > 0:
             vol_decline = recent_vol / prior_vol
             if vol_decline < 0.5:
-                score += 10
+                score += 5
                 details.append(f"🔥 Vol Dry-Up extrem: {vol_decline:.2f}x")
             elif vol_decline < 0.7:
-                score += 7
+                score += 3
                 details.append(f"✅ Vol sinkt deutlich: {vol_decline:.2f}x")
             elif vol_decline < 0.85:
-                score += 4
+                score += 2
                 details.append(f"⚠️ Vol leicht sinkend: {vol_decline:.2f}x")
             else:
                 details.append(f"❌ Kein Vol Dry-Up: {vol_decline:.2f}x")
@@ -3578,7 +3587,7 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("❌ Vol Dry-Up: Nicht genug Daten (min 15 Tage)")
 
     # ===================================================================
-    # SIGNAL 3: OBV-DIVERGENZ — max 10 Punkte
+    # SIGNAL 3: OBV-DIVERGENZ — max 13 Punkte [BOOSTED]
     # OBV steigt/faellt waehrend Preis flat = Smart Money positioniert sich
     # ===================================================================
     obv = [0]
@@ -3603,25 +3612,25 @@ def analyze_breakout_imminent(bars, direction="long"):
 
         if price_flat:
             if direction == "long" and obv_rising:
-                score += 10
-                details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt")
+                score += 13
+                details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt [Smart Money!]")
             elif direction == "short" and obv_falling:
-                score += 10
-                details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt")
+                score += 13
+                details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt [Smart Money!]")
             elif direction == "long" and obv_falling:
                 details.append(f"❌ OBV faellt = eher Short")
             elif direction == "short" and obv_rising:
                 details.append(f"❌ OBV steigt = eher Long")
             else:
-                score += 3
+                score += 4
                 details.append(f"⚠️ OBV neutral")
         else:
             # Preis nicht flat — OBV-Richtung trotzdem bewerten (weniger Gewicht)
             if direction == "long" and obv_rising:
-                score += 5
+                score += 7
                 details.append(f"✅ OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
             elif direction == "short" and obv_falling:
-                score += 5
+                score += 7
                 details.append(f"✅ OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
             else:
                 details.append(f"⚠️ OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
@@ -3659,8 +3668,8 @@ def analyze_breakout_imminent(bars, direction="long"):
                 details.append(f"⚠️ Close Position neutral: {avg_cp:.0%}")
 
     # ===================================================================
-    # SIGNAL 5: RANGE DURATION — max 10 Punkte
-    # Laengere Konsolidierung = staerkerer Breakout
+    # SIGNAL 5: RANGE DURATION — max 5 Punkte [CUT]
+    # Laengere Konsolidierung, ABER zu lang = tote Aktie!
     # ===================================================================
     # Zaehle aufeinanderfolgende Tage in enger Range (vom Ende rueckwaerts)
     range_days = 0
@@ -3678,13 +3687,13 @@ def analyze_breakout_imminent(bars, direction="long"):
             break
 
     if range_days >= 15:
-        score += 10
+        score += 5
         details.append(f"🔥 Lange Konsolidierung: {range_days} Tage")
     elif range_days >= 10:
-        score += 7
+        score += 3
         details.append(f"✅ Solide Konsolidierung: {range_days} Tage")
     elif range_days >= 6:
-        score += 4
+        score += 2
         details.append(f"⚠️ Kurze Konsolidierung: {range_days} Tage")
     else:
         details.append(f"❌ Keine Konsolidierung: {range_days} Tage")
@@ -3725,27 +3734,27 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append(f"❌ Boundary-Tests: Keine Konsolidierung ({range_days} Tage < 5)")
 
     # ===================================================================
-    # SIGNAL 7: ADX TURNING UP — max 10 Punkte
-    # ADX < 20 + steigend = neuer Trend beginnt JETZT
+    # SIGNAL 7: ADX TURNING UP — max 14 Punkte [BOOSTED]
+    # ADX < 20 + steigend = neuer Trend beginnt JETZT (Minervini/O'Neil Key Signal)
     # ===================================================================
     adx, adx_prev = calculate_adx(bars)
 
     if adx is not None:
         if adx < 20 and adx_prev and adx > adx_prev:
-            score += 10
+            score += 14
             details.append(f"🔥 ADX Wende: {adx_prev:.0f}→{adx:.0f} (unter 20 + steigend = Breakout!)")
         elif adx < 25 and adx_prev and adx > adx_prev:
-            score += 6
+            score += 9
             details.append(f"✅ ADX steigend: {adx_prev:.0f}→{adx:.0f}")
         elif adx < 20:
-            score += 3
+            score += 4
             details.append(f"⚠️ ADX niedrig ({adx:.0f}) aber nicht steigend")
         else:
             details.append(f"❌ ADX bereits hoch: {adx:.0f} (Trend laeuft schon)")
 
     # ===================================================================
-    # SIGNAL 8: INSTITUTIONAL ACCUMULATION/DISTRIBUTION DAYS — max 10 Punkte
-    # Tage mit Close Up + Vol > Avg = Inst. Buying
+    # SIGNAL 8: INSTITUTIONAL ACCUMULATION/DISTRIBUTION DAYS — max 14 Punkte [BOOSTED]
+    # Tage mit Close Up + Vol > Avg = Inst. Buying (O'Neil CANSLIM Key Signal)
     # ===================================================================
     if n >= 10:
         avg_vol = sum(volumes) / n
@@ -3761,16 +3770,16 @@ def analyze_breakout_imminent(bars, direction="long"):
                     distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
-            score += 10
+            score += 14
             details.append(f"🔥 Institutionelle Akkumulation: {accum_days} Akku vs {distri_days} Distri")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
-            score += 6
+            score += 9
             details.append(f"✅ Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
-            score += 10
+            score += 14
             details.append(f"🔥 Institutionelle Distribution: {distri_days} Distri vs {accum_days} Akku")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
-            score += 6
+            score += 9
             details.append(f"✅ Distribution: {distri_days} vs {accum_days} Tage")
         else:
             details.append(f"⚠️ Gemischte Inst-Aktivitaet: {accum_days} Akku / {distri_days} Distri")
@@ -3855,9 +3864,8 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append(f"❌ Higher Lows/Lower Highs: Zu kurze Range ({range_days} Tage < 6)")
 
     # ===================================================================
-    # SIGNAL 11: RELATIVE STAERKE vs MARKT — max 10 Punkte
-    # Wird im Scanner-Loop befuellt (spy_change als Parameter)
-    # Hier nur Platzhalter-Score basierend auf eigener Preis-Resilience
+    # SIGNAL 11: RELATIVE STAERKE vs MARKT — max 14 Punkte [BOOSTED]
+    # Resilience = Minervini RS-Rating Proxy (Key SEPA Criterion)
     # ===================================================================
     # Statt SPY-Vergleich: Prüfe ob Aktie sich in Range haelt trotz Volatilitaet
     if n >= 10:
@@ -3870,23 +3878,23 @@ def analyze_breakout_imminent(bars, direction="long"):
         resilience = recovery_days / max(1, negative_days)
 
         if direction == "long" and resilience > 0.7:
-            score += 10
-            details.append(f"🔥 Hohe Resilience: {resilience:.0%} Recovery nach Dips")
+            score += 14
+            details.append(f"🔥 Hohe Resilience: {resilience:.0%} Recovery nach Dips [Minervini RS!]")
         elif direction == "long" and resilience > 0.5:
-            score += 5
+            score += 7
             details.append(f"✅ Gute Resilience: {resilience:.0%}")
         elif direction == "short" and resilience < 0.3:
-            score += 10
+            score += 14
             details.append(f"🔥 Schwache Resilience: {resilience:.0%} = Verkaufsdruck")
         elif direction == "short" and resilience < 0.5:
-            score += 5
+            score += 7
             details.append(f"✅ Maessige Resilience: {resilience:.0%}")
         else:
             details.append(f"⚠️ Resilience neutral: {resilience:.0%}")
 
     # ===================================================================
-    # SIGNAL 12: TIGHT RANGE COMPRESSION (Bollinger-Squeeze Proxy) — max 10 Punkte
-    # Standardabweichung der Closes schrumpft auf Minimum
+    # SIGNAL 12: TIGHT RANGE COMPRESSION (Bollinger-Squeeze Proxy) — max 6 Punkte [CUT]
+    # StdDev schrumpft, ABER extreme Kompression = oft tote Aktie!
     # ===================================================================
     if n >= 10:
         recent_closes = closes[-10:]
@@ -3895,13 +3903,13 @@ def analyze_breakout_imminent(bars, direction="long"):
         std_dev_pct = ((variance ** 0.5) / mean_price) * 100 if mean_price > 0 else 99
 
         if std_dev_pct < 1.5:
-            score += 10
+            score += 6
             details.append(f"🔥 Extreme Kompression: StdDev {std_dev_pct:.2f}%")
         elif std_dev_pct < 2.5:
-            score += 7
+            score += 4
             details.append(f"✅ Starke Kompression: StdDev {std_dev_pct:.2f}%")
         elif std_dev_pct < 4.0:
-            score += 3
+            score += 2
             details.append(f"⚠️ Moderate Kompression: StdDev {std_dev_pct:.2f}%")
         else:
             details.append(f"❌ Keine Kompression: StdDev {std_dev_pct:.2f}%")
@@ -3972,8 +3980,8 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("❌ Stochastic: Nicht genug Daten")
 
     # ===================================================================
-    # SIGNAL 15: ORDER BLOCK CONFLUENCE — max 10 Punkte
-    # Breakout nahe einem Order Block = institutionelle Zone
+    # SIGNAL 15: ORDER BLOCK CONFLUENCE — max 14 Punkte [BOOSTED]
+    # Breakout nahe Order Block = institutionelle Zone (Wyckoff/ICT)
     # ===================================================================
     try:
         ob_data = detect_order_blocks(bars, max_blocks=5)
@@ -3989,13 +3997,13 @@ def analyze_breakout_imminent(bars, direction="long"):
                 # Zweitstärkst: Bullish OB nahe Range-Low = Demand Zone stützt Basis
                 near_support = any(abs(ob["zone_low"] - range_low_15) < atr_ob * 2 for ob in bull_obs)
                 if near_breakout:
-                    score += 10
+                    score += 14
                     details.append(f"🔥 Bullish OB nahe Breakout-Level = institutionelles Kaufinteresse!")
                 elif near_support:
-                    score += 7
+                    score += 9
                     details.append(f"✅ Bullish OB stuetzt Range-Low = Demand Zone")
                 else:
-                    score += 3
+                    score += 4
                     details.append(f"⚠️ Bullish OBs vorhanden ({len(bull_obs)}x) aber nicht in Naehe")
             else:
                 details.append(f"❌ Keine Bullish Order Blocks")
@@ -4005,13 +4013,13 @@ def analyze_breakout_imminent(bars, direction="long"):
                 near_breakout = any(abs(ob["zone_low"] - range_low_15) < atr_ob * 2 for ob in bear_obs)
                 near_resistance = any(abs(ob["zone_high"] - range_high_15) < atr_ob * 2 for ob in bear_obs)
                 if near_breakout:
-                    score += 10
+                    score += 14
                     details.append(f"🔥 Bearish OB nahe Breakdown-Level = institutioneller Verkaufsdruck!")
                 elif near_resistance:
-                    score += 7
+                    score += 9
                     details.append(f"✅ Bearish OB deckt Range-High = Supply Zone")
                 else:
-                    score += 3
+                    score += 4
                     details.append(f"⚠️ Bearish OBs vorhanden ({len(bear_obs)}x) aber nicht in Naehe")
             else:
                 details.append(f"❌ Keine Bearish Order Blocks")
@@ -4051,8 +4059,8 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("⚠️ FVG Check uebersprungen")
 
     # ===================================================================
-    # SIGNAL 17: LIQUIDITY POOL PROXIMITY — max 10 Punkte
-    # Buyside Liquidity ueber Range = Stops werden gejagt → explosiver Move
+    # SIGNAL 17: LIQUIDITY POOL PROXIMITY — max 14 Punkte [BOOSTED]
+    # Buyside Liq ueber Range = Stop-Hunt → explosiver Move (ICT/Wyckoff)
     # ===================================================================
     try:
         liq_data = detect_liquidity_levels(bars, max_levels=5)
@@ -4063,20 +4071,20 @@ def analyze_breakout_imminent(bars, direction="long"):
             # Buyside Liq knapp über Range-High = Stops-Jagd → explosiv
             near_liq = [l for l in liq_data["buyside"] if l["price"] > range_high_17 and (l["price"] - range_high_17) / current_price * 100 < 3]
             if near_liq:
-                score += 10
+                score += 14
                 details.append(f"🔥 Buyside Liquidity {near_liq[0]['price']:.2f} knapp ueber Range = Stop-Hunt Potential")
             elif liq_data["buyside"]:
-                score += 3
+                score += 5
                 details.append(f"✅ Buyside Liq vorhanden ({len(liq_data['buyside'])} Levels)")
             else:
                 details.append(f"⚠️ Keine Buyside Liquidity erkannt")
         elif direction == "short" and liq_data.get("sellside"):
             near_liq = [l for l in liq_data["sellside"] if l["price"] < range_low_17 and (range_low_17 - l["price"]) / current_price * 100 < 3]
             if near_liq:
-                score += 10
+                score += 14
                 details.append(f"🔥 Sellside Liquidity {near_liq[0]['price']:.2f} knapp unter Range = Stop-Hunt Potential")
             elif liq_data["sellside"]:
-                score += 3
+                score += 5
                 details.append(f"✅ Sellside Liq vorhanden ({len(liq_data['sellside'])} Levels)")
             else:
                 details.append(f"⚠️ Keine Sellside Liquidity erkannt")
@@ -4188,8 +4196,8 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("⚠️ Volume Void Check uebersprungen")
 
     # ===================================================================
-    # SIGNAL 20: CANDLE BODY COMPRESSION — max 10 Punkte
-    # Body-zu-Range Ratio sinkt = Doji-artige Kerzen = Gleichgewicht = Breakout imminent
+    # SIGNAL 20: CANDLE BODY COMPRESSION — max 5 Punkte [CUT]
+    # Body-Ratio sinkt = Doji-Cluster, ABER auch bei Aktien ohne Interesse!
     # ===================================================================
     if n >= 10:
         # Vergleiche Body/Range Ratio: letzte 5 vs vorherige 10
@@ -4209,13 +4217,13 @@ def analyze_breakout_imminent(bars, direction="long"):
             body_compression = avg_recent_body / avg_prior_body
 
             if body_compression < 0.4:
-                score += 10
+                score += 5
                 details.append(f"🔥 Extreme Body-Kompression: {body_compression:.2f}x (Doji-Cluster!)")
             elif body_compression < 0.6:
-                score += 7
+                score += 3
                 details.append(f"✅ Starke Body-Kompression: {body_compression:.2f}x")
             elif body_compression < 0.8:
-                score += 3
+                score += 1
                 details.append(f"⚠️ Leichte Body-Kompression: {body_compression:.2f}x")
             else:
                 details.append(f"❌ Keine Body-Kompression: {body_compression:.2f}x")
@@ -15732,12 +15740,17 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
 def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         min_price=5.0, min_volume=200000, progress_callback=None):
     """
-    🔮 Breakout Imminent V2 Backtest — Rolling-Window Analyse.
+    🔮 Breakout Imminent V2.1 Backtest — Rolling-Window Analyse (Pro-Reweighted).
+
+    V2.1 Upgrades:
+    - Signal-Gewichte rebalanciert: Smart Money BOOSTED, Dead Stock CUT
+    - Minervini Volume Confirmation: Breakout-Volume >= 1.4x Avg (40% über Normal)
+    - Löst Grade-B-Inversion (tote Aktien kommen nicht mehr auf hohe Scores)
 
     Für jeden Tag im Backtest-Zeitraum:
-    1. Nimm 30-Tage Fenster als Input für analyze_breakout_imminent()
-    2. Bei gültigem Signal → berechne Entry/SL/TP (identisch zum Live-Scanner)
-    3. Simuliere Trade über die nächsten Tage
+    1. Nimm 50-Tage Fenster als Input für analyze_breakout_imminent()
+    2. Bei gültigem Signal + Volume Confirmation → Breakout-Retest Entry
+    3. Simuliere Trade mit 3-Phase System (Breakout → Retest → Management)
     4. Tracke Ergebnis nach Grade (S/A/B/C)
 
     Args:
@@ -15954,8 +15967,11 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 "range_pct": round(range_pct, 1),
             }
 
+            # === VOLUME AVERAGE für Breakout-Confirmation (Minervini: 40%+ über Avg) ===
+            avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20 if len(window) >= 20 else sum(b["volume"] for b in window) / len(window)
+
             # 3-Phase Simulation:
-            # Phase 1: Breakout bestätigt (Close über/unter Range + ATR-Threshold)
+            # Phase 1: Breakout bestätigt (Close über/unter Range + ATR-Threshold + Volume)
             # Phase 2: Pullback in die Retest-Zone (zwischen upper/lower)
             # Phase 3: Trade Management (Stop/TP/Breakeven)
             entry_filled = False
@@ -15979,11 +15995,14 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 # === PHASE 1: Breakout-Bestätigung ===
                 if not breakout_confirmed:
-                    if direction == "long" and future_bar["close"] > breakout_level + breakout_threshold:
+                    # Minervini/O'Neil Volume Confirmation: Breakout-Day Volume >= 1.4x Avg
+                    vol_ok = future_bar["volume"] >= avg_vol_20 * 1.4
+
+                    if direction == "long" and future_bar["close"] > breakout_level + breakout_threshold and vol_ok:
                         breakout_confirmed = True
                         breakout_high = future_bar["high"]
                         # FIX #4: KEIN continue — prüfe sofort ob Entry möglich
-                    elif direction == "short" and future_bar["close"] < breakout_level - breakout_threshold:
+                    elif direction == "short" and future_bar["close"] < breakout_level - breakout_threshold and vol_ok:
                         breakout_confirmed = True
                         breakout_high = future_bar["low"]  # Tiefster Punkt für Short
                     elif day_offset >= 7:
