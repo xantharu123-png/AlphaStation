@@ -15890,47 +15890,57 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 continue
 
             # ============================================
-            # Entry/SL/TP Berechnung V2.2 (Revert bad opts)
+            # BREAKOUT-RETEST ENTRY V3.0
+            # ============================================
+            # Statt beim Breakout zu kaufen (teuer, hohe Fail-Rate),
+            # warten wir auf:
+            # 1. Bestätigter Breakout (Close über Range)
+            # 2. Pullback zurück zum Range-Level
+            # 3. Entry beim Retest mit engem Stop
+            #
+            # Vorteile: Besserer Preis, engerer Stop, 2-3x besseres R:R
             # ============================================
             atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
 
             if direction == "long":
-                entry_price = round(range_high + atr_5 * 0.1, 4)
-                stop_price = round(range_high - atr_5 * 1.5, 4)    # Original ATR×1.5
-                tp1_price = round(range_high + range_size * 0.75, 4)
-                tp2_price = round(range_high + range_size * 1.618, 4)
+                breakout_level = round(range_high, 4)          # Breakout-Bestätigung
+                retest_entry = round(range_high + atr_5 * 0.05, 4)  # Entry knapp über Range
+                stop_price = round(range_low - atr_5 * 0.3, 4)     # Stop unter Range-Low
+                tp1_price = round(range_high + range_size * 1.0, 4)  # TP1 = 1x Range über High
+                tp2_price = round(range_high + range_size * 2.0, 4)  # TP2 = 2x Range
             else:
-                entry_price = round(range_low - atr_5 * 0.1, 4)
-                stop_price = round(range_low + atr_5 * 1.5, 4)     # Original ATR×1.5
-                tp1_price = round(range_low - range_size * 0.75, 4)
-                tp2_price = round(range_low - range_size * 1.618, 4)
+                breakout_level = round(range_low, 4)
+                retest_entry = round(range_low - atr_5 * 0.05, 4)
+                stop_price = round(range_high + atr_5 * 0.3, 4)
+                tp1_price = round(range_low - range_size * 1.0, 4)
+                tp2_price = round(range_low - range_size * 2.0, 4)
 
-            risk = abs(entry_price - stop_price)
-            reward = abs(tp1_price - entry_price)
+            risk = abs(retest_entry - stop_price)
+            reward = abs(tp1_price - retest_entry)
             rr = round(reward / risk, 2) if risk > 0 else 0
 
-            if rr < 1.0:
+            if rr < 1.5:  # Minimum 1.5:1 R:R (Retest gibt uns besseres R:R)
                 continue
 
-            if entry_price <= 0 or stop_price <= 0:
+            if retest_entry <= 0 or stop_price <= 0:
                 continue
 
             signals_found += 1
             cooldown[ticker] = idx
 
-            # === TRADE SIMULIEREN ===
-            max_hold = 15  # Max 15 Tage halten
-            slippage = 0.001  # 0.1% Slippage
+            # === BREAKOUT-RETEST TRADE SIMULATION ===
+            max_hold = 20  # Mehr Zeit für Retest (war 15)
+            slippage = 0.001
 
             trade_result = {
                 "ticker": ticker,
-                "signal_date": bars[idx-1]["date"],  # Signal am letzten Bar des Windows
+                "signal_date": bars[idx-1]["date"],
                 "grade": grade,
                 "score": bi_score,
                 "max_score": bi_max,
                 "confidence": confidence,
                 "direction": direction.upper(),
-                "entry_target": entry_price,
+                "entry_target": retest_entry,
                 "stop_target": stop_price,
                 "tp1_target": tp1_price,
                 "tp2_target": tp2_price,
@@ -15938,8 +15948,11 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 "range_pct": round(range_pct, 1),
             }
 
-            # Simuliere: Suche Entry in den Folgetagen
+            # Phase 1: Warte auf Breakout-Bestätigung (Close über/unter Range)
+            # Phase 2: Warte auf Pullback zum Retest-Level
+            # Phase 3: Entry + Trade Management
             entry_filled = False
+            breakout_confirmed = False
             actual_entry = None
             entry_date = None
             exit_price = None
@@ -15947,7 +15960,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             exit_date = None
             tp1_hit = False
             bars_held = 0
-            current_stop = stop_price  # Wird nach TP1 auf Breakeven verschoben
+            current_stop = stop_price
 
             for day_offset in range(1, max_hold + 1):
                 future_idx = idx + day_offset
@@ -15956,22 +15969,37 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 future_bar = bars[future_idx]
 
-                if not entry_filled:
-                    # CLOSE-based Entry: Aktie muss ÜBER dem Entry-Level SCHLIESSEN
-                    # (nicht nur intraday darüber wicken — das sind Fake-Breakouts!)
-                    if direction == "long" and future_bar["close"] >= entry_price:
-                        actual_entry = future_bar["close"] * (1 + slippage)
-                        entry_filled = True
-                        entry_date = future_bar["date"]
-                        bars_held = 0
-                    elif direction == "short" and future_bar["close"] <= entry_price:
-                        actual_entry = future_bar["close"] * (1 - slippage)
-                        entry_filled = True
-                        entry_date = future_bar["date"]
-                        bars_held = 0
-                    elif day_offset >= 5:
-                        break
+                if not breakout_confirmed:
+                    # Phase 1: Breakout-Bestätigung (Close über Range-High)
+                    if direction == "long" and future_bar["close"] > breakout_level * 1.005:
+                        breakout_confirmed = True
+                    elif direction == "short" and future_bar["close"] < breakout_level * 0.995:
+                        breakout_confirmed = True
+                    elif day_offset >= 7:
+                        break  # Kein Breakout nach 7 Tagen → abbrechen
                     continue
+
+                if not entry_filled:
+                    # Phase 2: Pullback zum Retest-Level
+                    if direction == "long":
+                        # Preis kommt zurück nahe Range-High → Entry
+                        if future_bar["low"] <= retest_entry * 1.01:
+                            actual_entry = retest_entry * (1 + slippage)
+                            entry_filled = True
+                            entry_date = future_bar["date"]
+                            bars_held = 0
+                        elif future_bar["low"] > retest_entry * 1.05:
+                            pass  # Noch kein Pullback, weiter warten
+                    else:
+                        if future_bar["high"] >= retest_entry * 0.99:
+                            actual_entry = retest_entry * (1 - slippage)
+                            entry_filled = True
+                            entry_date = future_bar["date"]
+                            bars_held = 0
+                    if day_offset >= 15 and not entry_filled:
+                        break  # Kein Pullback → abbrechen
+                    if not entry_filled:
+                        continue
 
                 bars_held += 1
 
