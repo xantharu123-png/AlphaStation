@@ -15752,7 +15752,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         dict mit trades, stats_by_grade, summary
     """
     end_dt = datetime.now() - timedelta(days=1)
-    start_dt = end_dt - timedelta(days=months * 30 + 45)  # +45 für 30-Tage-Fenster
+    window_size = 50  # 50 Bars für MACD (braucht 35+) und bessere Pattern-Erkennung
+    start_dt = end_dt - timedelta(days=months * 30 + window_size + 20)  # +window+buffer
     test_start = (end_dt - timedelta(days=months * 30)).strftime("%Y-%m-%d")
 
     # Generiere Handelstage (Mo-Fr)
@@ -15818,14 +15819,22 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 ticker_history[ticker] = []
             ticker_history[ticker].append(bar)
 
-    # Sortiere nach Volumen und nimm Top N
+    # Sortiere und filtere Ticker — Mid-Caps (500K-10M Vol) sind BI-Goldzone
     ticker_avg_vol = {}
     for t, bars_list in ticker_history.items():
-        if len(bars_list) >= 35:
-            ticker_avg_vol[t] = sum(b["volume"] for b in bars_list[-20:]) / 20
+        if len(bars_list) >= (window_size + 5):  # Genug History für Window + Simulation
+            avg_vol = sum(b["volume"] for b in bars_list[-20:]) / 20
+            ticker_avg_vol[t] = avg_vol
 
-    sorted_tickers = sorted(ticker_avg_vol.keys(), key=lambda t: ticker_avg_vol[t], reverse=True)
-    tickers_to_test = sorted_tickers[:max_tickers]
+    # Priorisiere Mid-Cap-Volumen (500K-10M) — hier passieren die besten Breakouts
+    # Aber schliesse High-Volume nicht komplett aus (niedrigere Prio)
+    midcap_tickers = {t: v for t, v in ticker_avg_vol.items() if 500_000 <= v <= 10_000_000}
+    largecap_tickers = {t: v for t, v in ticker_avg_vol.items() if v > 10_000_000}
+
+    # Mid-Caps zuerst (sortiert nach Vol), dann Large-Caps auffüllen
+    sorted_midcap = sorted(midcap_tickers.keys(), key=lambda t: midcap_tickers[t], reverse=True)
+    sorted_largecap = sorted(largecap_tickers.keys(), key=lambda t: largecap_tickers[t], reverse=True)
+    tickers_to_test = (sorted_midcap + sorted_largecap)[:max_tickers]
 
     # ============================================================
     # PASS 2: Rolling-Window Breakout Imminent Analyse + Trade Sim
@@ -15843,8 +15852,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
         bars = ticker_history[ticker]
 
-        # Für jeden Tag ab test_start: 30-Bar Fenster → BI V2 Analyse
-        for idx in range(30, len(bars)):
+        # Für jeden Tag ab test_start: 50-Bar Fenster → BI V2 Analyse
+        for idx in range(window_size, len(bars)):
             if bars[idx]["date"] < test_start:
                 continue
 
@@ -15854,8 +15863,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 if idx - last_sig_idx < 10:
                     continue
 
-            # 30-Bar Rolling Window
-            window = bars[idx-30:idx]
+            # 50-Bar Rolling Window (genug für MACD 26+9=35)
+            window = bars[idx-window_size:idx]
 
             is_valid, bi_score, bi_max, details, confidence, grade = analyze_breakout_imminent(window, direction=direction)
 
@@ -15959,33 +15968,66 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 bars_held += 1
 
-                # Prüfe Stop und Target
+                # Prüfe Stop und Target (Intraday-Reihenfolge via Open-Proximity)
+                bar_open = future_bar["open"]
+
                 if direction == "long":
-                    if future_bar["low"] <= stop_price:
+                    stop_hit = future_bar["low"] <= stop_price
+                    tp1_possible = future_bar["high"] >= tp1_price
+                    tp2_possible = future_bar["high"] >= tp2_price
+
+                    if stop_hit and tp2_possible:
+                        # Beide möglich → Open-Proximity entscheidet
+                        if abs(bar_open - stop_price) < abs(bar_open - tp2_price):
+                            exit_price = stop_price * (1 - slippage)
+                            exit_reason = "STOP"
+                        else:
+                            tp1_hit = True
+                            exit_price = tp2_price * (1 - slippage)
+                            exit_reason = "TP2"
+                        exit_date = future_bar["date"]
+                        break
+                    elif stop_hit:
                         exit_price = stop_price * (1 - slippage)
                         exit_reason = "STOP"
                         exit_date = future_bar["date"]
                         break
-                    if future_bar["high"] >= tp1_price and not tp1_hit:
-                        tp1_hit = True
-                    if future_bar["high"] >= tp2_price:
-                        exit_price = tp2_price * (1 - slippage)
-                        exit_reason = "TP2"
+                    else:
+                        if tp1_possible and not tp1_hit:
+                            tp1_hit = True
+                        if tp2_possible:
+                            exit_price = tp2_price * (1 - slippage)
+                            exit_reason = "TP2"
+                            exit_date = future_bar["date"]
+                            break
+                else:  # short
+                    stop_hit = future_bar["high"] >= stop_price
+                    tp1_possible = future_bar["low"] <= tp1_price
+                    tp2_possible = future_bar["low"] <= tp2_price
+
+                    if stop_hit and tp2_possible:
+                        if abs(bar_open - stop_price) < abs(bar_open - tp2_price):
+                            exit_price = stop_price * (1 + slippage)
+                            exit_reason = "STOP"
+                        else:
+                            tp1_hit = True
+                            exit_price = tp2_price * (1 + slippage)
+                            exit_reason = "TP2"
                         exit_date = future_bar["date"]
                         break
-                else:  # short
-                    if future_bar["high"] >= stop_price:
+                    elif stop_hit:
                         exit_price = stop_price * (1 + slippage)
                         exit_reason = "STOP"
                         exit_date = future_bar["date"]
                         break
-                    if future_bar["low"] <= tp1_price and not tp1_hit:
-                        tp1_hit = True
-                    if future_bar["low"] <= tp2_price:
-                        exit_price = tp2_price * (1 + slippage)
-                        exit_reason = "TP2"
-                        exit_date = future_bar["date"]
-                        break
+                    else:
+                        if tp1_possible and not tp1_hit:
+                            tp1_hit = True
+                        if tp2_possible:
+                            exit_price = tp2_price * (1 + slippage)
+                            exit_reason = "TP2"
+                            exit_date = future_bar["date"]
+                            break
 
             # Trade-Ende: TP1 als Exit wenn TP2 nicht erreicht
             if entry_filled and exit_price is None:
@@ -16082,6 +16124,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         "total_pnl": round(sum(t["pnl_pct"] for t in filled_trades), 2) if filled_trades else 0,
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
+        "n_midcap": len(sorted_midcap),
+        "n_largecap": len(sorted_largecap),
         "direction": direction,
         "months": months,
     }
