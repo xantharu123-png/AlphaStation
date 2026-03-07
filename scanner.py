@@ -15998,8 +15998,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
             # === TREND CONFIRMATION (Weinstein Stage 2 Filter) ===
             # 20-Tage-MA muss in Richtung des Trades zeigen
-            ma_20_current = sum(c for c in closes[-20:]) / 20 if len(closes) >= 20 else sum(closes) / len(closes)
-            ma_20_prev = sum(c for c in closes[-25:-5]) / 20 if len(closes) >= 25 else ma_20_current
+            w_closes = [b["close"] for b in window]
+            ma_20_current = sum(w_closes[-20:]) / 20 if len(w_closes) >= 20 else sum(w_closes) / len(w_closes)
+            ma_20_prev = sum(w_closes[-25:-5]) / 20 if len(w_closes) >= 25 else ma_20_current
             if direction == "long":
                 trend_ok = ma_20_current > ma_20_prev  # MA steigt = bullischer Trend
                 price_above_ma = window[-1]["close"] > ma_20_current  # Preis über MA
