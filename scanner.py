@@ -15857,10 +15857,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if bars[idx]["date"] < test_start:
                 continue
 
-            # Cooldown: Min 10 Tage zwischen Signalen pro Ticker
+            # Cooldown: Min 7 Tage zwischen Signalen pro Ticker
             if ticker in cooldown:
                 last_sig_idx = cooldown[ticker]
-                if idx - last_sig_idx < 10:
+                if idx - last_sig_idx < 7:
                     continue
 
             # 50-Bar Rolling Window (genug für MACD 26+9=35)
@@ -15885,34 +15885,18 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 continue
 
             # ============================================
-            # OPTIMIERTE Entry/SL/TP Berechnung V2.1
+            # Entry/SL/TP Berechnung V2.2 (Revert bad opts)
             # ============================================
             atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
 
-            # --- OPT 2: Trend-Filter (20-SMA Richtung) ---
-            if len(window) >= 20:
-                sma_20_now = sum(b["close"] for b in window[-20:]) / 20
-                sma_20_prev = sum(b["close"] for b in window[-25:-5]) / 20 if len(window) >= 25 else sma_20_now
-                trend_rising = sma_20_now > sma_20_prev
-                trend_falling = sma_20_now < sma_20_prev
-            else:
-                trend_rising = True
-                trend_falling = True
-
-            # Gegen den Trend? → Skip
-            if direction == "long" and not trend_rising:
-                continue
-            if direction == "short" and not trend_falling:
-                continue
-
             if direction == "long":
                 entry_price = round(range_high + atr_5 * 0.1, 4)
-                stop_price = round(range_high - atr_5 * 2.0, 4)    # OPT 1: ATR×2.0 (war 1.5)
+                stop_price = round(range_high - atr_5 * 1.5, 4)    # Original ATR×1.5
                 tp1_price = round(range_high + range_size * 0.75, 4)
                 tp2_price = round(range_high + range_size * 1.618, 4)
             else:
                 entry_price = round(range_low - atr_5 * 0.1, 4)
-                stop_price = round(range_low + atr_5 * 2.0, 4)     # OPT 1: ATR×2.0 (war 1.5)
+                stop_price = round(range_low + atr_5 * 1.5, 4)     # Original ATR×1.5
                 tp1_price = round(range_low - range_size * 0.75, 4)
                 tp2_price = round(range_low - range_size * 1.618, 4)
 
@@ -15920,7 +15904,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             reward = abs(tp1_price - entry_price)
             rr = round(reward / risk, 2) if risk > 0 else 0
 
-            if rr < 0.8:  # Leicht gelockert da Stop weiter weg (war 1.0)
+            if rr < 1.0:
                 continue
 
             if entry_price <= 0 or stop_price <= 0:
@@ -15929,11 +15913,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             signals_found += 1
             cooldown[ticker] = idx
 
-            # Avg Volume für Volume-Confirmation
-            avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20
-
             # === TRADE SIMULIEREN ===
-            # Entry = nächster Tag, wenn Preis das Entry-Level erreicht + Volumen bestätigt
             max_hold = 15  # Max 15 Tage halten
             slippage = 0.001  # 0.1% Slippage
 
@@ -15962,7 +15942,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             exit_date = None
             tp1_hit = False
             bars_held = 0
-            current_stop = stop_price  # OPT 4: Wird nach TP1 auf Breakeven verschoben
+            current_stop = stop_price  # Wird nach TP1 auf Breakeven verschoben
 
             for day_offset in range(1, max_hold + 1):
                 future_idx = idx + day_offset
@@ -15973,23 +15953,16 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 if not entry_filled:
                     # Prüfe ob Entry erreicht wird
-                    price_hit = (direction == "long" and future_bar["high"] >= entry_price) or \
-                                (direction == "short" and future_bar["low"] <= entry_price)
-
-                    # OPT 3: Volume Confirmation — Breakout-Tag muss > 1.2x Avg Vol haben
-                    vol_confirmed = future_bar["volume"] >= avg_vol_20 * 1.2
-
-                    if price_hit and vol_confirmed:
-                        if direction == "long":
-                            actual_entry = entry_price * (1 + slippage)
-                        else:
-                            actual_entry = entry_price * (1 - slippage)
+                    if direction == "long" and future_bar["high"] >= entry_price:
+                        actual_entry = entry_price * (1 + slippage)
                         entry_filled = True
                         entry_date = future_bar["date"]
                         bars_held = 0
-                    elif price_hit and not vol_confirmed:
-                        # Preis erreicht aber kein Volumen → Fake Breakout, skip
-                        continue
+                    elif direction == "short" and future_bar["low"] <= entry_price:
+                        actual_entry = entry_price * (1 - slippage)
+                        entry_filled = True
+                        entry_date = future_bar["date"]
+                        bars_held = 0
                     elif day_offset >= 5:
                         break
                     continue
@@ -16596,11 +16569,11 @@ def display_backtest_lab(poly_key):
 
         col_b1, col_b2, col_b3 = st.columns(3)
         with col_b1:
-            bi_months = st.selectbox("📅 Zeitraum", [1, 3, 6], index=2, format_func=lambda x: f"{x} Monate", key="bi_months")
+            bi_months = st.selectbox("📅 Zeitraum", [3, 6, 12], index=1, format_func=lambda x: f"{x} Monate", key="bi_months")
         with col_b2:
             bi_direction = st.selectbox("📈 Richtung", ["long", "short"], key="bi_dir")
         with col_b3:
-            bi_max_tickers = st.selectbox("🎯 Aktien (Top nach Vol)", [50, 100, 200, 500], index=1, key="bi_max")
+            bi_max_tickers = st.selectbox("🎯 Aktien (Mid-Cap Prio)", [100, 200, 500, 1000], index=1, key="bi_max")
 
         st.caption(f"⏱️ Geschätzte Dauer: ~{bi_months * 22 // 5 + bi_max_tickers // 20} Min (Grouped Daily + Analyse)")
 
