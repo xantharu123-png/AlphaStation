@@ -15884,17 +15884,35 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if avg_daily_range < 0.3:
                 continue
 
-            # Entry/SL/TP berechnen (identisch zum Live-Scanner)
+            # ============================================
+            # OPTIMIERTE Entry/SL/TP Berechnung V2.1
+            # ============================================
             atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
+
+            # --- OPT 2: Trend-Filter (20-SMA Richtung) ---
+            if len(window) >= 20:
+                sma_20_now = sum(b["close"] for b in window[-20:]) / 20
+                sma_20_prev = sum(b["close"] for b in window[-25:-5]) / 20 if len(window) >= 25 else sma_20_now
+                trend_rising = sma_20_now > sma_20_prev
+                trend_falling = sma_20_now < sma_20_prev
+            else:
+                trend_rising = True
+                trend_falling = True
+
+            # Gegen den Trend? → Skip
+            if direction == "long" and not trend_rising:
+                continue
+            if direction == "short" and not trend_falling:
+                continue
 
             if direction == "long":
                 entry_price = round(range_high + atr_5 * 0.1, 4)
-                stop_price = round(range_high - atr_5 * 1.5, 4)
+                stop_price = round(range_high - atr_5 * 2.0, 4)    # OPT 1: ATR×2.0 (war 1.5)
                 tp1_price = round(range_high + range_size * 0.75, 4)
                 tp2_price = round(range_high + range_size * 1.618, 4)
             else:
                 entry_price = round(range_low - atr_5 * 0.1, 4)
-                stop_price = round(range_low + atr_5 * 1.5, 4)
+                stop_price = round(range_low + atr_5 * 2.0, 4)     # OPT 1: ATR×2.0 (war 1.5)
                 tp1_price = round(range_low - range_size * 0.75, 4)
                 tp2_price = round(range_low - range_size * 1.618, 4)
 
@@ -15902,7 +15920,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             reward = abs(tp1_price - entry_price)
             rr = round(reward / risk, 2) if risk > 0 else 0
 
-            if rr < 1.0:
+            if rr < 0.8:  # Leicht gelockert da Stop weiter weg (war 1.0)
                 continue
 
             if entry_price <= 0 or stop_price <= 0:
@@ -15911,8 +15929,11 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             signals_found += 1
             cooldown[ticker] = idx
 
+            # Avg Volume für Volume-Confirmation
+            avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20
+
             # === TRADE SIMULIEREN ===
-            # Entry = nächster Tag, wenn Preis das Entry-Level erreicht
+            # Entry = nächster Tag, wenn Preis das Entry-Level erreicht + Volumen bestätigt
             max_hold = 15  # Max 15 Tage halten
             slippage = 0.001  # 0.1% Slippage
 
@@ -15941,6 +15962,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             exit_date = None
             tp1_hit = False
             bars_held = 0
+            current_stop = stop_price  # OPT 4: Wird nach TP1 auf Breakeven verschoben
 
             for day_offset in range(1, max_hold + 1):
                 future_idx = idx + day_offset
@@ -15951,36 +15973,41 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 if not entry_filled:
                     # Prüfe ob Entry erreicht wird
-                    if direction == "long" and future_bar["high"] >= entry_price:
-                        actual_entry = entry_price * (1 + slippage)
+                    price_hit = (direction == "long" and future_bar["high"] >= entry_price) or \
+                                (direction == "short" and future_bar["low"] <= entry_price)
+
+                    # OPT 3: Volume Confirmation — Breakout-Tag muss > 1.2x Avg Vol haben
+                    vol_confirmed = future_bar["volume"] >= avg_vol_20 * 1.2
+
+                    if price_hit and vol_confirmed:
+                        if direction == "long":
+                            actual_entry = entry_price * (1 + slippage)
+                        else:
+                            actual_entry = entry_price * (1 - slippage)
                         entry_filled = True
                         entry_date = future_bar["date"]
                         bars_held = 0
-                    elif direction == "short" and future_bar["low"] <= entry_price:
-                        actual_entry = entry_price * (1 - slippage)
-                        entry_filled = True
-                        entry_date = future_bar["date"]
-                        bars_held = 0
+                    elif price_hit and not vol_confirmed:
+                        # Preis erreicht aber kein Volumen → Fake Breakout, skip
+                        continue
                     elif day_offset >= 5:
-                        # Entry nicht erreicht nach 5 Tagen → abbrechen
                         break
                     continue
 
                 bars_held += 1
 
-                # Prüfe Stop und Target (Intraday-Reihenfolge via Open-Proximity)
+                # Prüfe Stop und Target (Intraday via Open-Proximity + Breakeven-Stop)
                 bar_open = future_bar["open"]
 
                 if direction == "long":
-                    stop_hit = future_bar["low"] <= stop_price
+                    stop_hit = future_bar["low"] <= current_stop  # OPT 4: current_stop statt stop_price
                     tp1_possible = future_bar["high"] >= tp1_price
                     tp2_possible = future_bar["high"] >= tp2_price
 
                     if stop_hit and tp2_possible:
-                        # Beide möglich → Open-Proximity entscheidet
-                        if abs(bar_open - stop_price) < abs(bar_open - tp2_price):
-                            exit_price = stop_price * (1 - slippage)
-                            exit_reason = "STOP"
+                        if abs(bar_open - current_stop) < abs(bar_open - tp2_price):
+                            exit_price = current_stop * (1 - slippage)
+                            exit_reason = "BE_STOP" if tp1_hit else "STOP"
                         else:
                             tp1_hit = True
                             exit_price = tp2_price * (1 - slippage)
@@ -15988,27 +16015,29 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         exit_date = future_bar["date"]
                         break
                     elif stop_hit:
-                        exit_price = stop_price * (1 - slippage)
-                        exit_reason = "STOP"
+                        exit_price = current_stop * (1 - slippage)
+                        exit_reason = "BE_STOP" if tp1_hit else "STOP"
                         exit_date = future_bar["date"]
                         break
                     else:
                         if tp1_possible and not tp1_hit:
                             tp1_hit = True
+                            # OPT 4: Breakeven-Stop nach TP1 Hit
+                            current_stop = actual_entry  # Stop auf Entry verschieben
                         if tp2_possible:
                             exit_price = tp2_price * (1 - slippage)
                             exit_reason = "TP2"
                             exit_date = future_bar["date"]
                             break
                 else:  # short
-                    stop_hit = future_bar["high"] >= stop_price
+                    stop_hit = future_bar["high"] >= current_stop  # OPT 4: current_stop
                     tp1_possible = future_bar["low"] <= tp1_price
                     tp2_possible = future_bar["low"] <= tp2_price
 
                     if stop_hit and tp2_possible:
-                        if abs(bar_open - stop_price) < abs(bar_open - tp2_price):
-                            exit_price = stop_price * (1 + slippage)
-                            exit_reason = "STOP"
+                        if abs(bar_open - current_stop) < abs(bar_open - tp2_price):
+                            exit_price = current_stop * (1 + slippage)
+                            exit_reason = "BE_STOP" if tp1_hit else "STOP"
                         else:
                             tp1_hit = True
                             exit_price = tp2_price * (1 + slippage)
@@ -16016,25 +16045,32 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         exit_date = future_bar["date"]
                         break
                     elif stop_hit:
-                        exit_price = stop_price * (1 + slippage)
-                        exit_reason = "STOP"
+                        exit_price = current_stop * (1 + slippage)
+                        exit_reason = "BE_STOP" if tp1_hit else "STOP"
                         exit_date = future_bar["date"]
                         break
                     else:
                         if tp1_possible and not tp1_hit:
                             tp1_hit = True
+                            current_stop = actual_entry  # OPT 4: Breakeven
                         if tp2_possible:
                             exit_price = tp2_price * (1 + slippage)
                             exit_reason = "TP2"
                             exit_date = future_bar["date"]
                             break
 
-            # Trade-Ende: TP1 als Exit wenn TP2 nicht erreicht
+            # Trade-Ende: OPT 5 — Partial-Exit Simulation
+            # Wenn TP1 erreicht aber TP2 nicht → 50% Gewinn von TP1 + 50% am Close
             if entry_filled and exit_price is None:
                 if tp1_hit:
-                    exit_price = tp1_price * (1 - slippage if direction == "long" else 1 + slippage)
-                    exit_reason = "TP1"
-                    exit_date = bars[min(idx + max_hold, len(bars)-1)]["date"]
+                    # TP1 wurde erreicht, TP2 nicht → simuliere 50/50 Split
+                    last_idx = min(idx + max_hold, len(bars)-1)
+                    tp1_exit = tp1_price * (1 - slippage if direction == "long" else 1 + slippage)
+                    close_exit = bars[last_idx]["close"]
+                    # Gewichteter Exit: 50% TP1 + 50% Close (BE-Stop schützt 2. Hälfte)
+                    exit_price = (tp1_exit + max(close_exit, actual_entry)) / 2  # min BE
+                    exit_reason = "TP1_PARTIAL"
+                    exit_date = bars[last_idx]["date"]
                 elif entry_filled:
                     # Max Hold → Exit at Close
                     last_idx = min(idx + max_hold, len(bars)-1)
