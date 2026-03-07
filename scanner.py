@@ -3438,20 +3438,71 @@ def calculate_rsi_from_bars(bars, period=14):
     return round(rsi, 1)
 
 
+def calculate_macd(bars, fast=12, slow=26, signal=9):
+    """MACD berechnen (Standard 12/26/9). Returns (macd_line, signal_line, histogram) oder (None,None,None)."""
+    if not bars or len(bars) < slow + signal:
+        return None, None, None
+    closes = [b["close"] for b in bars]
+    # EMA Berechnung
+    def _ema(data, period):
+        ema = [data[0]]
+        k = 2 / (period + 1)
+        for i in range(1, len(data)):
+            ema.append(data[i] * k + ema[-1] * (1 - k))
+        return ema
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+    macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(closes))]
+    signal_line = _ema(macd_line[slow-1:], signal)  # Signal ab slow-1
+    # Histogram = MACD - Signal (nur für die letzten signal Perioden)
+    offset = slow - 1
+    hist = [macd_line[offset + i] - signal_line[i] for i in range(len(signal_line))]
+    return macd_line[-1], signal_line[-1], hist
+
+
+def calculate_stochastic(bars, k_period=14, d_period=3):
+    """Stochastic Oscillator (%K, %D). Returns (k, d) oder (None, None)."""
+    if not bars or len(bars) < k_period + d_period:
+        return None, None
+    # %K für jeden Bar
+    k_values = []
+    for i in range(k_period - 1, len(bars)):
+        window = bars[i - k_period + 1:i + 1]
+        highest = max(b["high"] for b in window)
+        lowest = min(b["low"] for b in window)
+        if highest == lowest:
+            k_values.append(50.0)
+        else:
+            k_values.append(((bars[i]["close"] - lowest) / (highest - lowest)) * 100)
+    # %D = SMA von %K
+    if len(k_values) < d_period:
+        return None, None
+    d_values = []
+    for i in range(d_period - 1, len(k_values)):
+        d_values.append(sum(k_values[i - d_period + 1:i + 1]) / d_period)
+    return round(k_values[-1], 1), round(d_values[-1], 1)
+
+
 def analyze_breakout_imminent(bars, direction="long"):
     """
-    🔮 BREAKOUT IMMINENT — Multi-Signal Composite Prediction
+    🔮 BREAKOUT IMMINENT V2 — 20-Signal Composite Prediction
 
-    Kombiniert 12 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
-    Jeder Faktor gibt 0-10 Punkte. Maximum: 120 Punkte.
-    Threshold: 55 (Long) / 50 (Short — schwerer zu predicten)
+    Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
+    Jeder Faktor gibt 0-10 Punkte. Maximum: 200 Punkte.
+
+    Signalgruppen:
+    🔋 ENERGIE (1-4): ATR Squeeze, Vol Dry-Up, Bollinger Compression, Candle Compression
+    📊 MOMENTUM (5-8): RSI Drift, MACD Divergenz, Stochastic, ADX
+    🏦 SMART MONEY (9-12): OBV Divergenz, Inst. Accumulation, Order Blocks, Liquidity
+    📐 STRUKTUR (13-16): Range Duration, Boundary Tests, Higher Lows, Fib Confluence
+    🎯 TARGETS (17-20): Vol Profile Void, FVG Proximity, Relative Stärke, Close Clustering
 
     Args:
         bars: Liste von OHLC-Dicts (min 15 Tage, ideal 30)
         direction: "long" oder "short"
 
     Returns:
-        (is_valid, score, max_score, details, direction_confidence)
+        (is_valid, score, max_score, details, direction_confidence, grade)
     """
     if not bars or len(bars) < 10:
         return False, 0, 120, ["Nicht genug Daten (min 10 Tage)"], 0
@@ -3494,6 +3545,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                 details.append(f"⚠️ ATR leicht sinkend: {atr_ratio:.2f}x")
             else:
                 details.append(f"❌ Kein ATR-Squeeze: {atr_ratio:.2f}x")
+        else:
+            details.append("❌ ATR-Squeeze: Keine Prior-ATR Daten")
+    else:
+        details.append("❌ ATR-Squeeze: Nicht genug Daten (min 15 Tage)")
 
     # ===================================================================
     # SIGNAL 2: VOLUME DRY-UP — max 10 Punkte
@@ -3517,6 +3572,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                 details.append(f"⚠️ Vol leicht sinkend: {vol_decline:.2f}x")
             else:
                 details.append(f"❌ Kein Vol Dry-Up: {vol_decline:.2f}x")
+        else:
+            details.append("❌ Vol Dry-Up: Kein Prior-Volumen")
+    else:
+        details.append("❌ Vol Dry-Up: Nicht genug Daten (min 15 Tage)")
 
     # ===================================================================
     # SIGNAL 3: OBV-DIVERGENZ — max 10 Punkte
@@ -3535,26 +3594,39 @@ def analyze_breakout_imminent(bars, direction="long"):
     price_change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
     price_flat = abs(price_change_pct) < 5  # Preis relativ flat
 
-    if len(obv) >= 6 and price_flat:
+    if len(obv) >= 6:
         mid = len(obv) // 2
         early_obv = sum(obv[:mid]) / mid
         late_obv = sum(obv[mid:]) / (len(obv) - mid)
         obv_rising = late_obv > early_obv * 1.05
         obv_falling = late_obv < early_obv * 0.95
 
-        if direction == "long" and obv_rising:
-            score += 10
-            details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt")
-        elif direction == "short" and obv_falling:
-            score += 10
-            details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt")
-        elif direction == "long" and obv_falling:
-            details.append(f"❌ OBV faellt = eher Short")
-        elif direction == "short" and obv_rising:
-            details.append(f"❌ OBV steigt = eher Long")
+        if price_flat:
+            if direction == "long" and obv_rising:
+                score += 10
+                details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt")
+            elif direction == "short" and obv_falling:
+                score += 10
+                details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt")
+            elif direction == "long" and obv_falling:
+                details.append(f"❌ OBV faellt = eher Short")
+            elif direction == "short" and obv_rising:
+                details.append(f"❌ OBV steigt = eher Long")
+            else:
+                score += 3
+                details.append(f"⚠️ OBV neutral")
         else:
-            score += 3
-            details.append(f"⚠️ OBV neutral")
+            # Preis nicht flat — OBV-Richtung trotzdem bewerten (weniger Gewicht)
+            if direction == "long" and obv_rising:
+                score += 5
+                details.append(f"✅ OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
+            elif direction == "short" and obv_falling:
+                score += 5
+                details.append(f"✅ OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
+            else:
+                details.append(f"⚠️ OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
+    else:
+        details.append("❌ OBV: Nicht genug Daten")
 
     # ===================================================================
     # SIGNAL 4: CLOSE POSITION CLUSTERING — max 10 Punkte
@@ -3647,6 +3719,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                 details.append(f"✅ {lower_tests}x Support getestet")
             else:
                 details.append(f"⚠️ Wenig Boundary-Tests (Upper: {upper_tests}, Lower: {lower_tests})")
+        else:
+            details.append(f"❌ Boundary-Tests: Range-Size = 0")
+    else:
+        details.append(f"❌ Boundary-Tests: Keine Konsolidierung ({range_days} Tage < 5)")
 
     # ===================================================================
     # SIGNAL 7: ADX TURNING UP — max 10 Punkte
@@ -3706,24 +3782,38 @@ def analyze_breakout_imminent(bars, direction="long"):
     # ===================================================================
     rsi = calculate_rsi_from_bars(bars)
 
-    if rsi is not None and price_flat:
-        if direction == "long" and 55 <= rsi <= 65:
-            score += 10
-            details.append(f"🔥 RSI-Drift bullisch: {rsi:.0f} (Momentum baut auf)")
-        elif direction == "long" and 50 <= rsi < 55:
-            score += 5
-            details.append(f"✅ RSI leicht bullisch: {rsi:.0f}")
-        elif direction == "short" and 35 <= rsi <= 45:
-            score += 10
-            details.append(f"🔥 RSI-Drift baerisch: {rsi:.0f} (Schwaeche baut auf)")
-        elif direction == "short" and 45 < rsi <= 50:
-            score += 5
-            details.append(f"✅ RSI leicht baerisch: {rsi:.0f}")
-        elif 40 <= rsi <= 60:
-            score += 2
-            details.append(f"⚠️ RSI neutral: {rsi:.0f}")
+    if rsi is not None:
+        if price_flat:
+            # Preis flat + RSI driftet = unsichtbares Momentum (starkes Signal)
+            if direction == "long" and 55 <= rsi <= 65:
+                score += 10
+                details.append(f"🔥 RSI-Drift bullisch: {rsi:.0f} (Preis flat, Momentum baut auf)")
+            elif direction == "long" and 50 <= rsi < 55:
+                score += 5
+                details.append(f"✅ RSI leicht bullisch: {rsi:.0f}")
+            elif direction == "short" and 35 <= rsi <= 45:
+                score += 10
+                details.append(f"🔥 RSI-Drift baerisch: {rsi:.0f} (Preis flat, Schwaeche baut auf)")
+            elif direction == "short" and 45 < rsi <= 50:
+                score += 5
+                details.append(f"✅ RSI leicht baerisch: {rsi:.0f}")
+            elif 40 <= rsi <= 60:
+                score += 2
+                details.append(f"⚠️ RSI neutral: {rsi:.0f}")
+            else:
+                details.append(f"❌ RSI extrem: {rsi:.0f}")
         else:
-            details.append(f"❌ RSI extrem: {rsi:.0f}")
+            # Preis nicht flat — RSI trotzdem bewerten aber weniger Punkte
+            if direction == "long" and 50 <= rsi <= 65:
+                score += 4
+                details.append(f"✅ RSI bullisch: {rsi:.0f} (Preis bewegt: {price_change_pct:+.1f}%)")
+            elif direction == "short" and 35 <= rsi <= 50:
+                score += 4
+                details.append(f"✅ RSI baerisch: {rsi:.0f} (Preis bewegt: {price_change_pct:+.1f}%)")
+            else:
+                details.append(f"⚠️ RSI: {rsi:.0f} (Preis nicht flat: {price_change_pct:+.1f}%)")
+    else:
+        details.append("❌ RSI: Nicht genug Daten")
 
     # ===================================================================
     # SIGNAL 10: HIGHER LOWS / LOWER HIGHS IN RANGE — max 10 Punkte
@@ -3761,6 +3851,8 @@ def analyze_breakout_imminent(bars, direction="long"):
             details.append(f"✅ Tendenz Lower Highs: {lh_pct:.0%}")
         else:
             details.append(f"⚠️ Keine klare Struktur (HL: {hl_pct:.0%}, LH: {lh_pct:.0%})")
+    else:
+        details.append(f"❌ Higher Lows/Lower Highs: Zu kurze Range ({range_days} Tage < 6)")
 
     # ===================================================================
     # SIGNAL 11: RELATIVE STAERKE vs MARKT — max 10 Punkte
@@ -3815,20 +3907,346 @@ def analyze_breakout_imminent(bars, direction="long"):
             details.append(f"❌ Keine Kompression: StdDev {std_dev_pct:.2f}%")
 
     # ===================================================================
-    # FINAL SCORE + RICHTUNGS-KONFIDENZ
+    # SIGNAL 13: MACD HISTOGRAM DIVERGENZ — max 10 Punkte
+    # MACD-Histogram dreht → unsichtbares Momentum baut auf
     # ===================================================================
-    max_score = 120
+    macd_line, signal_line, hist = calculate_macd(bars)
+    if hist and len(hist) >= 3:
+        # Histogram Slope: letzte 3 Werte
+        hist_slope = hist[-1] - hist[-3]
+        hist_turning = (hist[-2] < hist[-1]) if direction == "long" else (hist[-2] > hist[-1])
 
-    # Richtungs-Konfidenz: Wie viele Signale zeigen in die richtige Richtung?
+        if direction == "long" and hist[-1] < 0 and hist_slope > 0 and hist_turning:
+            score += 10
+            details.append(f"🔥 MACD-Divergenz bullisch: Histogram dreht auf ({hist[-1]:.3f})")
+        elif direction == "long" and hist_slope > 0:
+            score += 5
+            details.append(f"✅ MACD-Histogram steigend")
+        elif direction == "short" and hist[-1] > 0 and hist_slope < 0 and hist_turning:
+            score += 10
+            details.append(f"🔥 MACD-Divergenz baerisch: Histogram kippt ({hist[-1]:.3f})")
+        elif direction == "short" and hist_slope < 0:
+            score += 5
+            details.append(f"✅ MACD-Histogram fallend")
+        else:
+            details.append(f"⚠️ MACD neutral (Hist: {hist[-1]:.3f})")
+    else:
+        details.append("❌ MACD: Nicht genug Daten")
+
+    # ===================================================================
+    # SIGNAL 14: STOCHASTIC MOMENTUM — max 10 Punkte
+    # %K/%D Kreuzung in Extremzonen = starkes Timing-Signal
+    # ===================================================================
+    stoch_k, stoch_d = calculate_stochastic(bars)
+    if stoch_k is not None and stoch_d is not None:
+        if direction == "long":
+            # Breakout-Kontext: %K rising + crossover ist wichtiger als Extremzone
+            if stoch_k < 30 and stoch_k > stoch_d:
+                score += 10
+                details.append(f"🔥 Stochastic bullisch: %K={stoch_k:.0f} kreuzt %D={stoch_d:.0f} in Oversold")
+            elif stoch_k < 50 and stoch_k > stoch_d:
+                score += 7
+                details.append(f"✅ Stochastic steigend aus Mitte: %K={stoch_k:.0f} > %D={stoch_d:.0f}")
+            elif stoch_k > stoch_d:
+                score += 3
+                details.append(f"⚠️ Stochastic steigend: %K={stoch_k:.0f} (aber schon hoch)")
+            elif stoch_k > 80:
+                details.append(f"❌ Stochastic ueberkauft: {stoch_k:.0f}")
+            else:
+                details.append(f"⚠️ Stochastic neutral: %K={stoch_k:.0f}")
+        else:  # short
+            if stoch_k > 70 and stoch_k < stoch_d:
+                score += 10
+                details.append(f"🔥 Stochastic baerisch: %K={stoch_k:.0f} kreuzt %D={stoch_d:.0f} in Overbought")
+            elif stoch_k > 50 and stoch_k < stoch_d:
+                score += 7
+                details.append(f"✅ Stochastic fallend aus Mitte: %K={stoch_k:.0f} < %D={stoch_d:.0f}")
+            elif stoch_k < stoch_d:
+                score += 3
+                details.append(f"⚠️ Stochastic fallend: %K={stoch_k:.0f} (aber schon niedrig)")
+            elif stoch_k < 20:
+                details.append(f"❌ Stochastic ueberverkauft: {stoch_k:.0f}")
+            else:
+                details.append(f"⚠️ Stochastic neutral: %K={stoch_k:.0f}")
+    else:
+        details.append("❌ Stochastic: Nicht genug Daten")
+
+    # ===================================================================
+    # SIGNAL 15: ORDER BLOCK CONFLUENCE — max 10 Punkte
+    # Breakout nahe einem Order Block = institutionelle Zone
+    # ===================================================================
+    try:
+        ob_data = detect_order_blocks(bars, max_blocks=5)
+        range_high_15 = max(highs[-min(15, n):])
+        range_low_15 = min(lows[-min(15, n):])
+        atr_ob = sum((bars[i]["high"] - bars[i]["low"]) for i in range(max(0, n-10), n)) / min(10, n)
+
+        if direction == "long":
+            bull_obs = ob_data.get("bullish_obs", [])
+            if bull_obs:
+                # Stärkster Check: Bullish OB nahe Range-High (Breakout-Level) = Kauf-Interesse am Ausbruchspunkt
+                near_breakout = any(abs(ob["zone_high"] - range_high_15) < atr_ob * 2 for ob in bull_obs)
+                # Zweitstärkst: Bullish OB nahe Range-Low = Demand Zone stützt Basis
+                near_support = any(abs(ob["zone_low"] - range_low_15) < atr_ob * 2 for ob in bull_obs)
+                if near_breakout:
+                    score += 10
+                    details.append(f"🔥 Bullish OB nahe Breakout-Level = institutionelles Kaufinteresse!")
+                elif near_support:
+                    score += 7
+                    details.append(f"✅ Bullish OB stuetzt Range-Low = Demand Zone")
+                else:
+                    score += 3
+                    details.append(f"⚠️ Bullish OBs vorhanden ({len(bull_obs)}x) aber nicht in Naehe")
+            else:
+                details.append(f"❌ Keine Bullish Order Blocks")
+        else:  # short
+            bear_obs = ob_data.get("bearish_obs", [])
+            if bear_obs:
+                near_breakout = any(abs(ob["zone_low"] - range_low_15) < atr_ob * 2 for ob in bear_obs)
+                near_resistance = any(abs(ob["zone_high"] - range_high_15) < atr_ob * 2 for ob in bear_obs)
+                if near_breakout:
+                    score += 10
+                    details.append(f"🔥 Bearish OB nahe Breakdown-Level = institutioneller Verkaufsdruck!")
+                elif near_resistance:
+                    score += 7
+                    details.append(f"✅ Bearish OB deckt Range-High = Supply Zone")
+                else:
+                    score += 3
+                    details.append(f"⚠️ Bearish OBs vorhanden ({len(bear_obs)}x) aber nicht in Naehe")
+            else:
+                details.append(f"❌ Keine Bearish Order Blocks")
+    except Exception:
+        details.append("⚠️ Order Block Check uebersprungen")
+
+    # ===================================================================
+    # SIGNAL 16: VOLUME IMBALANCE / FVG PROXIMITY — max 10 Punkte
+    # FVG ueber Preis = Magnet fuer Long, unter Preis = Magnet fuer Short
+    # ===================================================================
+    try:
+        vi_data = detect_volume_imbalances(bars, max_zones=20)
+        if direction == "long" and vi_data.get("unfilled_bull"):
+            # Unfilled Bullish FVG über aktuellem Preis = Preis wird hingezogen
+            above_fvgs = [z for z in vi_data["unfilled_bull"] if z.get("zone_low", z.get("low", 0)) > current_price]
+            if above_fvgs:
+                score += 10
+                details.append(f"🔥 {len(above_fvgs)} unfilled FVGs ueber Preis = Breakout-Magneten")
+            elif vi_data["unfilled_bull"]:
+                score += 4
+                details.append(f"✅ Bullish FVGs vorhanden ({len(vi_data['unfilled_bull'])}x)")
+            else:
+                details.append(f"⚠️ Keine bullischen FVGs")
+        elif direction == "short" and vi_data.get("unfilled_bear"):
+            below_fvgs = [z for z in vi_data["unfilled_bear"] if z.get("zone_high", z.get("high", 999999)) < current_price]
+            if below_fvgs:
+                score += 10
+                details.append(f"🔥 {len(below_fvgs)} unfilled FVGs unter Preis = Breakdown-Magneten")
+            elif vi_data["unfilled_bear"]:
+                score += 4
+                details.append(f"✅ Bearish FVGs vorhanden ({len(vi_data['unfilled_bear'])}x)")
+            else:
+                details.append(f"⚠️ Keine baerischen FVGs")
+        else:
+            details.append(f"⚠️ Keine relevanten FVGs")
+    except Exception:
+        details.append("⚠️ FVG Check uebersprungen")
+
+    # ===================================================================
+    # SIGNAL 17: LIQUIDITY POOL PROXIMITY — max 10 Punkte
+    # Buyside Liquidity ueber Range = Stops werden gejagt → explosiver Move
+    # ===================================================================
+    try:
+        liq_data = detect_liquidity_levels(bars, max_levels=5)
+        range_high_17 = max(highs[-min(15, n):])
+        range_low_17 = min(lows[-min(15, n):])
+
+        if direction == "long" and liq_data.get("buyside"):
+            # Buyside Liq knapp über Range-High = Stops-Jagd → explosiv
+            near_liq = [l for l in liq_data["buyside"] if l["price"] > range_high_17 and (l["price"] - range_high_17) / current_price * 100 < 3]
+            if near_liq:
+                score += 10
+                details.append(f"🔥 Buyside Liquidity {near_liq[0]['price']:.2f} knapp ueber Range = Stop-Hunt Potential")
+            elif liq_data["buyside"]:
+                score += 3
+                details.append(f"✅ Buyside Liq vorhanden ({len(liq_data['buyside'])} Levels)")
+            else:
+                details.append(f"⚠️ Keine Buyside Liquidity erkannt")
+        elif direction == "short" and liq_data.get("sellside"):
+            near_liq = [l for l in liq_data["sellside"] if l["price"] < range_low_17 and (range_low_17 - l["price"]) / current_price * 100 < 3]
+            if near_liq:
+                score += 10
+                details.append(f"🔥 Sellside Liquidity {near_liq[0]['price']:.2f} knapp unter Range = Stop-Hunt Potential")
+            elif liq_data["sellside"]:
+                score += 3
+                details.append(f"✅ Sellside Liq vorhanden ({len(liq_data['sellside'])} Levels)")
+            else:
+                details.append(f"⚠️ Keine Sellside Liquidity erkannt")
+        else:
+            details.append(f"⚠️ Keine relevanten Liquidity Levels")
+    except Exception:
+        details.append("⚠️ Liquidity Check uebersprungen")
+
+    # ===================================================================
+    # SIGNAL 18: FIBONACCI CONFLUENCE — max 10 Punkte
+    # Preis nahe Key-Fib-Level = starker Breakout-Punkt
+    # ===================================================================
+    if n >= 20:
+        # Finde Swing High/Low der letzten 30 Bars fuer Fib
+        lookback = min(30, n)
+        swing_high = max(highs[-lookback:])
+        swing_low = min(lows[-lookback:])
+        fib_range = swing_high - swing_low
+
+        if fib_range > 0 and current_price > 0:
+            # Alle Fib-Level berechnen
+            fib_levels = {
+                "23.6%": swing_high - fib_range * 0.236,
+                "38.2%": swing_high - fib_range * 0.382,
+                "50.0%": swing_high - fib_range * 0.500,
+                "61.8%": swing_high - fib_range * 0.618,
+                "78.6%": swing_high - fib_range * 0.786,
+            }
+            tolerance = fib_range * 0.03  # 3% der Range als Toleranz
+
+            # Direktional filtern: Long = obere Fibs (23.6%, 38.2%), Short = untere Fibs (61.8%, 78.6%)
+            if direction == "long":
+                # Für Long-Breakout: Preis sollte nahe 23.6% oder 38.2% sein (obere Range)
+                bullish_fibs = {"23.6%": fib_levels["23.6%"], "38.2%": fib_levels["38.2%"]}
+                near_fibs = [name for name, level in bullish_fibs.items() if abs(current_price - level) < tolerance]
+                # Auch 50% akzeptieren (mittlere Stärke)
+                if not near_fibs and abs(current_price - fib_levels["50.0%"]) < tolerance:
+                    near_fibs = ["50.0%"]
+            else:
+                # Für Short-Breakdown: Preis sollte nahe 61.8% oder 78.6% sein (untere Range)
+                bearish_fibs = {"61.8%": fib_levels["61.8%"], "78.6%": fib_levels["78.6%"]}
+                near_fibs = [name for name, level in bearish_fibs.items() if abs(current_price - level) < tolerance]
+                if not near_fibs and abs(current_price - fib_levels["50.0%"]) < tolerance:
+                    near_fibs = ["50.0%"]
+
+            if near_fibs:
+                score += 10
+                details.append(f"🔥 Fib-Confluence: Preis nahe {', '.join(near_fibs)} ({'bullisch' if direction == 'long' else 'baerisch'})")
+            else:
+                # Prüfe ob Range-Boundary nahe Fib
+                range_h = max(highs[-min(15, n):])
+                range_l = min(lows[-min(15, n):])
+                boundary = range_h if direction == "long" else range_l
+                near_boundary_fibs = [name for name, level in fib_levels.items() if abs(boundary - level) < tolerance]
+                if near_boundary_fibs:
+                    score += 5
+                    details.append(f"✅ Range-Boundary nahe Fib {', '.join(near_boundary_fibs)}")
+                else:
+                    details.append(f"⚠️ Kein relevantes Fib-Level in der Naehe")
+        else:
+            details.append(f"❌ Fib: Range zu klein")
+    else:
+        details.append("❌ Fib: Nicht genug Daten (min 20 Tage)")
+
+    # ===================================================================
+    # SIGNAL 19: VOLUME PROFILE VOID — max 10 Punkte
+    # Low-Volume-Zone ueber/unter Range = Preis fliegt durch (kein Widerstand)
+    # ===================================================================
+    try:
+        vol_profile = calculate_volume_profile(bars, num_bins=15)
+        if vol_profile:
+            void_data = find_volume_voids(current_price, vol_profile, min_void_size_pct=0.5)
+            if void_data:
+                if direction == "long" and void_data.get("voids_above"):
+                    nearest = void_data["nearest_void_above"]
+                    if nearest:
+                        dist_pct = (nearest["low"] - current_price) / current_price * 100 if current_price > 0 else 99
+                        if dist_pct < 5:
+                            score += 10
+                            details.append(f"🔥 Volume Void {dist_pct:.1f}% ueber Preis = Vakuum-Effekt!")
+                        elif dist_pct < 10:
+                            score += 5
+                            details.append(f"✅ Volume Void {dist_pct:.1f}% entfernt")
+                        else:
+                            details.append(f"⚠️ Volume Void zu weit: {dist_pct:.1f}%")
+                    else:
+                        details.append(f"⚠️ Kein Volume Void ueber Preis")
+                elif direction == "short" and void_data.get("voids_below"):
+                    nearest = void_data["nearest_void_below"]
+                    if nearest:
+                        dist_pct = (current_price - nearest["high"]) / current_price * 100 if current_price > 0 else 99
+                        if dist_pct < 5:
+                            score += 10
+                            details.append(f"🔥 Volume Void {dist_pct:.1f}% unter Preis = Vakuum-Effekt!")
+                        elif dist_pct < 10:
+                            score += 5
+                            details.append(f"✅ Volume Void {dist_pct:.1f}% entfernt")
+                        else:
+                            details.append(f"⚠️ Volume Void zu weit: {dist_pct:.1f}%")
+                    else:
+                        details.append(f"⚠️ Kein Volume Void unter Preis")
+                else:
+                    details.append(f"⚠️ Kein relevanter Volume Void")
+            else:
+                details.append(f"⚠️ Volume Void Analyse leer")
+        else:
+            details.append(f"⚠️ Volume Profile nicht berechenbar")
+    except Exception:
+        details.append("⚠️ Volume Void Check uebersprungen")
+
+    # ===================================================================
+    # SIGNAL 20: CANDLE BODY COMPRESSION — max 10 Punkte
+    # Body-zu-Range Ratio sinkt = Doji-artige Kerzen = Gleichgewicht = Breakout imminent
+    # ===================================================================
+    if n >= 10:
+        # Vergleiche Body/Range Ratio: letzte 5 vs vorherige 10
+        def _body_ratio(b):
+            rng = b["high"] - b["low"]
+            if rng <= 0:
+                return 1.0
+            return abs(b["close"] - b["open"]) / rng
+
+        recent_body_ratios = [_body_ratio(b) for b in bars[-5:]]
+        prior_body_ratios = [_body_ratio(b) for b in bars[-15:-5]] if n >= 15 else [_body_ratio(b) for b in bars[:-5]]
+
+        avg_recent_body = sum(recent_body_ratios) / len(recent_body_ratios) if recent_body_ratios else 0.5
+        avg_prior_body = sum(prior_body_ratios) / len(prior_body_ratios) if prior_body_ratios else 0.5
+
+        if avg_prior_body > 0:
+            body_compression = avg_recent_body / avg_prior_body
+
+            if body_compression < 0.4:
+                score += 10
+                details.append(f"🔥 Extreme Body-Kompression: {body_compression:.2f}x (Doji-Cluster!)")
+            elif body_compression < 0.6:
+                score += 7
+                details.append(f"✅ Starke Body-Kompression: {body_compression:.2f}x")
+            elif body_compression < 0.8:
+                score += 3
+                details.append(f"⚠️ Leichte Body-Kompression: {body_compression:.2f}x")
+            else:
+                details.append(f"❌ Keine Body-Kompression: {body_compression:.2f}x")
+
+    # ===================================================================
+    # FINAL SCORE + RICHTUNGS-KONFIDENZ + GRADE
+    # ===================================================================
+    max_score = 200
+
+    # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
+    # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation
     directional_signals = sum(1 for d in details if "🔥" in d or "✅" in d)
-    total_signals = len(details)
-    direction_confidence = round((directional_signals / max(1, total_signals)) * 100)
+    direction_confidence = round((directional_signals / 20) * 100)
 
-    # Threshold: Long 65, Short 60 — nur starke Setups durchlassen
-    threshold = 65 if direction == "long" else 60
+    # Grade System
+    if score >= 170:
+        grade = "S"  # 🏆 ELITE
+    elif score >= 140:
+        grade = "A"  # 🔥 STARK
+    elif score >= 110:
+        grade = "B"  # ✅ SOLIDE
+    elif score >= 80:
+        grade = "C"  # ⚠️ WATCHLIST
+    else:
+        grade = "D"  # ❌ SCHWACH
+
+    # Threshold: Long 100, Short 90 (50%/45% von 200)
+    threshold = 100 if direction == "long" else 90
     is_valid = score >= threshold
 
-    return is_valid, score, max_score, details, direction_confidence
+    return is_valid, score, max_score, details, direction_confidence, grade
 
 
 # =============================================================================
@@ -17856,7 +18274,7 @@ with st.sidebar:
                             if not bars or len(bars) < 10:
                                 continue
 
-                            is_valid, score, max_score, details, confidence = analyze_breakout_imminent(bars, direction=bi_direction)
+                            is_valid, score, max_score, details, confidence, grade = analyze_breakout_imminent(bars, direction=bi_direction)
 
                             if is_valid:
                                 # Range berechnen
@@ -17865,15 +18283,19 @@ with st.sidebar:
                                 range_size = range_high - range_low
                                 range_pct = (range_size / range_low * 100) if range_low > 0 else 0
 
-                                # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 3% sein!
-                                # Unter 3% = tote Aktie, kein echter Breakout-Kandidat
-                                if range_pct < 3.0:
+                                # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 2% sein!
+                                # Unter 2% = zu enger Range, kein sinnvoller Breakout-Kandidat
+                                if range_pct < 2.0:
                                     continue
 
-                                # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.5% sein
+                                # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.3% sein
                                 avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
-                                if avg_daily_range < 0.5:
+                                if avg_daily_range < 0.3:
                                     continue
+
+                                # Grade Emoji
+                                grade_map = {"S": "🏆 ELITE", "A": "🔥 STARK", "B": "✅ SOLIDE", "C": "⚠️ WATCH", "D": "❌ SCHWACH"}
+                                grade_label = grade_map.get(grade, grade)
 
                                 candidate["Alpha"] = score
                                 candidate["BI_Score"] = score
@@ -17881,6 +18303,8 @@ with st.sidebar:
                                 candidate["BI_Details"] = details
                                 candidate["BI_Confidence"] = confidence
                                 candidate["BI_Direction"] = bi_direction.upper()
+                                candidate["BI_Grade"] = grade
+                                candidate["BI_GradeLabel"] = grade_label
 
                                 # Entry/SL/TP basierend auf Range — mit ATR-basiertem Risiko
                                 # ATR für realistischere SL-Berechnung
@@ -19140,38 +19564,42 @@ with tab_scanner:
                 if is_bi and "BI_Score" in df.columns:
                     try:
                         bi_score = row.get("BI_Score", 0)
-                        bi_max = row.get("BI_MaxScore", 120)
+                        bi_max = row.get("BI_MaxScore", 200)
                         bi_conf = row.get("BI_Confidence", 0)
                         bi_details = row.get("BI_Details", [])
                         bi_dir = row.get("BI_Direction", "LONG")
+                        bi_grade = row.get("BI_GradeLabel", "")
 
                         st.divider()
                         dir_label = "⬆️ LONG" if bi_dir == "LONG" else "⬇️ SHORT"
 
-                        # Score-basierte Farbe
-                        if bi_score >= 80:
-                            st.success(f"🔮 **Breakout Imminent** {dir_label} | Score: **{bi_score}/{bi_max}** | Konfidenz: {bi_conf}%")
-                        elif bi_score >= 65:
-                            st.info(f"🔮 **Breakout Imminent** {dir_label} | Score: **{bi_score}/{bi_max}** | Konfidenz: {bi_conf}%")
+                        # Grade-basierte Farbe
+                        bi_grade_letter = row.get("BI_Grade", "D")
+                        if bi_grade_letter == "S":
+                            st.success(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                        elif bi_grade_letter == "A":
+                            st.success(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                        elif bi_grade_letter == "B":
+                            st.info(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
                         else:
-                            st.warning(f"🔮 **Breakout Imminent** {dir_label} | Score: **{bi_score}/{bi_max}** | Konfidenz: {bi_conf}%")
+                            st.warning(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
 
-                        # Signal-Details
+                        # Signal-Details nach Gruppen
                         if isinstance(bi_details, list):
                             fire_signals = [d for d in bi_details if "🔥" in str(d)]
                             ok_signals = [d for d in bi_details if "✅" in str(d)]
                             weak_signals = [d for d in bi_details if "⚠️" in str(d) or "❌" in str(d)]
 
                             if fire_signals:
-                                st.caption("**🔥 Starke Signale:**")
+                                st.caption(f"**🔥 Starke Signale ({len(fire_signals)}/20):**")
                                 for s in fire_signals:
                                     st.caption(f"  {s}")
                             if ok_signals:
-                                st.caption("**✅ Positive Signale:**")
+                                st.caption(f"**✅ Positive Signale ({len(ok_signals)}/20):**")
                                 for s in ok_signals:
                                     st.caption(f"  {s}")
                             if weak_signals:
-                                with st.expander("⚠️ Schwache/Fehlende Signale"):
+                                with st.expander(f"⚠️ Schwache/Fehlende Signale ({len(weak_signals)}/20)"):
                                     for s in weak_signals:
                                         st.caption(f"  {s}")
 
@@ -20885,29 +21313,52 @@ Erkennt XABCD-Patterns basierend auf Fibonacci-Verhältnissen: Gartley, Bat, But
 *Empfohlen für:* Erfahrene Swing Trader. Harmonic Patterns haben hohe Trefferquoten wenn korrekt identifiziert. Preis $5-500.
 """)
 
-        st.subheader("🔮 Breakout Imminent (12-Signal Composite)")
+        st.subheader("🔮 Breakout Imminent V2 (20-Signal Composite)")
 
         st.markdown("""
 **Breakout Imminent Long 🔮⬆️ / Breakout Imminent Short 🔮⬇️**
-Das fortschrittlichste Setup im Scanner. Kombiniert **12 unabhängige Signale** zu einem Composite Score (max 120 Punkte):
+Das fortschrittlichste Setup im Scanner. Kombiniert **20 unabhängige Signale** aus 5 Kategorien zu einem Composite Score (max 200 Punkte):
 
-1. **ATR Squeeze** — Volatilität der letzten 5 Tage vs. vorherige 15 Tage sinkt → Compression
-2. **Volume Dry-Up** — Volumen der letzten 5 Tage vs. vorherige 15 Tage sinkt → Desinteresse vor Explosion
-3. **OBV Divergenz** — On-Balance Volume steigt (Long) / fällt (Short) obwohl Preis seitwärts → Smart Money
-4. **ADX Trend** — ADX steigt über vorheriges Niveau → neuer Trend formiert sich
-5. **Close Clustering** — Schlusskurse eng beieinander (StdDev <1.5%) → Konsolidierung bestätigt
-6. **Range Duration** — Preis bewegt sich seit >5 Tagen in enger Range → je länger, desto stärker der Ausbruch
-7. **Boundary Tests** — Preis testet Range-Grenzen 4+ mal → Widerstand/Support wird schwächer
-8. **Institutional Days** — Tage mit >1.5x Volumen + wenig Preisbewegung → Fonds akkumulieren/distribuieren
-9. **RSI Drift** — RSI driftet Richtung 55+ (Long) oder unter 45 (Short) → subtiler Bias
-10. **Higher Lows / Lower Highs** — Strukturelle Verengung → Druck baut sich auf
-11. **Resilience/Weakness** — Erholung nach roten Tagen (Long) / Schwäche nach grünen (Short)
-12. **StdDev Compression** — Standardabweichung der Returns sinkt → statistische Breakout-Wahrscheinlichkeit steigt
+🔋 **ENERGIE (Compression-Signale):**
+1. **ATR Squeeze** — Volatilität schrumpft → Energie baut sich auf
+2. **Volume Dry-Up** — Volumen sinkt → Desinteresse vor Explosion
+3. **StdDev Compression** — Standardabweichung sinkt → statistische Breakout-Wahrscheinlichkeit steigt
+4. **Candle Body Compression** — Kerzenkörper werden kleiner (Doji-Cluster) → Gleichgewicht vor Ausbruch
 
-**Schwellenwerte:** Long ≥55 Punkte, Short ≥50 Punkte. Nutzt 30 Tage History.
-Entry/SL/TP werden automatisch auf Basis der Range berechnet.
+📊 **MOMENTUM (Frühindikatoren):**
+5. **RSI Drift** — RSI driftet Richtung 55+ (Long) / unter 45 (Short) → subtiler Bias
+6. **MACD Histogram Divergenz** — Histogram dreht bei flachem Preis → unsichtbares Momentum
+7. **Stochastic Momentum** — %K kreuzt %D in Extremzonen → Timing-Signal
+8. **ADX Turning** — ADX < 20 + steigend → neuer Trend formiert sich JETZT
 
-*Empfohlen für:* Swing Trading (2-10 Tage). DAS beste Setup für frühzeitige Breakout-Erkennung. Funktioniert am besten bei Aktien $5-$1000 mit moderatem RVOL.
+🏦 **SMART MONEY (Institutionelle Aktivität):**
+9. **OBV Divergenz** — OBV vs. Preis divergiert → Smart Money positioniert sich
+10. **Institutional Accumulation Days** — Hohes Volumen + kleine Kerzen → Fonds laden auf
+11. **Order Block Confluence** — Breakout-Level nahe institutioneller Kauf/Verkaufszone
+12. **Liquidity Pool Proximity** — Stop-Cluster über/unter Range → explosiver Stop-Hunt Effekt
+
+📐 **STRUKTUR (Pattern-Signale):**
+13. **Range Duration** — Konsolidierung >10 Tage → stärkerer Ausbruch
+14. **Boundary Tests** — 4+ Tests an Resistance/Support → Wand wird schwächer
+15. **Higher Lows / Lower Highs** — Strukturelle Verengung → Kontrolle wird übernommen
+16. **Fibonacci Confluence** — Preis nahe Key-Fib-Level (38.2%, 50%, 61.8%) → starker Wendepunkt
+
+🎯 **TARGETS (Breakout-Ziele):**
+17. **Volume Void Above/Below** — Low-Volume-Zone über/unter Preis = Vakuum-Effekt
+18. **FVG/Volume Imbalance** — Unfilled Fair Value Gaps = Preismagneten
+19. **Relative Stärke** — Resilience nach Dips (Long) / Schwäche nach Bounces (Short)
+20. **Close Position Clustering** — Closes nahe Highs (Long) / Lows (Short) → Bias bestätigt
+
+**Grade-System:**
+- 🏆 **S-Tier** (≥170): ELITE SETUP — höchste Wahrscheinlichkeit
+- 🔥 **A-Tier** (≥140): STARK — sehr guter Kandidat
+- ✅ **B-Tier** (≥110): SOLIDE — tradeworthy
+- ⚠️ **C-Tier** (≥80): WATCHLIST — beobachten
+
+**Schwellenwerte:** Long ≥100 Punkte, Short ≥90 Punkte. Nutzt 30 Tage History.
+Entry/SL/TP automatisch berechnet (ATR-basierter Stop, Measured Move Targets).
+
+*Empfohlen für:* Swing Trading (2-10 Tage). DAS beste Setup für frühzeitige Breakout-Erkennung.
 """)
 
         st.subheader("🏦 Wyckoff Strategien")
