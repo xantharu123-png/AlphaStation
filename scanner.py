@@ -16366,14 +16366,21 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 # =============================================================================
 
 DEFAULT_CRYPTO_COINS = [
-    # Mega Cap
-    "BTC", "ETH",
-    # Large Cap
-    "BNB", "SOL", "XRP", "ADA",
-    # Mid Cap
-    "AVAX", "LINK", "DOT", "ARB",
-    # Small Cap
-    "FET", "TIA", "SEI",
+    # Mega Cap (Top 5 by Market Cap)
+    "BTC", "ETH", "BNB", "SOL", "XRP",
+    # Large Cap (Top 6-15)
+    "ADA", "DOGE", "TRX", "TON", "LINK",
+    "AVAX", "SHIB", "DOT", "LTC", "SUI",
+    # Mid Cap (Top 16-30)
+    "ICP", "UNI", "NEAR", "APT", "ATOM",
+    "FIL", "HBAR", "ARB", "OP", "INJ",
+    "VET", "FTM", "ALGO", "SEI", "TIA",
+    # Small Cap / DeFi / Memes
+    "FET", "RENDER", "IMX", "PEPE", "BONK",
+    "FLOKI", "WIF", "ENS", "1INCH", "SUSHI",
+    "AAVE", "MKR", "CRV", "LDO", "SNX",
+    "COMP", "RPL", "AXS", "SAND", "MANA",
+    "APE", "GMT", "XLM", "MATIC",
 ]
 
 
@@ -17348,8 +17355,8 @@ def display_backtest_lab(poly_key):
         with col_c2:
             crypto_direction = st.selectbox("📈 Richtung", ["long", "short"], key="crypto_bt_dir")
 
-        st.caption("🪙 Default: BTC, ETH, BNB, SOL, XRP, ADA, AVAX, LINK, DOT, ARB, FET, TIA, SEI")
-        st.caption(f"⏱️ ~2-3 Minuten (13 Coins × CoinGecko Rate Limit ~10 Calls/Min)")
+        st.caption(f"🪙 {len(DEFAULT_CRYPTO_COINS)} Coins: Top 30 by Market Cap + DeFi + Memes")
+        st.caption(f"⏱️ ~6-8 Minuten ({len(DEFAULT_CRYPTO_COINS)} Coins × CoinGecko Rate Limit ~10 Calls/Min)")
 
         if st.button("🚀 Crypto Backtest starten", type="primary", use_container_width=True, key="crypto_bt_start"):
             progress_bar = st.progress(0, text="Starte Crypto Backtest...")
@@ -17357,7 +17364,7 @@ def display_backtest_lab(poly_key):
             def update_crypto_progress(pct, text):
                 progress_bar.progress(min(pct, 1.0), text=text)
 
-            with st.spinner(f"Analysiere 13 Coins über {crypto_days} Tage..."):
+            with st.spinner(f"Analysiere {len(DEFAULT_CRYPTO_COINS)} Coins über {crypto_days} Tage..."):
                 crypto_results = run_crypto_backtest(
                     direction=crypto_direction,
                     days=crypto_days,
