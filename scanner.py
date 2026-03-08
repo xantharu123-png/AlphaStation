@@ -15936,9 +15936,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
             breakout_threshold = atr_5 * 0.25  # ATR-basiert statt fixer 0.5% (#20)
 
-            # Grade-abhängiger Stop: C bekommt etwas mehr Luft (weniger frühzeitige Stops)
-            # B+ hat strengeren Breakout → kann engeren Stop vertragen
-            stop_atr_mult = 1.5 if grade == "C" else 1.2
+            # Stop ATR×1.2 für alle Grades (bewährt — NICHT ändern!)
+            stop_atr_mult = 1.2
 
             if direction == "long":
                 breakout_level = round(range_high, 4)
