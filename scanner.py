@@ -4252,15 +4252,16 @@ def analyze_breakout_imminent(bars, direction="long"):
             elif "✅" in details[bi]:
                 smart_money_hits += 1
 
-    # Grade System V2.1 (mit angehobenen Mittelstufen)
-    if score >= 140:
-        grade = "S"  # 🏆 ELITE — Braucht 4+ Boosted fires
-    elif score >= 120:
-        grade = "A"  # 🔥 STARK — Braucht 3+ Boosted fires
-    elif score >= 100:
-        grade = "B"  # ✅ SOLIDE — Braucht 2+ Boosted fires
+    # Grade System V2.5 — Score + Smart Money kombiniert
+    # Höhere Grades brauchen BEIDES: hohen Score UND Smart Money Signale
+    if score >= 120 and smart_money_fires >= 4:
+        grade = "S"  # 🏆 ELITE — Score 120+ UND 4+ Boosted 🔥 fires
+    elif score >= 105 and smart_money_fires >= 3:
+        grade = "A"  # 🔥 STARK — Score 105+ UND 3+ Boosted 🔥 fires
+    elif score >= 90 and smart_money_hits >= 2:
+        grade = "B"  # ✅ SOLIDE — Score 90+ UND 2+ Boosted hits
     elif score >= 80:
-        grade = "C"  # ⚠️ WATCHLIST — 1+ Boosted fires
+        grade = "C"  # ⚠️ WATCHLIST — Score 80+
     else:
         grade = "D"  # ❌ SCHWACH
 
@@ -15935,18 +15936,22 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
             breakout_threshold = atr_5 * 0.25  # ATR-basiert statt fixer 0.5% (#20)
 
+            # Grade-abhängiger Stop: C bekommt etwas mehr Luft (weniger frühzeitige Stops)
+            # B+ hat strengeren Breakout → kann engeren Stop vertragen
+            stop_atr_mult = 1.5 if grade == "C" else 1.2
+
             if direction == "long":
                 breakout_level = round(range_high, 4)
                 retest_zone_upper = round(range_high + atr_5 * 0.15, 4)  # Knapp über Range-High
                 retest_zone_lower = round(range_high - atr_5 * 0.3, 4)   # Leicht unter Range-High
-                stop_price = round(range_high - atr_5 * 1.2, 4)          # FIX #3: ATR×1.2 (war 0.75)
+                stop_price = round(range_high - atr_5 * stop_atr_mult, 4)
                 tp1_price = round(range_high + range_size * 1.0, 4)
                 tp2_price = round(range_high + range_size * 2.0, 4)
             else:
                 breakout_level = round(range_low, 4)
                 retest_zone_upper = round(range_low + atr_5 * 0.3, 4)
                 retest_zone_lower = round(range_low - atr_5 * 0.15, 4)
-                stop_price = round(range_low + atr_5 * 1.2, 4)           # FIX #3
+                stop_price = round(range_low + atr_5 * stop_atr_mult, 4)
                 tp1_price = round(range_low - range_size * 1.0, 4)
                 tp2_price = round(range_low - range_size * 2.0, 4)
 
@@ -15993,8 +15998,23 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 "range_pct": round(range_pct, 1),
             }
 
-            # === VOLUME AVERAGE für Breakout-Confirmation (Minervini-light: 15%+ über Avg) ===
+            # === VOLUME AVERAGE für Breakout-Confirmation ===
             avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20 if len(window) >= 20 else sum(b["volume"] for b in window) / len(window)
+
+            # === GRADE-ABHÄNGIGE BREAKOUT-STÄRKE ===
+            # Grade B+ hat hohe Kompression → braucht STÄRKEREN Beweis dass Breakout echt ist
+            # Grade C hat moderate Kompression → Standard-Filter reicht
+            if grade in ("B", "A", "S"):
+                vol_multiplier = 2.0    # Volume 2x statt 1.4x
+                breakout_threshold = atr_5 * 0.5   # Stärkerer Breakout nötig (ATR×0.5 statt 0.25)
+                min_rr = 2.5            # Höheres R:R Minimum
+            else:
+                vol_multiplier = 1.4    # Standard Minervini
+                min_rr = 2.0
+
+            # R:R nochmal prüfen mit grade-abhängigem Minimum
+            if rr < min_rr:
+                continue
 
             # === TREND CONFIRMATION (Weinstein Stage 2 Filter) ===
             # 20-Tage-MA muss in Richtung des Trades zeigen
@@ -16037,8 +16057,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
                 # === PHASE 1: Breakout-Bestätigung ===
                 if not breakout_confirmed:
-                    # Volume Confirmation: Breakout-Day Volume >= 1.4x Avg (Minervini Original)
-                    vol_ok = future_bar["volume"] >= avg_vol_20 * 1.4
+                    # Volume Confirmation: grade-abhängig (B+: 2.0x, C: 1.4x)
+                    vol_ok = future_bar["volume"] >= avg_vol_20 * vol_multiplier
 
                     if direction == "long" and future_bar["close"] > breakout_level + breakout_threshold and vol_ok:
                         breakout_confirmed = True
