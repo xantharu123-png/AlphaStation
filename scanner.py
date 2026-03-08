@@ -3514,9 +3514,11 @@ def analyze_breakout_imminent(bars, direction="long"):
         (is_valid, score, max_score, details, direction_confidence, grade)
     """
     if not bars or len(bars) < 10:
-        return False, 0, 120, ["Nicht genug Daten (min 10 Tage)"], 0
+        return False, 0, 120, ["Nicht genug Daten (min 10 Tage)"], 0, "D", 0, 0
 
     score = 0
+    sm_fires = 0   # 🔥 Smart Money Fires (Boosted-Signale auf Maximum)
+    sm_hits = 0     # 🔥 + ✅ Smart Money Hits (Boosted-Signale aktiv)
     details = []
     n = len(bars)
 
@@ -3612,10 +3614,10 @@ def analyze_breakout_imminent(bars, direction="long"):
 
         if price_flat:
             if direction == "long" and obv_rising:
-                score += 13
+                score += 13; sm_fires += 1; sm_hits += 1
                 details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt [Smart Money!]")
             elif direction == "short" and obv_falling:
-                score += 13
+                score += 13; sm_fires += 1; sm_hits += 1
                 details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt [Smart Money!]")
             elif direction == "long" and obv_falling:
                 details.append(f"❌ OBV faellt = eher Short")
@@ -3627,10 +3629,10 @@ def analyze_breakout_imminent(bars, direction="long"):
         else:
             # Preis nicht flat — OBV-Richtung trotzdem bewerten
             if direction == "long" and obv_rising:
-                score += 7
+                score += 7; sm_hits += 1
                 details.append(f"✅ OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
             elif direction == "short" and obv_falling:
-                score += 7
+                score += 7; sm_hits += 1
                 details.append(f"✅ OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
             else:
                 details.append(f"⚠️ OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
@@ -3741,10 +3743,10 @@ def analyze_breakout_imminent(bars, direction="long"):
 
     if adx is not None:
         if adx < 20 and adx_prev and adx > adx_prev:
-            score += 14
+            score += 14; sm_fires += 1; sm_hits += 1
             details.append(f"🔥 ADX Wende: {adx_prev:.0f}→{adx:.0f} (unter 20 + steigend = Breakout!)")
         elif adx < 25 and adx_prev and adx > adx_prev:
-            score += 9
+            score += 9; sm_hits += 1
             details.append(f"✅ ADX steigend: {adx_prev:.0f}→{adx:.0f}")
         elif adx < 20:
             score += 4
@@ -3770,16 +3772,16 @@ def analyze_breakout_imminent(bars, direction="long"):
                     distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
-            score += 14
+            score += 14; sm_fires += 1; sm_hits += 1
             details.append(f"🔥 Institutionelle Akkumulation: {accum_days} Akku vs {distri_days} Distri")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
-            score += 9
+            score += 9; sm_hits += 1
             details.append(f"✅ Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
-            score += 14
+            score += 14; sm_fires += 1; sm_hits += 1
             details.append(f"🔥 Institutionelle Distribution: {distri_days} Distri vs {accum_days} Akku")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
-            score += 9
+            score += 9; sm_hits += 1
             details.append(f"✅ Distribution: {distri_days} vs {accum_days} Tage")
         else:
             details.append(f"⚠️ Gemischte Inst-Aktivitaet: {accum_days} Akku / {distri_days} Distri")
@@ -3878,16 +3880,16 @@ def analyze_breakout_imminent(bars, direction="long"):
         resilience = recovery_days / max(1, negative_days)
 
         if direction == "long" and resilience > 0.7:
-            score += 14
+            score += 14; sm_fires += 1; sm_hits += 1
             details.append(f"🔥 Hohe Resilience: {resilience:.0%} Recovery nach Dips [Minervini RS!]")
         elif direction == "long" and resilience > 0.5:
-            score += 7
+            score += 7; sm_hits += 1
             details.append(f"✅ Gute Resilience: {resilience:.0%}")
         elif direction == "short" and resilience < 0.3:
-            score += 14
+            score += 14; sm_fires += 1; sm_hits += 1
             details.append(f"🔥 Schwache Resilience: {resilience:.0%} = Verkaufsdruck")
         elif direction == "short" and resilience < 0.5:
-            score += 7
+            score += 7; sm_hits += 1
             details.append(f"✅ Maessige Resilience: {resilience:.0%}")
         else:
             details.append(f"⚠️ Resilience neutral: {resilience:.0%}")
@@ -3997,10 +3999,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                 # Zweitstärkst: Bullish OB nahe Range-Low = Demand Zone stützt Basis
                 near_support = any(abs(ob["zone_low"] - range_low_15) < atr_ob * 2 for ob in bull_obs)
                 if near_breakout:
-                    score += 14
+                    score += 14; sm_fires += 1; sm_hits += 1
                     details.append(f"🔥 Bullish OB nahe Breakout-Level = institutionelles Kaufinteresse!")
                 elif near_support:
-                    score += 9
+                    score += 9; sm_hits += 1
                     details.append(f"✅ Bullish OB stuetzt Range-Low = Demand Zone")
                 else:
                     score += 4
@@ -4013,10 +4015,10 @@ def analyze_breakout_imminent(bars, direction="long"):
                 near_breakout = any(abs(ob["zone_low"] - range_low_15) < atr_ob * 2 for ob in bear_obs)
                 near_resistance = any(abs(ob["zone_high"] - range_high_15) < atr_ob * 2 for ob in bear_obs)
                 if near_breakout:
-                    score += 14
+                    score += 14; sm_fires += 1; sm_hits += 1
                     details.append(f"🔥 Bearish OB nahe Breakdown-Level = institutioneller Verkaufsdruck!")
                 elif near_resistance:
-                    score += 9
+                    score += 9; sm_hits += 1
                     details.append(f"✅ Bearish OB deckt Range-High = Supply Zone")
                 else:
                     score += 4
@@ -4071,20 +4073,20 @@ def analyze_breakout_imminent(bars, direction="long"):
             # Buyside Liq knapp über Range-High = Stops-Jagd → explosiv
             near_liq = [l for l in liq_data["buyside"] if l["price"] > range_high_17 and (l["price"] - range_high_17) / current_price * 100 < 3]
             if near_liq:
-                score += 14
+                score += 14; sm_fires += 1; sm_hits += 1
                 details.append(f"🔥 Buyside Liquidity {near_liq[0]['price']:.2f} knapp ueber Range = Stop-Hunt Potential")
             elif liq_data["buyside"]:
-                score += 5
+                score += 5; sm_hits += 1
                 details.append(f"✅ Buyside Liq vorhanden ({len(liq_data['buyside'])} Levels)")
             else:
                 details.append(f"⚠️ Keine Buyside Liquidity erkannt")
         elif direction == "short" and liq_data.get("sellside"):
             near_liq = [l for l in liq_data["sellside"] if l["price"] < range_low_17 and (range_low_17 - l["price"]) / current_price * 100 < 3]
             if near_liq:
-                score += 14
+                score += 14; sm_fires += 1; sm_hits += 1
                 details.append(f"🔥 Sellside Liquidity {near_liq[0]['price']:.2f} knapp unter Range = Stop-Hunt Potential")
             elif liq_data["sellside"]:
-                score += 5
+                score += 5; sm_hits += 1
                 details.append(f"✅ Sellside Liq vorhanden ({len(liq_data['sellside'])} Levels)")
             else:
                 details.append(f"⚠️ Keine Sellside Liquidity erkannt")
@@ -4238,19 +4240,10 @@ def analyze_breakout_imminent(bars, direction="long"):
     directional_signals = sum(1 for d in details if "🔥" in d or "✅" in d)
     direction_confidence = round((directional_signals / 20) * 100)
 
-    # Smart Money Sub-Score: Zähle wie viele der 6 BOOSTED-Signale gefeuert haben
-    # Boosted-Signale sind an Position 3, 7, 8, 11, 15, 17 in der details-Liste
-    # Wir zählen 🔥 (stark) und ✅ (mittel) separat
-    boosted_indices = [2, 6, 7, 10, 14, 16]  # 0-basiert: Signal 3,7,8,11,15,17
-    smart_money_fires = 0  # 🔥 Treffer
-    smart_money_hits = 0   # 🔥 + ✅ Treffer
-    for bi in boosted_indices:
-        if bi < len(details):
-            if "🔥" in details[bi]:
-                smart_money_fires += 1
-                smart_money_hits += 1
-            elif "✅" in details[bi]:
-                smart_money_hits += 1
+    # Smart Money Sub-Score: Inline-Counter sm_fires/sm_hits werden direkt
+    # bei jedem BOOSTED-Signal inkrementiert (Signale 3,7,8,11,15,17)
+    smart_money_fires = sm_fires  # 🔥 Treffer (max bei Boosted-Signal)
+    smart_money_hits = sm_hits    # 🔥 + ✅ Treffer (aktiv bei Boosted-Signal)
 
     # Grade System V2.5 — Score + Smart Money kombiniert
     # Höhere Grades brauchen BEIDES: hohen Score UND Smart Money Signale
