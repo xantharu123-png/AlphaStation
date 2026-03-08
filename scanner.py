@@ -7215,7 +7215,19 @@ def fetch_historical_data_crypto(coin_id, days):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         params = {"vs_currency": "usd", "days": fetch_days}
-        resp = rate_limited_get(url, params=params, timeout=15)
+
+        # CoinGecko Free API: ~10 Calls/Min → 7s Pause + Retry bei 429
+        for attempt in range(3):
+            time.sleep(7 if attempt > 0 else 2)  # 2s vor erstem Call, 7s bei Retry
+            resp = rate_limited_get(url, params=params, timeout=15)
+            if resp.status_code == 200:
+                break
+            elif resp.status_code == 429:
+                time.sleep(15)  # Extra Cooldown bei Rate Limit
+                continue
+            else:
+                return None
+
         if resp.status_code != 200:
             return None
 
@@ -16514,8 +16526,8 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
 
             if not is_valid or grade == "D":
                 continue
-            if sm_hits < 2:
-                continue
+            # KEIN sm_hits Filter hier — Grade-System reicht
+            # (Crypto produziert weniger SM-Signale als Aktien)
 
             signals_found += 1
             cooldown[symbol] = idx
@@ -17337,7 +17349,7 @@ def display_backtest_lab(poly_key):
             crypto_direction = st.selectbox("📈 Richtung", ["long", "short"], key="crypto_bt_dir")
 
         st.caption("🪙 Default: BTC, ETH, BNB, SOL, XRP, ADA, AVAX, LINK, DOT, ARB, FET, TIA, SEI")
-        st.caption(f"⏱️ ~30 Sekunden (13 Coins × CoinGecko OHLC)")
+        st.caption(f"⏱️ ~2-3 Minuten (13 Coins × CoinGecko Rate Limit ~10 Calls/Min)")
 
         if st.button("🚀 Crypto Backtest starten", type="primary", use_container_width=True, key="crypto_bt_start"):
             progress_bar = st.progress(0, text="Starte Crypto Backtest...")
