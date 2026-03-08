@@ -15987,20 +15987,26 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # Stop ATR×1.2 für alle Grades (bewährt — NICHT ändern!)
             stop_atr_mult = 1.2
 
+            # V2.8: Grade C bekommt engere Targets (realistischer für schwächere Signale)
+            # Grade B+: TP1=1.0×Range, TP2=2.0×Range (Standard)
+            # Grade C:  TP1=0.7×Range, TP2=1.4×Range (näher → höhere TP1 Rate → mehr Teilgewinne)
+            tp1_mult = 0.7 if grade == "C" else 1.0
+            tp2_mult = 1.4 if grade == "C" else 2.0
+
             if direction == "long":
                 breakout_level = round(range_high, 4)
                 retest_zone_upper = round(range_high + atr_5 * 0.15, 4)  # Knapp über Range-High
                 retest_zone_lower = round(range_high - atr_5 * 0.3, 4)   # Leicht unter Range-High
                 stop_price = round(range_high - atr_5 * stop_atr_mult, 4)
-                tp1_price = round(range_high + range_size * 1.0, 4)
-                tp2_price = round(range_high + range_size * 2.0, 4)
+                tp1_price = round(range_high + range_size * tp1_mult, 4)
+                tp2_price = round(range_high + range_size * tp2_mult, 4)
             else:
                 breakout_level = round(range_low, 4)
                 retest_zone_upper = round(range_low + atr_5 * 0.3, 4)
                 retest_zone_lower = round(range_low - atr_5 * 0.15, 4)
                 stop_price = round(range_low + atr_5 * stop_atr_mult, 4)
-                tp1_price = round(range_low - range_size * 1.0, 4)
-                tp2_price = round(range_low - range_size * 2.0, 4)
+                tp1_price = round(range_low - range_size * tp1_mult, 4)
+                tp2_price = round(range_low - range_size * tp2_mult, 4)
 
             # FIX #6: Validierung Stop auf korrekter Seite
             if direction == "long" and stop_price >= range_high:
@@ -16048,10 +16054,13 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # === VOLUME AVERAGE für Breakout-Confirmation ===
             avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20 if len(window) >= 20 else sum(b["volume"] for b in window) / len(window)
 
-            # === EINHEITLICHE BREAKOUT-FILTER (V2.7) ===
-            # V2.5 hatte grade-abhängige Filter (2.0x Vol für B+) → hat P&L zerstört
-            # Zurück zu einheitlichem Minervini-Filter für alle Grades
-            vol_multiplier = 1.4    # Standard Minervini Volume Confirmation
+            # === BREAKOUT-FILTER (V2.8 — Grade-abhängig für C) ===
+            # Grade B+: Standard Minervini 1.4x Volume
+            # Grade C:  Strengerer Filter 1.6x (schwächere Signale brauchen stärkere Bestätigung)
+            if grade == "C":
+                vol_multiplier = 1.6    # Strengere Confirmation für schwache Signale
+            else:
+                vol_multiplier = 1.4    # Standard Minervini für B/A/S
             min_rr = 2.0           # Standard R:R Minimum
 
             if rr < min_rr:
@@ -16069,9 +16078,14 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 trend_ok = ma_20_current < ma_20_prev  # MA fällt = bärischer Trend
                 price_above_ma = window[-1]["close"] < ma_20_current  # Preis unter MA
 
-            # Trend muss stimmen ODER Preis muss auf richtiger Seite des MA sein
-            if not (trend_ok or price_above_ma):
-                continue  # Counter-Trend Trade → Skip
+            # V2.8: Grade C braucht BEIDE Trend-Bedingungen (strenger)
+            # Grade B+: Eine reicht (wie bisher)
+            if grade == "C":
+                if not (trend_ok and price_above_ma):
+                    continue  # Grade C: Nur MIT Trend traden
+            else:
+                if not (trend_ok or price_above_ma):
+                    continue  # Grade B+: Eine Bedingung reicht
 
             # 3-Phase Simulation:
             # Phase 1: Breakout bestätigt (Close über/unter Range + ATR-Threshold + Volume)
