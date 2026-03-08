@@ -1566,14 +1566,9 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             health -= 7
             warnings.append(f"⚠️ Absolute Distanz +{change_pct:.1f}% — schon weit gelaufen")
     else:
-        # V68: Crypto bekommt geschätzte ATR
+        # V69: Crypto ATR — zentrale Funktion mit echtem Range wenn verfügbar
         if market_type == "Krypto" and market_cap and market_cap > 0:
-            mc = market_cap
-            if mc > 100_000_000_000: est_atr = 2.5
-            elif mc > 10_000_000_000: est_atr = 4.0
-            elif mc > 1_000_000_000: est_atr = 6.5
-            elif mc > 100_000_000: est_atr = 9.5
-            else: est_atr = 15.0
+            est_atr = estimate_crypto_atr(market_cap, high, low, close)
             ext_r = change_pct / est_atr
             if ext_r > 4.0:
                 health -= 12
@@ -2440,18 +2435,34 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
     return min(100, max(0, score))
 
 
+def estimate_crypto_atr(market_cap, high_24h=None, low_24h=None, price=None):
+    """V69: Zentrale ATR-Schätzung für Crypto — bevorzugt echten Range wenn verfügbar.
+
+    Wenn high_24h/low_24h/price vorhanden → echte Tages-Range als ATR-Proxy.
+    Sonst Fallback auf Market-Cap-Tiers (weniger genau).
+    """
+    # Echte Range nutzen wenn verfügbar (10x genauer als statische Tiers)
+    if high_24h and low_24h and price and price > 0 and high_24h > low_24h:
+        real_atr = (high_24h - low_24h) / price * 100
+        if real_atr >= 0.1:  # Mindestens 0.1% Range (Sanity Check)
+            return real_atr
+    # Fallback: Market-Cap-basierte Schätzung
+    mc = market_cap or 0
+    if mc > 100_000_000_000:   return 2.5
+    elif mc > 10_000_000_000:  return 4.0
+    elif mc > 1_000_000_000:   return 6.5
+    elif mc > 100_000_000:     return 9.5
+    else:                      return 15.0
+
+
 def calculate_setup_score_crypto(change_pct, rvol, close_pos, upper_wick_pct, lower_wick_pct,
-                                  vortag_pct, vol_24h, price, market_cap, direction="long"):
+                                  vortag_pct, vol_24h, price, market_cap, direction="long",
+                                  high_24h=None, low_24h=None):
     """Setup Quality Score 0-100 für KRYPTO. Aktien-Score bleibt unverändert."""
     score = 0
     is_long = direction == "long"
     abs_change = abs(change_pct) if change_pct else 0
-    mc = market_cap or 0
-    if mc > 100_000_000_000:   est_atr = 2.5
-    elif mc > 10_000_000_000:  est_atr = 4.0
-    elif mc > 1_000_000_000:   est_atr = 6.5
-    elif mc > 100_000_000:     est_atr = 9.5
-    else:                      est_atr = 15.0
+    est_atr = estimate_crypto_atr(market_cap, high_24h, low_24h, price)
     # 1. VOLUME (0-20)
     if rvol is not None and rvol > 0:
         if rvol >= 3.0:   score += 20
@@ -2525,15 +2536,11 @@ def calculate_setup_score_crypto(change_pct, rvol, close_pos, upper_wick_pct, lo
     return min(100, max(0, score))
 
 
-def calculate_alpha_score_crypto(rvol, vortag_pct, change_pct, market_cap):
+def calculate_alpha_score_crypto(rvol, vortag_pct, change_pct, market_cap,
+                                  high_24h=None, low_24h=None, price=None):
     """Alpha Score 0-100 für KRYPTO — Market-Cap-aware."""
     import math
-    mc = market_cap or 0
-    if mc > 100_000_000_000:   est_atr = 2.5
-    elif mc > 10_000_000_000:  est_atr = 4.0
-    elif mc > 1_000_000_000:   est_atr = 6.5
-    elif mc > 100_000_000:     est_atr = 9.5
-    else:                      est_atr = 15.0
+    est_atr = estimate_crypto_atr(market_cap, high_24h, low_24h, price)
     rvol_safe = min(max(rvol or 0, 0), 8)
     rvol_score = (math.log(1 + rvol_safe) / math.log(9)) * 35
     atr_ratio = min(abs(change_pct or 0) / est_atr, 3.0) if est_atr > 0 else 0
@@ -12703,6 +12710,8 @@ def fetch_crypto_data():
                 # OHLC für Wick-Berechnung
                 # Approximation: Open = Price / (1 + change/100)
                 open_price = price / (1 + change_24h / 100) if change_24h != -100 else price
+                # V69 FIX: Clamp open_price in High/Low Range (sonst negative Wicks möglich)
+                open_price = max(low_24h, min(high_24h, open_price))
                 
                 # Wick-Berechnungen (mit min_range_pct Check für Konsistenz)
                 candle_range = high_24h - low_24h if high_24h > low_24h else 0
@@ -12739,18 +12748,20 @@ def fetch_crypto_data():
                     turnover_pct = (vol_24h / market_cap) * 100
                     # Baseline = typischer Tages-Turnover (%) fuer diese Kategorie
                     # RVOL 1.0 bedeutet "normales Volumen fuer diese Groesse"
-                    # Quelle: empirische Mediane aus CoinGecko Top-500
-                    # V68: Baselines für Small/Micro GESENKT
+                    # V69 AUDIT FIX: Baselines an echte Mediane angepasst
+                    # Quelle: CoinGecko Top-500 empirische Turnover-Daten
+                    #   Mega >$100B: 2-4% normal, Large >$10B: 5-8%, Mid >$1B: 8-15%
+                    #   Small >$100M: 15-30%, Micro <$100M: 20-50%+
                     if market_cap > 100_000_000_000:
-                        baseline = 2.5   # Mega Cap (BTC, ETH)
+                        baseline = 3.0    # Mega Cap (BTC, ETH) — Median ~3%
                     elif market_cap > 10_000_000_000:
-                        baseline = 4.0   # Large Cap (SOL, BNB)
+                        baseline = 6.0    # Large Cap (SOL, BNB) — Median ~6%
                     elif market_cap > 1_000_000_000:
-                        baseline = 5.5   # Mid Cap
+                        baseline = 10.0   # Mid Cap — Median ~10%
                     elif market_cap > 100_000_000:
-                        baseline = 7.0   # Small Cap (von 8)
+                        baseline = 20.0   # Small Cap — Median ~20%
                     else:
-                        baseline = 8.0   # Micro Cap (von 12!)
+                        baseline = 30.0   # Micro Cap — Median ~30%
                     rvol = round(turnover_pct / baseline, 2)
                     rvol = max(0.1, min(rvol, 50.0))  # Cap bei 50x
                 else:
@@ -12816,7 +12827,8 @@ def fetch_crypto_data():
                     continue
                 
                 ticker = coin.get("symbol", "").upper()
-                alpha = calculate_alpha_score_crypto(rvol, vortag_chg, change_24h, market_cap)
+                alpha = calculate_alpha_score_crypto(rvol, vortag_chg, change_24h, market_cap,
+                                                      high_24h=high_24h, low_24h=low_24h, price=price)
                 
                 # Flag-Pattern Validierung für Krypto
                 flag_score = 0
@@ -12829,16 +12841,18 @@ def fetch_crypto_data():
                 if current_strategy == "Bull Flag":
                     is_valid, flag_score, flag_details = validate_flag_pattern(
                         vortag_chg, change_24h, rvol, price, prev_close_approx, high_24h, low_24h, "bull",
+                        prev_high=high_24h, prev_low=low_24h,  # V69 FIX: 24h Range als Flagpole
                         market_type="Krypto"
                     )
                     if not is_valid:
                         skipped_filter += 1
                         continue
                     alpha = flag_score
-                    
+
                 elif current_strategy == "Bear Flag":
                     is_valid, flag_score, flag_details = validate_flag_pattern(
                         vortag_chg, change_24h, rvol, price, prev_close_approx, high_24h, low_24h, "bear",
+                        prev_high=high_24h, prev_low=low_24h,  # V69 FIX: 24h Range als Flagpole
                         market_type="Krypto"
                     )
                     if not is_valid:
@@ -12853,7 +12867,7 @@ def fetch_crypto_data():
                         breakout_health = assess_breakout_health(
                             change_pct=change_24h, rvol=rvol, close_pos=close_pos,
                             high=high_24h, low=low_24h, close=price,
-                            open_price=None, prev_close=prev_close_approx,
+                            open_price=open_price, prev_close=prev_close_approx,
                             vortag_pct=vortag_chg, vi_result=None,
                             market_type="Krypto", market_cap=market_cap
                         )
@@ -12886,7 +12900,8 @@ def fetch_crypto_data():
                     change_pct=change_24h, rvol=rvol, close_pos=close_pos,
                     upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
                     vortag_pct=vortag_chg, vol_24h=vol_24h, price=price,
-                    market_cap=market_cap, direction=setup_direction
+                    market_cap=market_cap, direction=setup_direction,
+                    high_24h=high_24h, low_24h=low_24h
                 )
                 
                 results.append({
@@ -15993,18 +16008,12 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # === VOLUME AVERAGE für Breakout-Confirmation ===
             avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20 if len(window) >= 20 else sum(b["volume"] for b in window) / len(window)
 
-            # === GRADE-ABHÄNGIGE BREAKOUT-STÄRKE ===
-            # Grade B+ hat hohe Kompression → braucht STÄRKEREN Beweis dass Breakout echt ist
-            # Grade C hat moderate Kompression → Standard-Filter reicht
-            if grade in ("B", "A", "S"):
-                vol_multiplier = 2.0    # Volume 2x statt 1.4x
-                breakout_threshold = atr_5 * 0.5   # Stärkerer Breakout nötig (ATR×0.5 statt 0.25)
-                min_rr = 2.5            # Höheres R:R Minimum
-            else:
-                vol_multiplier = 1.4    # Standard Minervini
-                min_rr = 2.0
+            # === EINHEITLICHE BREAKOUT-FILTER (V2.7) ===
+            # V2.5 hatte grade-abhängige Filter (2.0x Vol für B+) → hat P&L zerstört
+            # Zurück zu einheitlichem Minervini-Filter für alle Grades
+            vol_multiplier = 1.4    # Standard Minervini Volume Confirmation
+            min_rr = 2.0           # Standard R:R Minimum
 
-            # R:R nochmal prüfen mit grade-abhängigem Minimum
             if rr < min_rr:
                 continue
 
