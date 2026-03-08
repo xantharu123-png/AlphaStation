@@ -3490,12 +3490,15 @@ def calculate_stochastic(bars, k_period=14, d_period=3):
     return round(k_values[-1], 1), round(d_values[-1], 1)
 
 
-def analyze_breakout_imminent(bars, direction="long"):
+def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     """
     🔮 BREAKOUT IMMINENT V2.1 — 20-Signal Composite Prediction (Pro-Reweighted)
 
     Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
     Maximum: 200 Punkte — aber GEWICHTET nach Trader-Wisdom:
+
+    crypto_mode=True: Volume-Signale (2,3,8,16,19) werden durch Spread-basierte
+    Preis-Proxies ersetzt, da CoinGecko kein historisches Volume liefert.
 
     BOOSTED (Smart Money / Momentum — diese Signale unterscheiden echte Breakouts):
       OBV Divergenz (13), ADX Turning (14), Inst. Accumulation (14),
@@ -3569,82 +3572,139 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("❌ ATR-Squeeze: Nicht genug Daten (min 15 Tage)")
 
     # ===================================================================
-    # SIGNAL 2: VOLUME DRY-UP — max 5 Punkte [CUT]
-    # Volumen sinkt = Erschoepfung, ABER auch bei vergessenen Aktien!
+    # SIGNAL 2: VOLUME DRY-UP / SPREAD DRY-UP — max 5 Punkte [CUT]
+    # Crypto: Spread (H-L) als Volume-Proxy — schrumpfende Ranges = Energie baut auf
     # ===================================================================
-    if len(volumes) >= 15:
-        # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage
-        recent_vol = sum(volumes[-5:]) / 5
-        prior_vol = sum(volumes[-20:-5]) / max(1, len(volumes[-20:-5]))
-
-        if prior_vol > 0:
-            vol_decline = recent_vol / prior_vol
-            if vol_decline < 0.5:
-                score += 5
-                details.append(f"🔥 Vol Dry-Up extrem: {vol_decline:.2f}x")
-            elif vol_decline < 0.7:
-                score += 3
-                details.append(f"✅ Vol sinkt deutlich: {vol_decline:.2f}x")
-            elif vol_decline < 0.85:
-                score += 2
-                details.append(f"⚠️ Vol leicht sinkend: {vol_decline:.2f}x")
+    if crypto_mode:
+        if len(daily_ranges) >= 15:
+            recent_spread = sum(daily_ranges[-5:]) / 5
+            prior_spread = sum(daily_ranges[-20:-5]) / max(1, len(daily_ranges[-20:-5]))
+            if prior_spread > 0:
+                spread_decline = recent_spread / prior_spread
+                if spread_decline < 0.5:
+                    score += 5
+                    details.append(f"🔥 Spread Dry-Up extrem: {spread_decline:.2f}x")
+                elif spread_decline < 0.7:
+                    score += 3
+                    details.append(f"✅ Spread sinkt deutlich: {spread_decline:.2f}x")
+                elif spread_decline < 0.85:
+                    score += 2
+                    details.append(f"⚠️ Spread leicht sinkend: {spread_decline:.2f}x")
+                else:
+                    details.append(f"❌ Kein Spread Dry-Up: {spread_decline:.2f}x")
             else:
-                details.append(f"❌ Kein Vol Dry-Up: {vol_decline:.2f}x")
+                details.append("❌ Spread Dry-Up: Keine Prior-Daten")
         else:
-            details.append("❌ Vol Dry-Up: Kein Prior-Volumen")
+            details.append("❌ Spread Dry-Up: Nicht genug Daten")
     else:
-        details.append("❌ Vol Dry-Up: Nicht genug Daten (min 15 Tage)")
+        if len(volumes) >= 15:
+            recent_vol = sum(volumes[-5:]) / 5
+            prior_vol = sum(volumes[-20:-5]) / max(1, len(volumes[-20:-5]))
 
-    # ===================================================================
-    # SIGNAL 3: OBV-DIVERGENZ — max 13 Punkte [BOOSTED]
-    # OBV steigt/faellt waehrend Preis flat = Smart Money positioniert sich
-    # ===================================================================
-    obv = [0]
-    for i in range(1, n):
-        if closes[i] > closes[i-1]:
-            obv.append(obv[-1] + volumes[i])
-        elif closes[i] < closes[i-1]:
-            obv.append(obv[-1] - volumes[i])
+            if prior_vol > 0:
+                vol_decline = recent_vol / prior_vol
+                if vol_decline < 0.5:
+                    score += 5
+                    details.append(f"🔥 Vol Dry-Up extrem: {vol_decline:.2f}x")
+                elif vol_decline < 0.7:
+                    score += 3
+                    details.append(f"✅ Vol sinkt deutlich: {vol_decline:.2f}x")
+                elif vol_decline < 0.85:
+                    score += 2
+                    details.append(f"⚠️ Vol leicht sinkend: {vol_decline:.2f}x")
+                else:
+                    details.append(f"❌ Kein Vol Dry-Up: {vol_decline:.2f}x")
+            else:
+                details.append("❌ Vol Dry-Up: Kein Prior-Volumen")
         else:
-            obv.append(obv[-1])
+            details.append("❌ Vol Dry-Up: Nicht genug Daten (min 15 Tage)")
 
-    # Preis-Trend vs OBV-Trend
+    # ===================================================================
+    # SIGNAL 3: OBV-DIVERGENZ / CLOSE-MOMENTUM DIVERGENZ — max 13 Punkte [BOOSTED]
+    # Crypto: Cumulative Close Delta (wie OBV aber mit Preis-Änderung statt Volume)
+    # ===================================================================
     price_change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
     price_flat = abs(price_change_pct) < 5  # Preis relativ flat
 
-    if len(obv) >= 6:
-        mid = len(obv) // 2
-        early_obv = sum(obv[:mid]) / mid
-        late_obv = sum(obv[mid:]) / (len(obv) - mid)
-        obv_rising = late_obv > early_obv * 1.05
-        obv_falling = late_obv < early_obv * 0.95
+    if crypto_mode:
+        # Cumulative Close-Delta: Summe der täglichen Preis-Änderungen (wie OBV ohne Vol)
+        ccd = [0]
+        for i in range(1, n):
+            ccd.append(ccd[-1] + (closes[i] - closes[i-1]))
+        if len(ccd) >= 6:
+            mid = len(ccd) // 2
+            early_ccd = sum(ccd[:mid]) / mid
+            late_ccd = sum(ccd[mid:]) / (len(ccd) - mid)
+            ccd_rising = late_ccd > early_ccd * 1.05 if early_ccd > 0 else late_ccd > early_ccd
+            ccd_falling = late_ccd < early_ccd * 0.95 if early_ccd < 0 else late_ccd < early_ccd
 
-        if price_flat:
-            if direction == "long" and obv_rising:
-                score += 13; sm_fires += 1; sm_hits += 1
-                details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt [Smart Money!]")
-            elif direction == "short" and obv_falling:
-                score += 13; sm_fires += 1; sm_hits += 1
-                details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt [Smart Money!]")
-            elif direction == "long" and obv_falling:
-                details.append(f"❌ OBV faellt = eher Short")
-            elif direction == "short" and obv_rising:
-                details.append(f"❌ OBV steigt = eher Long")
+            if price_flat:
+                if direction == "long" and ccd_rising:
+                    score += 13; sm_fires += 1; sm_hits += 1
+                    details.append(f"🔥 Close-Momentum bullisch: Preis flat, Momentum steigt")
+                elif direction == "short" and ccd_falling:
+                    score += 13; sm_fires += 1; sm_hits += 1
+                    details.append(f"🔥 Close-Momentum baerisch: Preis flat, Momentum faellt")
+                elif direction == "long" and ccd_falling:
+                    details.append(f"❌ Close-Momentum faellt = eher Short")
+                elif direction == "short" and ccd_rising:
+                    details.append(f"❌ Close-Momentum steigt = eher Long")
+                else:
+                    score += 4
+                    details.append(f"⚠️ Close-Momentum neutral")
             else:
-                score += 4
-                details.append(f"⚠️ OBV neutral")
+                if direction == "long" and ccd_rising:
+                    score += 7; sm_hits += 1
+                    details.append(f"✅ Close-Momentum steigt ({price_change_pct:+.1f}%)")
+                elif direction == "short" and ccd_falling:
+                    score += 7; sm_hits += 1
+                    details.append(f"✅ Close-Momentum faellt ({price_change_pct:+.1f}%)")
+                else:
+                    details.append(f"⚠️ Close-Momentum passt nicht ({price_change_pct:+.1f}%)")
         else:
-            # Preis nicht flat — OBV-Richtung trotzdem bewerten
-            if direction == "long" and obv_rising:
-                score += 7; sm_hits += 1
-                details.append(f"✅ OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
-            elif direction == "short" and obv_falling:
-                score += 7; sm_hits += 1
-                details.append(f"✅ OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
-            else:
-                details.append(f"⚠️ OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
+            details.append("❌ Close-Momentum: Nicht genug Daten")
     else:
-        details.append("❌ OBV: Nicht genug Daten")
+        obv = [0]
+        for i in range(1, n):
+            if closes[i] > closes[i-1]:
+                obv.append(obv[-1] + volumes[i])
+            elif closes[i] < closes[i-1]:
+                obv.append(obv[-1] - volumes[i])
+            else:
+                obv.append(obv[-1])
+
+        if len(obv) >= 6:
+            mid = len(obv) // 2
+            early_obv = sum(obv[:mid]) / mid
+            late_obv = sum(obv[mid:]) / (len(obv) - mid)
+            obv_rising = late_obv > early_obv * 1.05
+            obv_falling = late_obv < early_obv * 0.95
+
+            if price_flat:
+                if direction == "long" and obv_rising:
+                    score += 13; sm_fires += 1; sm_hits += 1
+                    details.append(f"🔥 OBV-Divergenz bullisch: Preis flat, OBV steigt [Smart Money!]")
+                elif direction == "short" and obv_falling:
+                    score += 13; sm_fires += 1; sm_hits += 1
+                    details.append(f"🔥 OBV-Divergenz baerisch: Preis flat, OBV faellt [Smart Money!]")
+                elif direction == "long" and obv_falling:
+                    details.append(f"❌ OBV faellt = eher Short")
+                elif direction == "short" and obv_rising:
+                    details.append(f"❌ OBV steigt = eher Long")
+                else:
+                    score += 4
+                    details.append(f"⚠️ OBV neutral")
+            else:
+                if direction == "long" and obv_rising:
+                    score += 7; sm_hits += 1
+                    details.append(f"✅ OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
+                elif direction == "short" and obv_falling:
+                    score += 7; sm_hits += 1
+                    details.append(f"✅ OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
+                else:
+                    details.append(f"⚠️ OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
+        else:
+            details.append("❌ OBV: Nicht genug Daten")
 
     # ===================================================================
     # SIGNAL 4: CLOSE POSITION CLUSTERING — max 10 Punkte
@@ -3762,36 +3822,47 @@ def analyze_breakout_imminent(bars, direction="long"):
             details.append(f"❌ ADX bereits hoch: {adx:.0f} (Trend laeuft schon)")
 
     # ===================================================================
-    # SIGNAL 8: INSTITUTIONAL ACCUMULATION/DISTRIBUTION DAYS — max 14 Punkte [BOOSTED]
-    # Tage mit Close Up + Vol > Avg = Inst. Buying (O'Neil CANSLIM Key Signal)
+    # SIGNAL 8: INSTITUTIONAL ACCUMULATION / SPREAD-EXPANSION DAYS — max 14 Punkte [BOOSTED]
+    # Crypto: Spread-Expansion + Close Direction als Volume-Proxy
     # ===================================================================
     if n >= 10:
-        avg_vol = sum(volumes) / n
-
-        accum_days = 0  # Close up + vol > avg
-        distri_days = 0  # Close down + vol > avg
-
-        for i in range(1, n):
-            if volumes[i] > avg_vol * 1.5:  # Deutlich ueberdurchschnittliches Vol
-                if closes[i] > closes[i-1]:
-                    accum_days += 1
-                elif closes[i] < closes[i-1]:
-                    distri_days += 1
+        if crypto_mode:
+            # Crypto: Tage mit überdurchschnittlichem Spread + Close in Richtung
+            avg_spread = sum(daily_ranges) / len(daily_ranges) if daily_ranges else 1
+            accum_days = 0
+            distri_days = 0
+            for i in range(1, n):
+                bar_spread = (bars[i]["high"] - bars[i]["low"]) / bars[i]["close"] * 100 if bars[i]["close"] > 0 else 0
+                if bar_spread > avg_spread * 1.3:  # Überdurchschnittliche Aktivität
+                    if closes[i] > closes[i-1]:
+                        accum_days += 1
+                    elif closes[i] < closes[i-1]:
+                        distri_days += 1
+        else:
+            avg_vol = sum(volumes) / n
+            accum_days = 0
+            distri_days = 0
+            for i in range(1, n):
+                if volumes[i] > avg_vol * 1.5:
+                    if closes[i] > closes[i-1]:
+                        accum_days += 1
+                    elif closes[i] < closes[i-1]:
+                        distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
             score += 14; sm_fires += 1; sm_hits += 1
-            details.append(f"🔥 Institutionelle Akkumulation: {accum_days} Akku vs {distri_days} Distri")
+            details.append(f"🔥 {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
             score += 9; sm_hits += 1
             details.append(f"✅ Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
             score += 14; sm_fires += 1; sm_hits += 1
-            details.append(f"🔥 Institutionelle Distribution: {distri_days} Distri vs {accum_days} Akku")
+            details.append(f"🔥 {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
             score += 9; sm_hits += 1
             details.append(f"✅ Distribution: {distri_days} vs {accum_days} Tage")
         else:
-            details.append(f"⚠️ Gemischte Inst-Aktivitaet: {accum_days} Akku / {distri_days} Distri")
+            details.append(f"⚠️ Gemischte Aktivitaet: {accum_days} Akku / {distri_days} Distri")
 
     # ===================================================================
     # SIGNAL 9: RSI DRIFT — max 10 Punkte
@@ -4159,50 +4230,96 @@ def analyze_breakout_imminent(bars, direction="long"):
         details.append("❌ Fib: Nicht genug Daten (min 20 Tage)")
 
     # ===================================================================
-    # SIGNAL 19: VOLUME PROFILE VOID — max 10 Punkte
-    # Low-Volume-Zone ueber/unter Range = Preis fliegt durch (kein Widerstand)
+    # SIGNAL 19: VOLUME PROFILE VOID / PRICE GAP — max 10 Punkte
+    # Crypto: Price Gap Detector — Preiszonen mit wenig Aktivität (Preis fliegt durch)
     # ===================================================================
-    try:
-        vol_profile = calculate_volume_profile(bars, num_bins=15)
-        if vol_profile:
-            void_data = find_volume_voids(current_price, vol_profile, min_void_size_pct=0.5)
-            if void_data:
-                if direction == "long" and void_data.get("voids_above"):
-                    nearest = void_data["nearest_void_above"]
-                    if nearest:
-                        dist_pct = (nearest["low"] - current_price) / current_price * 100 if current_price > 0 else 99
-                        if dist_pct < 5:
-                            score += 10
-                            details.append(f"🔥 Volume Void {dist_pct:.1f}% ueber Preis = Vakuum-Effekt!")
-                        elif dist_pct < 10:
-                            score += 5
-                            details.append(f"✅ Volume Void {dist_pct:.1f}% entfernt")
-                        else:
-                            details.append(f"⚠️ Volume Void zu weit: {dist_pct:.1f}%")
-                    else:
-                        details.append(f"⚠️ Kein Volume Void ueber Preis")
-                elif direction == "short" and void_data.get("voids_below"):
-                    nearest = void_data["nearest_void_below"]
-                    if nearest:
-                        dist_pct = (current_price - nearest["high"]) / current_price * 100 if current_price > 0 else 99
-                        if dist_pct < 5:
-                            score += 10
-                            details.append(f"🔥 Volume Void {dist_pct:.1f}% unter Preis = Vakuum-Effekt!")
-                        elif dist_pct < 10:
-                            score += 5
-                            details.append(f"✅ Volume Void {dist_pct:.1f}% entfernt")
-                        else:
-                            details.append(f"⚠️ Volume Void zu weit: {dist_pct:.1f}%")
-                    else:
-                        details.append(f"⚠️ Kein Volume Void unter Preis")
+    if crypto_mode:
+        try:
+            # Price Distribution: Histogramm der Close-Preise
+            price_min = min(lows)
+            price_max = max(highs)
+            price_range = price_max - price_min
+            if price_range > 0 and n >= 10:
+                num_bins = 15
+                bin_size = price_range / num_bins
+                bins = [0] * num_bins
+                for b in bars:
+                    mid_price = (b["high"] + b["low"]) / 2
+                    bin_idx = min(int((mid_price - price_min) / bin_size), num_bins - 1)
+                    bins[bin_idx] += 1
+                # Finde Voids (Bins mit < 20% des Durchschnitts)
+                avg_density = sum(bins) / num_bins
+                current_bin = min(int((current_price - price_min) / bin_size), num_bins - 1)
+                void_above = False
+                void_below = False
+                for bi in range(current_bin + 1, min(current_bin + 4, num_bins)):
+                    if bins[bi] < avg_density * 0.2:
+                        void_above = True
+                        break
+                for bi in range(max(current_bin - 3, 0), current_bin):
+                    if bins[bi] < avg_density * 0.2:
+                        void_below = True
+                        break
+                if direction == "long" and void_above:
+                    score += 10
+                    details.append(f"🔥 Price Void ueber Preis = wenig Widerstand")
+                elif direction == "short" and void_below:
+                    score += 10
+                    details.append(f"🔥 Price Void unter Preis = wenig Support")
+                elif direction == "long" and void_below:
+                    score += 3
+                    details.append(f"⚠️ Price Void nur unter Preis")
+                elif direction == "short" and void_above:
+                    score += 3
+                    details.append(f"⚠️ Price Void nur ueber Preis")
                 else:
-                    details.append(f"⚠️ Kein relevanter Volume Void")
+                    details.append(f"⚠️ Kein Price Void in der Naehe")
             else:
-                details.append(f"⚠️ Volume Void Analyse leer")
-        else:
-            details.append(f"⚠️ Volume Profile nicht berechenbar")
-    except Exception:
-        details.append("⚠️ Volume Void Check uebersprungen")
+                details.append("⚠️ Price Gap: Nicht genug Daten")
+        except Exception:
+            details.append("⚠️ Price Gap Check uebersprungen")
+    else:
+        try:
+            vol_profile = calculate_volume_profile(bars, num_bins=15)
+            if vol_profile:
+                void_data = find_volume_voids(current_price, vol_profile, min_void_size_pct=0.5)
+                if void_data:
+                    if direction == "long" and void_data.get("voids_above"):
+                        nearest = void_data["nearest_void_above"]
+                        if nearest:
+                            dist_pct = (nearest["low"] - current_price) / current_price * 100 if current_price > 0 else 99
+                            if dist_pct < 5:
+                                score += 10
+                                details.append(f"🔥 Volume Void {dist_pct:.1f}% ueber Preis = Vakuum-Effekt!")
+                            elif dist_pct < 10:
+                                score += 5
+                                details.append(f"✅ Volume Void {dist_pct:.1f}% entfernt")
+                            else:
+                                details.append(f"⚠️ Volume Void zu weit: {dist_pct:.1f}%")
+                        else:
+                            details.append(f"⚠️ Kein Volume Void ueber Preis")
+                    elif direction == "short" and void_data.get("voids_below"):
+                        nearest = void_data["nearest_void_below"]
+                        if nearest:
+                            dist_pct = (current_price - nearest["high"]) / current_price * 100 if current_price > 0 else 99
+                            if dist_pct < 5:
+                                score += 10
+                                details.append(f"🔥 Volume Void {dist_pct:.1f}% unter Preis = Vakuum-Effekt!")
+                            elif dist_pct < 10:
+                                score += 5
+                                details.append(f"✅ Volume Void {dist_pct:.1f}% entfernt")
+                            else:
+                                details.append(f"⚠️ Volume Void zu weit: {dist_pct:.1f}%")
+                        else:
+                            details.append(f"⚠️ Kein Volume Void unter Preis")
+                    else:
+                        details.append(f"⚠️ Kein relevanter Volume Void")
+                else:
+                    details.append(f"⚠️ Volume Void Analyse leer")
+            else:
+                details.append(f"⚠️ Volume Profile nicht berechenbar")
+        except Exception:
+            details.append("⚠️ Volume Void Check uebersprungen")
 
     # ===================================================================
     # SIGNAL 20: CANDLE BODY COMPRESSION — max 5 Punkte [CUT]
@@ -4254,19 +4371,36 @@ def analyze_breakout_imminent(bars, direction="long"):
 
     # Grade System V2.5 — Score + Smart Money kombiniert
     # Höhere Grades brauchen BEIDES: hohen Score UND Smart Money Signale
-    if score >= 120 and smart_money_fires >= 4:
-        grade = "S"  # 🏆 ELITE — Score 120+ UND 4+ Boosted 🔥 fires
-    elif score >= 105 and smart_money_fires >= 3:
-        grade = "A"  # 🔥 STARK — Score 105+ UND 3+ Boosted 🔥 fires
-    elif score >= 90 and smart_money_hits >= 2:
-        grade = "B"  # ✅ SOLIDE — Score 90+ UND 2+ Boosted hits
-    elif score >= 80:
-        grade = "C"  # ⚠️ WATCHLIST — Score 80+
+    # Grade-Schwellen: Crypto hat niedrigere Scores (kein Volume-Daten)
+    if crypto_mode:
+        if score >= 85 and smart_money_fires >= 3:
+            grade = "S"
+        elif score >= 75 and smart_money_fires >= 2:
+            grade = "A"
+        elif score >= 65 and smart_money_hits >= 1:
+            grade = "B"
+        elif score >= 55:
+            grade = "C"
+        else:
+            grade = "D"
     else:
-        grade = "D"  # ❌ SCHWACH
+        if score >= 120 and smart_money_fires >= 4:
+            grade = "S"  # 🏆 ELITE — Score 120+ UND 4+ Boosted 🔥 fires
+        elif score >= 105 and smart_money_fires >= 3:
+            grade = "A"  # 🔥 STARK — Score 105+ UND 3+ Boosted 🔥 fires
+        elif score >= 90 and smart_money_hits >= 2:
+            grade = "B"  # ✅ SOLIDE — Score 90+ UND 2+ Boosted hits
+        elif score >= 80:
+            grade = "C"  # ⚠️ WATCHLIST — Score 80+
+        else:
+            grade = "D"  # ❌ SCHWACH
 
     # Threshold: Long 85, Short 80 (42.5%/40% von 200)
-    threshold = 85 if direction == "long" else 80
+    # Crypto: Niedrigere Schwelle (kein echtes Volume → weniger max erreichbar)
+    if crypto_mode:
+        threshold = 60 if direction == "long" else 55
+    else:
+        threshold = 85 if direction == "long" else 80
     is_valid = score >= threshold
 
     return is_valid, score, max_score, details, direction_confidence, grade, smart_money_fires, smart_money_hits
@@ -16523,8 +16657,8 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
 
             window = bars[idx - window_size:idx]
 
-            # BI V2 Analyse (gleich wie Aktien!)
-            result = analyze_breakout_imminent(window, direction=direction)
+            # BI V2 Analyse (crypto_mode=True: Spread-Proxies statt Volume-Signale)
+            result = analyze_breakout_imminent(window, direction=direction, crypto_mode=True)
             if len(result) == 8:
                 is_valid, bi_score, bi_max, details, confidence, grade, sm_fires, sm_hits = result
             else:
