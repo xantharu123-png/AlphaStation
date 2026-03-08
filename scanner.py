@@ -7198,19 +7198,59 @@ def _resolve_coingecko_id(symbol):
 
 
 def fetch_historical_data_crypto(coin_id, days):
-    """Holt historische OHLC-Daten von CoinGecko"""
+    """
+    Holt historische OHLC-Daten von CoinGecko via market_chart (hourly → daily aggregation).
+
+    CoinGecko /ohlc Endpoint gibt für >30 Tage nur 4-Tages-Candles (zu wenig Daten).
+    Stattdessen: /market_chart mit days≤90 gibt stündliche Preise (24/Tag),
+    die wir zu echten täglichen OHLC-Bars aggregieren.
+
+    Returns: [[timestamp_ms, open, high, low, close], ...] — tägliche Bars
+    """
+    from datetime import datetime as _dt
+
+    # CoinGecko gibt stündliche Daten nur für days ≤ 90
+    fetch_days = min(days, 90)
+
     try:
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-        params = {"vs_currency": "usd", "days": days}
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+        params = {"vs_currency": "usd", "days": fetch_days}
         resp = rate_limited_get(url, params=params, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Format: [[timestamp, open, high, low, close], ...]
-            if data and len(data) > 0:
-                return data
-    except Exception as e:
-        pass
-    return None
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        prices = data.get("prices", [])
+        if not prices or len(prices) < 48:  # Mindestens 2 Tage stündliche Daten
+            return None
+
+        # Prüfe ob wir wirklich stündliche Daten haben (Intervall < 4h)
+        if len(prices) > 1:
+            interval_h = (prices[1][0] - prices[0][0]) / 3_600_000
+            if interval_h > 4:  # Tägliche Daten statt stündliche → kein echtes H/L
+                return None
+
+        # Aggregiere stündliche Preise zu täglichen OHLC-Bars
+        daily_map = {}
+        for ts, price in prices:
+            day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+            if day_key not in daily_map:
+                daily_map[day_key] = {"ts": ts, "open": price, "high": price, "low": price, "close": price}
+            else:
+                daily_map[day_key]["high"] = max(daily_map[day_key]["high"], price)
+                daily_map[day_key]["low"] = min(daily_map[day_key]["low"], price)
+                daily_map[day_key]["close"] = price
+
+        # Konvertiere zurück zu [[ts, o, h, l, c], ...] Format
+        result = []
+        for day_key in sorted(daily_map.keys()):
+            d = daily_map[day_key]
+            result.append([d["ts"], d["open"], d["high"], d["low"], d["close"]])
+
+        return result if len(result) >= 5 else None
+
+    except Exception:
+        return None
 
 def fetch_historical_data_stocks(ticker, days, poly_key):
     """Holt historische Daten — Polygon für US, Yahoo für internationale Aktien"""
@@ -16369,7 +16409,7 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
         coins = DEFAULT_CRYPTO_COINS
 
     # === PARAMETER (Crypto-angepasst) ===
-    window_size = 50
+    window_size = 20        # CoinGecko max ~85 daily Bars (hourly→daily, ≤90d)
     max_hold = 15           # Kürzere Trends als Aktien
     slippage = 0.0015       # 0.15% (Crypto Spreads)
     stop_atr_mult = 1.5     # Höhere Vola → mehr Puffer
@@ -16396,7 +16436,9 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
         if not coin_id:
             continue
 
-        ohlc_data = fetch_historical_data_crypto(coin_id, days + window_size + 10)
+        # CoinGecko hourly→daily: max 90 Tage (danach nur noch 1 Punkt/Tag = kein H/L)
+        fetch_days = min(days + window_size + 10, 90)
+        ohlc_data = fetch_historical_data_crypto(coin_id, fetch_days)
         if not ohlc_data or len(ohlc_data) < window_size + 5:
             continue
 
