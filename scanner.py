@@ -15904,8 +15904,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if not is_valid:
                 continue
 
-            # Grade-Filter: C+ traden (Close-Entry filtert Fake-Breakouts)
-            if grade == "D":
+            # Grade-Filter: NUR Grade C traden
+            # Grade B verliert konstant in allen Backtests (-18.94%, -10.32%, -0.34%)
+            # Grade D zu schwach, Grade A/S zu selten
+            if grade != "C":
                 continue
 
             # SMART MONEY MINIMUM: Min 2 Boosted-Signale müssen feuern (🔥 oder ✅)
