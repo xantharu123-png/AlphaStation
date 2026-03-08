@@ -16295,6 +16295,445 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     return {"trades": all_trades, "stats_by_grade": stats_by_grade, "summary": summary}
 
 
+# =============================================================================
+# 🔮 CRYPTO BACKTEST — Breakout Imminent für Krypto (CoinGecko OHLC)
+# =============================================================================
+
+DEFAULT_CRYPTO_COINS = [
+    # Mega Cap
+    "BTC", "ETH",
+    # Large Cap
+    "BNB", "SOL", "XRP", "ADA",
+    # Mid Cap
+    "AVAX", "LINK", "DOT", "ARB",
+    # Small Cap
+    "FET", "TIA", "SEI",
+]
+
+
+def _crypto_breakout_ok(bar, range_high, range_low, atr, direction, recent_bars):
+    """Crypto Breakout Confirmation OHNE Volume — nutzt Spread + Wick + Momentum."""
+    if not bar or atr <= 0:
+        return False
+
+    # 1. Price Breakout: Close muss über/unter Range + ATR-Threshold
+    if direction == "long":
+        if bar["close"] <= range_high + atr * 0.2:
+            return False
+    else:
+        if bar["close"] >= range_low - atr * 0.2:
+            return False
+
+    # 2. Spread-Expansion als Volume-Proxy
+    bar_spread = bar["high"] - bar["low"]
+    if recent_bars and len(recent_bars) >= 3:
+        avg_spread = sum((b["high"] - b["low"]) for b in recent_bars[-5:]) / min(5, len(recent_bars))
+        if avg_spread > 0 and bar_spread < avg_spread * 1.2:
+            return False  # Kein Spread-Expansion → schwacher Breakout
+
+    # 3. Wick-Check: Kein starkes Rejection
+    bar_range = bar["high"] - bar["low"]
+    if bar_range > 0:
+        if direction == "long":
+            upper_wick = bar["high"] - max(bar["open"], bar["close"])
+            if (upper_wick / bar_range) > 0.25:
+                return False  # >25% Upper Wick = Rejection
+        else:
+            lower_wick = min(bar["open"], bar["close"]) - bar["low"]
+            if (lower_wick / bar_range) > 0.25:
+                return False
+
+    return True
+
+
+def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback=None):
+    """
+    🔮 Crypto Breakout Imminent Backtest — Rolling-Window Analyse mit CoinGecko OHLC.
+
+    Analog zu run_bi_v2_backtest() aber für Krypto angepasst:
+    - Keine Volume-Confirmation (CoinGecko hat kein hist. Volume)
+    - Spread-basierte Breakout-Bestätigung
+    - Schnellere Timeouts (24/7 Markt)
+    - Höhere ATR-Stops (mehr Volatilität)
+
+    Args:
+        direction: "long" oder "short"
+        days: Backtest-Zeitraum in Tagen (default 90)
+        coins: Liste von Coin-Symbolen (default: DEFAULT_CRYPTO_COINS)
+        progress_callback: (pct, text) Callback für UI
+
+    Returns:
+        dict: {trades, stats_by_grade, summary}
+    """
+    if coins is None:
+        coins = DEFAULT_CRYPTO_COINS
+
+    # === PARAMETER (Crypto-angepasst) ===
+    window_size = 50
+    max_hold = 15           # Kürzere Trends als Aktien
+    slippage = 0.0015       # 0.15% (Crypto Spreads)
+    stop_atr_mult = 1.5     # Höhere Vola → mehr Puffer
+    tp1_mult = 0.8          # Schnellere Reversals → näher
+    tp2_mult = 1.5          # Realistischer als 2.0
+    trail_pct = 0.50        # 50% Trail (vs 66% bei Aktien)
+    min_rr = 1.5            # Angepasst an TPs
+    breakout_timeout = 5    # 5 Tage Breakout-Fenster
+    entry_timeout = 8       # 8 Tage Entry-Fenster
+
+    all_trades = []
+    signals_found = 0
+    coins_processed = 0
+
+    # === PHASE 1: Daten holen ===
+    coin_histories = {}
+    total_coins = len(coins)
+
+    for i, symbol in enumerate(coins):
+        if progress_callback:
+            progress_callback(i / total_coins * 0.3, f"📥 Lade {symbol} ({i+1}/{total_coins})...")
+
+        coin_id = _resolve_coingecko_id(symbol)
+        if not coin_id:
+            continue
+
+        ohlc_data = fetch_historical_data_crypto(coin_id, days + window_size + 10)
+        if not ohlc_data or len(ohlc_data) < window_size + 5:
+            continue
+
+        # Normalisiere zu Standard-Bar-Format
+        bars = []
+        for candle in ohlc_data:
+            if len(candle) >= 5:
+                ts = candle[0]
+                # CoinGecko timestamp = Millisekunden
+                from datetime import datetime
+                dt = datetime.utcfromtimestamp(ts / 1000)
+                bars.append({
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "open": candle[1],
+                    "high": candle[2],
+                    "low": candle[3],
+                    "close": candle[4],
+                    "volume": 1,  # Kein Volume bei CoinGecko OHLC
+                })
+
+        if len(bars) >= window_size + 5:
+            coin_histories[symbol] = bars
+            coins_processed += 1
+
+    if not coin_histories:
+        if progress_callback:
+            progress_callback(1.0, "❌ Keine Crypto-Daten geladen")
+        return {"trades": [], "stats_by_grade": {}, "summary": {
+            "total_signals": 0, "total_filled": 0, "win_rate": 0,
+            "total_pnl": 0, "n_coins": 0, "direction": direction, "days": days
+        }}
+
+    # === PHASE 2: Rolling Window Analyse + Trade Simulation ===
+    cooldown = {}
+    total_windows = sum(max(0, len(b) - window_size) for b in coin_histories.values())
+    windows_done = 0
+
+    for symbol, bars in coin_histories.items():
+        for idx in range(window_size, len(bars)):
+            windows_done += 1
+            if progress_callback and windows_done % 20 == 0:
+                pct = 0.3 + (windows_done / max(1, total_windows)) * 0.5
+                progress_callback(min(pct, 0.8), f"🔍 Analysiere {symbol} ({windows_done}/{total_windows})...")
+
+            # Cooldown: Min 7 Bars zwischen Signalen pro Coin
+            if symbol in cooldown:
+                if idx - cooldown[symbol] < 7:
+                    continue
+
+            window = bars[idx - window_size:idx]
+
+            # BI V2 Analyse (gleich wie Aktien!)
+            result = analyze_breakout_imminent(window, direction=direction)
+            if len(result) == 8:
+                is_valid, bi_score, bi_max, details, confidence, grade, sm_fires, sm_hits = result
+            else:
+                is_valid, bi_score, bi_max, details, confidence, grade = result
+                sm_fires, sm_hits = 0, 0
+
+            if not is_valid or grade == "D":
+                continue
+            if sm_hits < 2:
+                continue
+
+            signals_found += 1
+            cooldown[symbol] = idx
+
+            # === Range & Levels berechnen ===
+            range_high = max(b["high"] for b in window[-15:])
+            range_low = min(b["low"] for b in window[-15:])
+            range_size = range_high - range_low
+            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+
+            if range_pct < 1.0:  # Min 1% Range (Crypto: niedriger als Aktien 2%)
+                continue
+
+            atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
+            if atr_5 <= 0:
+                continue
+
+            breakout_threshold = atr_5 * 0.2
+
+            # Levels
+            if direction == "long":
+                breakout_level = range_high
+                retest_zone_upper = range_high + atr_5 * 0.1
+                retest_zone_lower = range_high - atr_5 * 0.25
+                stop_price = range_high - atr_5 * stop_atr_mult
+                tp1_price = range_high + range_size * tp1_mult
+                tp2_price = range_high + range_size * tp2_mult
+            else:
+                breakout_level = range_low
+                retest_zone_upper = range_low + atr_5 * 0.25
+                retest_zone_lower = range_low - atr_5 * 0.1
+                stop_price = range_low + atr_5 * stop_atr_mult
+                tp1_price = range_low - range_size * tp1_mult
+                tp2_price = range_low - range_size * tp2_mult
+
+            # R:R Check
+            est_entry = (retest_zone_upper + retest_zone_lower) / 2
+            risk = abs(est_entry - stop_price)
+            reward = abs(tp1_price - est_entry)
+            rr = round(reward / risk, 2) if risk > 0 else 0
+            if rr < min_rr:
+                continue
+
+            # === Trade-Basis ===
+            trade_result = {
+                "ticker": symbol,
+                "signal_date": bars[idx]["date"],
+                "grade": grade,
+                "score": bi_score,
+                "max_score": bi_max,
+                "confidence": confidence,
+                "smart_money_fires": sm_fires,
+                "smart_money_hits": sm_hits,
+                "direction": direction.upper(),
+                "entry_target": round(est_entry, 6),
+                "stop_target": round(stop_price, 6),
+                "tp1_target": round(tp1_price, 6),
+                "tp2_target": round(tp2_price, 6),
+                "rr_planned": rr,
+                "range_pct": round(range_pct, 1),
+            }
+
+            # === 3-Phase Simulation ===
+            breakout_confirmed = False
+            entry_filled = False
+            actual_entry = None
+            entry_date = None
+            exit_price = None
+            exit_date = None
+            exit_reason = None
+            bars_held = 0
+            current_stop = stop_price
+            tp1_hit = False
+            breakout_high = 0
+
+            for day_offset in range(1, max_hold + breakout_timeout + entry_timeout):
+                future_idx = idx + day_offset
+                if future_idx >= len(bars):
+                    break
+
+                future_bar = bars[future_idx]
+
+                # Phase 1: Breakout Confirmation (OHNE Volume — Spread-basiert)
+                if not breakout_confirmed:
+                    recent = bars[max(0, future_idx - 5):future_idx]
+                    bo_ok = _crypto_breakout_ok(
+                        future_bar, range_high, range_low, atr_5, direction, recent
+                    )
+                    if bo_ok:
+                        breakout_confirmed = True
+                        breakout_high = future_bar["high"] if direction == "long" else future_bar["low"]
+                    elif day_offset >= breakout_timeout:
+                        break
+                    else:
+                        continue
+
+                # Phase 2: Pullback Retest Entry
+                if not entry_filled:
+                    if direction == "long":
+                        breakout_high = max(breakout_high, future_bar["high"])
+                        price_pulled_back = future_bar["low"] <= retest_zone_upper
+                        price_above_stop = future_bar["low"] > stop_price
+                        had_upward_move = breakout_high > retest_zone_upper
+
+                        if price_pulled_back and price_above_stop and had_upward_move:
+                            actual_entry = max(future_bar["close"], retest_zone_lower) * (1 + slippage)
+                            entry_filled = True
+                            entry_date = future_bar["date"]
+                            bars_held = 0
+                            risk = abs(actual_entry - stop_price)
+                    else:
+                        breakout_high = min(breakout_high, future_bar["low"])
+                        price_pulled_back = future_bar["high"] >= retest_zone_lower
+                        price_below_stop = future_bar["high"] < stop_price
+                        had_downward_move = breakout_high < retest_zone_lower
+
+                        if price_pulled_back and price_below_stop and had_downward_move:
+                            actual_entry = min(future_bar["close"], retest_zone_upper) * (1 - slippage)
+                            entry_filled = True
+                            entry_date = future_bar["date"]
+                            bars_held = 0
+                            risk = abs(actual_entry - stop_price)
+
+                    if day_offset >= breakout_timeout + entry_timeout and not entry_filled:
+                        break
+                    if not entry_filled:
+                        continue
+
+                # Phase 3: Trade Management
+                bars_held += 1
+                if bars_held > max_hold:
+                    exit_price = future_bar["close"]
+                    exit_reason = "MAX_HOLD"
+                    exit_date = future_bar["date"]
+                    break
+
+                if direction == "long":
+                    stop_hit = future_bar["low"] <= current_stop
+                    tp1_possible = future_bar["high"] >= tp1_price
+                    tp2_possible = future_bar["high"] >= tp2_price
+
+                    if stop_hit:
+                        exit_price = current_stop * (1 - slippage)
+                        exit_reason = "BE_STOP" if tp1_hit else "STOP"
+                        exit_date = future_bar["date"]
+                        break
+
+                    if tp1_possible and not tp1_hit:
+                        tp1_hit = True
+                        trail_level = actual_entry + (tp1_price - actual_entry) * trail_pct
+                        current_stop = trail_level
+
+                    if tp2_possible:
+                        exit_price = tp2_price * (1 - slippage)
+                        exit_reason = "TP2"
+                        exit_date = future_bar["date"]
+                        break
+                else:  # short
+                    stop_hit = future_bar["high"] >= current_stop
+                    tp1_possible = future_bar["low"] <= tp1_price
+                    tp2_possible = future_bar["low"] <= tp2_price
+
+                    if stop_hit:
+                        exit_price = current_stop * (1 + slippage)
+                        exit_reason = "BE_STOP" if tp1_hit else "STOP"
+                        exit_date = future_bar["date"]
+                        break
+
+                    if tp1_possible and not tp1_hit:
+                        tp1_hit = True
+                        trail_level = actual_entry - (actual_entry - tp1_price) * trail_pct
+                        current_stop = trail_level
+
+                    if tp2_possible:
+                        exit_price = tp2_price * (1 + slippage)
+                        exit_reason = "TP2"
+                        exit_date = future_bar["date"]
+                        break
+
+            # Partial Exit wenn TP1 hit aber TP2 nicht
+            if entry_filled and exit_price is None:
+                if tp1_hit:
+                    last_idx = min(idx + max_hold + breakout_timeout, len(bars) - 1)
+                    tp1_exit = tp1_price * (1 - slippage if direction == "long" else 1 + slippage)
+                    close_exit = bars[last_idx]["close"]
+                    if direction == "long":
+                        exit_price = (tp1_exit + max(close_exit, actual_entry)) / 2
+                    else:
+                        exit_price = (tp1_exit + min(close_exit, actual_entry)) / 2
+                    exit_reason = "TP1_PARTIAL"
+                    exit_date = bars[last_idx]["date"]
+                else:
+                    last_idx = min(idx + max_hold + breakout_timeout, len(bars) - 1)
+                    exit_price = bars[last_idx]["close"]
+                    exit_reason = "MAX_HOLD"
+                    exit_date = bars[last_idx]["date"]
+
+            # P&L berechnen
+            if not entry_filled or actual_entry is None or exit_price is None:
+                trade_result["outcome"] = "NO_FILL"
+                trade_result["pnl_pct"] = 0
+                trade_result["r_multiple"] = 0
+                trade_result["is_winner"] = False
+            else:
+                if direction == "long":
+                    pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100
+                else:
+                    pnl_pct = ((actual_entry - exit_price) / actual_entry) * 100
+
+                r_multiple = round(pnl_pct / (risk / actual_entry * 100), 2) if risk > 0 and actual_entry > 0 else 0
+
+                trade_result["actual_entry"] = round(actual_entry, 6)
+                trade_result["exit_price"] = round(exit_price, 6)
+                trade_result["entry_date"] = entry_date
+                trade_result["exit_date"] = exit_date
+                trade_result["exit_reason"] = exit_reason
+                trade_result["bars_held"] = bars_held
+                trade_result["tp1_hit"] = tp1_hit
+                trade_result["pnl_pct"] = round(pnl_pct, 2)
+                trade_result["r_multiple"] = r_multiple
+                trade_result["is_winner"] = pnl_pct > 0
+                trade_result["outcome"] = exit_reason
+
+            all_trades.append(trade_result)
+
+    # === PHASE 3: Stats berechnen ===
+    filled_trades = [t for t in all_trades if t.get("outcome") != "NO_FILL"]
+
+    stats_by_grade = {}
+    for g in ["S", "A", "B", "C", "D"]:
+        grade_trades = [t for t in filled_trades if t["grade"] == g]
+        if not grade_trades:
+            continue
+
+        winners = [t for t in grade_trades if t["is_winner"]]
+        losers = [t for t in grade_trades if not t["is_winner"]]
+        total_pnl = sum(t["pnl_pct"] for t in grade_trades)
+        gross_profit = sum(t["pnl_pct"] for t in winners)
+        gross_loss = abs(sum(t["pnl_pct"] for t in losers))
+
+        stats_by_grade[g] = {
+            "total": len(grade_trades),
+            "winners": len(winners),
+            "losers": len(losers),
+            "win_rate": round(len(winners) / len(grade_trades) * 100, 1),
+            "avg_pnl": round(total_pnl / len(grade_trades), 2),
+            "avg_winner": round(gross_profit / len(winners), 2) if winners else 0,
+            "avg_loser": round(-gross_loss / len(losers), 2) if losers else 0,
+            "total_pnl": round(total_pnl, 2),
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0,
+            "avg_r": round(sum(t["r_multiple"] for t in grade_trades) / len(grade_trades), 2),
+            "tp1_rate": round(sum(1 for t in grade_trades if t.get("tp1_hit")) / len(grade_trades) * 100, 1),
+            "tp2_rate": round(sum(1 for t in grade_trades if t.get("outcome") == "TP2") / len(grade_trades) * 100, 1),
+        }
+
+    summary = {
+        "total_signals": signals_found,
+        "total_filled": len(filled_trades),
+        "no_fill": len(all_trades) - len(filled_trades),
+        "win_rate": round(sum(1 for t in filled_trades if t["is_winner"]) / len(filled_trades) * 100, 1) if filled_trades else 0,
+        "avg_pnl": round(sum(t["pnl_pct"] for t in filled_trades) / len(filled_trades), 2) if filled_trades else 0,
+        "total_pnl": round(sum(t["pnl_pct"] for t in filled_trades), 2) if filled_trades else 0,
+        "n_coins": coins_processed,
+        "n_coins_total": total_coins,
+        "direction": direction,
+        "days": days,
+    }
+
+    if progress_callback:
+        progress_callback(1.0, f"✅ Crypto Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
+
+    return {"trades": all_trades, "stats_by_grade": stats_by_grade, "summary": summary}
+
+
 def compute_daily_metrics(bars, idx):
     """
     Berechnet Screening-Metriken für einen Tag.
@@ -16705,7 +17144,7 @@ def display_backtest_lab(poly_key):
     st.caption("Teste Strategien über historische Daten mit echten Polygon-Daten")
 
     # === MODUS: Standard vs BI V2 ===
-    bt_mode = st.radio("Backtest-Modus", ["📊 Standard Strategien", "🔮 Breakout Imminent V2"],
+    bt_mode = st.radio("Backtest-Modus", ["📊 Standard Strategien", "🔮 Breakout Imminent V2", "🌐 Crypto BI"],
                         horizontal=True, key="bt_mode_radio")
 
     # =================================================================
@@ -16826,6 +17265,100 @@ def display_backtest_lab(poly_key):
             st.info("🔄 Klicke 'BI V2 Backtest starten' um die Strategie zu testen.")
 
         return  # BI V2 Modus → nicht weitermachen mit Standard
+
+    # =================================================================
+    # 🌐 CRYPTO BREAKOUT IMMINENT BACKTEST
+    # =================================================================
+    elif bt_mode == "🌐 Crypto BI":
+        st.subheader("🌐 Crypto Breakout Imminent — Historischer Backtest")
+        st.caption("Testet BI-Signale auf 13 Krypto-Coins via CoinGecko OHLC (kein Volume → Spread-Confirmation)")
+
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            crypto_days = st.selectbox("📅 Tage", [30, 60, 90], index=2,
+                                       format_func=lambda x: f"{x} Tage", key="crypto_bt_days")
+        with col_c2:
+            crypto_direction = st.selectbox("📈 Richtung", ["long", "short"], key="crypto_bt_dir")
+
+        st.caption("🪙 Default: BTC, ETH, BNB, SOL, XRP, ADA, AVAX, LINK, DOT, ARB, FET, TIA, SEI")
+        st.caption(f"⏱️ ~30 Sekunden (13 Coins × CoinGecko OHLC)")
+
+        if st.button("🚀 Crypto Backtest starten", type="primary", use_container_width=True, key="crypto_bt_start"):
+            progress_bar = st.progress(0, text="Starte Crypto Backtest...")
+
+            def update_crypto_progress(pct, text):
+                progress_bar.progress(min(pct, 1.0), text=text)
+
+            with st.spinner(f"Analysiere 13 Coins über {crypto_days} Tage..."):
+                crypto_results = run_crypto_backtest(
+                    direction=crypto_direction,
+                    days=crypto_days,
+                    progress_callback=update_crypto_progress
+                )
+
+            st.session_state["crypto_backtest_results"] = crypto_results
+
+        # Ergebnisse anzeigen
+        crypto_results = st.session_state.get("crypto_backtest_results")
+        if crypto_results:
+            summary = crypto_results["summary"]
+            trades = crypto_results.get("trades", [])
+            stats = crypto_results.get("stats_by_grade", {})
+
+            # Summary Metrics
+            st.divider()
+            st.subheader("📊 Zusammenfassung")
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric("Signale", summary["total_signals"])
+            mc2.metric("Trades", summary["total_filled"])
+            mc3.metric("Win Rate", f"{summary['win_rate']:.1f}%")
+            mc4.metric("Total P&L", f"{summary['total_pnl']:+.2f}%")
+            mc5.metric("Coins", summary["n_coins"])
+
+            # Grade Breakdown
+            if stats:
+                st.divider()
+                st.subheader("📊 Grade Breakdown")
+                for grade in ["S", "A", "B", "C"]:
+                    if grade in stats:
+                        s = stats[grade]
+                        with st.expander(f"Grade {grade}: {s['total']} Trades, {s['win_rate']:.1f}% WR, {s['total_pnl']:+.2f}% P&L"):
+                            gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+                            gc1.metric("Winners", s["winners"])
+                            gc2.metric("Losers", s["losers"])
+                            gc3.metric("Profit Factor", f"{s['profit_factor']:.2f}")
+                            gc4.metric("Avg R", f"{s['avg_r']:.2f}")
+                            gc5.metric("Avg P&L", f"{s['avg_pnl']:+.2f}%")
+
+                            gc6, gc7 = st.columns(2)
+                            gc6.metric("TP1 Rate", f"{s.get('tp1_rate', 0):.1f}%")
+                            gc7.metric("TP2 Rate", f"{s.get('tp2_rate', 0):.1f}%")
+
+            # Trade-Liste
+            if trades:
+                st.divider()
+                filled = [t for t in trades if t.get("outcome") != "NO_FILL"]
+                if filled:
+                    st.subheader(f"📋 Trade-Liste ({len(filled)} Trades)")
+                    _crypto_df = []
+                    for t in sorted(filled, key=lambda x: x.get("pnl_pct", 0), reverse=True):
+                        _crypto_df.append({
+                            "Coin": t["ticker"],
+                            "Datum": t.get("signal_date", ""),
+                            "Grade": t["grade"],
+                            "Score": f"{t['score']}/{t['max_score']}",
+                            "Entry": f"${t.get('actual_entry', 0):.4f}",
+                            "Exit": f"${t.get('exit_price', 0):.4f}",
+                            "P&L": f"{t['pnl_pct']:+.2f}%",
+                            "R": f"{t['r_multiple']:.1f}R",
+                            "Exit Grund": t.get("outcome", ""),
+                            "Tage": t.get("bars_held", 0),
+                        })
+                    st.dataframe(_crypto_df, use_container_width=True)
+        else:
+            st.info("🔄 Klicke 'Crypto Backtest starten' um die Strategie zu testen.")
+
+        return  # Crypto BI Modus → nicht weitermachen mit Standard
 
     # =================================================================
     # 📊 STANDARD STRATEGIEN BACKTEST (original code below)
