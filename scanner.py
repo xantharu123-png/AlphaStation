@@ -20300,6 +20300,25 @@ with tab_scanner:
                 except Exception:
                     pass
             
+            # ── FINALE SORTIERUNG: Immer nach Score absteigend ──
+            # Nach Earnings-Penalties & VP-Adjustments können Scores ungeordnet sein
+            sort_key = None
+            if "BI_Score" in df.columns:
+                sort_key = "BI_Score"
+            elif "SetupScore" in df.columns:
+                sort_key = "SetupScore"
+            elif "WyckoffScore" in df.columns:
+                sort_key = "WyckoffScore"
+            elif "VoidScore" in df.columns:
+                sort_key = "VoidScore"
+            elif "Alpha" in df.columns:
+                sort_key = "Alpha"
+
+            if sort_key:
+                df = df.sort_values(by=sort_key, ascending=False).reset_index(drop=True)
+                # scan_results auch aktualisieren (für Navigation)
+                st.session_state.scan_results = df.to_dict("records")
+
             # Earnings-Marker als separate Spalte (Ticker nicht verändern!)
             if "EarningsWarning" in df.columns:
                 def _earnings_flag(ear):
