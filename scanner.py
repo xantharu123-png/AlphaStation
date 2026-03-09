@@ -22123,6 +22123,34 @@ with tab_bi:
             if details:
                 with st.expander("🔬 Signal-Details", expanded=False):
                     st.text(details)
+
+            # ── TradingView Chart ──
+            st.divider()
+            bi_tv_symbol = ticker
+            bi_tv_html = f'''
+            <div style="height:500px; border-radius: 8px; overflow: hidden;">
+                <div id="bi_tv_chart" style="height:100%"></div>
+                <script src="https://s3.tradingview.com/tv.js"></script>
+                <script>
+                    new TradingView.widget({{
+                        "autosize": true,
+                        "symbol": "{bi_tv_symbol}",
+                        "interval": "D",
+                        "timezone": "Europe/Berlin",
+                        "theme": "dark",
+                        "style": "1",
+                        "locale": "de_DE",
+                        "enable_publishing": false,
+                        "hide_side_toolbar": false,
+                        "allow_symbol_change": true,
+                        "studies": ["Volume@tv-basicstudies", "BB@tv-basicstudies", "RSI@tv-basicstudies"],
+                        "container_id": "bi_tv_chart",
+                        "range": "3M"
+                    }});
+                </script>
+            </div>
+            '''
+            st.components.v1.html(bi_tv_html, height=500)
     else:
         st.info("Noch keine BI Ergebnisse. Scan starten oder auf Auto-Scan warten.")
 
