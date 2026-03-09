@@ -19404,163 +19404,14 @@ with st.sidebar:
     
     st.divider()
 
-    # ═══════════════════════════════════════════════════════════
-    # BI BACKGROUND SCAN — Eigene UI VOR dem normalen Scan-Button
-    # BI läuft im Hintergrund, braucht eigene Buttons statt SCAN STARTEN
-    # ═══════════════════════════════════════════════════════════
+    # BI Strategie → Hinweis auf eigenen Tab
     _bi_current_strat = st.session_state.get("current_strategy", "")
-    _bi_is_bi = "Breakout Imminent" in _bi_current_strat
-    _bi_handled = False
+    if "Breakout Imminent" in _bi_current_strat:
+        st.info("🔮 **Breakout Imminent** hat einen eigenen Tab → Wechsle zum **🔮 BI Scanner** Tab!")
 
-    if _bi_is_bi and m_type == "Aktien":
-        bi_direction = "long" if "Long" in _bi_current_strat else "short"
-        dir_emoji = "⬆️" if bi_direction == "long" else "⬇️"
-
-        # Status prüfen
-        cached_results, cached_ts, cache_age_min = _bi_cache_load(bi_direction)
-        cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 120  # 2h TTL
-        scan_running = _bi_scan_is_running(bi_direction)
-        progress = _bi_progress_read(bi_direction)
-
-        # ── FALL 1: Scan läuft im Hintergrund ──
-        if scan_running and progress:
-            p_checked = progress.get("checked", 0)
-            p_total = progress.get("total", 0)
-            p_hits = progress.get("hits", 0)
-            p_top = progress.get("top_score", 0)
-            pct = round(p_checked / max(1, p_total) * 100)
-            est_left = max(1, (p_total - p_checked) // 75)
-
-            st.info(f"🔮 **BI Scan läuft** — {p_checked}/{p_total} ({pct}%) | "
-                    f"{p_hits} Treffer | Top: {p_top} | ~{est_left} Min")
-            st.progress(min(1.0, p_checked / max(1, p_total)))
-            st.caption("💡 App normal weiter benutzen — Scan läuft im Hintergrund!")
-
-            if cache_valid:
-                cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
-                if st.button(f"⚡ Vorherigen Cache laden ({len(cached_results)} Treffer von {cache_time_str})", use_container_width=True):
-                    st.session_state.scan_results = cached_results
-                    st.session_state.market_type = "Aktien"
-                    st.session_state.selected_row_index = 0
-                    st.rerun()
-            _bi_handled = True
-
-        # ── FALL 2: Scan fertig → Auto-Load Ergebnisse ──
-        elif progress and progress.get("status") == "done":
-            fresh_results, _, _ = _bi_cache_load(bi_direction)
-            if fresh_results is not None:
-                # Auto-Load: Ergebnisse direkt in Session laden
-                st.session_state.scan_results = fresh_results
-                st.session_state.market_type = "Aktien"
-                st.session_state.selected_row_index = 0
-                st.success(f"✅ **BI Scan fertig!** {len(fresh_results)} Treffer — automatisch geladen")
-                st.caption(f"🔍 {progress.get('detail', '')}")
-                next_scan_info = "Nächster Auto-Scan wenn Cache >2h alt + Markt offen"
-                st.caption(f"⏰ {next_scan_info}")
-                _bi_progress_clear(bi_direction)
-            else:
-                st.warning("⚠️ Scan fertig aber keine Treffer gefunden")
-                _bi_progress_clear(bi_direction)
-            _bi_handled = True
-
-        # ── FALL 3: Fehler ──
-        elif progress and progress.get("status") == "error":
-            st.error(f"❌ BI Scan Fehler: {progress.get('detail', 'Unbekannt')}")
-            _bi_progress_clear(bi_direction)
-
-        # ── FALL 4: Kein Scan aktiv — Auto-Scan + Buttons ──
-        else:
-            # --- Auto-Scan Logik: Prüfe ob Marktzeit und Cache abgelaufen ---
-            from zoneinfo import ZoneInfo
-            now_cet = datetime.now(ZoneInfo("Europe/Berlin"))
-            now_hour_min = now_cet.hour * 60 + now_cet.minute  # Minuten seit Mitternacht
-            market_open = 15 * 60 + 30   # 15:30 CET
-            market_close = 22 * 60       # 22:00 CET
-            is_market_hours = market_open <= now_hour_min <= market_close
-            is_weekday = now_cet.weekday() < 5  # Mo-Fr
-
-            # Auto-Scan Zeitfenster: 15:45 und 18:30 CET (±15 Min Fenster)
-            auto_scan_windows = [
-                (15 * 60 + 45, "15:45"),  # 15 Min nach Open
-                (18 * 60 + 30, "18:30"),  # Mittag US
-            ]
-            should_auto_scan = False
-            auto_scan_reason = ""
-            if is_weekday and is_market_hours:
-                cache_expired = not cache_valid  # Cache >2h oder nicht vorhanden
-                if cache_expired:
-                    for window_min, window_name in auto_scan_windows:
-                        # Innerhalb ±15 Min des Scan-Fensters
-                        if abs(now_hour_min - window_min) <= 15:
-                            should_auto_scan = True
-                            auto_scan_reason = f"Auto-Scan {window_name} CET"
-                            break
-                    # Fallback: Immer auto-scannen wenn Cache abgelaufen + Markt offen
-                    if not should_auto_scan:
-                        should_auto_scan = True
-                        auto_scan_reason = f"Cache abgelaufen — Markt offen"
-
-            if cache_valid:
-                # Cache vorhanden → automatisch laden + Manuell-Buttons zeigen
-                cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
-                st.success(f"⚡ **BI Cache:** {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
-
-                # Auto-Load: Wenn noch keine Ergebnisse geladen → direkt laden
-                if not st.session_state.get("scan_results"):
-                    st.session_state.scan_results = cached_results
-                    st.session_state.market_type = "Aktien"
-                    st.session_state.selected_row_index = 0
-
-                bi_col1, bi_col2 = st.columns(2)
-                with bi_col1:
-                    if st.button(f"⚡ Cache laden ({len(cached_results)})", use_container_width=True, type="primary"):
-                        st.session_state.scan_results = cached_results
-                        st.session_state.market_type = "Aktien"
-                        st.session_state.selected_row_index = 0
-                        st.rerun()
-                with bi_col2:
-                    if st.button("🔄 Neu scannen", use_container_width=True):
-                        should_auto_scan = True
-                        auto_scan_reason = "Manuell gestartet"
-
-            elif should_auto_scan:
-                st.info(f"🤖 **{auto_scan_reason}** — Scan startet automatisch...")
-            else:
-                # Außerhalb Marktzeiten / Wochenende → manueller Button
-                time_info = f"Mo-Fr 15:30-22:00 CET" if not is_weekday else "nächstes Scan-Fenster"
-                st.caption(f"⏰ Auto-Scan aktiv während Marktzeiten ({time_info})")
-                if st.button(f"🚀 BI Scan starten {dir_emoji} (Hintergrund ~30 Min)", use_container_width=True, type="primary"):
-                    should_auto_scan = True
-                    auto_scan_reason = "Manuell gestartet"
-
-            # --- Scan starten (Auto oder Manuell) ---
-            if should_auto_scan and not scan_running:
-                try:
-                    poly_key = st.secrets["POLYGON_KEY"]
-                    with st.spinner(f"📡 {auto_scan_reason} — Lade Aktien-Snapshot..."):
-                        raw_candidates = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
-                    if not raw_candidates:
-                        st.error("❌ Keine Daten von Polygon API erhalten!")
-                    else:
-                        filtered = []
-                        for s in raw_candidates:
-                            price = s.get("Preis", 0)
-                            dvol = s.get("DollarVol", 0)
-                            chg = abs(s.get("Change%", 0))
-                            rvol = s.get("RVOL", 0)
-                            if price >= 5 and dvol >= 500_000 and chg <= 3 and rvol <= 2.0:
-                                filtered.append(s)
-                        st.info(f"✅ {len(filtered)} Kandidaten geladen (von {len(raw_candidates)})")
-                        thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction, filtered), daemon=True)
-                        thread.start()
-                        st.rerun()
-                except KeyError:
-                    st.error("❌ POLYGON_KEY fehlt!")
-            _bi_handled = True
-
-    # SCAN Button (für ALLE anderen Strategien — BI hat eigene Buttons oben)
-    if _bi_handled:
-        pass  # BI hat eigene UI oben — kein SCAN STARTEN Button nötig
+    # SCAN Button (für ALLE anderen Strategien — BI hat eigenen Tab)
+    if "Breakout Imminent" in _bi_current_strat:
+        pass  # BI hat eigenen Tab
     elif st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
         # Reset Navigation Index für neue Ergebnisse
         st.session_state.selected_row_index = 0
@@ -20510,7 +20361,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
-tab_scanner, tab_search, tab_watchlist, tab_moneyflow, tab_backtest, tab_guide = st.tabs(["📊 Scanner", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "🧪 Backtest", "📖 Strategie Guide"])
+tab_scanner, tab_bi, tab_search, tab_watchlist, tab_moneyflow, tab_backtest, tab_guide = st.tabs(["📊 Scanner", "🔮 BI Scanner", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "🧪 Backtest", "📖 Strategie Guide"])
 
 with tab_scanner:
     # PRE-MARKET WATCHLIST ANZEIGE (wenn aktiv)
@@ -21996,6 +21847,212 @@ with tab_scanner:
             </div>
             '''
             st.components.v1.html(tv_html, height=420)
+
+# =============================================================================
+# BI SCANNER TAB — Breakout Imminent mit Auto-Scan + Einstellungen
+# =============================================================================
+with tab_bi:
+    st.header("🔮 Breakout Imminent Scanner")
+    st.caption("Automatischer Hintergrund-Scan für Breakout-Imminent Setups | 20-Signal Composite Scoring")
+
+    # ── Einstellungen (Expander) ──
+    with st.expander("⚙️ Einstellungen", expanded=False):
+        bi_set_col1, bi_set_col2 = st.columns(2)
+        with bi_set_col1:
+            bi_tab_direction = st.radio(
+                "Richtung",
+                ["Long ⬆️", "Short ⬇️"],
+                index=0 if st.session_state.get("bi_tab_direction", "long") == "long" else 1,
+                horizontal=True,
+                key="bi_tab_dir_radio"
+            )
+            st.session_state["bi_tab_direction"] = "long" if "Long" in bi_tab_direction else "short"
+        with bi_set_col2:
+            bi_tab_threshold = st.number_input(
+                "Score Threshold",
+                min_value=50, max_value=150, value=st.session_state.get("bi_tab_threshold", 85),
+                step=5, help="Minimum BI Score für Treffer (Standard: 85 Long, 80 Short)",
+                key="bi_tab_threshold_input"
+            )
+            st.session_state["bi_tab_threshold"] = bi_tab_threshold
+
+        st.divider()
+        st.subheader("⏰ Auto-Scan Zeiten (CET)")
+        bi_time_col1, bi_time_col2, bi_time_col3 = st.columns(3)
+        with bi_time_col1:
+            bi_scan1_h = st.number_input("Scan 1 — Stunde", min_value=9, max_value=22, value=st.session_state.get("bi_scan1_h", 15), key="bi_s1h")
+            bi_scan1_m = st.number_input("Scan 1 — Minute", min_value=0, max_value=59, value=st.session_state.get("bi_scan1_m", 45), key="bi_s1m")
+            st.session_state["bi_scan1_h"] = bi_scan1_h
+            st.session_state["bi_scan1_m"] = bi_scan1_m
+        with bi_time_col2:
+            bi_scan2_h = st.number_input("Scan 2 — Stunde", min_value=9, max_value=22, value=st.session_state.get("bi_scan2_h", 18), key="bi_s2h")
+            bi_scan2_m = st.number_input("Scan 2 — Minute", min_value=0, max_value=59, value=st.session_state.get("bi_scan2_m", 30), key="bi_s2m")
+            st.session_state["bi_scan2_h"] = bi_scan2_h
+            st.session_state["bi_scan2_m"] = bi_scan2_m
+        with bi_time_col3:
+            bi_auto_enabled = st.toggle("Auto-Scan aktiv", value=st.session_state.get("bi_auto_enabled", True), key="bi_auto_toggle")
+            st.session_state["bi_auto_enabled"] = bi_auto_enabled
+            bi_cache_ttl_h = st.number_input("Cache TTL (Std)", min_value=1, max_value=6, value=st.session_state.get("bi_cache_ttl_h", 2), key="bi_ttl")
+            st.session_state["bi_cache_ttl_h"] = bi_cache_ttl_h
+
+        st.caption(f"📋 Scan 1: **{bi_scan1_h:02d}:{bi_scan1_m:02d}** CET | Scan 2: **{bi_scan2_h:02d}:{bi_scan2_m:02d}** CET | TTL: {bi_cache_ttl_h}h | Auto: {'✅' if bi_auto_enabled else '❌'}")
+
+    # ── Status + Ergebnisse ──
+    st.divider()
+
+    bi_dir = st.session_state.get("bi_tab_direction", "long")
+    bi_dir_emoji = "⬆️" if bi_dir == "long" else "⬇️"
+    bi_dir_label = "Long" if bi_dir == "long" else "Short"
+    cache_ttl_min = st.session_state.get("bi_cache_ttl_h", 2) * 60
+
+    # Cache + Status laden
+    bi_cached_results, bi_cached_ts, bi_cache_age = _bi_cache_load(bi_dir)
+    bi_cache_ok = bi_cached_results is not None and bi_cache_age is not None and bi_cache_age < cache_ttl_min
+    bi_running = _bi_scan_is_running(bi_dir)
+    bi_progress = _bi_progress_read(bi_dir)
+
+    # ── Auto-Scan Logik ──
+    from zoneinfo import ZoneInfo
+    bi_now_cet = datetime.now(ZoneInfo("Europe/Berlin"))
+    bi_now_hm = bi_now_cet.hour * 60 + bi_now_cet.minute
+    bi_market_open = 15 * 60 + 30
+    bi_market_close = 22 * 60
+    bi_is_market = bi_market_open <= bi_now_hm <= bi_market_close and bi_now_cet.weekday() < 5
+    bi_auto_on = st.session_state.get("bi_auto_enabled", True)
+
+    bi_should_auto = False
+    bi_auto_reason = ""
+    if bi_auto_on and bi_is_market and not bi_cache_ok and not bi_running:
+        s1 = st.session_state.get("bi_scan1_h", 15) * 60 + st.session_state.get("bi_scan1_m", 45)
+        s2 = st.session_state.get("bi_scan2_h", 18) * 60 + st.session_state.get("bi_scan2_m", 30)
+        for wmin, wname in [(s1, "Scan 1"), (s2, "Scan 2")]:
+            if abs(bi_now_hm - wmin) <= 15:
+                bi_should_auto = True
+                bi_auto_reason = f"Auto-{wname} ({wmin // 60:02d}:{wmin % 60:02d} CET)"
+                break
+        if not bi_should_auto:
+            bi_should_auto = True
+            bi_auto_reason = "Cache abgelaufen — Markt offen"
+
+    # ── FALL 1: Scan läuft ──
+    if bi_running and bi_progress:
+        p_c = bi_progress.get("checked", 0)
+        p_t = bi_progress.get("total", 0)
+        p_h = bi_progress.get("hits", 0)
+        p_top = bi_progress.get("top_score", 0)
+        pct = round(p_c / max(1, p_t) * 100)
+        est = max(1, (p_t - p_c) // 75)
+        st.info(f"🔮 **BI Scan {bi_dir_label} {bi_dir_emoji} läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
+        st.progress(min(1.0, p_c / max(1, p_t)))
+        st.caption("💡 Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
+        # Alten Cache laden während Scan läuft
+        if bi_cache_ok:
+            cache_t = datetime.fromtimestamp(bi_cached_ts).strftime("%H:%M")
+            if st.button(f"⚡ Vorherige Ergebnisse laden ({len(bi_cached_results)} Treffer von {cache_t})", use_container_width=True, key="bi_tab_load_while_running"):
+                st.session_state.bi_tab_results = bi_cached_results
+
+    # ── FALL 2: Scan fertig ──
+    elif bi_progress and bi_progress.get("status") == "done":
+        fresh, _, _ = _bi_cache_load(bi_dir)
+        if fresh is not None:
+            st.session_state.bi_tab_results = fresh
+            st.success(f"✅ **BI Scan {bi_dir_label} fertig!** {len(fresh)} Treffer — automatisch geladen")
+            st.caption(f"🔍 {bi_progress.get('detail', '')}")
+        else:
+            st.warning("⚠️ Scan fertig — keine Treffer")
+        _bi_progress_clear(bi_dir)
+
+    # ── FALL 3: Fehler ──
+    elif bi_progress and bi_progress.get("status") == "error":
+        st.error(f"❌ BI Scan Fehler: {bi_progress.get('detail', 'Unbekannt')}")
+        _bi_progress_clear(bi_dir)
+
+    # ── FALL 4: Kein Scan aktiv ──
+    else:
+        if bi_cache_ok:
+            cache_t = datetime.fromtimestamp(bi_cached_ts).strftime("%H:%M")
+            st.success(f"⚡ **Cache {bi_dir_label}:** {len(bi_cached_results)} Treffer von {cache_t} ({_bi_cache_age_str(bi_cache_age)})")
+            # Auto-Load
+            if not st.session_state.get("bi_tab_results"):
+                st.session_state.bi_tab_results = bi_cached_results
+
+        if bi_should_auto:
+            st.info(f"🤖 **{bi_auto_reason}** — Scan startet automatisch...")
+
+        bi_btn_col1, bi_btn_col2 = st.columns(2)
+        with bi_btn_col1:
+            bi_manual_scan = st.button(f"🚀 Scan starten {bi_dir_emoji}", use_container_width=True, type="primary", key="bi_tab_manual_scan")
+        with bi_btn_col2:
+            if bi_cache_ok:
+                if st.button(f"⚡ Cache laden ({len(bi_cached_results)})", use_container_width=True, key="bi_tab_load_cache"):
+                    st.session_state.bi_tab_results = bi_cached_results
+                    st.rerun()
+
+        # Zeitinfo
+        if bi_auto_on and bi_is_market:
+            s1 = st.session_state.get("bi_scan1_h", 15) * 60 + st.session_state.get("bi_scan1_m", 45)
+            s2 = st.session_state.get("bi_scan2_h", 18) * 60 + st.session_state.get("bi_scan2_m", 30)
+            st.caption(f"⏰ Auto-Scan: {s1//60:02d}:{s1%60:02d} + {s2//60:02d}:{s2%60:02d} CET | Nächster wenn Cache >{cache_ttl_min//60}h alt")
+        elif not bi_is_market:
+            st.caption("⏰ Markt geschlossen — Auto-Scan pausiert (Mo-Fr 15:30-22:00 CET)")
+
+        # --- Scan starten (Auto oder Manuell) ---
+        if (bi_should_auto or bi_manual_scan) and not bi_running:
+            try:
+                poly_key = st.secrets["POLYGON_KEY"]
+                reason = bi_auto_reason if bi_should_auto else "Manuell gestartet"
+                with st.spinner(f"📡 {reason} — Lade Aktien-Snapshot..."):
+                    raw = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                if not raw:
+                    st.error("❌ Keine Daten von Polygon API!")
+                else:
+                    filtered = [s for s in raw if s.get("Preis", 0) >= 5 and s.get("DollarVol", 0) >= 500_000 and abs(s.get("Change%", 0)) <= 3 and s.get("RVOL", 0) <= 2.0]
+                    st.info(f"✅ {len(filtered)} Kandidaten (von {len(raw)}) — Scan startet im Hintergrund")
+                    thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_dir, filtered), daemon=True)
+                    thread.start()
+                    import time; time.sleep(1)
+                    st.rerun()
+            except KeyError:
+                st.error("❌ POLYGON_KEY fehlt in secrets!")
+
+    # ── Ergebnis-Tabelle ──
+    st.divider()
+    bi_tab_data = st.session_state.get("bi_tab_results", None)
+    if bi_tab_data and len(bi_tab_data) > 0:
+        import pandas as pd
+        bi_df = pd.DataFrame(bi_tab_data)
+        if "BI_Score" in bi_df.columns:
+            bi_df = bi_df.sort_values(by="BI_Score", ascending=False).reset_index(drop=True)
+
+        st.subheader(f"🔮 {len(bi_df)} Treffer — {bi_dir_label} {bi_dir_emoji}")
+
+        # Kompakte Tabellen-Ansicht
+        display_cols = [c for c in ["Ticker", "Preis", "Change%", "BI_Score", "BI_Grade", "BI_Konfidenz", "Breakout_Zone", "R_R", "Range%", "ATR%", "RVOL", "DollarVol"] if c in bi_df.columns]
+        if display_cols:
+            st.dataframe(
+                bi_df[display_cols],
+                use_container_width=True,
+                height=min(800, 40 + len(bi_df) * 35),
+                hide_index=True
+            )
+
+        # Detail-Klick auf Ticker
+        if "Ticker" in bi_df.columns:
+            bi_selected_ticker = st.selectbox("📌 Detail-Ansicht", bi_df["Ticker"].tolist(), key="bi_tab_detail_select")
+            if bi_selected_ticker:
+                bi_row = bi_df[bi_df["Ticker"] == bi_selected_ticker].iloc[0]
+                detail_col1, detail_col2 = st.columns(2)
+                with detail_col1:
+                    st.metric("BI Score", f"{bi_row.get('BI_Score', 0)}/200")
+                    st.metric("Grade", bi_row.get("BI_Grade", "N/A"))
+                    st.metric("Konfidenz", f"{bi_row.get('BI_Konfidenz', 0)}%")
+                with detail_col2:
+                    st.metric("Preis", f"${bi_row.get('Preis', 0):.2f}")
+                    st.metric("R:R", f"{bi_row.get('R_R', 0):.1f}")
+                    st.metric("Breakout Zone", bi_row.get("Breakout_Zone", "N/A"))
+    else:
+        st.info("Noch keine BI Ergebnisse. Scan starten oder auf Auto-Scan warten.")
+
 
 # -----------------------------------------------------------------------------
 # SUCHE TAB - Manuelle Ticker-Suche
