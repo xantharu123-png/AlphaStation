@@ -19679,13 +19679,13 @@ with st.sidebar:
                         status.update(label="Schritt 1/3: Hole alle Aktien...")
                         candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
 
-                        # Basis-Filter: Preis $5+, Liquiditaet > $500k, FLACHE Bewegung
-                        # BI sucht Konsolidierungen → flache Aktien, aber nicht zu restriktiv
+                        # Basis-Filter: BI sucht Konsolidierungen → FLACHE Aktien + Vol Dry-Up
+                        # Minervini VCP/SEPA: Tight price action + low relative volume VOR Breakout
                         candidates = [c for c in candidates
-                                      if c.get("Preis", 0) >= 5
-                                      and c.get("DollarVol", 0) >= 500_000
-                                      and -5 <= c.get("Chg%", 0) <= 5
-                                      and c.get("RVOL", 1.0) <= 3.0]
+                                      if c.get("Preis", 0) >= 5       # Keine Pennystocks
+                                      and c.get("DollarVol", 0) >= 500_000  # Genug Liquidität
+                                      and -3 <= c.get("Chg%", 0) <= 3      # Flat = konsolidiert
+                                      and c.get("RVOL", 1.0) <= 2.0]       # Low RVOL = Vol Dry-Up
 
                         status.update(label=f"Schritt 1/3: {len(candidates)} Kandidaten gefiltert")
 
