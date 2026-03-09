@@ -7238,7 +7238,7 @@ import os
 
 _BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
 _BI_PROGRESS_FILE = "/tmp/bi_scan_progress_{direction}.json"
-_BI_CACHE_MAX_AGE = 3600  # 1 Stunde in Sekunden
+_BI_CACHE_MAX_AGE = 7200  # 2 Stunden — Auto-Scan bei 15:45 und 18:30 CET
 _bi_scan_lock = threading.Lock()
 
 
@@ -19418,7 +19418,7 @@ with st.sidebar:
 
         # Status prüfen
         cached_results, cached_ts, cache_age_min = _bi_cache_load(bi_direction)
-        cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 60
+        cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 120  # 2h TTL
         scan_running = _bi_scan_is_running(bi_direction)
         progress = _bi_progress_read(bi_direction)
 
@@ -19445,18 +19445,21 @@ with st.sidebar:
                     st.rerun()
             _bi_handled = True
 
-        # ── FALL 2: Scan fertig ──
+        # ── FALL 2: Scan fertig → Auto-Load Ergebnisse ──
         elif progress and progress.get("status") == "done":
             fresh_results, _, _ = _bi_cache_load(bi_direction)
             if fresh_results is not None:
+                # Auto-Load: Ergebnisse direkt in Session laden
                 st.session_state.scan_results = fresh_results
                 st.session_state.market_type = "Aktien"
                 st.session_state.selected_row_index = 0
-                st.success(f"✅ **BI Scan fertig!** {len(fresh_results)} Treffer")
+                st.success(f"✅ **BI Scan fertig!** {len(fresh_results)} Treffer — automatisch geladen")
                 st.caption(f"🔍 {progress.get('detail', '')}")
+                next_scan_info = "Nächster Auto-Scan wenn Cache >2h alt + Markt offen"
+                st.caption(f"⏰ {next_scan_info}")
                 _bi_progress_clear(bi_direction)
             else:
-                st.warning("⚠️ Scan fertig aber Cache leer")
+                st.warning("⚠️ Scan fertig aber keine Treffer gefunden")
                 _bi_progress_clear(bi_direction)
             _bi_handled = True
 
@@ -19465,66 +19468,94 @@ with st.sidebar:
             st.error(f"❌ BI Scan Fehler: {progress.get('detail', 'Unbekannt')}")
             _bi_progress_clear(bi_direction)
 
-        # ── FALL 4: Kein Scan aktiv — Buttons zeigen ──
+        # ── FALL 4: Kein Scan aktiv — Auto-Scan + Buttons ──
         else:
+            # --- Auto-Scan Logik: Prüfe ob Marktzeit und Cache abgelaufen ---
+            from zoneinfo import ZoneInfo
+            now_cet = datetime.now(ZoneInfo("Europe/Berlin"))
+            now_hour_min = now_cet.hour * 60 + now_cet.minute  # Minuten seit Mitternacht
+            market_open = 15 * 60 + 30   # 15:30 CET
+            market_close = 22 * 60       # 22:00 CET
+            is_market_hours = market_open <= now_hour_min <= market_close
+            is_weekday = now_cet.weekday() < 5  # Mo-Fr
+
+            # Auto-Scan Zeitfenster: 15:45 und 18:30 CET (±15 Min Fenster)
+            auto_scan_windows = [
+                (15 * 60 + 45, "15:45"),  # 15 Min nach Open
+                (18 * 60 + 30, "18:30"),  # Mittag US
+            ]
+            should_auto_scan = False
+            auto_scan_reason = ""
+            if is_weekday and is_market_hours:
+                cache_expired = not cache_valid  # Cache >2h oder nicht vorhanden
+                if cache_expired:
+                    for window_min, window_name in auto_scan_windows:
+                        # Innerhalb ±15 Min des Scan-Fensters
+                        if abs(now_hour_min - window_min) <= 15:
+                            should_auto_scan = True
+                            auto_scan_reason = f"Auto-Scan {window_name} CET"
+                            break
+                    # Fallback: Immer auto-scannen wenn Cache abgelaufen + Markt offen
+                    if not should_auto_scan:
+                        should_auto_scan = True
+                        auto_scan_reason = f"Cache abgelaufen — Markt offen"
+
             if cache_valid:
+                # Cache vorhanden → automatisch laden + Manuell-Buttons zeigen
                 cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
-                st.success(f"⚡ **Cache:** {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
+                st.success(f"⚡ **BI Cache:** {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
+
+                # Auto-Load: Wenn noch keine Ergebnisse geladen → direkt laden
+                if not st.session_state.get("scan_results"):
+                    st.session_state.scan_results = cached_results
+                    st.session_state.market_type = "Aktien"
+                    st.session_state.selected_row_index = 0
+
                 bi_col1, bi_col2 = st.columns(2)
                 with bi_col1:
-                    if st.button(f"⚡ Cache laden", use_container_width=True, type="primary"):
+                    if st.button(f"⚡ Cache laden ({len(cached_results)})", use_container_width=True, type="primary"):
                         st.session_state.scan_results = cached_results
                         st.session_state.market_type = "Aktien"
                         st.session_state.selected_row_index = 0
                         st.rerun()
                 with bi_col2:
                     if st.button("🔄 Neu scannen", use_container_width=True):
-                        try:
-                            poly_key = st.secrets["POLYGON_KEY"]
-                            with st.spinner("📡 Lade Aktien-Snapshot..."):
-                                raw_candidates = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
-                            if not raw_candidates:
-                                st.error("❌ Keine Daten von Polygon API erhalten!")
-                            else:
-                                # Minervini Pre-Filter im Hauptthread
-                                filtered = []
-                                for s in raw_candidates:
-                                    price = s.get("Preis", 0)
-                                    dvol = s.get("DollarVol", 0)
-                                    chg = abs(s.get("Change%", 0))
-                                    rvol = s.get("RVOL", 0)
-                                    if price >= 5 and dvol >= 500_000 and chg <= 3 and rvol <= 2.0:
-                                        filtered.append(s)
-                                st.info(f"✅ {len(filtered)} Kandidaten geladen (von {len(raw_candidates)})")
-                                thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction, filtered), daemon=True)
-                                thread.start()
-                                st.rerun()
-                        except KeyError:
-                            st.error("❌ POLYGON_KEY fehlt!")
+                        should_auto_scan = True
+                        auto_scan_reason = "Manuell gestartet"
+
+            elif should_auto_scan:
+                st.info(f"🤖 **{auto_scan_reason}** — Scan startet automatisch...")
             else:
+                # Außerhalb Marktzeiten / Wochenende → manueller Button
+                time_info = f"Mo-Fr 15:30-22:00 CET" if not is_weekday else "nächstes Scan-Fenster"
+                st.caption(f"⏰ Auto-Scan aktiv während Marktzeiten ({time_info})")
                 if st.button(f"🚀 BI Scan starten {dir_emoji} (Hintergrund ~30 Min)", use_container_width=True, type="primary"):
-                    try:
-                        poly_key = st.secrets["POLYGON_KEY"]
-                        with st.spinner("📡 Lade Aktien-Snapshot..."):
-                            raw_candidates = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
-                        if not raw_candidates:
-                            st.error("❌ Keine Daten von Polygon API erhalten!")
-                        else:
-                            # Minervini Pre-Filter im Hauptthread
-                            filtered = []
-                            for s in raw_candidates:
-                                price = s.get("Preis", 0)
-                                dvol = s.get("DollarVol", 0)
-                                chg = abs(s.get("Change%", 0))
-                                rvol = s.get("RVOL", 0)
-                                if price >= 5 and dvol >= 500_000 and chg <= 3 and rvol <= 2.0:
-                                    filtered.append(s)
-                            st.info(f"✅ {len(filtered)} Kandidaten geladen (von {len(raw_candidates)})")
-                            thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction, filtered), daemon=True)
-                            thread.start()
-                            st.rerun()
-                    except KeyError:
-                        st.error("❌ POLYGON_KEY fehlt!")
+                    should_auto_scan = True
+                    auto_scan_reason = "Manuell gestartet"
+
+            # --- Scan starten (Auto oder Manuell) ---
+            if should_auto_scan and not scan_running:
+                try:
+                    poly_key = st.secrets["POLYGON_KEY"]
+                    with st.spinner(f"📡 {auto_scan_reason} — Lade Aktien-Snapshot..."):
+                        raw_candidates = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                    if not raw_candidates:
+                        st.error("❌ Keine Daten von Polygon API erhalten!")
+                    else:
+                        filtered = []
+                        for s in raw_candidates:
+                            price = s.get("Preis", 0)
+                            dvol = s.get("DollarVol", 0)
+                            chg = abs(s.get("Change%", 0))
+                            rvol = s.get("RVOL", 0)
+                            if price >= 5 and dvol >= 500_000 and chg <= 3 and rvol <= 2.0:
+                                filtered.append(s)
+                        st.info(f"✅ {len(filtered)} Kandidaten geladen (von {len(raw_candidates)})")
+                        thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction, filtered), daemon=True)
+                        thread.start()
+                        st.rerun()
+                except KeyError:
+                    st.error("❌ POLYGON_KEY fehlt!")
             _bi_handled = True
 
     # SCAN Button (für ALLE anderen Strategien — BI hat eigene Buttons oben)
