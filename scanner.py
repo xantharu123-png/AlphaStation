@@ -7230,6 +7230,65 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
     
     return results
 
+# =============================================================================
+# BI BACKGROUND CACHE — Stündlich gecachte Breakout Imminent Ergebnisse
+# =============================================================================
+_BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
+_BI_CACHE_MAX_AGE = 3600  # 1 Stunde in Sekunden
+
+
+def _bi_cache_path(direction="long"):
+    """Pfad zur BI Cache-Datei je Richtung."""
+    return _BI_CACHE_FILE.format(direction=direction)
+
+
+def _bi_cache_load(direction="long"):
+    """
+    Lädt BI-Cache. Returns (results, timestamp, age_minutes) oder (None, None, None).
+    """
+    try:
+        import os
+        path = _bi_cache_path(direction)
+        if not os.path.exists(path):
+            return None, None, None
+        with open(path, "r") as f:
+            cache = json.load(f)
+        ts = cache.get("timestamp", 0)
+        age_sec = time.time() - ts
+        age_min = int(age_sec / 60)
+        results = cache.get("results", [])
+        return results, ts, age_min
+    except Exception:
+        return None, None, None
+
+
+def _bi_cache_save(results, direction="long"):
+    """Speichert BI-Ergebnisse im Cache."""
+    try:
+        cache = {
+            "timestamp": time.time(),
+            "direction": direction,
+            "count": len(results),
+            "results": results
+        }
+        with open(_bi_cache_path(direction), "w") as f:
+            json.dump(cache, f, default=str)
+    except Exception:
+        pass
+
+
+def _bi_cache_age_str(age_min):
+    """Formatiert Cache-Alter als lesbaren String."""
+    if age_min < 1:
+        return "gerade eben"
+    elif age_min < 60:
+        return f"vor {age_min} Min"
+    else:
+        h = age_min // 60
+        m = age_min % 60
+        return f"vor {h}h {m}m"
+
+
 def _watchlist_file():
     """Pfad zur Watchlist-Datei."""
     return "/tmp/alpha_station_watchlist.json"
@@ -19678,133 +19737,163 @@ with st.sidebar:
                 bi_direction = "long" if "Long" in current_strat else "short"
                 dir_emoji = "⬆️" if bi_direction == "long" else "⬇️"
 
-                with st.status(f"🔮 Scanne Breakout Imminent {dir_emoji}...") as status:
-                    try:
-                        poly_key = st.secrets["POLYGON_KEY"]
+                # ── BI CACHE CHECK ──
+                cached_results, cached_ts, cache_age_min = _bi_cache_load(bi_direction)
+                cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 60  # < 1 Stunde
 
-                        # Schritt 1: Hole ALLE Aktien (ungefiltert) — wir brauchen die flachen!
-                        status.update(label="Schritt 1/3: Hole alle Aktien...")
-                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                # Cache-Status anzeigen
+                if cache_valid:
+                    cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
+                    st.success(f"⚡ **Cache verfügbar** — {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
+                    bi_col1, bi_col2 = st.columns(2)
+                    with bi_col1:
+                        use_cache = st.button(f"⚡ Cache laden ({len(cached_results)} Treffer)", use_container_width=True, type="primary")
+                    with bi_col2:
+                        force_rescan = st.button("🔄 Neu scannen", use_container_width=True)
+                else:
+                    if cached_results is not None and cache_age_min is not None:
+                        st.info(f"⏰ Cache abgelaufen ({_bi_cache_age_str(cache_age_min)}) — wird neu gescannt")
+                    use_cache = False
+                    force_rescan = True  # Kein gültiger Cache → immer scannen
 
-                        # Basis-Filter: BI sucht Konsolidierungen → FLACHE Aktien + Vol Dry-Up
-                        # Minervini VCP/SEPA: Tight price action + low relative volume VOR Breakout
-                        candidates = [c for c in candidates
-                                      if c.get("Preis", 0) >= 5       # Keine Pennystocks
-                                      and c.get("DollarVol", 0) >= 500_000  # Genug Liquidität
-                                      and -3 <= c.get("Chg%", 0) <= 3      # Flat = konsolidiert
-                                      and c.get("RVOL", 1.0) <= 2.0]       # Low RVOL = Vol Dry-Up
+                # ── CACHE VERWENDEN (sofort, < 1 Sek) ──
+                if cache_valid and use_cache and not force_rescan:
+                    st.session_state.scan_results = cached_results
+                    st.session_state.market_type = "Aktien"
+                    st.toast(f"⚡ {len(cached_results)} BI {dir_emoji} Setups aus Cache geladen!")
 
-                        status.update(label=f"Schritt 1/3: {len(candidates)} Kandidaten gefiltert")
+                # ── FRISCHER SCAN (mit Cache-Speicherung) ──
+                elif (cache_valid and force_rescan) or not cache_valid:
+                    with st.status(f"🔮 Scanne Breakout Imminent {dir_emoji}...") as status:
+                        try:
+                            poly_key = st.secrets["POLYGON_KEY"]
 
-                        # Sortiere nach DollarVol (höchste Liquidität zuerst)
-                        # KEIN künstliches Cap — Pre-Filter hat bereits gefiltert
-                        candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)
+                            # Schritt 1: Hole ALLE Aktien (ungefiltert) — wir brauchen die flachen!
+                            status.update(label="Schritt 1/3: Hole alle Aktien...")
+                            candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
 
-                        max_analyze = len(candidates)
-                        est_min = max(1, max_analyze // 100)  # ~100 Calls/Min bei Starter
-                        status.update(label=f"Schritt 2/3: Analysiere {max_analyze} Aktien mit 20 Signalen (~{est_min} Min)...")
+                            # Basis-Filter: BI sucht Konsolidierungen → FLACHE Aktien + Vol Dry-Up
+                            # Minervini VCP/SEPA: Tight price action + low relative volume VOR Breakout
+                            candidates = [c for c in candidates
+                                          if c.get("Preis", 0) >= 5       # Keine Pennystocks
+                                          and c.get("DollarVol", 0) >= 500_000  # Genug Liquidität
+                                          and -3 <= c.get("Chg%", 0) <= 3      # Flat = konsolidiert
+                                          and c.get("RVOL", 1.0) <= 2.0]       # Low RVOL = Vol Dry-Up
 
-                        results = []
-                        checked = 0
+                            status.update(label=f"Schritt 1/3: {len(candidates)} Kandidaten gefiltert")
 
-                        for candidate in candidates:  # ALLE die durch den Pre-Filter kamen
-                            ticker = candidate["Ticker"]
+                            # Sortiere nach DollarVol (höchste Liquidität zuerst)
+                            # KEIN künstliches Cap — Pre-Filter hat bereits gefiltert
+                            candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)
 
-                            bars = fetch_multi_day_data(ticker, poly_key, days=30)
-                            checked += 1
+                            max_analyze = len(candidates)
+                            est_min = max(1, max_analyze // 100)  # ~100 Calls/Min bei Starter
+                            status.update(label=f"Schritt 2/3: Analysiere {max_analyze} Aktien mit 20 Signalen (~{est_min} Min)...")
 
-                            if checked % 25 == 0:
-                                status.update(label=f"Schritt 2/3: {checked}/{max_analyze} analysiert | {len(results)} Treffer...")
-                                time.sleep(0.15)  # Rate Limiting (Polygon Starter: 100/min)
+                            results = []
+                            checked = 0
 
-                            if not bars or len(bars) < 10:
-                                continue
+                            for candidate in candidates:  # ALLE die durch den Pre-Filter kamen
+                                ticker = candidate["Ticker"]
 
-                            result = analyze_breakout_imminent(bars, direction=bi_direction)
-                            if len(result) == 8:
-                                is_valid, score, max_score, details, confidence, grade, sm_fires, sm_hits = result
-                            else:
-                                is_valid, score, max_score, details, confidence, grade = result
-                                sm_fires, sm_hits = 0, 0
+                                bars = fetch_multi_day_data(ticker, poly_key, days=30)
+                                checked += 1
 
-                            if is_valid:
-                                # Range berechnen
-                                range_high = max(b["high"] for b in bars[-15:])
-                                range_low = min(b["low"] for b in bars[-15:])
-                                range_size = range_high - range_low
-                                range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+                                if checked % 25 == 0:
+                                    status.update(label=f"Schritt 2/3: {checked}/{max_analyze} analysiert | {len(results)} Treffer...")
+                                    time.sleep(0.15)  # Rate Limiting (Polygon Starter: 100/min)
 
-                                # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 2% sein!
-                                # Unter 2% = zu enger Range, kein sinnvoller Breakout-Kandidat
-                                if range_pct < 2.0:
+                                if not bars or len(bars) < 10:
                                     continue
 
-                                # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.3% sein
-                                avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
-                                if avg_daily_range < 0.3:
-                                    continue
-
-                                # Grade Emoji
-                                grade_map = {"S": "🏆 ELITE", "A": "🔥 STARK", "B": "✅ SOLIDE", "C": "⚠️ WATCH", "D": "❌ SCHWACH"}
-                                grade_label = grade_map.get(grade, grade)
-
-                                candidate["Alpha"] = score
-                                candidate["BI_Score"] = score
-                                candidate["BI_MaxScore"] = max_score
-                                candidate["BI_Details"] = details
-                                candidate["BI_Confidence"] = confidence
-                                candidate["BI_Direction"] = bi_direction.upper()
-                                candidate["BI_Grade"] = grade
-                                candidate["BI_GradeLabel"] = grade_label
-
-                                # Entry/SL/TP basierend auf Range — mit ATR-basiertem Risiko
-                                # ATR für realistischere SL-Berechnung
-                                atr_5 = sum((b["high"] - b["low"]) for b in bars[-5:]) / 5
-
-                                if bi_direction == "long":
-                                    candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)  # Knapp über Range-High
-                                    candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)  # 1.5x ATR unter Entry
-                                    candidate["TP1"] = round(range_high + range_size * 0.75, 2)  # 75% Measured Move
-                                    candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # Fib Extension
+                                result = analyze_breakout_imminent(bars, direction=bi_direction)
+                                if len(result) == 8:
+                                    is_valid, score, max_score, details, confidence, grade, sm_fires, sm_hits = result
                                 else:
-                                    candidate["Entry"] = round(range_low - atr_5 * 0.1, 2)  # Knapp unter Range-Low
-                                    candidate["StopLoss"] = round(range_low + atr_5 * 1.5, 2)  # 1.5x ATR über Entry
-                                    candidate["TP1"] = round(range_low - range_size * 0.75, 2)  # 75% Measured Move
-                                    candidate["TP2"] = round(range_low - range_size * 1.618, 2)  # Fib Extension
+                                    is_valid, score, max_score, details, confidence, grade = result
+                                    sm_fires, sm_hits = 0, 0
 
-                                risk = abs(candidate["Entry"] - candidate["StopLoss"])
-                                reward = abs(candidate["TP1"] - candidate["Entry"])
-                                candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
-                                candidate["RangeHigh"] = round(range_high, 2)
-                                candidate["RangeLow"] = round(range_low, 2)
+                                if is_valid:
+                                    # Range berechnen
+                                    range_high = max(b["high"] for b in bars[-15:])
+                                    range_low = min(b["low"] for b in bars[-15:])
+                                    range_size = range_high - range_low
+                                    range_pct = (range_size / range_low * 100) if range_low > 0 else 0
 
-                                # ⚠️ QUALITÄTS-FILTER: R:R muss mindestens 1.0 sein!
-                                if candidate["RiskReward"] < 1.0:
-                                    continue
+                                    # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 2% sein!
+                                    # Unter 2% = zu enger Range, kein sinnvoller Breakout-Kandidat
+                                    if range_pct < 2.0:
+                                        continue
 
-                                results.append(candidate)
+                                    # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.3% sein
+                                    avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
+                                    if avg_daily_range < 0.3:
+                                        continue
 
-                        # Sortiere nach Score (hoechster zuerst)
-                        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+                                    # Grade Emoji
+                                    grade_map = {"S": "🏆 ELITE", "A": "🔥 STARK", "B": "✅ SOLIDE", "C": "⚠️ WATCH", "D": "❌ SCHWACH"}
+                                    grade_label = grade_map.get(grade, grade)
 
-                        st.session_state.scan_results = results
-                        st.session_state.market_type = "Aktien"
+                                    candidate["Alpha"] = score
+                                    candidate["BI_Score"] = score
+                                    candidate["BI_MaxScore"] = max_score
+                                    candidate["BI_Details"] = details
+                                    candidate["BI_Confidence"] = confidence
+                                    candidate["BI_Direction"] = bi_direction.upper()
+                                    candidate["BI_Grade"] = grade
+                                    candidate["BI_GradeLabel"] = grade_label
 
-                        status.update(
-                            label=f"✅ {len(results)} Breakout Imminent {dir_emoji} Setups gefunden (von {checked} analysiert)",
-                            state="complete"
-                        )
+                                    # Entry/SL/TP basierend auf Range — mit ATR-basiertem Risiko
+                                    # ATR für realistischere SL-Berechnung
+                                    atr_5 = sum((b["high"] - b["low"]) for b in bars[-5:]) / 5
 
-                        if len(results) == 0:
-                            st.info(f"ℹ️ Keine unmittelbaren Breakout-Setups gefunden. "
-                                   f"{checked} Aktien analysiert — aktuell konsolidiert keiner mit genug Signalen.")
+                                    if bi_direction == "long":
+                                        candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)  # Knapp über Range-High
+                                        candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)  # 1.5x ATR unter Entry
+                                        candidate["TP1"] = round(range_high + range_size * 0.75, 2)  # 75% Measured Move
+                                        candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # Fib Extension
+                                    else:
+                                        candidate["Entry"] = round(range_low - atr_5 * 0.1, 2)  # Knapp unter Range-Low
+                                        candidate["StopLoss"] = round(range_low + atr_5 * 1.5, 2)  # 1.5x ATR über Entry
+                                        candidate["TP1"] = round(range_low - range_size * 0.75, 2)  # 75% Measured Move
+                                        candidate["TP2"] = round(range_low - range_size * 1.618, 2)  # Fib Extension
 
-                    except KeyError:
-                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
-                    except Exception as e:
-                        st.error(f"Fehler beim Breakout Imminent Scan: {e}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                                    risk = abs(candidate["Entry"] - candidate["StopLoss"])
+                                    reward = abs(candidate["TP1"] - candidate["Entry"])
+                                    candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
+                                    candidate["RangeHigh"] = round(range_high, 2)
+                                    candidate["RangeLow"] = round(range_low, 2)
+
+                                    # ⚠️ QUALITÄTS-FILTER: R:R muss mindestens 1.0 sein!
+                                    if candidate["RiskReward"] < 1.0:
+                                        continue
+
+                                    results.append(candidate)
+
+                            # Sortiere nach Score (hoechster zuerst)
+                            results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+
+                            # ── CACHE SPEICHERN ──
+                            _bi_cache_save(results, direction=bi_direction)
+
+                            st.session_state.scan_results = results
+                            st.session_state.market_type = "Aktien"
+
+                            status.update(
+                                label=f"✅ {len(results)} Breakout Imminent {dir_emoji} Setups gefunden (von {checked} analysiert) — Cache gespeichert!",
+                                state="complete"
+                            )
+
+                            if len(results) == 0:
+                                st.info(f"ℹ️ Keine unmittelbaren Breakout-Setups gefunden. "
+                                       f"{checked} Aktien analysiert — aktuell konsolidiert keiner mit genug Signalen.")
+
+                        except KeyError:
+                            st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                        except Exception as e:
+                            st.error(f"Fehler beim Breakout Imminent Scan: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
 
         elif not st.session_state.active_filters and not st.session_state.get("current_strategy"):
             st.warning("Erst Strategie laden!")
