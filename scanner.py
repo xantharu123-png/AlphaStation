@@ -764,22 +764,7 @@ STRATEGIES = {
     # Close Clustering, Range Duration, Boundary Tests, Institutional Days,
     # RSI Drift, Higher Lows/Lower Highs, Resilience, Bollinger-Squeeze
     # =========================================================================
-    "Breakout Imminent Long 🔮⬆️": {
-        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach OBEN (min 3% Range, R:R ≥1.0)",
-        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.3, 2.0)},
-        "logic": "ATR-Squeeze + Vol Dry-Up + OBV steigt + ADX dreht + Higher Lows + Inst. Akkumulation | Score ≥65/120",
-        "needs_history": True,
-        "pattern_type": "breakout_imminent_long",
-        "history_days": 30
-    },
-    "Breakout Imminent Short 🔮⬇️": {
-        "description": "🔮 12-Signal Breakout-Prediction: Bevorstehender Ausbruch nach UNTEN (min 3% Range, R:R ≥1.0)",
-        "filters": {"Preis": (5.0, 1000.0), "Change %": (-3.0, 3.0), "RVOL": (0.3, 2.0)},
-        "logic": "ATR-Squeeze + Vol Dry-Up + OBV faellt + ADX dreht + Lower Highs + Inst. Distribution | Score ≥60/120",
-        "needs_history": True,
-        "pattern_type": "breakout_imminent_short",
-        "history_days": 30
-    },
+    # Breakout Imminent → eigener Tab "🔮 BI Scanner" (entfernt aus Strategie-Dropdown)
     # =========================================================================
     # WYCKOFF STRATEGIEN 🏦 - Klassische Akkumulations/Distributions-Phasen
     # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
