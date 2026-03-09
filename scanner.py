@@ -21991,7 +21991,7 @@ with tab_bi:
                 if not raw:
                     st.error("❌ Keine Daten von Polygon API!")
                 else:
-                    filtered = [s for s in raw if s.get("Preis", 0) >= 5 and s.get("DollarVol", 0) >= 500_000 and abs(s.get("Change%", 0)) <= 3 and s.get("RVOL", 0) <= 2.0]
+                    filtered = [s for s in raw if s.get("Preis", 0) >= 5 and s.get("DollarVol", 0) >= 500_000 and abs(s.get("Change%", 0)) <= 3 and s.get("RVOL", 0) <= 2.0 and not is_etf_or_etp(s.get("Ticker", ""))]
                     st.info(f"✅ {len(filtered)} Kandidaten (von {len(raw)}) — Scan startet im Hintergrund")
                     thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_dir, filtered), daemon=True)
                     thread.start()
@@ -22011,30 +22011,118 @@ with tab_bi:
 
         st.subheader(f"🔮 {len(bi_df)} Treffer — {bi_dir_label} {bi_dir_emoji}")
 
-        # Kompakte Tabellen-Ansicht
-        display_cols = [c for c in ["Ticker", "Preis", "Change%", "BI_Score", "BI_Grade", "BI_Konfidenz", "Breakout_Zone", "R_R", "Range%", "ATR%", "RVOL", "DollarVol"] if c in bi_df.columns]
-        if display_cols:
-            st.dataframe(
-                bi_df[display_cols],
-                use_container_width=True,
-                height=min(800, 40 + len(bi_df) * 35),
-                hide_index=True
-            )
+        # Rename Felder für Display (Code-Namen → lesbare Namen)
+        rename_map = {}
+        if "BI_Confidence" in bi_df.columns:
+            rename_map["BI_Confidence"] = "Konfidenz%"
+        if "RiskReward" in bi_df.columns:
+            rename_map["RiskReward"] = "R:R"
+        if "RangeHigh" in bi_df.columns and "RangeLow" in bi_df.columns:
+            bi_df["Breakout_Zone"] = bi_df.apply(
+                lambda r: f"${r.get('RangeLow', 0):.0f}-${r.get('RangeHigh', 0):.0f}", axis=1)
+        if "BI_GradeLabel" in bi_df.columns:
+            rename_map["BI_GradeLabel"] = "Grade"
+        elif "BI_Grade" in bi_df.columns:
+            rename_map["BI_Grade"] = "Grade"
+        bi_df = bi_df.rename(columns=rename_map)
 
-        # Detail-Klick auf Ticker
+        # Display-Spalten (mit korrekten Namen nach Rename)
+        display_cols = [c for c in [
+            "Ticker", "Preis", "Change%", "BI_Score", "Grade", "Konfidenz%",
+            "Breakout_Zone", "R:R", "Entry", "StopLoss", "TP1",
+            "Range%", "RVOL", "DollarVol"
+        ] if c in bi_df.columns]
+
+        # ── Klickbare Tabelle: Zeile anklicken → Detail unten ──
         if "Ticker" in bi_df.columns:
-            bi_selected_ticker = st.selectbox("📌 Detail-Ansicht", bi_df["Ticker"].tolist(), key="bi_tab_detail_select")
-            if bi_selected_ticker:
-                bi_row = bi_df[bi_df["Ticker"] == bi_selected_ticker].iloc[0]
-                detail_col1, detail_col2 = st.columns(2)
-                with detail_col1:
-                    st.metric("BI Score", f"{bi_row.get('BI_Score', 0)}/200")
-                    st.metric("Grade", bi_row.get("BI_Grade", "N/A"))
-                    st.metric("Konfidenz", f"{bi_row.get('BI_Konfidenz', 0)}%")
-                with detail_col2:
-                    st.metric("Preis", f"${bi_row.get('Preis', 0):.2f}")
-                    st.metric("R:R", f"{bi_row.get('R_R', 0):.1f}")
-                    st.metric("Breakout Zone", bi_row.get("Breakout_Zone", "N/A"))
+            # Aktuelle Auswahl
+            bi_sel_idx = st.session_state.get("bi_sel_idx", 0)
+            bi_sel_idx = min(bi_sel_idx, len(bi_df) - 1)
+
+            # Dataframe mit Selektion (on_select)
+            if display_cols:
+                event = st.dataframe(
+                    bi_df[display_cols],
+                    use_container_width=True,
+                    height=min(800, 40 + len(bi_df) * 35),
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="bi_tab_df_select"
+                )
+
+                # Auswahl aus Dataframe-Klick übernehmen
+                if event and event.selection and event.selection.rows:
+                    bi_sel_idx = event.selection.rows[0]
+                    st.session_state["bi_sel_idx"] = bi_sel_idx
+
+            # ── Keyboard Navigation: E (zurück) / W (vor) ──
+            nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
+            with nav_col1:
+                if st.button("◀ Zurück (E)", key="bi_nav_prev", use_container_width=True, disabled=bi_sel_idx <= 0):
+                    st.session_state["bi_sel_idx"] = max(0, bi_sel_idx - 1)
+                    st.rerun()
+            with nav_col2:
+                st.caption(f"📌 **{bi_sel_idx + 1} / {len(bi_df)}** — Klicke Zeile in Tabelle oder nutze ◀ ▶ Buttons (Tastatur: **E** / **W**)")
+            with nav_col3:
+                if st.button("Vor ▶ (W)", key="bi_nav_next", use_container_width=True, disabled=bi_sel_idx >= len(bi_df) - 1):
+                    st.session_state["bi_sel_idx"] = min(len(bi_df) - 1, bi_sel_idx + 1)
+                    st.rerun()
+
+            # Keyboard shortcuts via JS
+            st.components.v1.html(f"""
+            <script>
+            document.addEventListener('keydown', function(e) {{
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                if (e.key === 'e' || e.key === 'E') {{
+                    const btn = parent.document.querySelector('[data-testid="stButton"] button[kind="secondary"]:first-of-type');
+                    const prevBtn = parent.document.querySelectorAll('button');
+                    prevBtn.forEach(b => {{ if (b.textContent.includes('Zurück')) b.click(); }});
+                }}
+                if (e.key === 'w' || e.key === 'W') {{
+                    const prevBtn = parent.document.querySelectorAll('button');
+                    prevBtn.forEach(b => {{ if (b.textContent.includes('Vor')) b.click(); }});
+                }}
+            }});
+            </script>
+            """, height=0)
+
+            # ── Detail-Ansicht für ausgewählten Ticker ──
+            bi_row = bi_df.iloc[bi_sel_idx]
+            ticker = bi_row.get("Ticker", "?")
+            st.divider()
+            st.subheader(f"📌 {ticker}")
+
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                score = bi_row.get("BI_Score", 0)
+                max_s = bi_row.get("BI_MaxScore", 200)
+                pct_s = round(score / max(1, max_s) * 100)
+                st.metric("BI Score", f"{score}/{max_s} ({pct_s}%)")
+                st.metric("Grade", bi_row.get("Grade", bi_row.get("BI_Grade", "N/A")))
+            with d2:
+                st.metric("Konfidenz", f"{bi_row.get('Konfidenz%', bi_row.get('BI_Confidence', 0))}%")
+                st.metric("R:R", f"{bi_row.get('R:R', bi_row.get('RiskReward', 0)):.1f}")
+            with d3:
+                st.metric("Entry", f"${bi_row.get('Entry', 0):.2f}")
+                st.metric("Stop Loss", f"${bi_row.get('StopLoss', 0):.2f}")
+            with d4:
+                st.metric("TP1", f"${bi_row.get('TP1', 0):.2f}")
+                st.metric("TP2", f"${bi_row.get('TP2', 0):.2f}")
+
+            # Breakout Zone
+            zone_text = bi_row.get("Breakout_Zone", "")
+            if not zone_text:
+                rh = bi_row.get("RangeHigh", 0)
+                rl = bi_row.get("RangeLow", 0)
+                zone_text = f"${rl:.2f} — ${rh:.2f}" if rh > 0 else "N/A"
+            st.caption(f"🎯 Breakout Zone: **{zone_text}** | Preis: ${bi_row.get('Preis', 0):.2f} | Change: {bi_row.get('Change%', 0):.1f}% | RVOL: {bi_row.get('RVOL', 0):.2f}")
+
+            # Signal-Details
+            details = bi_row.get("BI_Details", "")
+            if details:
+                with st.expander("🔬 Signal-Details", expanded=False):
+                    st.text(details)
     else:
         st.info("Noch keine BI Ergebnisse. Scan starten oder auf Auto-Scan warten.")
 
