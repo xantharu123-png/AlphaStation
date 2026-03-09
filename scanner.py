@@ -5429,8 +5429,9 @@ def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="
                 results.append(result)
         except Exception:
             continue
+        # Polygon Starter: ~100 Calls/Min → 0.15s zwischen Calls
         if i % 10 == 9:
-            time.sleep(0.5)
+            time.sleep(1.5)  # 10 Calls in ~1.5s + 1.5s Pause = ~80/Min
     results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
@@ -7144,8 +7145,7 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
     """
     results = []
     
-    # Begrenze auf 30 Ticker pro Scan (API-Limits)
-    tickers = tickers[:30]
+    # Kein künstliches Limit — Polygon Starter: 100 Calls/Min
     
     for ticker in tickers:
         try:
@@ -19153,19 +19153,19 @@ with st.sidebar:
                     
                     status.update(label=f"Hole Top-Aktien für Volume Profile Analyse...")
                     
-                    # Erst Standard-Scan für Kandidaten
-                    candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
-                    
-                    # Filter: Nur Aktien mit genug Bewegung und Liquidität
+                    # Alle Aktien ungefiltert holen
+                    candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+
+                    # Filter: Liquidität + Preis
                     if direction == "long":
-                        # Für Long: Aktien die noch nicht zu stark gestiegen sind
-                        filtered = [c for c in candidates if -5 <= c.get("Chg%", 0) <= 10 and 5 <= c.get("Preis", 0) <= 500]
+                        filtered = [c for c in candidates if -5 <= c.get("Chg%", 0) <= 10
+                                    and c.get("Preis", 0) >= 5 and c.get("DollarVol", 0) >= 500_000]
                     else:
-                        # Für Short: Aktien die noch nicht zu stark gefallen sind  
-                        filtered = [c for c in candidates if -10 <= c.get("Chg%", 0) <= 5 and 5 <= c.get("Preis", 0) <= 500]
-                    
-                    # Top 30 nach Alpha Score
-                    filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:30]
+                        filtered = [c for c in candidates if -10 <= c.get("Chg%", 0) <= 5
+                                    and c.get("Preis", 0) >= 5 and c.get("DollarVol", 0) >= 500_000]
+
+                    # Sortiere nach DollarVol — KEIN Cap
+                    filtered = sorted(filtered, key=lambda x: x.get("DollarVol", 0), reverse=True)
                     tickers = [c["Ticker"] for c in filtered]
                     
                     status.update(label=f"Analysiere Volume Profile für {len(tickers)} Aktien...")
@@ -19255,14 +19255,16 @@ with st.sidebar:
                         
                         status.update(label="Hole Top-Aktien für Pattern-Analyse...")
                         
-                        # Erst Standard-Scan für Kandidaten
-                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
-                        
-                        # Filter: Nur liquide Aktien mit Bewegung
-                        filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
-                        
-                        # Sortiere nach Setup Score (Fallback Alpha), nimm Top 50
-                        filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:50]
+                        # Alle Aktien holen (ungefiltert) für maximale Abdeckung
+                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+
+                        # Filter: Nur liquide Aktien (Preis >= $5, DollarVol >= $500k)
+                        filtered = [c for c in candidates
+                                    if c.get("Preis", 0) >= 5
+                                    and c.get("DollarVol", 0) >= 500_000]
+
+                        # Sortiere nach Setup Score (Fallback Alpha) — KEIN künstliches Cap
+                        filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)
                         tickers = [c["Ticker"] for c in filtered]
                         
                         status.update(label=f"Analysiere {len(tickers)} Aktien auf Harmonic Patterns ({harmonic_tf}, {api_days}d)...")
@@ -19343,13 +19345,18 @@ with st.sidebar:
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
                         
-                        status.update(label="Hole Top-Aktien für Wyckoff-Analyse...")
-                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular")
-                        filtered = [c for c in candidates if 5 <= c.get("Preis", 0) <= 500]
-                        filtered = sorted(filtered, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:50]
+                        status.update(label="Hole alle Aktien für Wyckoff-Analyse...")
+                        candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                        # Wyckoff braucht Liquidität + ordentliche Preise
+                        filtered = [c for c in candidates
+                                    if c.get("Preis", 0) >= 5
+                                    and c.get("DollarVol", 0) >= 500_000]
+                        # Sortiere nach DollarVol (liquideste zuerst)
+                        filtered = sorted(filtered, key=lambda x: x.get("DollarVol", 0), reverse=True)
                         tickers = [c["Ticker"] for c in filtered]
-                        
-                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Wyckoff ({wyckoff_tf}, {api_days}d)...")
+
+                        est_min = max(1, len(tickers) // 80)  # ~80 Calls/Min mit Rate Limiting
+                        status.update(label=f"Analysiere {len(tickers)} Aktien auf Wyckoff ({wyckoff_tf}, {api_days}d) ~{est_min} Min...")
                         
                         wyckoff_results = scan_wyckoff_batch(tickers, poly_key, days=api_days, timeframe=api_tf, direction=direction)
                         
@@ -19449,8 +19456,8 @@ with st.sidebar:
                     
                     status.update(label=f"Schritt 1/3: {len(filtered)} Kandidaten nach Change%-Filter")
                     
-                    # Sortiere nach Change% (kleinste Bewegung zuerst = näher am Pullback)
-                    filtered = sorted(filtered, key=lambda x: abs(x.get("Chg%", 0)))[:80]
+                    # Sortiere nach Change% (kleinste Bewegung zuerst = näher am Pullback) — KEIN künstliches Cap
+                    filtered = sorted(filtered, key=lambda x: abs(x.get("Chg%", 0)))
                     
                     status.update(label=f"Schritt 2/3: Berechne {ma_type} {ma_period} für {len(filtered)} Aktien...")
                     
