@@ -7339,6 +7339,201 @@ def _bi_scan_is_running(direction="long"):
     return True
 
 
+def _detect_chart_patterns(bars, direction="long"):
+    """
+    Erkennt Umkehr-Patterns auf Daily Bars (90-Tage Lookback).
+
+    Erkannte Patterns:
+    - Double Top (bearish) — 2 Peaks auf ähnlichem Level, Tal dazwischen
+    - Double Bottom (bullish) — 2 Tiefs auf ähnlichem Level, Peak dazwischen
+    - Head & Shoulders (bearish) — 3 Peaks, mittlerer am höchsten
+    - Inv. Head & Shoulders (bullish) — 3 Tiefs, mittleres am tiefsten
+
+    Returns:
+        list of dict: [{pattern, severity, description}, ...]
+        severity: "high" (Umkehr gegen Trade-Richtung) / "medium" / "info"
+    """
+    warnings = []
+    if not bars or len(bars) < 30:
+        return warnings
+
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    closes = [b["close"] for b in bars]
+    n = len(bars)
+
+    # ── Pivot-Punkte finden (lokale Extrema mit ±5 Bar Fenster) ──
+    pivot_highs = []  # (index, price)
+    pivot_lows = []
+    window = 5
+
+    for i in range(window, n - window):
+        # Pivot High: höher als alle ±window Nachbarn
+        if highs[i] == max(highs[i-window:i+window+1]):
+            pivot_highs.append((i, highs[i]))
+        # Pivot Low: tiefer als alle ±window Nachbarn
+        if lows[i] == min(lows[i-window:i+window+1]):
+            pivot_lows.append((i, lows[i]))
+
+    current_price = closes[-1] if closes else 0
+
+    # ══════════════════════════════════════════════════════════
+    # DOUBLE TOP — 2 Peaks innerhalb 3% auf ähnlichem Level
+    # ══════════════════════════════════════════════════════════
+    if len(pivot_highs) >= 2:
+        for i in range(len(pivot_highs)):
+            for j in range(i + 1, len(pivot_highs)):
+                idx1, p1 = pivot_highs[i]
+                idx2, p2 = pivot_highs[j]
+
+                # Mindestabstand: 15 Bars (3 Wochen)
+                if abs(idx2 - idx1) < 15:
+                    continue
+
+                # Peaks innerhalb 3% voneinander
+                diff_pct = abs(p1 - p2) / max(p1, p2) * 100
+                if diff_pct > 3.0:
+                    continue
+
+                # Tal dazwischen muss mindestens 5% tiefer sein
+                valley = min(lows[idx1:idx2+1])
+                peak_avg = (p1 + p2) / 2
+                valley_depth = (peak_avg - valley) / peak_avg * 100
+                if valley_depth < 5.0:
+                    continue
+
+                # Preis nahe am zweiten Peak (innerhalb 5%)
+                dist_from_peak = (peak_avg - current_price) / peak_avg * 100
+
+                if dist_from_peak < 5.0:  # Preis nahe am Widerstand
+                    severity = "high" if direction == "long" else "info"
+                    peak_level = round(peak_avg, 2)
+                    warnings.append({
+                        "pattern": "⚠️ Double Top",
+                        "severity": severity,
+                        "level": peak_level,
+                        "description": f"Zwei Peaks bei ~${peak_level} (Diff: {diff_pct:.1f}%) — Tal: -{valley_depth:.0f}% — Starker Widerstand!"
+                    })
+                    break
+            if warnings:
+                break
+
+    # ══════════════════════════════════════════════════════════
+    # DOUBLE BOTTOM — 2 Tiefs innerhalb 3%
+    # ══════════════════════════════════════════════════════════
+    if len(pivot_lows) >= 2:
+        for i in range(len(pivot_lows)):
+            for j in range(i + 1, len(pivot_lows)):
+                idx1, p1 = pivot_lows[i]
+                idx2, p2 = pivot_lows[j]
+
+                if abs(idx2 - idx1) < 15:
+                    continue
+
+                diff_pct = abs(p1 - p2) / max(p1, p2) * 100
+                if diff_pct > 3.0:
+                    continue
+
+                peak = max(highs[idx1:idx2+1])
+                trough_avg = (p1 + p2) / 2
+                peak_height = (peak - trough_avg) / trough_avg * 100
+                if peak_height < 5.0:
+                    continue
+
+                dist_from_bottom = (current_price - trough_avg) / trough_avg * 100
+
+                if dist_from_bottom < 10.0:
+                    severity = "high" if direction == "short" else "info"
+                    bottom_level = round(trough_avg, 2)
+                    warnings.append({
+                        "pattern": "⚠️ Double Bottom",
+                        "severity": severity,
+                        "level": bottom_level,
+                        "description": f"Zwei Tiefs bei ~${bottom_level} (Diff: {diff_pct:.1f}%) — Peak: +{peak_height:.0f}% — Starke Unterstützung!"
+                    })
+                    break
+            if [w for w in warnings if "Bottom" in w["pattern"]]:
+                break
+
+    # ══════════════════════════════════════════════════════════
+    # HEAD & SHOULDERS — 3 Peaks, mittlerer höchster
+    # ══════════════════════════════════════════════════════════
+    if len(pivot_highs) >= 3:
+        for i in range(len(pivot_highs) - 2):
+            idx1, left = pivot_highs[i]
+            idx2, head = pivot_highs[i + 1]
+            idx3, right = pivot_highs[i + 2]
+
+            # Head muss höchster sein
+            if head <= left or head <= right:
+                continue
+
+            # Schultern innerhalb 8% voneinander
+            shoulder_diff = abs(left - right) / max(left, right) * 100
+            if shoulder_diff > 8.0:
+                continue
+
+            # Head mindestens 3% über Schultern
+            shoulder_avg = (left + right) / 2
+            head_above = (head - shoulder_avg) / shoulder_avg * 100
+            if head_above < 3.0:
+                continue
+
+            # Nackenlinie
+            valley1 = min(lows[idx1:idx2+1])
+            valley2 = min(lows[idx2:idx3+1])
+            neckline = (valley1 + valley2) / 2
+
+            dist_from_neck = (current_price - neckline) / neckline * 100
+            if dist_from_neck < 15.0:
+                severity = "high" if direction == "long" else "info"
+                warnings.append({
+                    "pattern": "🚨 Head & Shoulders",
+                    "severity": severity,
+                    "level": round(neckline, 2),
+                    "description": f"Kopf: ${head:.0f} | Schultern: ${left:.0f}/${right:.0f} | Nackenlinie: ~${neckline:.0f} — Klassisches Umkehr-Signal!"
+                })
+                break
+
+    # ══════════════════════════════════════════════════════════
+    # INVERSE H&S — 3 Tiefs, mittleres tiefstes
+    # ══════════════════════════════════════════════════════════
+    if len(pivot_lows) >= 3:
+        for i in range(len(pivot_lows) - 2):
+            idx1, left = pivot_lows[i]
+            idx2, head = pivot_lows[i + 1]
+            idx3, right = pivot_lows[i + 2]
+
+            if head >= left or head >= right:
+                continue
+
+            shoulder_diff = abs(left - right) / max(left, right) * 100
+            if shoulder_diff > 8.0:
+                continue
+
+            shoulder_avg = (left + right) / 2
+            head_below = (shoulder_avg - head) / shoulder_avg * 100
+            if head_below < 3.0:
+                continue
+
+            peak1 = max(highs[idx1:idx2+1])
+            peak2 = max(highs[idx2:idx3+1])
+            neckline = (peak1 + peak2) / 2
+
+            dist_from_neck = (neckline - current_price) / neckline * 100
+            if dist_from_neck < 15.0:
+                severity = "high" if direction == "short" else "info"
+                warnings.append({
+                    "pattern": "🚨 Inv. Head & Shoulders",
+                    "severity": severity,
+                    "level": round(neckline, 2),
+                    "description": f"Kopf: ${head:.0f} | Schultern: ${left:.0f}/${right:.0f} | Nackenlinie: ~${neckline:.0f} — Bullisches Umkehr-Signal!"
+                })
+                break
+
+    return warnings
+
+
 def _bi_background_scan(poly_key, direction="long", candidates=None):
     """
     Background-Thread: Analysiert vorgeladene Kandidaten auf BI-Signale.
@@ -7373,10 +7568,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         for candidate in candidates:
             ticker = candidate["Ticker"]
 
-            # Hole 30 Tage OHLCV
+            # Hole 90 Tage OHLCV (für BI-Analyse + Pattern-Warnung)
             try:
                 end_date = datetime.now()
-                start_date = end_date - timedelta(days=50)  # Buffer für Wochenenden
+                start_date = end_date - timedelta(days=130)  # 90 Trading-Tage + Wochenend-Buffer
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
                 params = {"adjusted": "true", "sort": "asc", "apiKey": poly_key}
 
@@ -7406,9 +7601,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     no_data_count += 1
                     continue
 
-                bars = []
-                for bar in raw_bars[-30:]:
-                    bars.append({
+                all_bars = []
+                for bar in raw_bars:
+                    all_bars.append({
                         "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
                         "open": bar["o"],
                         "high": bar["h"],
@@ -7416,6 +7611,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         "close": bar["c"],
                         "volume": bar["v"]
                     })
+                bars = all_bars[-30:]  # Letzte 30 für BI-Analyse
 
             except Exception:
                 no_data_count += 1
@@ -7487,6 +7683,22 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             if candidate["RiskReward"] < 1.0:
                 rr_fail += 1
                 continue
+
+            # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
+            pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
+            if pattern_warnings:
+                high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
+                candidate["PatternWarnings"] = pattern_warnings
+                candidate["PatternCount"] = len(pattern_warnings)
+                candidate["PatternHighCount"] = len(high_warnings)
+                # Warntext für Tabelle
+                warn_texts = [w["pattern"] for w in pattern_warnings]
+                candidate["PatternLabel"] = " | ".join(warn_texts)
+            else:
+                candidate["PatternWarnings"] = []
+                candidate["PatternCount"] = 0
+                candidate["PatternHighCount"] = 0
+                candidate["PatternLabel"] = "✅ Clean"
 
             results.append(candidate)
 
@@ -22029,7 +22241,7 @@ with tab_bi:
         # Display-Spalten (mit korrekten Namen nach Rename)
         display_cols = [c for c in [
             "Ticker", "Preis", "Change%", "BI_Score", "Grade", "Konfidenz%",
-            "Breakout_Zone", "R:R", "Entry", "StopLoss", "TP1",
+            "PatternLabel", "Breakout_Zone", "R:R", "Entry", "StopLoss", "TP1",
             "Range%", "RVOL", "DollarVol"
         ] if c in bi_df.columns]
 
@@ -22117,6 +22329,28 @@ with tab_bi:
                 rl = bi_row.get("RangeLow", 0)
                 zone_text = f"${rl:.2f} — ${rh:.2f}" if rh > 0 else "N/A"
             st.caption(f"🎯 Breakout Zone: **{zone_text}** | Preis: ${bi_row.get('Preis', 0):.2f} | Change: {bi_row.get('Change%', 0):.1f}% | RVOL: {bi_row.get('RVOL', 0):.2f}")
+
+            # ── Chart-Pattern-Warnungen ──
+            pattern_warns = bi_row.get("PatternWarnings", [])
+            if isinstance(pattern_warns, str):
+                try:
+                    import json as _json
+                    pattern_warns = _json.loads(pattern_warns) if pattern_warns else []
+                except Exception:
+                    pattern_warns = []
+            if pattern_warns and len(pattern_warns) > 0:
+                for pw in pattern_warns:
+                    sev = pw.get("severity", "info")
+                    pat = pw.get("pattern", "")
+                    desc = pw.get("description", "")
+                    if sev == "high":
+                        st.error(f"**{pat}** — {desc}")
+                    elif sev == "medium":
+                        st.warning(f"**{pat}** — {desc}")
+                    else:
+                        st.info(f"**{pat}** — {desc}")
+            else:
+                st.success("✅ **Kein Umkehr-Pattern erkannt** — Chart ist clean")
 
             # Signal-Details
             details = bi_row.get("BI_Details", "")
