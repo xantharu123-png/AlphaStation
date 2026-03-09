@@ -7354,69 +7354,26 @@ def _bi_scan_is_running(direction="long"):
     return True
 
 
-def _bi_background_scan(poly_key, direction="long"):
+def _bi_background_scan(poly_key, direction="long", candidates=None):
     """
-    Background-Thread: Scannt ALLE Aktien auf BI-Signale.
-    Schreibt Fortschritt in Progress-Datei, Ergebnisse in Cache-Datei.
-    Überlebt Streamlit-Reruns weil der Thread unabhängig läuft.
+    Background-Thread: Analysiert vorgeladene Kandidaten auf BI-Signale.
+    Kandidaten werden VOR dem Thread im Hauptthread geladen (1 API-Call).
+    Thread macht nur die langsame Einzelanalyse (2000+ individuelle API-Calls).
+
+    Args:
+        poly_key: Polygon API Key
+        direction: "long" oder "short"
+        candidates: Vorgeladene Kandidaten-Liste (aus fetch_stock_data im Hauptthread)
     """
     try:
-        _bi_progress_write(direction, "running", detail="Hole alle Aktien...")
-
-        # ── Schritt 1: Aktien laden ──
-        # Wir müssen requests direkt nutzen (kein st.secrets im Thread)
-        snapshot_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-        resp = requests.get(snapshot_url, params={"apiKey": poly_key}, timeout=30)
-        if resp.status_code != 200:
-            _bi_progress_write(direction, "error", detail=f"Snapshot API Fehler: {resp.status_code}")
+        if not candidates:
+            _bi_progress_write(direction, "error", detail="Keine Kandidaten übergeben")
             return
 
-        data = resp.json()
-        all_tickers = data.get("tickers", [])
-
-        # Konvertiere Snapshot zu Kandidaten-Format
-        candidates = []
-        for t in all_tickers:
-            try:
-                ticker = t.get("ticker", "")
-                day = t.get("day", {})
-                prev_day = t.get("prevDay", {})
-                price = day.get("c", 0) or prev_day.get("c", 0)
-                volume = day.get("v", 0)
-                prev_vol = prev_day.get("v", 1)
-                prev_close = prev_day.get("c", 0)
-
-                if not price or price <= 0 or not prev_close or prev_close <= 0:
-                    continue
-
-                change_pct = ((price - prev_close) / prev_close) * 100
-                rvol = volume / prev_vol if prev_vol > 0 else 1.0
-                dollar_vol = price * volume
-
-                candidates.append({
-                    "Ticker": ticker,
-                    "Preis": round(price, 2),
-                    "Chg%": round(change_pct, 2),
-                    "RVOL": round(rvol, 2),
-                    "DollarVol": round(dollar_vol),
-                    "Volume": volume,
-                })
-            except Exception:
-                continue
-
-        # Basis-Filter: Minervini VCP/SEPA Kriterien
-        candidates = [c for c in candidates
-                      if c["Preis"] >= 5
-                      and c["DollarVol"] >= 500_000
-                      and -3 <= c["Chg%"] <= 3
-                      and c["RVOL"] <= 2.0]
-
-        candidates = sorted(candidates, key=lambda x: x["DollarVol"], reverse=True)
         total = len(candidates)
+        _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...")
 
-        _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten gefiltert")
-
-        # ── Schritt 2: Analyse ──
+        # ── Analyse ──
         results = []
         checked = 0
         no_data_count = 0
@@ -19524,18 +19481,48 @@ with st.sidebar:
                     if st.button("🔄 Neu scannen", use_container_width=True):
                         try:
                             poly_key = st.secrets["POLYGON_KEY"]
-                            thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction), daemon=True)
-                            thread.start()
-                            st.rerun()
+                            with st.spinner("📡 Lade Aktien-Snapshot..."):
+                                raw_candidates = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                            if not raw_candidates:
+                                st.error("❌ Keine Daten von Polygon API erhalten!")
+                            else:
+                                # Minervini Pre-Filter im Hauptthread
+                                filtered = []
+                                for s in raw_candidates:
+                                    price = s.get("Preis", 0)
+                                    dvol = s.get("DollarVol", 0)
+                                    chg = abs(s.get("Change%", 0))
+                                    rvol = s.get("RVOL", 0)
+                                    if price >= 5 and dvol >= 500_000 and chg <= 3 and rvol <= 2.0:
+                                        filtered.append(s)
+                                st.info(f"✅ {len(filtered)} Kandidaten geladen (von {len(raw_candidates)})")
+                                thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction, filtered), daemon=True)
+                                thread.start()
+                                st.rerun()
                         except KeyError:
                             st.error("❌ POLYGON_KEY fehlt!")
             else:
                 if st.button(f"🚀 BI Scan starten {dir_emoji} (Hintergrund ~30 Min)", use_container_width=True, type="primary"):
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
-                        thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction), daemon=True)
-                        thread.start()
-                        st.rerun()
+                        with st.spinner("📡 Lade Aktien-Snapshot..."):
+                            raw_candidates = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                        if not raw_candidates:
+                            st.error("❌ Keine Daten von Polygon API erhalten!")
+                        else:
+                            # Minervini Pre-Filter im Hauptthread
+                            filtered = []
+                            for s in raw_candidates:
+                                price = s.get("Preis", 0)
+                                dvol = s.get("DollarVol", 0)
+                                chg = abs(s.get("Change%", 0))
+                                rvol = s.get("RVOL", 0)
+                                if price >= 5 and dvol >= 500_000 and chg <= 3 and rvol <= 2.0:
+                                    filtered.append(s)
+                            st.info(f"✅ {len(filtered)} Kandidaten geladen (von {len(raw_candidates)})")
+                            thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction, filtered), daemon=True)
+                            thread.start()
+                            st.rerun()
                     except KeyError:
                         st.error("❌ POLYGON_KEY fehlt!")
             _bi_handled = True
