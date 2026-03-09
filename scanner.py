@@ -7231,10 +7231,15 @@ def scan_volume_voids_batch(tickers, poly_key, direction="long"):
     return results
 
 # =============================================================================
-# BI BACKGROUND CACHE — Stündlich gecachte Breakout Imminent Ergebnisse
+# BI BACKGROUND SCAN — Überlebt Streamlit-Reruns via Threading + Dateien
 # =============================================================================
+import threading
+import os
+
 _BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
+_BI_PROGRESS_FILE = "/tmp/bi_scan_progress_{direction}.json"
 _BI_CACHE_MAX_AGE = 3600  # 1 Stunde in Sekunden
+_bi_scan_lock = threading.Lock()
 
 
 def _bi_cache_path(direction="long"):
@@ -7242,12 +7247,14 @@ def _bi_cache_path(direction="long"):
     return _BI_CACHE_FILE.format(direction=direction)
 
 
+def _bi_progress_path(direction="long"):
+    """Pfad zur Progress-Datei."""
+    return _BI_PROGRESS_FILE.format(direction=direction)
+
+
 def _bi_cache_load(direction="long"):
-    """
-    Lädt BI-Cache. Returns (results, timestamp, age_minutes) oder (None, None, None).
-    """
+    """Lädt BI-Cache. Returns (results, timestamp, age_minutes) oder (None, None, None)."""
     try:
-        import os
         path = _bi_cache_path(direction)
         if not os.path.exists(path):
             return None, None, None
@@ -7277,6 +7284,49 @@ def _bi_cache_save(results, direction="long"):
         pass
 
 
+def _bi_progress_read(direction="long"):
+    """Liest Scan-Fortschritt. Returns dict oder None."""
+    try:
+        path = _bi_progress_path(direction)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0, top_score=0, avg_score=0, detail=""):
+    """Schreibt Scan-Fortschritt in Datei."""
+    try:
+        progress = {
+            "status": status,  # "running", "done", "error"
+            "direction": direction,
+            "checked": checked,
+            "total": total,
+            "hits": hits,
+            "no_data": no_data,
+            "top_score": top_score,
+            "avg_score": avg_score,
+            "detail": detail,
+            "timestamp": time.time()
+        }
+        with open(_bi_progress_path(direction), "w") as f:
+            json.dump(progress, f)
+    except Exception:
+        pass
+
+
+def _bi_progress_clear(direction="long"):
+    """Löscht Progress-Datei."""
+    try:
+        path = _bi_progress_path(direction)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 def _bi_cache_age_str(age_min):
     """Formatiert Cache-Alter als lesbaren String."""
     if age_min < 1:
@@ -7287,6 +7337,236 @@ def _bi_cache_age_str(age_min):
         h = age_min // 60
         m = age_min % 60
         return f"vor {h}h {m}m"
+
+
+def _bi_scan_is_running(direction="long"):
+    """Prüft ob ein Background-Scan läuft."""
+    prog = _bi_progress_read(direction)
+    if not prog:
+        return False
+    if prog.get("status") != "running":
+        return False
+    # Timeout: Scan älter als 45 Min = abgebrochen
+    age = time.time() - prog.get("timestamp", 0)
+    if age > 2700:  # 45 Min
+        _bi_progress_clear(direction)
+        return False
+    return True
+
+
+def _bi_background_scan(poly_key, direction="long"):
+    """
+    Background-Thread: Scannt ALLE Aktien auf BI-Signale.
+    Schreibt Fortschritt in Progress-Datei, Ergebnisse in Cache-Datei.
+    Überlebt Streamlit-Reruns weil der Thread unabhängig läuft.
+    """
+    try:
+        _bi_progress_write(direction, "running", detail="Hole alle Aktien...")
+
+        # ── Schritt 1: Aktien laden ──
+        # Wir müssen requests direkt nutzen (kein st.secrets im Thread)
+        snapshot_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+        resp = requests.get(snapshot_url, params={"apiKey": poly_key}, timeout=30)
+        if resp.status_code != 200:
+            _bi_progress_write(direction, "error", detail=f"Snapshot API Fehler: {resp.status_code}")
+            return
+
+        data = resp.json()
+        all_tickers = data.get("tickers", [])
+
+        # Konvertiere Snapshot zu Kandidaten-Format
+        candidates = []
+        for t in all_tickers:
+            try:
+                ticker = t.get("ticker", "")
+                day = t.get("day", {})
+                prev_day = t.get("prevDay", {})
+                price = day.get("c", 0) or prev_day.get("c", 0)
+                volume = day.get("v", 0)
+                prev_vol = prev_day.get("v", 1)
+                prev_close = prev_day.get("c", 0)
+
+                if not price or price <= 0 or not prev_close or prev_close <= 0:
+                    continue
+
+                change_pct = ((price - prev_close) / prev_close) * 100
+                rvol = volume / prev_vol if prev_vol > 0 else 1.0
+                dollar_vol = price * volume
+
+                candidates.append({
+                    "Ticker": ticker,
+                    "Preis": round(price, 2),
+                    "Chg%": round(change_pct, 2),
+                    "RVOL": round(rvol, 2),
+                    "DollarVol": round(dollar_vol),
+                    "Volume": volume,
+                })
+            except Exception:
+                continue
+
+        # Basis-Filter: Minervini VCP/SEPA Kriterien
+        candidates = [c for c in candidates
+                      if c["Preis"] >= 5
+                      and c["DollarVol"] >= 500_000
+                      and -3 <= c["Chg%"] <= 3
+                      and c["RVOL"] <= 2.0]
+
+        candidates = sorted(candidates, key=lambda x: x["DollarVol"], reverse=True)
+        total = len(candidates)
+
+        _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten gefiltert")
+
+        # ── Schritt 2: Analyse ──
+        results = []
+        checked = 0
+        no_data_count = 0
+        low_score_count = 0
+        range_fail = 0
+        atr_fail = 0
+        rr_fail = 0
+        score_sum = 0
+        score_count = 0
+        top_score = 0
+
+        for candidate in candidates:
+            ticker = candidate["Ticker"]
+
+            # Hole 30 Tage OHLCV
+            try:
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=50)  # Buffer für Wochenenden
+                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+                params = {"adjusted": "true", "sort": "asc", "apiKey": poly_key}
+
+                resp = requests.get(url, params=params, timeout=15)
+                checked += 1
+
+                # Rate Limiting: 0.8s alle 10 Calls → ~75/Min
+                if checked % 10 == 0:
+                    time.sleep(0.8)
+
+                if checked % 50 == 0:
+                    avg_sc = round(score_sum / max(1, score_count))
+                    _bi_progress_write(direction, "running", checked=checked, total=total,
+                                       hits=len(results), no_data=no_data_count,
+                                       top_score=top_score, avg_score=avg_sc,
+                                       detail=f"{checked}/{total} analysiert")
+
+                if resp.status_code != 200:
+                    no_data_count += 1
+                    if resp.status_code == 429:
+                        time.sleep(5)  # Rate Limit → 5s Pause
+                    continue
+
+                api_data = resp.json()
+                raw_bars = api_data.get("results", [])
+                if not raw_bars or len(raw_bars) < 10:
+                    no_data_count += 1
+                    continue
+
+                bars = []
+                for bar in raw_bars[-30:]:
+                    bars.append({
+                        "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                        "open": bar["o"],
+                        "high": bar["h"],
+                        "low": bar["l"],
+                        "close": bar["c"],
+                        "volume": bar["v"]
+                    })
+
+            except Exception:
+                no_data_count += 1
+                continue
+
+            # Analyse
+            result = analyze_breakout_imminent(bars, direction=direction)
+            if len(result) == 8:
+                is_valid, bi_score, max_score, details, confidence, grade, sm_fires, sm_hits = result
+            else:
+                is_valid, bi_score, max_score, details, confidence, grade = result
+                sm_fires, sm_hits = 0, 0
+
+            score_sum += bi_score
+            score_count += 1
+            if bi_score > top_score:
+                top_score = bi_score
+
+            if not is_valid:
+                low_score_count += 1
+                continue
+
+            # Range berechnen
+            range_high = max(b["high"] for b in bars[-15:])
+            range_low = min(b["low"] for b in bars[-15:])
+            range_size = range_high - range_low
+            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+
+            if range_pct < 2.0:
+                range_fail += 1
+                continue
+
+            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
+            if avg_daily_range < 0.3:
+                atr_fail += 1
+                continue
+
+            grade_map = {"S": "🏆 ELITE", "A": "🔥 STARK", "B": "✅ SOLIDE", "C": "⚠️ WATCH", "D": "❌ SCHWACH"}
+            grade_label = grade_map.get(grade, grade)
+
+            candidate["Alpha"] = bi_score
+            candidate["BI_Score"] = bi_score
+            candidate["BI_MaxScore"] = max_score
+            candidate["BI_Details"] = details
+            candidate["BI_Confidence"] = confidence
+            candidate["BI_Direction"] = direction.upper()
+            candidate["BI_Grade"] = grade
+            candidate["BI_GradeLabel"] = grade_label
+
+            atr_5 = sum((b["high"] - b["low"]) for b in bars[-5:]) / 5
+
+            if direction == "long":
+                candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)
+                candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)
+                candidate["TP1"] = round(range_high + range_size * 0.75, 2)
+                candidate["TP2"] = round(range_high + range_size * 1.618, 2)
+            else:
+                candidate["Entry"] = round(range_low - atr_5 * 0.1, 2)
+                candidate["StopLoss"] = round(range_low + atr_5 * 1.5, 2)
+                candidate["TP1"] = round(range_low - range_size * 0.75, 2)
+                candidate["TP2"] = round(range_low - range_size * 1.618, 2)
+
+            risk = abs(candidate["Entry"] - candidate["StopLoss"])
+            reward = abs(candidate["TP1"] - candidate["Entry"])
+            candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
+            candidate["RangeHigh"] = round(range_high, 2)
+            candidate["RangeLow"] = round(range_low, 2)
+
+            if candidate["RiskReward"] < 1.0:
+                rr_fail += 1
+                continue
+
+            results.append(candidate)
+
+        # Sortiere nach Score
+        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+
+        # Cache + Progress speichern
+        _bi_cache_save(results, direction=direction)
+
+        avg_sc = round(score_sum / max(1, score_count))
+        pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
+                    f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold 85) → "
+                    f"{low_score_count} unter Threshold → {range_fail} Range → "
+                    f"{atr_fail} ATR → {rr_fail} R:R → {len(results)} Treffer")
+
+        _bi_progress_write(direction, "done", checked=checked, total=total,
+                           hits=len(results), no_data=no_data_count,
+                           top_score=top_score, avg_score=avg_sc,
+                           detail=pipeline)
+
+    except Exception as e:
+        _bi_progress_write(direction, "error", detail=f"Fehler: {str(e)[:100]}")
 
 
 def _watchlist_file():
@@ -19737,198 +20017,96 @@ with st.sidebar:
                 bi_direction = "long" if "Long" in current_strat else "short"
                 dir_emoji = "⬆️" if bi_direction == "long" else "⬇️"
 
-                # ── BI CACHE CHECK ──
+                # ── BI STATUS CHECK ──
                 cached_results, cached_ts, cache_age_min = _bi_cache_load(bi_direction)
-                cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 60  # < 1 Stunde
+                cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 60
+                scan_running = _bi_scan_is_running(bi_direction)
+                progress = _bi_progress_read(bi_direction)
 
-                # Cache-Status anzeigen
-                if cache_valid:
-                    cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
-                    st.success(f"⚡ **Cache verfügbar** — {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
-                    bi_col1, bi_col2 = st.columns(2)
-                    with bi_col1:
-                        use_cache = st.button(f"⚡ Cache laden ({len(cached_results)} Treffer)", use_container_width=True, type="primary")
-                    with bi_col2:
-                        force_rescan = st.button("🔄 Neu scannen", use_container_width=True)
-                else:
-                    if cached_results is not None and cache_age_min is not None:
-                        st.info(f"⏰ Cache abgelaufen ({_bi_cache_age_str(cache_age_min)}) — wird neu gescannt")
-                    use_cache = False
-                    force_rescan = True  # Kein gültiger Cache → immer scannen
+                # ── FALL 1: Scan läuft im Hintergrund ──
+                if scan_running and progress:
+                    p_checked = progress.get("checked", 0)
+                    p_total = progress.get("total", 0)
+                    p_hits = progress.get("hits", 0)
+                    p_no_data = progress.get("no_data", 0)
+                    p_top = progress.get("top_score", 0)
+                    pct = round(p_checked / max(1, p_total) * 100)
+                    est_left = max(1, (p_total - p_checked) // 75)  # ~75 Calls/Min
 
-                # ── CACHE VERWENDEN (sofort, < 1 Sek) ──
-                if cache_valid and use_cache and not force_rescan:
-                    st.session_state.scan_results = cached_results
-                    st.session_state.market_type = "Aktien"
-                    st.toast(f"⚡ {len(cached_results)} BI {dir_emoji} Setups aus Cache geladen!")
+                    st.info(f"🔮 **BI Scan läuft im Hintergrund** — {p_checked}/{p_total} ({pct}%) | "
+                            f"{p_hits} Treffer | Top: {p_top} | ~{est_left} Min verbleibend")
+                    st.progress(min(1.0, p_checked / max(1, p_total)))
+                    st.caption("💡 Du kannst die App normal weiter benutzen — der Scan läuft weiter!")
 
-                # ── FRISCHER SCAN (mit Cache-Speicherung) ──
-                elif (cache_valid and force_rescan) or not cache_valid:
-                    with st.status(f"🔮 Scanne Breakout Imminent {dir_emoji}...") as status:
-                        try:
-                            poly_key = st.secrets["POLYGON_KEY"]
-
-                            # Schritt 1: Hole ALLE Aktien (ungefiltert) — wir brauchen die flachen!
-                            status.update(label="Schritt 1/3: Hole alle Aktien...")
-                            candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
-
-                            # Basis-Filter: BI sucht Konsolidierungen → FLACHE Aktien + Vol Dry-Up
-                            # Minervini VCP/SEPA: Tight price action + low relative volume VOR Breakout
-                            candidates = [c for c in candidates
-                                          if c.get("Preis", 0) >= 5       # Keine Pennystocks
-                                          and c.get("DollarVol", 0) >= 500_000  # Genug Liquidität
-                                          and -3 <= c.get("Chg%", 0) <= 3      # Flat = konsolidiert
-                                          and c.get("RVOL", 1.0) <= 2.0]       # Low RVOL = Vol Dry-Up
-
-                            status.update(label=f"Schritt 1/3: {len(candidates)} Kandidaten gefiltert")
-
-                            # Sortiere nach DollarVol (höchste Liquidität zuerst)
-                            # KEIN künstliches Cap — Pre-Filter hat bereits gefiltert
-                            candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)
-
-                            max_analyze = len(candidates)
-                            est_min = max(1, max_analyze // 100)  # ~100 Calls/Min bei Starter
-                            status.update(label=f"Schritt 2/3: Analysiere {max_analyze} Aktien mit 20 Signalen (~{est_min} Min)...")
-
-                            results = []
-                            checked = 0
-                            no_data_count = 0    # DEBUG: Kein History zurück
-                            low_score_count = 0  # DEBUG: Score unter Threshold
-                            range_fail = 0       # DEBUG: Range < 2%
-                            atr_fail = 0         # DEBUG: ATR < 0.3%
-                            rr_fail = 0          # DEBUG: R:R < 1.0
-                            score_sum = 0        # DEBUG: Durchschnitt aller Scores
-                            score_count = 0      # DEBUG: Anzahl gültiger Scores
-                            top_score = 0        # DEBUG: Höchster Score
-
-                            for candidate in candidates:  # ALLE die durch den Pre-Filter kamen
-                                ticker = candidate["Ticker"]
-
-                                bars = fetch_multi_day_data(ticker, poly_key, days=30)
-                                checked += 1
-
-                                # Rate Limiting: 0.8s Pause alle 10 Calls → ~75 Calls/Min (sicher unter 100)
-                                if checked % 10 == 0:
-                                    time.sleep(0.8)
-                                if checked % 50 == 0:
-                                    status.update(label=f"Schritt 2/3: {checked}/{max_analyze} | {len(results)} Treffer | {no_data_count} kein History | Top: {top_score}")
-
-                                if not bars or len(bars) < 10:
-                                    no_data_count += 1
-                                    continue
-
-                                result = analyze_breakout_imminent(bars, direction=bi_direction)
-                                if len(result) == 8:
-                                    is_valid, score, max_score, details, confidence, grade, sm_fires, sm_hits = result
-                                else:
-                                    is_valid, score, max_score, details, confidence, grade = result
-                                    sm_fires, sm_hits = 0, 0
-
-                                score_sum += score
-                                score_count += 1
-                                if score > top_score:
-                                    top_score = score
-
-                                if not is_valid:
-                                    low_score_count += 1
-                                    continue
-
-                                if is_valid:
-                                    # Range berechnen
-                                    range_high = max(b["high"] for b in bars[-15:])
-                                    range_low = min(b["low"] for b in bars[-15:])
-                                    range_size = range_high - range_low
-                                    range_pct = (range_size / range_low * 100) if range_low > 0 else 0
-
-                                    # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 2% sein!
-                                    # Unter 2% = zu enger Range, kein sinnvoller Breakout-Kandidat
-                                    if range_pct < 2.0:
-                                        range_fail += 1
-                                        continue
-
-                                    # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.3% sein
-                                    avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
-                                    if avg_daily_range < 0.3:
-                                        atr_fail += 1
-                                        continue
-
-                                    # Grade Emoji
-                                    grade_map = {"S": "🏆 ELITE", "A": "🔥 STARK", "B": "✅ SOLIDE", "C": "⚠️ WATCH", "D": "❌ SCHWACH"}
-                                    grade_label = grade_map.get(grade, grade)
-
-                                    candidate["Alpha"] = score
-                                    candidate["BI_Score"] = score
-                                    candidate["BI_MaxScore"] = max_score
-                                    candidate["BI_Details"] = details
-                                    candidate["BI_Confidence"] = confidence
-                                    candidate["BI_Direction"] = bi_direction.upper()
-                                    candidate["BI_Grade"] = grade
-                                    candidate["BI_GradeLabel"] = grade_label
-
-                                    # Entry/SL/TP basierend auf Range — mit ATR-basiertem Risiko
-                                    # ATR für realistischere SL-Berechnung
-                                    atr_5 = sum((b["high"] - b["low"]) for b in bars[-5:]) / 5
-
-                                    if bi_direction == "long":
-                                        candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)  # Knapp über Range-High
-                                        candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)  # 1.5x ATR unter Entry
-                                        candidate["TP1"] = round(range_high + range_size * 0.75, 2)  # 75% Measured Move
-                                        candidate["TP2"] = round(range_high + range_size * 1.618, 2)  # Fib Extension
-                                    else:
-                                        candidate["Entry"] = round(range_low - atr_5 * 0.1, 2)  # Knapp unter Range-Low
-                                        candidate["StopLoss"] = round(range_low + atr_5 * 1.5, 2)  # 1.5x ATR über Entry
-                                        candidate["TP1"] = round(range_low - range_size * 0.75, 2)  # 75% Measured Move
-                                        candidate["TP2"] = round(range_low - range_size * 1.618, 2)  # Fib Extension
-
-                                    risk = abs(candidate["Entry"] - candidate["StopLoss"])
-                                    reward = abs(candidate["TP1"] - candidate["Entry"])
-                                    candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
-                                    candidate["RangeHigh"] = round(range_high, 2)
-                                    candidate["RangeLow"] = round(range_low, 2)
-
-                                    # ⚠️ QUALITÄTS-FILTER: R:R muss mindestens 1.0 sein!
-                                    if candidate["RiskReward"] < 1.0:
-                                        rr_fail += 1
-                                        continue
-
-                                    results.append(candidate)
-
-                            # Sortiere nach Score (hoechster zuerst)
-                            results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
-
-                            # ── CACHE SPEICHERN ──
-                            _bi_cache_save(results, direction=bi_direction)
-
-                            st.session_state.scan_results = results
+                    # Cache anbieten wenn vorhanden
+                    if cache_valid:
+                        cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
+                        if st.button(f"⚡ Vorherigen Cache laden ({len(cached_results)} Treffer von {cache_time_str})", use_container_width=True):
+                            st.session_state.scan_results = cached_results
                             st.session_state.market_type = "Aktien"
+                            st.rerun()
 
-                            avg_score = round(score_sum / max(1, score_count))
-                            status.update(
-                                label=f"✅ {len(results)} Breakout Imminent {dir_emoji} Setups (von {checked} analysiert) — Cache gespeichert!",
-                                state="complete"
-                            )
+                # ── FALL 2: Scan fertig (Ergebnis abholen) ──
+                elif progress and progress.get("status") == "done":
+                    # Ergebnisse aus Cache laden
+                    fresh_results, _, _ = _bi_cache_load(bi_direction)
+                    if fresh_results is not None:
+                        st.session_state.scan_results = fresh_results
+                        st.session_state.market_type = "Aktien"
+                        st.success(f"✅ **BI Scan fertig!** {len(fresh_results)} Treffer gefunden")
+                        # Pipeline-Info anzeigen
+                        st.caption(f"🔍 {progress.get('detail', '')}")
+                        _bi_progress_clear(bi_direction)
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ Scan fertig aber keine Ergebnisse im Cache")
+                        _bi_progress_clear(bi_direction)
 
-                            # ── DEBUG PIPELINE (immer bei 0 Ergebnissen, sonst optional) ──
-                            if len(results) == 0 or st.session_state.get("debug_mode", False):
-                                st.caption(
-                                    f"🔍 **BI Pipeline:** {max_analyze} Kandidaten → "
-                                    f"{no_data_count} kein History → "
-                                    f"{score_count} analysiert (Ø Score: {avg_score}, Top: {top_score}, Threshold: 85) → "
-                                    f"{low_score_count} unter Threshold → "
-                                    f"{range_fail} Range<2% → {atr_fail} ATR<0.3% → {rr_fail} R:R<1.0 → "
-                                    f"**{len(results)} Treffer**"
+                # ── FALL 3: Fehler beim Scan ──
+                elif progress and progress.get("status") == "error":
+                    st.error(f"❌ BI Scan Fehler: {progress.get('detail', 'Unbekannt')}")
+                    _bi_progress_clear(bi_direction)
+
+                # ── FALL 4: Kein Scan aktiv — Buttons anzeigen ──
+                else:
+                    if cache_valid:
+                        cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
+                        st.success(f"⚡ **Cache verfügbar** — {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
+                        bi_col1, bi_col2 = st.columns(2)
+                        with bi_col1:
+                            if st.button(f"⚡ Cache laden ({len(cached_results)} Treffer)", use_container_width=True, type="primary"):
+                                st.session_state.scan_results = cached_results
+                                st.session_state.market_type = "Aktien"
+                                st.rerun()
+                        with bi_col2:
+                            if st.button("🔄 Neu scannen (Hintergrund)", use_container_width=True):
+                                try:
+                                    poly_key = st.secrets["POLYGON_KEY"]
+                                    thread = threading.Thread(
+                                        target=_bi_background_scan,
+                                        args=(poly_key, bi_direction),
+                                        daemon=True
+                                    )
+                                    thread.start()
+                                    st.rerun()
+                                except KeyError:
+                                    st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    else:
+                        # Kein Cache → Scan direkt starten
+                        est_min = 30  # ~2250 Aktien / 75 pro Min
+                        st.info(f"🔮 Kein BI-Cache vorhanden. Scan analysiert ~2000+ Aktien (~{est_min} Min im Hintergrund).")
+                        if st.button(f"🚀 BI Scan starten {dir_emoji} (Hintergrund)", use_container_width=True, type="primary"):
+                            try:
+                                poly_key = st.secrets["POLYGON_KEY"]
+                                thread = threading.Thread(
+                                    target=_bi_background_scan,
+                                    args=(poly_key, bi_direction),
+                                    daemon=True
                                 )
-                            if len(results) == 0:
-                                st.info(f"ℹ️ Keine unmittelbaren Breakout-Setups gefunden. "
-                                       f"Höchster Score: {top_score}/200 (Threshold: 85). "
-                                       f"{no_data_count} Ticker ohne History-Daten.")
-
-                        except KeyError:
-                            st.error("❌ POLYGON_KEY fehlt in Secrets!")
-                        except Exception as e:
-                            st.error(f"Fehler beim Breakout Imminent Scan: {e}")
-                            import traceback
-                            st.code(traceback.format_exc())
+                                thread.start()
+                                st.rerun()
+                            except KeyError:
+                                st.error("❌ POLYGON_KEY fehlt in Secrets!")
 
         elif not st.session_state.active_filters and not st.session_state.get("current_strategy"):
             st.warning("Erst Strategie laden!")
