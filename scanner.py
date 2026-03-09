@@ -19689,16 +19689,18 @@ with st.sidebar:
 
                         status.update(label=f"Schritt 1/3: {len(candidates)} Kandidaten gefiltert")
 
-                        # Sortiere nach DollarVol (höchste Liquidität = bessere Trades)
-                        candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)[:500]
+                        # Sortiere nach DollarVol (höchste Liquidität zuerst)
+                        # KEIN künstliches Cap — Pre-Filter hat bereits gefiltert
+                        candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)
 
-                        max_analyze = min(len(candidates), 500)
-                        status.update(label=f"Schritt 2/3: Analysiere {max_analyze} Aktien mit 20 Signalen...")
+                        max_analyze = len(candidates)
+                        est_min = max(1, max_analyze // 100)  # ~100 Calls/Min bei Starter
+                        status.update(label=f"Schritt 2/3: Analysiere {max_analyze} Aktien mit 20 Signalen (~{est_min} Min)...")
 
                         results = []
                         checked = 0
 
-                        for candidate in candidates[:500]:  # Max 500 (Polygon Starter: 100 Calls/Min)
+                        for candidate in candidates:  # ALLE die durch den Pre-Filter kamen
                             ticker = candidate["Ticker"]
 
                             bars = fetch_multi_day_data(ticker, poly_key, days=30)
