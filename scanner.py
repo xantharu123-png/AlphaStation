@@ -19679,32 +19679,34 @@ with st.sidebar:
                         status.update(label="Schritt 1/3: Hole alle Aktien...")
                         candidates, _, _, _ = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
 
-                        # Basis-Filter: Preis $5-$500, Liquiditaet > $500k, FLACHE Bewegung
+                        # Basis-Filter: Preis $5+, Liquiditaet > $500k, FLACHE Bewegung
+                        # BI sucht Konsolidierungen → flache Aktien, aber nicht zu restriktiv
                         candidates = [c for c in candidates
-                                      if 5 <= c.get("Preis", 0) <= 500
+                                      if c.get("Preis", 0) >= 5
                                       and c.get("DollarVol", 0) >= 500_000
-                                      and -3 <= c.get("Chg%", 0) <= 3
-                                      and c.get("RVOL", 1.0) <= 2.0]
+                                      and -5 <= c.get("Chg%", 0) <= 5
+                                      and c.get("RVOL", 1.0) <= 3.0]
 
-                        status.update(label=f"Schritt 1/3: {len(candidates)} flache Aktien gefiltert")
+                        status.update(label=f"Schritt 1/3: {len(candidates)} Kandidaten gefiltert")
 
                         # Sortiere nach DollarVol (höchste Liquidität = bessere Trades)
-                        candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)[:100]
+                        candidates = sorted(candidates, key=lambda x: x.get("DollarVol", 0), reverse=True)[:500]
 
-                        status.update(label=f"Schritt 2/3: Analysiere {min(len(candidates), 60)} Aktien mit 12 Signalen...")
+                        max_analyze = min(len(candidates), 500)
+                        status.update(label=f"Schritt 2/3: Analysiere {max_analyze} Aktien mit 20 Signalen...")
 
                         results = []
                         checked = 0
 
-                        for candidate in candidates[:60]:  # Max 60 API-Calls
+                        for candidate in candidates[:500]:  # Max 500 (Polygon Starter: 100 Calls/Min)
                             ticker = candidate["Ticker"]
 
                             bars = fetch_multi_day_data(ticker, poly_key, days=30)
                             checked += 1
 
-                            if checked % 10 == 0:
-                                status.update(label=f"Schritt 2/3: {checked}/{min(len(candidates), 60)} analysiert | {len(results)} Treffer...")
-                                time.sleep(0.5)  # Rate Limiting
+                            if checked % 25 == 0:
+                                status.update(label=f"Schritt 2/3: {checked}/{max_analyze} analysiert | {len(results)} Treffer...")
+                                time.sleep(0.15)  # Rate Limiting (Polygon Starter: 100/min)
 
                             if not bars or len(bars) < 10:
                                 continue
@@ -19774,7 +19776,7 @@ with st.sidebar:
                                 results.append(candidate)
 
                         # Sortiere nach Score (hoechster zuerst)
-                        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:25]
+                        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
 
                         st.session_state.scan_results = results
                         st.session_state.market_type = "Aktien"
