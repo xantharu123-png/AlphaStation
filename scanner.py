@@ -21968,6 +21968,53 @@ with tab_scanner:
                 st.info("💡 **Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
         
         # =====================================================
+        # CHART PATTERN WARNUNG — Umkehr-Patterns erkennen (Daily, 90 Tage)
+        # =====================================================
+        _pattern_ticker = str(row.get("Ticker", "")) if "Ticker" in row.index else st.session_state.selected_symbol
+        _pattern_direction = "long"  # Default
+        _cur_strat = st.session_state.get("current_strategy", "")
+        if any(kw in _cur_strat.lower() for kw in ["short", "distribution", "⬇️", "selling"]):
+            _pattern_direction = "short"
+
+        if st.session_state.market_type == "Aktien" and _pattern_ticker:
+            try:
+                _poly_key = st.secrets.get("POLYGON_KEY", "")
+                if _poly_key:
+                    # Cache Pattern-Ergebnis in session_state um wiederholte API-Calls zu vermeiden
+                    _pat_cache_key = f"_pattern_cache_{_pattern_ticker}"
+                    _pat_cached = st.session_state.get(_pat_cache_key)
+                    if _pat_cached and _pat_cached.get("ticker") == _pattern_ticker:
+                        _pat_warnings = _pat_cached.get("warnings", [])
+                    else:
+                        _pat_end = datetime.now()
+                        _pat_start = _pat_end - timedelta(days=130)
+                        _pat_url = f"https://api.polygon.io/v2/aggs/ticker/{_pattern_ticker}/range/1/day/{_pat_start.strftime('%Y-%m-%d')}/{_pat_end.strftime('%Y-%m-%d')}"
+                        _pat_resp = requests.get(_pat_url, params={"adjusted": "true", "sort": "asc", "apiKey": _poly_key}, timeout=10)
+                        _pat_warnings = []
+                        if _pat_resp.status_code == 200:
+                            _pat_raw = _pat_resp.json().get("results", [])
+                            if _pat_raw and len(_pat_raw) >= 30:
+                                _pat_bars = [{"date": datetime.fromtimestamp(b["t"]/1000).strftime("%Y-%m-%d"),
+                                              "open": b["o"], "high": b["h"], "low": b["l"],
+                                              "close": b["c"], "volume": b["v"]} for b in _pat_raw]
+                                _pat_warnings = _detect_chart_patterns(_pat_bars, direction=_pattern_direction)
+                        st.session_state[_pat_cache_key] = {"ticker": _pattern_ticker, "warnings": _pat_warnings}
+
+                    # Anzeige
+                    if _pat_warnings:
+                        for _pw in _pat_warnings:
+                            _sev = _pw.get("severity", "info")
+                            _pat_text = f"**{_pw['pattern']}** — {_pw['description']}"
+                            if _sev == "high":
+                                st.error(_pat_text)
+                            elif _sev == "medium":
+                                st.warning(_pat_text)
+                            else:
+                                st.info(_pat_text)
+            except Exception:
+                pass  # Pattern-Check ist optional — nie die Haupt-UI blockieren
+
+        # =====================================================
         # CHART RENDERING
         # =====================================================
         # Internationale Aktien: Eigener Lightweight-Chart (Yahoo Finance)
