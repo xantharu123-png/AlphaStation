@@ -19792,6 +19792,14 @@ with st.sidebar:
 
                             results = []
                             checked = 0
+                            no_data_count = 0    # DEBUG: Kein History zurück
+                            low_score_count = 0  # DEBUG: Score unter Threshold
+                            range_fail = 0       # DEBUG: Range < 2%
+                            atr_fail = 0         # DEBUG: ATR < 0.3%
+                            rr_fail = 0          # DEBUG: R:R < 1.0
+                            score_sum = 0        # DEBUG: Durchschnitt aller Scores
+                            score_count = 0      # DEBUG: Anzahl gültiger Scores
+                            top_score = 0        # DEBUG: Höchster Score
 
                             for candidate in candidates:  # ALLE die durch den Pre-Filter kamen
                                 ticker = candidate["Ticker"]
@@ -19799,11 +19807,14 @@ with st.sidebar:
                                 bars = fetch_multi_day_data(ticker, poly_key, days=30)
                                 checked += 1
 
-                                if checked % 25 == 0:
-                                    status.update(label=f"Schritt 2/3: {checked}/{max_analyze} analysiert | {len(results)} Treffer...")
-                                    time.sleep(0.15)  # Rate Limiting (Polygon Starter: 100/min)
+                                # Rate Limiting: 0.8s Pause alle 10 Calls → ~75 Calls/Min (sicher unter 100)
+                                if checked % 10 == 0:
+                                    time.sleep(0.8)
+                                if checked % 50 == 0:
+                                    status.update(label=f"Schritt 2/3: {checked}/{max_analyze} | {len(results)} Treffer | {no_data_count} kein History | Top: {top_score}")
 
                                 if not bars or len(bars) < 10:
+                                    no_data_count += 1
                                     continue
 
                                 result = analyze_breakout_imminent(bars, direction=bi_direction)
@@ -19812,6 +19823,15 @@ with st.sidebar:
                                 else:
                                     is_valid, score, max_score, details, confidence, grade = result
                                     sm_fires, sm_hits = 0, 0
+
+                                score_sum += score
+                                score_count += 1
+                                if score > top_score:
+                                    top_score = score
+
+                                if not is_valid:
+                                    low_score_count += 1
+                                    continue
 
                                 if is_valid:
                                     # Range berechnen
@@ -19823,11 +19843,13 @@ with st.sidebar:
                                     # ⚠️ QUALITÄTS-FILTER: Range muss mindestens 2% sein!
                                     # Unter 2% = zu enger Range, kein sinnvoller Breakout-Kandidat
                                     if range_pct < 2.0:
+                                        range_fail += 1
                                         continue
 
                                     # ⚠️ QUALITÄTS-FILTER: ATR muss mindestens 0.3% sein
                                     avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
                                     if avg_daily_range < 0.3:
+                                        atr_fail += 1
                                         continue
 
                                     # Grade Emoji
@@ -19866,6 +19888,7 @@ with st.sidebar:
 
                                     # ⚠️ QUALITÄTS-FILTER: R:R muss mindestens 1.0 sein!
                                     if candidate["RiskReward"] < 1.0:
+                                        rr_fail += 1
                                         continue
 
                                     results.append(candidate)
@@ -19879,14 +19902,26 @@ with st.sidebar:
                             st.session_state.scan_results = results
                             st.session_state.market_type = "Aktien"
 
+                            avg_score = round(score_sum / max(1, score_count))
                             status.update(
-                                label=f"✅ {len(results)} Breakout Imminent {dir_emoji} Setups gefunden (von {checked} analysiert) — Cache gespeichert!",
+                                label=f"✅ {len(results)} Breakout Imminent {dir_emoji} Setups (von {checked} analysiert) — Cache gespeichert!",
                                 state="complete"
                             )
 
+                            # ── DEBUG PIPELINE (immer bei 0 Ergebnissen, sonst optional) ──
+                            if len(results) == 0 or st.session_state.get("debug_mode", False):
+                                st.caption(
+                                    f"🔍 **BI Pipeline:** {max_analyze} Kandidaten → "
+                                    f"{no_data_count} kein History → "
+                                    f"{score_count} analysiert (Ø Score: {avg_score}, Top: {top_score}, Threshold: 85) → "
+                                    f"{low_score_count} unter Threshold → "
+                                    f"{range_fail} Range<2% → {atr_fail} ATR<0.3% → {rr_fail} R:R<1.0 → "
+                                    f"**{len(results)} Treffer**"
+                                )
                             if len(results) == 0:
                                 st.info(f"ℹ️ Keine unmittelbaren Breakout-Setups gefunden. "
-                                       f"{checked} Aktien analysiert — aktuell konsolidiert keiner mit genug Signalen.")
+                                       f"Höchster Score: {top_score}/200 (Threshold: 85). "
+                                       f"{no_data_count} Ticker ohne History-Daten.")
 
                         except KeyError:
                             st.error("❌ POLYGON_KEY fehlt in Secrets!")
