@@ -19446,9 +19446,104 @@ with st.sidebar:
             }
     
     st.divider()
-    
-    # SCAN Button
-    if st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
+
+    # ═══════════════════════════════════════════════════════════
+    # BI BACKGROUND SCAN — Eigene UI VOR dem normalen Scan-Button
+    # BI läuft im Hintergrund, braucht eigene Buttons statt SCAN STARTEN
+    # ═══════════════════════════════════════════════════════════
+    _bi_current_strat = st.session_state.get("current_strategy", "")
+    _bi_is_bi = "Breakout Imminent" in _bi_current_strat
+    _bi_handled = False
+
+    if _bi_is_bi and m_type == "Aktien":
+        bi_direction = "long" if "Long" in _bi_current_strat else "short"
+        dir_emoji = "⬆️" if bi_direction == "long" else "⬇️"
+
+        # Status prüfen
+        cached_results, cached_ts, cache_age_min = _bi_cache_load(bi_direction)
+        cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 60
+        scan_running = _bi_scan_is_running(bi_direction)
+        progress = _bi_progress_read(bi_direction)
+
+        # ── FALL 1: Scan läuft im Hintergrund ──
+        if scan_running and progress:
+            p_checked = progress.get("checked", 0)
+            p_total = progress.get("total", 0)
+            p_hits = progress.get("hits", 0)
+            p_top = progress.get("top_score", 0)
+            pct = round(p_checked / max(1, p_total) * 100)
+            est_left = max(1, (p_total - p_checked) // 75)
+
+            st.info(f"🔮 **BI Scan läuft** — {p_checked}/{p_total} ({pct}%) | "
+                    f"{p_hits} Treffer | Top: {p_top} | ~{est_left} Min")
+            st.progress(min(1.0, p_checked / max(1, p_total)))
+            st.caption("💡 App normal weiter benutzen — Scan läuft im Hintergrund!")
+
+            if cache_valid:
+                cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
+                if st.button(f"⚡ Vorherigen Cache laden ({len(cached_results)} Treffer von {cache_time_str})", use_container_width=True):
+                    st.session_state.scan_results = cached_results
+                    st.session_state.market_type = "Aktien"
+                    st.session_state.selected_row_index = 0
+                    st.rerun()
+            _bi_handled = True
+
+        # ── FALL 2: Scan fertig ──
+        elif progress and progress.get("status") == "done":
+            fresh_results, _, _ = _bi_cache_load(bi_direction)
+            if fresh_results is not None:
+                st.session_state.scan_results = fresh_results
+                st.session_state.market_type = "Aktien"
+                st.session_state.selected_row_index = 0
+                st.success(f"✅ **BI Scan fertig!** {len(fresh_results)} Treffer")
+                st.caption(f"🔍 {progress.get('detail', '')}")
+                _bi_progress_clear(bi_direction)
+            else:
+                st.warning("⚠️ Scan fertig aber Cache leer")
+                _bi_progress_clear(bi_direction)
+            _bi_handled = True
+
+        # ── FALL 3: Fehler ──
+        elif progress and progress.get("status") == "error":
+            st.error(f"❌ BI Scan Fehler: {progress.get('detail', 'Unbekannt')}")
+            _bi_progress_clear(bi_direction)
+
+        # ── FALL 4: Kein Scan aktiv — Buttons zeigen ──
+        else:
+            if cache_valid:
+                cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
+                st.success(f"⚡ **Cache:** {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
+                bi_col1, bi_col2 = st.columns(2)
+                with bi_col1:
+                    if st.button(f"⚡ Cache laden", use_container_width=True, type="primary"):
+                        st.session_state.scan_results = cached_results
+                        st.session_state.market_type = "Aktien"
+                        st.session_state.selected_row_index = 0
+                        st.rerun()
+                with bi_col2:
+                    if st.button("🔄 Neu scannen", use_container_width=True):
+                        try:
+                            poly_key = st.secrets["POLYGON_KEY"]
+                            thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction), daemon=True)
+                            thread.start()
+                            st.rerun()
+                        except KeyError:
+                            st.error("❌ POLYGON_KEY fehlt!")
+            else:
+                if st.button(f"🚀 BI Scan starten {dir_emoji} (Hintergrund ~30 Min)", use_container_width=True, type="primary"):
+                    try:
+                        poly_key = st.secrets["POLYGON_KEY"]
+                        thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_direction), daemon=True)
+                        thread.start()
+                        st.rerun()
+                    except KeyError:
+                        st.error("❌ POLYGON_KEY fehlt!")
+            _bi_handled = True
+
+    # SCAN Button (für ALLE anderen Strategien — BI hat eigene Buttons oben)
+    if _bi_handled:
+        pass  # BI hat eigene UI oben — kein SCAN STARTEN Button nötig
+    elif st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
         # Reset Navigation Index für neue Ergebnisse
         st.session_state.selected_row_index = 0
         if "ticker_select_df" in st.session_state:
@@ -20008,105 +20103,11 @@ with st.sidebar:
                     st.code(traceback.format_exc())
 
         # =================================================================
-        # BREAKOUT IMMINENT 🔮 - Multi-Signal Composite Prediction
+        # BREAKOUT IMMINENT 🔮 — wird OBEN in der Sidebar gehandelt (Background-Scan)
+        # Dieser Block ist nur noch ein Fallback falls _bi_handled nicht griff
         # =================================================================
         elif is_breakout_imminent:
-            if m_type != "Aktien":
-                st.error("❌ Breakout Imminent Scanner funktioniert aktuell nur für **Aktien**!")
-            else:
-                bi_direction = "long" if "Long" in current_strat else "short"
-                dir_emoji = "⬆️" if bi_direction == "long" else "⬇️"
-
-                # ── BI STATUS CHECK ──
-                cached_results, cached_ts, cache_age_min = _bi_cache_load(bi_direction)
-                cache_valid = cached_results is not None and cache_age_min is not None and cache_age_min < 60
-                scan_running = _bi_scan_is_running(bi_direction)
-                progress = _bi_progress_read(bi_direction)
-
-                # ── FALL 1: Scan läuft im Hintergrund ──
-                if scan_running and progress:
-                    p_checked = progress.get("checked", 0)
-                    p_total = progress.get("total", 0)
-                    p_hits = progress.get("hits", 0)
-                    p_no_data = progress.get("no_data", 0)
-                    p_top = progress.get("top_score", 0)
-                    pct = round(p_checked / max(1, p_total) * 100)
-                    est_left = max(1, (p_total - p_checked) // 75)  # ~75 Calls/Min
-
-                    st.info(f"🔮 **BI Scan läuft im Hintergrund** — {p_checked}/{p_total} ({pct}%) | "
-                            f"{p_hits} Treffer | Top: {p_top} | ~{est_left} Min verbleibend")
-                    st.progress(min(1.0, p_checked / max(1, p_total)))
-                    st.caption("💡 Du kannst die App normal weiter benutzen — der Scan läuft weiter!")
-
-                    # Cache anbieten wenn vorhanden
-                    if cache_valid:
-                        cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
-                        if st.button(f"⚡ Vorherigen Cache laden ({len(cached_results)} Treffer von {cache_time_str})", use_container_width=True):
-                            st.session_state.scan_results = cached_results
-                            st.session_state.market_type = "Aktien"
-                            st.rerun()
-
-                # ── FALL 2: Scan fertig (Ergebnis abholen) ──
-                elif progress and progress.get("status") == "done":
-                    # Ergebnisse aus Cache laden
-                    fresh_results, _, _ = _bi_cache_load(bi_direction)
-                    if fresh_results is not None:
-                        st.session_state.scan_results = fresh_results
-                        st.session_state.market_type = "Aktien"
-                        st.success(f"✅ **BI Scan fertig!** {len(fresh_results)} Treffer gefunden")
-                        # Pipeline-Info anzeigen
-                        st.caption(f"🔍 {progress.get('detail', '')}")
-                        _bi_progress_clear(bi_direction)
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Scan fertig aber keine Ergebnisse im Cache")
-                        _bi_progress_clear(bi_direction)
-
-                # ── FALL 3: Fehler beim Scan ──
-                elif progress and progress.get("status") == "error":
-                    st.error(f"❌ BI Scan Fehler: {progress.get('detail', 'Unbekannt')}")
-                    _bi_progress_clear(bi_direction)
-
-                # ── FALL 4: Kein Scan aktiv — Buttons anzeigen ──
-                else:
-                    if cache_valid:
-                        cache_time_str = datetime.fromtimestamp(cached_ts).strftime("%H:%M")
-                        st.success(f"⚡ **Cache verfügbar** — {len(cached_results)} Treffer von {cache_time_str} ({_bi_cache_age_str(cache_age_min)})")
-                        bi_col1, bi_col2 = st.columns(2)
-                        with bi_col1:
-                            if st.button(f"⚡ Cache laden ({len(cached_results)} Treffer)", use_container_width=True, type="primary"):
-                                st.session_state.scan_results = cached_results
-                                st.session_state.market_type = "Aktien"
-                                st.rerun()
-                        with bi_col2:
-                            if st.button("🔄 Neu scannen (Hintergrund)", use_container_width=True):
-                                try:
-                                    poly_key = st.secrets["POLYGON_KEY"]
-                                    thread = threading.Thread(
-                                        target=_bi_background_scan,
-                                        args=(poly_key, bi_direction),
-                                        daemon=True
-                                    )
-                                    thread.start()
-                                    st.rerun()
-                                except KeyError:
-                                    st.error("❌ POLYGON_KEY fehlt in Secrets!")
-                    else:
-                        # Kein Cache → Scan direkt starten
-                        est_min = 30  # ~2250 Aktien / 75 pro Min
-                        st.info(f"🔮 Kein BI-Cache vorhanden. Scan analysiert ~2000+ Aktien (~{est_min} Min im Hintergrund).")
-                        if st.button(f"🚀 BI Scan starten {dir_emoji} (Hintergrund)", use_container_width=True, type="primary"):
-                            try:
-                                poly_key = st.secrets["POLYGON_KEY"]
-                                thread = threading.Thread(
-                                    target=_bi_background_scan,
-                                    args=(poly_key, bi_direction),
-                                    daemon=True
-                                )
-                                thread.start()
-                                st.rerun()
-                            except KeyError:
-                                st.error("❌ POLYGON_KEY fehlt in Secrets!")
+            pass  # Komplett in Sidebar-UI vor SCAN STARTEN verlagert
 
         elif not st.session_state.active_filters and not st.session_state.get("current_strategy"):
             st.warning("Erst Strategie laden!")
