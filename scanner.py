@@ -7411,7 +7411,9 @@ def _detect_chart_patterns(bars, direction="long"):
     current_price = closes[-1] if closes else 0
 
     # ══════════════════════════════════════════════════════════
-    # DOUBLE TOP — 2 Peaks innerhalb 3% auf ähnlichem Level
+    # DOUBLE TOP — 2 Peaks innerhalb 2% auf ähnlichem Level
+    # VERSCHÄRFT: Consolidation-Ranges sind KEINE Double Tops!
+    # Ein echter Double Top braucht tiefes Tal + klare Ablehnung
     # ══════════════════════════════════════════════════════════
     if len(pivot_highs) >= 2:
         for i in range(len(pivot_highs)):
@@ -7419,26 +7421,27 @@ def _detect_chart_patterns(bars, direction="long"):
                 idx1, p1 = pivot_highs[i]
                 idx2, p2 = pivot_highs[j]
 
-                # Mindestabstand: 15 Bars (3 Wochen)
-                if abs(idx2 - idx1) < 15:
+                # Mindestabstand: 20 Bars (4 Wochen) — nicht zu nah beieinander
+                if abs(idx2 - idx1) < 20:
                     continue
 
-                # Peaks innerhalb 3% voneinander
+                # Peaks innerhalb 2% voneinander (war 3% — zu locker)
                 diff_pct = abs(p1 - p2) / max(p1, p2) * 100
-                if diff_pct > 3.0:
+                if diff_pct > 2.0:
                     continue
 
-                # Tal dazwischen muss mindestens 5% tiefer sein
+                # Tal dazwischen muss mindestens 7% tiefer sein (war 5% — zu flach)
+                # 5% Tal = normale Consolidation, 7%+ = echte Ablehnung
                 valley = min(lows[idx1:idx2+1])
                 peak_avg = (p1 + p2) / 2
                 valley_depth = (peak_avg - valley) / peak_avg * 100
-                if valley_depth < 5.0:
+                if valley_depth < 7.0:
                     continue
 
-                # Preis nahe am zweiten Peak (innerhalb 5%)
+                # Preis nahe am zweiten Peak (innerhalb 3%) — war 5%, zu weit
                 dist_from_peak = (peak_avg - current_price) / peak_avg * 100
 
-                if dist_from_peak < 5.0:  # Preis nahe am Widerstand
+                if dist_from_peak < 3.0:  # Preis wirklich nahe am Widerstand
                     severity = "high" if direction == "long" else "info"
                     peak_level = round(peak_avg, 2)
                     warnings.append({
@@ -7452,7 +7455,8 @@ def _detect_chart_patterns(bars, direction="long"):
                 break
 
     # ══════════════════════════════════════════════════════════
-    # DOUBLE BOTTOM — 2 Tiefs innerhalb 3%
+    # DOUBLE BOTTOM — 2 Tiefs innerhalb 2%
+    # VERSCHÄRFT: Analog zu Double Top — echte Ablehnung nötig
     # ══════════════════════════════════════════════════════════
     if len(pivot_lows) >= 2:
         for i in range(len(pivot_lows)):
@@ -7460,22 +7464,22 @@ def _detect_chart_patterns(bars, direction="long"):
                 idx1, p1 = pivot_lows[i]
                 idx2, p2 = pivot_lows[j]
 
-                if abs(idx2 - idx1) < 15:
+                if abs(idx2 - idx1) < 20:
                     continue
 
                 diff_pct = abs(p1 - p2) / max(p1, p2) * 100
-                if diff_pct > 3.0:
+                if diff_pct > 2.0:
                     continue
 
                 peak = max(highs[idx1:idx2+1])
                 trough_avg = (p1 + p2) / 2
                 peak_height = (peak - trough_avg) / trough_avg * 100
-                if peak_height < 5.0:
+                if peak_height < 7.0:
                     continue
 
                 dist_from_bottom = (current_price - trough_avg) / trough_avg * 100
 
-                if dist_from_bottom < 10.0:
+                if dist_from_bottom < 8.0:
                     severity = "high" if direction == "short" else "info"
                     bottom_level = round(trough_avg, 2)
                     warnings.append({
@@ -7724,9 +7728,27 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["PatternWarnings"] = pattern_warnings
                 candidate["PatternCount"] = len(pattern_warnings)
                 candidate["PatternHighCount"] = len(high_warnings)
-                # Warntext für Tabelle
                 warn_texts = [w["pattern"] for w in pattern_warnings]
                 candidate["PatternLabel"] = " | ".join(warn_texts)
+
+                # Score-Abzug für Umkehr-Patterns GEGEN die Trade-Richtung
+                # High severity = direkt gegen uns (Double Top bei Long, Double Bottom bei Short)
+                for pw in pattern_warnings:
+                    if pw["severity"] == "high":
+                        if "Double Top" in pw["pattern"] or "Head & Shoulders" in pw["pattern"]:
+                            bi_score -= 15  # Starkes bearish Pattern
+                        elif "Double Bottom" in pw["pattern"] or "Inv. Head" in pw["pattern"]:
+                            bi_score -= 15  # Starkes bullish Pattern (gegen Short)
+                    elif pw["severity"] == "medium":
+                        bi_score -= 5
+
+                candidate["BI_Score"] = max(0, bi_score)
+                # Grade neu berechnen nach Abzug
+                if bi_score >= 120: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "🏆 ELITE"
+                elif bi_score >= 100: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "🔥 STARK"
+                elif bi_score >= 85: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "✅ SOLIDE"
+                elif bi_score >= 70: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "⚠️ WATCH"
+                else: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "❌ SCHWACH"
             else:
                 candidate["PatternWarnings"] = []
                 candidate["PatternCount"] = 0
