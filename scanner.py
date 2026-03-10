@@ -7372,6 +7372,30 @@ def _bi_scan_is_running(direction="long"):
     return True
 
 
+# ── BI Scanner Stop-Mechanismus ──
+def _bi_stop_file(direction="long"):
+    return f"/tmp/alpha_bi_stop_{direction}"
+
+def _bi_request_stop(direction="long"):
+    """UI ruft das auf — schreibt Stop-Signal für den Background-Thread."""
+    try:
+        with open(_bi_stop_file(direction), "w") as f:
+            f.write("stop")
+    except Exception:
+        pass
+
+def _bi_should_stop(direction="long"):
+    """Background-Thread prüft das regelmäßig."""
+    return os.path.exists(_bi_stop_file(direction))
+
+def _bi_clear_stop(direction="long"):
+    """Aufräumen nach Stop oder vor neuem Scan."""
+    try:
+        os.remove(_bi_stop_file(direction))
+    except Exception:
+        pass
+
+
 def _detect_chart_patterns(bars, direction="long"):
     """
     Erkennt Umkehr-Patterns auf Daily Bars (90-Tage Lookback).
@@ -7588,6 +7612,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             return
 
         total = len(candidates)
+        _bi_clear_stop(direction)  # Altes Stop-Signal aufräumen
         _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...")
 
         # ── Analyse ──
@@ -7603,6 +7628,19 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         top_score = 0
 
         for candidate in candidates:
+            # ── Stop-Signal prüfen ──
+            if _bi_should_stop(direction):
+                avg_sc = round(score_sum / max(1, score_count)) if score_count else 0
+                _bi_progress_write(direction, "stopped", checked=checked, total=total,
+                                   hits=len(results), no_data=no_data_count,
+                                   top_score=top_score, avg_score=avg_sc,
+                                   detail=f"⏹️ Manuell gestoppt bei {checked}/{total}")
+                if results:
+                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)
+                    _bi_cache_save(results, direction)
+                _bi_clear_stop(direction)
+                return
+
             ticker = candidate["Ticker"]
 
             # Hole 90 Tage OHLCV (für BI-Analyse + Pattern-Warnung)
@@ -7889,6 +7927,28 @@ def _biotech_config_save(config):
 
 def _biotech_progress_file():
     return "/tmp/alpha_biotech_progress.json"
+
+def _biotech_stop_file():
+    return "/tmp/alpha_biotech_stop"
+
+def _biotech_request_stop():
+    """UI ruft das auf — schreibt Stop-Signal für den Background-Thread."""
+    try:
+        with open(_biotech_stop_file(), "w") as f:
+            f.write("stop")
+    except Exception:
+        pass
+
+def _biotech_should_stop():
+    """Background-Thread prüft das regelmäßig."""
+    return os.path.exists(_biotech_stop_file())
+
+def _biotech_clear_stop():
+    """Aufräumen nach Stop oder vor neuem Scan."""
+    try:
+        os.remove(_biotech_stop_file())
+    except Exception:
+        pass
 
 def _biotech_progress_write(status, **kwargs):
     try:
@@ -8458,6 +8518,7 @@ def _biotech_background_scan(poly_key):
     Läuft als Thread — schreibt Progress in /tmp/.
     """
     try:
+        _biotech_clear_stop()  # Altes Stop-Signal löschen
         _biotech_progress_write("running", checked=0, total=0, hits=0, detail="Lade Biotech-Universum...")
 
         # 1. Biotech Universum laden (oder aus 24h Cache)
@@ -8480,6 +8541,17 @@ def _biotech_background_scan(poly_key):
         checked = 0
 
         for stock in universe:
+            # Stop-Signal prüfen
+            if _biotech_should_stop():
+                _biotech_progress_write("stopped", checked=checked, total=total,
+                                        hits=len(results), detail=f"⏹️ Manuell gestoppt bei {checked}/{total}")
+                # Bisherige Ergebnisse trotzdem speichern
+                if results:
+                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+                    _biotech_cache_save(results)
+                _biotech_clear_stop()
+                return
+
             if not isinstance(stock, dict):
                 continue
             ticker = stock.get("ticker", "")
@@ -8672,7 +8744,18 @@ def _biotech_quick_scan(poly_key):
         results = []
         checked = 0
 
+        _biotech_clear_stop()  # Altes Stop-Signal löschen
         for ticker in all_tickers:
+            # Stop-Signal prüfen
+            if _biotech_should_stop():
+                _biotech_progress_write("stopped", checked=checked, total=total,
+                                        hits=len(results), detail=f"⏹️ Quick Scan gestoppt bei {checked}/{total}")
+                if results:
+                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+                    _biotech_cache_save(results)
+                _biotech_clear_stop()
+                return
+
             checked += 1
             if checked % 20 == 0:
                 _biotech_progress_write("running", checked=checked, total=total,
@@ -23321,7 +23404,15 @@ with tab_bi:
         pct = round(p_c / max(1, p_t) * 100)
         est = max(1, (p_t - p_c) // 75)
         st.info(f"🔮 **BI Scan {bi_dir_label} {bi_dir_emoji} läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
-        st.progress(min(1.0, p_c / max(1, p_t)))
+        _bi_prog_col1, _bi_prog_col2 = st.columns([5, 1])
+        with _bi_prog_col1:
+            st.progress(min(1.0, p_c / max(1, p_t)))
+        with _bi_prog_col2:
+            if st.button("⏹️ Stop", key=f"bi_stop_btn_{bi_dir}", use_container_width=True, type="secondary"):
+                _bi_request_stop(bi_dir)
+                st.toast("⏹️ BI Scan wird gestoppt...")
+                time.sleep(1)
+                st.rerun()
         st.caption("💡 Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
         # Alten Cache laden während Scan läuft
         if bi_cache_ok:
@@ -23339,6 +23430,24 @@ with tab_bi:
         else:
             st.warning("⚠️ Scan fertig — keine Treffer")
         _bi_progress_clear(bi_dir)
+
+    # ── FALL 2b: Scan manuell gestoppt ──
+    elif bi_progress and bi_progress.get("status") == "stopped":
+        _bp_hits = bi_progress.get("hits", 0)
+        _bp_checked = bi_progress.get("checked", 0)
+        _bp_total = bi_progress.get("total", 0)
+        st.warning(f"⏹️ BI Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
+        # Ergebnisse aus Cache laden falls vorhanden
+        if _bp_hits > 0:
+            fresh, _, _ = _bi_cache_load(bi_dir)
+            if fresh is not None:
+                st.session_state.bi_tab_results = fresh
+        # Stopped-Status nach 30 Sek aufräumen
+        if time.time() - bi_progress.get("timestamp", 0) > 30:
+            try:
+                os.remove(_bi_progress_path(bi_dir))
+            except Exception:
+                pass
 
     # ── FALL 3: Fehler ──
     elif bi_progress and bi_progress.get("status") == "error":
@@ -23738,15 +23847,34 @@ with tab_biotech:
             _bp_detail = _bio_prog.get("detail", "")
             _bp_pct = _bp_checked / max(1, _bp_total)
 
-            st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
+            _bio_prog_col1, _bio_prog_col2 = st.columns([5, 1])
+            with _bio_prog_col1:
+                st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
+            with _bio_prog_col2:
+                if st.button("⏹️ Stop", key="bio_stop_btn", use_container_width=True, type="secondary"):
+                    _biotech_request_stop()
+                    st.toast("⏹️ Biotech Scan wird gestoppt...")
+                    time.sleep(1)
+                    st.rerun()
 
-            # Sanftes Polling: st.rerun() alle 8 Sek statt 3 — reduziert App-Last
-            # (st.rerun betrifft die GANZE App, nicht nur Biotech-Tab)
+            # Sanftes Polling: st.rerun() alle 8 Sek — reduziert App-Last
             _bio_last_rerun = st.session_state.get("_bio_last_rerun", 0)
             if time.time() - _bio_last_rerun > 8:
                 st.session_state["_bio_last_rerun"] = time.time()
                 time.sleep(2)
                 st.rerun()
+
+    elif _bio_prog and _bio_prog.get("status") == "stopped":
+        _bp_hits = _bio_prog.get("hits", 0)
+        _bp_checked = _bio_prog.get("checked", 0)
+        _bp_total = _bio_prog.get("total", 0)
+        st.warning(f"⏹️ Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
+        # Nach 30 Sek aufräumen
+        if time.time() - _bio_prog.get("timestamp", 0) > 30:
+            try:
+                os.remove(_biotech_progress_file())
+            except Exception:
+                pass
 
     elif _bio_prog and _bio_prog.get("status") == "error":
         st.error(f"❌ Scan Fehler: {_bio_prog.get('detail', 'Unbekannt')}")
