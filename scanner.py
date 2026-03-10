@@ -8427,7 +8427,11 @@ def _biotech_background_scan(poly_key):
         checked = 0
 
         for stock in universe:
-            ticker = stock["ticker"]
+            if not isinstance(stock, dict):
+                continue
+            ticker = stock.get("ticker", "")
+            if not ticker:
+                continue
             checked += 1
 
             if checked % 10 == 0:
@@ -23315,7 +23319,7 @@ with tab_bi:
                 if not raw:
                     st.error("❌ Keine Daten von Polygon API!")
                 else:
-                    filtered = [s for s in raw if s.get("Preis", 0) >= 5 and s.get("DollarVol", 0) >= 500_000 and abs(s.get("Change%", 0)) <= 3 and s.get("RVOL", 0) <= 2.0 and not is_etf_or_etp(s.get("Ticker", ""))]
+                    filtered = [s for s in raw if isinstance(s, dict) and s.get("Preis", 0) >= 5 and s.get("DollarVol", 0) >= 500_000 and abs(s.get("Change%", 0)) <= 3 and s.get("RVOL", 0) <= 2.0 and not is_etf_or_etp(s.get("Ticker", ""))]
                     st.info(f"✅ {len(filtered)} Kandidaten (von {len(raw)}) — Scan startet im Hintergrund")
                     thread = threading.Thread(target=_bi_background_scan, args=(poly_key, bi_dir, filtered), daemon=True)
                     thread.start()
@@ -23684,7 +23688,7 @@ with tab_biotech:
 
     if _bio_results:
         # Filter nach Min Score
-        _bio_filtered = [r for r in _bio_results if r.get("Score", 0) >= _bio_min_score]
+        _bio_filtered = [r for r in _bio_results if isinstance(r, dict) and r.get("Score", 0) >= _bio_min_score]
 
         if not _bio_filtered:
             st.info("Keine Ergebnisse über dem Mindest-Score. Reduziere den Min. Score in den Einstellungen.")
