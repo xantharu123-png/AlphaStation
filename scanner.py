@@ -7225,8 +7225,39 @@ import os
 
 _BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
 _BI_PROGRESS_FILE = "/tmp/bi_scan_progress_{direction}.json"
+_BI_CONFIG_FILE = "/tmp/alpha_bi_config.json"
 _BI_CACHE_MAX_AGE = 7200  # 2 Stunden — Auto-Scan bei 15:45 und 18:30 CET
 _bi_scan_lock = threading.Lock()
+
+_BI_DEFAULT_CONFIG = {
+    "direction": "long",
+    "threshold": 85,
+    "auto_enabled": True,
+    "scan1_h": 15,
+    "scan1_m": 45,
+    "scan2_h": 18,
+    "scan2_m": 30,
+    "cache_ttl_h": 2,
+}
+
+def _bi_config_load():
+    """Lädt persistente BI Scanner Einstellungen."""
+    try:
+        with open(_BI_CONFIG_FILE, "r") as f:
+            saved = json.load(f)
+        config = dict(_BI_DEFAULT_CONFIG)
+        config.update(saved)
+        return config
+    except Exception:
+        return dict(_BI_DEFAULT_CONFIG)
+
+def _bi_config_save(config):
+    """Speichert BI Scanner Einstellungen persistent."""
+    try:
+        with open(_BI_CONFIG_FILE, "w") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
 
 
 def _bi_cache_path(direction="long"):
@@ -23108,6 +23139,9 @@ with tab_bi:
     st.header("🔮 Breakout Imminent Scanner")
     st.caption("Automatischer Hintergrund-Scan für Breakout-Imminent Setups | 20-Signal Composite Scoring")
 
+    # ── Config laden ──
+    _bi_cfg = _bi_config_load()
+
     # ── Einstellungen (Expander) ──
     with st.expander("⚙️ Einstellungen", expanded=False):
         bi_set_col1, bi_set_col2 = st.columns(2)
@@ -23115,7 +23149,7 @@ with tab_bi:
             bi_tab_direction = st.radio(
                 "Richtung",
                 ["Long ⬆️", "Short ⬇️"],
-                index=0 if st.session_state.get("bi_tab_direction", "long") == "long" else 1,
+                index=0 if _bi_cfg.get("direction", "long") == "long" else 1,
                 horizontal=True,
                 key="bi_tab_dir_radio"
             )
@@ -23123,7 +23157,7 @@ with tab_bi:
         with bi_set_col2:
             bi_tab_threshold = st.number_input(
                 "Score Threshold",
-                min_value=50, max_value=150, value=st.session_state.get("bi_tab_threshold", 85),
+                min_value=50, max_value=150, value=_bi_cfg.get("threshold", 85),
                 step=5, help="Minimum BI Score für Treffer (Standard: 85 Long, 80 Short)",
                 key="bi_tab_threshold_input"
             )
@@ -23133,22 +23167,36 @@ with tab_bi:
         st.subheader("⏰ Auto-Scan Zeiten (CET)")
         bi_time_col1, bi_time_col2, bi_time_col3 = st.columns(3)
         with bi_time_col1:
-            bi_scan1_h = st.number_input("Scan 1 — Stunde", min_value=9, max_value=22, value=st.session_state.get("bi_scan1_h", 15), key="bi_s1h")
-            bi_scan1_m = st.number_input("Scan 1 — Minute", min_value=0, max_value=59, value=st.session_state.get("bi_scan1_m", 45), key="bi_s1m")
+            bi_scan1_h = st.number_input("Scan 1 — Stunde", min_value=9, max_value=22, value=_bi_cfg.get("scan1_h", 15), key="bi_s1h")
+            bi_scan1_m = st.number_input("Scan 1 — Minute", min_value=0, max_value=59, value=_bi_cfg.get("scan1_m", 45), key="bi_s1m")
             st.session_state["bi_scan1_h"] = bi_scan1_h
             st.session_state["bi_scan1_m"] = bi_scan1_m
         with bi_time_col2:
-            bi_scan2_h = st.number_input("Scan 2 — Stunde", min_value=9, max_value=22, value=st.session_state.get("bi_scan2_h", 18), key="bi_s2h")
-            bi_scan2_m = st.number_input("Scan 2 — Minute", min_value=0, max_value=59, value=st.session_state.get("bi_scan2_m", 30), key="bi_s2m")
+            bi_scan2_h = st.number_input("Scan 2 — Stunde", min_value=9, max_value=22, value=_bi_cfg.get("scan2_h", 18), key="bi_s2h")
+            bi_scan2_m = st.number_input("Scan 2 — Minute", min_value=0, max_value=59, value=_bi_cfg.get("scan2_m", 30), key="bi_s2m")
             st.session_state["bi_scan2_h"] = bi_scan2_h
             st.session_state["bi_scan2_m"] = bi_scan2_m
         with bi_time_col3:
-            bi_auto_enabled = st.toggle("Auto-Scan aktiv", value=st.session_state.get("bi_auto_enabled", True), key="bi_auto_toggle")
+            bi_auto_enabled = st.toggle("Auto-Scan aktiv", value=_bi_cfg.get("auto_enabled", True), key="bi_auto_toggle")
             st.session_state["bi_auto_enabled"] = bi_auto_enabled
-            bi_cache_ttl_h = st.number_input("Cache TTL (Std)", min_value=1, max_value=6, value=st.session_state.get("bi_cache_ttl_h", 2), key="bi_ttl")
+            bi_cache_ttl_h = st.number_input("Cache TTL (Std)", min_value=1, max_value=6, value=_bi_cfg.get("cache_ttl_h", 2), key="bi_ttl")
             st.session_state["bi_cache_ttl_h"] = bi_cache_ttl_h
 
         st.caption(f"📋 Scan 1: **{bi_scan1_h:02d}:{bi_scan1_m:02d}** CET | Scan 2: **{bi_scan2_h:02d}:{bi_scan2_m:02d}** CET | TTL: {bi_cache_ttl_h}h | Auto: {'✅' if bi_auto_enabled else '❌'}")
+
+        # ── Config speichern wenn geändert ──
+        _bi_new_cfg = {
+            "direction": st.session_state.get("bi_tab_direction", "long"),
+            "threshold": bi_tab_threshold,
+            "auto_enabled": bi_auto_enabled,
+            "scan1_h": bi_scan1_h,
+            "scan1_m": bi_scan1_m,
+            "scan2_h": bi_scan2_h,
+            "scan2_m": bi_scan2_m,
+            "cache_ttl_h": bi_cache_ttl_h,
+        }
+        if _bi_new_cfg != _bi_cfg:
+            _bi_config_save(_bi_new_cfg)
 
     # ── Status + Ergebnisse ──
     st.divider()
