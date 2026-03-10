@@ -13539,42 +13539,38 @@ def fetch_crypto_data():
                         continue
                     alpha = flag_score
                 
-                # Breakout Health für Crypto
+                # Breakout Health für Crypto — ALLE Strategien
                 breakout_health = None
-                if current_strategy in ("Breakout Long", "Early Momentum", "Whale Watch 🐋"):
-                    if change_24h > 0:
-                        breakout_health = assess_breakout_health(
-                            change_pct=change_24h, rvol=rvol, close_pos=close_pos,
-                            high=high_24h, low=low_24h, close=price,
-                            open_price=open_price, prev_close=prev_close_approx,
-                            vortag_pct=vortag_chg, vi_result=None,
-                            market_type="Krypto", market_cap=market_cap
-                        )
-                        
-                        # V68: 7d-Trend Korrektur
-                        # Problem: 6d-avg kann ~0% sein obwohl 7d = -10%
-                        # (z.B. 6 Tage -11%, heute +1% → avg≈-0.1%/Tag → "ruhige Phase")
-                        # Der rohe 7d-Change fängt das auf
-                        if breakout_health and change_7d < -5:
-                            bh = breakout_health
-                            penalty = 20 if change_7d < -15 else 15 if change_7d < -10 else 10
-                            bh["health_score"] = max(10, bh["health_score"] - penalty)
-                            bh["warnings"].append(
-                                f"🔴 7d-Trend: {change_7d:+.1f}% — Bounce im Abwärtstrend, kein echter Breakout"
-                            )
-                            # Verdict neu berechnen
-                            h = bh["health_score"]
-                            if h >= 75: bh["verdict"], bh["verdict_emoji"] = "STRONG", "💪🟢"
-                            elif h >= 55: bh["verdict"], bh["verdict_emoji"] = "HEALTHY", "✅🟢"
-                            elif h >= 40: bh["verdict"], bh["verdict_emoji"] = "CAUTION", "⚠️🟡"
-                            elif h >= 25: bh["verdict"], bh["verdict_emoji"] = "WEAK", "⚠️🟠"
-                            else: bh["verdict"], bh["verdict_emoji"] = "FAKEOUT", "🚫🔴"
-                            if h < 40:
-                                bh["action"] = "KEIN ENTRY — 7d-Trend negativ, wahrscheinlich nur Bounce."
-                
-                # Setup Score für Krypto — CRYPTO-SPEZIFISCH
-                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇️", "Selling"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
+
+                if (setup_direction == "long" and change_24h > 0) or (setup_direction == "short" and change_24h < 0):
+                    breakout_health = assess_breakout_health(
+                        change_pct=abs(change_24h), rvol=rvol, close_pos=close_pos,
+                        high=high_24h, low=low_24h, close=price,
+                        open_price=open_price, prev_close=prev_close_approx,
+                        vortag_pct=vortag_chg, vi_result=None,
+                        market_type="Krypto", market_cap=market_cap
+                    )
+
+                    # V68: 7d-Trend Korrektur
+                    if breakout_health and change_7d < -5:
+                        bh = breakout_health
+                        penalty = 20 if change_7d < -15 else 15 if change_7d < -10 else 10
+                        bh["health_score"] = max(10, bh["health_score"] - penalty)
+                        bh["warnings"].append(
+                            f"🔴 7d-Trend: {change_7d:+.1f}% — Bounce im Abwärtstrend, kein echter Breakout"
+                        )
+                        h = bh["health_score"]
+                        if h >= 75: bh["verdict"], bh["verdict_emoji"] = "STRONG", "💪🟢"
+                        elif h >= 55: bh["verdict"], bh["verdict_emoji"] = "HEALTHY", "✅🟢"
+                        elif h >= 40: bh["verdict"], bh["verdict_emoji"] = "CAUTION", "⚠️🟡"
+                        elif h >= 25: bh["verdict"], bh["verdict_emoji"] = "WEAK", "⚠️🟠"
+                        else: bh["verdict"], bh["verdict_emoji"] = "FAKEOUT", "🚫🔴"
+                        if h < 40:
+                            bh["action"] = "KEIN ENTRY — 7d-Trend negativ, wahrscheinlich nur Bounce."
+
+                # Setup Score für Krypto — CRYPTO-SPEZIFISCH
                 setup_score = calculate_setup_score_crypto(
                     change_pct=change_24h, rvol=rvol, close_pos=close_pos,
                     upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
@@ -13582,6 +13578,17 @@ def fetch_crypto_data():
                     market_cap=market_cap, direction=setup_direction,
                     high_24h=high_24h, low_24h=low_24h
                 )
+
+                # Health-Penalty auf SetupScore anwenden
+                if breakout_health and isinstance(breakout_health, dict):
+                    bh_score = breakout_health.get("health_score", 100)
+                    bh_selloff = breakout_health.get("selloff_risk", "LOW")
+                    if bh_score < 40 or bh_selloff in ("IMMINENT", "CRITICAL"):
+                        setup_score = max(0, setup_score - 25)  # Schwere Penalty
+                    elif bh_score < 55 or bh_selloff == "HIGH":
+                        setup_score = max(0, setup_score - 15)
+                    elif bh_score < 70 or bh_selloff == "MEDIUM":
+                        setup_score = max(0, setup_score - 5)
                 
                 results.append({
                     "Ticker": ticker, 
@@ -13983,24 +13990,22 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                         continue
                     alpha = flag_score
                 
-                # Breakout Health Assessment für relevante Strategien
+                # Breakout Health Assessment — für ALLE Strategien mit positiver Change
                 breakout_health = None
-                if current_strategy in ("Breakout Long", "Early Momentum", "Whale Watch", 
-                                        "Gap Up Momentum", "PM Gainers 🌅",
-                                        "Breakout Long (Ultra)", "Gap Up Momentum (Ultra)"):
-                    if change > 0:
-                        breakout_health = assess_breakout_health(
-                            change_pct=change, rvol=rvol, close_pos=close_pos,
-                            high=high, low=low, close=price,
-                            open_price=None, prev_close=prev_close,
-                            prev_high=prev_high, prev_low=prev_low,
-                            vortag_pct=vortag_chg, vi_result=None,
-                            atr_pct=atr_pct
-                        )
-                
-                # Setup Score — Richtung aus Strategie ableiten
-                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down"]
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇️", "Selling"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
+
+                if (setup_direction == "long" and change > 0) or (setup_direction == "short" and change < 0):
+                    breakout_health = assess_breakout_health(
+                        change_pct=abs(change), rvol=rvol, close_pos=close_pos,
+                        high=high, low=low, close=price,
+                        open_price=None, prev_close=prev_close,
+                        prev_high=prev_high, prev_low=prev_low,
+                        vortag_pct=vortag_chg, vi_result=None,
+                        atr_pct=atr_pct
+                    )
+
+                # Setup Score
                 setup_score = calculate_setup_score(
                     change_pct=change, rvol=rvol, close_pos=close_pos,
                     upper_wick_pct=upper_wick_pct, lower_wick_pct=lower_wick_pct,
@@ -14008,6 +14013,17 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     dollar_volume=dollar_volume, price=price,
                     direction=setup_direction
                 )
+
+                # Health-Penalty auf SetupScore anwenden
+                if breakout_health and isinstance(breakout_health, dict):
+                    bh_score = breakout_health.get("health_score", 100)
+                    bh_selloff = breakout_health.get("selloff_risk", "LOW")
+                    if bh_score < 40 or bh_selloff in ("IMMINENT", "CRITICAL"):
+                        setup_score = max(0, setup_score - 25)  # Schwere Penalty
+                    elif bh_score < 55 or bh_selloff == "HIGH":
+                        setup_score = max(0, setup_score - 15)  # Mittlere Penalty
+                    elif bh_score < 70 or bh_selloff == "MEDIUM":
+                        setup_score = max(0, setup_score - 5)   # Leichte Penalty
                 
                 results.append({
                     "Ticker": ticker_raw, "Name": "",
