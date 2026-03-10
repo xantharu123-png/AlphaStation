@@ -7650,12 +7650,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
                 params = {"adjusted": "true", "sort": "asc", "apiKey": poly_key}
 
-                resp = requests.get(url, params=params, timeout=15)
+                resp = rate_limited_get(url, params=params, timeout=15)
                 checked += 1
-
-                # Rate Limiting: 0.8s alle 10 Calls → ~75/Min
-                if checked % 10 == 0:
-                    time.sleep(0.8)
 
                 if checked % 50 == 0:
                     avg_sc = round(score_sum / max(1, score_count))
@@ -7784,11 +7780,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         bi_score -= 5
 
                 candidate["BI_Score"] = max(0, bi_score)
-                # Grade neu berechnen nach Abzug
-                if bi_score >= 120: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "🏆 S — ELITE"
-                elif bi_score >= 100: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "🔥 A — STARK"
-                elif bi_score >= 85: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "✅ B — SOLIDE"
-                elif bi_score >= 70: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "⚠️ C — WATCH"
+                # Grade neu berechnen nach Abzug — GLEICHE Logik wie analyze_breakout_imminent
+                if bi_score >= 120 and sm_fires >= 4: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "🏆 S — ELITE"
+                elif bi_score >= 105 and sm_fires >= 3: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "🔥 A — STARK"
+                elif bi_score >= 90 and sm_hits >= 2: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "✅ B — SOLIDE"
+                elif bi_score >= 80: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "⚠️ C — WATCH"
                 else: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "❌ D — SCHWACH"
             else:
                 candidate["PatternWarnings"] = []
@@ -23526,7 +23522,8 @@ with tab_bi:
             rename_map["RiskReward"] = "R:R"
         if "RangeHigh" in bi_df.columns and "RangeLow" in bi_df.columns:
             bi_df["Breakout_Zone"] = bi_df.apply(
-                lambda r: f"${r.get('RangeLow', 0):.0f}-${r.get('RangeHigh', 0):.0f}", axis=1)
+                lambda r: f"${r.get('RangeLow', 0):.2f}-${r.get('RangeHigh', 0):.2f}" if r.get('RangeHigh', 0) < 100
+                else f"${r.get('RangeLow', 0):.0f}-${r.get('RangeHigh', 0):.0f}", axis=1)
         if "BI_GradeLabel" in bi_df.columns:
             rename_map["BI_GradeLabel"] = "Grade"
         elif "BI_Grade" in bi_df.columns:
