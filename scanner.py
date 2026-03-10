@@ -2479,14 +2479,15 @@ def calculate_setup_score_crypto(change_pct, rvol, close_pos, upper_wick_pct, lo
                 if upper_wick_pct > 50: c -= 6
                 elif upper_wick_pct > 30: c -= 3
     score += max(0, c)
-    # 3. TIMING (0-20)
+    # 3. TIMING (0-20) — Extension vs geschätzte ATR
     ext = abs_change / est_atr if est_atr > 0 else 1.0
-    if abs_change < 0.3: pass
-    elif 0.5 <= ext <= 2.0: score += 20
-    elif 0.3 <= ext < 0.5:  score += 8
-    elif ext < 0.3:         score += 2
-    elif ext <= 3.0:        score += 14
-    elif ext <= 4.0:        score += 7
+    if abs_change < 0.3:      pass              # Zu klein → 0
+    elif ext < 0.3:           score += 2         # Kaum Bewegung vs ATR
+    elif 0.3 <= ext < 0.5:   score += 8          # Unterdurchschnittlich
+    elif 0.5 <= ext <= 2.0:  score += 20         # Ideal: 0.5-2x ATR
+    elif 2.0 < ext <= 3.0:   score += 14         # Leicht überdehnt
+    elif 3.0 < ext <= 4.0:   score += 7          # Stark überdehnt
+    # >4x ATR → 0 Punkte (zu riskant)
     # 4. LIQUIDITÄT (0-15)
     if vol_24h:
         if vol_24h >= 100_000_000:   score += 15
@@ -2649,10 +2650,10 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
     if pattern_type == "bull":
         # Kriterium 1: Vorheriger Aufwärtstrend
         if is_crypto:
-            if vortag_chg >= 1.5:
+            if vortag_chg >= 0.8:
                 score += 25
                 details.append(f"✅ Starker 6d-Trend: {vortag_chg:+.1f}%/Tag (≈{vortag_chg*6:+.0f}%/Wo)")
-            elif vortag_chg >= 0.5:
+            elif vortag_chg >= 0.3:
                 score += 15
                 details.append(f"✅ Moderater 6d-Trend: {vortag_chg:+.1f}%/Tag")
             else:
@@ -20354,7 +20355,7 @@ with st.sidebar:
                     elif sf > 0:
                         st.caption(f"📊 {len(results)} Treffer | {sf} ausgefiltert | RVOL nach Tageszeit normalisiert")
                 
-                st.session_state.scan_results = sorted(results, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)[:50]
+                st.session_state.scan_results = sorted(results, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)
                 
                 # =============================================================
                 # K1: MULTI-DAY PATTERN VALIDATION (wenn needs_history=True)
