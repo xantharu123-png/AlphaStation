@@ -23574,8 +23574,11 @@ with tab_biotech:
         try:
             _bio_prog_check = _biotech_progress_read()
             _bio_is_running = _bio_prog_check and _bio_prog_check.get("status") == "running"
+            # Auch "done" als Blocker — Scan ist gerade erst fertig, kein neuer nötig
+            _bio_recently_done = (_bio_prog_check and _bio_prog_check.get("status") == "done"
+                                  and time.time() - _bio_prog_check.get("timestamp", 0) < 300)  # 5 Min Cooldown
 
-            if not _bio_is_running:
+            if not _bio_is_running and not _bio_recently_done:
                 # Prüfe wann letzter Full Scan war
                 _bio_full_cache = _biotech_cache_load(max_age_hours=_bio_full_interval)
                 _bio_quick_cache = _biotech_cache_load(max_age_hours=_bio_quick_interval)
@@ -23672,9 +23675,13 @@ with tab_biotech:
 
             st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
 
-            # Auto-Rerun für Live-Update
-            time.sleep(3)
-            st.rerun()
+            # Sanftes Polling: st.rerun() alle 8 Sek statt 3 — reduziert App-Last
+            # (st.rerun betrifft die GANZE App, nicht nur Biotech-Tab)
+            _bio_last_rerun = st.session_state.get("_bio_last_rerun", 0)
+            if time.time() - _bio_last_rerun > 8:
+                st.session_state["_bio_last_rerun"] = time.time()
+                time.sleep(2)
+                st.rerun()
 
     elif _bio_prog and _bio_prog.get("status") == "error":
         st.error(f"❌ Scan Fehler: {_bio_prog.get('detail', 'Unbekannt')}")
@@ -23683,7 +23690,16 @@ with tab_biotech:
         _bp_hits = _bio_prog.get("hits", 0)
         _bp_total = _bio_prog.get("total", 0)
         _bp_top = _bio_prog.get("top_score", 0)
-        st.success(f"✅ Scan fertig: {_bp_total} Biotech-Aktien → **{_bp_hits} mit Katalysator** (Top Score: {_bp_top})")
+        _bp_done_age = time.time() - _bio_prog.get("timestamp", 0)
+        # Nur kurz "fertig" anzeigen, dann Progress-Datei aufräumen
+        if _bp_done_age < 60:
+            st.success(f"✅ Scan fertig: {_bp_total} Biotech-Aktien → **{_bp_hits} mit Katalysator** (Top Score: {_bp_top})")
+        else:
+            # Progress-Datei entfernen damit kein dauerhaftes "done" hängen bleibt
+            try:
+                os.remove(_biotech_progress_file())
+            except Exception:
+                pass
 
     # ── Ergebnisse anzeigen ──
     _bio_results = _bio_cached if _bio_cached else _biotech_cache_load(max_age_hours=24)
