@@ -23278,11 +23278,48 @@ with tab_biotech:
     with st.expander("⚙️ Einstellungen", expanded=False):
         _bio_col1, _bio_col2, _bio_col3 = st.columns(3)
         with _bio_col1:
-            _bio_cache_ttl = st.number_input("Cache TTL (Stunden)", min_value=1, max_value=24, value=2, key="bio_cache_ttl")
-        with _bio_col2:
+            _bio_cache_ttl = st.number_input("Cache TTL (Stunden)", min_value=1, max_value=24, value=3, key="bio_cache_ttl")
             _bio_min_score = st.slider("Min. Score", min_value=0, max_value=50, value=20, key="bio_min_score")
+        with _bio_col2:
+            _bio_auto_scan = st.toggle("🔄 Auto-Scan", value=True, key="bio_auto_scan",
+                                       help="Automatischer Scan zu den eingestellten Zeiten")
+            _bio_scan_time1 = st.text_input("Scan-Zeit 1 (CET)", value="07:00", key="bio_scan_t1",
+                                             help="Pre-Market: FDA-News kommen oft vor Börsenöffnung")
+            _bio_scan_time2 = st.text_input("Scan-Zeit 2 (CET)", value="14:30", key="bio_scan_t2",
+                                             help="Vor US-Börsenöffnung: letzte News vor dem Handel")
+            _bio_scan_time3 = st.text_input("Scan-Zeit 3 (CET)", value="22:30", key="bio_scan_t3",
+                                             help="After-Hours: FDA-Entscheidungen nach Börsenschluss")
         with _bio_col3:
-            st.info("💡 Der Scan nutzt Polygon News API, ClinicalTrials.gov und technische Analyse")
+            st.info("💡 FDA-News kommen oft **Pre-Market** (vor 15:30 CET) oder **After-Hours** (nach 22:00 CET). "
+                    "3 Scan-Fenster decken alle Phasen ab.")
+            st.caption("📡 Polygon News API + ClinicalTrials.gov + Technische Analyse")
+
+    # ── Auto-Scan Logik ──
+    _bio_auto_triggered = False
+    if _bio_auto_scan:
+        try:
+            from zoneinfo import ZoneInfo
+            _bio_now = datetime.now(ZoneInfo("Europe/Berlin"))
+            _bio_now_str = _bio_now.strftime("%H:%M")
+
+            # Prüfe ob einer der Scan-Zeitpunkte erreicht ist (±5 Min Fenster)
+            for _bio_stime in [_bio_scan_time1, _bio_scan_time2, _bio_scan_time3]:
+                try:
+                    _bio_sh, _bio_sm = int(_bio_stime.split(":")[0]), int(_bio_stime.split(":")[1])
+                    _bio_target = _bio_now.replace(hour=_bio_sh, minute=_bio_sm, second=0)
+                    _bio_diff = abs((_bio_now - _bio_target).total_seconds())
+                    if _bio_diff <= 300:  # ±5 Min Fenster
+                        # Prüfe ob Cache noch frisch genug ist (nicht innerhalb letzter 30 Min gescannt)
+                        _bio_existing = _biotech_cache_load(max_age_hours=0.5)
+                        _bio_prog_check = _biotech_progress_read()
+                        _bio_is_running = _bio_prog_check and _bio_prog_check.get("status") == "running"
+                        if not _bio_existing and not _bio_is_running:
+                            _bio_auto_triggered = True
+                            break
+                except (ValueError, IndexError):
+                    continue
+        except Exception:
+            pass
 
     # ── Scan Controls ──
     _bio_col_a, _bio_col_b, _bio_col_c = st.columns([1, 1, 2])
@@ -23293,11 +23330,20 @@ with tab_biotech:
     with _bio_col_b:
         _bio_cached = _biotech_cache_load(max_age_hours=_bio_cache_ttl)
         if _bio_cached:
-            _bio_cache_age = (time.time() - os.path.getmtime(_biotech_cache_file())) / 60
-            st.caption(f"📦 Cache: {len(_bio_cached)} Ergebnisse ({_bio_cache_age:.0f} Min alt)")
+            try:
+                _bio_cache_age = (time.time() - os.path.getmtime(_biotech_cache_file())) / 60
+                st.caption(f"📦 Cache: {len(_bio_cached)} Ergebnisse ({_bio_cache_age:.0f} Min alt)")
+            except Exception:
+                st.caption(f"📦 Cache: {len(_bio_cached)} Ergebnisse")
 
-    # ── Start Scan ──
-    if _bio_scan_btn:
+    with _bio_col_c:
+        if _bio_auto_scan:
+            st.caption(f"🔄 Auto-Scan: {_bio_scan_time1} | {_bio_scan_time2} | {_bio_scan_time3} CET")
+        if _bio_auto_triggered:
+            st.info("🔄 Auto-Scan wird gestartet...")
+
+    # ── Start Scan (manuell ODER auto-triggered) ──
+    if _bio_scan_btn or _bio_auto_triggered:
         try:
             _bio_poly_key = st.secrets.get("POLYGON_KEY", "")
             if not _bio_poly_key:
@@ -23309,7 +23355,8 @@ with tab_biotech:
                     daemon=True
                 )
                 _bio_thread.start()
-                st.toast("🧬 Biotech Scan gestartet...")
+                _trigger_type = "Auto" if _bio_auto_triggered else "Manuell"
+                st.toast(f"🧬 Biotech Scan gestartet ({_trigger_type})...")
                 time.sleep(1)
                 st.rerun()
         except Exception as e:
