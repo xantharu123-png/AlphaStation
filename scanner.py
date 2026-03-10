@@ -7469,7 +7469,7 @@ def _detect_chart_patterns(bars, direction="long"):
                     severity = "high" if direction == "long" else "info"
                     peak_level = round(peak_avg, 2)
                     warnings.append({
-                        "pattern": "⚠️ Double Top",
+                        "pattern": "Double Top",
                         "severity": severity,
                         "level": peak_level,
                         "description": f"Zwei Peaks bei ~${peak_level} (Diff: {diff_pct:.1f}%) — Tal: -{valley_depth:.0f}% — Starker Widerstand!"
@@ -7507,7 +7507,7 @@ def _detect_chart_patterns(bars, direction="long"):
                     severity = "high" if direction == "short" else "info"
                     bottom_level = round(trough_avg, 2)
                     warnings.append({
-                        "pattern": "⚠️ Double Bottom",
+                        "pattern": "Double Bottom",
                         "severity": severity,
                         "level": bottom_level,
                         "description": f"Zwei Tiefs bei ~${bottom_level} (Diff: {diff_pct:.1f}%) — Peak: +{peak_height:.0f}% — Starke Unterstützung!"
@@ -7549,7 +7549,7 @@ def _detect_chart_patterns(bars, direction="long"):
             if dist_from_neck < 15.0:
                 severity = "high" if direction == "long" else "info"
                 warnings.append({
-                    "pattern": "🚨 Head & Shoulders",
+                    "pattern": "Head & Shoulders",
                     "severity": severity,
                     "level": round(neckline, 2),
                     "description": f"Kopf: ${head:.0f} | Schultern: ${left:.0f}/${right:.0f} | Nackenlinie: ~${neckline:.0f} — Klassisches Umkehr-Signal!"
@@ -7585,7 +7585,7 @@ def _detect_chart_patterns(bars, direction="long"):
             if dist_from_neck < 15.0:
                 severity = "high" if direction == "short" else "info"
                 warnings.append({
-                    "pattern": "🚨 Inv. Head & Shoulders",
+                    "pattern": "Inv. Head & Shoulders",
                     "severity": severity,
                     "level": round(neckline, 2),
                     "description": f"Kopf: ${head:.0f} | Schultern: ${left:.0f}/${right:.0f} | Nackenlinie: ~${neckline:.0f} — Bullisches Umkehr-Signal!"
@@ -7724,7 +7724,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 atr_fail += 1
                 continue
 
-            grade_map = {"S": "🏆 ELITE", "A": "🔥 STARK", "B": "✅ SOLIDE", "C": "⚠️ WATCH", "D": "❌ SCHWACH"}
+            grade_map = {"S": "🏆 S — ELITE", "A": "🔥 A — STARK", "B": "✅ B — SOLIDE", "C": "⚠️ C — WATCH", "D": "❌ D — SCHWACH"}
             grade_label = grade_map.get(grade, grade)
 
             candidate["Alpha"] = bi_score
@@ -7763,30 +7763,33 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
             if pattern_warnings:
                 high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
+                medium_warnings = [w for w in pattern_warnings if w["severity"] == "medium"]
+                danger_warnings = high_warnings + medium_warnings
                 candidate["PatternWarnings"] = pattern_warnings
-                candidate["PatternCount"] = len(pattern_warnings)
+                candidate["PatternCount"] = len(danger_warnings)  # Nur relevante Warnings zählen
                 candidate["PatternHighCount"] = len(high_warnings)
-                warn_texts = [w["pattern"] for w in pattern_warnings]
-                candidate["PatternLabel"] = " | ".join(warn_texts)
+                # Nur high/medium als Warnung anzeigen — info = positiv für Trade-Richtung
+                if danger_warnings:
+                    warn_texts = [f"🚨 {w['pattern']}" if w["severity"] == "high" else f"⚠️ {w['pattern']}" for w in danger_warnings]
+                    candidate["PatternLabel"] = " | ".join(warn_texts)
+                else:
+                    candidate["PatternLabel"] = "✅ Clean"  # Nur info-Patterns = harmlos
 
-                # Score-Abzug für Umkehr-Patterns GEGEN die Trade-Richtung
-                # High severity = direkt gegen uns (Double Top bei Long, Double Bottom bei Short)
+                # Score-Abzug: Severity bestimmt bereits die Richtungsrelevanz
+                # high = Pattern GEGEN Trade-Richtung, info = Pattern FÜR Trade-Richtung
                 for pw in pattern_warnings:
                     if pw["severity"] == "high":
-                        if "Double Top" in pw["pattern"] or "Head & Shoulders" in pw["pattern"]:
-                            bi_score -= 15  # Starkes bearish Pattern
-                        elif "Double Bottom" in pw["pattern"] or "Inv. Head" in pw["pattern"]:
-                            bi_score -= 15  # Starkes bullish Pattern (gegen Short)
+                        bi_score -= 15  # Umkehr-Pattern gegen uns
                     elif pw["severity"] == "medium":
                         bi_score -= 5
 
                 candidate["BI_Score"] = max(0, bi_score)
                 # Grade neu berechnen nach Abzug
-                if bi_score >= 120: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "🏆 ELITE"
-                elif bi_score >= 100: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "🔥 STARK"
-                elif bi_score >= 85: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "✅ SOLIDE"
-                elif bi_score >= 70: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "⚠️ WATCH"
-                else: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "❌ SCHWACH"
+                if bi_score >= 120: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "🏆 S — ELITE"
+                elif bi_score >= 100: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "🔥 A — STARK"
+                elif bi_score >= 85: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "✅ B — SOLIDE"
+                elif bi_score >= 70: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "⚠️ C — WATCH"
+                else: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "❌ D — SCHWACH"
             else:
                 candidate["PatternWarnings"] = []
                 candidate["PatternCount"] = 0
