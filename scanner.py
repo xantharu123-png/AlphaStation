@@ -22048,7 +22048,7 @@ with tab_scanner:
         # =====================================================
         # CHART PATTERN WARNUNG — Umkehr-Patterns erkennen (Daily, 90 Tage)
         # =====================================================
-        _pattern_ticker = str(row.get("Ticker", "")) if "Ticker" in row.index else st.session_state.selected_symbol
+        _pattern_ticker = st.session_state.get("selected_symbol", "")
         _pattern_direction = "long"  # Default
         _cur_strat = st.session_state.get("current_strategy", "")
         if any(kw in _cur_strat.lower() for kw in ["short", "distribution", "⬇️", "selling"]):
