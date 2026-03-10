@@ -22,6 +22,7 @@
 """
 
 import streamlit as st
+import re
 import pandas as pd
 import requests
 import anthropic
@@ -7751,7 +7752,7 @@ FDA_CATALYST_KEYWORDS = {
         "keywords": ["fda approval", "fda approved", "pdufa", "nda accepted", "bla accepted",
                      "fda clearance", "breakthrough therapy", "fast track", "priority review",
                      "accelerated approval", "orphan drug", "emergency use", "eua granted",
-                     "complete response letter", "crl", "adcom", "advisory committee",
+                     "complete response letter", "adcom", "advisory committee",
                      "fda decision", "fda action date"],
         "score": 30,
         "label": "🎯 FDA Event"
@@ -7861,8 +7862,9 @@ def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50, max_mcap_m=
     """
     biotech_tickers = []
 
-    # Methode 1: SIC-Code basiert (präziser)
-    for sic in ["2833", "2834", "2835", "2836", "2831"]:
+    # Methode 1: SIC-Code basiert (präziser) — ALLE SIC Codes + Pagination
+    existing_tickers = set()
+    for sic in BIOTECH_SIC_CODES:
         try:
             url = "https://api.polygon.io/v3/reference/tickers"
             params = {
@@ -7872,12 +7874,17 @@ def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50, max_mcap_m=
                 "sic_code": sic,
                 "limit": 250,
             }
-            resp = rate_limited_get(url, params=params, timeout=10)
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])
+            # Pagination: Polygon gibt next_url zurück wenn es mehr Ergebnisse gibt
+            for _page in range(5):  # Max 5 Seiten = 1250 Tickers pro SIC
+                resp = rate_limited_get(url, params=params, timeout=10)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                results = data.get("results", [])
                 for r in results:
                     ticker = r.get("ticker", "")
-                    if ticker and ticker not in [t["ticker"] for t in biotech_tickers]:
+                    if ticker and ticker not in existing_tickers:
+                        existing_tickers.add(ticker)
                         biotech_tickers.append({
                             "ticker": ticker,
                             "name": r.get("name", ""),
@@ -7886,6 +7893,12 @@ def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50, max_mcap_m=
                             "primary_exchange": r.get("primary_exchange", ""),
                             "source": "SIC"
                         })
+                # Nächste Seite?
+                next_url = data.get("next_url")
+                if not next_url:
+                    break
+                url = next_url
+                params = {"apiKey": poly_key}  # next_url enthält bereits die Query-Parameter
         except Exception:
             continue
 
@@ -7903,12 +7916,12 @@ def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50, max_mcap_m=
             resp = rate_limited_get(url, params=params, timeout=10)
             if resp.status_code == 200:
                 results = resp.json().get("results", [])
-                existing = {t["ticker"] for t in biotech_tickers}
                 for r in results:
                     ticker = r.get("ticker", "")
                     name = (r.get("name", "") or "").lower()
-                    if ticker and ticker not in existing:
+                    if ticker and ticker not in existing_tickers:
                         if any(kw in name for kw in BIOTECH_NAME_KEYWORDS):
+                            existing_tickers.add(ticker)
                             biotech_tickers.append({
                                 "ticker": ticker,
                                 "name": r.get("name", ""),
@@ -7958,30 +7971,34 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                     sentiment = insight.get("sentiment", "neutral")
                     break
 
-            # Negative Catalyst Check
+            # Negative Catalyst Check (mit Wortgrenzen) — VOR positivem Check
+            _is_negative_article = False
             for neg_kw, penalty in BIOTECH_NEGATIVE_CATALYSTS.items():
-                if neg_kw in combined:
+                if re.search(r'\b' + re.escape(neg_kw) + r'\b', combined):
                     negative_flags.append({"flag": neg_kw, "penalty": penalty, "date": pub_date})
+                    _is_negative_article = True
 
-            # Positive Catalyst Detection (Tier-basiert)
+            # Positive Catalyst Detection (Tier-basiert, mit Wortgrenzen)
+            # Skip positive detection wenn Artikel bereits als negativ markiert (z.B. CRL)
             article_catalysts = []
-            for tier_name, tier_data in FDA_CATALYST_KEYWORDS.items():
-                for kw in tier_data["keywords"]:
-                    if kw in combined:
-                        cat = {
-                            "keyword": kw,
-                            "tier": tier_name,
-                            "score": tier_data["score"],
-                            "label": tier_data["label"],
-                            "date": pub_date,
-                            "headline": article.get("title", "")[:100]
-                        }
-                        article_catalysts.append(cat)
-                        if best_tier is None or tier_data["score"] > best_tier:
-                            best_tier = tier_data["score"]
-                        break  # Nur höchster Tier pro Artikel
-                if article_catalysts:
-                    break
+            if not _is_negative_article:
+                for tier_name, tier_data in FDA_CATALYST_KEYWORDS.items():
+                    for kw in tier_data["keywords"]:
+                        if re.search(r'\b' + re.escape(kw) + r'\b', combined):
+                            cat = {
+                                "keyword": kw,
+                                "tier": tier_name,
+                                "score": tier_data["score"],
+                                "label": tier_data["label"],
+                                "date": pub_date,
+                                "headline": article.get("title", "")[:100]
+                            }
+                            article_catalysts.append(cat)
+                            if best_tier is None or tier_data["score"] > best_tier:
+                                best_tier = tier_data["score"]
+                            break  # Nur höchster Tier pro Artikel
+                    if article_catalysts:
+                        break
 
             catalysts.extend(article_catalysts)
 
@@ -8021,7 +8038,14 @@ def _check_clinical_trials(company_name, ticker):
     """
     try:
         # Suche nach Company Name (besser als Ticker)
-        search_term = company_name.split(" ")[0] if company_name else ticker
+        # Entferne generische Suffixe, nutze max 3 relevante Wörter
+        _strip_words = {"inc", "inc.", "corp", "corp.", "ltd", "ltd.", "plc", "co", "co.",
+                        "group", "holdings", "llc", "sa", "se", "nv", "ag", "gmbh", "the"}
+        if company_name:
+            _name_parts = [w for w in company_name.split() if w.lower() not in _strip_words]
+            search_term = " ".join(_name_parts[:3]) if _name_parts else ticker
+        else:
+            search_term = ticker
         url = "https://clinicaltrials.gov/api/v2/studies"
         params = {
             "query.spons": search_term,
@@ -8169,14 +8193,14 @@ def _biotech_technical_score(poly_key, ticker):
             else:
                 details["consolidation"] = "🌊 Weit gespreizt"
 
-        # 5. Trend Direction — EMA20 > EMA50 = Aufwärtstrend (max 3 pts)
+        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts)
         if len(closes) >= 50:
-            ema20 = sum(closes[-20:]) / 20
-            ema50 = sum(closes[-50:]) / 50
-            if ema20 > ema50:
+            sma20 = sum(closes[-20:]) / 20
+            sma50 = sum(closes[-50:]) / 50
+            if sma20 > sma50:
                 tech_score += 3
                 details["trend"] = "📈 Aufwärtstrend"
-            elif ema20 > ema50 * 0.97:
+            elif sma20 > sma50 * 0.97:
                 tech_score += 1
                 details["trend"] = "➡️ Seitwärts"
             else:
@@ -8233,18 +8257,18 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
         risk_score += 1
         risk_details.append("🔥🔥 Micro Float (extrem volatil)")
 
-    # Negative Catalysts Penalty (max -4 pts)
-    if negative_flags:
-        penalty = min(4, len(negative_flags) * 2)
-        risk_score = max(0, risk_score - penalty)
-        risk_details.append(f"⚠️ {len(negative_flags)} negative Signal(e)")
-
-    # Bonus: keine negativen Flags = sauberer (max 4 pts)
+    # Sauberkeit: keine negativen Flags = Bonus, viele Flags = Abzug (max 4 pts netto)
     if not negative_flags:
         risk_score += 4
         risk_details.append("✅ Keine negativen Signale")
+    elif len(negative_flags) == 1:
+        risk_score += 1
+        risk_details.append(f"⚠️ 1 negatives Signal")
     else:
-        risk_score += max(0, 4 - len(negative_flags))
+        # 2+ negative Flags → kein Bonus, zusätzlich Penalty
+        penalty = min(4, (len(negative_flags) - 1) * 2)
+        risk_score = max(0, risk_score - penalty)
+        risk_details.append(f"⚠️ {len(negative_flags)} negative Signale (−{penalty} Pts)")
 
     return {"risk_score": min(15, risk_score), "risk_details": risk_details}
 
@@ -8351,15 +8375,16 @@ def _biotech_background_scan(poly_key):
                 momentum_score = momentum_data["momentum_score"]
 
                 # Quick Filter: Ohne Catalyst UND ohne News-Momentum → Skip
-                if catalyst_score == 0 and momentum_score <= 4:
+                # ABER: Nicht zu aggressiv — auch Aktien mit wenig News aber potenzieller Pipeline durchlassen
+                if catalyst_score == 0 and momentum_score <= 2:
                     continue
 
                 # C) Ticker Details (MCap, Shares)
                 details = get_ticker_details(poly_key, ticker)
 
-                # D) Clinical Trials (nur wenn News-Catalyst gefunden)
+                # D) Clinical Trials — für alle die den Quick Filter passiert haben
                 trial_data = {"pipeline_score": 0, "trials": [], "phase_summary": {}, "total_active": 0}
-                if catalyst_score >= 8 or momentum_score >= 6:
+                if catalyst_score >= 4 or momentum_score >= 4:
                     company_name = details.get("name", "") or stock.get("name", "")
                     trial_data = _check_clinical_trials(company_name, ticker)
 
@@ -23293,17 +23318,26 @@ with tab_biotech:
     # ── Progress Anzeige ──
     _bio_prog = _biotech_progress_read()
     if _bio_prog and _bio_prog.get("status") == "running":
-        _bp_checked = _bio_prog.get("checked", 0)
-        _bp_total = _bio_prog.get("total", 0)
-        _bp_hits = _bio_prog.get("hits", 0)
-        _bp_detail = _bio_prog.get("detail", "")
-        _bp_pct = _bp_checked / max(1, _bp_total)
+        # Timeout: Scan älter als 60 Min = abgebrochen
+        _bio_age = time.time() - _bio_prog.get("timestamp", 0)
+        if _bio_age > 3600:
+            st.error("⏰ Biotech Scan Timeout (>60 Min). Bitte neu starten.")
+            try:
+                os.remove(_biotech_progress_file())
+            except Exception:
+                pass
+        else:
+            _bp_checked = _bio_prog.get("checked", 0)
+            _bp_total = _bio_prog.get("total", 0)
+            _bp_hits = _bio_prog.get("hits", 0)
+            _bp_detail = _bio_prog.get("detail", "")
+            _bp_pct = _bp_checked / max(1, _bp_total)
 
-        st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
+            st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
 
-        # Auto-Rerun für Live-Update
-        time.sleep(3)
-        st.rerun()
+            # Auto-Rerun für Live-Update
+            time.sleep(3)
+            st.rerun()
 
     elif _bio_prog and _bio_prog.get("status") == "error":
         st.error(f"❌ Scan Fehler: {_bio_prog.get('detail', 'Unbekannt')}")
