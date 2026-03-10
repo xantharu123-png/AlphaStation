@@ -23315,7 +23315,9 @@ with tab_bi:
                 poly_key = st.secrets["POLYGON_KEY"]
                 reason = bi_auto_reason if bi_should_auto else "Manuell gestartet"
                 with st.spinner(f"📡 {reason} — Lade Aktien-Snapshot..."):
-                    raw = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                    _bi_fetch = fetch_stock_data(poly_key, session="Regular", skip_filters=True)
+                    # fetch_stock_data gibt Tuple zurück: (results, skipped, skipped_filter, debug)
+                    raw = _bi_fetch[0] if isinstance(_bi_fetch, (list, tuple)) and len(_bi_fetch) > 0 and isinstance(_bi_fetch[0], list) else (_bi_fetch if isinstance(_bi_fetch, list) else [])
                 if not raw:
                     st.error("❌ Keine Daten von Polygon API!")
                 else:
