@@ -8337,7 +8337,7 @@ def _biotech_technical_score(poly_key, ticker):
             else:
                 details["consolidation"] = "🌊 Weit gespreizt"
 
-        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts / min -4 pts)
+        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts, kein Abzug)
         if len(closes) >= 50:
             sma20 = sum(closes[-20:]) / 20
             sma50 = sum(closes[-50:]) / 50
@@ -8347,47 +8347,69 @@ def _biotech_technical_score(poly_key, ticker):
             elif sma20 > sma50 * 0.97:
                 tech_score += 1
                 details["trend"] = "➡️ Seitwärts"
-            elif sma20 > sma50 * 0.93:
-                tech_score -= 2  # Leichter Abwärtstrend
-                details["trend"] = "📉 Abwärtstrend (−2)"
             else:
-                tech_score -= 4  # Starker Abwärtstrend
-                details["trend"] = "📉 Starker Abwärtstrend (−4)"
+                details["trend"] = "📉 Abwärtstrend"
 
-        # 6. Drawdown vom 90d-High — Penalty wenn zu weit gefallen (min -6 pts)
+        # ── CHART HEALTH (separate Metrik, beeinflusst Score NICHT) ──
+        # Gibt dem Trader eine schnelle Einschätzung ob der Chart tradebar ist,
+        # ohne gute Catalyst-Trades zu verstecken.
+        # Skala: 0-10 (10 = perfekter Chart, 0 = aktiver Crash)
+        chart_health = 10  # Start bei "perfekt", dann Abzüge
+
+        # A) Drawdown vom 90d-High
+        drawdown_pct = 0
         if range_90d > 0:
             drawdown_pct = (high_90d - current_price) / high_90d * 100
             details["drawdown%"] = round(drawdown_pct, 1)
             if drawdown_pct >= 30:
-                tech_score -= 6
-                details["drawdown"] = "💀 Crash (−6)"
+                chart_health -= 4
+                details["drawdown"] = "💀 −{:.0f}% vom High".format(drawdown_pct)
             elif drawdown_pct >= 20:
-                tech_score -= 4
-                details["drawdown"] = "🔴 Starker Abverkauf (−4)"
+                chart_health -= 3
+                details["drawdown"] = "🔴 −{:.0f}% vom High".format(drawdown_pct)
             elif drawdown_pct >= 15:
-                tech_score -= 2
-                details["drawdown"] = "⚠️ Signifikanter Rückgang (−2)"
+                chart_health -= 2
+                details["drawdown"] = "⚠️ −{:.0f}% vom High".format(drawdown_pct)
             elif drawdown_pct <= 5:
                 details["drawdown"] = "✅ Nahe Highs"
-            else:
-                details["drawdown"] = "📊 Normaler Pullback"
 
-        # 7. Bearish Price Action — mehrheitlich rote Kerzen letzte 5 Tage (min -3 pts)
+        # B) Trend
+        if details.get("trend", "").startswith("📉"):
+            chart_health -= 2
+
+        # C) Bearish Price Action letzte 5 Tage
         if len(closes) >= 6:
             red_days = sum(1 for i in range(-5, 0) if closes[i] < closes[i-1])
             if red_days >= 4:
-                tech_score -= 3
-                details["recent_action"] = f"🔴 {red_days}/5 rote Tage (−3)"
+                chart_health -= 2
+                details["recent_action"] = f"🔴 {red_days}/5 rote Tage"
             elif red_days >= 3:
-                tech_score -= 1
-                details["recent_action"] = f"⚠️ {red_days}/5 rote Tage (−1)"
+                chart_health -= 1
+                details["recent_action"] = f"⚠️ {red_days}/5 rote Tage"
+
+        # D) Price Position (schon berechnet: pos_90d)
+        if details.get("pos_90d", 50) <= 20:
+            chart_health -= 1
+
+        chart_health = max(0, min(10, chart_health))
+        details["chart_health"] = chart_health
+
+        # Chart Health Label für Tabelle
+        if chart_health >= 8:
+            details["chart_health_label"] = "🟢 Stark"
+        elif chart_health >= 6:
+            details["chart_health_label"] = "🟡 OK"
+        elif chart_health >= 4:
+            details["chart_health_label"] = "🟠 Schwach"
+        else:
+            details["chart_health_label"] = "🔴 Kritisch"
 
         details["price"] = current_price
         details["avg_vol"] = int(avg_vol_20)
         details["high_90d"] = high_90d
         details["low_90d"] = low_90d
 
-        return {"technical_score": max(-10, min(20, tech_score)), "details": details}
+        return {"technical_score": min(20, tech_score), "details": details}
     except Exception:
         return {"technical_score": 0, "details": {}}
 
@@ -8665,6 +8687,24 @@ def _biotech_background_scan(poly_key):
                 catalyst_label = best_cat["label"] if best_cat else "🔬 Pipeline"
                 catalyst_headline = best_cat["headline"] if best_cat else ""
 
+                # Chart Health + Selloff-Reason
+                _tech_details = tech_data.get("details", {})
+                _chart_health = _tech_details.get("chart_health", 10)
+                _chart_label = _tech_details.get("chart_health_label", "🟢 Stark")
+                _drawdown = _tech_details.get("drawdown%", 0)
+
+                # Selloff-Reason: Warum fällt der Stock?
+                # Korreliere Chart-Schwäche mit negativen Catalysts
+                _selloff_reason = ""
+                _neg_flags = news_data.get("negative_flags", [])
+                if _chart_health <= 5:  # Chart ist schwach/kritisch
+                    if _neg_flags:
+                        _flag_names = [nf["flag"] for nf in _neg_flags[:2]]
+                        _selloff_reason = "⚠️ " + ", ".join(_flag_names)
+                    elif _drawdown >= 15:
+                        _selloff_reason = "❓ Kein neg. Catalyst — prüfe Chart"
+                    # Wenn Chart schwach ABER keine neg. News → könnte Dip-Opportunity sein
+
                 result = {
                     "Ticker": ticker,
                     "Name": (details.get("name", "") or stock.get("name", ""))[:30],
@@ -8676,21 +8716,25 @@ def _biotech_background_scan(poly_key):
                     "Technical_Score": tech_data["technical_score"],
                     "Risk_Score": risk_data["risk_score"],
                     "Momentum_Score": momentum_score,
-                    "Preis": tech_data.get("details", {}).get("price", 0),
+                    "Preis": _tech_details.get("price", 0),
                     "MCap_M": details.get("market_cap_millions", 0),
                     "Shares_M": details.get("shares_millions", 0),
-                    "RVOL": tech_data.get("details", {}).get("RVOL", 0),
+                    "RVOL": _tech_details.get("RVOL", 0),
                     "Float_Cat": details.get("float_category", "UNKNOWN"),
                     "Headline": catalyst_headline,
                     "Phase3": trial_data["phase_summary"].get("PHASE3", 0),
                     "Phase2": trial_data["phase_summary"].get("PHASE2", 0),
                     "Phase1": trial_data["phase_summary"].get("PHASE1", 0),
                     "Active_Trials": trial_data.get("total_active", 0),
+                    "Chart": _chart_label,
+                    "Chart_Health": _chart_health,
+                    "Drawdown": round(_drawdown, 1),
+                    "Selloff_Reason": _selloff_reason,
                     "Trials": trial_data.get("trials", [])[:5],
                     "News": news_data.get("news", [])[:5],
-                    "Negative_Flags": news_data.get("negative_flags", []),
+                    "Negative_Flags": _neg_flags,
                     "Risk_Details": risk_data.get("risk_details", []),
-                    "Tech_Details": tech_data.get("details", {}),
+                    "Tech_Details": _tech_details,
                     "Sentiment": momentum_data.get("sentiment_summary", ""),
                     "Catalysts_All": news_data.get("catalysts", []),
                 }
@@ -23954,7 +23998,7 @@ with tab_biotech:
             # ── Dataframe ──
             import pandas as pd
             _bio_df = pd.DataFrame(_bio_filtered)
-            _bio_display_cols = ["Ticker", "Name", "Score", "Grade", "Catalyst", "Preis", "MCap_M", "RVOL",
+            _bio_display_cols = ["Ticker", "Name", "Score", "Grade", "Chart", "Catalyst", "Preis", "MCap_M", "RVOL",
                                  "Phase3", "Phase2", "Active_Trials", "Sentiment", "Float_Cat"]
             _bio_avail_cols = [c for c in _bio_display_cols if c in _bio_df.columns]
 
@@ -23965,6 +24009,7 @@ with tab_biotech:
                     "Name": st.column_config.TextColumn("Name", width="medium"),
                     "Score": st.column_config.ProgressColumn("Catalyst Score", format="%d", min_value=0, max_value=100),
                     "Grade": st.column_config.TextColumn("Grade", width="small"),
+                    "Chart": st.column_config.TextColumn("Chart", width="small"),
                     "Catalyst": st.column_config.TextColumn("Katalysator", width="medium"),
                     "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
                     "MCap_M": st.column_config.NumberColumn("MCap (M$)", format="%.0f"),
@@ -24001,13 +24046,35 @@ with tab_biotech:
                     unsafe_allow_html=True
                 )
 
+                # Chart Health Warnung (wenn schwach/kritisch)
+                _bio_ch = _bio_item.get("Chart_Health", 10)
+                _bio_dd = _bio_item.get("Drawdown", 0)
+                _bio_sr = _bio_item.get("Selloff_Reason", "")
+                if _bio_ch <= 5:
+                    _ch_parts = [_bio_item.get("Chart", "")]
+                    if _bio_dd > 0:
+                        _ch_parts.append(f"−{_bio_dd:.0f}% vom High")
+                    _td = _bio_item.get("Tech_Details", {})
+                    if _td.get("trend", "").startswith("📉"):
+                        _ch_parts.append(_td["trend"])
+                    if _td.get("recent_action"):
+                        _ch_parts.append(_td["recent_action"])
+                    if _bio_sr:
+                        if "❓" in _bio_sr:
+                            st.warning(f"📉 **Chart schwach** ({' | '.join(_ch_parts)}) — Aber: **Kein negativer Catalyst gefunden** → mögliche Dip-Opportunity?")
+                        else:
+                            st.error(f"📉 **Chart schwach** ({' | '.join(_ch_parts)}) — Grund: **{_bio_sr}**")
+                    else:
+                        st.warning(f"📉 **Chart Achtung:** {' | '.join(_ch_parts)}")
+
                 # Score Breakdown
-                _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5 = st.columns(5)
+                _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5, _bio_bc6 = st.columns(6)
                 _bio_bc1.metric("🎯 Catalyst", f"{_bio_item.get('Catalyst_Score', 0)}/30", help="FDA/PDUFA Events, Approvals, Breakthrough")
                 _bio_bc2.metric("🔬 Pipeline", f"{_bio_item.get('Pipeline_Score', 0)}/20", help="Phase 3/2/1 Clinical Trials")
                 _bio_bc3.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
                 _bio_bc4.metric("🎰 Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
                 _bio_bc5.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
+                _bio_bc6.metric("📊 Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}%" if _bio_dd >= 10 else None, delta_color="inverse", help="Chart Health: 10=perfekt, 0=Crash")
 
                 st.divider()
 
