@@ -21799,6 +21799,185 @@ with st.sidebar:
                     status.update(label=f"✅ {len(st.session_state.scan_results)} Signale", state="complete")
 
 # -----------------------------------------------------------------------------
+# SEKTOR-TREND CONTEXT BANNER (Helper)
+# -----------------------------------------------------------------------------
+# SIC Code → SPDR Sektor ETF Mapping
+_SIC_TO_SECTOR = {
+    # Technology (XLK) — NUR spezifische 4-Digit Codes, keine 2-Digit Prefixe
+    # (35xx=Industrial Machinery, 36xx=Electronic, 37xx=Transportation → zu breit für XLK)
+    "7371": "XLK", "7372": "XLK", "7373": "XLK", "7374": "XLK", "7375": "XLK", "7376": "XLK", "7377": "XLK", "7378": "XLK", "7379": "XLK",
+    "3559": "XLK", "3669": "XLK", "3672": "XLK", "3674": "XLK", "3679": "XLK",
+    "3577": "XLK", "3661": "XLK", "3663": "XLK", "3678": "XLK",
+    # Healthcare (XLV)
+    "28": "XLV", "80": "XLV",
+    "2830": "XLV", "2833": "XLV", "2834": "XLV", "2835": "XLV", "2836": "XLV",
+    "3841": "XLV", "3842": "XLV", "3843": "XLV", "3844": "XLV", "3845": "XLV", "3851": "XLV",
+    "5912": "XLV", "8000": "XLV", "8011": "XLV", "8049": "XLV", "8050": "XLV", "8060": "XLV", "8071": "XLV", "8082": "XLV", "8090": "XLV",
+    # Financials (XLF)
+    "60": "XLF", "61": "XLF", "62": "XLF", "63": "XLF", "64": "XLF", "67": "XLF",
+    "6020": "XLF", "6021": "XLF", "6022": "XLF", "6035": "XLF", "6036": "XLF",
+    "6141": "XLF", "6153": "XLF", "6159": "XLF", "6162": "XLF", "6163": "XLF",
+    "6199": "XLF", "6200": "XLF", "6211": "XLF", "6282": "XLF", "6311": "XLF", "6321": "XLF", "6324": "XLF", "6331": "XLF", "6399": "XLF",
+    # Energy (XLE)
+    "13": "XLE", "29": "XLE",
+    "1311": "XLE", "1381": "XLE", "1382": "XLE", "1389": "XLE",
+    "2911": "XLE", "2990": "XLE",
+    # Consumer Discretionary (XLY)
+    "25": "XLY", "53": "XLY", "54": "XLY", "55": "XLY", "56": "XLY", "57": "XLY", "58": "XLY", "59": "XLY", "70": "XLY", "72": "XLY", "78": "XLY", "79": "XLY",
+    "5311": "XLY", "5411": "XLY", "5812": "XLY", "5944": "XLY", "5945": "XLY", "5961": "XLY", "7011": "XLY",
+    # Consumer Staples (XLP)
+    "20": "XLP", "21": "XLP",
+    "2000": "XLP", "2011": "XLP", "2013": "XLP", "2020": "XLP", "2030": "XLP", "2040": "XLP", "2050": "XLP", "2060": "XLP", "2080": "XLP", "2086": "XLP", "2090": "XLP",
+    "2100": "XLP", "2111": "XLP",
+    # Industrials (XLI)
+    "15": "XLI", "16": "XLI", "17": "XLI", "34": "XLI", "40": "XLI", "42": "XLI", "44": "XLI", "45": "XLI",
+    "3714": "XLI", "3720": "XLI", "3721": "XLI", "3724": "XLI", "3728": "XLI", "3743": "XLI",
+    "4011": "XLI", "4013": "XLI", "4210": "XLI", "4213": "XLI", "4412": "XLI", "4512": "XLI", "4522": "XLI", "4581": "XLI",
+    # Materials (XLB)
+    "10": "XLB", "12": "XLB", "14": "XLB", "24": "XLB", "26": "XLB", "30": "XLB", "32": "XLB", "33": "XLB",
+    # Utilities (XLU)
+    "49": "XLU",
+    "4911": "XLU", "4922": "XLU", "4923": "XLU", "4924": "XLU", "4931": "XLU", "4932": "XLU", "4941": "XLU",
+    # Real Estate (XLRE)
+    "65": "XLRE", "6500": "XLRE", "6510": "XLRE", "6512": "XLRE", "6552": "XLRE", "6798": "XLRE",
+    # Communication Services (XLC)
+    "27": "XLC", "48": "XLC",
+    "4812": "XLC", "4813": "XLC", "4822": "XLC", "4833": "XLC", "4841": "XLC", "4899": "XLC",
+    "7311": "XLC", "7812": "XLC", "7819": "XLC", "7822": "XLC",
+}
+
+_SECTOR_ETF_META = {
+    "XLK": {"name": "Technology", "emoji": "💻"},
+    "XLF": {"name": "Financials", "emoji": "🏦"},
+    "XLE": {"name": "Energy", "emoji": "⚡"},
+    "XLV": {"name": "Healthcare", "emoji": "🏥"},
+    "XLI": {"name": "Industrials", "emoji": "🏭"},
+    "XLY": {"name": "Consumer Disc.", "emoji": "🛒"},
+    "XLP": {"name": "Consumer Staples", "emoji": "🥫"},
+    "XLU": {"name": "Utilities", "emoji": "💡"},
+    "XLB": {"name": "Materials", "emoji": "🧱"},
+    "XLRE": {"name": "Real Estate", "emoji": "🏠"},
+    "XLC": {"name": "Communication", "emoji": "📱"},
+}
+
+# Bekannte Ticker → Sektor Overrides (für Mega-Caps die jeder kennt)
+_TICKER_SECTOR_OVERRIDE = {
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "GOOGL": "XLC", "GOOG": "XLC",
+    "META": "XLC", "AMZN": "XLY", "TSLA": "XLY", "NFLX": "XLC", "DIS": "XLC",
+    "JPM": "XLF", "BAC": "XLF", "GS": "XLF", "MS": "XLF", "WFC": "XLF",
+    "XOM": "XLE", "CVX": "XLE", "COP": "XLE", "SLB": "XLE", "OXY": "XLE",
+    "JNJ": "XLV", "UNH": "XLV", "PFE": "XLV", "ABBV": "XLV", "MRK": "XLV", "LLY": "XLV",
+    "AVGO": "XLK", "AMD": "XLK", "INTC": "XLK", "MU": "XLK", "QCOM": "XLK", "TXN": "XLK",
+    "CRM": "XLK", "ORCL": "XLK", "ADBE": "XLK", "NOW": "XLK", "INTU": "XLK", "PLTR": "XLK",
+    "WMT": "XLP", "COST": "XLP", "PG": "XLP", "KO": "XLP", "PEP": "XLP",
+    "CAT": "XLI", "DE": "XLI", "BA": "XLI", "UPS": "XLI", "HON": "XLI", "GE": "XLI",
+    "LIN": "XLB", "APD": "XLB", "NEM": "XLB", "FCX": "XLB",
+    "NEE": "XLU", "DUK": "XLU", "SO": "XLU", "D": "XLU",
+    "AMT": "XLRE", "PLD": "XLRE", "SPG": "XLRE", "O": "XLRE",
+    "T": "XLC", "VZ": "XLC", "CMCSA": "XLC", "TMUS": "XLC",
+    "V": "XLK", "MA": "XLK", "PYPL": "XLK", "SQ": "XLK",
+    "COIN": "XLF", "HOOD": "XLF", "SOFI": "XLF", "AFRM": "XLK",
+    "MRNA": "XLV", "BNTX": "XLV", "CRSP": "XLV", "REGN": "XLV", "GILD": "XLV", "BIIB": "XLV", "VRTX": "XLV",
+}
+
+
+def _resolve_sector_etf(ticker, sic_code=""):
+    """Mappt Ticker auf Sektor-ETF. Prüft 1) Override, 2) SIC-Code, 3) None."""
+    # 1. Bekannter Override
+    t = ticker.upper().split(".")[0]  # z.B. VNA.DE → VNA
+    if t in _TICKER_SECTOR_OVERRIDE:
+        return _TICKER_SECTOR_OVERRIDE[t]
+    # 2. SIC-Code Matching (4-stellig → 2-stellig Fallback)
+    sic = str(sic_code).strip()
+    if sic and sic in _SIC_TO_SECTOR:
+        return _SIC_TO_SECTOR[sic]
+    if len(sic) >= 2 and sic[:2] in _SIC_TO_SECTOR:
+        return _SIC_TO_SECTOR[sic[:2]]
+    return None
+
+
+@st.cache_data(ttl=600)  # 10 Min Cache (konsistent mit Money Flow Tab)
+def _fetch_sector_etf_performance(poly_key):
+    """Holt aktuelle Tagesperformance für alle 11 SPDR Sektor-ETFs."""
+    results = {}
+    from datetime import timedelta
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=5)  # Letzte 5 Tage um Wochenende abzudecken
+    for etf in _SECTOR_ETF_META:
+        try:
+            url = f"https://api.polygon.io/v2/aggs/ticker/{etf}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+            resp = rate_limited_get(url, params={"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 10}, timeout=8)
+            if resp.status_code == 200:
+                bars = resp.json().get("results", [])
+                if bars and len(bars) >= 2:
+                    prev_close = bars[-2]["c"]
+                    last_close = bars[-1]["c"]
+                    chg = ((last_close - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                    results[etf] = round(chg, 2)
+        except Exception:
+            pass
+    return results
+
+
+def _render_sector_trend_banner(ticker, sic_code="", poly_key=None, all_tickers=None):
+    """
+    Zeigt Sektor-Trend Banner für einen oder mehrere Ticker.
+    - Einzelner Ticker: zeigt dessen Sektor + Performance
+    - all_tickers: Liste von (ticker, sic_code) → zeigt Top-Sektoren der Ergebnisse
+    """
+    if not poly_key:
+        return
+    try:
+        perf = _fetch_sector_etf_performance(poly_key)
+        if not perf:
+            return
+
+        if all_tickers and len(all_tickers) > 0:
+            # Sammle welche Sektoren in den Ergebnissen vertreten sind
+            sector_counts = {}
+            for t, sic in all_tickers:
+                etf = _resolve_sector_etf(t, sic)
+                if etf and etf in perf:
+                    sector_counts[etf] = sector_counts.get(etf, 0) + 1
+
+            if not sector_counts:
+                return
+
+            # Sortiere nach Häufigkeit, zeige Top 5
+            top_sectors = sorted(sector_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            parts = []
+            for etf, count in top_sectors:
+                meta = _SECTOR_ETF_META.get(etf, {})
+                chg = perf.get(etf, 0)
+                emoji = meta.get("emoji", "")
+                name = meta.get("name", etf)
+                color = "🟢" if chg > 0.3 else ("🔴" if chg < -0.3 else "⚪")
+                parts.append(f"{emoji} {name} **{chg:+.1f}%** {color} ({count})")
+
+            st.markdown(f"📊 **Sektor-Trend:** {' · '.join(parts)}")
+
+        elif ticker:
+            etf = _resolve_sector_etf(ticker, sic_code)
+            if etf and etf in perf:
+                meta = _SECTOR_ETF_META.get(etf, {})
+                chg = perf.get(etf, 0)
+                emoji = meta.get("emoji", "")
+                name = meta.get("name", etf)
+                if chg > 1.5:
+                    st.success(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Starker Rückenwind")
+                elif chg > 0.3:
+                    st.info(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Leichter Rückenwind")
+                elif chg < -1.5:
+                    st.error(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Starker Gegenwind")
+                elif chg < -0.3:
+                    st.warning(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Leichter Gegenwind")
+                else:
+                    st.caption(f"📊 Sektor-Trend: {emoji} {name} ({etf}) {chg:+.1f}% — Neutral")
+    except Exception:
+        pass
+
+
+# -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
 tab_scanner, tab_bi, tab_biotech, tab_search, tab_watchlist, tab_moneyflow, tab_backtest, tab_guide = st.tabs(["📊 Scanner", "🔮 BI Scanner", "🧬 Biotech", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "🧪 Backtest", "📖 Strategie Guide"])
@@ -22149,7 +22328,20 @@ with tab_scanner:
                                 st.caption(f"📡 Live: ${rt_price:.2f} ✓{time_info}")
                     except Exception as e:
                         pass  # Fehler ignorieren
-                
+
+                # ═══════════════════════════════════════════════════════
+                # 📊 SEKTOR-TREND BANNER
+                # ═══════════════════════════════════════════════════════
+                if st.session_state.market_type == "Aktien":
+                    try:
+                        _st_poly = st.secrets.get("POLYGON_KEY", "")
+                        if _st_poly:
+                            _st_ticker = str(row.get("Ticker", ""))
+                            _st_sic = str(row.get("sic_code", "") or "")
+                            _render_sector_trend_banner(_st_ticker, sic_code=_st_sic, poly_key=_st_poly)
+                    except Exception:
+                        pass
+
                 # ═══════════════════════════════════════════════════════
                 # ⚠️ EARNINGS WARNING — GANZ OBEN, VOR ALLEM ANDEREN!
                 # ═══════════════════════════════════════════════════════
@@ -23593,6 +23785,15 @@ with tab_bi:
 
         st.subheader(f"🔮 {len(bi_df)} Treffer — {bi_dir_label} {bi_dir_emoji}")
 
+        # ── Sektor-Trend Übersicht für alle BI-Ergebnisse ──
+        try:
+            _bi_poly = st.secrets.get("POLYGON_KEY", "")
+            if _bi_poly and len(bi_df) > 0:
+                _bi_all_tickers = [(str(r.get("Ticker", "")), str(r.get("sic_code", "") or "")) for r in bi_tab_data]
+                _render_sector_trend_banner(None, poly_key=_bi_poly, all_tickers=_bi_all_tickers)
+        except Exception:
+            pass
+
         # Rename Felder für Display (Code-Namen → lesbare Namen)
         rename_map = {}
         if "BI_Confidence" in bi_df.columns:
@@ -23675,6 +23876,14 @@ with tab_bi:
             ticker = bi_row.get("Ticker", "?")
             st.divider()
             st.subheader(f"📌 {ticker}")
+
+            # Sektor-Trend für ausgewählten Ticker
+            try:
+                _bi_pk = st.secrets.get("POLYGON_KEY", "")
+                if _bi_pk:
+                    _render_sector_trend_banner(ticker, sic_code=str(bi_row.get("sic_code", "") or ""), poly_key=_bi_pk)
+            except Exception:
+                pass
 
             d1, d2, d3, d4 = st.columns(4)
             with d1:
@@ -23995,6 +24204,26 @@ with tab_biotech:
             _bio_m3.metric("🅱️ Grade B", _bio_grade_b)
             _bio_m4.metric("🎯 FDA Events", _bio_fda_count)
             _bio_m5.metric("📊 Trial Results", _bio_trial_count)
+
+            # ── Sektor-Trend: Healthcare / Biotech ──
+            try:
+                _bio_poly = st.secrets.get("POLYGON_KEY", "")
+                if _bio_poly:
+                    _bio_perf = _fetch_sector_etf_performance(_bio_poly)
+                    if _bio_perf and "XLV" in _bio_perf:
+                        _xlv_chg = _bio_perf["XLV"]
+                        if _xlv_chg > 1.5:
+                            st.success(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Starker Rückenwind für Biotech")
+                        elif _xlv_chg > 0.3:
+                            st.info(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Leichter Rückenwind")
+                        elif _xlv_chg < -1.5:
+                            st.error(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Starker Gegenwind für Biotech")
+                        elif _xlv_chg < -0.3:
+                            st.warning(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Leichter Gegenwind")
+                        else:
+                            st.caption(f"📊 Sektor-Trend: 🏥 Healthcare (XLV) {_xlv_chg:+.1f}% — Neutral")
+            except Exception:
+                pass
 
             st.divider()
 
