@@ -8033,9 +8033,11 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                     break
 
             # Negative Catalyst Check (mit Wortgrenzen) — VOR positivem Check
+            # NUR im Titel prüfen — in der Description stehen oft Referenzen
+            # (z.B. "fda approval" Artikel erwähnt auch "complete response" als Kontext)
             _is_negative_article = False
             for neg_kw, penalty in BIOTECH_NEGATIVE_CATALYSTS.items():
-                if re.search(r'\b' + re.escape(neg_kw) + r'\b', combined):
+                if re.search(r'\b' + re.escape(neg_kw) + r'\b', title):
                     negative_flags.append({"flag": neg_kw, "penalty": penalty, "date": pub_date})
                     _is_negative_article = True
 
@@ -8115,7 +8117,7 @@ def _check_clinical_trials(company_name, ticker):
             "format": "json",
             "fields": "NCTId,BriefTitle,Phase,OverallStatus,StartDate,Condition",
         }
-        resp = requests.get(url, params=params, timeout=8)
+        resp = rate_limited_get(url, params=params, timeout=8)
         if resp.status_code != 200:
             return {"pipeline_score": 0, "trials": [], "phase_summary": {}}
 
@@ -8622,9 +8624,10 @@ def _biotech_quick_scan(poly_key):
                     continue
 
                 # Bestehende Daten wiederverwenden wenn vorhanden
-                old = existing_map.get(ticker, {})
+                old = existing_map.get(ticker)
 
                 if old:
+                    old = dict(old)  # Copy um Original nicht zu mutieren
                     # Update nur News-bezogene Felder, behalte Rest
                     old["Catalyst_Score"] = catalyst_score
                     old["Momentum_Score"] = momentum_score
@@ -23232,8 +23235,13 @@ with tab_bi:
                 bi_auto_reason = f"Auto-{wname} ({wmin // 60:02d}:{wmin % 60:02d} CET)"
                 break
         if not bi_should_auto:
-            bi_should_auto = True
-            bi_auto_reason = "Cache abgelaufen — Markt offen"
+            # Nur auto-triggern wenn letzter Scan nicht gerade eben fertig wurde
+            _bi_last_done = bi_progress
+            _bi_recently_done = (_bi_last_done and _bi_last_done.get("status") == "done"
+                                 and time.time() - _bi_last_done.get("timestamp", 0) < 120)
+            if not _bi_recently_done:
+                bi_should_auto = True
+                bi_auto_reason = "Cache abgelaufen — Markt offen"
 
     # ── FALL 1: Scan läuft ──
     if bi_running and bi_progress:
@@ -23866,8 +23874,7 @@ with tab_biotech:
                 </script>
                 </div>
                 '''
-                import streamlit.components.v1 as components
-                components.html(_bio_tv_html, height=420)
+                st.components.v1.html(_bio_tv_html, height=420)
 
     else:
         # Kein Cache — Willkommens-Seite
@@ -23893,7 +23900,7 @@ with tab_biotech:
         Market Cap, Float, Penny Stock Check, negative Signale (Clinical Hold, Offerings, etc.)
 
         ---
-        **Drücke "🧬 Biotech Scan starten" um zu beginnen!**
+        **Drücke "🔬 Full Scan" um zu beginnen!**
         """)
 
 
