@@ -8372,6 +8372,8 @@ def _biotech_technical_score(poly_key, ticker):
                 details["drawdown"] = "⚠️ −{:.0f}% vom High".format(drawdown_pct)
             elif drawdown_pct <= 5:
                 details["drawdown"] = "✅ Nahe Highs"
+            else:
+                details["drawdown"] = "📊 Normaler Pullback (−{:.0f}%)".format(drawdown_pct)
 
         # B) Trend
         if details.get("trend", "").startswith("📉"):
@@ -8894,6 +8896,7 @@ def _biotech_quick_scan(poly_key):
                             "Preis": 0, "MCap_M": 0, "Shares_M": 0, "RVOL": 0, "Float_Cat": "UNKNOWN",
                             "Headline": news_data.get("best_catalyst", {}).get("headline", ""),
                             "Phase3": 0, "Phase2": 0, "Phase1": 0, "Active_Trials": 0,
+                            "Chart": "⚪ Neu", "Chart_Health": 5, "Drawdown": 0, "Selloff_Reason": "",
                             "Trials": [], "News": news_data.get("news", [])[:5],
                             "Negative_Flags": news_data.get("negative_flags", []),
                             "Risk_Details": [], "Tech_Details": {},
@@ -24074,7 +24077,7 @@ with tab_biotech:
                 _bio_bc3.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
                 _bio_bc4.metric("🎰 Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
                 _bio_bc5.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
-                _bio_bc6.metric("📊 Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}%" if _bio_dd >= 10 else None, delta_color="inverse", help="Chart Health: 10=perfekt, 0=Crash")
+                _bio_bc6.metric("📊 Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}% vom High" if _bio_dd >= 10 else None, delta_color="normal", help="Chart Health: 10=perfekt, 0=Crash. Delta = Drawdown vom 90-Tage-High.")
 
                 st.divider()
 
