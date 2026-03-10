@@ -7804,6 +7804,36 @@ BIOTECH_NEGATIVE_CATALYSTS = {
 }
 
 
+_BIOTECH_CONFIG_FILE = "/tmp/alpha_biotech_config.json"
+
+_BIOTECH_DEFAULT_CONFIG = {
+    "auto_scan": True,
+    "quick_interval_h": 2,
+    "full_interval_h": 6,
+    "min_score": 20,
+}
+
+def _biotech_config_load():
+    """Lädt persistente Biotech Scanner Einstellungen."""
+    try:
+        with open(_BIOTECH_CONFIG_FILE, "r") as f:
+            saved = json.load(f)
+        # Merge mit Defaults (falls neue Keys hinzukommen)
+        config = dict(_BIOTECH_DEFAULT_CONFIG)
+        config.update(saved)
+        return config
+    except Exception:
+        return dict(_BIOTECH_DEFAULT_CONFIG)
+
+def _biotech_config_save(config):
+    """Speichert Biotech Scanner Einstellungen persistent."""
+    try:
+        with open(_BIOTECH_CONFIG_FILE, "w") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
+
+
 def _biotech_progress_file():
     return "/tmp/alpha_biotech_progress.json"
 
@@ -23422,23 +23452,34 @@ with tab_biotech:
     st.subheader("🧬 Biotech Scanner — FDA Catalysts & Pipeline Tracker")
     st.caption("Scannt Biotech/Pharma-Aktien nach FDA-Events, Clinical Trial Ergebnissen und Pipeline-Katalysatoren")
 
+    # ── Settings aus Config laden ──
+    _bio_cfg = _biotech_config_load()
+
     # ── Settings Expander ──
     with st.expander("⚙️ Einstellungen", expanded=False):
         _bio_col1, _bio_col2, _bio_col3 = st.columns(3)
         with _bio_col1:
-            _bio_min_score = st.slider("Min. Score", min_value=0, max_value=50, value=20, key="bio_min_score")
-            _bio_auto_scan = st.toggle("🔄 Auto-Scan", value=True, key="bio_auto_scan",
+            _bio_min_score = st.slider("Min. Score", min_value=0, max_value=50,
+                                        value=_bio_cfg.get("min_score", 20), key="bio_min_score")
+            _bio_auto_scan = st.toggle("🔄 Auto-Scan",
+                                       value=_bio_cfg.get("auto_scan", True), key="bio_auto_scan",
                                        help="Automatischer Scan im Intervall")
         with _bio_col2:
+            _quick_options = [1, 2, 3, 4]
+            _quick_default = _bio_cfg.get("quick_interval_h", 2)
+            _quick_idx = _quick_options.index(_quick_default) if _quick_default in _quick_options else 1
             _bio_quick_interval = st.selectbox("⚡ Quick Scan Intervall",
-                                                options=[1, 2, 3, 4],
-                                                index=1,  # Default: 2h
+                                                options=_quick_options,
+                                                index=_quick_idx,
                                                 format_func=lambda x: f"Alle {x}h",
                                                 key="bio_quick_interval",
                                                 help="Quick Scan = nur News updaten (schnell, ~2-3 Min)")
+            _full_options = [4, 6, 8, 12]
+            _full_default = _bio_cfg.get("full_interval_h", 6)
+            _full_idx = _full_options.index(_full_default) if _full_default in _full_options else 1
             _bio_full_interval = st.selectbox("🔬 Full Scan Intervall",
-                                               options=[4, 6, 8, 12],
-                                               index=1,  # Default: 6h
+                                               options=_full_options,
+                                               index=_full_idx,
                                                format_func=lambda x: f"Alle {x}h",
                                                key="bio_full_interval",
                                                help="Full Scan = Universum + News + Pipeline + Technik (langsam, ~15-20 Min)")
@@ -23452,6 +23493,16 @@ with tab_biotech:
 
             FDA-News kommen **jederzeit** — Pre-Market, Regular, After-Hours.
             """)
+
+        # ── Einstellungen speichern wenn geändert ──
+        _bio_new_cfg = {
+            "auto_scan": _bio_auto_scan,
+            "quick_interval_h": _bio_quick_interval,
+            "full_interval_h": _bio_full_interval,
+            "min_score": _bio_min_score,
+        }
+        if _bio_new_cfg != _bio_cfg:
+            _biotech_config_save(_bio_new_cfg)
 
     # ── Auto-Scan Logik (Intervall-basiert) ──
     _bio_auto_triggered = False
