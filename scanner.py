@@ -15237,7 +15237,7 @@ def _render_pm_item(item, direction="long"):
             st.markdown(
                 f"## {item['Ticker']} "
                 f"<span style='background:{score_color};color:white;padding:2px 8px;border-radius:12px;"
-                f"font-size:16px;font-weight:bold;vertical-align:middle;'>{pm_score}</span>",
+                f"font-size:16px;font-weight:bold;vertical-align:middle;'>Setup {pm_score}/100</span>",
                 unsafe_allow_html=True
             )
             
@@ -15312,7 +15312,8 @@ def _render_pm_item(item, direction="long"):
             else:
                 filled = 10 - int(pos/10)
                 pos_bar = "⬜" * int(pos/10) + "🟥" * filled
-            st.caption(f"Position: {pos_bar} {pos:.0f}%")
+            st.caption(f"Range-Pos: {pos_bar} {pos:.0f}%")
+            st.caption("↑ Preis in PM-Range (High/Low)", help="Zeigt wo der aktuelle Preis innerhalb der PreMarket-Spanne liegt. 100% = am PM-High. Nicht mit dem Setup-Score verwechseln!")
         
         # ── WARNINGS — Sofort sichtbare Probleme ──
         warnings_list = item.get("PM_Breakdown", {}).get("warnings", [])
@@ -15495,7 +15496,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                 df[available_cols],
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker"),
-                    "PM_Score": st.column_config.ProgressColumn("Score", format="%d", min_value=0, max_value=100),
+                    "PM_Score": st.column_config.ProgressColumn("Setup Score", format="%d", min_value=0, max_value=100),
                     "PM_Confidence": st.column_config.TextColumn("Conf.", help="🟢HIGH 🟡MED 🟠LOW 🔴AVOID"),
                     "PM_Chg%": st.column_config.NumberColumn("PM Chg%", format="%.1f%%"),
                     "PM_Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
