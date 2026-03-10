@@ -8337,7 +8337,7 @@ def _biotech_technical_score(poly_key, ticker):
             else:
                 details["consolidation"] = "🌊 Weit gespreizt"
 
-        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts)
+        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts / min -4 pts)
         if len(closes) >= 50:
             sma20 = sum(closes[-20:]) / 20
             sma50 = sum(closes[-50:]) / 50
@@ -8347,15 +8347,47 @@ def _biotech_technical_score(poly_key, ticker):
             elif sma20 > sma50 * 0.97:
                 tech_score += 1
                 details["trend"] = "➡️ Seitwärts"
+            elif sma20 > sma50 * 0.93:
+                tech_score -= 2  # Leichter Abwärtstrend
+                details["trend"] = "📉 Abwärtstrend (−2)"
             else:
-                details["trend"] = "📉 Abwärtstrend"
+                tech_score -= 4  # Starker Abwärtstrend
+                details["trend"] = "📉 Starker Abwärtstrend (−4)"
+
+        # 6. Drawdown vom 90d-High — Penalty wenn zu weit gefallen (min -6 pts)
+        if range_90d > 0:
+            drawdown_pct = (high_90d - current_price) / high_90d * 100
+            details["drawdown%"] = round(drawdown_pct, 1)
+            if drawdown_pct >= 30:
+                tech_score -= 6
+                details["drawdown"] = "💀 Crash (−6)"
+            elif drawdown_pct >= 20:
+                tech_score -= 4
+                details["drawdown"] = "🔴 Starker Abverkauf (−4)"
+            elif drawdown_pct >= 15:
+                tech_score -= 2
+                details["drawdown"] = "⚠️ Signifikanter Rückgang (−2)"
+            elif drawdown_pct <= 5:
+                details["drawdown"] = "✅ Nahe Highs"
+            else:
+                details["drawdown"] = "📊 Normaler Pullback"
+
+        # 7. Bearish Price Action — mehrheitlich rote Kerzen letzte 5 Tage (min -3 pts)
+        if len(closes) >= 6:
+            red_days = sum(1 for i in range(-5, 0) if closes[i] < closes[i-1])
+            if red_days >= 4:
+                tech_score -= 3
+                details["recent_action"] = f"🔴 {red_days}/5 rote Tage (−3)"
+            elif red_days >= 3:
+                tech_score -= 1
+                details["recent_action"] = f"⚠️ {red_days}/5 rote Tage (−1)"
 
         details["price"] = current_price
         details["avg_vol"] = int(avg_vol_20)
         details["high_90d"] = high_90d
         details["low_90d"] = low_90d
 
-        return {"technical_score": min(20, tech_score), "details": details}
+        return {"technical_score": max(-10, min(20, tech_score)), "details": details}
     except Exception:
         return {"technical_score": 0, "details": {}}
 
