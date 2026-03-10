@@ -13339,10 +13339,22 @@ def fetch_crypto_data():
         coins = all_coins
         if not coins:
             return [], 0, 0
-        
+
+        # ── BTC Benchmark extrahieren (für Relative Stärke) ──
+        btc_change_24h = 0
+        btc_change_7d = 0
+        for _c in coins:
+            if _c.get("symbol", "").lower() == "btc" or _c.get("id", "") == "bitcoin":
+                btc_change_24h = _c.get("price_change_percentage_24h") or 0
+                btc_change_7d = (
+                    _c.get("price_change_percentage_7d_in_currency") or
+                    _c.get("price_change_percentage_7d") or 0
+                )
+                break
+
         f = st.session_state.active_filters
         af = st.session_state.additional_filters
-        
+
         for coin in coins:
             try:
                 price = coin.get("current_price") or 0
@@ -13591,18 +13603,34 @@ def fetch_crypto_data():
                     elif bh_score < 70 or bh_selloff == "MEDIUM":
                         setup_score = max(0, setup_score - 5)
                 
+                # BTC Relative Stärke
+                rel_strength_24h = round(change_24h - btc_change_24h, 2)
+                # Korrelations-Label
+                if abs(change_24h - btc_change_24h) <= 2.0:
+                    btc_corr_label = "🔗 BTC-korreliert"
+                elif change_24h > btc_change_24h + 5.0:
+                    btc_corr_label = "💪 Outperformer"
+                elif change_24h < btc_change_24h - 5.0:
+                    btc_corr_label = "⚠️ Underperformer"
+                elif change_24h > btc_change_24h + 2.0:
+                    btc_corr_label = "📈 Rel. stark"
+                elif change_24h < btc_change_24h - 2.0:
+                    btc_corr_label = "📉 Rel. schwach"
+                else:
+                    btc_corr_label = "↔️ Neutral"
+
                 results.append({
-                    "Ticker": ticker, 
+                    "Ticker": ticker,
                     "Name": coin.get("name", "")[:15],
-                    "Preis": round(price, 6), 
+                    "Preis": round(price, 6),
                     "Chg%": round(change_24h, 2),
-                    "RVOL": rvol, 
+                    "RVOL": rvol,
                     "Vortag%": round(vortag_chg, 2),
-                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5, 
+                    "ClosePos": round(close_pos, 2) if close_pos is not None else 0.5,
                     "Alpha": alpha,
                     "UpperWick%": round(upper_wick_pct, 1),
                     "LowerWick%": round(lower_wick_pct, 1),
-                    "Gap%": 0,  # Immer 0 bei Krypto (keine echten Gaps)
+                    "Gap%": 0,
                     "FlagScore": flag_score,
                     "FlagDetails": flag_details,
                     "High": high_24h,
@@ -13610,6 +13638,9 @@ def fetch_crypto_data():
                     "PrevClose": prev_close_approx,
                     "BreakoutHealth": breakout_health,
                     "SetupScore": setup_score,
+                    "BTC_Chg%": round(btc_change_24h, 2),
+                    "RelStrength": rel_strength_24h,
+                    "BTC_Label": btc_corr_label,
                 })
             except Exception as e:
                 continue
@@ -21621,7 +21652,37 @@ with tab_scanner:
                                             st.caption(f"{icon} {cat['emoji']} **{cat['name']}**: {cat['value']}")
                     except Exception:
                         pass
-                
+
+                # =====================================================================
+                # ₿ BTC KONTEXT — Relative Stärke vs Bitcoin (nur Krypto)
+                # =====================================================================
+                if st.session_state.market_type == "Krypto":
+                    btc_chg = row.get("BTC_Chg%", None)
+                    rel_str = row.get("RelStrength", None)
+                    btc_label = row.get("BTC_Label", "")
+                    coin_chg = row.get("Chg%", 0)
+
+                    if btc_chg is not None:
+                        st.divider()
+                        btc_c1, btc_c2, btc_c3 = st.columns(3)
+                        with btc_c1:
+                            btc_color = "normal" if abs(btc_chg) < 2 else ("off" if btc_chg < 0 else "normal")
+                            st.metric("₿ Bitcoin 24h", f"{btc_chg:+.1f}%")
+                        with btc_c2:
+                            st.metric("Rel. Stärke vs BTC", f"{rel_str:+.1f}%" if rel_str is not None else "N/A")
+                        with btc_c3:
+                            st.metric("Signal", btc_label)
+
+                        # Interpretation
+                        if abs(coin_chg - btc_chg) <= 2.0:
+                            st.warning(f"🔗 **Nur BTC-Korrelation!** Coin bewegt sich ≈ gleich wie BTC ({btc_chg:+.1f}%). Kein eigenständiger Breakout — warte auf Entkopplung.")
+                        elif rel_str and rel_str > 5.0:
+                            st.success(f"💪 **Starke relative Stärke!** Coin outperformt BTC um {rel_str:+.1f}% — eigenständiger Move, echtes Signal.")
+                        elif rel_str and rel_str < -5.0:
+                            st.error(f"⚠️ **Relative Schwäche!** Coin underperformt BTC um {rel_str:+.1f}% — trotz BTC-Stärke schwach.")
+                        elif rel_str and rel_str > 2.0:
+                            st.info(f"📈 **Leicht relativ stark** vs BTC (+{rel_str:.1f}%) — gutes Zeichen, aber noch keine klare Entkopplung.")
+
                 # ACTION BUTTONS ROW
                 _btn_cols = st.columns(3)
                 with _btn_cols[0]:
