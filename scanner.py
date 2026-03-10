@@ -7724,6 +7724,733 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _bi_progress_write(direction, "error", detail=f"Fehler: {str(e)[:100]}")
 
 
+# =====================================================
+# 🧬 BIOTECH SCANNER — FDA Catalysts & Pipeline Tracker
+# =====================================================
+
+# Biotech SIC Codes (Pharmaceutical & Biotech Manufacturing)
+BIOTECH_SIC_CODES = {
+    "2833", "2834", "2835", "2836",  # Pharma / Biotech Manufacturing
+    "2831",  # Biological Products
+    "3841", "3842",  # Medical Instruments & Devices
+    "8731", "8734",  # R&D / Testing Labs
+}
+
+# Keywords zum Erkennen von Biotech-Aktien (wenn SIC fehlt)
+BIOTECH_NAME_KEYWORDS = [
+    "pharma", "therapeutics", "biosciences", "biotech", "biopharma",
+    "oncology", "genomics", "immuno", "medical", "diagnostics",
+    "gene therapy", "cell therapy", "biologics", "vaccine", "antibody",
+    "rna", "mrna", "crispr", "peptide", "neuro", "cardio",
+]
+
+# FDA / Catalyst Keywords für News-Scanning
+FDA_CATALYST_KEYWORDS = {
+    # Höchste Priorität — direkte FDA Events
+    "tier1": {
+        "keywords": ["fda approval", "fda approved", "pdufa", "nda accepted", "bla accepted",
+                     "fda clearance", "breakthrough therapy", "fast track", "priority review",
+                     "accelerated approval", "orphan drug", "emergency use", "eua granted",
+                     "complete response letter", "crl", "adcom", "advisory committee",
+                     "fda decision", "fda action date"],
+        "score": 30,
+        "label": "🎯 FDA Event"
+    },
+    # Hohe Priorität — Clinical Trial Milestones
+    "tier2": {
+        "keywords": ["phase 3 results", "phase 3 data", "phase iii", "pivotal trial",
+                     "primary endpoint met", "primary endpoint", "topline results", "topline data",
+                     "positive results", "statistically significant", "overall survival",
+                     "progression-free survival", "complete remission", "phase 2 results",
+                     "phase ii data", "late-breaking", "interim analysis", "interim data"],
+        "score": 22,
+        "label": "📊 Trial Results"
+    },
+    # Mittlere Priorität — Pipeline & Partnership
+    "tier3": {
+        "keywords": ["licensing agreement", "partnership", "collaboration", "acquisition target",
+                     "buyout", "merger", "ind filed", "ind accepted", "clinical trial initiation",
+                     "patient enrollment", "first patient dosed", "dosing initiated",
+                     "expanded access", "compassionate use", "label expansion"],
+        "score": 15,
+        "label": "🤝 Deal/Pipeline"
+    },
+    # Niedrige Priorität — Allgemeine Pipeline Signals
+    "tier4": {
+        "keywords": ["preclinical", "phase 1", "phase i", "proof of concept",
+                     "patent granted", "patent filed", "ip protection", "data presentation",
+                     "conference presentation", "manuscript published", "peer review"],
+        "score": 8,
+        "label": "🔬 Early Pipeline"
+    },
+}
+
+# Negative Biotech Katalysatoren — Score-Abzug
+BIOTECH_NEGATIVE_CATALYSTS = {
+    "clinical hold": -25,
+    "fda rejection": -30,
+    "complete response": -20,
+    "trial failure": -25,
+    "missed endpoint": -25,
+    "adverse events": -15,
+    "safety concern": -15,
+    "stock offering": -10,
+    "dilution": -10,
+    "shelf registration": -8,
+    "going concern": -20,
+    "delisting": -25,
+    "sec investigation": -15,
+}
+
+
+def _biotech_progress_file():
+    return "/tmp/alpha_biotech_progress.json"
+
+def _biotech_progress_write(status, **kwargs):
+    try:
+        data = {"status": status, "timestamp": time.time()}
+        data.update(kwargs)
+        with open(_biotech_progress_file(), "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+def _biotech_progress_read():
+    try:
+        with open(_biotech_progress_file(), "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _biotech_cache_file():
+    return "/tmp/alpha_biotech_cache.json"
+
+def _biotech_cache_save(results):
+    try:
+        with open(_biotech_cache_file(), "w") as f:
+            json.dump({"results": results, "timestamp": time.time()}, f, default=str)
+    except Exception:
+        pass
+
+def _biotech_cache_load(max_age_hours=2):
+    try:
+        with open(_biotech_cache_file(), "r") as f:
+            data = json.load(f)
+        if time.time() - data.get("timestamp", 0) > max_age_hours * 3600:
+            return None
+        return data.get("results", [])
+    except Exception:
+        return None
+
+
+def _is_biotech_stock(ticker_details):
+    """Prüft ob ein Ticker ein Biotech/Pharma-Unternehmen ist."""
+    sic = str(ticker_details.get("sic_code", ""))
+    if sic in BIOTECH_SIC_CODES:
+        return True
+    name = (ticker_details.get("name", "") or "").lower()
+    desc = (ticker_details.get("description", "") or "").lower()
+    combined = name + " " + desc
+    return any(kw in combined for kw in BIOTECH_NAME_KEYWORDS)
+
+
+def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50, max_mcap_m=50000):
+    """
+    Scannt Polygon Ticker-Datenbank nach Biotech/Pharma Aktien.
+    Nutzt SIC-Codes + Name-Keywords für breite Erkennung.
+    """
+    biotech_tickers = []
+
+    # Methode 1: SIC-Code basiert (präziser)
+    for sic in ["2833", "2834", "2835", "2836", "2831"]:
+        try:
+            url = "https://api.polygon.io/v3/reference/tickers"
+            params = {
+                "apiKey": poly_key,
+                "market": "stocks",
+                "active": "true",
+                "sic_code": sic,
+                "limit": 250,
+            }
+            resp = rate_limited_get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                for r in results:
+                    ticker = r.get("ticker", "")
+                    if ticker and ticker not in [t["ticker"] for t in biotech_tickers]:
+                        biotech_tickers.append({
+                            "ticker": ticker,
+                            "name": r.get("name", ""),
+                            "market_cap": r.get("market_cap", 0),
+                            "sic_code": sic,
+                            "primary_exchange": r.get("primary_exchange", ""),
+                            "source": "SIC"
+                        })
+        except Exception:
+            continue
+
+    # Methode 2: Keyword-basiert für Tickers die keinen SIC haben
+    for keyword in ["biotech", "therapeutics", "pharma", "oncology", "genomics"]:
+        try:
+            url = "https://api.polygon.io/v3/reference/tickers"
+            params = {
+                "apiKey": poly_key,
+                "market": "stocks",
+                "active": "true",
+                "search": keyword,
+                "limit": 100,
+            }
+            resp = rate_limited_get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                existing = {t["ticker"] for t in biotech_tickers}
+                for r in results:
+                    ticker = r.get("ticker", "")
+                    name = (r.get("name", "") or "").lower()
+                    if ticker and ticker not in existing:
+                        if any(kw in name for kw in BIOTECH_NAME_KEYWORDS):
+                            biotech_tickers.append({
+                                "ticker": ticker,
+                                "name": r.get("name", ""),
+                                "market_cap": r.get("market_cap", 0),
+                                "sic_code": r.get("sic_code", ""),
+                                "primary_exchange": r.get("primary_exchange", ""),
+                                "source": "Keyword"
+                            })
+        except Exception:
+            continue
+
+    return biotech_tickers
+
+
+def _scan_biotech_news(poly_key, ticker, limit=5):
+    """
+    Scannt News für einen Biotech-Ticker nach FDA/Pipeline Katalysatoren.
+    Returns: dict mit catalyst_score, catalysts list, news items
+    """
+    try:
+        url = "https://api.polygon.io/v2/reference/news"
+        resp = rate_limited_get(url, params={
+            "ticker": ticker, "limit": limit, "order": "desc",
+            "sort": "published_utc", "apiKey": poly_key
+        }, timeout=5)
+
+        if resp.status_code != 200:
+            return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
+
+        articles = resp.json().get("results", [])
+        catalyst_score = 0
+        catalysts = []
+        negative_flags = []
+        news_items = []
+        best_tier = None
+
+        for article in articles[:limit]:
+            title = (article.get("title", "") or "").lower()
+            desc = (article.get("description", "") or "").lower()
+            combined = title + " " + desc
+            pub_date = (article.get("published_utc", "") or "")[:10]
+
+            # Sentiment
+            sentiment = "neutral"
+            for insight in article.get("insights", []):
+                if insight.get("ticker") == ticker:
+                    sentiment = insight.get("sentiment", "neutral")
+                    break
+
+            # Negative Catalyst Check
+            for neg_kw, penalty in BIOTECH_NEGATIVE_CATALYSTS.items():
+                if neg_kw in combined:
+                    negative_flags.append({"flag": neg_kw, "penalty": penalty, "date": pub_date})
+
+            # Positive Catalyst Detection (Tier-basiert)
+            article_catalysts = []
+            for tier_name, tier_data in FDA_CATALYST_KEYWORDS.items():
+                for kw in tier_data["keywords"]:
+                    if kw in combined:
+                        cat = {
+                            "keyword": kw,
+                            "tier": tier_name,
+                            "score": tier_data["score"],
+                            "label": tier_data["label"],
+                            "date": pub_date,
+                            "headline": article.get("title", "")[:100]
+                        }
+                        article_catalysts.append(cat)
+                        if best_tier is None or tier_data["score"] > best_tier:
+                            best_tier = tier_data["score"]
+                        break  # Nur höchster Tier pro Artikel
+                if article_catalysts:
+                    break
+
+            catalysts.extend(article_catalysts)
+
+            news_items.append({
+                "title": article.get("title", "")[:100],
+                "published": pub_date,
+                "sentiment": sentiment,
+                "catalyst": article_catalysts[0]["label"] if article_catalysts else None,
+                "url": article.get("article_url", ""),
+            })
+
+        # Score = bester Catalyst (nicht kumulativ, sonst zu viele Punkte)
+        if catalysts:
+            catalyst_score = max(c["score"] for c in catalysts)
+
+        # Negative Flags abziehen
+        for nf in negative_flags:
+            catalyst_score += nf["penalty"]
+
+        catalyst_score = max(0, min(30, catalyst_score))
+
+        return {
+            "catalyst_score": catalyst_score,
+            "catalysts": catalysts,
+            "news": news_items,
+            "negative_flags": negative_flags,
+            "best_catalyst": catalysts[0] if catalysts else None,
+        }
+    except Exception:
+        return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
+
+
+def _check_clinical_trials(company_name, ticker):
+    """
+    Prüft ClinicalTrials.gov API nach aktiven Studien.
+    Returns: dict mit pipeline_score, trials info
+    """
+    try:
+        # Suche nach Company Name (besser als Ticker)
+        search_term = company_name.split(" ")[0] if company_name else ticker
+        url = "https://clinicaltrials.gov/api/v2/studies"
+        params = {
+            "query.spons": search_term,
+            "filter.overallStatus": "RECRUITING,ACTIVE_NOT_RECRUITING,ENROLLING_BY_INVITATION,NOT_YET_RECRUITING",
+            "pageSize": 20,
+            "format": "json",
+            "fields": "NCTId,BriefTitle,Phase,OverallStatus,StartDate,Condition",
+        }
+        resp = requests.get(url, params=params, timeout=8)
+        if resp.status_code != 200:
+            return {"pipeline_score": 0, "trials": [], "phase_summary": {}}
+
+        studies = resp.json().get("studies", [])
+
+        phase_counts = {"PHASE3": 0, "PHASE2": 0, "PHASE1": 0, "EARLY_PHASE1": 0, "PHASE4": 0, "NA": 0}
+        trials = []
+
+        for study in studies:
+            proto = study.get("protocolSection", {})
+            ident = proto.get("identificationModule", {})
+            status_mod = proto.get("statusModule", {})
+            design = proto.get("designModule", {})
+            cond_mod = proto.get("conditionsModule", {})
+
+            nct_id = ident.get("nctId", "")
+            title = ident.get("briefTitle", "")[:80]
+            phases = design.get("phases", [])
+            status = status_mod.get("overallStatus", "")
+            conditions = cond_mod.get("conditions", [])
+
+            phase_label = phases[0] if phases else "NA"
+            phase_key = phase_label.replace(" ", "").upper()
+            if phase_key in phase_counts:
+                phase_counts[phase_key] += 1
+
+            trials.append({
+                "nct_id": nct_id,
+                "title": title,
+                "phase": phase_label,
+                "status": status,
+                "conditions": conditions[:3],
+            })
+
+        # Pipeline Score (max 20)
+        pipeline_score = 0
+        pipeline_score += min(phase_counts["PHASE3"] * 8, 16)   # Phase 3 = Gold
+        pipeline_score += min(phase_counts["PHASE2"] * 3, 9)    # Phase 2 = gut
+        pipeline_score += min(phase_counts["PHASE1"] * 1, 3)    # Phase 1 = früh
+        pipeline_score = min(20, pipeline_score)
+
+        return {
+            "pipeline_score": pipeline_score,
+            "trials": trials[:10],
+            "phase_summary": phase_counts,
+            "total_active": len(studies),
+        }
+    except Exception:
+        return {"pipeline_score": 0, "trials": [], "phase_summary": {}, "total_active": 0}
+
+
+def _biotech_technical_score(poly_key, ticker):
+    """
+    Technische Analyse für Biotech: Unusual Volume, Akkumulation, Price Action.
+    Returns: dict mit technical_score (max 20), details
+    """
+    try:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=90)
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        resp = rate_limited_get(url, params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10)
+
+        if resp.status_code != 200:
+            return {"technical_score": 0, "details": {}}
+
+        bars = resp.json().get("results", [])
+        if not bars or len(bars) < 20:
+            return {"technical_score": 0, "details": {}}
+
+        tech_score = 0
+        details = {}
+
+        closes = [b["c"] for b in bars]
+        volumes = [b["v"] for b in bars]
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
+
+        current_price = closes[-1]
+        avg_vol_20 = sum(volumes[-20:]) / 20
+        avg_vol_50 = sum(volumes[-min(50, len(volumes)):]) / min(50, len(volumes))
+        last_vol = volumes[-1]
+
+        # 1. Unusual Volume (max 6 pts)
+        rvol = last_vol / max(1, avg_vol_20)
+        details["RVOL"] = round(rvol, 2)
+        if rvol >= 3.0:
+            tech_score += 6
+            details["vol_signal"] = "🔥 Extrem hohes Volumen"
+        elif rvol >= 2.0:
+            tech_score += 4
+            details["vol_signal"] = "📈 Hohes Volumen"
+        elif rvol >= 1.5:
+            tech_score += 2
+            details["vol_signal"] = "📊 Leicht erhöht"
+        else:
+            details["vol_signal"] = "😴 Normal"
+
+        # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
+        if len(volumes) >= 20:
+            vol_recent = sum(volumes[-5:]) / 5
+            vol_prior = sum(volumes[-20:-5]) / 15
+            vol_trend = vol_recent / max(1, vol_prior)
+            details["vol_trend"] = round(vol_trend, 2)
+            if vol_trend >= 2.0:
+                tech_score += 4
+            elif vol_trend >= 1.5:
+                tech_score += 3
+            elif vol_trend >= 1.2:
+                tech_score += 1
+
+        # 3. Price Position — nahe Highs = bullish (max 4 pts)
+        high_90d = max(highs)
+        low_90d = min(lows)
+        range_90d = high_90d - low_90d
+        if range_90d > 0:
+            pos_90d = (current_price - low_90d) / range_90d * 100
+            details["pos_90d"] = round(pos_90d, 1)
+            if pos_90d >= 80:
+                tech_score += 4
+            elif pos_90d >= 60:
+                tech_score += 2
+            elif pos_90d <= 20:
+                tech_score += 0  # Am Boden = könnte Value sein, aber riskant
+
+        # 4. Tight Range (Akkumulation) — niedrige Volatilität = Ruhe vor Sturm (max 3 pts)
+        if len(closes) >= 10:
+            recent_closes = closes[-10:]
+            range_10d = (max(recent_closes) - min(recent_closes)) / min(recent_closes) * 100
+            details["range_10d%"] = round(range_10d, 1)
+            if range_10d <= 5:
+                tech_score += 3
+                details["consolidation"] = "🎯 Tight Consolidation"
+            elif range_10d <= 10:
+                tech_score += 1
+                details["consolidation"] = "📦 Moderate Range"
+            else:
+                details["consolidation"] = "🌊 Weit gespreizt"
+
+        # 5. Trend Direction — EMA20 > EMA50 = Aufwärtstrend (max 3 pts)
+        if len(closes) >= 50:
+            ema20 = sum(closes[-20:]) / 20
+            ema50 = sum(closes[-50:]) / 50
+            if ema20 > ema50:
+                tech_score += 3
+                details["trend"] = "📈 Aufwärtstrend"
+            elif ema20 > ema50 * 0.97:
+                tech_score += 1
+                details["trend"] = "➡️ Seitwärts"
+            else:
+                details["trend"] = "📉 Abwärtstrend"
+
+        details["price"] = current_price
+        details["avg_vol"] = int(avg_vol_20)
+        details["high_90d"] = high_90d
+        details["low_90d"] = low_90d
+
+        return {"technical_score": min(20, tech_score), "details": details}
+    except Exception:
+        return {"technical_score": 0, "details": {}}
+
+
+def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
+    """
+    Risiko-Bewertung für Biotech (max 15 pts — höher = besser/sicherer).
+    """
+    risk_score = 0
+    risk_details = []
+
+    # Market Cap (max 5 pts) — zu klein = sehr riskant
+    if market_cap_m >= 2000:
+        risk_score += 5
+        risk_details.append("🏢 Mid/Large Cap (stabiler)")
+    elif market_cap_m >= 500:
+        risk_score += 4
+        risk_details.append("🏗️ Small Cap")
+    elif market_cap_m >= 100:
+        risk_score += 2
+        risk_details.append("⚠️ Micro Cap (hohes Risiko)")
+    else:
+        risk_score += 0
+        risk_details.append("🔴 Nano Cap (sehr hohes Risiko)")
+
+    # Price (max 3 pts) — Penny Stocks = riskant
+    if price >= 10:
+        risk_score += 3
+    elif price >= 5:
+        risk_score += 2
+    elif price >= 2:
+        risk_score += 1
+    else:
+        risk_details.append("💀 Penny Stock (<$2)")
+
+    # Float Size (max 3 pts) — Liquidität
+    if shares_m >= 50:
+        risk_score += 3
+    elif shares_m >= 20:
+        risk_score += 2
+        risk_details.append("🔥 Low Float (volatil)")
+    elif shares_m > 0:
+        risk_score += 1
+        risk_details.append("🔥🔥 Micro Float (extrem volatil)")
+
+    # Negative Catalysts Penalty (max -4 pts)
+    if negative_flags:
+        penalty = min(4, len(negative_flags) * 2)
+        risk_score = max(0, risk_score - penalty)
+        risk_details.append(f"⚠️ {len(negative_flags)} negative Signal(e)")
+
+    # Bonus: keine negativen Flags = sauberer (max 4 pts)
+    if not negative_flags:
+        risk_score += 4
+        risk_details.append("✅ Keine negativen Signale")
+    else:
+        risk_score += max(0, 4 - len(negative_flags))
+
+    return {"risk_score": min(15, risk_score), "risk_details": risk_details}
+
+
+def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_score, risk_score, news_momentum_score):
+    """
+    Berechnet den finalen Biotech Catalyst Score (0-100).
+    """
+    total = catalyst_score + pipeline_score + technical_score + risk_score + news_momentum_score
+    return min(100, max(0, total))
+
+
+def _biotech_news_momentum(news_items):
+    """
+    Bewertet News-Sentiment und -Momentum (max 15 pts).
+    """
+    if not news_items:
+        return {"momentum_score": 0, "sentiment_summary": "Keine News"}
+
+    pos = sum(1 for n in news_items if n.get("sentiment") == "positive")
+    neg = sum(1 for n in news_items if n.get("sentiment") == "negative")
+    total = len(news_items)
+
+    score = 0
+
+    # Sentiment Ratio (max 8 pts)
+    if total > 0:
+        pos_ratio = pos / total
+        if pos_ratio >= 0.8:
+            score += 8
+        elif pos_ratio >= 0.6:
+            score += 6
+        elif pos_ratio >= 0.4:
+            score += 4
+        elif neg / total >= 0.6:
+            score += 0
+        else:
+            score += 2
+
+    # News Frequency — mehr News = mehr Aufmerksamkeit (max 4 pts)
+    if total >= 5:
+        score += 4
+    elif total >= 3:
+        score += 3
+    elif total >= 2:
+        score += 2
+    elif total >= 1:
+        score += 1
+
+    # Catalyst in News (max 3 pts)
+    cat_count = sum(1 for n in news_items if n.get("catalyst"))
+    if cat_count >= 2:
+        score += 3
+    elif cat_count >= 1:
+        score += 2
+
+    sentiment_label = "🟢 Positiv" if pos > neg else "🔴 Negativ" if neg > pos else "⚪ Neutral"
+
+    return {
+        "momentum_score": min(15, score),
+        "sentiment_summary": f"{sentiment_label} ({pos}↑ / {neg}↓ / {total - pos - neg}→)",
+        "positive": pos,
+        "negative": neg,
+        "neutral": total - pos - neg,
+    }
+
+
+def _biotech_background_scan(poly_key):
+    """
+    Hintergrund-Scan: Findet alle Biotech-Aktien mit FDA-Katalysatoren.
+    Läuft als Thread — schreibt Progress in /tmp/.
+    """
+    try:
+        _biotech_progress_write("running", checked=0, total=0, hits=0, detail="Lade Biotech-Universum...")
+
+        # 1. Biotech Universum laden
+        universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50)
+        total = len(universe)
+        _biotech_progress_write("running", checked=0, total=total, hits=0,
+                                detail=f"{total} Biotech-Aktien gefunden, starte Scan...")
+
+        if total == 0:
+            _biotech_progress_write("done", checked=0, total=0, hits=0, detail="Keine Biotech-Aktien gefunden")
+            return
+
+        results = []
+        checked = 0
+
+        for stock in universe:
+            ticker = stock["ticker"]
+            checked += 1
+
+            if checked % 10 == 0:
+                _biotech_progress_write("running", checked=checked, total=total,
+                                        hits=len(results), detail=f"Analysiere {ticker}...")
+
+            try:
+                # A) News + Catalyst Scan
+                news_data = _scan_biotech_news(poly_key, ticker, limit=5)
+                catalyst_score = news_data["catalyst_score"]
+
+                # B) News Momentum
+                momentum_data = _biotech_news_momentum(news_data["news"])
+                momentum_score = momentum_data["momentum_score"]
+
+                # Quick Filter: Ohne Catalyst UND ohne News-Momentum → Skip
+                if catalyst_score == 0 and momentum_score <= 4:
+                    continue
+
+                # C) Ticker Details (MCap, Shares)
+                details = get_ticker_details(poly_key, ticker)
+
+                # D) Clinical Trials (nur wenn News-Catalyst gefunden)
+                trial_data = {"pipeline_score": 0, "trials": [], "phase_summary": {}, "total_active": 0}
+                if catalyst_score >= 8 or momentum_score >= 6:
+                    company_name = details.get("name", "") or stock.get("name", "")
+                    trial_data = _check_clinical_trials(company_name, ticker)
+
+                # E) Technical Score
+                tech_data = _biotech_technical_score(poly_key, ticker)
+
+                # F) Risk Score
+                risk_data = _biotech_risk_score(
+                    market_cap_m=details.get("market_cap_millions", 0),
+                    shares_m=details.get("shares_millions", 0),
+                    negative_flags=news_data.get("negative_flags", []),
+                    price=tech_data.get("details", {}).get("price", 0)
+                )
+
+                # G) Final Score
+                total_score = _calculate_biotech_catalyst_score(
+                    catalyst_score=catalyst_score,
+                    pipeline_score=trial_data["pipeline_score"],
+                    technical_score=tech_data["technical_score"],
+                    risk_score=risk_data["risk_score"],
+                    news_momentum_score=momentum_score
+                )
+
+                # Nur Ergebnisse mit Score >= 20 behalten
+                if total_score < 20:
+                    continue
+
+                # Grade
+                if total_score >= 75:
+                    grade = "A"
+                elif total_score >= 55:
+                    grade = "B"
+                elif total_score >= 35:
+                    grade = "C"
+                else:
+                    grade = "D"
+
+                # Best Catalyst Label
+                best_cat = news_data.get("best_catalyst")
+                catalyst_label = best_cat["label"] if best_cat else "🔬 Pipeline"
+                catalyst_headline = best_cat["headline"] if best_cat else ""
+
+                result = {
+                    "Ticker": ticker,
+                    "Name": (details.get("name", "") or stock.get("name", ""))[:30],
+                    "Score": total_score,
+                    "Grade": grade,
+                    "Catalyst": catalyst_label,
+                    "Catalyst_Score": catalyst_score,
+                    "Pipeline_Score": trial_data["pipeline_score"],
+                    "Technical_Score": tech_data["technical_score"],
+                    "Risk_Score": risk_data["risk_score"],
+                    "Momentum_Score": momentum_score,
+                    "Preis": tech_data.get("details", {}).get("price", 0),
+                    "MCap_M": details.get("market_cap_millions", 0),
+                    "Shares_M": details.get("shares_millions", 0),
+                    "RVOL": tech_data.get("details", {}).get("RVOL", 0),
+                    "Float_Cat": details.get("float_category", "UNKNOWN"),
+                    "Headline": catalyst_headline,
+                    "Phase3": trial_data["phase_summary"].get("PHASE3", 0),
+                    "Phase2": trial_data["phase_summary"].get("PHASE2", 0),
+                    "Phase1": trial_data["phase_summary"].get("PHASE1", 0),
+                    "Active_Trials": trial_data.get("total_active", 0),
+                    "Trials": trial_data.get("trials", [])[:5],
+                    "News": news_data.get("news", [])[:5],
+                    "Negative_Flags": news_data.get("negative_flags", []),
+                    "Risk_Details": risk_data.get("risk_details", []),
+                    "Tech_Details": tech_data.get("details", {}),
+                    "Sentiment": momentum_data.get("sentiment_summary", ""),
+                    "Catalysts_All": news_data.get("catalysts", []),
+                }
+                results.append(result)
+
+            except Exception:
+                continue
+
+        # Sortiere nach Score
+        results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+
+        # Cache speichern
+        _biotech_cache_save(results)
+
+        top_score = results[0]["Score"] if results else 0
+        _biotech_progress_write("done", checked=checked, total=total,
+                                hits=len(results), top_score=top_score,
+                                detail=f"{total} gescannt → {len(results)} mit Katalysator")
+
+    except Exception as e:
+        _biotech_progress_write("error", detail=f"Fehler: {str(e)[:150]}")
+
+
 def _watchlist_file():
     """Pfad zur Watchlist-Datei."""
     return "/tmp/alpha_station_watchlist.json"
@@ -20607,7 +21334,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
-tab_scanner, tab_bi, tab_search, tab_watchlist, tab_moneyflow, tab_backtest, tab_guide = st.tabs(["📊 Scanner", "🔮 BI Scanner", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "🧪 Backtest", "📖 Strategie Guide"])
+tab_scanner, tab_bi, tab_biotech, tab_search, tab_watchlist, tab_moneyflow, tab_backtest, tab_guide = st.tabs(["📊 Scanner", "🔮 BI Scanner", "🧬 Biotech", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "🧪 Backtest", "📖 Strategie Guide"])
 
 with tab_scanner:
     # PRE-MARKET WATCHLIST ANZEIGE (wenn aktiv)
@@ -22513,6 +23240,304 @@ with tab_bi:
             st.components.v1.html(bi_tv_html, height=500)
     else:
         st.info("Noch keine BI Ergebnisse. Scan starten oder auf Auto-Scan warten.")
+
+
+# -----------------------------------------------------------------------------
+# 🧬 BIOTECH TAB — FDA Catalyst Scanner
+# -----------------------------------------------------------------------------
+with tab_biotech:
+    st.subheader("🧬 Biotech Scanner — FDA Catalysts & Pipeline Tracker")
+    st.caption("Scannt Biotech/Pharma-Aktien nach FDA-Events, Clinical Trial Ergebnissen und Pipeline-Katalysatoren")
+
+    # ── Settings Expander ──
+    with st.expander("⚙️ Einstellungen", expanded=False):
+        _bio_col1, _bio_col2, _bio_col3 = st.columns(3)
+        with _bio_col1:
+            _bio_cache_ttl = st.number_input("Cache TTL (Stunden)", min_value=1, max_value=24, value=2, key="bio_cache_ttl")
+        with _bio_col2:
+            _bio_min_score = st.slider("Min. Score", min_value=0, max_value=50, value=20, key="bio_min_score")
+        with _bio_col3:
+            st.info("💡 Der Scan nutzt Polygon News API, ClinicalTrials.gov und technische Analyse")
+
+    # ── Scan Controls ──
+    _bio_col_a, _bio_col_b, _bio_col_c = st.columns([1, 1, 2])
+
+    with _bio_col_a:
+        _bio_scan_btn = st.button("🧬 Biotech Scan starten", use_container_width=True, type="primary")
+
+    with _bio_col_b:
+        _bio_cached = _biotech_cache_load(max_age_hours=_bio_cache_ttl)
+        if _bio_cached:
+            _bio_cache_age = (time.time() - os.path.getmtime(_biotech_cache_file())) / 60
+            st.caption(f"📦 Cache: {len(_bio_cached)} Ergebnisse ({_bio_cache_age:.0f} Min alt)")
+
+    # ── Start Scan ──
+    if _bio_scan_btn:
+        try:
+            _bio_poly_key = st.secrets.get("POLYGON_KEY", "")
+            if not _bio_poly_key:
+                st.error("❌ POLYGON_KEY fehlt in Secrets!")
+            else:
+                _bio_thread = threading.Thread(
+                    target=_biotech_background_scan,
+                    args=(_bio_poly_key,),
+                    daemon=True
+                )
+                _bio_thread.start()
+                st.toast("🧬 Biotech Scan gestartet...")
+                time.sleep(1)
+                st.rerun()
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+
+    # ── Progress Anzeige ──
+    _bio_prog = _biotech_progress_read()
+    if _bio_prog and _bio_prog.get("status") == "running":
+        _bp_checked = _bio_prog.get("checked", 0)
+        _bp_total = _bio_prog.get("total", 0)
+        _bp_hits = _bio_prog.get("hits", 0)
+        _bp_detail = _bio_prog.get("detail", "")
+        _bp_pct = _bp_checked / max(1, _bp_total)
+
+        st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
+
+        # Auto-Rerun für Live-Update
+        time.sleep(3)
+        st.rerun()
+
+    elif _bio_prog and _bio_prog.get("status") == "error":
+        st.error(f"❌ Scan Fehler: {_bio_prog.get('detail', 'Unbekannt')}")
+
+    elif _bio_prog and _bio_prog.get("status") == "done":
+        _bp_hits = _bio_prog.get("hits", 0)
+        _bp_total = _bio_prog.get("total", 0)
+        _bp_top = _bio_prog.get("top_score", 0)
+        st.success(f"✅ Scan fertig: {_bp_total} Biotech-Aktien → **{_bp_hits} mit Katalysator** (Top Score: {_bp_top})")
+
+    # ── Ergebnisse anzeigen ──
+    _bio_results = _bio_cached if _bio_cached else _biotech_cache_load(max_age_hours=24)
+
+    if _bio_results:
+        # Filter nach Min Score
+        _bio_filtered = [r for r in _bio_results if r.get("Score", 0) >= _bio_min_score]
+
+        if not _bio_filtered:
+            st.info("Keine Ergebnisse über dem Mindest-Score. Reduziere den Min. Score in den Einstellungen.")
+        else:
+            # ── Summary Metrics ──
+            _bio_m1, _bio_m2, _bio_m3, _bio_m4, _bio_m5 = st.columns(5)
+            _bio_grade_a = sum(1 for r in _bio_filtered if r.get("Grade") == "A")
+            _bio_grade_b = sum(1 for r in _bio_filtered if r.get("Grade") == "B")
+            _bio_fda_count = sum(1 for r in _bio_filtered if "FDA" in r.get("Catalyst", ""))
+            _bio_trial_count = sum(1 for r in _bio_filtered if "Trial" in r.get("Catalyst", "") or "Pipeline" in r.get("Catalyst", ""))
+
+            _bio_m1.metric("🧬 Treffer", len(_bio_filtered))
+            _bio_m2.metric("🅰️ Grade A", _bio_grade_a)
+            _bio_m3.metric("🅱️ Grade B", _bio_grade_b)
+            _bio_m4.metric("🎯 FDA Events", _bio_fda_count)
+            _bio_m5.metric("📊 Trial Results", _bio_trial_count)
+
+            st.divider()
+
+            # ── Dataframe ──
+            import pandas as pd
+            _bio_df = pd.DataFrame(_bio_filtered)
+            _bio_display_cols = ["Ticker", "Name", "Score", "Grade", "Catalyst", "Preis", "MCap_M", "RVOL",
+                                 "Phase3", "Phase2", "Active_Trials", "Sentiment", "Float_Cat"]
+            _bio_avail_cols = [c for c in _bio_display_cols if c in _bio_df.columns]
+
+            _bio_sel = st.dataframe(
+                _bio_df[_bio_avail_cols],
+                column_config={
+                    "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+                    "Name": st.column_config.TextColumn("Name", width="medium"),
+                    "Score": st.column_config.ProgressColumn("Catalyst Score", format="%d", min_value=0, max_value=100),
+                    "Grade": st.column_config.TextColumn("Grade", width="small"),
+                    "Catalyst": st.column_config.TextColumn("Katalysator", width="medium"),
+                    "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
+                    "MCap_M": st.column_config.NumberColumn("MCap (M$)", format="%.0f"),
+                    "RVOL": st.column_config.NumberColumn("RVOL", format="%.1f"),
+                    "Phase3": st.column_config.NumberColumn("Ph3", width="small"),
+                    "Phase2": st.column_config.NumberColumn("Ph2", width="small"),
+                    "Active_Trials": st.column_config.NumberColumn("Trials", width="small"),
+                    "Sentiment": st.column_config.TextColumn("Sentiment"),
+                    "Float_Cat": st.column_config.TextColumn("Float", width="small"),
+                },
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="biotech_table"
+            )
+
+            # ── Detail View bei Auswahl ──
+            _bio_selected_idx = None
+            if _bio_sel and _bio_sel.selection and _bio_sel.selection.rows:
+                _bio_selected_idx = _bio_sel.selection.rows[0]
+
+            if _bio_selected_idx is not None and 0 <= _bio_selected_idx < len(_bio_filtered):
+                _bio_item = _bio_filtered[_bio_selected_idx]
+                st.divider()
+
+                # Header
+                _bio_score = _bio_item.get("Score", 0)
+                _bio_score_color = "#22c55e" if _bio_score >= 75 else "#eab308" if _bio_score >= 55 else "#f97316" if _bio_score >= 35 else "#ef4444"
+                st.markdown(
+                    f"## 🧬 {_bio_item['Ticker']} — {_bio_item.get('Name', '')} "
+                    f"<span style='background:{_bio_score_color};color:white;padding:4px 12px;border-radius:12px;"
+                    f"font-size:18px;font-weight:bold;'>{_bio_item.get('Grade', '?')} ({_bio_score}/100)</span>",
+                    unsafe_allow_html=True
+                )
+
+                # Score Breakdown
+                _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5 = st.columns(5)
+                _bio_bc1.metric("🎯 Catalyst", f"{_bio_item.get('Catalyst_Score', 0)}/30", help="FDA/PDUFA Events, Approvals, Breakthrough")
+                _bio_bc2.metric("🔬 Pipeline", f"{_bio_item.get('Pipeline_Score', 0)}/20", help="Phase 3/2/1 Clinical Trials")
+                _bio_bc3.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
+                _bio_bc4.metric("🛡️ Risk", f"{_bio_item.get('Risk_Score', 0)}/15", help="MCap, Float, Negative Flags")
+                _bio_bc5.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
+
+                st.divider()
+
+                # ── Catalyst Details ──
+                _bio_dc1, _bio_dc2 = st.columns(2)
+
+                with _bio_dc1:
+                    st.markdown("### 🎯 Katalysator")
+                    _bio_cats = _bio_item.get("Catalysts_All", [])
+                    if _bio_cats:
+                        for cat in _bio_cats[:5]:
+                            _tier_color = {"tier1": "🔴", "tier2": "🟠", "tier3": "🟡", "tier4": "🟢"}.get(cat.get("tier"), "⚪")
+                            st.markdown(f"{_tier_color} **{cat.get('label', '')}**: {cat.get('keyword', '')} ({cat.get('date', '')})")
+                            if cat.get("headline"):
+                                st.caption(f"📰 {cat['headline']}")
+                    else:
+                        st.info("Kein direkter FDA-Catalyst gefunden — Signal basiert auf Pipeline/Momentum")
+
+                    # Headline
+                    if _bio_item.get("Headline"):
+                        st.markdown(f"**💡 Top Headline:** {_bio_item['Headline']}")
+
+                    # Negative Flags
+                    _neg_flags = _bio_item.get("Negative_Flags", [])
+                    if _neg_flags:
+                        st.markdown("#### ⚠️ Warnungen")
+                        for nf in _neg_flags:
+                            st.error(f"**{nf['flag'].upper()}** ({nf['date']}) — Penalty: {nf['penalty']} Punkte")
+
+                with _bio_dc2:
+                    st.markdown("### 🔬 Clinical Trials Pipeline")
+                    _bio_trials = _bio_item.get("Trials", [])
+                    if _bio_trials:
+                        _p3 = _bio_item.get("Phase3", 0)
+                        _p2 = _bio_item.get("Phase2", 0)
+                        _p1 = _bio_item.get("Phase1", 0)
+                        _at = _bio_item.get("Active_Trials", 0)
+                        st.markdown(f"**{_at} aktive Studien**: 🔴 {_p3} Phase 3 | 🟠 {_p2} Phase 2 | 🟢 {_p1} Phase 1")
+
+                        for trial in _bio_trials[:5]:
+                            phase = trial.get("phase", "?")
+                            phase_emoji = "🔴" if "3" in str(phase) else "🟠" if "2" in str(phase) else "🟢"
+                            conditions = ", ".join(trial.get("conditions", [])[:2])
+                            st.markdown(f"{phase_emoji} **{phase}** — {trial.get('title', '')}")
+                            if conditions:
+                                st.caption(f"Indikation: {conditions}")
+                    else:
+                        st.info("Keine aktiven Studien auf ClinicalTrials.gov gefunden")
+
+                # ── Technical Details & News ──
+                _bio_tc1, _bio_tc2 = st.columns(2)
+
+                with _bio_tc1:
+                    st.markdown("### 📈 Technische Analyse")
+                    _tech = _bio_item.get("Tech_Details", {})
+                    if _tech:
+                        _tc_cols = st.columns(3)
+                        _tc_cols[0].metric("💰 Preis", f"${_tech.get('price', 0):.2f}")
+                        _tc_cols[1].metric("📊 RVOL", f"{_tech.get('RVOL', 0):.1f}x")
+                        _tc_cols[2].metric("📉 90D Pos", f"{_tech.get('pos_90d', 0):.0f}%")
+
+                        if _tech.get("vol_signal"):
+                            st.caption(f"Volume: {_tech['vol_signal']}")
+                        if _tech.get("trend"):
+                            st.caption(f"Trend: {_tech['trend']}")
+                        if _tech.get("consolidation"):
+                            st.caption(f"Range: {_tech['consolidation']}")
+
+                    # Risk Details
+                    _risk_details = _bio_item.get("Risk_Details", [])
+                    if _risk_details:
+                        st.markdown("**🛡️ Risiko-Profil:**")
+                        for rd in _risk_details:
+                            st.caption(rd)
+
+                with _bio_tc2:
+                    st.markdown("### 📰 Aktuelle News")
+                    _bio_news = _bio_item.get("News", [])
+                    if _bio_news:
+                        for n in _bio_news[:5]:
+                            sent_emoji = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
+                            cat_badge = f" {n['catalyst']}" if n.get("catalyst") else ""
+                            st.markdown(f"{sent_emoji}{cat_badge} {n.get('title', '')} ({n.get('published', '')})")
+                    else:
+                        st.info("Keine aktuellen News verfügbar")
+
+                # ── TradingView Chart ──
+                st.divider()
+                _bio_ticker_tv = _bio_item["Ticker"]
+                _bio_tv_html = f'''
+                <div id="biotech-tv-widget" style="height:400px;">
+                <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+                <script type="text/javascript">
+                new TradingView.widget({{
+                    "autosize": true,
+                    "symbol": "{_bio_ticker_tv}",
+                    "interval": "D",
+                    "timezone": "Europe/Berlin",
+                    "theme": "dark",
+                    "style": "1",
+                    "locale": "de_DE",
+                    "toolbar_bg": "#1e1e1e",
+                    "enable_publishing": false,
+                    "hide_side_toolbar": false,
+                    "allow_symbol_change": true,
+                    "studies": ["Volume@tv-basicstudies", "MAExp@tv-basicstudies"],
+                    "container_id": "biotech-tv-widget",
+                    "height": "400",
+                    "width": "100%"
+                }});
+                </script>
+                </div>
+                '''
+                import streamlit.components.v1 as components
+                components.html(_bio_tv_html, height=420)
+
+    else:
+        # Kein Cache — Willkommens-Seite
+        st.markdown("---")
+        st.markdown("""
+        ### 🧬 Willkommen beim Biotech Scanner
+
+        Dieser Scanner analysiert **Biotech- und Pharma-Aktien** auf:
+
+        **🎯 FDA-Katalysatoren (30 Punkte)**
+        PDUFA Dates, FDA Approvals, Breakthrough Therapy, Fast Track, Priority Review, AdCom Meetings
+
+        **🔬 Clinical Trial Pipeline (20 Punkte)**
+        Phase 3/2/1 Studien via ClinicalTrials.gov — mehr Phase-3 = höherer Score
+
+        **📈 Technische Analyse (20 Punkte)**
+        Unusual Volume, Volume-Trend, Akkumulation, Price Position, Trend-Richtung
+
+        **📰 News Momentum (15 Punkte)**
+        Sentiment-Analyse, News-Frequenz, Katalysator-Dichte
+
+        **🛡️ Risiko-Bewertung (15 Punkte)**
+        Market Cap, Float, Penny Stock Check, negative Signale (Clinical Hold, Offerings, etc.)
+
+        ---
+        **Drücke "🧬 Biotech Scan starten" um zu beginnen!**
+        """)
 
 
 # -----------------------------------------------------------------------------
