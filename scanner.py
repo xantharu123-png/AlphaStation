@@ -8303,44 +8303,61 @@ def _biotech_technical_score(poly_key, ticker):
 
 def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
     """
-    Risiko-Bewertung für Biotech (max 15 pts — höher = besser/sicherer).
+    Opportunity & Risk Score für Biotech (max 15 pts).
+
+    PHILOSOPHIE: Für Catalyst-Trading sind Mid/Small Caps BESSER als Large Caps.
+    Ein FDA Approval bewegt ABBV ($400B) vielleicht 2%, aber BCRX ($2B) um 30%+.
+    Der Score belohnt den Sweet Spot: groß genug zum sicher Traden,
+    klein genug für großes Catalyst-Upside.
     """
     risk_score = 0
     risk_details = []
 
-    # Market Cap (max 5 pts) — zu klein = sehr riskant
-    if market_cap_m >= 2000:
+    # Market Cap (max 5 pts) — Sweet Spot: $500M - $10B
+    # Zu groß = kaum Bewegung bei Catalyst, zu klein = zu riskant
+    if 500 <= market_cap_m <= 10000:
         risk_score += 5
-        risk_details.append("🏢 Mid/Large Cap (stabiler)")
-    elif market_cap_m >= 500:
+        risk_details.append("🎯 Catalyst Sweet Spot ($0.5-10B)")
+    elif 200 <= market_cap_m < 500:
         risk_score += 4
-        risk_details.append("🏗️ Small Cap")
+        risk_details.append("🔥 Small Cap — hohes Catalyst-Upside")
+    elif 10000 < market_cap_m <= 50000:
+        risk_score += 3
+        risk_details.append("🏢 Large Cap — solide aber weniger Upside")
+    elif market_cap_m > 50000:
+        risk_score += 1
+        risk_details.append("🐘 Mega Cap — Catalyst bewegt Kurs kaum")
     elif market_cap_m >= 100:
         risk_score += 2
-        risk_details.append("⚠️ Micro Cap (hohes Risiko)")
+        risk_details.append("⚠️ Micro Cap — hohes Risiko, hohes Upside")
     else:
         risk_score += 0
-        risk_details.append("🔴 Nano Cap (sehr hohes Risiko)")
+        risk_details.append("🔴 Nano Cap — sehr hohes Risiko")
 
-    # Price (max 3 pts) — Penny Stocks = riskant
-    if price >= 10:
+    # Price (max 3 pts) — tradeable Range bevorzugen
+    if 5 <= price <= 100:
         risk_score += 3
-    elif price >= 5:
+        risk_details.append("✅ Guter Preis-Range für Trading")
+    elif price > 100:
         risk_score += 2
     elif price >= 2:
         risk_score += 1
     else:
         risk_details.append("💀 Penny Stock (<$2)")
 
-    # Float Size (max 3 pts) — Liquidität
-    if shares_m >= 50:
+    # Float Size (max 3 pts) — Low Float = explosive Moves bei Catalyst
+    if 10 <= shares_m <= 50:
         risk_score += 3
-    elif shares_m >= 20:
+        risk_details.append("🔥 Low Float — explosives Catalyst-Potential")
+    elif shares_m < 10 and shares_m > 0:
         risk_score += 2
-        risk_details.append("🔥 Low Float (volatil)")
-    elif shares_m > 0:
+        risk_details.append("🔥🔥 Micro Float — extrem volatil")
+    elif 50 < shares_m <= 200:
+        risk_score += 2
+        risk_details.append("📊 Moderate Float")
+    elif shares_m > 200:
         risk_score += 1
-        risk_details.append("🔥🔥 Micro Float (extrem volatil)")
+        risk_details.append("🐘 High Float — weniger explosiv")
 
     # Sauberkeit: keine negativen Flags = Bonus, viele Flags = Abzug (max 4 pts netto)
     if not negative_flags:
@@ -8358,11 +8375,25 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
     return {"risk_score": min(15, risk_score), "risk_details": risk_details}
 
 
-def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_score, risk_score, news_momentum_score):
+def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_score, risk_score, news_momentum_score, rvol=0):
     """
     Berechnet den finalen Biotech Catalyst Score (0-100).
+
+    Bonus: Catalyst + Volume Confirmation = stärkeres Signal.
+    Wenn ein Catalyst gefunden wird UND das Volumen ungewöhnlich hoch ist,
+    ist das Signal deutlich stärker (Smart Money bestätigt die News).
     """
     total = catalyst_score + pipeline_score + technical_score + risk_score + news_momentum_score
+
+    # Catalyst-Volume Confirmation Bonus (max 10 Extra-Punkte)
+    if catalyst_score > 0 and rvol >= 1.5:
+        if rvol >= 3.0:
+            total += 10  # Extrem: Catalyst + 3x Volume = Hot
+        elif rvol >= 2.0:
+            total += 7   # Stark: Catalyst + 2x Volume
+        else:
+            total += 4   # Moderat: Catalyst + 1.5x Volume
+
     return min(100, max(0, total))
 
 
@@ -8496,13 +8527,15 @@ def _biotech_background_scan(poly_key):
                     price=tech_data.get("details", {}).get("price", 0)
                 )
 
-                # G) Final Score
+                # G) Final Score (mit RVOL für Catalyst-Volume Confirmation)
+                _rvol_val = tech_data.get("details", {}).get("RVOL", 0)
                 total_score = _calculate_biotech_catalyst_score(
                     catalyst_score=catalyst_score,
                     pipeline_score=trial_data["pipeline_score"],
                     technical_score=tech_data["technical_score"],
                     risk_score=risk_data["risk_score"],
-                    news_momentum_score=momentum_score
+                    news_momentum_score=momentum_score,
+                    rvol=_rvol_val
                 )
 
                 # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
@@ -8680,7 +8713,8 @@ def _biotech_quick_scan(poly_key):
                         pipeline_score=old.get("Pipeline_Score", 0),
                         technical_score=old.get("Technical_Score", 0),
                         risk_score=old.get("Risk_Score", 0),
-                        news_momentum_score=momentum_score
+                        news_momentum_score=momentum_score,
+                        rvol=old.get("RVOL", 0)
                     )
 
                     # Grade aktualisieren
@@ -23812,7 +23846,7 @@ with tab_biotech:
                 _bio_bc1.metric("🎯 Catalyst", f"{_bio_item.get('Catalyst_Score', 0)}/30", help="FDA/PDUFA Events, Approvals, Breakthrough")
                 _bio_bc2.metric("🔬 Pipeline", f"{_bio_item.get('Pipeline_Score', 0)}/20", help="Phase 3/2/1 Clinical Trials")
                 _bio_bc3.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
-                _bio_bc4.metric("🛡️ Risk", f"{_bio_item.get('Risk_Score', 0)}/15", help="MCap, Float, Negative Flags")
+                _bio_bc4.metric("🎰 Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
                 _bio_bc5.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
 
                 st.divider()
