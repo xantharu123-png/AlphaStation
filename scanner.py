@@ -8369,7 +8369,7 @@ def _biotech_news_momentum(news_items):
         elif neg / total >= 0.6:
             score += 0
         else:
-            score += 2
+            score += 0  # Neutral/gemischt = kein Signal, kein Bonus
 
     # News Frequency — mehr News = mehr Aufmerksamkeit (max 4 pts)
     if total >= 5:
@@ -8447,17 +8447,19 @@ def _biotech_background_scan(poly_key):
                 momentum_data = _biotech_news_momentum(news_data["news"])
                 momentum_score = momentum_data["momentum_score"]
 
-                # Quick Filter: Ohne Catalyst UND ohne News-Momentum → Skip
-                # ABER: Nicht zu aggressiv — auch Aktien mit wenig News aber potenzieller Pipeline durchlassen
-                if catalyst_score == 0 and momentum_score <= 2:
+                # Quick Filter — QUALITÄT: Mindestens ein echtes Signal nötig
+                # Catalyst > 0 = FDA/Pipeline Keyword in News gefunden
+                # Momentum >= 6 = starkes positives Sentiment + mehrere News (ohne Catalyst)
+                # Alles andere ist Rauschen (normale Biotech-Aktie mit Alltagsnews)
+                if catalyst_score == 0 and momentum_score < 6:
                     continue
 
                 # C) Ticker Details (MCap, Shares)
                 details = get_ticker_details(poly_key, ticker)
 
-                # D) Clinical Trials — für alle die den Quick Filter passiert haben
+                # D) Clinical Trials — nur wenn echtes Catalyst-Signal vorhanden
                 trial_data = {"pipeline_score": 0, "trials": [], "phase_summary": {}, "total_active": 0}
-                if catalyst_score >= 4 or momentum_score >= 4:
+                if catalyst_score >= 4 or momentum_score >= 6:
                     company_name = details.get("name", "") or stock.get("name", "")
                     trial_data = _check_clinical_trials(company_name, ticker)
 
@@ -8481,8 +8483,13 @@ def _biotech_background_scan(poly_key):
                     news_momentum_score=momentum_score
                 )
 
-                # Nur Ergebnisse mit Score >= 20 behalten
-                if total_score < 20:
+                # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
+                # Ohne FDA/Pipeline Catalyst braucht es einen sehr hohen Score
+                if catalyst_score > 0:
+                    min_required = 20  # Mit Catalyst: normaler Threshold
+                else:
+                    min_required = 35  # Ohne Catalyst: nur rein wenn Momentum+Technik stark
+                if total_score < min_required:
                     continue
 
                 # Grade
@@ -8623,8 +8630,8 @@ def _biotech_quick_scan(poly_key):
                 momentum_data = _biotech_news_momentum(news_data["news"])
                 momentum_score = momentum_data["momentum_score"]
 
-                # Quick Filter
-                if catalyst_score == 0 and momentum_score <= 2:
+                # Quick Filter — gleiche Qualitäts-Logik wie Full Scan
+                if catalyst_score == 0 and momentum_score < 6:
                     continue
 
                 # Bestehende Daten wiederverwenden wenn vorhanden
@@ -8658,7 +8665,9 @@ def _biotech_quick_scan(poly_key):
                     s = old["Score"]
                     old["Grade"] = "A" if s >= 75 else "B" if s >= 55 else "C" if s >= 35 else "D"
 
-                    if old["Score"] >= 20:
+                    # Qualitäts-Gate: mit Catalyst ab 20, ohne ab 35
+                    _min_req = 20 if catalyst_score > 0 else 35
+                    if old["Score"] >= _min_req:
                         results.append(old)
                 else:
                     # Neuer Ticker — minimal-Eintrag (wird beim nächsten Full Scan vervollständigt)
