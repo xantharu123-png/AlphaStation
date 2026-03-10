@@ -8344,11 +8344,17 @@ def _biotech_background_scan(poly_key):
     try:
         _biotech_progress_write("running", checked=0, total=0, hits=0, detail="Lade Biotech-Universum...")
 
-        # 1. Biotech Universum laden
-        universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50)
+        # 1. Biotech Universum laden (oder aus 24h Cache)
+        universe = _biotech_universe_cache_load(max_age_hours=24)
+        if universe:
+            _biotech_progress_write("running", checked=0, total=len(universe), hits=0,
+                                    detail=f"📦 {len(universe)} Biotech-Aktien aus Cache, starte Full Scan...")
+        else:
+            universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50)
+            _biotech_universe_cache_save(universe)
         total = len(universe)
         _biotech_progress_write("running", checked=0, total=total, hits=0,
-                                detail=f"{total} Biotech-Aktien gefunden, starte Scan...")
+                                detail=f"{total} Biotech-Aktien gefunden, starte Full Scan...")
 
         if total == 0:
             _biotech_progress_write("done", checked=0, total=0, hits=0, detail="Keine Biotech-Aktien gefunden")
@@ -8474,6 +8480,148 @@ def _biotech_background_scan(poly_key):
 
     except Exception as e:
         _biotech_progress_write("error", detail=f"Fehler: {str(e)[:150]}")
+
+
+def _biotech_universe_cache_file():
+    return "/tmp/alpha_biotech_universe.json"
+
+def _biotech_universe_cache_save(universe):
+    """Speichert Biotech-Universum separat (ändert sich selten)."""
+    try:
+        with open(_biotech_universe_cache_file(), "w") as f:
+            json.dump({"universe": universe, "timestamp": time.time()}, f, default=str)
+    except Exception:
+        pass
+
+def _biotech_universe_cache_load(max_age_hours=24):
+    """Lädt gecachtes Universum (24h gültig — Tickers ändern sich nicht täglich)."""
+    try:
+        with open(_biotech_universe_cache_file(), "r") as f:
+            data = json.load(f)
+        if time.time() - data.get("timestamp", 0) > max_age_hours * 3600:
+            return None
+        return data.get("universe", [])
+    except Exception:
+        return None
+
+
+def _biotech_quick_scan(poly_key):
+    """
+    Quick Scan: Nutzt gecachte Ergebnisse und aktualisiert NUR News/Catalysts.
+    Viel schneller als Full Scan weil:
+    - Kein Universum-Laden (nutzt bestehende Ticker-Liste aus Cache)
+    - Kein ClinicalTrials.gov API Call (Pipeline ändert sich nicht stündlich)
+    - Keine Technical Score Neuberechnung (ändert sich nicht stündlich)
+    - NUR: Neue News scannen → Catalyst Score + Momentum aktualisieren
+    """
+    try:
+        # Lade bestehende Ergebnisse
+        existing = _biotech_cache_load(max_age_hours=24)  # Alte Daten als Basis
+        if not existing:
+            # Kein Cache → muss Full Scan machen
+            _biotech_progress_write("running", checked=0, total=0, hits=0,
+                                    detail="Kein Cache vorhanden — starte Full Scan...")
+            _biotech_background_scan(poly_key)
+            return
+
+        # Auch Universum laden für neue Tickers die vielleicht noch nicht im Cache sind
+        universe_tickers = set()
+        universe = _biotech_universe_cache_load(max_age_hours=24)
+        if universe:
+            universe_tickers = {u["ticker"] for u in universe}
+
+        # Merge: bestehende + ggf. neue Tickers aus Universe
+        existing_tickers = {r["Ticker"] for r in existing}
+        all_tickers = list(existing_tickers | universe_tickers)
+        total = len(all_tickers)
+
+        _biotech_progress_write("running", checked=0, total=total, hits=0,
+                                detail=f"⚡ Quick Scan: {total} Tickers, nur News-Update...")
+
+        # Bestehende Ergebnisse als Lookup
+        existing_map = {r["Ticker"]: r for r in existing}
+        results = []
+        checked = 0
+
+        for ticker in all_tickers:
+            checked += 1
+            if checked % 20 == 0:
+                _biotech_progress_write("running", checked=checked, total=total,
+                                        hits=len(results), detail=f"⚡ Quick: {ticker}...")
+
+            try:
+                # NUR News neu scannen
+                news_data = _scan_biotech_news(poly_key, ticker, limit=5)
+                catalyst_score = news_data["catalyst_score"]
+                momentum_data = _biotech_news_momentum(news_data["news"])
+                momentum_score = momentum_data["momentum_score"]
+
+                # Quick Filter
+                if catalyst_score == 0 and momentum_score <= 2:
+                    continue
+
+                # Bestehende Daten wiederverwenden wenn vorhanden
+                old = existing_map.get(ticker, {})
+
+                if old:
+                    # Update nur News-bezogene Felder, behalte Rest
+                    old["Catalyst_Score"] = catalyst_score
+                    old["Momentum_Score"] = momentum_score
+                    old["News"] = news_data.get("news", [])[:5]
+                    old["Negative_Flags"] = news_data.get("negative_flags", [])
+                    old["Sentiment"] = momentum_data.get("sentiment_summary", "")
+                    old["Catalysts_All"] = news_data.get("catalysts", [])
+
+                    # Best Catalyst aktualisieren
+                    best_cat = news_data.get("best_catalyst")
+                    old["Catalyst"] = best_cat["label"] if best_cat else old.get("Catalyst", "🔬 Pipeline")
+                    old["Headline"] = best_cat["headline"] if best_cat else old.get("Headline", "")
+
+                    # Score neu berechnen mit alten Pipeline/Technical/Risk + neuen News
+                    old["Score"] = _calculate_biotech_catalyst_score(
+                        catalyst_score=catalyst_score,
+                        pipeline_score=old.get("Pipeline_Score", 0),
+                        technical_score=old.get("Technical_Score", 0),
+                        risk_score=old.get("Risk_Score", 0),
+                        news_momentum_score=momentum_score
+                    )
+
+                    # Grade aktualisieren
+                    s = old["Score"]
+                    old["Grade"] = "A" if s >= 75 else "B" if s >= 55 else "C" if s >= 35 else "D"
+
+                    if old["Score"] >= 20:
+                        results.append(old)
+                else:
+                    # Neuer Ticker — minimal-Eintrag (wird beim nächsten Full Scan vervollständigt)
+                    if catalyst_score >= 8:
+                        results.append({
+                            "Ticker": ticker, "Name": "", "Score": catalyst_score + momentum_score,
+                            "Grade": "C", "Catalyst": news_data.get("best_catalyst", {}).get("label", "🔬 Neu"),
+                            "Catalyst_Score": catalyst_score, "Pipeline_Score": 0,
+                            "Technical_Score": 0, "Risk_Score": 5, "Momentum_Score": momentum_score,
+                            "Preis": 0, "MCap_M": 0, "Shares_M": 0, "RVOL": 0, "Float_Cat": "UNKNOWN",
+                            "Headline": news_data.get("best_catalyst", {}).get("headline", ""),
+                            "Phase3": 0, "Phase2": 0, "Phase1": 0, "Active_Trials": 0,
+                            "Trials": [], "News": news_data.get("news", [])[:5],
+                            "Negative_Flags": news_data.get("negative_flags", []),
+                            "Risk_Details": [], "Tech_Details": {},
+                            "Sentiment": momentum_data.get("sentiment_summary", ""),
+                            "Catalysts_All": news_data.get("catalysts", []),
+                        })
+            except Exception:
+                continue
+
+        results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+        _biotech_cache_save(results)
+
+        top_score = results[0]["Score"] if results else 0
+        _biotech_progress_write("done", checked=checked, total=total,
+                                hits=len(results), top_score=top_score,
+                                detail=f"⚡ Quick Scan: {total} geprüft → {len(results)} Treffer")
+
+    except Exception as e:
+        _biotech_progress_write("error", detail=f"Quick Scan Fehler: {str(e)[:150]}")
 
 
 def _watchlist_file():
@@ -23278,85 +23426,114 @@ with tab_biotech:
     with st.expander("⚙️ Einstellungen", expanded=False):
         _bio_col1, _bio_col2, _bio_col3 = st.columns(3)
         with _bio_col1:
-            _bio_cache_ttl = st.number_input("Cache TTL (Stunden)", min_value=1, max_value=24, value=3, key="bio_cache_ttl")
             _bio_min_score = st.slider("Min. Score", min_value=0, max_value=50, value=20, key="bio_min_score")
-        with _bio_col2:
             _bio_auto_scan = st.toggle("🔄 Auto-Scan", value=True, key="bio_auto_scan",
-                                       help="Automatischer Scan zu den eingestellten Zeiten")
-            _bio_scan_time1 = st.text_input("Scan-Zeit 1 (CET)", value="07:00", key="bio_scan_t1",
-                                             help="Pre-Market: FDA-News kommen oft vor Börsenöffnung")
-            _bio_scan_time2 = st.text_input("Scan-Zeit 2 (CET)", value="14:30", key="bio_scan_t2",
-                                             help="Vor US-Börsenöffnung: letzte News vor dem Handel")
-            _bio_scan_time3 = st.text_input("Scan-Zeit 3 (CET)", value="22:30", key="bio_scan_t3",
-                                             help="After-Hours: FDA-Entscheidungen nach Börsenschluss")
+                                       help="Automatischer Scan im Intervall")
+        with _bio_col2:
+            _bio_quick_interval = st.selectbox("⚡ Quick Scan Intervall",
+                                                options=[1, 2, 3, 4],
+                                                index=1,  # Default: 2h
+                                                format_func=lambda x: f"Alle {x}h",
+                                                key="bio_quick_interval",
+                                                help="Quick Scan = nur News updaten (schnell, ~2-3 Min)")
+            _bio_full_interval = st.selectbox("🔬 Full Scan Intervall",
+                                               options=[4, 6, 8, 12],
+                                               index=1,  # Default: 6h
+                                               format_func=lambda x: f"Alle {x}h",
+                                               key="bio_full_interval",
+                                               help="Full Scan = Universum + News + Pipeline + Technik (langsam, ~15-20 Min)")
         with _bio_col3:
-            st.info("💡 FDA-News kommen oft **Pre-Market** (vor 15:30 CET) oder **After-Hours** (nach 22:00 CET). "
-                    "3 Scan-Fenster decken alle Phasen ab.")
-            st.caption("📡 Polygon News API + ClinicalTrials.gov + Technische Analyse")
+            st.markdown("""
+            **⚡ Quick Scan** (alle 1-2h)
+            Nur News-Update für bekannte Tickers. Schnell (~2 Min).
 
-    # ── Auto-Scan Logik ──
+            **🔬 Full Scan** (alle 4-6h)
+            Universum + News + ClinicalTrials + Technik. Gründlich (~15 Min).
+
+            FDA-News kommen **jederzeit** — Pre-Market, Regular, After-Hours.
+            """)
+
+    # ── Auto-Scan Logik (Intervall-basiert) ──
     _bio_auto_triggered = False
+    _bio_auto_type = None  # "quick" oder "full"
+
     if _bio_auto_scan:
         try:
-            from zoneinfo import ZoneInfo
-            _bio_now = datetime.now(ZoneInfo("Europe/Berlin"))
-            _bio_now_str = _bio_now.strftime("%H:%M")
+            _bio_prog_check = _biotech_progress_read()
+            _bio_is_running = _bio_prog_check and _bio_prog_check.get("status") == "running"
 
-            # Prüfe ob einer der Scan-Zeitpunkte erreicht ist (±5 Min Fenster)
-            for _bio_stime in [_bio_scan_time1, _bio_scan_time2, _bio_scan_time3]:
-                try:
-                    _bio_sh, _bio_sm = int(_bio_stime.split(":")[0]), int(_bio_stime.split(":")[1])
-                    _bio_target = _bio_now.replace(hour=_bio_sh, minute=_bio_sm, second=0)
-                    _bio_diff = abs((_bio_now - _bio_target).total_seconds())
-                    if _bio_diff <= 300:  # ±5 Min Fenster
-                        # Prüfe ob Cache noch frisch genug ist (nicht innerhalb letzter 30 Min gescannt)
-                        _bio_existing = _biotech_cache_load(max_age_hours=0.5)
-                        _bio_prog_check = _biotech_progress_read()
-                        _bio_is_running = _bio_prog_check and _bio_prog_check.get("status") == "running"
-                        if not _bio_existing and not _bio_is_running:
-                            _bio_auto_triggered = True
-                            break
-                except (ValueError, IndexError):
-                    continue
+            if not _bio_is_running:
+                # Prüfe wann letzter Full Scan war
+                _bio_full_cache = _biotech_cache_load(max_age_hours=_bio_full_interval)
+                _bio_quick_cache = _biotech_cache_load(max_age_hours=_bio_quick_interval)
+
+                if not _bio_full_cache:
+                    # Kein frischer Full-Scan Cache → Full Scan starten
+                    _bio_auto_triggered = True
+                    _bio_auto_type = "full"
+                elif not _bio_quick_cache:
+                    # Full Scan ist noch frisch, aber Quick Intervall abgelaufen → Quick Scan
+                    _bio_auto_triggered = True
+                    _bio_auto_type = "quick"
         except Exception:
             pass
 
     # ── Scan Controls ──
-    _bio_col_a, _bio_col_b, _bio_col_c = st.columns([1, 1, 2])
+    _bio_col_a, _bio_col_b, _bio_col_c, _bio_col_d = st.columns([1, 1, 1, 1])
 
     with _bio_col_a:
-        _bio_scan_btn = st.button("🧬 Biotech Scan starten", use_container_width=True, type="primary")
+        _bio_full_btn = st.button("🔬 Full Scan", use_container_width=True, type="primary",
+                                   help="Kompletter Scan: Universum + News + Pipeline + Technik")
 
     with _bio_col_b:
-        _bio_cached = _biotech_cache_load(max_age_hours=_bio_cache_ttl)
+        _bio_quick_btn = st.button("⚡ Quick Scan", use_container_width=True,
+                                    help="Schnell: Nur News-Update für bekannte Tickers")
+
+    with _bio_col_c:
+        _bio_cached = _biotech_cache_load(max_age_hours=24)
         if _bio_cached:
             try:
                 _bio_cache_age = (time.time() - os.path.getmtime(_biotech_cache_file())) / 60
-                st.caption(f"📦 Cache: {len(_bio_cached)} Ergebnisse ({_bio_cache_age:.0f} Min alt)")
+                _bio_age_str = f"{_bio_cache_age:.0f} Min" if _bio_cache_age < 120 else f"{_bio_cache_age/60:.1f}h"
+                st.caption(f"📦 {len(_bio_cached)} Ergebnisse ({_bio_age_str} alt)")
             except Exception:
-                st.caption(f"📦 Cache: {len(_bio_cached)} Ergebnisse")
+                st.caption(f"📦 {len(_bio_cached)} Ergebnisse")
 
-    with _bio_col_c:
+    with _bio_col_d:
         if _bio_auto_scan:
-            st.caption(f"🔄 Auto-Scan: {_bio_scan_time1} | {_bio_scan_time2} | {_bio_scan_time3} CET")
+            st.caption(f"🔄 Quick: {_bio_quick_interval}h | Full: {_bio_full_interval}h")
         if _bio_auto_triggered:
-            st.info("🔄 Auto-Scan wird gestartet...")
+            _auto_label = "🔬 Full" if _bio_auto_type == "full" else "⚡ Quick"
+            st.info(f"🔄 Auto {_auto_label} Scan startet...")
 
     # ── Start Scan (manuell ODER auto-triggered) ──
-    if _bio_scan_btn or _bio_auto_triggered:
+    _bio_start_full = _bio_full_btn or (_bio_auto_triggered and _bio_auto_type == "full")
+    _bio_start_quick = _bio_quick_btn or (_bio_auto_triggered and _bio_auto_type == "quick")
+
+    if _bio_start_full or _bio_start_quick:
         try:
             _bio_poly_key = st.secrets.get("POLYGON_KEY", "")
             if not _bio_poly_key:
                 st.error("❌ POLYGON_KEY fehlt in Secrets!")
             else:
-                _bio_thread = threading.Thread(
-                    target=_biotech_background_scan,
-                    args=(_bio_poly_key,),
-                    daemon=True
-                )
+                if _bio_start_full:
+                    _bio_thread = threading.Thread(
+                        target=_biotech_background_scan,
+                        args=(_bio_poly_key,),
+                        daemon=True
+                    )
+                    _scan_label = "Full Scan"
+                else:
+                    _bio_thread = threading.Thread(
+                        target=_biotech_quick_scan,
+                        args=(_bio_poly_key,),
+                        daemon=True
+                    )
+                    _scan_label = "Quick Scan"
+
                 _bio_thread.start()
-                _trigger_type = "Auto" if _bio_auto_triggered else "Manuell"
-                st.toast(f"🧬 Biotech Scan gestartet ({_trigger_type})...")
+                _trigger = "Auto" if _bio_auto_triggered else "Manuell"
+                st.toast(f"🧬 {_scan_label} gestartet ({_trigger})...")
                 time.sleep(1)
                 st.rerun()
         except Exception as e:
