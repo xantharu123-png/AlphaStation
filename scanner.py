@@ -8242,6 +8242,217 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
 
 
+# =============================================================================
+# BPIQ CATALYST API — Kuratierte Biotech-Katalysator-Daten
+# =============================================================================
+# BPIQ liefert manuell kuratierte Catalyst-Dates (PDUFA, Phase 3 Readouts etc.)
+# die DEUTLICH zuverlässiger sind als ClinicalTrials.gov Primary Completion Dates.
+# ClinicalTrials.gov bleibt als Fallback für Pipeline-Daten (Studienanzahl, Phasen).
+#
+# API: https://api.bpiq.com/api/v1/drugs/
+# Auth: Token-Header
+# Rate: ~1.3s pro Call, Batch-Fetch aller Catalyst-Drugs in 4 Calls möglich
+# =============================================================================
+
+_BPIQ_CATALYST_CACHE = {}
+_BPIQ_CACHE_TIMESTAMP = 0
+
+def _load_bpiq_catalyst_cache():
+    """
+    Lädt ALLE Drugs mit Catalyst-Dates von BPIQ in einen In-Memory-Cache.
+    648 Drugs, 332 Ticker — 4 API-Calls (limit=200 pro Call).
+    Cache-TTL: 4 Stunden (Daten werden täglich aktualisiert).
+    """
+    global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP
+    import time as _time
+
+    # Cache noch gültig? (4h = 14400s)
+    if _BPIQ_CATALYST_CACHE and (_time.time() - _BPIQ_CACHE_TIMESTAMP) < 14400:
+        return _BPIQ_CATALYST_CACHE
+
+    try:
+        bpiq_key = st.secrets.get("BPIQ_API_KEY", "")
+        if not bpiq_key:
+            return {}
+
+        all_drugs = []
+        for offset in range(0, 800, 200):
+            resp = rate_limited_get(
+                f"https://api.bpiq.com/api/v1/drugs/?has_catalyst=true&limit=200&offset={offset}",
+                headers={"Authorization": f"Token {bpiq_key}"},
+                timeout=15
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                break
+            all_drugs.extend(results)
+
+        # Gruppiere nach Ticker
+        cache = {}
+        _now = datetime.now()
+        for drug in all_drugs:
+            ticker = drug.get("ticker", "").upper()
+            if not ticker:
+                continue
+
+            cat_date = drug.get("catalyst_date")
+            cat_text = drug.get("catalyst_date_text", "TBA")
+            stage = drug.get("stage_event", {})
+            stage_label = stage.get("stage_label", "")
+            event_label = stage.get("event_label", "")
+            full_label = stage.get("label", "")
+            bpiq_score = stage.get("score", 0)
+
+            # Tage bis Catalyst berechnen
+            days_until = None
+            if cat_date:
+                try:
+                    _cd = datetime.strptime(cat_date[:10], "%Y-%m-%d")
+                    days_until = (_cd - _now).days
+                except Exception:
+                    pass
+
+            # Kategorie bestimmen
+            category = ""
+            if days_until is not None:
+                if days_until < 0:
+                    if abs(days_until) <= 90:
+                        category = "OVERDUE"
+                    # >90d overdue bei BPIQ = wahrscheinlich veralteter Eintrag
+                elif days_until <= 30:
+                    category = "IMMINENT"
+                elif days_until <= 90:
+                    category = "UPCOMING"
+                elif days_until <= 365:
+                    category = "LATER"
+
+            # Phase-Multiplikator
+            phase_mult = 1.0
+            if "Phase 3" in stage_label or "PDUFA" in stage_label:
+                phase_mult = 3.0
+            elif "Phase 2" in stage_label:
+                phase_mult = 2.0
+            elif "Phase 1" in stage_label:
+                phase_mult = 1.0
+            else:
+                phase_mult = 0.5
+
+            entry = {
+                "drug_name": drug.get("drug_name", "")[:60],
+                "stage_label": stage_label,
+                "event_label": event_label,
+                "full_label": full_label,
+                "catalyst_date": cat_date,
+                "catalyst_date_text": cat_text,
+                "days_until": days_until,
+                "category": category,
+                "phase_mult": phase_mult,
+                "bpiq_score": bpiq_score,
+                "indications": drug.get("indications_text", ""),
+                "note": (drug.get("note", "") or "")[:200],
+                "source": drug.get("catalyst_source", ""),
+            }
+
+            if ticker not in cache:
+                cache[ticker] = []
+            cache[ticker].append(entry)
+
+        # Sortiere pro Ticker: PDUFA zuerst, dann IMMINENT, dann nach Datum
+        cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2, "LATER": 3, "": 9}
+        for ticker in cache:
+            cache[ticker].sort(key=lambda x: (
+                cat_order.get(x["category"], 9),
+                x["days_until"] if x["days_until"] is not None else 9999
+            ))
+
+        _BPIQ_CATALYST_CACHE = cache
+        _BPIQ_CACHE_TIMESTAMP = _time.time()
+        return cache
+
+    except Exception:
+        return {}
+
+
+def _get_bpiq_catalysts(ticker):
+    """
+    Holt BPIQ-Catalyst-Daten für einen Ticker.
+    Returns: dict kompatibel mit dem bestehenden Readout-System.
+
+    Felder:
+    - readout_score: 0-15 (Bonus für Score-Berechnung)
+    - readout_label: UI-Label (🔴 PDUFA, 🟡 Readout etc.)
+    - catalyst_readouts: Liste der Catalyst-Events
+    - bpiq_available: True wenn BPIQ-Daten vorhanden
+    """
+    cache = _load_bpiq_catalyst_cache()
+    drugs = cache.get(ticker.upper(), [])
+
+    if not drugs:
+        return {
+            "readout_score": 0,
+            "readout_label": "",
+            "catalyst_readouts": [],
+            "bpiq_available": False,
+        }
+
+    # Score berechnen: Gewichtet nach Kategorie und Phase
+    readout_score = 0
+    catalyst_readouts = []
+
+    for drug in drugs:
+        cat = drug["category"]
+        pm = drug["phase_mult"]
+
+        if cat == "OVERDUE":
+            readout_score += 4 * pm
+        elif cat == "IMMINENT":
+            readout_score += 5 * pm   # BPIQ-IMMINENT ist stärker als CT.gov (kuratiert!)
+        elif cat == "UPCOMING":
+            readout_score += 2 * pm
+        elif cat == "LATER":
+            readout_score += 0.5 * pm
+
+        if cat in ("OVERDUE", "IMMINENT", "UPCOMING"):
+            catalyst_readouts.append(drug)
+
+    readout_score = min(15, int(readout_score))
+
+    # Label: Bestes (nächstes) Event
+    readout_label = ""
+    if catalyst_readouts:
+        top = catalyst_readouts[0]
+        days = top["days_until"]
+        stage = top["full_label"]
+        drug_name = top["drug_name"][:25]
+        cat = top["category"]
+
+        if "PDUFA" in stage:
+            # PDUFA = besonders wichtig, eigenes Format
+            if cat == "IMMINENT":
+                readout_label = f"🔴 PDUFA {top['catalyst_date_text']} — {drug_name}"
+            elif cat == "UPCOMING":
+                readout_label = f"🟡 PDUFA in {days}d — {drug_name}"
+            elif cat == "OVERDUE":
+                readout_label = f"🔴 PDUFA ÜBERFÄLLIG ({abs(days)}d) — {drug_name}"
+        else:
+            if cat == "OVERDUE":
+                readout_label = f"🔴 {stage} ÜBERFÄLLIG ({abs(days)}d) — {drug_name}"
+            elif cat == "IMMINENT":
+                readout_label = f"🟡 {stage} in {days}d — {drug_name}"
+            elif cat == "UPCOMING":
+                readout_label = f"🟢 {stage} in {days}d — {drug_name}"
+
+    return {
+        "readout_score": readout_score,
+        "readout_label": readout_label,
+        "catalyst_readouts": catalyst_readouts[:5],
+        "bpiq_available": True,
+    }
+
+
 def _check_clinical_trials(company_name, ticker):
     """
     Prüft ClinicalTrials.gov API nach aktiven Studien + Readout-Kalender.
@@ -8819,11 +9030,24 @@ def _biotech_background_scan(poly_key):
                 details = get_ticker_details(poly_key, ticker)
 
                 # D) Clinical Trials + Readout-Kalender
+                # BPIQ = primäre Catalyst-Quelle (kuratiert, PDUFA-Dates, täglich aktualisiert)
+                # ClinicalTrials.gov = Fallback für Pipeline-Daten (Studienanzahl, Phasen)
                 trial_data = {"pipeline_score": 0, "readout_score": 0, "readout_label": "",
                               "catalyst_readouts": [], "trials": [], "phase_summary": {}, "total_active": 0}
+                bpiq_data = {"readout_score": 0, "readout_label": "", "catalyst_readouts": [], "bpiq_available": False}
+
                 if catalyst_score >= 4 or momentum_score >= 6:
                     company_name = details.get("name", "") or stock.get("name", "")
+                    # 1) BPIQ Catalyst-Daten (aus Pre-Loaded Cache, kein extra API-Call)
+                    bpiq_data = _get_bpiq_catalysts(ticker)
+                    # 2) ClinicalTrials.gov für Pipeline (Studien, Phasen)
                     trial_data = _check_clinical_trials(company_name, ticker)
+
+                    # BPIQ überschreibt CT.gov Readout-Daten wenn verfügbar
+                    if bpiq_data.get("bpiq_available"):
+                        trial_data["readout_score"] = bpiq_data["readout_score"]
+                        trial_data["readout_label"] = bpiq_data["readout_label"]
+                        trial_data["catalyst_readouts"] = bpiq_data["catalyst_readouts"]
 
                 # E) Technical Score
                 tech_data = _biotech_technical_score(poly_key, ticker)
@@ -8932,6 +9156,8 @@ def _biotech_background_scan(poly_key):
                     "Headline": catalyst_headline,
                     "Readout_Label": _readout_lbl,
                     "Readout_Details": trial_data.get("catalyst_readouts", [])[:3],
+                    "BPIQ_Available": bpiq_data.get("bpiq_available", False),
+                    "BPIQ_Catalysts": bpiq_data.get("catalyst_readouts", [])[:5],
                     "Phase3": trial_data["phase_summary"].get("PHASE3", 0),
                     "Phase2": trial_data["phase_summary"].get("PHASE2", 0),
                     "Phase1": trial_data["phase_summary"].get("PHASE1", 0),
@@ -24639,14 +24865,14 @@ with tab_biotech:
             _bio_m1, _bio_m2, _bio_m3, _bio_m4, _bio_m5 = st.columns(5)
             _bio_grade_a = sum(1 for r in _bio_filtered if r.get("Grade") == "A")
             _bio_grade_b = sum(1 for r in _bio_filtered if r.get("Grade") == "B")
-            _bio_fda_count = sum(1 for r in _bio_filtered if "FDA" in r.get("Catalyst", ""))
-            _bio_trial_count = sum(1 for r in _bio_filtered if "Trial" in r.get("Catalyst", "") or "Pipeline" in r.get("Catalyst", ""))
+            _bio_fda_count = sum(1 for r in _bio_filtered if "FDA" in r.get("Catalyst", "") or "PDUFA" in r.get("Readout_Label", ""))
+            _bio_bpiq_cat = sum(1 for r in _bio_filtered if r.get("BPIQ_Available") and r.get("Readout_Score", 0) > 0)
 
             _bio_m1.metric("🧬 Treffer", len(_bio_filtered))
             _bio_m2.metric("🅰️ Grade A", _bio_grade_a)
             _bio_m3.metric("🅱️ Grade B", _bio_grade_b)
-            _bio_m4.metric("🎯 FDA Events", _bio_fda_count)
-            _bio_m5.metric("📊 Trial Results", _bio_trial_count)
+            _bio_m4.metric("🎯 FDA/PDUFA", _bio_fda_count)
+            _bio_m5.metric("📊 BPIQ Catalysts", _bio_bpiq_cat)
 
             # ── Sektor-Trend: Healthcare / Biotech ──
             try:
@@ -24754,28 +24980,66 @@ with tab_biotech:
                     else:
                         st.warning(f"📉 **Chart Achtung:** {' | '.join(_ch_parts)}")
 
-                # ── Trial Readout Kalender (wenn vorhanden) ──
+                # ── Catalyst Kalender (BPIQ oder CT.gov Fallback) ──
+                _bio_has_bpiq = _bio_item.get("BPIQ_Available", False)
+                _bio_bpiq_cats = _bio_item.get("BPIQ_Catalysts", [])
                 _bio_readouts = _bio_item.get("Readout_Details", [])
                 _bio_readout_lbl = _bio_item.get("Readout_Label", "")
-                if _bio_readouts:
+
+                if _bio_has_bpiq and _bio_bpiq_cats:
+                    # ── BPIQ Kuratierte Catalyst-Daten ──
+                    for _bcat in _bio_bpiq_cats[:3]:
+                        _bc_cat = _bcat.get("category", "")
+                        _bc_days = _bcat.get("days_until")
+                        _bc_label = _bcat.get("full_label", "?")
+                        _bc_drug = _bcat.get("drug_name", "")[:40]
+                        _bc_date_txt = _bcat.get("catalyst_date_text", "")
+                        _bc_note = _bcat.get("note", "")[:120]
+                        _bc_ind = _bcat.get("indications", "")
+
+                        if "PDUFA" in _bc_label:
+                            # PDUFA = höchste Priorität
+                            if _bc_cat == "IMMINENT":
+                                st.error(f"🔴 **PDUFA {_bc_date_txt}** ({_bc_days}d) — {_bc_drug}"
+                                         f"{' | ' + _bc_ind if _bc_ind else ''}")
+                            elif _bc_cat == "UPCOMING":
+                                st.warning(f"🟡 **PDUFA in {_bc_days} Tagen** ({_bc_date_txt}) — {_bc_drug}"
+                                           f"{' | ' + _bc_ind if _bc_ind else ''}")
+                            elif _bc_cat == "OVERDUE":
+                                st.error(f"🔴 **PDUFA ÜBERFÄLLIG** ({abs(_bc_days)}d) — {_bc_drug}")
+                        else:
+                            if _bc_cat == "OVERDUE":
+                                st.error(f"🔴 **{_bc_label} ÜBERFÄLLIG** ({abs(_bc_days)}d) — {_bc_drug}"
+                                         f"{' | ' + _bc_ind if _bc_ind else ''}")
+                            elif _bc_cat == "IMMINENT":
+                                st.warning(f"🟡 **{_bc_label} in {_bc_days}d** ({_bc_date_txt}) — {_bc_drug}"
+                                           f"{' | ' + _bc_ind if _bc_ind else ''}")
+                            elif _bc_cat == "UPCOMING":
+                                st.info(f"🟢 **{_bc_label} in {_bc_days}d** ({_bc_date_txt}) — {_bc_drug}"
+                                        f"{' | ' + _bc_ind if _bc_ind else ''}")
+                        if _bc_note:
+                            st.caption(f"📝 {_bc_note}")
+
+                elif _bio_readouts:
+                    # ── CT.gov Fallback (wenn kein BPIQ) ──
                     _ro_top = _bio_readouts[0]
-                    _ro_cat = _ro_top.get("readout_category", "")
+                    _ro_cat = _ro_top.get("readout_category", "") if isinstance(_ro_top, dict) and "readout_category" in _ro_top else _ro_top.get("category", "")
                     if _ro_cat == "OVERDUE":
-                        st.error(f"🔴 **TRIAL READOUT ÜBERFÄLLIG** — {_ro_top.get('phase', '?')}: "
-                                 f"Primary Completion war {_ro_top.get('primary_completion', '?')} "
-                                 f"({abs(_ro_top.get('days_until_readout', 0))} Tage überfällig). "
-                                 f"**Daten stehen unmittelbar bevor!** _{_ro_top.get('title', '')}_")
+                        _phase = _ro_top.get("phase", _ro_top.get("full_label", "?"))
+                        _pc = _ro_top.get("primary_completion", _ro_top.get("catalyst_date_text", "?"))
+                        _days = abs(_ro_top.get("days_until_readout", _ro_top.get("days_until", 0)))
+                        st.error(f"🔴 **TRIAL READOUT ÜBERFÄLLIG** — {_phase}: {_days}d überfällig. "
+                                 f"_{_ro_top.get('title', _ro_top.get('drug_name', ''))}_")
                     elif _ro_cat == "OVERDUE_STALE":
-                        st.caption(f"⚪ Trial Readout veraltet ({abs(_ro_top.get('days_until_readout', 0))}d überfällig) — "
-                                   f"{_ro_top.get('phase', '?')}: Wahrscheinlich abgeschlossen, Status nicht aktualisiert")
+                        st.caption(f"⚪ Trial Readout veraltet — wahrscheinlich abgeschlossen, Status nicht aktualisiert")
                     elif _ro_cat == "IMMINENT":
-                        st.warning(f"🟡 **TRIAL READOUT IN {_ro_top.get('days_until_readout', '?')} TAGEN** — "
-                                   f"{_ro_top.get('phase', '?')}: Primary Completion {_ro_top.get('primary_completion', '?')}. "
-                                   f"**Bevorstehender Katalysator!** _{_ro_top.get('title', '')}_")
+                        _days = _ro_top.get("days_until_readout", _ro_top.get("days_until", "?"))
+                        st.warning(f"🟡 **TRIAL READOUT IN {_days} TAGEN** — "
+                                   f"_{_ro_top.get('title', _ro_top.get('drug_name', ''))}_")
                     elif _ro_cat == "UPCOMING":
-                        st.info(f"🟢 **Trial Readout in {_ro_top.get('days_until_readout', '?')} Tagen** — "
-                                f"{_ro_top.get('phase', '?')}: {_ro_top.get('primary_completion', '?')}. "
-                                f"_{_ro_top.get('title', '')}_")
+                        _days = _ro_top.get("days_until_readout", _ro_top.get("days_until", "?"))
+                        st.info(f"🟢 **Trial Readout in {_days} Tagen** — "
+                                f"_{_ro_top.get('title', _ro_top.get('drug_name', ''))}_")
 
                 # ── Options Unusual Activity (on-demand, nur in Detail View) ──
                 try:
@@ -24827,7 +25091,30 @@ with tab_biotech:
                             st.error(f"**{nf['flag'].upper()}** ({nf['date']}) — Penalty: {nf['penalty']} Punkte")
 
                 with _bio_dc2:
-                    st.markdown("### 🔬 Clinical Trials Pipeline")
+                    # ── BPIQ Drug Pipeline (kuratiert) ──
+                    if _bio_item.get("BPIQ_Available") and _bio_item.get("BPIQ_Catalysts"):
+                        st.markdown("### 💊 Drug Pipeline (BPIQ)")
+                        _all_bpiq = _bio_item.get("BPIQ_Catalysts", [])
+                        for _bd in _all_bpiq[:5]:
+                            _bd_stage = _bd.get("stage_label", "")
+                            _bd_emoji = "🔴" if "3" in _bd_stage or "PDUFA" in _bd_stage else "🟠" if "2" in _bd_stage else "🟢"
+                            _bd_cat = _bd.get("category", "")
+                            _bd_days = _bd.get("days_until")
+                            _bd_badge = ""
+                            if _bd_cat == "IMMINENT":
+                                _bd_badge = f" ⏰🟡 **{_bd_days}d**"
+                            elif _bd_cat == "UPCOMING":
+                                _bd_badge = f" ⏰🟢 {_bd_days}d"
+                            elif _bd_cat == "OVERDUE":
+                                _bd_badge = f" ⏰🔴 **{abs(_bd_days)}d**"
+                            st.markdown(f"{_bd_emoji} **{_bd.get('full_label', '?')}** — {_bd.get('drug_name', '')}{_bd_badge}")
+                            _bd_ind = _bd.get("indications", "")
+                            if _bd_ind:
+                                st.caption(f"Indikation: {_bd_ind}")
+                        st.caption("_Quelle: BPIQ (kuratiert, täglich aktualisiert)_")
+                        st.divider()
+
+                    st.markdown("### 🔬 Clinical Trials (ClinicalTrials.gov)")
                     _bio_trials = _bio_item.get("Trials", [])
                     if _bio_trials:
                         _p3 = _bio_item.get("Phase3", 0)
