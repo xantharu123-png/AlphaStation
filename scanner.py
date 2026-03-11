@@ -7997,7 +7997,7 @@ def _is_biotech_stock(ticker_details):
     return any(kw in combined for kw in BIOTECH_NAME_KEYWORDS)
 
 
-def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50, max_mcap_m=50000):
+def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=20, max_mcap_m=50000):
     """
     Scannt Polygon Ticker-Datenbank nach Biotech/Pharma Aktien.
     Nutzt SIC-Codes + Name-Keywords für breite Erkennung.
@@ -8582,7 +8582,7 @@ def _biotech_background_scan(poly_key):
             _biotech_progress_write("running", checked=0, total=len(universe), hits=0,
                                     detail=f"📦 {len(universe)} Biotech-Aktien aus Cache, starte Full Scan...")
         else:
-            universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=50)
+            universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=20)
             _biotech_universe_cache_save(universe)
         total = len(universe)
         _biotech_progress_write("running", checked=0, total=total, hits=0,
@@ -8707,11 +8707,21 @@ def _biotech_background_scan(poly_key):
                         _selloff_reason = "❓ Kein neg. Catalyst — prüfe Chart"
                     # Wenn Chart schwach ABER keine neg. News → könnte Dip-Opportunity sein
 
+                # ── Penny Stock / Micro Cap Warnung ──
+                _mcap_m = details.get("market_cap_millions", 0)
+                _stock_price = _tech_details.get("price", 0)
+                _penny_warning = ""
+                if _mcap_m < 50 or _stock_price < 1.0:
+                    _penny_warning = "🚨 PENNY"
+                elif _mcap_m < 100:
+                    _penny_warning = "⚠️ MICRO"
+
                 result = {
                     "Ticker": ticker,
                     "Name": (details.get("name", "") or stock.get("name", ""))[:30],
                     "Score": total_score,
                     "Grade": grade,
+                    "Risk_Flag": _penny_warning,
                     "Catalyst": catalyst_label,
                     "Catalyst_Score": catalyst_score,
                     "Pipeline_Score": trial_data["pipeline_score"],
@@ -24230,7 +24240,7 @@ with tab_biotech:
             # ── Dataframe ──
             import pandas as pd
             _bio_df = pd.DataFrame(_bio_filtered)
-            _bio_display_cols = ["Ticker", "Name", "Score", "Grade", "Chart", "Catalyst", "Preis", "MCap_M", "RVOL",
+            _bio_display_cols = ["Ticker", "Risk_Flag", "Name", "Score", "Grade", "Chart", "Catalyst", "Preis", "MCap_M", "RVOL",
                                  "Phase3", "Phase2", "Active_Trials", "Sentiment", "Float_Cat"]
             _bio_avail_cols = [c for c in _bio_display_cols if c in _bio_df.columns]
 
@@ -24238,6 +24248,7 @@ with tab_biotech:
                 _bio_df[_bio_avail_cols],
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+                    "Risk_Flag": st.column_config.TextColumn("⚠️", width="small"),
                     "Name": st.column_config.TextColumn("Name", width="medium"),
                     "Score": st.column_config.ProgressColumn("Catalyst Score", format="%d", min_value=0, max_value=100),
                     "Grade": st.column_config.TextColumn("Grade", width="small"),
@@ -24277,6 +24288,16 @@ with tab_biotech:
                     f"font-size:18px;font-weight:bold;'>{_bio_item.get('Grade', '?')} ({_bio_score}/100)</span>",
                     unsafe_allow_html=True
                 )
+
+                # ── Penny Stock / Micro Cap Warnung ──
+                _bio_risk_flag = _bio_item.get("Risk_Flag", "")
+                if "PENNY" in _bio_risk_flag:
+                    st.error("🚨 **PENNY STOCK WARNUNG** — MCap unter $50M und/oder Preis unter $1. "
+                             "Extrem hohes Risiko: geringe Liquidität, große Spreads, anfällig für Manipulation. "
+                             "Nur mit Spielgeld und striktem Stop-Loss traden!")
+                elif "MICRO" in _bio_risk_flag:
+                    st.warning("⚠️ **MICRO CAP** — MCap unter $100M. Erhöhte Volatilität und Liquiditätsrisiko. "
+                               "Position-Sizing reduzieren!")
 
                 # Chart Health Warnung (wenn schwach/kritisch)
                 _bio_ch = _bio_item.get("Chart_Health", 10)
