@@ -8328,7 +8328,14 @@ def _check_clinical_trials(company_name, ticker):
                     _days_until = (_pc_date - _now).days
 
                     if _days_until < 0:
-                        _readout_category = "OVERDUE"
+                        # Decay-Logik: Extrem überfällige Readouts sind Datenleichen
+                        # Sponsoren updaten ClinicalTrials.gov oft nicht → 2000d "overdue"
+                        _overdue_days = abs(_days_until)
+                        if _overdue_days <= 180:
+                            _readout_category = "OVERDUE"       # Echt — Readout steht bevor
+                        elif _overdue_days <= 365:
+                            _readout_category = "OVERDUE_STALE" # Fragwürdig — reduzierter Score
+                        # >365d: Ignorieren — fast sicher abgeschlossen aber nicht aktualisiert
                     elif _days_until <= 30:
                         _readout_category = "IMMINENT"
                     elif _days_until <= 90:
@@ -8349,11 +8356,11 @@ def _check_clinical_trials(company_name, ticker):
             trials.append(_trial_info)
 
             # Catalyst-Readout nur wenn zeitlich relevant
-            if _readout_category in ("OVERDUE", "IMMINENT", "UPCOMING"):
+            if _readout_category in ("OVERDUE", "OVERDUE_STALE", "IMMINENT", "UPCOMING"):
                 catalyst_readouts.append(_trial_info)
 
         # Sortiere Readouts: OVERDUE zuerst, dann IMMINENT, dann UPCOMING
-        _cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2}
+        _cat_order = {"OVERDUE": 0, "IMMINENT": 1, "OVERDUE_STALE": 2, "UPCOMING": 3}
         catalyst_readouts.sort(key=lambda x: (_cat_order.get(x["readout_category"], 9), x.get("days_until_readout") or 999))
 
         # Pipeline Score (max 20)
@@ -8382,10 +8389,13 @@ def _check_clinical_trials(company_name, ticker):
                 _phase_mult = 0.5
 
             # Timing-Gewichtung: OVERDUE > IMMINENT > UPCOMING
+            # OVERDUE_STALE (180-365d): Nur minimaler Score — fragwürdige Daten
             if _cat == "OVERDUE":
                 readout_score += 4 * _phase_mult
             elif _cat == "IMMINENT":
                 readout_score += 3 * _phase_mult
+            elif _cat == "OVERDUE_STALE":
+                readout_score += 0.5 * _phase_mult  # Minimal — wahrscheinlich Datenleiche
             elif _cat == "UPCOMING":
                 readout_score += 1.5 * _phase_mult
 
@@ -8400,6 +8410,8 @@ def _check_clinical_trials(company_name, ticker):
             _ph = _top.get("phase", "?")
             if _cat == "OVERDUE":
                 _readout_label = f"🔴 Readout ÜBERFÄLLIG ({abs(_d)}d) — {_ph}"
+            elif _cat == "OVERDUE_STALE":
+                _readout_label = f"⚪ Readout veraltet ({abs(_d)}d) — {_ph}"
             elif _cat == "IMMINENT":
                 _readout_label = f"🟡 Readout in {_d}d — {_ph}"
             elif _cat == "UPCOMING":
@@ -24753,6 +24765,9 @@ with tab_biotech:
                                  f"Primary Completion war {_ro_top.get('primary_completion', '?')} "
                                  f"({abs(_ro_top.get('days_until_readout', 0))} Tage überfällig). "
                                  f"**Daten stehen unmittelbar bevor!** _{_ro_top.get('title', '')}_")
+                    elif _ro_cat == "OVERDUE_STALE":
+                        st.caption(f"⚪ Trial Readout veraltet ({abs(_ro_top.get('days_until_readout', 0))}d überfällig) — "
+                                   f"{_ro_top.get('phase', '?')}: Wahrscheinlich abgeschlossen, Status nicht aktualisiert")
                     elif _ro_cat == "IMMINENT":
                         st.warning(f"🟡 **TRIAL READOUT IN {_ro_top.get('days_until_readout', '?')} TAGEN** — "
                                    f"{_ro_top.get('phase', '?')}: Primary Completion {_ro_top.get('primary_completion', '?')}. "
@@ -24832,6 +24847,8 @@ with tab_biotech:
                             _ro_badge = ""
                             if _ro_cat == "OVERDUE":
                                 _ro_badge = f" ⏰🔴 **ÜBERFÄLLIG** ({abs(_ro_days)}d)"
+                            elif _ro_cat == "OVERDUE_STALE":
+                                _ro_badge = f" ⚪ _(veraltet, {abs(_ro_days)}d)_"
                             elif _ro_cat == "IMMINENT":
                                 _ro_badge = f" ⏰🟡 **{_ro_days}d**"
                             elif _ro_cat == "UPCOMING":
