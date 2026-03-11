@@ -7486,18 +7486,27 @@ def _detect_chart_patterns(bars, direction="long"):
     closes = [b["close"] for b in bars]
     n = len(bars)
 
-    # ── Pivot-Punkte finden (lokale Extrema mit ±5 Bar Fenster) ──
+    # ── Dual-Pass Pivot-Erkennung ──────────────────────────────
+    # Pass 1: Fenster=5 für etablierte Swing-Punkte
+    # Pass 2: Fenster=3 für scharfe Spikes (z.B. schneller H&S-Kopf)
+    # Merge: Dedupliziert nach Index (±2 Bars = gleicher Pivot)
+    # ──────────────────────────────────────────────────────────
     pivot_highs = []  # (index, price)
     pivot_lows = []
-    window = 5
 
-    for i in range(window, n - window):
-        # Pivot High: höher als alle ±window Nachbarn
-        if highs[i] == max(highs[i-window:i+window+1]):
-            pivot_highs.append((i, highs[i]))
-        # Pivot Low: tiefer als alle ±window Nachbarn
-        if lows[i] == min(lows[i-window:i+window+1]):
-            pivot_lows.append((i, lows[i]))
+    for _pw in [5, 3]:
+        for i in range(_pw, n - _pw):
+            if highs[i] == max(highs[i-_pw:i+_pw+1]):
+                # Nur hinzufügen wenn kein existierender Pivot innerhalb ±2 Bars
+                if not any(abs(i - idx) <= 2 for idx, _ in pivot_highs):
+                    pivot_highs.append((i, highs[i]))
+            if lows[i] == min(lows[i-_pw:i+_pw+1]):
+                if not any(abs(i - idx) <= 2 for idx, _ in pivot_lows):
+                    pivot_lows.append((i, lows[i]))
+
+    # Nach Index sortieren für korrekte Pattern-Reihenfolge
+    pivot_highs.sort(key=lambda x: x[0])
+    pivot_lows.sort(key=lambda x: x[0])
 
     current_price = closes[-1] if closes else 0
 
@@ -11100,20 +11109,27 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
         atr_pct = atr / current_price if current_price > 0 else 0.02
         
-        # Finde Swing Highs und Lows mit ADAPTIVEM Window
-        # Window = mindestens 5, maximal 10, skaliert mit Datenmenge
+        # Dual-Pass Swing-Erkennung: Großes + kleines Fenster
+        # Pass 1: Adaptives großes Fenster (5-10) für etablierte Swings
+        # Pass 2: Fenster=3 für scharfe Spikes (schnelle H&S-Köpfe etc.)
         swing_window = max(5, min(10, len(data) // 8))
-        
+
         swing_highs = []
         swing_lows = []
-        
-        for i in range(swing_window, len(data) - swing_window):
-            # Swing High: Höher als alle Bars links UND rechts im Window
-            if highs[i] >= max(highs[i-swing_window:i]) and highs[i] >= max(highs[i+1:i+swing_window+1]):
-                swing_highs.append({"price": highs[i], "index": i, "volume": volumes[i]})
-            # Swing Low: Tiefer als alle Bars links UND rechts im Window
-            if lows[i] <= min(lows[i-swing_window:i]) and lows[i] <= min(lows[i+1:i+swing_window+1]):
-                swing_lows.append({"price": lows[i], "index": i, "volume": volumes[i]})
+
+        for _sw in [swing_window, 3]:
+            for i in range(_sw, len(data) - _sw):
+                if highs[i] >= max(highs[i-_sw:i]) and highs[i] >= max(highs[i+1:i+_sw+1]):
+                    # Deduplizieren: kein existierender Swing innerhalb ±2 Bars
+                    if not any(abs(i - s["index"]) <= 2 for s in swing_highs):
+                        swing_highs.append({"price": highs[i], "index": i, "volume": volumes[i]})
+                if lows[i] <= min(lows[i-_sw:i]) and lows[i] <= min(lows[i+1:i+_sw+1]):
+                    if not any(abs(i - s["index"]) <= 2 for s in swing_lows):
+                        swing_lows.append({"price": lows[i], "index": i, "volume": volumes[i]})
+
+        # Nach Index sortieren für korrekte Pattern-Reihenfolge
+        swing_highs.sort(key=lambda x: x["index"])
+        swing_lows.sort(key=lambda x: x["index"])
         
         # === DOUBLE TOP ===
         if len(swing_highs) >= 2:
