@@ -8177,35 +8177,57 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
 
 def _check_clinical_trials(company_name, ticker):
     """
-    Prüft ClinicalTrials.gov API nach aktiven Studien.
-    Returns: dict mit pipeline_score, trials info
+    Prüft ClinicalTrials.gov API nach aktiven Studien + Readout-Kalender.
+    Returns: dict mit pipeline_score, trials info, catalyst_readouts
+
+    Catalyst-Readout-Logik:
+    - OVERDUE: Primary Completion überschritten → Daten kommen BALD
+    - IMMINENT: Primary Completion in ≤30 Tagen
+    - UPCOMING: Primary Completion in ≤90 Tagen
+    - Phase 3 > Phase 2 > Phase 1 Gewichtung
     """
     try:
+        from datetime import timedelta as _td
+        _now = datetime.now()
+
         # Suche nach Company Name (besser als Ticker)
-        # Entferne generische Suffixe, nutze max 3 relevante Wörter
         _strip_words = {"inc", "inc.", "corp", "corp.", "ltd", "ltd.", "plc", "co", "co.",
-                        "group", "holdings", "llc", "sa", "se", "nv", "ag", "gmbh", "the"}
+                        "group", "holdings", "llc", "sa", "se", "nv", "ag", "gmbh", "the",
+                        "pharmaceuticals", "pharmaceutical", "therapeutics", "biosciences",
+                        "oncology", "sciences", "common", "ordinary", "shares", "class"}
         if company_name:
             _name_parts = [w for w in company_name.split() if w.lower() not in _strip_words]
             search_term = " ".join(_name_parts[:3]) if _name_parts else ticker
         else:
             search_term = ticker
-        url = "https://clinicaltrials.gov/api/v2/studies"
-        params = {
-            "query.spons": search_term,
-            "filter.overallStatus": "RECRUITING,ACTIVE_NOT_RECRUITING,ENROLLING_BY_INVITATION,NOT_YET_RECRUITING",
-            "pageSize": 20,
-            "format": "json",
-            "fields": "NCTId,BriefTitle,Phase,OverallStatus,StartDate,Condition",
-        }
-        resp = rate_limited_get(url, params=params, timeout=8)
-        if resp.status_code != 200:
-            return {"pipeline_score": 0, "trials": [], "phase_summary": {}}
 
-        studies = resp.json().get("studies", [])
+        url = "https://clinicaltrials.gov/api/v2/studies"
+
+        # Zwei Suchen: query.spons (exakt) und query.term (breiter) — nehme besseres Ergebnis
+        _all_studies = []
+        for _qfield in ["query.spons", "query.term"]:
+            params = {
+                _qfield: search_term,
+                "pageSize": 50,
+                "format": "json",
+            }
+            try:
+                resp = rate_limited_get(url, params=params, timeout=10)
+                if resp.status_code == 200 and resp.text.strip():
+                    _fetched = resp.json().get("studies", [])
+                    if len(_fetched) > len(_all_studies):
+                        _all_studies = _fetched
+            except Exception:
+                pass
+
+        # Client-side Filter: nur aktive Studies
+        _active_statuses = {"RECRUITING", "ACTIVE_NOT_RECRUITING", "ENROLLING_BY_INVITATION", "NOT_YET_RECRUITING"}
+        studies = [s for s in _all_studies
+                   if s.get("protocolSection", {}).get("statusModule", {}).get("overallStatus", "") in _active_statuses]
 
         phase_counts = {"PHASE3": 0, "PHASE2": 0, "PHASE1": 0, "EARLY_PHASE1": 0, "PHASE4": 0, "NA": 0}
         trials = []
+        catalyst_readouts = []  # NEU: Readout-Kalender
 
         for study in studies:
             proto = study.get("protocolSection", {})
@@ -8225,29 +8247,109 @@ def _check_clinical_trials(company_name, ticker):
             if phase_key in phase_counts:
                 phase_counts[phase_key] += 1
 
-            trials.append({
+            # ── NEU: Readout-Kalender ──
+            _pc = status_mod.get("primaryCompletionDateStruct", {})
+            _pc_str = _pc.get("date", "")
+            _days_until = None
+            _readout_category = ""
+            if _pc_str:
+                try:
+                    if len(_pc_str) == 7:  # YYYY-MM
+                        _pc_date = datetime.strptime(_pc_str, "%Y-%m")
+                    else:
+                        _pc_date = datetime.strptime(_pc_str[:10], "%Y-%m-%d")
+                    _days_until = (_pc_date - _now).days
+
+                    if _days_until < 0:
+                        _readout_category = "OVERDUE"
+                    elif _days_until <= 30:
+                        _readout_category = "IMMINENT"
+                    elif _days_until <= 90:
+                        _readout_category = "UPCOMING"
+                except Exception:
+                    pass
+
+            _trial_info = {
                 "nct_id": nct_id,
                 "title": title,
                 "phase": phase_label,
                 "status": status,
                 "conditions": conditions[:3],
-            })
+                "primary_completion": _pc_str,
+                "days_until_readout": _days_until,
+                "readout_category": _readout_category,
+            }
+            trials.append(_trial_info)
+
+            # Catalyst-Readout nur wenn zeitlich relevant
+            if _readout_category in ("OVERDUE", "IMMINENT", "UPCOMING"):
+                catalyst_readouts.append(_trial_info)
+
+        # Sortiere Readouts: OVERDUE zuerst, dann IMMINENT, dann UPCOMING
+        _cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2}
+        catalyst_readouts.sort(key=lambda x: (_cat_order.get(x["readout_category"], 9), x.get("days_until_readout") or 999))
 
         # Pipeline Score (max 20)
         pipeline_score = 0
-        pipeline_score += min(phase_counts["PHASE3"] * 8, 16)   # Phase 3 = Gold
-        pipeline_score += min(phase_counts["PHASE2"] * 3, 9)    # Phase 2 = gut
-        pipeline_score += min(phase_counts["PHASE1"] * 1, 3)    # Phase 1 = früh
+        pipeline_score += min(phase_counts["PHASE3"] * 8, 16)
+        pipeline_score += min(phase_counts["PHASE2"] * 3, 9)
+        pipeline_score += min(phase_counts["PHASE1"] * 1, 3)
         pipeline_score = min(20, pipeline_score)
+
+        # ── NEU: Catalyst-Readout Score (max 15 Bonus) ──
+        # Überfällige/bevorstehende Readouts = potentieller Kurssprung
+        readout_score = 0
+        for _ro in catalyst_readouts:
+            _phase = _ro.get("phase", "").replace(" ", "").upper()
+            _cat = _ro.get("readout_category", "")
+
+            # Phase-Gewichtung: P3 > P2 > P1
+            _phase_mult = 1.0
+            if "PHASE3" in _phase:
+                _phase_mult = 3.0
+            elif "PHASE2" in _phase:
+                _phase_mult = 2.0
+            elif "PHASE1" in _phase:
+                _phase_mult = 1.0
+            else:
+                _phase_mult = 0.5
+
+            # Timing-Gewichtung: OVERDUE > IMMINENT > UPCOMING
+            if _cat == "OVERDUE":
+                readout_score += 4 * _phase_mult
+            elif _cat == "IMMINENT":
+                readout_score += 3 * _phase_mult
+            elif _cat == "UPCOMING":
+                readout_score += 1.5 * _phase_mult
+
+        readout_score = min(15, int(readout_score))
+
+        # Readout-Label für UI
+        _readout_label = ""
+        if catalyst_readouts:
+            _top = catalyst_readouts[0]
+            _d = _top.get("days_until_readout", 0)
+            _cat = _top.get("readout_category", "")
+            _ph = _top.get("phase", "?")
+            if _cat == "OVERDUE":
+                _readout_label = f"🔴 Readout ÜBERFÄLLIG ({abs(_d)}d) — {_ph}"
+            elif _cat == "IMMINENT":
+                _readout_label = f"🟡 Readout in {_d}d — {_ph}"
+            elif _cat == "UPCOMING":
+                _readout_label = f"🟢 Readout in {_d}d — {_ph}"
 
         return {
             "pipeline_score": pipeline_score,
+            "readout_score": readout_score,
+            "readout_label": _readout_label,
+            "catalyst_readouts": catalyst_readouts[:5],
             "trials": trials[:10],
             "phase_summary": phase_counts,
             "total_active": len(studies),
         }
     except Exception:
-        return {"pipeline_score": 0, "trials": [], "phase_summary": {}, "total_active": 0}
+        return {"pipeline_score": 0, "readout_score": 0, "readout_label": "",
+                "catalyst_readouts": [], "trials": [], "phase_summary": {}, "total_active": 0}
 
 
 def _biotech_technical_score(poly_key, ticker):
@@ -8637,8 +8739,9 @@ def _biotech_background_scan(poly_key):
                 # C) Ticker Details (MCap, Shares)
                 details = get_ticker_details(poly_key, ticker)
 
-                # D) Clinical Trials — nur wenn echtes Catalyst-Signal vorhanden
-                trial_data = {"pipeline_score": 0, "trials": [], "phase_summary": {}, "total_active": 0}
+                # D) Clinical Trials + Readout-Kalender
+                trial_data = {"pipeline_score": 0, "readout_score": 0, "readout_label": "",
+                              "catalyst_readouts": [], "trials": [], "phase_summary": {}, "total_active": 0}
                 if catalyst_score >= 4 or momentum_score >= 6:
                     company_name = details.get("name", "") or stock.get("name", "")
                     trial_data = _check_clinical_trials(company_name, ticker)
@@ -8665,10 +8768,15 @@ def _biotech_background_scan(poly_key):
                     rvol=_rvol_val
                 )
 
+                # H) Readout-Bonus: Überfällige/nahende Trial-Readouts boosten den Score
+                _readout_bonus = trial_data.get("readout_score", 0)
+                total_score += _readout_bonus
+
                 # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
-                # Ohne FDA/Pipeline Catalyst braucht es einen sehr hohen Score
-                if catalyst_score > 0:
-                    min_required = 20  # Mit Catalyst: normaler Threshold
+                # READOUT-OVERRIDE: Wenn ein Readout überfällig/imminent ist, senke den Threshold
+                _has_readout = len(trial_data.get("catalyst_readouts", [])) > 0
+                if catalyst_score > 0 or _has_readout:
+                    min_required = 20  # Mit Catalyst oder Readout: normaler Threshold
                 else:
                     min_required = 35  # Ohne Catalyst: nur rein wenn Momentum+Technik stark
                 if total_score < min_required:
@@ -8716,6 +8824,14 @@ def _biotech_background_scan(poly_key):
                 elif _mcap_m < 100:
                     _penny_warning = "⚠️ MICRO"
 
+                # Readout-Label: Wenn vorhanden, ergänze Catalyst-Label
+                _readout_lbl = trial_data.get("readout_label", "")
+                if _readout_lbl and not catalyst_label.startswith("🔴") and not catalyst_label.startswith("🟡"):
+                    # Readout ist das primäre Signal wenn kein stärkerer Catalyst da ist
+                    if trial_data.get("readout_score", 0) >= 5:
+                        catalyst_label = _readout_lbl
+                        catalyst_headline = f"Trial-Readout erwartet — {trial_data['catalyst_readouts'][0]['title'][:60]}" if trial_data.get("catalyst_readouts") else ""
+
                 result = {
                     "Ticker": ticker,
                     "Name": (details.get("name", "") or stock.get("name", ""))[:30],
@@ -8725,6 +8841,7 @@ def _biotech_background_scan(poly_key):
                     "Catalyst": catalyst_label,
                     "Catalyst_Score": catalyst_score,
                     "Pipeline_Score": trial_data["pipeline_score"],
+                    "Readout_Score": trial_data.get("readout_score", 0),
                     "Technical_Score": tech_data["technical_score"],
                     "Risk_Score": risk_data["risk_score"],
                     "Momentum_Score": momentum_score,
@@ -8734,6 +8851,8 @@ def _biotech_background_scan(poly_key):
                     "RVOL": _tech_details.get("RVOL", 0),
                     "Float_Cat": details.get("float_category", "UNKNOWN"),
                     "Headline": catalyst_headline,
+                    "Readout_Label": _readout_lbl,
+                    "Readout_Details": trial_data.get("catalyst_readouts", [])[:3],
                     "Phase3": trial_data["phase_summary"].get("PHASE3", 0),
                     "Phase2": trial_data["phase_summary"].get("PHASE2", 0),
                     "Phase1": trial_data["phase_summary"].get("PHASE1", 0),
@@ -8900,8 +9019,10 @@ def _biotech_quick_scan(poly_key):
                     if catalyst_score >= 8:
                         results.append({
                             "Ticker": ticker, "Name": "", "Score": catalyst_score + momentum_score,
-                            "Grade": "C", "Catalyst": news_data.get("best_catalyst", {}).get("label", "🔬 Neu"),
+                            "Grade": "C", "Risk_Flag": "",
+                            "Catalyst": news_data.get("best_catalyst", {}).get("label", "🔬 Neu"),
                             "Catalyst_Score": catalyst_score, "Pipeline_Score": 0,
+                            "Readout_Score": 0, "Readout_Label": "", "Readout_Details": [],
                             "Technical_Score": 0, "Risk_Score": 5, "Momentum_Score": momentum_score,
                             "Preis": 0, "MCap_M": 0, "Shares_M": 0, "RVOL": 0, "Float_Cat": "UNKNOWN",
                             "Headline": news_data.get("best_catalyst", {}).get("headline", ""),
@@ -24240,7 +24361,7 @@ with tab_biotech:
             # ── Dataframe ──
             import pandas as pd
             _bio_df = pd.DataFrame(_bio_filtered)
-            _bio_display_cols = ["Ticker", "Risk_Flag", "Name", "Score", "Grade", "Chart", "Catalyst", "Preis", "MCap_M", "RVOL",
+            _bio_display_cols = ["Ticker", "Risk_Flag", "Name", "Score", "Grade", "Chart", "Catalyst", "Readout_Label", "Preis", "MCap_M", "RVOL",
                                  "Phase3", "Phase2", "Active_Trials", "Sentiment", "Float_Cat"]
             _bio_avail_cols = [c for c in _bio_display_cols if c in _bio_df.columns]
 
@@ -24254,6 +24375,7 @@ with tab_biotech:
                     "Grade": st.column_config.TextColumn("Grade", width="small"),
                     "Chart": st.column_config.TextColumn("Chart", width="small"),
                     "Catalyst": st.column_config.TextColumn("Katalysator", width="medium"),
+                    "Readout_Label": st.column_config.TextColumn("⏰ Readout", width="medium"),
                     "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
                     "MCap_M": st.column_config.NumberColumn("MCap (M$)", format="%.0f"),
                     "RVOL": st.column_config.NumberColumn("RVOL", format="%.1f"),
@@ -24320,14 +24442,35 @@ with tab_biotech:
                     else:
                         st.warning(f"📉 **Chart Achtung:** {' | '.join(_ch_parts)}")
 
+                # ── Trial Readout Kalender (wenn vorhanden) ──
+                _bio_readouts = _bio_item.get("Readout_Details", [])
+                _bio_readout_lbl = _bio_item.get("Readout_Label", "")
+                if _bio_readouts:
+                    _ro_top = _bio_readouts[0]
+                    _ro_cat = _ro_top.get("readout_category", "")
+                    if _ro_cat == "OVERDUE":
+                        st.error(f"🔴 **TRIAL READOUT ÜBERFÄLLIG** — {_ro_top.get('phase', '?')}: "
+                                 f"Primary Completion war {_ro_top.get('primary_completion', '?')} "
+                                 f"({abs(_ro_top.get('days_until_readout', 0))} Tage überfällig). "
+                                 f"**Daten stehen unmittelbar bevor!** _{_ro_top.get('title', '')}_")
+                    elif _ro_cat == "IMMINENT":
+                        st.warning(f"🟡 **TRIAL READOUT IN {_ro_top.get('days_until_readout', '?')} TAGEN** — "
+                                   f"{_ro_top.get('phase', '?')}: Primary Completion {_ro_top.get('primary_completion', '?')}. "
+                                   f"**Bevorstehender Katalysator!** _{_ro_top.get('title', '')}_")
+                    elif _ro_cat == "UPCOMING":
+                        st.info(f"🟢 **Trial Readout in {_ro_top.get('days_until_readout', '?')} Tagen** — "
+                                f"{_ro_top.get('phase', '?')}: {_ro_top.get('primary_completion', '?')}. "
+                                f"_{_ro_top.get('title', '')}_")
+
                 # Score Breakdown
-                _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5, _bio_bc6 = st.columns(6)
+                _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5, _bio_bc6, _bio_bc7 = st.columns(7)
                 _bio_bc1.metric("🎯 Catalyst", f"{_bio_item.get('Catalyst_Score', 0)}/30", help="FDA/PDUFA Events, Approvals, Breakthrough")
                 _bio_bc2.metric("🔬 Pipeline", f"{_bio_item.get('Pipeline_Score', 0)}/20", help="Phase 3/2/1 Clinical Trials")
-                _bio_bc3.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
-                _bio_bc4.metric("🎰 Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
-                _bio_bc5.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
-                _bio_bc6.metric("📊 Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}% vom High" if _bio_dd >= 10 else None, delta_color="normal", help="Chart Health: 10=perfekt, 0=Crash. Delta = Drawdown vom 90-Tage-High.")
+                _bio_bc3.metric("⏰ Readout", f"{_bio_item.get('Readout_Score', 0)}/15", help="Überfällige/bevorstehende Trial-Readouts. OVERDUE=🔴, IMMINENT=🟡, UPCOMING=🟢")
+                _bio_bc4.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
+                _bio_bc5.metric("🎰 Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
+                _bio_bc6.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
+                _bio_bc7.metric("📊 Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}% vom High" if _bio_dd >= 10 else None, delta_color="normal", help="Chart Health: 10=perfekt, 0=Crash.")
 
                 st.divider()
 
@@ -24371,7 +24514,21 @@ with tab_biotech:
                             phase = trial.get("phase", "?")
                             phase_emoji = "🔴" if "3" in str(phase) else "🟠" if "2" in str(phase) else "🟢"
                             conditions = ", ".join(trial.get("conditions", [])[:2])
-                            st.markdown(f"{phase_emoji} **{phase}** — {trial.get('title', '')}")
+                            # Readout-Status anzeigen
+                            _ro_cat = trial.get("readout_category", "")
+                            _ro_days = trial.get("days_until_readout")
+                            _pc_date = trial.get("primary_completion", "")
+                            _ro_badge = ""
+                            if _ro_cat == "OVERDUE":
+                                _ro_badge = f" ⏰🔴 **ÜBERFÄLLIG** ({abs(_ro_days)}d)"
+                            elif _ro_cat == "IMMINENT":
+                                _ro_badge = f" ⏰🟡 **{_ro_days}d**"
+                            elif _ro_cat == "UPCOMING":
+                                _ro_badge = f" ⏰🟢 {_ro_days}d"
+                            elif _pc_date:
+                                _ro_badge = f" _(PC: {_pc_date})_"
+
+                            st.markdown(f"{phase_emoji} **{phase}** — {trial.get('title', '')}{_ro_badge}")
                             if conditions:
                                 st.caption(f"Indikation: {conditions}")
                     else:
