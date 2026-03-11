@@ -21930,6 +21930,225 @@ with st.sidebar:
                     status.update(label=f"✅ {len(st.session_state.scan_results)} Signale", state="complete")
 
 # -----------------------------------------------------------------------------
+# OPTIONS UNUSUAL ACTIVITY DETECTION (Free Polygon Plan)
+# -----------------------------------------------------------------------------
+
+@st.cache_data(ttl=900)  # 15 Min Cache — Options-Daten ändern sich nicht so schnell
+def _detect_unusual_options(ticker, current_price, poly_key):
+    """
+    Erkennt ungewöhnliche Optionsaktivität für einen Ticker.
+
+    Strategie (Free Plan optimiert — minimale API Calls):
+    1. Reference API → ATM-Kontrakte identifizieren (1 Call)
+    2. Aggregates für 6 wichtigste ATM-Strikes (6 Calls)
+    3. RVOL-Vergleich: aktuelles Volume vs 20-Tage-Avg
+
+    Args:
+        ticker: Aktien-Ticker (z.B. "MRNA")
+        current_price: Aktueller Aktienpreis
+        poly_key: Polygon API Key
+
+    Returns:
+        dict: {has_unusual, signals, put_call_ratio, total_call_vol, total_put_vol, label}
+    """
+    try:
+        from datetime import timedelta as _td
+        _now = datetime.now()
+        _empty = {"has_unusual": False, "signals": [], "put_call_ratio": 0,
+                  "total_call_vol": 0, "total_put_vol": 0, "label": ""}
+
+        if not ticker or not current_price or current_price <= 0 or not poly_key:
+            return _empty
+
+        # ── Schritt 1: ATM-Zone bestimmen ──
+        # ATM = ±15% vom aktuellen Preis, gerundet auf gängige Strikes
+        _atm_low = current_price * 0.85
+        _atm_high = current_price * 1.15
+
+        # Nächste Expiry: 7-30 Tage in der Zukunft
+        _exp_min = (_now + _td(days=3)).strftime("%Y-%m-%d")
+        _exp_max = (_now + _td(days=45)).strftime("%Y-%m-%d")
+
+        # ── Schritt 2: Reference API → ATM Kontrakte (1 Call für Calls, 1 für Puts) ──
+        _ref_url = "https://api.polygon.io/v3/reference/options/contracts"
+        _atm_contracts = {"calls": [], "puts": []}
+
+        for _ctype in ["call", "put"]:
+            _params = {
+                "underlying_ticker": ticker,
+                "contract_type": _ctype,
+                "expired": "false",
+                "strike_price.gte": round(_atm_low, 0),
+                "strike_price.lte": round(_atm_high, 0),
+                "expiration_date.gte": _exp_min,
+                "expiration_date.lte": _exp_max,
+                "limit": 100,
+                "apiKey": poly_key,
+                "order": "asc",
+                "sort": "strike_price",
+            }
+            try:
+                _resp = rate_limited_get(_ref_url, params=_params, timeout=10)
+                if _resp.status_code == 200:
+                    _contracts = _resp.json().get("results", [])
+                    _atm_contracts["calls" if _ctype == "call" else "puts"] = _contracts
+            except Exception:
+                pass
+
+        if not _atm_contracts["calls"] and not _atm_contracts["puts"]:
+            return _empty
+
+        # ── Schritt 3: Wähle die 3 nächsten ATM-Strikes pro Typ ──
+        # Sortiere nach Nähe zum aktuellen Preis
+        def _pick_top_strikes(contracts, n=3):
+            sorted_c = sorted(contracts, key=lambda c: abs(c.get("strike_price", 0) - current_price))
+            return sorted_c[:n]
+
+        _selected_calls = _pick_top_strikes(_atm_contracts["calls"], 3)
+        _selected_puts = _pick_top_strikes(_atm_contracts["puts"], 3)
+        _selected = [(c, "CALL") for c in _selected_calls] + [(c, "PUT") for c in _selected_puts]
+
+        if not _selected:
+            return _empty
+
+        # ── Schritt 4: Aggregate Volume für jeden ausgewählten Strike (6 Calls) ──
+        _end = _now
+        _start = _now - _td(days=30)
+        _contract_data = []
+
+        for _contract, _ctype in _selected:
+            _oticker = _contract.get("ticker", "")
+            if not _oticker:
+                continue
+
+            try:
+                _agg_url = f"https://api.polygon.io/v2/aggs/ticker/{_oticker}/range/1/day/{_start.strftime('%Y-%m-%d')}/{_end.strftime('%Y-%m-%d')}"
+                _agg_params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 50}
+                _agg_resp = rate_limited_get(_agg_url, params=_agg_params, timeout=10)
+
+                if _agg_resp.status_code == 200:
+                    _bars = _agg_resp.json().get("results", [])
+                    if _bars:
+                        _volumes = [b.get("v", 0) for b in _bars]
+                        _avg_vol = sum(_volumes[:-1]) / max(len(_volumes) - 1, 1) if len(_volumes) > 1 else _volumes[0]
+                        _last_vol = _volumes[-1]
+                        _rvol = _last_vol / _avg_vol if _avg_vol > 0 else 0
+
+                        _contract_data.append({
+                            "ticker": _oticker,
+                            "type": _ctype,
+                            "strike": _contract.get("strike_price", 0),
+                            "expiry": _contract.get("expiration_date", ""),
+                            "last_vol": _last_vol,
+                            "avg_vol": round(_avg_vol, 1),
+                            "rvol": round(_rvol, 1),
+                            "days_data": len(_bars),
+                        })
+            except Exception:
+                pass
+
+        if not _contract_data:
+            return _empty
+
+        # ── Schritt 5: Anomalie-Detection ──
+        _signals = []
+        _total_call_vol = sum(c["last_vol"] for c in _contract_data if c["type"] == "CALL")
+        _total_put_vol = sum(c["last_vol"] for c in _contract_data if c["type"] == "PUT")
+        _pc_ratio = _total_put_vol / _total_call_vol if _total_call_vol > 0 else 0
+
+        for c in _contract_data:
+            if c["rvol"] >= 3.0:
+                _signals.append({
+                    "severity": "HIGH",
+                    "type": c["type"],
+                    "strike": c["strike"],
+                    "rvol": c["rvol"],
+                    "vol": c["last_vol"],
+                    "avg": c["avg_vol"],
+                    "label": f"🔴 {c['type']} ${c['strike']:.0f}: {c['rvol']:.1f}x Volumen ({c['last_vol']} vs avg {c['avg_vol']:.0f})"
+                })
+            elif c["rvol"] >= 2.0:
+                _signals.append({
+                    "severity": "MEDIUM",
+                    "type": c["type"],
+                    "strike": c["strike"],
+                    "rvol": c["rvol"],
+                    "vol": c["last_vol"],
+                    "avg": c["avg_vol"],
+                    "label": f"🟡 {c['type']} ${c['strike']:.0f}: {c['rvol']:.1f}x Volumen ({c['last_vol']} vs avg {c['avg_vol']:.0f})"
+                })
+
+        # Put/Call Ratio Anomalie
+        if _pc_ratio >= 2.0:
+            _signals.append({
+                "severity": "HIGH", "type": "P/C_RATIO", "strike": 0,
+                "rvol": _pc_ratio, "vol": _total_put_vol, "avg": _total_call_vol,
+                "label": f"🔴 Put/Call Ratio: {_pc_ratio:.1f} — starke Put-Aktivität (bearish Signal)"
+            })
+        elif _pc_ratio <= 0.3 and _total_call_vol > 50:
+            _signals.append({
+                "severity": "MEDIUM", "type": "P/C_RATIO", "strike": 0,
+                "rvol": _pc_ratio, "vol": _total_call_vol, "avg": _total_put_vol,
+                "label": f"🟡 Put/Call Ratio: {_pc_ratio:.2f} — starke Call-Aktivität (bullish Signal)"
+            })
+
+        # Gesamt-Label
+        _label = ""
+        _has_unusual = len(_signals) > 0
+        if _has_unusual:
+            _top = _signals[0]
+            _label = _top["label"]
+        else:
+            _label = f"✅ Normal (C:{_total_call_vol} P:{_total_put_vol} P/C:{_pc_ratio:.2f})"
+
+        return {
+            "has_unusual": _has_unusual,
+            "signals": _signals,
+            "put_call_ratio": round(_pc_ratio, 2),
+            "total_call_vol": _total_call_vol,
+            "total_put_vol": _total_put_vol,
+            "label": _label,
+            "contracts_checked": len(_contract_data),
+        }
+
+    except Exception:
+        return {"has_unusual": False, "signals": [], "put_call_ratio": 0,
+                "total_call_vol": 0, "total_put_vol": 0, "label": ""}
+
+
+def _render_options_activity_banner(ticker, current_price, poly_key):
+    """Rendert ein Options-Activity Banner im Biotech Scanner Detail View."""
+    if not ticker or not current_price or not poly_key:
+        return
+
+    try:
+        _data = _detect_unusual_options(ticker, current_price, poly_key)
+        if not _data or not _data.get("contracts_checked"):
+            return
+
+        if _data["has_unusual"]:
+            _signals = _data["signals"]
+            _high = [s for s in _signals if s["severity"] == "HIGH"]
+            _medium = [s for s in _signals if s["severity"] == "MEDIUM"]
+
+            if _high:
+                st.error(f"🎰 **UNUSUAL OPTIONS ACTIVITY** — {_signals[0]['label']}")
+                for s in _signals[1:3]:
+                    st.warning(s["label"])
+            elif _medium:
+                st.warning(f"🎰 **Options-Signal** — {_signals[0]['label']}")
+        else:
+            # Nur im Detail View anzeigen, nicht als Banner
+            _pc = _data["put_call_ratio"]
+            _cv = _data["total_call_vol"]
+            _pv = _data["total_put_vol"]
+            if _cv + _pv > 0:
+                st.caption(f"🎰 Options: Call Vol {_cv} | Put Vol {_pv} | P/C Ratio {_pc:.2f}")
+    except Exception:
+        pass
+
+
+# -----------------------------------------------------------------------------
 # SEKTOR-TREND CONTEXT BANNER (Helper)
 # -----------------------------------------------------------------------------
 # SIC Code → SPDR Sektor ETF Mapping
@@ -24016,6 +24235,15 @@ with tab_bi:
             except Exception:
                 pass
 
+            # Options Unusual Activity für BI Scanner
+            try:
+                _bi_pk2 = st.secrets.get("POLYGON_KEY", "")
+                _bi_price = bi_row.get("Preis", bi_row.get("close", 0))
+                if _bi_pk2 and _bi_price > 0:
+                    _render_options_activity_banner(ticker, _bi_price, _bi_pk2)
+            except Exception:
+                pass
+
             d1, d2, d3, d4 = st.columns(4)
             with d1:
                 score = bi_row.get("BI_Score", 0)
@@ -24461,6 +24689,17 @@ with tab_biotech:
                         st.info(f"🟢 **Trial Readout in {_ro_top.get('days_until_readout', '?')} Tagen** — "
                                 f"{_ro_top.get('phase', '?')}: {_ro_top.get('primary_completion', '?')}. "
                                 f"_{_ro_top.get('title', '')}_")
+
+                # ── Options Unusual Activity (on-demand, nur in Detail View) ──
+                try:
+                    _bio_price = _bio_item.get("Preis", 0)
+                    _bio_mcap = _bio_item.get("MCap_M", 0)
+                    _opt_poly = st.secrets.get("POLYGON_KEY", "")
+                    # Nur für Aktien mit MCap > $200M (darunter keine Options-Liquidität)
+                    if _opt_poly and _bio_price > 0 and _bio_mcap >= 200:
+                        _render_options_activity_banner(_bio_item["Ticker"], _bio_price, _opt_poly)
+                except Exception:
+                    pass
 
                 # Score Breakdown
                 _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5, _bio_bc6, _bio_bc7 = st.columns(7)
