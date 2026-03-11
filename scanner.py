@@ -5795,19 +5795,86 @@ def get_volatility_regime(atr_pct):
 def validate_liquidity(volume, price, min_dollar_volume=100000):
     """
     Prüft ob genug Liquidität für einen Trade vorhanden ist.
-    
+
     Gemini's Kritik: "Pennystocks mit 100 Aktien Volumen"
-    
+
     Dollar Volume = Volume * Price
     Minimum: $100,000 für Day Trading
     """
     if volume <= 0 or price <= 0:
         return False, 0
-    
+
     dollar_volume = volume * price
     is_liquid = dollar_volume >= min_dollar_volume
-    
+
     return is_liquid, dollar_volume
+
+def get_time_adjusted_liquidity_threshold(threshold, session="Regular"):
+    """
+    Passt den Liquiditäts-Schwellwert an die aktuelle Tageszeit an.
+
+    PROBLEM: Am Morgen (10:00 ET) sind erst ~12% des Tagesvolumens gehandelt.
+    Ein $10M Dollar-Volume-Filter killt dann fast alle Aktien, weil das
+    tatsächlich gehandelte Volume noch zu niedrig ist.
+
+    LÖSUNG: Senke den Schwellwert proportional zur Tageszeit.
+    Der User meint mit "$10M Minimum" das TAGES-Volume, nicht das Morgen-Volume.
+
+    Beispiel um 10:00 ET (expected_pct = 0.12):
+    - User-Filter: $10M Minimum
+    - Angepasst: $10M × 0.12 = $1.2M aktuell nötig
+    - Eine Aktie mit $1.5M um 10:00 → PASS (wird auf ~$12.5M Tages-Vol kommen)
+
+    Returns: Angepasster Schwellwert
+    """
+    if threshold <= 0:
+        return 0
+
+    # Für Pre/Post/Extended: Keine Anpassung
+    if session in ["Pre-Market", "After-Hours", "Extended"]:
+        return threshold
+
+    try:
+        et_tz = pytz.timezone('US/Eastern')
+        now_et = datetime.now(et_tz)
+        current_hour = now_et.hour + now_et.minute / 60
+
+        market_open = 9.5
+        market_close = 16.0
+
+        if current_hour < market_open:
+            return threshold
+        if current_hour >= market_close:
+            return threshold
+
+        # Gleiches Volume Profile wie calculate_rvol_at_time
+        volume_profile = [
+            (9.5, 0.0), (10.0, 0.12), (10.5, 0.22), (11.0, 0.30),
+            (11.5, 0.36), (12.0, 0.42), (12.5, 0.47), (13.0, 0.52),
+            (13.5, 0.57), (14.0, 0.62), (14.5, 0.68), (15.0, 0.75),
+            (15.5, 0.85), (16.0, 1.0),
+        ]
+
+        expected_pct = 0.0
+        for i, (hour, pct) in enumerate(volume_profile):
+            if current_hour <= hour:
+                if i == 0:
+                    expected_pct = 0.0
+                else:
+                    prev_hour, prev_pct = volume_profile[i-1]
+                    time_ratio = (current_hour - prev_hour) / (hour - prev_hour)
+                    expected_pct = prev_pct + time_ratio * (pct - prev_pct)
+                break
+        else:
+            expected_pct = 1.0
+
+        expected_pct = max(0.05, expected_pct)
+
+        # Schwellwert proportional zur Tageszeit senken
+        return threshold * expected_pct
+
+    except Exception:
+        return threshold
 
 # =============================================================================
 # ETF / ETP FILTER - Filtert Leveraged ETFs, ETNs, etc.
@@ -15189,7 +15256,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                     base_min_dollar_vol = 20000  # $20k für Extended (vs $100k Regular)
                 else:
                     base_min_dollar_vol = 100000
-                
+
                 is_liquid, dollar_volume = validate_liquidity(vol, price, min_dollar_volume=base_min_dollar_vol)
                 
                 # FILTER-LOGIK
@@ -15233,11 +15300,16 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                         continue  # Skip illiquide Trades
                 
                 # GLOBALER LIQUIDITÄTS-FILTER (aus Zusatzfiltern)
+                # WICHTIG: Schwellwert wird an Tageszeit angepasst!
+                # Am Morgen (10:00 ET) sind erst ~12% des Tagesvolumens gehandelt.
+                # Ohne Anpassung würde $10M-Filter fast alle Aktien rauswerfen.
                 user_min_liquidity = af.get("min_liquidity", 0)
-                if user_min_liquidity > 0 and dollar_volume < user_min_liquidity:
-                    skipped_filter += 1
-                    debug_stats["skipped_other"] += 1
-                    continue  # Skip wegen User-definiertem Liquiditäts-Minimum
+                if user_min_liquidity > 0:
+                    adjusted_min_liq = get_time_adjusted_liquidity_threshold(user_min_liquidity, session)
+                    if dollar_volume < adjusted_min_liq:
+                        skipped_filter += 1
+                        debug_stats["skipped_other"] += 1
+                        continue  # Skip wegen User-definiertem Liquiditäts-Minimum
                 
                 # DEBUG: Zähle total tickers
                 debug_stats["total_tickers"] += 1
@@ -20959,7 +21031,7 @@ with st.sidebar:
                     list(liq_options.keys()), 
                     index=3,  # Default: $10M
                     key="af_min_liq",
-                    help="Dollar Volume = Preis × Volumen. Höher = besser handelbar."
+                    help="Projiziertes Tages-Dollar-Volume (zeitnormalisiert). Am Morgen wird das aktuelle Volumen auf den vollen Tag hochgerechnet."
                 )
                 min_liquidity = liq_options[liq_choice]
             else:
