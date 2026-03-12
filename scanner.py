@@ -19765,27 +19765,36 @@ def display_backtest_lab(poly_key):
     # =================================================================
     # 📊 STANDARD STRATEGIEN BACKTEST (original code below)
     # =================================================================
+    elif bt_mode == "📊 Standard Strategien":
+        pass  # Weiter unten — aber expliziter Guard verhindert Rendering bei falschem Tab
+    else:
+        st.warning("Unbekannter Backtest-Modus")
+        return
+
     # Einstellungen
     col_set1, col_set2, col_set3 = st.columns(3)
-    
+
     with col_set1:
-        months = st.selectbox("📅 Zeitraum", [1, 3, 6, 9, 12], index=2, format_func=lambda x: f"{x} Monate")
-    
+        months = st.selectbox("📅 Zeitraum", [1, 3, 6, 9, 12], index=2,
+                              format_func=lambda x: f"{x} Monate", key="std_bt_months")
+
     with col_set2:
         strat_options = list(BACKTEST_STRATEGY_RULES.keys())
         selected_strats = st.multiselect(
             "📋 Strategien",
             strat_options,
             default=strat_options,
-            help="Wähle welche Strategien getestet werden sollen"
+            help="Wähle welche Strategien getestet werden sollen",
+            key="std_bt_strats"
         )
-    
+
     with col_set3:
         universe_size = st.selectbox(
-            "🌍 Universum", 
+            "🌍 Universum",
             ["Klein (30)", "Mittel (75)", "Groß (175)", "🔥 ALLE US-Aktien"],
             index=1,
-            help="ALLE US-Aktien nutzt Grouped Daily API (1 Call/Tag → tausende Aktien)"
+            help="ALLE US-Aktien nutzt Grouped Daily API (1 Call/Tag → tausende Aktien)",
+            key="std_bt_universe"
         )
         if "Klein" in universe_size:
             tickers = BACKTEST_UNIVERSE[:30]
@@ -19817,7 +19826,7 @@ def display_backtest_lab(poly_key):
                 st.caption(f"Entry: {entry} | Stop: {rules['stop_pct']*100:.0f}% | TP1: {rules['tp1_rr']}R | TP2: {rules['tp2_rr']}R | Max Hold: {rules['max_hold_days']}d")
     
     # Run Button
-    if st.button("🚀 Backtest starten", type="primary", use_container_width=True):
+    if st.button("🚀 Backtest starten", type="primary", use_container_width=True, key="std_bt_start"):
         if not selected_strats:
             st.error("Bitte mindestens eine Strategie auswählen!")
             return
