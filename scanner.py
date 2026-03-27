@@ -9866,6 +9866,196 @@ def _theme_score_bar(score, max_score, label="Score"):
     )
 
 
+# =============================================================================
+# CLEAN WHITE UI COMPONENTS — Summary Bars, Detail Cards, HTML Tables
+# =============================================================================
+_TH_COLORS = {
+    "bg": "#f8f9fb" if _is_light else "#0f1117",
+    "card": "#ffffff" if _is_light else "#161822",
+    "border": "#e5e7eb" if _is_light else "#1e2130",
+    "text": "#1a1a2e" if _is_light else "#e2e8f0",
+    "muted": "#6b7280" if _is_light else "#64748b",
+    "subtle": "#374151" if _is_light else "#94a3b8",
+    "accent": "#2563eb" if _is_light else "#3b82f6",
+    "green": "#059669" if _is_light else "#34d399",
+    "red": "#dc2626" if _is_light else "#f87171",
+    "orange": "#d97706" if _is_light else "#fbbf24",
+    "grade_s": "#7c3aed" if _is_light else "#a78bfa",
+    "grade_a": "#059669" if _is_light else "#34d399",
+    "grade_b": "#2563eb" if _is_light else "#60a5fa",
+    "grade_c": "#d97706" if _is_light else "#fbbf24",
+    "grade_d": "#6b7280" if _is_light else "#4b5563",
+    "thead": "#f0f2f5" if _is_light else "#1e2130",
+    "row_hover": "#f9fafb" if _is_light else "#1a1c28",
+    "bar_bg": "#e5e7eb" if _is_light else "#1e2130",
+    "bar_fill": "linear-gradient(90deg, #f59e0b, #f97316)" if _is_light else "linear-gradient(90deg, #f59e0b, #f97316)",
+}
+
+_GRADE_COLORS = {"S": _TH_COLORS["grade_s"], "A": _TH_COLORS["grade_a"], "B": _TH_COLORS["grade_b"],
+                 "C": _TH_COLORS["grade_c"], "D": _TH_COLORS["grade_d"]}
+
+
+def _cw_summary_bar(items):
+    """Render a Clean White summary bar. items = list of (label, value, color_or_None)."""
+    _c_card = _TH_COLORS["card"]
+    _c_bdr = _TH_COLORS["border"]
+    _c_text = _TH_COLORS["text"]
+    _c_muted = _TH_COLORS["muted"]
+    parts = []
+    for label, val, color in items:
+        c = f"color:{color};" if color else f"color:{_c_text};"
+        parts.append(f"<span style='{c}font-weight:600;'>{val}</span> <span style='color:{_c_muted};font-weight:500;'>{label}</span>")
+    inner = " &nbsp;&middot;&nbsp; ".join(parts)
+    return (
+        f"<div style='background:{_c_card};border:1px solid {_c_bdr};"
+        f"border-radius:8px;padding:10px 16px;margin:8px 0;font-size:13px;font-family:Inter,sans-serif;'>"
+        f"{inner}</div>"
+    )
+
+
+def _cw_grade_badge(grade_letter):
+    """Render an inline grade badge with color."""
+    gc = _GRADE_COLORS.get(grade_letter, _TH_COLORS["grade_d"])
+    bg_alpha = "20" if _is_light else "30"
+    return (
+        f"<span style='display:inline-block;padding:2px 10px;border-radius:4px;"
+        f"background:{gc}{bg_alpha};color:{gc};font-weight:700;font-size:12px;"
+        f"border:1px solid {gc}40;letter-spacing:0.5px;'>{grade_letter}</span>"
+    )
+
+
+def _cw_direction_tag(direction):
+    """Render LONG/SHORT as a colored tag."""
+    _c_green = _TH_COLORS["green"]
+    _c_red = _TH_COLORS["red"]
+    _c_muted = _TH_COLORS["muted"]
+    if direction and direction.upper() in ("LONG", "UP"):
+        return f"<span style='color:{_c_green};font-weight:600;font-size:12px;'>LONG</span>"
+    elif direction and direction.upper() in ("SHORT", "DOWN", "DN"):
+        return f"<span style='color:{_c_red};font-weight:600;font-size:12px;'>SHORT</span>"
+    return f"<span style='color:{_c_muted};font-size:12px;'>{direction or ''}</span>"
+
+
+def _cw_score_bar_inline(score, max_score=200):
+    """Render a small inline score bar like in the mockup."""
+    _c_text = _TH_COLORS["text"]
+    _c_bar_bg = _TH_COLORS["bar_bg"]
+    _c_bar_fill = _TH_COLORS["bar_fill"]
+    pct = min(100, int(score * 100 / max(max_score, 1)))
+    return (
+        f"<div style='display:flex;align-items:center;gap:6px;'>"
+        f"<span style='font-weight:600;min-width:26px;text-align:right;font-size:12px;color:{_c_text};'>{score}</span>"
+        f"<div style='width:50px;height:4px;background:{_c_bar_bg};border-radius:2px;overflow:hidden;'>"
+        f"<div style='width:{pct}%;height:100%;background:{_c_bar_fill};border-radius:2px;'></div>"
+        f"</div></div>"
+    )
+
+
+def _cw_change_colored(val):
+    """Render a change% value with green/red color."""
+    try:
+        v = float(val)
+        c = _TH_COLORS["green"] if v >= 0 else _TH_COLORS["red"]
+        sign = "+" if v >= 0 else ""
+        return f"<span style='color:{c};font-weight:500;'>{sign}{v:.2f}%</span>"
+    except (ValueError, TypeError):
+        _c_muted = _TH_COLORS["muted"]
+        return f"<span style='color:{_c_muted};'>—</span>"
+
+
+def _cw_html_table(df, columns, grade_col=None, score_col=None, score_max=200,
+                   change_col=None, dir_col=None, ticker_col="Ticker"):
+    """Render a full Clean White styled HTML table from a DataFrame."""
+    _c_subtle = _TH_COLORS["subtle"]
+    _c_thead = _TH_COLORS["thead"]
+    _c_bdr = _TH_COLORS["border"]
+    _c_text = _TH_COLORS["text"]
+    _c_card = _TH_COLORS["card"]
+    _c_hover = _TH_COLORS["row_hover"]
+
+    # Table header
+    ths = "".join(
+        f"<th style='text-align:left;padding:8px 10px;font-weight:600;color:{_c_subtle};"
+        f"font-size:11px;letter-spacing:0.4px;text-transform:uppercase;"
+        f"background:{_c_thead};border-bottom:2px solid {_c_bdr};'>{c}</th>"
+        for c in columns
+    )
+
+    # Table rows
+    rows_html = []
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        grade = str(row.get(grade_col, "D")) if grade_col else None
+        gc = _GRADE_COLORS.get(grade, _TH_COLORS["grade_d"]) if grade else None
+        border_style = f"border-left:3px solid {gc};" if gc else ""
+
+        tds = []
+        for c in columns:
+            val = row.get(c, "")
+            # Custom rendering per column type
+            if c == ticker_col:
+                _bs = border_style if len(tds) == 0 else ""
+                tds.append(f"<td style='padding:8px 10px;{_bs}font-weight:600;"
+                          f"color:{_c_text};border-bottom:1px solid {_c_bdr};'>{val}</td>")
+                border_style = ""
+            elif c == score_col:
+                tds.append(f"<td style='padding:8px 10px;border-bottom:1px solid {_c_bdr};'>"
+                          f"{_cw_score_bar_inline(val, score_max)}</td>")
+            elif c == change_col:
+                tds.append(f"<td style='padding:8px 10px;border-bottom:1px solid {_c_bdr};'>"
+                          f"{_cw_change_colored(val)}</td>")
+            elif c == dir_col:
+                tds.append(f"<td style='padding:8px 10px;border-bottom:1px solid {_c_bdr};'>"
+                          f"{_cw_direction_tag(str(val))}</td>")
+            elif c == grade_col:
+                tds.append(f"<td style='padding:8px 10px;border-bottom:1px solid {_c_bdr};'>"
+                          f"{_cw_grade_badge(str(val))}</td>")
+            else:
+                tds.append(f"<td style='padding:8px 10px;color:{_c_text};font-size:13px;"
+                          f"border-bottom:1px solid {_c_bdr};'>{val}</td>")
+
+        rows_html.append(f"<tr style='transition:background 0.15s;' "
+                        f"onmouseover=\"this.style.background='{_c_hover}'\" "
+                        f"onmouseout=\"this.style.background='transparent'\">"
+                        + "".join(tds) + "</tr>")
+
+    return (
+        f"<div style='border:1px solid {_c_bdr};border-radius:10px;overflow:hidden;"
+        f"background:{_c_card};margin:8px 0;'>"
+        f"<table style='width:100%;border-collapse:collapse;font-family:Inter,sans-serif;font-size:13px;'>"
+        f"<thead><tr>{ths}</tr></thead>"
+        f"<tbody>" + "".join(rows_html) + "</tbody>"
+        f"</table></div>"
+    )
+
+
+def _cw_detail_card(title, metrics, grade_letter=None):
+    """Render a Clean White detail card with metrics."""
+    _c_card = _TH_COLORS["card"]
+    _c_bdr = _TH_COLORS["border"]
+    _c_text = _TH_COLORS["text"]
+    _c_muted = _TH_COLORS["muted"]
+    gc = _GRADE_COLORS.get(grade_letter, _c_bdr) if grade_letter else _c_bdr
+
+    metrics_html = ""
+    for label, val in metrics:
+        metrics_html += (
+            f"<div style='flex:1;min-width:120px;'>"
+            f"<div style='font-size:11px;text-transform:uppercase;letter-spacing:0.5px;"
+            f"color:{_c_muted};font-weight:500;margin-bottom:2px;'>{label}</div>"
+            f"<div style='font-size:18px;font-weight:700;color:{_c_text};'>{val}</div>"
+            f"</div>"
+        )
+
+    return (
+        f"<div style='background:{_c_card};border:1px solid {_c_bdr};"
+        f"border-left:4px solid {gc};border-radius:10px;padding:16px 20px;margin:10px 0;'>"
+        f"<div style='font-size:15px;font-weight:700;color:{_c_text};margin-bottom:12px;'>{title}</div>"
+        f"<div style='display:flex;flex-wrap:wrap;gap:16px;'>{metrics_html}</div>"
+        f"</div>"
+    )
+
+
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
     refresh_interval = st.session_state.get("refresh_interval", 5) * 60 * 1000  # in ms
@@ -12901,6 +13091,21 @@ with tab_scanner:
                 df["ER"] = df["EarningsWarning"].apply(_earnings_flag)
             
             # =====================================================================
+            # CLEAN WHITE — SUMMARY BAR
+            # =====================================================================
+            _n_total = len(df)
+            _n_long = len(df[df.get("Direction", df.get("BI_Direction", pd.Series(dtype=str))).str.upper() == "LONG"]) if "Direction" in df.columns or "BI_Direction" in df.columns else 0
+            _n_short = _n_total - _n_long if _n_long > 0 else 0
+            _avg_score = df[sort_key].mean() if sort_key and sort_key in df.columns else 0
+            _summary_items = [
+                ("Signals", str(_n_total), _TH_COLORS["accent"]),
+                ("Long", str(_n_long), _TH_COLORS["green"]) if _n_long else None,
+                ("Short", str(_n_short), _TH_COLORS["red"]) if _n_short else None,
+                ("Avg Score", f"{_avg_score:.0f}", _TH_COLORS["orange"]) if _avg_score else None,
+            ]
+            st.markdown(_cw_summary_bar([i for i in _summary_items if i]), unsafe_allow_html=True)
+
+            # =====================================================================
             # KOMPAKTE TICKER-LISTE
             # =====================================================================
             num_results = len(df)
@@ -13703,24 +13908,22 @@ with tab_scanner:
                                     for s in weak_signals:
                                         st.caption(f"  {s}")
 
-                        # Range + Entry/SL/TP
-                        st.caption(f"**Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
-
-                        col_t1, col_t2 = st.columns(2)
-                        with col_t1:
-                            st.metric("Entry", f"${row.get('Entry', 0):.2f}")
-                            st.metric("Stop Loss", f"${row.get('StopLoss', 0):.2f}")
-                        with col_t2:
-                            st.metric("TP1 (1x Range)", f"${row.get('TP1', 0):.2f}")
-                            st.metric("TP2 (1.618x)", f"${row.get('TP2', 0):.2f}")
-
-                        rr = row.get('RiskReward', 0)
-                        if rr >= 2:
-                            st.success(f"R:R **{rr:.1f}:1**")
-                        elif rr >= 1.5:
-                            st.info(f"R:R **{rr:.1f}:1**")
-                        else:
-                            st.warning(f"R:R **{rr:.1f}:1**")
+                        # Range + Entry/SL/TP — Clean White Card
+                        _rr = row.get('RiskReward', 0)
+                        _rr_color = _TH_COLORS["green"] if _rr >= 2 else _TH_COLORS["accent"] if _rr >= 1.5 else _TH_COLORS["orange"]
+                        st.markdown(
+                            _cw_detail_card(
+                                "Trade Setup",
+                                [
+                                    ("Entry", f"${row.get('Entry', 0):.2f}"),
+                                    ("Stop Loss", f"${row.get('StopLoss', 0):.2f}"),
+                                    ("TP1 (1x Range)", f"${row.get('TP1', 0):.2f}"),
+                                    ("TP2 (1.618x)", f"${row.get('TP2', 0):.2f}"),
+                                    ("R:R", f"<span style='color:{_rr_color};font-weight:700;'>{_rr:.1f}:1</span>"),
+                                    ("Range", f"${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}"),
+                                ]
+                            ), unsafe_allow_html=True
+                        )
                     except Exception:
                         pass
 
@@ -14984,8 +15187,19 @@ with tab_bi:
             "Range%", "RVOL", "DollarVol"
         ] if c in bi_df.columns]
 
-        # ── Klickbare Tabelle: Zeile anklicken → Detail unten ──
+        # ── Clean White Summary + Klickbare Tabelle ──
         if "Ticker" in bi_df.columns:
+            # Summary Bar
+            _bi_n = len(bi_df)
+            _bi_avg = bi_df["BI_Score"].mean() if "BI_Score" in bi_df.columns else 0
+            _bi_top = bi_df["Grade"].value_counts().to_dict() if "Grade" in bi_df.columns else {}
+            _bi_sum = [("Signals", str(_bi_n), _TH_COLORS["accent"])]
+            for _g in ["S", "A", "B", "C"]:
+                if _bi_top.get(_g, 0) > 0:
+                    _bi_sum.append((_g, str(_bi_top[_g]), _GRADE_COLORS.get(_g, _TH_COLORS["muted"])))
+            _bi_sum.append(("Avg Score", f"{_bi_avg:.0f}", _TH_COLORS["orange"]))
+            st.markdown(_cw_summary_bar(_bi_sum), unsafe_allow_html=True)
+
             # Aktuelle Auswahl
             bi_sel_idx = st.session_state.get("bi_sel_idx", 0)
             bi_sel_idx = min(bi_sel_idx, len(bi_df) - 1)
@@ -15044,8 +15258,23 @@ with tab_bi:
             # ── Detail-Ansicht für ausgewählten Ticker ──
             bi_row = bi_df.iloc[bi_sel_idx]
             ticker = bi_row.get("Ticker", "?")
-            st.divider()
-            st.subheader(f"{ticker}")
+            _bi_det_grade = str(bi_row.get("BI_Grade", bi_row.get("Grade", "D"))).strip()[:1]
+            _bi_det_score = bi_row.get("BI_Score", 0)
+            _bi_det_dir = bi_row.get("BI_Direction", "LONG")
+            st.markdown(
+                _cw_detail_card(
+                    f"{ticker} — {_bi_det_dir} Setup",
+                    [
+                        ("BI Score", f"{_bi_det_score}/200"),
+                        ("Grade", f"{_bi_det_grade}"),
+                        ("Konfidenz", f"{bi_row.get('BI_Confidence', 0):.0f}%"),
+                        ("R:R", f"{bi_row.get('RiskReward', bi_row.get('R:R', 0)):.1f}"),
+                        ("Preis", f"${bi_row.get('Preis', 0):.2f}"),
+                        ("Change", f"{bi_row.get('Change%', 0):+.1f}%"),
+                    ],
+                    grade_letter=_bi_det_grade
+                ), unsafe_allow_html=True
+            )
 
             # Sektor-Trend für ausgewählten Ticker
             try:
@@ -15064,32 +15293,33 @@ with tab_bi:
             except Exception:
                 pass
 
-            d1, d2, d3, d4 = st.columns(4)
-            with d1:
-                score = bi_row.get("BI_Score", 0)
-                max_s = bi_row.get("BI_MaxScore", 200)
-                pct_s = round(score / max(1, max_s) * 100)
-                st.metric("BI Score", f"{score}/{max_s} ({pct_s}%)")
-                st.metric("Grade", bi_row.get("Grade", bi_row.get("BI_Grade", "N/A")))
-            with d2:
-                _bi_conf = bi_row.get('Konfidenz%', bi_row.get('BI_Confidence', 0))
-                st.metric("Konfidenz", f"{float(_bi_conf) if _bi_conf is not None else 0:.0f}%")
-                _bi_rr = bi_row.get('R:R', bi_row.get('RiskReward', 0))
-                st.metric("R:R", f"{float(_bi_rr) if _bi_rr is not None else 0:.1f}")
-            with d3:
-                st.metric("Entry", f"${float(bi_row.get('Entry', 0) or 0):.2f}")
-                st.metric("Stop Loss", f"${float(bi_row.get('StopLoss', 0) or 0):.2f}")
-            with d4:
-                st.metric("TP1", f"${float(bi_row.get('TP1', 0) or 0):.2f}")
-                st.metric("TP2", f"${float(bi_row.get('TP2', 0) or 0):.2f}")
-
-            # Breakout Zone
+            # Trade Setup — Clean White Card
+            _bi_entry = float(bi_row.get('Entry', 0) or 0)
+            _bi_sl = float(bi_row.get('StopLoss', 0) or 0)
+            _bi_tp1 = float(bi_row.get('TP1', 0) or 0)
+            _bi_tp2 = float(bi_row.get('TP2', 0) or 0)
+            _bi_rr_val = float(bi_row.get('R:R', bi_row.get('RiskReward', 0)) or 0)
+            _bi_rr_c = _TH_COLORS["green"] if _bi_rr_val >= 2 else _TH_COLORS["accent"] if _bi_rr_val >= 1.5 else _TH_COLORS["orange"]
             zone_text = bi_row.get("Breakout_Zone", "")
             if not zone_text:
                 rh = bi_row.get("RangeHigh", 0)
                 rl = bi_row.get("RangeLow", 0)
                 zone_text = f"${rl:.2f} — ${rh:.2f}" if rh > 0 else "N/A"
-            st.caption(f"Breakout Zone: **{zone_text}** | Preis: ${bi_row.get('Preis', 0):.2f} | Change: {bi_row.get('Change%', 0):.1f}% | RVOL: {bi_row.get('RVOL', 0):.2f}")
+
+            st.markdown(
+                _cw_detail_card(
+                    "Trade Setup",
+                    [
+                        ("Entry", f"${_bi_entry:.2f}"),
+                        ("Stop Loss", f"${_bi_sl:.2f}"),
+                        ("TP1", f"${_bi_tp1:.2f}"),
+                        ("TP2", f"${_bi_tp2:.2f}"),
+                        ("R:R", f"<span style='color:{_bi_rr_c};'>{_bi_rr_val:.1f}:1</span>"),
+                        ("Breakout Zone", zone_text),
+                        ("RVOL", f"{bi_row.get('RVOL', 0):.2f}"),
+                    ]
+                ), unsafe_allow_html=True
+            )
 
             # ── Chart-Pattern-Warnungen ──
             pattern_warns = bi_row.get("PatternWarnings", [])
@@ -18678,7 +18908,22 @@ with tab_bear:
             bear_df = bear_df.sort_values(by="BI_Score", ascending=False).reset_index(drop=True)
 
         _mode_label = "Intraday" if _bear_mode == "intraday" else "Swing"
-        st.subheader(f"{len(bear_df)} Treffer — Short DN({_mode_label})")
+
+        # Clean White Summary Bar
+        _bear_n = len(bear_df)
+        _bear_avg = bear_df["BI_Score"].mean() if "BI_Score" in bear_df.columns and _bear_n > 0 else 0
+        _bear_grades = {}
+        if "BI_Grade" in bear_df.columns:
+            _bear_grades = bear_df["BI_Grade"].value_counts().to_dict()
+        elif "BI_GradeLabel" in bear_df.columns:
+            _bear_grades = bear_df["BI_GradeLabel"].str[:1].value_counts().to_dict()
+        _bear_sum = [("Short Signals", str(_bear_n), _TH_COLORS["red"]),
+                     ("Mode", _mode_label, _TH_COLORS["accent"])]
+        for _g in ["S", "A", "B"]:
+            if _bear_grades.get(_g, 0) > 0:
+                _bear_sum.append((_g, str(_bear_grades[_g]), _GRADE_COLORS.get(_g, _TH_COLORS["muted"])))
+        _bear_sum.append(("Avg Score", f"{_bear_avg:.0f}", _TH_COLORS["orange"]))
+        st.markdown(_cw_summary_bar(_bear_sum), unsafe_allow_html=True)
 
         # Display-Spalten
         _bear_display_cols = [c for c in ["Ticker", "Preis", "Change%", "BI_Score", "ShortBonusScore",
@@ -18721,28 +18966,38 @@ with tab_bear:
 
             _bear_score = _bear_item.get("BI_Score", 0)
             _bear_grade = _bear_item.get("BI_GradeLabel", _bear_item.get("BI_Grade", "?"))
-            _bear_gl = _bear_item.get("BI_Grade", "D")
-            _bgc = {"S": "grade-s", "A": "grade-a", "B": "grade-b", "C": "grade-c"}.get(_bear_gl, "grade-d")
+            _bear_gl = str(_bear_item.get("BI_Grade", "D")).strip()[:1]
+
+            # Clean White Detail Card
             st.markdown(
-                f"<div class='{_bgc}' style='padding:16px 20px;border-radius:12px;margin:8px 0;'>"
-                f"<h3 style='margin:0;'>{_bear_item.get('Ticker', 'N/A')} — Short Setup | {_bear_grade} ({_bear_score}/200)</h3></div>",
-                unsafe_allow_html=True
+                _cw_detail_card(
+                    f"{_bear_item.get('Ticker', 'N/A')} — Short Setup | {_bear_grade}",
+                    [
+                        ("BI Score", f"{_bear_score}/200"),
+                        ("Grade", _bear_grade),
+                        ("Konfidenz", f"{_bear_item.get('BI_Confidence', 0):.0f}%"),
+                        ("R:R", f"{_bear_item.get('RiskReward', 0):.1f}"),
+                    ],
+                    grade_letter=_bear_gl
+                ), unsafe_allow_html=True
             )
 
-            # Metriken
-            _bm1, _bm2, _bm3, _bm4 = st.columns(4)
-            _bm1.metric("BI Score", f"{_bear_score}/200")
-            _bm1.metric("Grade", _bear_grade)
-            _bm2.metric("Konfidenz", f"{_bear_item.get('BI_Confidence', 0):.0f}%")
-            _bm2.metric("R:R", f"{_bear_item.get('RiskReward', 0):.1f}")
-            _bm3.metric("Entry (Short)", f"${_bear_item.get('Entry', 0):.2f}")
-            _bm3.metric("Stop Loss", f"${_bear_item.get('StopLoss', 0):.2f}")
-            _bm4.metric("TP1", f"${_bear_item.get('TP1', 0):.2f}")
-            _bm4.metric("TP2", f"${_bear_item.get('TP2', 0):.2f}")
-
-            st.caption(f"Range: ${_bear_item.get('RangeLow', 0):.2f}−${_bear_item.get('RangeHigh', 0):.2f} | "
-                       f"Preis: ${_bear_item.get('Preis', 0):.2f} | Change: {_bear_item.get('Change%', 0):.1f}% | "
-                       f"RVOL: {_bear_item.get('RVOL', 0):.2f}")
+            # Trade Setup Card
+            st.markdown(
+                _cw_detail_card(
+                    "Trade Setup",
+                    [
+                        ("Entry (Short)", f"${_bear_item.get('Entry', 0):.2f}"),
+                        ("Stop Loss", f"${_bear_item.get('StopLoss', 0):.2f}"),
+                        ("TP1", f"${_bear_item.get('TP1', 0):.2f}"),
+                        ("TP2", f"${_bear_item.get('TP2', 0):.2f}"),
+                        ("Preis", f"${_bear_item.get('Preis', 0):.2f}"),
+                        ("Change", f"{_bear_item.get('Change%', 0):+.1f}%"),
+                        ("Range", f"${_bear_item.get('RangeLow', 0):.2f} - ${_bear_item.get('RangeHigh', 0):.2f}"),
+                        ("RVOL", f"{_bear_item.get('RVOL', 0):.2f}"),
+                    ]
+                ), unsafe_allow_html=True
+            )
 
             # Short Bonus Signals Detail
             _short_bonus = _bear_item.get("ShortBonusScore", 0)
