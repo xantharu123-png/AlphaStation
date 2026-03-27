@@ -1,0 +1,2608 @@
+"""
+Scanners Module — BI Scanner, BioTech Scanner, AutoTrader (V70.0)
+
+Extrahiert aus scanner.py:
+- BI Scanner V2: Background scan, caching, scoring
+- BioTech Scanner: Clinical trials, news, technical scoring
+- AutoTrader: Automated scan + order pipeline
+"""
+import os
+import json
+import re
+import time
+import threading
+import datetime as dt
+from datetime import datetime, timedelta
+from modules.data_fetchers import (
+    rate_limited_get, fetch_grouped_daily, get_ticker_details,
+    _get_bpiq_catalysts, _calculate_biotech_catalyst_score
+)
+from modules.indicators import (
+    calculate_sma, calculate_ema, calculate_rsi_from_bars,
+    calculate_atr_14, calculate_obv, calculate_adx
+)
+from modules.scorers import calculate_setup_score, calculate_alpha_score
+from modules.helpers import is_spac
+from modules.patterns import analyze_breakout_imminent, analyze_candles
+from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
+
+# AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
+try:
+    from modules.brokers import ib_is_connected, ib_calc_shares, _get_ib_state, ib_get_contract
+    from ib_insync import Order
+except ImportError:
+    def ib_is_connected(): return False
+    def ib_calc_shares(*a, **kw): return 0
+    def _get_ib_state(): return {}
+    def ib_get_contract(*a, **kw): return None
+    Order = None
+
+# SPAC SIC Codes (für Biotech Scanner SPAC-Filter)
+SPAC_SIC_CODES = {"6770", "6726"}
+
+
+# ── Biotech Constants (needed by _fetch_biotech_universe etc.) ──
+BIOTECH_SIC_CODES = {
+    "2833", "2834", "2835", "2836",  # Pharma / Biotech Manufacturing
+    "2831",  # Biological Products
+    "3841", "3842",  # Medical Instruments & Devices
+    "8731", "8734",  # R&D / Testing Labs
+}
+
+BIOTECH_NAME_KEYWORDS = [
+    "pharma", "therapeutics", "biosciences", "biotech", "biopharma",
+    "oncology", "genomics", "immuno", "medical", "diagnostics",
+    "gene therapy", "cell therapy", "biologics", "vaccine", "antibody",
+    "rna", "mrna", "crispr", "peptide", "neuro", "cardio",
+]
+
+FDA_CATALYST_KEYWORDS = {
+    "tier1": {
+        "keywords": ["fda approval", "fda approved", "pdufa", "nda accepted", "bla accepted",
+                     "fda clearance", "breakthrough therapy", "fast track", "priority review",
+                     "accelerated approval", "orphan drug", "emergency use", "eua granted",
+                     "adcom", "advisory committee",
+                     "fda decision", "fda action date"],
+        "score": 30,
+        "label": "🎯 FDA Event"
+    },
+    "tier2": {
+        "keywords": ["phase 3 results", "phase 3 data", "phase iii", "pivotal trial",
+                     "primary endpoint met", "primary endpoint", "topline results", "topline data",
+                     "positive results", "statistically significant", "overall survival",
+                     "progression-free survival", "complete remission", "phase 2 results",
+                     "phase ii data", "late-breaking", "interim analysis", "interim data"],
+        "score": 22,
+        "label": "📊 Trial Results"
+    },
+    "tier3": {
+        "keywords": ["licensing agreement", "partnership", "collaboration", "acquisition target",
+                     "buyout", "merger", "ind filed", "ind accepted", "clinical trial initiation",
+                     "patient enrollment", "first patient dosed", "dosing initiated",
+                     "expanded access", "compassionate use", "label expansion"],
+        "score": 15,
+        "label": "🤝 Deal/Pipeline"
+    },
+    "tier4": {
+        "keywords": ["preclinical", "phase 1", "phase i", "proof of concept",
+                     "patent granted", "patent filed", "ip protection", "data presentation",
+                     "conference presentation", "manuscript published", "peer review"],
+        "score": 8,
+        "label": "🔬 Early Pipeline"
+    },
+}
+
+BIOTECH_NEGATIVE_CATALYSTS = {
+    "clinical hold": -25,
+    "fda rejection": -30,
+    "complete response": -20,
+    "trial failure": -25,
+    "missed endpoint": -25,
+    "adverse events": -15,
+    "safety concern": -15,
+    "stock offering": -10,
+    "dilution": -10,
+    "shelf registration": -8,
+    "going concern": -20,
+    "delisting": -25,
+    "sec investigation": -15,
+}
+
+# ── Constants (extracted from scanner.py V70.2) ──
+_AUTOTRADER_CONFIG_FILE = "/tmp/alpha_autotrader_config.json"
+_AUTOTRADER_STATE_FILE = "/tmp/alpha_autotrader_state.json"
+_AUTOTRADER_STOP_FILE = "/tmp/alpha_autotrader_stop"
+_AUTOTRADER_LOG_FILE = "/tmp/alpha_autotrader_log.json"
+
+_AUTOTRADER_DEFAULT_CONFIG = {
+    "mode": "semi",
+    "max_positions": 5,
+    "position_size_type": "dollar",
+    "position_size": 2000,
+    "excluded_grades": ["A"],
+    "min_bi_pct": 55,
+    "min_smart_money": 2,
+    "scan_interval_min": 15,
+    "max_daily_loss_pct": 3.0,
+    "cooldown_days": 5,
+    "trading_hours_only": True,
+    "min_rr": 2.0,
+    "max_tickers_scan": 300,
+    "min_price": 5.0,
+    "min_volume": 200000,
+}
+
+_BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
+_BI_PROGRESS_FILE = "/tmp/bi_scan_progress_{direction}.json"
+_BI_CONFIG_FILE = "/tmp/alpha_bi_config.json"
+_BI_CACHE_MAX_AGE = 7200
+_bi_scan_lock = threading.Lock()
+
+_BI_DEFAULT_CONFIG = {
+    "direction": "long",
+    "threshold": 85,
+    "auto_enabled": True,
+    "scan1_h": 15,
+    "scan1_m": 45,
+    "scan2_h": 18,
+    "scan2_m": 30,
+    "cache_ttl_h": 2,
+}
+
+_BIOTECH_CONFIG_FILE = "/tmp/alpha_biotech_config.json"
+
+_BIOTECH_DEFAULT_CONFIG = {
+    "auto_scan": True,
+    "quick_interval_h": 2,
+    "full_interval_h": 6,
+    "min_score": 20,
+}
+
+
+# ── Helper Functions (extracted from scanner.py V70.2) ──
+
+def _autotrader_should_stop():
+    """Prüft ob Stop-Signal gesetzt ist."""
+    return os.path.exists(_AUTOTRADER_STOP_FILE)
+
+
+def _autotrader_request_stop():
+    """Schreibt Stop-Signal für den AutoTrader Background-Thread."""
+    try:
+        with open(_AUTOTRADER_STOP_FILE, "w") as f:
+            f.write("stop")
+    except Exception:
+        pass
+
+
+def _autotrader_clear_stop():
+    """Löscht Stop-Signal."""
+    try:
+        os.remove(_AUTOTRADER_STOP_FILE)
+    except Exception:
+        pass
+
+
+def _autotrader_check_cooldown(ticker, cooldown_dict, cooldown_days):
+    """Prüft ob Ticker noch im Cooldown ist."""
+    if ticker not in cooldown_dict:
+        return False
+    last_trade_date = cooldown_dict[ticker]
+    try:
+        last_dt = datetime.strptime(last_trade_date, "%Y-%m-%d")
+        return (datetime.now() - last_dt).days < cooldown_days
+    except Exception:
+        return False
+
+
+def _bi_cache_path(direction="long"):
+    """Pfad zur BI Cache-Datei je Richtung."""
+    return _BI_CACHE_FILE.format(direction=direction)
+
+
+def _bi_progress_path(direction="long"):
+    """Pfad zur Progress-Datei."""
+    return _BI_PROGRESS_FILE.format(direction=direction)
+
+
+def _bi_stop_file(direction="long"):
+    return f"/tmp/alpha_bi_stop_{direction}"
+
+
+def _bi_request_stop(direction="long"):
+    """UI ruft das auf — schreibt Stop-Signal für den Background-Thread."""
+    try:
+        with open(_bi_stop_file(direction), "w") as f:
+            f.write("stop")
+    except Exception:
+        pass
+
+
+def _bi_should_stop(direction="long"):
+    """Background-Thread prüft das regelmäßig."""
+    return os.path.exists(_bi_stop_file(direction))
+
+
+def _bi_clear_stop(direction="long"):
+    """Aufräumen nach Stop oder vor neuem Scan."""
+    try:
+        os.remove(_bi_stop_file(direction))
+    except Exception:
+        pass
+
+
+def _bi_progress_clear(direction="long"):
+    """Löscht Progress-Datei."""
+    try:
+        path = _bi_progress_path(direction)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def _biotech_progress_file():
+    return "/tmp/alpha_biotech_progress.json"
+
+
+def _biotech_stop_file():
+    return "/tmp/alpha_biotech_stop"
+
+
+def _biotech_request_stop():
+    """UI ruft das auf — schreibt Stop-Signal für den Background-Thread."""
+    try:
+        with open(_biotech_stop_file(), "w") as f:
+            f.write("stop")
+    except Exception:
+        pass
+
+
+def _biotech_should_stop():
+    """Background-Thread prüft das regelmäßig."""
+    return os.path.exists(_biotech_stop_file())
+
+
+def _biotech_clear_stop():
+    """Aufräumen nach Stop oder vor neuem Scan."""
+    try:
+        os.remove(_biotech_stop_file())
+    except Exception:
+        pass
+
+
+def _biotech_cache_file():
+    return "/tmp/alpha_biotech_cache.json"
+
+
+def _biotech_universe_cache_file():
+    return "/tmp/alpha_biotech_universe.json"
+
+
+# ── Scanner Functions ──
+
+def _autotrader_config_load():
+    """Lädt Auto-Trader Konfiguration."""
+    try:
+        with open(_AUTOTRADER_CONFIG_FILE, "r") as f:
+            saved = json.load(f)
+        config = dict(_AUTOTRADER_DEFAULT_CONFIG)
+        config.update(saved)
+        return config
+    except Exception:
+        return dict(_AUTOTRADER_DEFAULT_CONFIG)
+
+
+def _autotrader_config_save(config):
+    """Speichert Auto-Trader Konfiguration persistent."""
+    try:
+        with open(_AUTOTRADER_CONFIG_FILE, "w") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
+
+
+def _autotrader_state_read():
+    """Liest aktuellen Auto-Trader Status."""
+    try:
+        with open(_AUTOTRADER_STATE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"status": "stopped", "positions": [], "daily_pnl": 0, "trades_today": 0,
+                "last_scan": None, "cooldown_tickers": {}, "log": []}
+
+
+def _autotrader_state_write(state):
+    """Schreibt Auto-Trader Status."""
+    try:
+        with open(_AUTOTRADER_STATE_FILE, "w") as f:
+            json.dump(state, f, default=str)
+    except Exception:
+        pass
+
+
+def _autotrader_log(message, level="INFO"):
+    """Schreibt Log-Eintrag."""
+    try:
+        log_data = []
+        try:
+            with open(_AUTOTRADER_LOG_FILE, "r") as f:
+                log_data = json.load(f)
+        except Exception:
+            pass
+        log_data.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "level": level,
+            "msg": message
+        })
+        # Behalte nur letzte 200 Einträge
+        log_data = log_data[-200:]
+        with open(_AUTOTRADER_LOG_FILE, "w") as f:
+            json.dump(log_data, f, default=str)
+    except Exception:
+        pass
+
+
+def _autotrader_is_market_hours():
+    """Prüft ob US-Markt offen ist (9:30-16:00 ET)."""
+    try:
+        import pytz
+        et = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et)
+        # Mo-Fr
+        if now_et.weekday() >= 5:
+            return False
+        # 9:30 - 16:00
+        market_open = now_et.replace(hour=9, minute=30, second=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0)
+        return market_open <= now_et <= market_close
+    except Exception:
+        return True  # Fallback: immer erlauben
+
+
+def autotrader_scan_once(poly_key, config=None):
+    """
+    🤖 Einmaliger Auto-Trader Scan-Durchlauf.
+
+    1. Holt aktuelle Marktdaten (letzte 50 Tage) für Top-Aktien
+    2. Läuft analyze_breakout_imminent() auf jede Aktie
+    3. Filtert nach Grade, Score, Smart Money, R:R
+    4. Berechnet Entry/Stop/TP für qualifizierte Signale
+    5. Submittet Bracket Orders an IBKR
+
+    Returns: dict mit signals_found, orders_placed, errors
+    """
+    if config is None:
+        config = _autotrader_config_load()
+
+    state = _autotrader_state_read()
+    result = {"signals_found": 0, "orders_placed": 0, "errors": [], "signals": []}
+
+    # Market Hours Check
+    if config.get("trading_hours_only", True) and not _autotrader_is_market_hours():
+        _autotrader_log("⏰ Außerhalb Handelszeiten — Scan übersprungen", "INFO")
+        result["errors"].append("Außerhalb Handelszeiten")
+        return result
+
+    # IBKR Connection Check
+    if not ib_is_connected():
+        _autotrader_log("🔴 IBKR nicht verbunden — Scan übersprungen", "WARN")
+        result["errors"].append("IBKR nicht verbunden")
+        return result
+
+    # Max Positions Check
+    current_positions = len(state.get("positions", []))
+    max_pos = config.get("max_positions", 5)
+    if current_positions >= max_pos:
+        _autotrader_log(f"📊 Max Positionen erreicht ({current_positions}/{max_pos})", "INFO")
+        result["errors"].append(f"Max Positionen: {current_positions}/{max_pos}")
+        return result
+
+    # Daily Loss Check
+    daily_pnl = state.get("daily_pnl", 0)
+    max_loss = config.get("max_daily_loss_pct", 3.0)
+    if daily_pnl < -max_loss:
+        _autotrader_log(f"🛑 Tages-Verlustlimit erreicht: {daily_pnl:.1f}% (Max: -{max_loss}%)", "WARN")
+        result["errors"].append(f"Tages-Verlustlimit: {daily_pnl:.1f}%")
+        return result
+
+    excluded_grades = set(config.get("excluded_grades", ["A"]))
+    min_bi_pct = config.get("min_bi_pct", 55)
+    min_sm = config.get("min_smart_money", 2)
+    cooldown_dict = state.get("cooldown_tickers", {})
+    cooldown_days = config.get("cooldown_days", 5)
+    position_tickers = set(p.get("ticker") for p in state.get("positions", []))
+
+    # Lade aktuelle Tages-Daten (Grouped Daily — heute)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    _autotrader_log(f"🔍 Starte Scan — Max {config['max_tickers_scan']} Tickers", "INFO")
+
+    # Lade 55 Tage History über Grouped Daily
+    window_size = 50
+    start_dt = datetime.now() - timedelta(days=window_size + 15)  # +Buffer für Wochenenden
+    trading_days = []
+    current_d = start_dt
+    while current_d <= datetime.now():
+        if current_d.weekday() < 5:
+            trading_days.append(current_d.strftime("%Y-%m-%d"))
+        current_d += timedelta(days=1)
+
+    # Baue Ticker History
+    ticker_history = {}
+    _skip_prefixes = (
+        "TQQQ","SQQQ","SOXL","SOXS","LABU","LABD","SPXL","SPXS",
+        "UPRO","SPXU","UVXY","SVXY","NUGT","DUST","JNUG","JDST",
+        "FNGU","FNGD","TECL","TECS","BULZ","BERZ","GUSH","DRIP",
+        "FAS","FAZ","UDOW","SDOW","YANG","YINN","ERX","ERY",
+    )
+
+    for date_str in trading_days:
+        day_data = fetch_grouped_daily(poly_key, date_str)
+        if not day_data:
+            continue
+        for ticker, r in day_data.items():
+            if len(ticker) > 5 or "." in ticker:
+                continue
+            if any(ticker.upper().startswith(p) for p in _skip_prefixes):
+                continue
+            price = r.get("c", 0)
+            volume = r.get("v", 0)
+            if price < config.get("min_price", 5.0) or volume < config.get("min_volume", 200000):
+                continue
+            bar = {
+                "date": date_str, "open": r.get("o", 0), "high": r.get("h", 0),
+                "low": r.get("l", 0), "close": price, "volume": volume, "time": date_str,
+            }
+            if ticker not in ticker_history:
+                ticker_history[ticker] = []
+            ticker_history[ticker].append(bar)
+
+    # Filtere auf Tickers mit genug History
+    valid_tickers = {t: bars for t, bars in ticker_history.items() if len(bars) >= window_size}
+
+    # Sortiere nach Volumen (Mid-Cap Prio)
+    ticker_vol = {}
+    for t, bars_list in valid_tickers.items():
+        avg_vol = sum(b["volume"] for b in bars_list[-20:]) / 20
+        ticker_vol[t] = avg_vol
+
+    midcap = {t: v for t, v in ticker_vol.items() if 500_000 <= v <= 10_000_000}
+    largecap = {t: v for t, v in ticker_vol.items() if v > 10_000_000}
+    sorted_mid = sorted(midcap.keys(), key=lambda t: midcap[t], reverse=True)
+    sorted_large = sorted(largecap.keys(), key=lambda t: largecap[t], reverse=True)
+    tickers_to_scan = (sorted_mid + sorted_large)[:config.get("max_tickers_scan", 300)]
+
+    _autotrader_log(f"📊 {len(tickers_to_scan)} Tickers geladen, starte BI-Analyse", "INFO")
+
+    qualified_signals = []
+
+    for ticker in tickers_to_scan:
+        if _autotrader_should_stop():
+            _autotrader_log("⏹️ Stop-Signal empfangen", "WARN")
+            break
+
+        bars = ticker_history[ticker]
+        window = bars[-window_size:]
+
+        # Skip wenn schon Position oder im Cooldown
+        if ticker in position_tickers:
+            continue
+        if _autotrader_check_cooldown(ticker, cooldown_dict, cooldown_days):
+            continue
+
+        # BI V2 Analyse
+        try:
+            bi_result = analyze_breakout_imminent(window, direction="long")
+            if len(bi_result) == 8:
+                is_valid, bi_score, bi_max, details, confidence, grade, sm_fires, sm_hits = bi_result
+            else:
+                is_valid, bi_score, bi_max, details, confidence, grade = bi_result
+                sm_fires, sm_hits = 0, 0
+
+            if not is_valid:
+                continue
+
+            # Grade Filter (Grade A ist Backtest-bestätigt schlecht!)
+            if grade in excluded_grades:
+                continue
+            if grade == "D":
+                continue
+
+            # Score-Minimum (als Prozent)
+            score_pct = (bi_score / bi_max * 100) if bi_max > 0 else 0
+            if score_pct < min_bi_pct:
+                continue
+
+            # Smart Money Minimum
+            if sm_hits < min_sm:
+                continue
+
+            result["signals_found"] += 1
+
+            # Berechne Entry/Stop/TP (identisch zum Backtest)
+            atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
+            range_high = max(b["high"] for b in window[-15:])
+            range_low = min(b["low"] for b in window[-15:])
+            range_size = range_high - range_low
+
+            # Qualitäts-Checks
+            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+            if range_pct < 2.0:
+                continue
+
+            # Entry/Stop/TP Berechnung
+            breakout_level = range_high
+            stop_atr_mult = 1.2
+            tp1_mult = 0.7 if grade == "C" else 1.0
+            tp2_mult = 1.4 if grade == "C" else 2.0
+
+            entry_price = round(range_high + atr_5 * 0.05, 2)  # Knapp über Range-High
+            stop_price = round(range_high - atr_5 * stop_atr_mult, 2)
+            tp1_price = round(range_high + range_size * tp1_mult, 2)
+            tp2_price = round(range_high + range_size * tp2_mult, 2)
+
+            risk = abs(entry_price - stop_price)
+            reward = abs(tp1_price - entry_price)
+            rr = round(reward / risk, 2) if risk > 0 else 0
+
+            if rr < config.get("min_rr", 2.0):
+                continue
+
+            # Trend Check (SMA20 > SMA50)
+            w_closes = [b["close"] for b in window]
+            sma20 = sum(w_closes[-20:]) / 20
+            sma50 = sum(w_closes[-50:]) / 50 if len(w_closes) >= 50 else sma20
+            if sma20 <= sma50 * 0.97:
+                continue
+
+            qualified_signals.append({
+                "ticker": ticker,
+                "grade": grade,
+                "bi_score": bi_score,
+                "bi_max": bi_max,
+                "score_pct": round(score_pct, 1),
+                "sm_hits": sm_hits,
+                "entry": entry_price,
+                "stop": stop_price,
+                "tp1": tp1_price,
+                "tp2": tp2_price,
+                "rr": rr,
+                "range_pct": round(range_pct, 1),
+                "current_price": window[-1]["close"],
+            })
+
+        except Exception as e:
+            continue
+
+    # Sortiere nach Score (beste zuerst)
+    qualified_signals.sort(key=lambda x: x["score_pct"], reverse=True)
+
+    # Begrenze auf verfügbare Slots
+    slots_available = max_pos - current_positions
+    signals_to_trade = qualified_signals[:slots_available]
+
+    _autotrader_log(f"✅ {len(qualified_signals)} qualifizierte Signale, {len(signals_to_trade)} werden getradet", "INFO")
+
+    # Orders an IBKR senden
+    for signal in signals_to_trade:
+        try:
+            # Position Size berechnen
+            shares = ib_calc_shares(
+                signal["entry"],
+                config.get("position_size", 2000),
+                "Dollar" if config.get("position_size_type") == "dollar" else "Shares"
+            )
+
+            if shares <= 0:
+                continue
+
+            # Bracket Order senden
+            # Mode: "full" → transmit=True (auto-execute), "semi" → transmit=False (confirm in TWS)
+            is_full_auto = config.get("mode") == "full"
+
+            ib_state = _get_ib_state()
+            ib = ib_state.get("ib")
+            if not ib or not ib.isConnected():
+                _autotrader_log(f"❌ IBKR Verbindung verloren bei {signal['ticker']}", "ERROR")
+                result["errors"].append(f"IBKR offline bei {signal['ticker']}")
+                break
+
+            # Contract erstellen
+            contract = ib_get_contract(signal["ticker"], "Aktien", "US")
+            if not contract:
+                _autotrader_log(f"❌ Contract nicht gefunden: {signal['ticker']}", "WARN")
+                continue
+
+            try:
+                qualified = ib.qualifyContracts(contract)
+                if not qualified:
+                    continue
+            except Exception:
+                continue
+
+            # Bracket Order bauen
+            main_action = "BUY"
+            exit_action = "SELL"
+
+            # Parent: Limit Buy
+            parent = Order(
+                action=main_action,
+                orderType="LMT",
+                lmtPrice=round(signal["entry"], 2),
+                totalQuantity=shares,
+                transmit=False
+            )
+            parent_trade = ib.placeOrder(contract, parent)
+            parent_id = parent_trade.order.orderId
+
+            # Stop Loss
+            stop_order = Order(
+                action=exit_action,
+                orderType="STP",
+                auxPrice=round(signal["stop"], 2),
+                totalQuantity=shares,
+                parentId=parent_id,
+                transmit=False
+            )
+            ib.placeOrder(contract, stop_order)
+
+            # TP1: 50% der Shares
+            tp1_shares = shares // 2
+            tp2_shares = shares - tp1_shares
+
+            tp1_order = Order(
+                action=exit_action,
+                orderType="LMT",
+                lmtPrice=round(signal["tp1"], 2),
+                totalQuantity=tp1_shares,
+                parentId=parent_id,
+                transmit=False
+            )
+            ib.placeOrder(contract, tp1_order)
+
+            # TP2: Restliche Shares — transmit hängt vom Mode ab
+            tp2_order = Order(
+                action=exit_action,
+                orderType="LMT",
+                lmtPrice=round(signal["tp2"], 2),
+                totalQuantity=tp2_shares,
+                parentId=parent_id,
+                transmit=is_full_auto  # True = sofort aktiv, False = warten auf TWS-Bestätigung
+            )
+            ib.placeOrder(contract, tp2_order)
+
+            ib.sleep(0.3)
+
+            # Position tracken
+            position_entry = {
+                "ticker": signal["ticker"],
+                "grade": signal["grade"],
+                "entry": signal["entry"],
+                "stop": signal["stop"],
+                "tp1": signal["tp1"],
+                "tp2": signal["tp2"],
+                "shares": shares,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "parent_id": parent_id,
+                "mode": "AUTO" if is_full_auto else "SEMI",
+                "score_pct": signal["score_pct"],
+                "rr": signal["rr"],
+            }
+            state["positions"].append(position_entry)
+            state["cooldown_tickers"][signal["ticker"]] = datetime.now().strftime("%Y-%m-%d")
+            state["trades_today"] = state.get("trades_today", 0) + 1
+
+            result["orders_placed"] += 1
+            result["signals"].append(signal)
+
+            mode_label = "🟢 AUTO" if is_full_auto else "🟡 SEMI"
+            _autotrader_log(
+                f"{mode_label} ORDER: {signal['ticker']} Grade {signal['grade']} | "
+                f"Entry ${signal['entry']} | SL ${signal['stop']} | TP1 ${signal['tp1']} | "
+                f"TP2 ${signal['tp2']} | {shares} Shares | R:R {signal['rr']}",
+                "TRADE"
+            )
+
+        except Exception as e:
+            _autotrader_log(f"❌ Order-Fehler {signal['ticker']}: {str(e)[:80]}", "ERROR")
+            result["errors"].append(f"{signal['ticker']}: {str(e)[:50]}")
+
+    # State speichern
+    state["last_scan"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["status"] = "running"
+    _autotrader_state_write(state)
+
+    del ticker_history  # Memory freigeben
+
+    _autotrader_log(
+        f"🏁 Scan fertig: {result['signals_found']} Signale, {result['orders_placed']} Orders",
+        "INFO"
+    )
+
+    return result
+
+
+def autotrader_background_loop(poly_key):
+    """
+    🤖 Background-Loop: Scannt periodisch und platziert Orders.
+    Läuft in separatem Thread.
+    """
+    _autotrader_clear_stop()
+    config = _autotrader_config_load()
+    interval_sec = config.get("scan_interval_min", 15) * 60
+
+    state = _autotrader_state_read()
+    state["status"] = "running"
+    state["trades_today"] = 0
+    state["daily_pnl"] = 0
+    _autotrader_state_write(state)
+
+    _autotrader_log("🤖 Auto-Trader gestartet", "INFO")
+
+    while not _autotrader_should_stop():
+        try:
+            # Config neu laden (kann sich während Laufzeit ändern)
+            config = _autotrader_config_load()
+
+            # Scan durchführen
+            scan_result = autotrader_scan_once(poly_key, config)
+
+            # Nächsten Scan planen
+            interval_sec = config.get("scan_interval_min", 15) * 60
+            _autotrader_log(f"⏳ Nächster Scan in {interval_sec // 60} Minuten", "INFO")
+
+            # Warte (mit Stop-Check alle 10 Sekunden)
+            for _ in range(interval_sec // 10):
+                if _autotrader_should_stop():
+                    break
+                time.sleep(10)
+
+        except Exception as e:
+            _autotrader_log(f"❌ Loop-Fehler: {str(e)[:100]}", "ERROR")
+            time.sleep(60)  # 1 Min warten bei Fehler
+
+    # Aufräumen
+    state = _autotrader_state_read()
+    state["status"] = "stopped"
+    _autotrader_state_write(state)
+    _autotrader_clear_stop()
+    _autotrader_log("🛑 Auto-Trader gestoppt", "INFO")
+
+
+def _bi_config_load():
+    """Lädt persistente BI Scanner Einstellungen."""
+    try:
+        with open(_BI_CONFIG_FILE, "r") as f:
+            saved = json.load(f)
+        config = dict(_BI_DEFAULT_CONFIG)
+        config.update(saved)
+        return config
+    except Exception:
+        return dict(_BI_DEFAULT_CONFIG)
+
+
+def _bi_config_save(config):
+    """Speichert BI Scanner Einstellungen persistent."""
+    try:
+        with open(_BI_CONFIG_FILE, "w") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
+
+
+def _bi_cache_load(direction="long"):
+    """Lädt BI-Cache. Returns (results, timestamp, age_minutes) oder (None, None, None)."""
+    try:
+        path = _bi_cache_path(direction)
+        if not os.path.exists(path):
+            return None, None, None
+        with open(path, "r") as f:
+            cache = json.load(f)
+        ts = cache.get("timestamp", 0)
+        age_sec = time.time() - ts
+        age_min = int(age_sec / 60)
+        results = cache.get("results", [])
+        return results, ts, age_min
+    except Exception:
+        return None, None, None
+
+
+def _bi_cache_save(results, direction="long"):
+    """Speichert BI-Ergebnisse im Cache."""
+    try:
+        cache = {
+            "timestamp": time.time(),
+            "direction": direction,
+            "count": len(results),
+            "results": results
+        }
+        with open(_bi_cache_path(direction), "w") as f:
+            json.dump(cache, f, default=str)
+    except Exception:
+        pass
+
+
+def _bi_progress_read(direction="long"):
+    """Liest Scan-Fortschritt. Returns dict oder None."""
+    try:
+        path = _bi_progress_path(direction)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0, top_score=0, avg_score=0, detail=""):
+    """Schreibt Scan-Fortschritt in Datei."""
+    try:
+        progress = {
+            "status": status,  # "running", "done", "error"
+            "direction": direction,
+            "checked": checked,
+            "total": total,
+            "hits": hits,
+            "no_data": no_data,
+            "top_score": top_score,
+            "avg_score": avg_score,
+            "detail": detail,
+            "timestamp": time.time()
+        }
+        with open(_bi_progress_path(direction), "w") as f:
+            json.dump(progress, f)
+    except Exception:
+        pass
+
+
+def _bi_cache_age_str(age_min):
+    """Formatiert Cache-Alter als lesbaren String."""
+    if age_min < 1:
+        return "gerade eben"
+    elif age_min < 60:
+        return f"vor {age_min} Min"
+    else:
+        h = age_min // 60
+        m = age_min % 60
+        return f"vor {h}h {m}m"
+
+
+def _bi_scan_is_running(direction="long"):
+    """Prüft ob ein Background-Scan läuft."""
+    # Wenn Stop angefordert wurde → sofort als "nicht laufend" melden
+    # damit die UI direkt zu FALL 2b/4 wechselt
+    if _bi_should_stop(direction):
+        return False
+    prog = _bi_progress_read(direction)
+    if not prog:
+        return False
+    if prog.get("status") != "running":
+        return False
+    # Timeout: Scan-Progress nicht aktualisiert seit 2 Min = Thread hängt/crashed
+    age = time.time() - prog.get("timestamp", 0)
+    if age > 120:  # 2 Min
+        _bi_progress_clear(direction)
+        return False
+    return True
+
+
+def _bi_background_scan(poly_key, direction="long", candidates=None):
+    """
+    Background-Thread: Analysiert vorgeladene Kandidaten auf BI-Signale.
+    Kandidaten werden VOR dem Thread im Hauptthread geladen (1 API-Call).
+    Thread macht nur die langsame Einzelanalyse (2000+ individuelle API-Calls).
+
+    Args:
+        poly_key: Polygon API Key
+        direction: "long" oder "short"
+        candidates: Vorgeladene Kandidaten-Liste (aus fetch_stock_data im Hauptthread)
+    """
+    try:
+        if not candidates:
+            _bi_progress_write(direction, "error", detail="Keine Kandidaten übergeben")
+            return
+
+        total = len(candidates)
+        _bi_clear_stop(direction)  # Altes Stop-Signal aufräumen
+        _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...")
+
+        # ── Analyse ──
+        results = []
+        checked = 0
+        no_data_count = 0
+        low_score_count = 0
+        range_fail = 0
+        atr_fail = 0
+        rr_fail = 0
+        score_sum = 0
+        score_count = 0
+        top_score = 0
+
+        for candidate in candidates:
+            # ── Stop-Signal prüfen ──
+            if _bi_should_stop(direction):
+                avg_sc = round(score_sum / max(1, score_count)) if score_count else 0
+                _bi_progress_write(direction, "stopped", checked=checked, total=total,
+                                   hits=len(results), no_data=no_data_count,
+                                   top_score=top_score, avg_score=avg_sc,
+                                   detail=f"⏹️ Manuell gestoppt bei {checked}/{total}")
+                if results:
+                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)
+                    _bi_cache_save(results, direction)
+                _bi_clear_stop(direction)
+                return
+
+            ticker = candidate["Ticker"]
+
+            # OHLCV laden — Short braucht 300 Tage für SMA200 Bonus-Signale
+            try:
+                end_date = datetime.now()
+                fetch_days = 320 if direction == "short" else 130
+                start_date = end_date - timedelta(days=fetch_days)
+                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+                params = {"adjusted": "true", "sort": "asc", "apiKey": poly_key}
+
+                resp = rate_limited_get(url, params=params, timeout=15)
+                checked += 1
+
+                if checked % 25 == 0:
+                    # Nicht "running" schreiben wenn Stop angefordert wurde
+                    if not _bi_should_stop(direction):
+                        avg_sc = round(score_sum / max(1, score_count))
+                        _bi_progress_write(direction, "running", checked=checked, total=total,
+                                           hits=len(results), no_data=no_data_count,
+                                           top_score=top_score, avg_score=avg_sc,
+                                           detail=f"{checked}/{total} analysiert")
+
+                if resp.status_code != 200:
+                    no_data_count += 1
+                    if resp.status_code == 429:
+                        time.sleep(5)  # Rate Limit → 5s Pause
+                    continue
+
+                api_data = resp.json()
+                raw_bars = api_data.get("results", [])
+                if not raw_bars or len(raw_bars) < 10:
+                    no_data_count += 1
+                    continue
+
+                all_bars = []
+                for bar in raw_bars:
+                    all_bars.append({
+                        "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                        "open": bar["o"],
+                        "high": bar["h"],
+                        "low": bar["l"],
+                        "close": bar["c"],
+                        "volume": bar["v"]
+                    })
+                bars = all_bars[-30:]  # Letzte 30 für BI-Analyse
+
+                # ── Mindest-History: Brauchen min 15 Bars für zuverlässige Analyse ──
+                # IPOs/frische Listings haben zu wenig Daten für Pattern-Erkennung
+                if len(all_bars) < 15:
+                    no_data_count += 1
+                    continue
+
+                # ── Avg-Volume-Check: min $500K Ø Daily Dollar-Volume ──
+                avg_vol_10d = sum(b["volume"] for b in all_bars[-10:]) / min(10, len(all_bars))
+                avg_dollar_vol = avg_vol_10d * all_bars[-1]["close"] if all_bars[-1]["close"] > 0 else 0
+                if avg_dollar_vol < 500_000:
+                    no_data_count += 1
+                    continue
+
+                # ── RVOL Anomalie-Filter: >50x = IPO-Tag oder Pump-Scheme ──
+                # Normales RVOL: 0.5-5.0, Breakout: 5-15, >50 = Spam
+                _prev_vol = sum(b["volume"] for b in all_bars[-20:-5]) / max(1, min(15, len(all_bars) - 5)) if len(all_bars) > 5 else 0
+                _recent_vol = sum(b["volume"] for b in all_bars[-5:]) / min(5, len(all_bars))
+                _scan_rvol = _recent_vol / max(1, _prev_vol) if _prev_vol > 0 else 0
+                if _scan_rvol > 50:
+                    no_data_count += 1
+                    continue
+
+                # ── SPAC NAV-Detection: Preis $9.50-$10.50 + ATR < 1% = SPAC bei NAV ──
+                _last_price = all_bars[-1]["close"]
+                _atr_pct = sum((b["high"] - b["low"]) / max(0.01, b["close"]) * 100 for b in all_bars[-10:]) / min(10, len(all_bars))
+                if 9.50 <= _last_price <= 10.50 and _atr_pct < 1.0:
+                    no_data_count += 1
+                    continue
+
+            except Exception:
+                no_data_count += 1
+                continue
+
+            # Analyse
+            result = analyze_breakout_imminent(bars, direction=direction)
+            if len(result) == 8:
+                is_valid, bi_score, max_score, details, confidence, grade, sm_fires, sm_hits = result
+            else:
+                is_valid, bi_score, max_score, details, confidence, grade = result
+                sm_fires, sm_hits = 0, 0
+
+            score_sum += bi_score
+            score_count += 1
+            if bi_score > top_score:
+                top_score = bi_score
+
+            if not is_valid:
+                low_score_count += 1
+                continue
+
+            # 🐻 Short Trend-Validierung: Aktie MUSS in Downtrend sein
+            if direction == "short" and len(all_bars) >= 20:
+                _closes = [b["close"] for b in all_bars]
+                _sma20 = sum(_closes[-20:]) / 20
+                _sma10 = sum(_closes[-10:]) / 10
+                _cur = _closes[-1]
+                if _cur > _sma20 and _sma10 > _sma20:
+                    continue  # Uptrend → kein Short (strikt: Preis muss unter SMA20)
+
+            # Range berechnen
+            range_high = max(b["high"] for b in bars[-15:])
+            range_low = min(b["low"] for b in bars[-15:])
+            range_size = range_high - range_low
+            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+
+            if range_pct < 2.0:
+                range_fail += 1
+                continue
+
+            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
+            if avg_daily_range < 0.3:
+                atr_fail += 1
+                continue
+
+            grade_map = {"S": "🏆 S — ELITE", "A": "🔥 A — STARK", "B": "✅ B — SOLIDE", "C": "⚠️ C — WATCH", "D": "❌ D — SCHWACH"}
+            grade_label = grade_map.get(grade, grade)
+
+            candidate["Alpha"] = bi_score
+            candidate["BI_Score"] = bi_score
+            candidate["BI_MaxScore"] = max_score
+            candidate["BI_Details"] = details
+            candidate["BI_Confidence"] = confidence
+            candidate["BI_Direction"] = direction.upper()
+            candidate["BI_Grade"] = grade
+            candidate["BI_GradeLabel"] = grade_label
+
+            atr_5 = sum((b["high"] - b["low"]) for b in bars[-5:]) / 5
+
+            if direction == "long":
+                candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)
+                candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)
+                candidate["TP1"] = round(range_high + range_size * 0.75, 2)
+                candidate["TP2"] = round(range_high + range_size * 1.618, 2)
+            else:
+                # SHORT: Entry bei Resistance (Pullback-Short), Stop knapp darüber
+                candidate["Entry"] = round(range_high * 0.995, 2)       # Knapp unter Resistance
+                candidate["StopLoss"] = round(range_high * 1.015, 2)    # 1.5% über Resistance
+                risk_short = candidate["StopLoss"] - candidate["Entry"]
+                candidate["TP1"] = round(candidate["Entry"] - risk_short * 2.0, 2) if risk_short > 0 else round(candidate["Entry"] * 0.95, 2)
+                candidate["TP2"] = round(candidate["Entry"] - risk_short * 3.5, 2) if risk_short > 0 else round(candidate["Entry"] * 0.90, 2)
+
+            risk = abs(candidate["Entry"] - candidate["StopLoss"])
+            reward = abs(candidate["TP1"] - candidate["Entry"])
+            candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
+            candidate["RangeHigh"] = round(range_high, 2)
+            candidate["RangeLow"] = round(range_low, 2)
+
+            if candidate["RiskReward"] < 1.5:
+                rr_fail += 1
+                continue
+
+            # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
+            pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
+            if pattern_warnings:
+                high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
+                medium_warnings = [w for w in pattern_warnings if w["severity"] == "medium"]
+                danger_warnings = high_warnings + medium_warnings
+                candidate["PatternWarnings"] = pattern_warnings
+                candidate["PatternCount"] = len(danger_warnings)  # Nur relevante Warnings zählen
+                candidate["PatternHighCount"] = len(high_warnings)
+                # Nur high/medium als Warnung anzeigen — info = positiv für Trade-Richtung
+                if danger_warnings:
+                    warn_texts = [f"🚨 {w['pattern']}" if w["severity"] == "high" else f"⚠️ {w['pattern']}" for w in danger_warnings]
+                    candidate["PatternLabel"] = " | ".join(warn_texts)
+                else:
+                    candidate["PatternLabel"] = "✅ Clean"  # Nur info-Patterns = harmlos
+
+                # Score-Abzug: Severity bestimmt bereits die Richtungsrelevanz
+                # high = Pattern GEGEN Trade-Richtung, info = Pattern FÜR Trade-Richtung
+                for pw in pattern_warnings:
+                    if pw["severity"] == "high":
+                        # Skaliert: proximity_pct nahe 0 = Pattern nah am Preis = volle Strafe
+                        prox = pw.get("proximity_pct", 5.0)
+                        penalty = max(10, int(25 * (1.0 - min(prox, 10.0) / 10.0)))
+                        bi_score -= penalty
+                    elif pw["severity"] == "medium":
+                        bi_score -= 10
+
+                # Zusätzlich: Wenn Confluence-Veto (Trend+MTF+Pattern gegen uns)
+                # → Score nochmal stark reduzieren
+                _conf_data = candidate.get("Confluence", {})
+                if isinstance(_conf_data, dict):
+                    _conf_cats = _conf_data.get("categories", {})
+                    _trend_against = not _conf_cats.get("trend", {}).get("pass", True)
+                    _mtf_against = not _conf_cats.get("multi_tf", {}).get("pass", True)
+                    if _trend_against and _mtf_against and high_warnings:
+                        bi_score -= 20  # Dreifach-Widerspruch: Trend + MTF + Pattern
+
+                # 🐻 Short Bonus Signals
+                if direction == "short":
+                    try:
+                        bonus_result = calculate_short_bonus_signals(
+                            ticker, all_bars, poly_key=poly_key, mode="swing"
+                        )
+                        short_bonus = bonus_result.get("bonus_score", 0)
+                        bi_score += short_bonus
+                        candidate["ShortBonusScore"] = short_bonus
+                        candidate["ShortBonusDetails"] = bonus_result.get("details", [])
+                    except Exception:
+                        candidate["ShortBonusScore"] = 0
+                        candidate["ShortBonusDetails"] = []
+
+                candidate["BI_Score"] = max(0, bi_score)
+                # V68: Grading geglättet — Score primär, SM-Fires sekundär (kein Cliff-Effekt)
+                if bi_score >= 120 and sm_fires >= 3: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "🏆 S — ELITE"
+                elif bi_score >= 105 and sm_fires >= 2: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "🔥 A — STARK"
+                elif bi_score >= 90: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "✅ B — SOLIDE"
+                elif bi_score >= 75: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "⚠️ C — WATCH"
+                else: candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "❌ D — SCHWACH"
+            else:
+                candidate["PatternWarnings"] = []
+                candidate["PatternCount"] = 0
+                candidate["PatternHighCount"] = 0
+                candidate["PatternLabel"] = "✅ Clean"
+
+            results.append(candidate)
+
+        # Sortiere nach Score
+        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+
+        # Cache + Progress speichern
+        _bi_cache_save(results, direction=direction)
+
+        avg_sc = round(score_sum / max(1, score_count))
+        pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
+                    f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold 85) → "
+                    f"{low_score_count} unter Threshold → {range_fail} Range → "
+                    f"{atr_fail} ATR → {rr_fail} R:R → {len(results)} Treffer")
+
+        _bi_progress_write(direction, "done", checked=checked, total=total,
+                           hits=len(results), no_data=no_data_count,
+                           top_score=top_score, avg_score=avg_sc,
+                           detail=pipeline)
+
+    except Exception as e:
+        _bi_progress_write(direction, "error", detail=f"Fehler: {str(e)[:100]}")
+
+
+def _biotech_config_load():
+    """Lädt persistente Biotech Scanner Einstellungen."""
+    try:
+        with open(_BIOTECH_CONFIG_FILE, "r") as f:
+            saved = json.load(f)
+        # Merge mit Defaults (falls neue Keys hinzukommen)
+        config = dict(_BIOTECH_DEFAULT_CONFIG)
+        config.update(saved)
+        return config
+    except Exception:
+        return dict(_BIOTECH_DEFAULT_CONFIG)
+
+
+def _biotech_config_save(config):
+    """Speichert Biotech Scanner Einstellungen persistent."""
+    try:
+        with open(_BIOTECH_CONFIG_FILE, "w") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
+
+
+def _biotech_progress_write(status, **kwargs):
+    try:
+        data = {"status": status, "timestamp": time.time()}
+        data.update(kwargs)
+        with open(_biotech_progress_file(), "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _biotech_progress_read():
+    try:
+        with open(_biotech_progress_file(), "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _biotech_cache_save(results):
+    try:
+        with open(_biotech_cache_file(), "w") as f:
+            json.dump({"results": results, "timestamp": time.time()}, f, default=str)
+    except Exception:
+        pass
+
+
+def _biotech_cache_load(max_age_hours=2):
+    try:
+        with open(_biotech_cache_file(), "r") as f:
+            data = json.load(f)
+        if time.time() - data.get("timestamp", 0) > max_age_hours * 3600:
+            return None
+        results = data.get("results", [])
+        # Leere Ergebnisse nicht als gültigen Cache behandeln
+        return results if results else None
+    except Exception:
+        return None
+
+
+def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=20, max_mcap_m=50000):
+    """
+    Scannt Polygon Ticker-Datenbank nach Biotech/Pharma Aktien.
+    Nutzt SIC-Codes + Name-Keywords für breite Erkennung.
+    Filtert nach min_price und min_mcap_m (Market Cap in Millionen).
+    """
+    biotech_tickers = []
+    min_mcap = min_mcap_m * 1_000_000  # Umrechnung in absoluten Wert
+    max_mcap = max_mcap_m * 1_000_000
+
+    # Methode 1: SIC-Code basiert (präziser) — ALLE SIC Codes + Pagination
+    existing_tickers = set()
+    for sic in BIOTECH_SIC_CODES:
+        try:
+            url = "https://api.polygon.io/v3/reference/tickers"
+            params = {
+                "apiKey": poly_key,
+                "market": "stocks",
+                "active": "true",
+                "sic_code": sic,
+                "limit": 250,
+            }
+            # Pagination: Polygon gibt next_url zurück wenn es mehr Ergebnisse gibt
+            for _page in range(5):  # Max 5 Seiten = 1250 Tickers pro SIC
+                resp = rate_limited_get(url, params=params, timeout=10)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                results = data.get("results", [])
+                for r in results:
+                    ticker = r.get("ticker", "")
+                    if ticker and ticker not in existing_tickers:
+                        existing_tickers.add(ticker)
+                        biotech_tickers.append({
+                            "ticker": ticker,
+                            "name": r.get("name", ""),
+                            "market_cap": r.get("market_cap", 0),
+                            "sic_code": sic,
+                            "primary_exchange": r.get("primary_exchange", ""),
+                            "source": "SIC"
+                        })
+                # Nächste Seite?
+                next_url = data.get("next_url")
+                if not next_url:
+                    break
+                url = next_url
+                params = {"apiKey": poly_key}  # next_url enthält bereits die Query-Parameter
+        except Exception:
+            continue
+
+    # Methode 2: Keyword-basiert für Tickers die keinen SIC haben
+    for keyword in ["biotech", "therapeutics", "pharma", "oncology", "genomics"]:
+        try:
+            url = "https://api.polygon.io/v3/reference/tickers"
+            params = {
+                "apiKey": poly_key,
+                "market": "stocks",
+                "active": "true",
+                "search": keyword,
+                "limit": 100,
+            }
+            resp = rate_limited_get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                for r in results:
+                    ticker = r.get("ticker", "")
+                    name = (r.get("name", "") or "").lower()
+                    if ticker and ticker not in existing_tickers:
+                        if any(kw in name for kw in BIOTECH_NAME_KEYWORDS):
+                            existing_tickers.add(ticker)
+                            biotech_tickers.append({
+                                "ticker": ticker,
+                                "name": r.get("name", ""),
+                                "market_cap": r.get("market_cap", 0),
+                                "sic_code": r.get("sic_code", ""),
+                                "primary_exchange": r.get("primary_exchange", ""),
+                                "source": "Keyword"
+                            })
+        except Exception:
+            continue
+
+    # Market Cap Filter anwenden (Polygon liefert MCap bei Reference-Tickers)
+    # Preis-Filter kann erst beim Scan angewendet werden (nicht in Reference-API)
+    if min_mcap > 0 or max_mcap > 0:
+        biotech_tickers = [t for t in biotech_tickers
+                           if t.get("market_cap", 0) == 0  # MCap unbekannt → erstmal behalten, beim Scan filtern
+                           or (min_mcap <= t.get("market_cap", 0) <= max_mcap)]
+
+    return biotech_tickers
+
+
+def _scan_biotech_news(poly_key, ticker, limit=5):
+    """
+    Scannt News für einen Biotech-Ticker nach FDA/Pipeline Katalysatoren.
+    Returns: dict mit catalyst_score, catalysts list, news items
+    """
+    try:
+        url = "https://api.polygon.io/v2/reference/news"
+        resp = rate_limited_get(url, params={
+            "ticker": ticker, "limit": limit, "order": "desc",
+            "sort": "published_utc", "apiKey": poly_key
+        }, timeout=5)
+
+        if resp.status_code != 200:
+            return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
+
+        articles = resp.json().get("results", [])
+        catalyst_score = 0
+        catalysts = []
+        negative_flags = []
+        news_items = []
+        best_tier = None
+
+        for article in articles[:limit]:
+            title = (article.get("title", "") or "").lower()
+            desc = (article.get("description", "") or "").lower()
+            combined = title + " " + desc
+            pub_date = (article.get("published_utc", "") or "")[:10]
+
+            # Sentiment
+            sentiment = "neutral"
+            for insight in article.get("insights", []):
+                if insight.get("ticker") == ticker:
+                    sentiment = insight.get("sentiment", "neutral")
+                    break
+
+            # Negative Catalyst Check (mit Wortgrenzen) — VOR positivem Check
+            # NUR im Titel prüfen — in der Description stehen oft Referenzen
+            # (z.B. "fda approval" Artikel erwähnt auch "complete response" als Kontext)
+            _is_negative_article = False
+            for neg_kw, penalty in BIOTECH_NEGATIVE_CATALYSTS.items():
+                if re.search(r'\b' + re.escape(neg_kw) + r'\b', title):
+                    negative_flags.append({"flag": neg_kw, "penalty": penalty, "date": pub_date})
+                    _is_negative_article = True
+
+            # Positive Catalyst Detection (Tier-basiert, mit Wortgrenzen)
+            # Skip positive detection wenn Artikel bereits als negativ markiert (z.B. CRL)
+            article_catalysts = []
+            if not _is_negative_article:
+                for tier_name, tier_data in FDA_CATALYST_KEYWORDS.items():
+                    for kw in tier_data["keywords"]:
+                        if re.search(r'\b' + re.escape(kw) + r'\b', combined):
+                            cat = {
+                                "keyword": kw,
+                                "tier": tier_name,
+                                "score": tier_data["score"],
+                                "label": tier_data["label"],
+                                "date": pub_date,
+                                "headline": article.get("title", "")[:100]
+                            }
+                            article_catalysts.append(cat)
+                            if best_tier is None or tier_data["score"] > best_tier:
+                                best_tier = tier_data["score"]
+                            break  # Nur höchster Tier pro Artikel
+                    if article_catalysts:
+                        break
+
+            catalysts.extend(article_catalysts)
+
+            news_items.append({
+                "title": article.get("title", "")[:100],
+                "description": (article.get("description", "") or "")[:200],
+                "published": pub_date,
+                "sentiment": sentiment,
+                "catalyst": article_catalysts[0]["label"] if article_catalysts else None,
+                "url": article.get("article_url", ""),
+            })
+
+        # V69: Time-Decay — alte Katalysatoren sind weniger relevant
+        # FDA-Event von 2022 soll NICHT denselben Score haben wie einer von gestern
+        from datetime import datetime as _dt_cls, timedelta as _td_cls
+        _today = _dt_cls.utcnow().date()
+        for cat in catalysts:
+            _cat_date_str = cat.get("date", "")
+            if _cat_date_str and len(_cat_date_str) >= 10:
+                try:
+                    _cat_date = _dt_cls.strptime(_cat_date_str[:10], "%Y-%m-%d").date()
+                    _days_old = (_today - _cat_date).days
+                    if _days_old > 365:
+                        cat["score"] = 0          # > 1 Jahr: komplett ignorieren
+                    elif _days_old > 180:
+                        cat["score"] = int(cat["score"] * 0.10)  # > 6 Monate: 10%
+                    elif _days_old > 90:
+                        cat["score"] = int(cat["score"] * 0.40)  # > 3 Monate: 40%
+                    elif _days_old > 30:
+                        cat["score"] = int(cat["score"] * 0.75)  # > 1 Monat: 75%
+                    # <= 30 Tage: voller Score (100%)
+                    cat["days_old"] = _days_old
+                except (ValueError, TypeError):
+                    # Datum nicht parsebar → konservativ: halber Score
+                    cat["score"] = int(cat["score"] * 0.50)
+            else:
+                # Kein Datum vorhanden → konservativ: halber Score
+                # (könnte alt oder neu sein, Unsicherheits-Penalty)
+                cat["score"] = int(cat["score"] * 0.50)
+
+        # Merke ob VOR Decay Catalyst-Keywords gefunden wurden (für BPIQ-Trigger)
+        _had_catalyst_keywords = len(catalysts) > 0
+
+        # Catalyst-Liste bereinigen — Einträge mit Score 0 nach Decay entfernen
+        catalysts = [c for c in catalysts if c.get("score", 0) > 0]
+
+        # V68: Score = bester Catalyst + 50% vom zweitbesten (gewichtete Kumulation)
+        # Reine max()-Logik unterschlug multi-Catalyst-Situationen (FDA + Phase 3)
+        # V69-FIX: Catalysts nach Score sortieren (höchster zuerst)
+        if catalysts:
+            catalysts.sort(key=lambda c: c.get("score", 0), reverse=True)
+            catalyst_score = catalysts[0]["score"]
+            if len(catalysts) > 1:
+                catalyst_score += int(catalysts[1]["score"] * 0.5)  # 50% Bonus für 2. Catalyst
+
+        # Negative Flags abziehen
+        for nf in negative_flags:
+            catalyst_score += nf["penalty"]
+
+        catalyst_score = max(0, min(30, catalyst_score))
+
+        return {
+            "catalyst_score": catalyst_score,
+            "catalysts": catalysts,
+            "news": news_items,
+            "negative_flags": negative_flags,
+            "best_catalyst": catalysts[0] if catalysts else None,  # Jetzt korrekt: höchster Score
+            "had_catalyst_keywords": _had_catalyst_keywords,  # Vor Decay Keywords gefunden?
+        }
+    except Exception:
+        return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
+
+
+def _check_clinical_trials(company_name, ticker):
+    """
+    Prüft ClinicalTrials.gov API nach aktiven Studien + Readout-Kalender.
+    Returns: dict mit pipeline_score, trials info, catalyst_readouts
+
+    Catalyst-Readout-Logik:
+    - OVERDUE: Primary Completion überschritten → Daten kommen BALD
+    - IMMINENT: Primary Completion in ≤30 Tagen
+    - UPCOMING: Primary Completion in ≤90 Tagen
+    - Phase 3 > Phase 2 > Phase 1 Gewichtung
+    """
+    try:
+        from datetime import timedelta as _td
+        _now = datetime.now()
+
+        # Suche nach Company Name (besser als Ticker)
+        _strip_words = {"inc", "inc.", "corp", "corp.", "ltd", "ltd.", "plc", "co", "co.",
+                        "group", "holdings", "llc", "sa", "se", "nv", "ag", "gmbh", "the",
+                        "pharmaceuticals", "pharmaceutical", "therapeutics", "biosciences",
+                        "oncology", "sciences", "common", "ordinary", "shares", "class"}
+        if company_name:
+            _name_parts = [w for w in company_name.split() if w.lower() not in _strip_words]
+            search_term = " ".join(_name_parts[:3]) if _name_parts else ticker
+        else:
+            search_term = ticker
+
+        url = "https://clinicaltrials.gov/api/v2/studies"
+
+        # Zwei Suchen: query.spons (exakt) und query.term (breiter) — nehme besseres Ergebnis
+        _all_studies = []
+        for _qfield in ["query.spons", "query.term"]:
+            params = {
+                _qfield: search_term,
+                "pageSize": 50,
+                "format": "json",
+            }
+            try:
+                resp = rate_limited_get(url, params=params, timeout=10)
+                if resp.status_code == 200 and resp.text.strip():
+                    _fetched = resp.json().get("studies", [])
+                    if len(_fetched) > len(_all_studies):
+                        _all_studies = _fetched
+            except Exception:
+                pass
+
+        # Client-side Filter: nur aktive Studies
+        _active_statuses = {"RECRUITING", "ACTIVE_NOT_RECRUITING", "ENROLLING_BY_INVITATION", "NOT_YET_RECRUITING"}
+        studies = [s for s in _all_studies
+                   if s.get("protocolSection", {}).get("statusModule", {}).get("overallStatus", "") in _active_statuses]
+
+        phase_counts = {"PHASE3": 0, "PHASE2": 0, "PHASE1": 0, "EARLY_PHASE1": 0, "PHASE4": 0, "NA": 0}
+        trials = []
+        catalyst_readouts = []  # NEU: Readout-Kalender
+
+        for study in studies:
+            proto = study.get("protocolSection", {})
+            ident = proto.get("identificationModule", {})
+            status_mod = proto.get("statusModule", {})
+            design = proto.get("designModule", {})
+            cond_mod = proto.get("conditionsModule", {})
+
+            nct_id = ident.get("nctId", "")
+            title = ident.get("briefTitle", "")[:80]
+            phases = design.get("phases", [])
+            status = status_mod.get("overallStatus", "")
+            conditions = cond_mod.get("conditions", [])
+
+            phase_label = phases[0] if phases else "NA"
+            phase_key = phase_label.replace(" ", "").upper()
+            if phase_key in phase_counts:
+                phase_counts[phase_key] += 1
+
+            # ── NEU: Readout-Kalender ──
+            _pc = status_mod.get("primaryCompletionDateStruct", {})
+            _pc_str = _pc.get("date", "")
+            _days_until = None
+            _readout_category = ""
+            if _pc_str:
+                try:
+                    if len(_pc_str) == 7:  # YYYY-MM
+                        _pc_date = datetime.strptime(_pc_str, "%Y-%m")
+                    else:
+                        _pc_date = datetime.strptime(_pc_str[:10], "%Y-%m-%d")
+                    _days_until = (_pc_date - _now).days
+
+                    if _days_until < 0:
+                        # Decay-Logik: Extrem überfällige Readouts sind Datenleichen
+                        # Sponsoren updaten ClinicalTrials.gov oft nicht → 2000d "overdue"
+                        _overdue_days = abs(_days_until)
+                        if _overdue_days <= 180:
+                            _readout_category = "OVERDUE"       # Echt — Readout steht bevor
+                        elif _overdue_days <= 365:
+                            _readout_category = "OVERDUE_STALE" # Fragwürdig — reduzierter Score
+                        # >365d: Ignorieren — fast sicher abgeschlossen aber nicht aktualisiert
+                    elif _days_until <= 30:
+                        _readout_category = "IMMINENT"
+                    elif _days_until <= 90:
+                        _readout_category = "UPCOMING"
+                except Exception:
+                    pass
+
+            _trial_info = {
+                "nct_id": nct_id,
+                "title": title,
+                "phase": phase_label,
+                "status": status,
+                "conditions": conditions[:3],
+                "primary_completion": _pc_str,
+                "days_until_readout": _days_until,
+                "readout_category": _readout_category,
+            }
+            trials.append(_trial_info)
+
+            # Catalyst-Readout nur wenn zeitlich relevant
+            if _readout_category in ("OVERDUE", "OVERDUE_STALE", "IMMINENT", "UPCOMING"):
+                catalyst_readouts.append(_trial_info)
+
+        # Sortiere Readouts: OVERDUE zuerst, dann IMMINENT, dann UPCOMING
+        _cat_order = {"OVERDUE": 0, "IMMINENT": 1, "OVERDUE_STALE": 2, "UPCOMING": 3}
+        catalyst_readouts.sort(key=lambda x: (_cat_order.get(x["readout_category"], 9), x.get("days_until_readout") or 999))
+
+        # Pipeline Score (max 20)
+        pipeline_score = 0
+        pipeline_score += min(phase_counts["PHASE3"] * 8, 16)
+        pipeline_score += min(phase_counts["PHASE2"] * 3, 9)
+        pipeline_score += min(phase_counts["PHASE1"] * 1, 3)
+        pipeline_score = min(20, pipeline_score)
+
+        # ── NEU: Catalyst-Readout Score (max 15 Bonus) ──
+        # Überfällige/bevorstehende Readouts = potentieller Kurssprung
+        readout_score = 0
+        for _ro in catalyst_readouts:
+            _phase = _ro.get("phase", "").replace(" ", "").upper()
+            _cat = _ro.get("readout_category", "")
+
+            # Phase-Gewichtung: P3 > P2 > P1
+            _phase_mult = 1.0
+            if "PHASE3" in _phase:
+                _phase_mult = 3.0
+            elif "PHASE2" in _phase:
+                _phase_mult = 2.0
+            elif "PHASE1" in _phase:
+                _phase_mult = 1.0
+            else:
+                _phase_mult = 0.5
+
+            # Timing-Gewichtung: OVERDUE > IMMINENT > UPCOMING
+            # OVERDUE_STALE (180-365d): Nur minimaler Score — fragwürdige Daten
+            if _cat == "OVERDUE":
+                readout_score += 4 * _phase_mult
+            elif _cat == "IMMINENT":
+                readout_score += 3 * _phase_mult
+            elif _cat == "OVERDUE_STALE":
+                readout_score += 0.5 * _phase_mult  # Minimal — wahrscheinlich Datenleiche
+            elif _cat == "UPCOMING":
+                readout_score += 1.5 * _phase_mult
+
+        readout_score = min(15, int(readout_score))
+
+        # Readout-Label für UI
+        _readout_label = ""
+        if catalyst_readouts:
+            _top = catalyst_readouts[0]
+            _d = _top.get("days_until_readout", 0)
+            _cat = _top.get("readout_category", "")
+            _ph = _top.get("phase", "?")
+            if _cat == "OVERDUE":
+                _readout_label = f"🔴 Readout ÜBERFÄLLIG ({abs(_d)}d) — {_ph}"
+            elif _cat == "OVERDUE_STALE":
+                _readout_label = f"⚪ Readout veraltet ({abs(_d)}d) — {_ph}"
+            elif _cat == "IMMINENT":
+                _readout_label = f"🟡 Readout in {_d}d — {_ph}"
+            elif _cat == "UPCOMING":
+                _readout_label = f"🟢 Readout in {_d}d — {_ph}"
+
+        return {
+            "pipeline_score": pipeline_score,
+            "readout_score": readout_score,
+            "readout_label": _readout_label,
+            "catalyst_readouts": catalyst_readouts[:5],
+            "trials": trials[:10],
+            "phase_summary": phase_counts,
+            "total_active": len(studies),
+        }
+    except Exception:
+        return {"pipeline_score": 0, "readout_score": 0, "readout_label": "",
+                "catalyst_readouts": [], "trials": [], "phase_summary": {}, "total_active": 0}
+
+
+def _biotech_technical_score(poly_key, ticker):
+    """
+    Technische Analyse für Biotech: Unusual Volume, Akkumulation, Price Action.
+    Returns: dict mit technical_score (max 20), details
+    """
+    try:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=90)
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        resp = rate_limited_get(url, params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10)
+
+        if resp.status_code != 200:
+            print(f"[BIOTECH] Technical API failed for {ticker}: HTTP {resp.status_code}")
+            return {"technical_score": 0, "details": {}}
+
+        bars = resp.json().get("results", [])
+        if not bars or len(bars) < 20:
+            return {"technical_score": 0, "details": {}}
+
+        tech_score = 0
+        details = {}
+
+        closes = [b["c"] for b in bars]
+        volumes = [b["v"] for b in bars]
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
+
+        current_price = closes[-1]
+        avg_vol_20 = sum(volumes[-20:]) / 20
+        avg_vol_50 = sum(volumes[-min(50, len(volumes)):]) / min(50, len(volumes))
+        last_vol = volumes[-1]
+
+        # 1. Unusual Volume (max 6 pts)
+        rvol = last_vol / max(1, avg_vol_20)
+        details["RVOL"] = round(rvol, 2)
+        if rvol >= 3.0:
+            tech_score += 6
+            details["vol_signal"] = "🔥 Extrem hohes Volumen"
+        elif rvol >= 2.0:
+            tech_score += 4
+            details["vol_signal"] = "📈 Hohes Volumen"
+        elif rvol >= 1.5:
+            tech_score += 2
+            details["vol_signal"] = "📊 Leicht erhöht"
+        else:
+            details["vol_signal"] = "😴 Normal"
+
+        # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
+        if len(volumes) >= 20:
+            vol_recent = sum(volumes[-5:]) / 5
+            vol_prior = sum(volumes[-20:-5]) / 15
+            vol_trend = vol_recent / max(1, vol_prior)
+            details["vol_trend"] = round(vol_trend, 2)
+            if vol_trend >= 2.0:
+                tech_score += 4
+            elif vol_trend >= 1.5:
+                tech_score += 3
+            elif vol_trend >= 1.2:
+                tech_score += 1
+
+        # 3. Price Position — nahe Highs = bullish (max 4 pts)
+        high_90d = max(highs)
+        low_90d = min(lows)
+        range_90d = high_90d - low_90d
+        if range_90d > 0:
+            pos_90d = (current_price - low_90d) / range_90d * 100
+            details["pos_90d"] = round(pos_90d, 1)
+            if pos_90d >= 80:
+                tech_score += 4
+            elif pos_90d >= 60:
+                tech_score += 2
+            elif pos_90d <= 20:
+                tech_score += 0  # Am Boden = könnte Value sein, aber riskant
+
+        # 4. Tight Range (Akkumulation) — niedrige Volatilität = Ruhe vor Sturm (max 3 pts)
+        if len(closes) >= 10:
+            recent_closes = closes[-10:]
+            range_10d = (max(recent_closes) - min(recent_closes)) / max(0.01, min(recent_closes)) * 100
+            details["range_10d%"] = round(range_10d, 1)
+            if range_10d <= 5:
+                tech_score += 3
+                details["consolidation"] = "🎯 Tight Consolidation"
+            elif range_10d <= 10:
+                tech_score += 1
+                details["consolidation"] = "📦 Moderate Range"
+            else:
+                details["consolidation"] = "🌊 Weit gespreizt"
+
+        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts, kein Abzug)
+        if len(closes) >= 50:
+            sma20 = sum(closes[-20:]) / 20
+            sma50 = sum(closes[-50:]) / 50
+            if sma20 > sma50:
+                tech_score += 3
+                details["trend"] = "📈 Aufwärtstrend"
+            elif sma20 > sma50 * 0.97:
+                tech_score += 1
+                details["trend"] = "➡️ Seitwärts"
+            else:
+                details["trend"] = "📉 Abwärtstrend"
+
+        # ── CHART HEALTH (separate Metrik, beeinflusst Score NICHT) ──
+        # Gibt dem Trader eine schnelle Einschätzung ob der Chart tradebar ist,
+        # ohne gute Catalyst-Trades zu verstecken.
+        # Skala: 0-10 (10 = perfekter Chart, 0 = aktiver Crash)
+        chart_health = 10  # Start bei "perfekt", dann Abzüge
+
+        # A) Drawdown vom 90d-High
+        drawdown_pct = 0
+        if range_90d > 0:
+            drawdown_pct = (high_90d - current_price) / high_90d * 100
+            details["drawdown%"] = round(drawdown_pct, 1)
+            if drawdown_pct >= 30:
+                chart_health -= 4
+                details["drawdown"] = "💀 −{:.0f}% vom High".format(drawdown_pct)
+            elif drawdown_pct >= 20:
+                chart_health -= 3
+                details["drawdown"] = "🔴 −{:.0f}% vom High".format(drawdown_pct)
+            elif drawdown_pct >= 15:
+                chart_health -= 2
+                details["drawdown"] = "⚠️ −{:.0f}% vom High".format(drawdown_pct)
+            elif drawdown_pct <= 5:
+                details["drawdown"] = "✅ Nahe Highs"
+            else:
+                details["drawdown"] = "📊 Normaler Pullback (−{:.0f}%)".format(drawdown_pct)
+
+        # B) Trend
+        if details.get("trend", "").startswith("📉"):
+            chart_health -= 2
+
+        # C) Bearish Price Action letzte 5 Tage
+        if len(closes) >= 6:
+            red_days = sum(1 for i in range(-5, 0) if closes[i] < closes[i-1])
+            if red_days >= 4:
+                chart_health -= 2
+                details["recent_action"] = f"🔴 {red_days}/5 rote Tage"
+            elif red_days >= 3:
+                chart_health -= 1
+                details["recent_action"] = f"⚠️ {red_days}/5 rote Tage"
+
+        # D) Price Position (schon berechnet: pos_90d)
+        if details.get("pos_90d", 50) <= 20:
+            chart_health -= 1
+
+        chart_health = max(0, min(10, chart_health))
+        details["chart_health"] = chart_health
+
+        # Chart Health Label für Tabelle
+        if chart_health >= 8:
+            details["chart_health_label"] = "🟢 Stark"
+        elif chart_health >= 6:
+            details["chart_health_label"] = "🟡 OK"
+        elif chart_health >= 4:
+            details["chart_health_label"] = "🟠 Schwach"
+        else:
+            details["chart_health_label"] = "🔴 Kritisch"
+
+        details["price"] = current_price
+        details["avg_vol"] = int(avg_vol_20)
+        details["high_90d"] = high_90d
+        details["low_90d"] = low_90d
+
+        # V69: Candlestick-Pattern-Erkennung für BioTech
+        candle_data = analyze_candles(bars)
+        details["candle_analysis"] = candle_data
+        details["candle_patterns"] = candle_data.get("patterns", [])
+        details["candle_trend"] = candle_data.get("trend", "unknown")
+        details["candle_volume_trend"] = candle_data.get("volume_trend", "neutral")
+        details["breakout_ready"] = candle_data.get("breakout_ready", False)
+        details["support"] = candle_data.get("support", 0)
+        details["resistance"] = candle_data.get("resistance", 0)
+
+        # Candlestick-Bonus auf tech_score (max +5 extra)
+        _candle_bonus = 0
+        _bullish_p = [p for p in candle_data.get("patterns", []) if p.get("type") == "bullish"]
+        _bearish_p = [p for p in candle_data.get("patterns", []) if p.get("type") == "bearish"]
+        if _bullish_p:
+            _candle_bonus += 2  # Bullische Patterns = gut für Catalyst-Play
+        if candle_data.get("breakout_ready"):
+            _candle_bonus += 2  # Enge Range + steigendes Vol = Breakout imminent
+        if candle_data.get("volume_trend") == "accumulation":
+            _candle_bonus += 1
+        if _bearish_p and not _bullish_p:
+            _candle_bonus -= 2  # Nur bearisch = Vorsicht
+        tech_score += max(-2, _candle_bonus)
+
+        return {"technical_score": min(20, max(0, tech_score)), "details": details}
+    except Exception:
+        return {"technical_score": 0, "details": {}}
+
+
+def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
+    """
+    Opportunity & Risk Score für Biotech (max 15 pts).
+
+    PHILOSOPHIE: Für Catalyst-Trading sind Mid/Small Caps BESSER als Large Caps.
+    Ein FDA Approval bewegt ABBV ($400B) vielleicht 2%, aber BCRX ($2B) um 30%+.
+    Der Score belohnt den Sweet Spot: groß genug zum sicher Traden,
+    klein genug für großes Catalyst-Upside.
+    """
+    risk_score = 0
+    risk_details = []
+
+    # Market Cap (max 5 pts) — Sweet Spot: $500M - $10B
+    # Zu groß = kaum Bewegung bei Catalyst, zu klein = zu riskant
+    if 500 <= market_cap_m <= 10000:
+        risk_score += 5
+        risk_details.append("🎯 Catalyst Sweet Spot ($0.5-10B)")
+    elif 200 <= market_cap_m < 500:
+        risk_score += 4
+        risk_details.append("🔥 Small Cap — hohes Catalyst-Upside")
+    elif 10000 < market_cap_m <= 50000:
+        risk_score += 3
+        risk_details.append("🏢 Large Cap — solide aber weniger Upside")
+    elif market_cap_m > 50000:
+        risk_score += 1
+        risk_details.append("🐘 Mega Cap — Catalyst bewegt Kurs kaum")
+    elif 100 <= market_cap_m < 200:
+        risk_score += 2
+        risk_details.append("⚠️ Micro Cap — hohes Risiko, hohes Upside")
+    else:
+        risk_score += 0
+        risk_details.append("🔴 Nano Cap — sehr hohes Risiko")
+
+    # Price (max 3 pts) — tradeable Range bevorzugen
+    if 5 <= price <= 100:
+        risk_score += 3
+        risk_details.append("✅ Guter Preis-Range für Trading")
+    elif price > 100:
+        risk_score += 2
+    elif price >= 2:
+        risk_score += 1
+    else:
+        risk_details.append("💀 Penny Stock (<$2)")
+
+    # Float Size (max 3 pts) — Low Float = explosive Moves bei Catalyst
+    if 10 <= shares_m <= 50:
+        risk_score += 3
+        risk_details.append("🔥 Low Float — explosives Catalyst-Potential")
+    elif shares_m < 10 and shares_m > 0:
+        risk_score += 2
+        risk_details.append("🔥🔥 Micro Float — extrem volatil")
+    elif 50 < shares_m <= 200:
+        risk_score += 2
+        risk_details.append("📊 Moderate Float")
+    elif shares_m > 200:
+        risk_score += 1
+        risk_details.append("🐘 High Float — weniger explosiv")
+
+    # Sauberkeit: keine negativen Flags = Bonus, viele Flags = Abzug (max 4 pts netto)
+    if not negative_flags:
+        risk_score += 4
+        risk_details.append("✅ Keine negativen Signale")
+    elif len(negative_flags) == 1:
+        risk_score += 1
+        risk_details.append(f"⚠️ 1 negatives Signal")
+    else:
+        # 2+ negative Flags → kein Bonus, zusätzlich Penalty
+        penalty = min(4, (len(negative_flags) - 1) * 2)
+        risk_score = max(0, risk_score - penalty)
+        risk_details.append(f"⚠️ {len(negative_flags)} negative Signale (−{penalty} Pts)")
+
+    return {"risk_score": min(15, risk_score), "risk_details": risk_details}
+
+
+def _biotech_news_momentum(news_items):
+    """
+    Bewertet News-Sentiment und -Momentum (max 15 pts).
+    """
+    if not news_items:
+        return {"momentum_score": 0, "sentiment_summary": "Keine News"}
+
+    pos = sum(1 for n in news_items if n.get("sentiment") == "positive")
+    neg = sum(1 for n in news_items if n.get("sentiment") == "negative")
+    total = len(news_items)
+
+    score = 0
+
+    # Sentiment Ratio (max 8 pts)
+    if total > 0:
+        pos_ratio = pos / total
+        if pos_ratio >= 0.8:
+            score += 8
+        elif pos_ratio >= 0.6:
+            score += 6
+        elif pos_ratio >= 0.4:
+            score += 4
+        elif neg / total >= 0.6:
+            # V68: Überwiegend negative News = aktiver Penalty statt nur 0
+            score -= 4  # Warnsignal: 60%+ negativ
+        else:
+            score += 0  # Neutral/gemischt = kein Signal, kein Bonus
+
+    # News Frequency — mehr News = mehr Aufmerksamkeit (max 4 pts)
+    if total >= 5:
+        score += 4
+    elif total >= 3:
+        score += 3
+    elif total >= 2:
+        score += 2
+    elif total >= 1:
+        score += 1
+
+    # Catalyst in News (max 3 pts)
+    cat_count = sum(1 for n in news_items if n.get("catalyst"))
+    if cat_count >= 2:
+        score += 3
+    elif cat_count >= 1:
+        score += 2
+
+    sentiment_label = "🟢 Positiv" if pos > neg else "🔴 Negativ" if neg > pos else "⚪ Neutral"
+
+    return {
+        "momentum_score": max(0, min(15, score)),  # V68: Floor bei 0 (negative Sentiment konnte Score < 0 erzeugen)
+        "sentiment_summary": f"{sentiment_label} ({pos}↑ / {neg}↓ / {total - pos - neg}→)",
+        "positive": pos,
+        "negative": neg,
+        "neutral": total - pos - neg,
+    }
+
+
+def _biotech_background_scan(poly_key):
+    """
+    Hintergrund-Scan: Findet alle Biotech-Aktien mit FDA-Katalysatoren.
+    Läuft als Thread — schreibt Progress in /tmp/.
+    """
+    try:
+        _biotech_clear_stop()  # Altes Stop-Signal löschen
+        _biotech_progress_write("running", checked=0, total=0, hits=0, detail="Lade Biotech-Universum...")
+
+        # 1. Biotech Universum laden (oder aus 24h Cache)
+        universe = _biotech_universe_cache_load(max_age_hours=24)
+        if universe:
+            _biotech_progress_write("running", checked=0, total=len(universe), hits=0,
+                                    detail=f"📦 {len(universe)} Biotech-Aktien aus Cache, starte Full Scan...")
+        else:
+            universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=20)
+            _biotech_universe_cache_save(universe)
+        total = len(universe)
+        _biotech_progress_write("running", checked=0, total=total, hits=0,
+                                detail=f"{total} Biotech-Aktien gefunden, starte Full Scan...")
+
+        if total == 0:
+            _biotech_progress_write("done", checked=0, total=0, hits=0, detail="Keine Biotech-Aktien gefunden")
+            return
+
+        results = []
+        checked = 0
+
+        for stock in universe:
+            # Stop-Signal prüfen
+            if _biotech_should_stop():
+                _biotech_progress_write("stopped", checked=checked, total=total,
+                                        hits=len(results), detail=f"⏹️ Manuell gestoppt bei {checked}/{total}")
+                # Bisherige Ergebnisse trotzdem speichern
+                if results:
+                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+                    _biotech_cache_save(results)
+                _biotech_clear_stop()
+                return
+
+            if not isinstance(stock, dict):
+                continue
+            ticker = stock.get("ticker", "")
+            if not ticker:
+                continue
+
+            # SPAC-Filter: Acquisition Corps etc. aus BioTech-Ergebnissen entfernen
+            _stock_name = stock.get("name", "") or ""
+            if is_spac(_stock_name):
+                continue
+            _stock_sic = str(stock.get("sic_code", "") or "")
+            if _stock_sic in SPAC_SIC_CODES:
+                continue
+
+            checked += 1
+
+            if checked % 5 == 0 and not _biotech_should_stop():
+                _biotech_progress_write("running", checked=checked, total=total,
+                                        hits=len(results), detail=f"Analysiere {ticker}...")
+
+            try:
+                # A) News + Catalyst Scan
+                news_data = _scan_biotech_news(poly_key, ticker, limit=5)
+                catalyst_score = news_data["catalyst_score"]
+
+                # B) News Momentum
+                momentum_data = _biotech_news_momentum(news_data["news"])
+                momentum_score = momentum_data["momentum_score"]
+
+                # Quick Filter — QUALITÄT: Mindestens ein echtes Signal nötig
+                # Catalyst > 0 = FDA/Pipeline Keyword in News gefunden
+                # Momentum >= 6 = starkes positives Sentiment + mehrere News (ohne Catalyst)
+                # had_catalyst_keywords = Alte Catalysts gefunden (Time-Decay auf 0) — BPIQ könnte aktuelle haben
+                # Alles andere ist Rauschen (normale Biotech-Aktie mit Alltagsnews)
+                _had_kw = news_data.get("had_catalyst_keywords", False)
+                if catalyst_score == 0 and momentum_score < 6 and not _had_kw:
+                    continue
+
+                # C) Ticker Details (MCap, Shares)
+                details = get_ticker_details(poly_key, ticker)
+
+                # D) BPIQ Catalyst-Daten (kuratiert, PDUFA-Dates, täglich aktualisiert)
+                # ClinicalTrials.gov entfernt — Datenqualität zu schlecht (veraltete Readout-Dates)
+                trial_data = {"pipeline_score": 0, "readout_score": 0, "readout_label": "",
+                              "catalyst_readouts": [], "trials": [], "phase_summary": {}, "total_active": 0}
+
+                # BPIQ aufrufen wenn: irgendein Catalyst-Keyword in News war (auch wenn
+                # Score nach Time-Decay auf 0 fiel), ODER starkes Momentum.
+                # BPIQ hat eigene aktuelle Readout-Dates — unabhängig vom News-Alter.
+                _had_keywords = news_data.get("had_catalyst_keywords", False)
+                bpiq_data = {"bpiq_available": False, "readout_score": 0, "readout_label": "", "catalyst_readouts": []}  # Default
+                if catalyst_score > 0 or _had_keywords or momentum_score >= 6:
+                    # Nur BPIQ — einzige zuverlässige Catalyst-Quelle
+                    bpiq_data = _get_bpiq_catalysts(ticker)
+                    if bpiq_data.get("bpiq_available"):
+                        trial_data["readout_score"] = bpiq_data["readout_score"]
+                        trial_data["readout_label"] = bpiq_data["readout_label"]
+                        trial_data["catalyst_readouts"] = bpiq_data["catalyst_readouts"]
+
+                # E) Technical Score
+                tech_data = _biotech_technical_score(poly_key, ticker)
+
+                # F) Risk Score
+                risk_data = _biotech_risk_score(
+                    market_cap_m=details.get("market_cap_millions", 0),
+                    shares_m=details.get("shares_millions", 0),
+                    negative_flags=news_data.get("negative_flags", []),
+                    price=tech_data.get("details", {}).get("price", 0)
+                )
+
+                # G) Final Score (mit RVOL für Catalyst-Volume Confirmation)
+                _rvol_val = tech_data.get("details", {}).get("RVOL", 0)
+                total_score = _calculate_biotech_catalyst_score(
+                    catalyst_score=catalyst_score,
+                    pipeline_score=trial_data["pipeline_score"],
+                    technical_score=tech_data["technical_score"],
+                    risk_score=risk_data["risk_score"],
+                    news_momentum_score=momentum_score,
+                    rvol=_rvol_val
+                )
+
+                # H) Readout-Bonus: Überfällige/nahende Trial-Readouts boosten den Score
+                # V68: Cap bei 100 NACH Readout-Addition (vorher konnte Score > 100 werden)
+                _readout_bonus = trial_data.get("readout_score", 0)
+                total_score = min(100, total_score + _readout_bonus)
+
+                # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
+                # READOUT-OVERRIDE: Wenn ein Readout überfällig/imminent ist, senke den Threshold
+                _has_readout = len(trial_data.get("catalyst_readouts", [])) > 0
+                if catalyst_score > 0 or _has_readout:
+                    min_required = 20  # Mit Catalyst oder Readout: normaler Threshold
+                else:
+                    min_required = 35  # Ohne Catalyst: nur rein wenn Momentum+Technik stark
+                if total_score < min_required:
+                    continue
+
+                # Grade
+                if total_score >= 75:
+                    grade = "A"
+                elif total_score >= 55:
+                    grade = "B"
+                elif total_score >= 35:
+                    grade = "C"
+                else:
+                    grade = "D"
+
+                # Best Catalyst Label — mit Datum und Event-Typ
+                best_cat = news_data.get("best_catalyst")
+                catalyst_label = best_cat["label"] if best_cat else "🔬 Pipeline"
+                catalyst_headline = best_cat["headline"] if best_cat else ""
+                catalyst_date = best_cat["date"] if best_cat else ""
+                catalyst_keyword = best_cat["keyword"] if best_cat else ""
+                # Ergänze Label mit Datum wenn vorhanden
+                if best_cat and best_cat.get("date"):
+                    catalyst_label = f"{best_cat['label']} ({best_cat['date']})"
+
+                # Chart Health + Selloff-Reason
+                _tech_details = tech_data.get("details", {})
+                _chart_health = _tech_details.get("chart_health", 10)
+                _chart_label = _tech_details.get("chart_health_label", "🟢 Stark")
+                _drawdown = _tech_details.get("drawdown%", 0)
+
+                # Selloff-Reason: Warum fällt der Stock?
+                # Korreliere Chart-Schwäche mit negativen Catalysts
+                _selloff_reason = ""
+                _neg_flags = news_data.get("negative_flags", [])
+                if _chart_health <= 5:  # Chart ist schwach/kritisch
+                    if _neg_flags:
+                        _flag_names = [nf["flag"] for nf in _neg_flags[:2]]
+                        _selloff_reason = "⚠️ " + ", ".join(_flag_names)
+                    elif _drawdown >= 15:
+                        _selloff_reason = "❓ Kein neg. Catalyst — prüfe Chart"
+                    # Wenn Chart schwach ABER keine neg. News → könnte Dip-Opportunity sein
+
+                # ── Penny Stock / Micro Cap Warnung ──
+                _mcap_m = details.get("market_cap_millions", 0)
+                _stock_price = _tech_details.get("price", 0)
+                _penny_warning = ""
+                if _mcap_m < 50 or _stock_price < 1.0:
+                    _penny_warning = "🚨 PENNY"
+                elif _mcap_m < 100:
+                    _penny_warning = "⚠️ MICRO"
+
+                # Readout-Label: Wenn vorhanden, ergänze Catalyst-Label
+                _readout_lbl = trial_data.get("readout_label", "")
+                if _readout_lbl and not catalyst_label.startswith("🔴") and not catalyst_label.startswith("🟡"):
+                    # Readout ist das primäre Signal wenn kein stärkerer Catalyst da ist
+                    if trial_data.get("readout_score", 0) >= 5:
+                        catalyst_label = _readout_lbl
+                        _cat_readouts = trial_data.get("catalyst_readouts", [])
+                        catalyst_headline = f"Trial-Readout erwartet — {_cat_readouts[0]['title'][:60]}" if _cat_readouts and len(_cat_readouts) > 0 else ""
+
+                # ── Fallback Readout_Label: Wenn CT.gov leer, nutze besten News-Catalyst ──
+                if not _readout_lbl and best_cat:
+                    _fb_label = best_cat.get("label", "")
+                    _fb_kw = best_cat.get("keyword", "")
+                    _fb_date = best_cat.get("date", "")
+                    _fb_hl = best_cat.get("headline", "")[:50]
+                    if _fb_label:
+                        _readout_lbl = f"{_fb_label}" + (f" ({_fb_date})" if _fb_date else "")
+                        if _fb_hl:
+                            _readout_lbl += f" — {_fb_hl}"
+
+                # ── Event Result Sentiment: Positiv/Negativ/Ausstehend ──
+                # V71-FIX: Alte Logik nutzte News-Publikationsdatum als Event-Datum
+                # → fast alles "in der Vergangenheit" → fast alles "❓ Unbekannt"
+                # Neue Logik: Catalyst-Keyword selbst bestimmt das Ergebnis:
+                #   - "fda approved" = Positiv (Ergebnis liegt vor)
+                #   - "pdufa" = Ausstehend (Event angekündigt)
+                #   - negative_flags = Negativ
+                #   - Polygon Sentiment als Tiebreaker
+                _event_result = ""
+                _all_catalysts = news_data.get("catalysts", [])
+                _neg_flags_ev = news_data.get("negative_flags", [])
+
+                # Schritt 1: News-Titel nach expliziten Result-Keywords durchsuchen
+                _has_positive_result = False
+                _has_negative_result = False
+                _positive_result_kws = {
+                    "positive results", "primary endpoint met", "statistically significant",
+                    "complete remission", "overall survival", "fda approved", "fda approval",
+                    "breakthrough therapy", "accelerated approval", "fast track",
+                    "pivotal trial success", "topline results positive", "met primary",
+                    "exceeded expectations", "superior efficacy", "approval granted",
+                    "nda approved", "bla approved", "marketing authorization",
+                    "complete response", "durable response", "objective response rate",
+                    "favorable safety", "well tolerated", "recommended for approval",
+                }
+                _negative_result_kws = {
+                    "clinical hold", "fda rejection", "complete response letter",
+                    "trial failure", "missed endpoint", "failed to meet",
+                    "did not meet", "discontinued", "terminated", "negative results",
+                    "adverse events", "safety concern", "partial clinical hold",
+                    "refuse to file", "not approved", "withdrawal", "halted",
+                    "futility", "did not achieve", "failed to demonstrate",
+                    "serious adverse", "dose limiting toxicity", "lack of efficacy",
+                }
+                for _nws in news_data.get("news", [])[:10]:
+                    _nws_title = (_nws.get("title", "") or "").lower()
+                    _nws_desc = (_nws.get("description", "") or "").lower() if isinstance(_nws, dict) else ""
+                    _nws_combined = _nws_title + " " + _nws_desc
+                    for _pk in _positive_result_kws:
+                        if _pk in _nws_combined:
+                            _has_positive_result = True
+                            break
+                    for _nk in _negative_result_kws:
+                        if _nk in _nws_combined:
+                            _has_negative_result = True
+                            break
+
+                # Auch negative_flags auswerten
+                if _neg_flags_ev:
+                    _has_negative_result = True
+
+                # Schritt 2: Ergebnis bestimmen — priorisiert
+                if _has_negative_result and not _has_positive_result:
+                    _event_result = "❌ Negativ"
+                elif _has_positive_result and not _has_negative_result:
+                    _event_result = "✅ Positiv"
+                elif _has_positive_result and _has_negative_result:
+                    _event_result = "⚠️ Gemischt"
+                elif best_cat:
+                    # Schritt 3: Kein explizites Result-Keyword gefunden
+                    # → Nutze den Catalyst-Keyword-Typ um Ergebnis abzuleiten
+                    _best_kw = (best_cat.get("keyword", "") or "").lower()
+
+                    # Keywords die ein DEFINITIVES positives Ergebnis anzeigen
+                    _definitive_positive_kws = {
+                        "fda approved", "fda approval", "fda clearance",
+                        "breakthrough therapy", "fast track", "priority review",
+                        "accelerated approval", "orphan drug", "emergency use",
+                        "eua granted", "positive results", "primary endpoint met",
+                        "statistically significant", "overall survival",
+                        "progression-free survival", "complete remission",
+                        "topline results", "topline data", "late-breaking",
+                        "licensing agreement", "partnership", "collaboration",
+                        "acquisition target", "buyout", "merger",
+                        "label expansion", "expanded access", "compassionate use",
+                        "patent granted",
+                    }
+
+                    # Keywords die ein BEVORSTEHENDES Event anzeigen (noch kein Ergebnis)
+                    _forward_looking_kws = {
+                        "pdufa", "nda accepted", "bla accepted", "adcom",
+                        "advisory committee", "fda decision", "fda action date",
+                        "phase 3 results", "phase 3 data", "phase iii",
+                        "pivotal trial", "primary endpoint", "interim analysis",
+                        "interim data", "phase 2 results", "phase ii data",
+                        "ind filed", "ind accepted", "clinical trial initiation",
+                        "patient enrollment", "first patient dosed", "dosing initiated",
+                        "preclinical", "phase 1", "phase i", "proof of concept",
+                        "patent filed", "ip protection", "data presentation",
+                        "conference presentation", "manuscript published", "peer review",
+                    }
+
+                    if _best_kw in _definitive_positive_kws:
+                        _event_result = "✅ Positiv"
+                    elif _best_kw in _forward_looking_kws:
+                        # Forward-looking: Polygon-Sentiment als Indikator nutzen
+                        _ev_news = news_data.get("news", [])
+                        _ev_pos = sum(1 for n in _ev_news if n.get("sentiment") == "positive")
+                        _ev_neg = sum(1 for n in _ev_news if n.get("sentiment") == "negative")
+                        if _ev_neg > _ev_pos and _ev_neg >= 2:
+                            _event_result = "⚠️ Risiko"
+                        else:
+                            _event_result = "⏳ Ausstehend"
+                    else:
+                        # Unbekanntes Keyword — Polygon-Sentiment als Fallback
+                        _ev_news = news_data.get("news", [])
+                        _ev_pos = sum(1 for n in _ev_news if n.get("sentiment") == "positive")
+                        _ev_neg = sum(1 for n in _ev_news if n.get("sentiment") == "negative")
+                        if _ev_pos > _ev_neg:
+                            _event_result = "✅ Positiv"
+                        elif _ev_neg > _ev_pos:
+                            _event_result = "⚠️ Risiko"
+                        else:
+                            _event_result = "⏳ Ausstehend"
+                elif _all_catalysts:
+                    # Hat Catalysts aber kein best_cat (nach Decay alle auf 0)
+                    _event_result = "📋 Catalyst"
+                else:
+                    _event_result = "—"
+
+                result = {
+                    "Ticker": ticker,
+                    "Name": (details.get("name", "") or stock.get("name", ""))[:30],
+                    "Score": total_score,
+                    "Grade": grade,
+                    "Risk_Flag": _penny_warning,
+                    "Catalyst": catalyst_label,
+                    "Catalyst_Score": catalyst_score,
+                    "Pipeline_Score": trial_data["pipeline_score"],
+                    "Readout_Score": trial_data.get("readout_score", 0),
+                    "Technical_Score": tech_data["technical_score"],
+                    "Risk_Score": risk_data["risk_score"],
+                    "Momentum_Score": momentum_score,
+                    "Preis": _tech_details.get("price", 0),
+                    "MCap_M": details.get("market_cap_millions", 0),
+                    "Shares_M": details.get("shares_millions", 0),
+                    "RVOL": _tech_details.get("RVOL", 0),
+                    "Float_Cat": details.get("float_category", "UNKNOWN"),
+                    "Headline": catalyst_headline,
+                    "Catalyst_Date": catalyst_date,
+                    "Catalyst_Keyword": catalyst_keyword,
+                    "Catalysts_All": news_data.get("catalysts", [])[:5],
+                    "Readout_Label": _readout_lbl,
+                    "Event_Result": _event_result,
+                    "Readout_Details": trial_data.get("catalyst_readouts", [])[:3],
+                    "BPIQ_Available": bpiq_data.get("bpiq_available", False),
+                    "BPIQ_Catalysts": bpiq_data.get("catalyst_readouts", [])[:5],
+                    "Phase3": trial_data["phase_summary"].get("PHASE3", 0),
+                    "Phase2": trial_data["phase_summary"].get("PHASE2", 0),
+                    "Phase1": trial_data["phase_summary"].get("PHASE1", 0),
+                    "Active_Trials": trial_data.get("total_active", 0),
+                    "Chart": _chart_label,
+                    "Chart_Health": _chart_health,
+                    "Drawdown": round(_drawdown, 1),
+                    "Selloff_Reason": _selloff_reason,
+                    "Trials": trial_data.get("trials", [])[:5],
+                    "News": news_data.get("news", [])[:5],
+                    "Negative_Flags": _neg_flags,
+                    "Risk_Details": risk_data.get("risk_details", []),
+                    "Tech_Details": _tech_details,
+                    "Sentiment": momentum_data.get("sentiment_summary", ""),
+                    "Catalysts_All": news_data.get("catalysts", []),
+                }
+                results.append(result)
+
+            except Exception as _bio_err:
+                import traceback
+                print(f"[BIOTECH] Fehler bei {ticker}: {_bio_err}\n{traceback.format_exc()}")
+                continue
+
+        # Sortiere nach Score
+        results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+
+        # Cache speichern
+        _biotech_cache_save(results)
+
+        top_score = results[0]["Score"] if results else 0
+        _biotech_progress_write("done", checked=checked, total=total,
+                                hits=len(results), top_score=top_score,
+                                detail=f"{total} gescannt → {len(results)} mit Katalysator")
+
+    except Exception as e:
+        _biotech_progress_write("error", detail=f"Fehler: {str(e)[:150]}")
+
+
+def _biotech_universe_cache_save(universe):
+    """Speichert Biotech-Universum separat (ändert sich selten)."""
+    try:
+        with open(_biotech_universe_cache_file(), "w") as f:
+            json.dump({"universe": universe, "timestamp": time.time()}, f, default=str)
+    except Exception:
+        pass
+
+
+def _biotech_universe_cache_load(max_age_hours=24):
+    """Lädt gecachtes Universum (24h gültig — Tickers ändern sich nicht täglich)."""
+    try:
+        with open(_biotech_universe_cache_file(), "r") as f:
+            data = json.load(f)
+        if time.time() - data.get("timestamp", 0) > max_age_hours * 3600:
+            return None
+        return data.get("universe", [])
+    except Exception:
+        return None
+
+
+def _biotech_quick_scan(poly_key):
+    """
+    Quick Scan: Nutzt gecachte Ergebnisse und aktualisiert NUR News/Catalysts.
+    Viel schneller als Full Scan weil:
+    - Kein Universum-Laden (nutzt bestehende Ticker-Liste aus Cache)
+    - Kein extra Pipeline API Call (BPIQ Cache wird im Full Scan geladen)
+    - Keine Technical Score Neuberechnung (ändert sich nicht stündlich)
+    - NUR: Neue News scannen → Catalyst Score + Momentum aktualisieren
+    """
+    try:
+        # Lade bestehende Ergebnisse
+        existing = _biotech_cache_load(max_age_hours=24)  # Alte Daten als Basis
+        if not existing:
+            # Kein Cache → muss Full Scan machen
+            _biotech_progress_write("running", checked=0, total=0, hits=0,
+                                    detail="Kein Cache vorhanden — starte Full Scan...")
+            _biotech_background_scan(poly_key)
+            return
+
+        # Auch Universum laden für neue Tickers die vielleicht noch nicht im Cache sind
+        universe_tickers = set()
+        universe = _biotech_universe_cache_load(max_age_hours=24)
+        if universe:
+            universe_tickers = {u["ticker"] for u in universe}
+
+        # Merge: bestehende + ggf. neue Tickers aus Universe
+        existing_tickers = {r["Ticker"] for r in existing}
+        all_tickers = list(existing_tickers | universe_tickers)
+        total = len(all_tickers)
+
+        _biotech_progress_write("running", checked=0, total=total, hits=0,
+                                detail=f"⚡ Quick Scan: {total} Tickers, nur News-Update...")
+
+        # Bestehende Ergebnisse als Lookup
+        existing_map = {r["Ticker"]: r for r in existing}
+        results = []
+        checked = 0
+
+        _biotech_clear_stop()  # Altes Stop-Signal löschen
+        for ticker in all_tickers:
+            # Stop-Signal prüfen
+            if _biotech_should_stop():
+                _biotech_progress_write("stopped", checked=checked, total=total,
+                                        hits=len(results), detail=f"⏹️ Quick Scan gestoppt bei {checked}/{total}")
+                if results:
+                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+                    _biotech_cache_save(results)
+                _biotech_clear_stop()
+                return
+
+            checked += 1
+            if checked % 20 == 0:
+                _biotech_progress_write("running", checked=checked, total=total,
+                                        hits=len(results), detail=f"⚡ Quick: {ticker}...")
+
+            try:
+                # NUR News neu scannen
+                news_data = _scan_biotech_news(poly_key, ticker, limit=5)
+                catalyst_score = news_data["catalyst_score"]
+                momentum_data = _biotech_news_momentum(news_data["news"])
+                momentum_score = momentum_data["momentum_score"]
+
+                # Quick Filter — gleiche Qualitäts-Logik wie Full Scan
+                _had_kw = news_data.get("had_catalyst_keywords", False)
+                if catalyst_score == 0 and momentum_score < 6 and not _had_kw:
+                    continue
+
+                # Bestehende Daten wiederverwenden wenn vorhanden
+                old = existing_map.get(ticker)
+
+                if old:
+                    old = dict(old)  # Copy um Original nicht zu mutieren
+                    # Update nur News-bezogene Felder, behalte Rest
+                    old["Catalyst_Score"] = catalyst_score
+                    old["Momentum_Score"] = momentum_score
+                    old["News"] = news_data.get("news", [])[:5]
+                    old["Negative_Flags"] = news_data.get("negative_flags", [])
+                    old["Sentiment"] = momentum_data.get("sentiment_summary", "")
+                    old["Catalysts_All"] = news_data.get("catalysts", [])
+
+                    # Best Catalyst aktualisieren
+                    best_cat = news_data.get("best_catalyst")
+                    old["Catalyst"] = best_cat["label"] if best_cat else old.get("Catalyst", "🔬 Pipeline")
+                    old["Headline"] = best_cat["headline"] if best_cat else old.get("Headline", "")
+
+                    # Score neu berechnen mit alten Pipeline/Technical/Risk + neuen News
+                    old["Score"] = _calculate_biotech_catalyst_score(
+                        catalyst_score=catalyst_score,
+                        pipeline_score=old.get("Pipeline_Score", 0),
+                        technical_score=old.get("Technical_Score", 0),
+                        risk_score=old.get("Risk_Score", 0),
+                        news_momentum_score=momentum_score,
+                        rvol=old.get("RVOL", 0)
+                    )
+
+                    # Grade aktualisieren
+                    s = old["Score"]
+                    old["Grade"] = "A" if s >= 75 else "B" if s >= 55 else "C" if s >= 35 else "D"
+
+                    # Qualitäts-Gate: mit Catalyst ab 20, ohne ab 35
+                    _min_req = 20 if catalyst_score > 0 else 35
+                    if old["Score"] >= _min_req:
+                        results.append(old)
+                else:
+                    # Neuer Ticker — minimal-Eintrag (wird beim nächsten Full Scan vervollständigt)
+                    if catalyst_score >= 8:
+                        results.append({
+                            "Ticker": ticker, "Name": "", "Score": catalyst_score + momentum_score,
+                            "Grade": "C", "Risk_Flag": "",
+                            "Catalyst": news_data.get("best_catalyst", {}).get("label", "🔬 Neu"),
+                            "Catalyst_Score": catalyst_score, "Pipeline_Score": 0,
+                            "Readout_Score": 0, "Readout_Label": "", "Readout_Details": [],
+                            "Technical_Score": 0, "Risk_Score": 5, "Momentum_Score": momentum_score,
+                            "Preis": 0, "MCap_M": 0, "Shares_M": 0, "RVOL": 0, "Float_Cat": "UNKNOWN",
+                            "Headline": news_data.get("best_catalyst", {}).get("headline", ""),
+                            "Phase3": 0, "Phase2": 0, "Phase1": 0, "Active_Trials": 0,
+                            "Chart": "⚪ Neu", "Chart_Health": 5, "Drawdown": 0, "Selloff_Reason": "",
+                            "Trials": [], "News": news_data.get("news", [])[:5],
+                            "Negative_Flags": news_data.get("negative_flags", []),
+                            "Risk_Details": [], "Tech_Details": {},
+                            "Sentiment": momentum_data.get("sentiment_summary", ""),
+                            "Catalysts_All": news_data.get("catalysts", []),
+                        })
+            except Exception as _bio_q_err:
+                print(f"[BIOTECH-QUICK] Fehler bei {ticker}: {_bio_q_err}")
+                continue
+
+        results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+        _biotech_cache_save(results)
+
+        top_score = results[0]["Score"] if results else 0
+        _biotech_progress_write("done", checked=checked, total=total,
+                                hits=len(results), top_score=top_score,
+                                detail=f"⚡ Quick Scan: {total} geprüft → {len(results)} Treffer")
+
+    except Exception as e:
+        _biotech_progress_write("error", detail=f"Quick Scan Fehler: {str(e)[:150]}")
+
+
+def _compute_biotech_technical_from_bars(bars):
+    """
+    Berechnet den BioTech Technical Score aus einem Bar-Fenster (offline, kein API-Call).
+    Identisch zur Logik in _biotech_technical_score(), aber nutzt lokale Bars.
+
+    Returns: dict mit technical_score (max 20), rvol, details
+    """
+    if not bars or len(bars) < 20:
+        return {"technical_score": 0, "rvol": 0, "details": {}}
+
+    closes = [b["close"] for b in bars]
+    volumes = [b["volume"] for b in bars]
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+
+    current_price = closes[-1]
+    avg_vol_20 = sum(volumes[-20:]) / 20
+    last_vol = volumes[-1]
+
+    tech_score = 0
+    details = {}
+
+    # 1. Unusual Volume (max 6 pts)
+    rvol = last_vol / max(1, avg_vol_20)
+    details["RVOL"] = round(rvol, 2)
+    if rvol >= 3.0:
+        tech_score += 6
+    elif rvol >= 2.0:
+        tech_score += 4
+    elif rvol >= 1.5:
+        tech_score += 2
+
+    # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
+    if len(volumes) >= 20:
+        vol_recent = sum(volumes[-5:]) / 5
+        vol_prior = sum(volumes[-20:-5]) / 15
+        vol_trend = vol_recent / max(1, vol_prior)
+        details["vol_trend"] = round(vol_trend, 2)
+        if vol_trend >= 2.0:
+            tech_score += 4
+        elif vol_trend >= 1.5:
+            tech_score += 3
+        elif vol_trend >= 1.2:
+            tech_score += 1
+
+    # 3. Price Position — nahe Highs = bullish (max 4 pts)
+    high_90d = max(highs[-min(90, len(highs)):])
+    low_90d = min(lows[-min(90, len(lows)):])
+    range_90d = high_90d - low_90d
+    if range_90d > 0:
+        pos_90d = (current_price - low_90d) / range_90d * 100
+        details["pos_90d"] = round(pos_90d, 1)
+        if pos_90d >= 80:
+            tech_score += 4
+        elif pos_90d >= 60:
+            tech_score += 2
+
+    # 4. Tight Range — niedrige Volatilität = Ruhe vor Sturm (max 3 pts)
+    if len(closes) >= 10:
+        recent_closes = closes[-10:]
+        range_10d = (max(recent_closes) - min(recent_closes)) / max(0.01, min(recent_closes)) * 100
+        details["range_10d%"] = round(range_10d, 1)
+        if range_10d <= 5:
+            tech_score += 3
+        elif range_10d <= 10:
+            tech_score += 1
+
+    # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts)
+    if len(closes) >= 50:
+        sma20 = sum(closes[-20:]) / 20
+        sma50 = sum(closes[-50:]) / 50
+        if sma20 > sma50:
+            tech_score += 3
+        elif sma20 > sma50 * 0.97:
+            tech_score += 1
+
+    return {"technical_score": min(20, tech_score), "rvol": round(rvol, 2), "details": details}
+
+
