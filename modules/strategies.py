@@ -70,7 +70,7 @@ STRATEGIES = {
         "min_dollar_volume": 500000
     },
     "Reversal Hunter": {
-        "description": "Bounce nach roter Kerze — echtes Reversal NUR wenn Stock im Downtrend (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+        "description": "Bounce nach roter Kerze — echtes Reversal NUR wenn Stock im Downtrend ( Vortag% = Kerze, nicht Tagesperformance)",
         "filters": {"Vortag %": (-50.0, -3.0), "Change %": (2.0, 30.0), "RVOL": (1.5, 50.0)},
         "logic": "Gestern bärische KERZE (-3%+), heute Käufer (+2%+). Bei Uptrend = Continuation Dip Buy, bei Downtrend = Reversal"
     },
@@ -84,68 +84,68 @@ STRATEGIES = {
         "filters": {"RVOL": (3.0, 100.0), "Change %": (2.0, 100.0), "Close Position": (0.55, 1.0)},
         "logic": "RVOL > 3.0 + Change > 2% + Close nahe High = echtes Whale Buying (kein Churn)"
     },
-    "Whale Watch Short 🐻": {
+    "Whale Watch Short ": {
         "description": "Extremes Volumen + Abverkauf - Big Player verkaufen",
         "filters": {"RVOL": (3.0, 100.0), "Change %": (-100.0, -2.0), "Close Position": (0.0, 0.45)},
         "logic": "RVOL > 3.0 + Change < -2% + Close nahe Low = echtes Whale Selling"
     },
     # =========================================================================
-    # PRE-MARKET STRATEGIEN 🌅 - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
+    # PRE-MARKET STRATEGIEN - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
     # =========================================================================
-    "PM Gainers 🌅": {
-        "description": "🌅 PRE-MARKET: Aktien mit starkem Anstieg vor Börsenöffnung",
+    "PM Gainers ": {
+        "description": " PRE-MARKET: Aktien mit starkem Anstieg vor Börsenöffnung",
         "filters": {"Change %": (5.0, 100.0), "Preis": (1.0, 10000.0)},
         "logic": "Change > 5% vs. Previous Close = starkes Pre-Market Momentum",
         "stocks_only": True,
         "session_hint": "Pre-Market"
     },
-    "PM Losers 🌅": {
-        "description": "🌅 PRE-MARKET: Aktien mit starkem Abverkauf vor Börsenöffnung",
+    "PM Losers ": {
+        "description": " PRE-MARKET: Aktien mit starkem Abverkauf vor Börsenöffnung",
         "filters": {"Change %": (-100.0, -5.0), "Preis": (1.0, 10000.0)},
         "logic": "Change < -5% vs. Previous Close = Gap-Down Kandidat",
         "stocks_only": True,
         "session_hint": "Pre-Market"
     },
-    "PM Gap & Go 🌅": {
-        "description": "🌅 PRE-MARKET: Quality Gaps mit Momentum-Potenzial",
+    "PM Gap & Go ": {
+        "description": " PRE-MARKET: Quality Gaps mit Momentum-Potenzial",
         "filters": {"Change %": (3.0, 50.0), "Preis": (5.0, 500.0)},
         "logic": "Solide Aktien (>$5) mit 3%+ Gap = Momentum-Trade bei Open",
         "stocks_only": True,
         "session_hint": "Pre-Market"
     },
-    "PM Penny Movers 🌅": {
-        "description": "🌅 PRE-MARKET: Günstige Aktien mit explosiver Bewegung",
+    "PM Penny Movers ": {
+        "description": " PRE-MARKET: Günstige Aktien mit explosiver Bewegung",
         "filters": {"Change %": (10.0, 500.0), "Preis": (0.10, 5.0)},
         "logic": "Lowcaps unter $5 mit >10% Move = High Risk/Reward",
         "stocks_only": True,
         "session_hint": "Pre-Market"
     },
     # =========================================================================
-    # AFTER-HOURS STRATEGIEN 🌙 - Optimiert für 16:00-20:00 ET (KEIN RVOL!)
+    # AFTER-HOURS STRATEGIEN - Optimiert für 16:00-20:00 ET (KEIN RVOL!)
     # =========================================================================
-    "AH Gainers 🌙": {
-        "description": "🌙 AFTER-HOURS: Aktien steigen nach Börsenschluss",
+    "AH Gainers ": {
+        "description": " AFTER-HOURS: Aktien steigen nach Börsenschluss",
         "filters": {"Change %": (3.0, 100.0), "Preis": (1.0, 10000.0)},
         "logic": "Change > 3% vs. Regular Close = positive News/Earnings",
         "stocks_only": True,
         "session_hint": "After-Hours"
     },
-    "AH Losers 🌙": {
-        "description": "🌙 AFTER-HOURS: Aktien fallen nach Börsenschluss",
+    "AH Losers ": {
+        "description": " AFTER-HOURS: Aktien fallen nach Börsenschluss",
         "filters": {"Change %": (-100.0, -3.0), "Preis": (1.0, 10000.0)},
         "logic": "Change < -3% vs. Regular Close = negative News/Earnings",
         "stocks_only": True,
         "session_hint": "After-Hours"
     },
-    "AH Earnings Gainers 🌙📈": {
-        "description": "🌙 AFTER-HOURS: Starker ANSTIEG nach Earnings",
+    "AH Earnings Gainers ": {
+        "description": " AFTER-HOURS: Starker ANSTIEG nach Earnings",
         "filters": {"Change %": (8.0, 200.0), "Preis": (10.0, 1000.0)},
         "logic": ">8% Anstieg nach Close = positive Earnings Überraschung",
         "stocks_only": True,
         "session_hint": "After-Hours"
     },
-    "AH Earnings Losers 🌙📉": {
-        "description": "🌙 AFTER-HOURS: Starker ABVERKAUF nach Earnings",
+    "AH Earnings Losers ": {
+        "description": " AFTER-HOURS: Starker ABVERKAUF nach Earnings",
         "filters": {"Change %": (-200.0, -8.0), "Preis": (10.0, 1000.0)},
         "logic": ">8% Fall nach Close = negative Earnings Überraschung oder Guidance",
         "stocks_only": True,
@@ -155,25 +155,25 @@ STRATEGIES = {
     # GAP STRATEGIEN - NUR AKTIEN! (Mit Liquiditäts-Filter!)
     # =========================================================================
     "Gap Up": {
-        "description": "📈 NUR AKTIEN: Gap nach oben mit Volumen-Bestätigung",
+        "description": " NUR AKTIEN: Gap nach oben mit Volumen-Bestätigung",
         "filters": {"Gap %": (2.0, 50.0), "RVOL": (1.0, 100.0)},
         "logic": "Gap Up + mindestens normales Volumen = echtes Interesse (nicht dünn gehandelt)",
         "stocks_only": True
     },
     "Gap Down": {
-        "description": "📉 NUR AKTIEN: Gap nach unten mit Volumen-Bestätigung",
+        "description": " NUR AKTIEN: Gap nach unten mit Volumen-Bestätigung",
         "filters": {"Gap %": (-50.0, -2.0), "RVOL": (1.0, 100.0)},
         "logic": "Gap Down + normales Volumen = echtes Selling",
         "stocks_only": True
     },
     "Gap Up (High Vol)": {
-        "description": "📈🔥 Gap Up mit HOHEM Volumen - Starkes Momentum",
+        "description": " Gap Up mit HOHEM Volumen - Starkes Momentum",
         "filters": {"Gap %": (3.0, 50.0), "RVOL": (2.0, 100.0), "Preis": (5.0, 500.0)},
         "logic": "Gap + hohes Volumen + liquide Aktie = Momentum-Play",
         "stocks_only": True
     },
     "Gap Down (High Vol)": {
-        "description": "📉🔥 Gap Down mit HOHEM Volumen - Panik oder News",
+        "description": " Gap Down mit HOHEM Volumen - Panik oder News",
         "filters": {"Gap %": (-50.0, -3.0), "RVOL": (2.0, 100.0), "Preis": (5.0, 500.0)},
         "logic": "Gap Down + hohes Volumen = News-Event, Gap-Fill Trade",
         "stocks_only": True
@@ -197,54 +197,54 @@ STRATEGIES = {
     # INSIDER STRATEGIEN - NUR AKTIEN
     # =========================================================================
     "Insider Buying": {
-        "description": "🔥 NUR AKTIEN: Insider (CEO, CFO, Directors) kaufen eigene Aktien",
+        "description": " NUR AKTIEN: Insider (CEO, CFO, Directors) kaufen eigene Aktien",
         "filters": {"Insider": "BUY"},
         "logic": "Insider kaufen = Sie glauben an die Firma → Bullish Signal",
         "stocks_only": True
     },
     "Insider Selling": {
-        "description": "⚠️ NUR AKTIEN: Insider verkaufen große Mengen",
+        "description": " NUR AKTIEN: Insider verkaufen große Mengen",
         "filters": {"Insider": "SELL"},
         "logic": "Große Insider-Verkäufe können Warnsignal sein",
         "stocks_only": True
     },
     # =========================================================================
-    # KONSOLIDIERUNGS-STRATEGIEN 📦 - (Wyckoff-inspiriert, vereinfacht)
+    # KONSOLIDIERUNGS-STRATEGIEN - (Wyckoff-inspiriert, vereinfacht)
     # HINWEIS: Echte Wyckoff-Analyse erfordert Wochen von Daten!
     # Diese Strategien finden 2-Tage Konsolidierungen, NICHT echte Wyckoff-Patterns.
     # Mit Multi-Day Analyse (5 Tage) für bessere Pattern-Erkennung.
     # =========================================================================
-    "Consolidation 📦": {
-        "description": "📦 Multi-Day Seitwärtsphase mit sinkendem Volumen (⚠️ Vortag% = Kerze, nicht Tagesperformance)",
+    "Consolidation ": {
+        "description": " Multi-Day Seitwärtsphase mit sinkendem Volumen ( Vortag% = Kerze, nicht Tagesperformance)",
         "filters": {"Change %": (-2.0, 2.0), "Vortag %": (-2.0, 2.0), "RVOL": (0.2, 1.2)},
         "logic": "Enge Range (±2%) + kleine Vortags-Kerze + niedriges Volumen = Ruhe vor dem Sturm",
         "needs_history": True,
         "pattern_type": "consolidation",
         "history_days": 5
     },
-    "Consolidation Breakout 🚀": {
-        "description": "📦→🚀 Ausbruch aus mehrtaegiger enger Range mit Volumen-Explosion",
+    "Consolidation Breakout ": {
+        "description": "→ Ausbruch aus mehrtaegiger enger Range mit Volumen-Explosion",
         "filters": {"Change %": (1.5, 50.0), "Vortag %": (-3.0, 3.0), "RVOL": (1.5, 50.0)},
         "logic": "Mehrtaegige enge Range + heute Ausbruch (+1.5%+) mit erhoehtem Volumen",
         "needs_history": True,
         "pattern_type": "consolidation_breakout",
         "history_days": 15
     },
-    "Reversal Setup 🪤": {
-        "description": "📦 Mehrtägiger Abverkauf + heute bullische Umkehr (⚠️ Vortag% = Kerze)",
+    "Reversal Setup ": {
+        "description": " Mehrtägiger Abverkauf + heute bullische Umkehr ( Vortag% = Kerze)",
         "filters": {"Change %": (2.0, 15.0), "Vortag %": (-8.0, -2.0), "RVOL": (1.5, 10.0)},
         "logic": "Mehrtägiger Downtrend + heute grün mit erhöhtem Volumen = Boden-Bildung",
         "needs_history": True,
         "pattern_type": "reversal_setup",
         "history_days": 5
     },
-    "Tight Range 📐": {
-        "description": "📐 Extrem enge Tagesrange mit niedrigem Volumen - Explosion steht bevor",
+    "Tight Range ": {
+        "description": " Extrem enge Tagesrange mit niedrigem Volumen - Explosion steht bevor",
         "filters": {"Change %": (-1.0, 1.0), "RVOL": (0.2, 0.8)},
         "logic": "Enge Range + niedriges Volumen = echte Ruhe vor dem Sturm (Richtung unklar)"
     },
-    "High Volume Churn 📤": {
-        "description": "📤 Hohes Volumen ohne Preisfortschritt = Smart Money akkumuliert/distribuiert",
+    "High Volume Churn ": {
+        "description": " Hohes Volumen ohne Preisfortschritt = Smart Money akkumuliert/distribuiert",
         "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.8, 50.0)},
         "logic": "Hohes Volumen (RVOL > 1.8) + enge Tagesrange (<2%) = Churn-Aktivitaet",
         "needs_history": True,
@@ -252,43 +252,43 @@ STRATEGIES = {
         "history_days": 10
     },
     # =========================================================================
-    # VOLUME VOID STRATEGIEN 🕳️ - Low Volume Node Scanner
+    # VOLUME VOID STRATEGIEN - Low Volume Node Scanner
     # =========================================================================
-    "Volume Void Long 🕳️⬆️": {
-        "description": "🕳️ Preis UNTER einem Volume Void - Potenzial für schnellen Anstieg!",
+    "Volume Void Long ⬆": {
+        "description": " Preis UNTER einem Volume Void - Potenzial für schnellen Anstieg!",
         "filters": {"Change %": (-5.0, 10.0), "Preis": (5.0, 500.0)},
         "logic": "Wenig Widerstand über aktuellem Preis → Preis kann schnell durch das 'Loch' steigen",
         "stocks_only": True,
         "needs_volume_profile": True
     },
-    "Volume Void Short 🕳️⬇️": {
-        "description": "🕳️ Preis ÜBER einem Volume Void - Potenzial für schnellen Fall!",
+    "Volume Void Short ⬇": {
+        "description": " Preis ÜBER einem Volume Void - Potenzial für schnellen Fall!",
         "filters": {"Change %": (-10.0, 5.0), "Preis": (5.0, 500.0)},
         "logic": "Wenig Support unter aktuellem Preis → Preis kann schnell durch das 'Loch' fallen",
         "stocks_only": True,
         "needs_volume_profile": True
     },
     # =========================================================================
-    # HARMONIC PATTERN STRATEGIEN 🦋 - Fibonacci-basierte Reversal Patterns
+    # HARMONIC PATTERN STRATEGIEN - Fibonacci-basierte Reversal Patterns
     # =========================================================================
-    "Harmonic Bullish 🦋⬆️": {
-        "description": "🦋 Bullische Harmonic Patterns (Gartley, Bat, Butterfly, Crab)",
+    "Harmonic Bullish ⬆": {
+        "description": " Bullische Harmonic Patterns (Gartley, Bat, Butterfly, Crab)",
         "filters": {"Preis": (5.0, 500.0)},
         "logic": "XABCD Pattern mit Fibonacci-Verhältnissen → Long Entry am Punkt D",
         "stocks_only": True,
         "needs_harmonic": True,
         "harmonic_direction": "LONG"
     },
-    "Harmonic Bearish 🦋⬇️": {
-        "description": "🦋 Bärische Harmonic Patterns (Short-Setups)",
+    "Harmonic Bearish ⬇": {
+        "description": " Bärische Harmonic Patterns (Short-Setups)",
         "filters": {"Preis": (5.0, 500.0)},
         "logic": "XABCD Pattern mit Fibonacci-Verhältnissen → Short Entry am Punkt D",
         "stocks_only": True,
         "needs_harmonic": True,
         "harmonic_direction": "SHORT"
     },
-    "Harmonic All Patterns 🦋": {
-        "description": "🦋 Alle Harmonic Patterns (Long + Short)",
+    "Harmonic All Patterns ": {
+        "description": " Alle Harmonic Patterns (Long + Short)",
         "filters": {"Preis": (5.0, 500.0)},
         "logic": "Scannt nach allen XABCD Patterns unabhängig von Richtung",
         "stocks_only": True,
@@ -296,26 +296,26 @@ STRATEGIES = {
         "harmonic_direction": "ALL"
     },
     # =========================================================================
-    # BREAKOUT IMMINENT 🔮 - Multi-Signal Composite Breakout Prediction
+    # BREAKOUT IMMINENT - Multi-Signal Composite Breakout Prediction
     # Kombiniert 12 Faktoren: ATR-Squeeze, Vol Dry-Up, OBV-Divergenz, ADX,
     # Close Clustering, Range Duration, Boundary Tests, Institutional Days,
     # RSI Drift, Higher Lows/Lower Highs, Resilience, Bollinger-Squeeze
     # =========================================================================
-    # Breakout Imminent → eigener Tab "🔮 BI Scanner" (entfernt aus Strategie-Dropdown)
+    # Breakout Imminent → eigener Tab " BI Scanner" (entfernt aus Strategie-Dropdown)
     # =========================================================================
-    # WYCKOFF STRATEGIEN 🏦 - Klassische Akkumulations/Distributions-Phasen
+    # WYCKOFF STRATEGIEN - Klassische Akkumulations/Distributions-Phasen
     # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
     # =========================================================================
-    "Wyckoff Accumulation 🏦⬆️": {
-        "description": "🏦 Wyckoff Akkumulation — Smart Money kauft leise in Trading Range",
+    "Wyckoff Accumulation ⬆": {
+        "description": " Wyckoff Akkumulation — Smart Money kauft leise in Trading Range",
         "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
         "logic": "Daily: Enge Range + abnehmendes Volumen + OBV-Divergenz = Akkumulation",
         "needs_history": True,
         "pattern_type": "wyckoff_accumulation",
         "history_days": 30
     },
-    "Wyckoff Distribution 🏦⬇️": {
-        "description": "🏦 Wyckoff Distribution — Smart Money verkauft leise in Trading Range",
+    "Wyckoff Distribution ⬇": {
+        "description": " Wyckoff Distribution — Smart Money verkauft leise in Trading Range",
         "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
         "logic": "Daily: Enge Range + abnehmendes Volumen + OBV-Divergenz = Distribution",
         "needs_history": True,
@@ -323,10 +323,10 @@ STRATEGIES = {
         "history_days": 30
     },
     # =========================================================================
-    # MA BOUNCE STRATEGIEN 📈 - Support/Resistance an Moving Averages
+    # MA BOUNCE STRATEGIEN - Support/Resistance an Moving Averages
     # =========================================================================
-    "SMA 50 Bounce Long 📈": {
-        "description": "📈 Preis nähert sich SMA 50 von OBEN - Support-Zone für Long",
+    "SMA 50 Bounce Long ": {
+        "description": " Preis nähert sich SMA 50 von OBEN - Support-Zone für Long",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-5.0, 2.0)},
         "logic": "Preis 0-3% über SMA50 + SMA50 steigend = Support-Bounce Setup",
         "stocks_only": True,
@@ -336,8 +336,8 @@ STRATEGIES = {
         "ma_approach": "from_above",  # Preis kommt von oben
         "ma_distance_max": 3.0  # Max 3% über SMA
     },
-    "SMA 50 Bounce Short 📉": {
-        "description": "📉 Preis nähert sich SMA 50 von UNTEN - Resistance-Zone für Short",
+    "SMA 50 Bounce Short ": {
+        "description": " Preis nähert sich SMA 50 von UNTEN - Resistance-Zone für Short",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-2.0, 5.0)},
         "logic": "Preis 0-3% unter SMA50 + SMA50 fallend = Resistance-Bounce Setup",
         "stocks_only": True,
@@ -347,8 +347,8 @@ STRATEGIES = {
         "ma_approach": "from_below",  # Preis kommt von unten
         "ma_distance_max": 3.0
     },
-    "SMA 200 Bounce Long 🏛️": {
-        "description": "🏛️ Preis nähert sich SMA 200 von OBEN - STARKER Support (Paul Tudor Jones)",
+    "SMA 200 Bounce Long ": {
+        "description": " Preis nähert sich SMA 200 von OBEN - STARKER Support (Paul Tudor Jones)",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-8.0, 2.0)},
         "logic": "SMA200 ist DER wichtigste MA! Preis 0-3% über SMA200 = Kaufchance",
         "stocks_only": True,
@@ -358,8 +358,8 @@ STRATEGIES = {
         "ma_approach": "from_above",
         "ma_distance_max": 3.0
     },
-    "SMA 200 Bounce Short 🏛️": {
-        "description": "🏛️ Preis nähert sich SMA 200 von UNTEN - STARKE Resistance",
+    "SMA 200 Bounce Short ": {
+        "description": " Preis nähert sich SMA 200 von UNTEN - STARKE Resistance",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-2.0, 8.0)},
         "logic": "SMA200 ist starke Resistance! Preis 0-3% unter SMA200 = Short-Chance",
         "stocks_only": True,
@@ -369,8 +369,8 @@ STRATEGIES = {
         "ma_approach": "from_below",
         "ma_distance_max": 3.0
     },
-    "EMA 21 Bounce (Swing) 🎯": {
-        "description": "🎯 EMA 21 Bounce - Linda Raschke 'Holy Grail' Setup",
+    "EMA 21 Bounce (Swing) ": {
+        "description": " EMA 21 Bounce - Linda Raschke 'Holy Grail' Setup",
         "filters": {"Preis": (5.0, 1000.0), "Change %": (-4.0, 4.0)},
         "logic": "EMA21 ist DER Swing-Trading MA! Pullback zur EMA21 im Uptrend = Entry",
         "stocks_only": True,
@@ -384,7 +384,7 @@ STRATEGIES = {
 
 
 FUTURES_STRATEGIES = {
-    "📈 Alle zeigen": {
+    " Alle zeigen": {
         "description": "Alle Futures anzeigen — ohne Filter",
         "filters": {},
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Futures"
@@ -392,26 +392,26 @@ FUTURES_STRATEGIES = {
     # =========================================================================
     # MOMENTUM STRATEGIEN (Any Time)
     # =========================================================================
-    "Futures Momentum 📈": {
-        "description": "📈 Starke Bewegung mit Volumen-Bestätigung",
+    "Futures Momentum ": {
+        "description": " Starke Bewegung mit Volumen-Bestätigung",
         "filters": {"Change %": (1.0, 20.0)},
         "logic": "Futures mit >1% Tagesbewegung = klares Momentum"
     },
-    "Futures Breakdown 📉": {
-        "description": "📉 Starker Abverkauf - Short-Opportunity",
+    "Futures Breakdown ": {
+        "description": " Starker Abverkauf - Short-Opportunity",
         "filters": {"Change %": (-20.0, -1.0)},
         "logic": "Futures mit <-1% = Verkaufsdruck"
     },
-    "Futures Reversal 🔄": {
-        "description": "🔄 Trendumkehr nach starkem Move (⚠️ Vortag% = Session-Kerze)",
+    "Futures Reversal ": {
+        "description": " Trendumkehr nach starkem Move ( Vortag% = Session-Kerze)",
         "filters": {"Vortag %": (-10.0, -2.0), "Change %": (0.5, 10.0)},
         "logic": "Letzte Session gefallen, jetzt steigend = potenzielle Umkehr"
     },
     # =========================================================================
     # SESSION-BASIERTE STRATEGIEN (mit Zeitfenster-Hinweis)
     # =========================================================================
-    "Globex Gap 🌙": {
-        "description": "🌙 Overnight Gap vs. Regular Session Close",
+    "Globex Gap ": {
+        "description": " Overnight Gap vs. Regular Session Close",
         "filters": {"Change %": (0.3, 10.0)},
         "logic": "Gap zwischen US Close und Asia/Europe Session",
         "best_time": "18:00-08:00 UTC (Globex Overnight)"
@@ -422,8 +422,8 @@ FUTURES_STRATEGIES = {
         "logic": "Europa-Session bringt oft neue Richtung",
         "best_time": "07:00-10:00 UTC"
     },
-    "NY Open Breakout 🗽": {
-        "description": "🗽 Breakout bei US-Börsenöffnung (14:30 UTC)",
+    "NY Open Breakout ": {
+        "description": " Breakout bei US-Börsenöffnung (14:30 UTC)",
         "filters": {"Change %": (0.3, 10.0)},
         "logic": "US-Session mit höchster Liquidität = große Moves",
         "best_time": "13:30-16:00 UTC"
@@ -431,18 +431,18 @@ FUTURES_STRATEGIES = {
     # =========================================================================
     # SPREAD & STRUKTUR (Any Time)
     # =========================================================================
-    "High Volatility ⚡": {
-        "description": "⚡ Überdurchschnittliche Tagesbewegung",
+    "High Volatility ": {
+        "description": " Überdurchschnittliche Tagesbewegung",
         "filters": {"Change %": (2.0, 50.0)},
         "logic": "Große Bewegung = Trading-Opportunity"
     },
-    "Low Volatility Squeeze 🎯": {
-        "description": "🎯 Enge Range - Breakout erwartet",
+    "Low Volatility Squeeze ": {
+        "description": " Enge Range - Breakout erwartet",
         "filters": {"Change %": (-0.3, 0.3)},
         "logic": "Sehr kleine Bewegung = Ruhe vor dem Sturm"
     },
-    "VIX Spike Alert 🔥": {
-        "description": "🔥 VIX steigt stark - Angst im Markt",
+    "VIX Spike Alert ": {
+        "description": " VIX steigt stark - Angst im Markt",
         "filters": {"Change %": (5.0, 100.0)},
         "logic": "Nur für VIX: Starker Anstieg = Absicherung aktiv"
     },
@@ -450,7 +450,7 @@ FUTURES_STRATEGIES = {
 
 
 FOREX_STRATEGIES = {
-    "💱 Alle zeigen": {
+    " Alle zeigen": {
         "description": "Alle Forex-Paare anzeigen — ohne Filter",
         "filters": {},
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Paare"
@@ -458,18 +458,18 @@ FOREX_STRATEGIES = {
     # =========================================================================
     # PIP-BASIERTE MOMENTUM STRATEGIEN (Any Time)
     # =========================================================================
-    "Forex Momentum 💹": {
-        "description": "💹 Starke Pip-Bewegung in eine Richtung",
+    "Forex Momentum ": {
+        "description": " Starke Pip-Bewegung in eine Richtung",
         "filters": {"Change %": (0.3, 5.0)},
         "logic": "Für Forex ist >0.3% bereits signifikant"
     },
-    "Forex Reversal 🔄": {
-        "description": "🔄 Gegenbewegung nach starkem Vortag (⚠️ Vortag% = 24h Kerze)",
+    "Forex Reversal ": {
+        "description": " Gegenbewegung nach starkem Vortag ( Vortag% = 24h Kerze)",
         "filters": {"Vortag %": (-3.0, -0.5), "Change %": (0.1, 3.0)},
         "logic": "Letzte 24h gefallen, jetzt steigend = Umkehr-Signal"
     },
-    "Pip Hunter 🎯": {
-        "description": "🎯 Größte Pip-Bewegungen des Tages",
+    "Pip Hunter ": {
+        "description": " Größte Pip-Bewegungen des Tages",
         "filters": {"Change %": (0.5, 10.0)},
         "logic": "Top Movers nach Pips sortiert"
     },
@@ -490,15 +490,15 @@ FOREX_STRATEGIES = {
         "best_time": "08:00-17:00 UTC",
         "best_pairs": ["EURUSD", "GBPUSD", "EURGBP", "EURJPY"]
     },
-    "NY Session 🗽": {
-        "description": "🗽 Bewegungen während NY Session (13:00-22:00 UTC)",
+    "NY Session ": {
+        "description": " Bewegungen während NY Session (13:00-22:00 UTC)",
         "filters": {"Change %": (0.2, 5.0)},
         "logic": "USD-Paare am aktivsten",
         "best_time": "13:00-22:00 UTC",
         "best_pairs": ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
     },
-    "London/NY Overlap 🔥": {
-        "description": "🔥 Höchste Volatilität: London + NY gleichzeitig (13:00-17:00 UTC)",
+    "London/NY Overlap ": {
+        "description": " Höchste Volatilität: London + NY gleichzeitig (13:00-17:00 UTC)",
         "filters": {"Change %": (0.3, 10.0)},
         "logic": "Beste Trading-Zeit - maximale Liquidität und Bewegung",
         "best_time": "13:00-17:00 UTC"
@@ -506,25 +506,25 @@ FOREX_STRATEGIES = {
     # =========================================================================
     # SPEZIELLE FOREX-STRATEGIEN (Any Time)
     # =========================================================================
-    "Safe Haven Flow 🛡️": {
-        "description": "🛡️ Flucht in sichere Währungen (CHF, JPY) - Risk-Off Signal",
+    "Safe Haven Flow ": {
+        "description": " Flucht in sichere Währungen (CHF, JPY) - Risk-Off Signal",
         "filters": {"Change %": (-5.0, -0.4)},
         "logic": "USD/CHF oder USD/JPY fallen deutlich = Risk-Off Modus (Investoren kaufen CHF/JPY)",
         "best_pairs": ["USDCHF", "USDJPY", "EURJPY"]
     },
-    "Risk-On Rally 🚀": {
-        "description": "🚀 Risikofreudige Währungen steigen (AUD, NZD) - Risk-On Signal",
+    "Risk-On Rally ": {
+        "description": " Risikofreudige Währungen steigen (AUD, NZD) - Risk-On Signal",
         "filters": {"Change %": (0.3, 5.0)},
         "logic": "AUD/USD, NZD/USD steigen deutlich = Risk-On Sentiment (Investoren gehen ins Risiko)",
         "best_pairs": ["AUDUSD", "NZDUSD", "AUDJPY"]
     },
-    "Exotic Movers 🌍": {
-        "description": "🌍 Große Bewegungen in Exotic Pairs",
+    "Exotic Movers ": {
+        "description": " Große Bewegungen in Exotic Pairs",
         "filters": {"Change %": (0.5, 20.0)},
         "logic": "Emerging Market Währungen mit hoher Volatilität"
     },
-    "Range Bound 📊": {
-        "description": "📊 Seitwärts-Bewegung - Range Trading",
+    "Range Bound ": {
+        "description": " Seitwärts-Bewegung - Range Trading",
         "filters": {"Change %": (-0.15, 0.15)},
         "logic": "Minimale Bewegung = Trade die Range"
     },
@@ -532,7 +532,7 @@ FOREX_STRATEGIES = {
 
 
 CRYPTO_STRATEGIES = {
-    "🌐 Alle zeigen": {
+    " Alle zeigen": {
         "description": "Alle Krypto-Assets anzeigen — ohne Filter",
         "filters": {},
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Coins"
@@ -543,12 +543,12 @@ CRYPTO_STRATEGIES = {
         "logic": "RVOL > 1.5 (deutlich über Baseline) + Change > 3% = echtes Interesse"
     },
     "Bull Flag": {
-        "description": "Konsolidierung nach Aufwärtstrend (⚠️ Vortag = 6d Tagesdurchschnitt)",
+        "description": "Konsolidierung nach Aufwärtstrend ( Vortag = 6d Tagesdurchschnitt)",
         "filters": {"Vortag %": (0.5, 30.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
         "logic": "6d-Trend positiv (avg >+0.5%/Tag ≈ +3%/Woche), heute flach, Volumen sinkt"
     },
     "Bear Flag": {
-        "description": "Konsolidierung nach Abwärtstrend (⚠️ Vortag = 6d Tagesdurchschnitt)",
+        "description": "Konsolidierung nach Abwärtstrend ( Vortag = 6d Tagesdurchschnitt)",
         "filters": {"Vortag %": (-30.0, -0.5), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
         "logic": "6d-Trend negativ (avg <-0.5%/Tag), heute flach = Bären sammeln Kraft"
     },
@@ -562,7 +562,7 @@ CRYPTO_STRATEGIES = {
         "filters": {"Change %": (-80.0, -4.0), "Close Position": (0.0, 0.35)},
         "logic": "Close nahe Low + starke Abwärtsbewegung = Schwäche"
     },
-    "Low Cap Rockets 🚀": {
+    "Low Cap Rockets ": {
         "description": "Small/Micro Cap mit explosivem Volumen & Bewegung",
         "filters": {"MarketCap": (0, 500_000_000), "RVOL": (1.2, 50.0), "Change %": (5.0, 100.0)},
         "logic": "MCap < $500M + RVOL > 1.2 + Change > 5% = echte Small-Cap-Explosion"
@@ -573,7 +573,7 @@ CRYPTO_STRATEGIES = {
         "logic": "Moderater Rücksetzer mit normalem Volumen — kein Panik-Dump"
     },
     "Reversal Hunter": {
-        "description": "Trendumkehr nach Abwärtstrend (⚠️ Vortag = 6d Tagesdurchschnitt)",
+        "description": "Trendumkehr nach Abwärtstrend ( Vortag = 6d Tagesdurchschnitt)",
         "filters": {"Vortag %": (-50.0, -1.0), "Change %": (2.0, 50.0)},
         "logic": "6d-Trend negativ (avg <-1%/Tag ≈ -6%/Woche), heute Käufer (+2%) = mögliche Wende"
     },
@@ -582,12 +582,12 @@ CRYPTO_STRATEGIES = {
         "filters": {"Change %": (3.0, 40.0), "RVOL": (1.0, 20.0)},
         "logic": "Positive Bewegung mit Volumen-Bestaetigung"
     },
-    "Whale Watch 🐋": {
+    "Whale Watch ": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
         "filters": {"RVOL": (2.5, 50.0), "Change %": (5.0, 100.0)},
         "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
     },
-    "Accumulation 📦": {
+    "Accumulation ": {
         "description": "Leise Akkumulation bei stabilem Preis",
         "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.2, 3.0)},
         "logic": "Seitwärts + leicht erhöhtes Volumen = jemand sammelt"
@@ -596,67 +596,67 @@ CRYPTO_STRATEGIES = {
 
 
 INTERNATIONAL_STRATEGIES = {
-    "🌍 Alle zeigen": {
+    " Alle zeigen": {
         "description": "Alle Aktien der Börse anzeigen — ohne Filter",
         "filters": {},
         "logic": "Kein Filter aktiv → zeige alle verfügbaren Aktien"
     },
-    "🌍 Gewinner": {
+    " Gewinner": {
         "description": "Aktien im Plus heute",
         "filters": {"Change %": (0.3, 100.0)},
         "logic": "Change > 0.3% = Aufwärtsbewegung"
     },
-    "🌍 Verlierer": {
+    " Verlierer": {
         "description": "Aktien im Minus heute",
         "filters": {"Change %": (-100.0, -0.3)},
         "logic": "Change < -0.3% = Abwärtsbewegung"
     },
-    "🌍 Momentum": {
+    " Momentum": {
         "description": "Stärkste positive Bewegung",
         "filters": {"Change %": (1.0, 50.0)},
         "logic": "Change > 1% = echtes Momentum für europäische Blue-Chips"
     },
-    "🌍 Breakout": {
+    " Breakout": {
         "description": "Starker Ausbruch nach oben — Close nahe Tageshoch",
         "filters": {"Change %": (1.5, 50.0), "Close Position": (0.65, 1.0)},
         "logic": "Change > 1.5% + Close nahe High = bullischer Ausbruch"
     },
-    "🌍 Breakdown": {
+    " Breakdown": {
         "description": "Starker Abverkauf — Close nahe Tagestief",
         "filters": {"Change %": (-50.0, -1.5), "Close Position": (0.0, 0.35)},
         "logic": "Change < -1.5% + Close nahe Low = Verkaufsdruck"
     },
-    "🌍 Dip Buy": {
+    " Dip Buy": {
         "description": "Moderate Schwäche — potenzielle Kaufchance",
         "filters": {"Change %": (-5.0, -0.5)},
         "logic": "Change -0.5% bis -5% = Rücksetzer bei soliden Aktien"
     },
-    "🌍 Volume Spike": {
+    " Volume Spike": {
         "description": "Deutlich überdurchschnittliches Volumen (normalisiert nach Tageszeit)",
         "filters": {"Change %": (0.5, 50.0), "RVOL": (0.4, 50.0)},
         "logic": "RVOL > 0.4 (normalisiert) + positive Bewegung = erhöhtes Interesse. Bei EU-Aktien selten >1.0 untertags."
     },
-    "🌍 Reversal": {
+    " Reversal": {
         "description": "Trendumkehr: Vortag stark gefallen, heute Bounce",
         "filters": {"Vortag %": (-30.0, -1.5), "Change %": (0.5, 30.0)},
         "logic": "Gestern -1.5%+, heute Erholung +0.5%+ = mögliche Wende"
     },
-    "🌍 Bull Flag": {
+    " Bull Flag": {
         "description": "Konsolidierung nach starkem Vortag — Momentum-Fortsetzung",
         "filters": {"Vortag %": (1.5, 20.0), "Change %": (-1.0, 1.0)},
         "logic": "Starker Vortag (+1.5%+), heute enge Range = Flagge bildet sich"
     },
-    "🌍 Bear Flag": {
+    " Bear Flag": {
         "description": "Konsolidierung nach Abverkauf — Short-Setup",
         "filters": {"Vortag %": (-20.0, -1.5), "Change %": (-1.0, 1.0)},
         "logic": "Schwacher Vortag (-1.5%+), heute enge Range = Bear Flag"
     },
-    "🌍 Big Movers": {
+    " Big Movers": {
         "description": "Größte absolute Bewegungen des Tages",
         "filters": {"Change %": (2.0, 100.0)},
         "logic": "Change > 2% = signifikante Bewegung für europäische Verhältnisse"
     },
-    "🌍 Whale Watch": {
+    " Whale Watch": {
         "description": "Extremes Volumen (normalisiert) — Big Player aktiv",
         "filters": {"RVOL": (0.5, 50.0)},
         "logic": "RVOL > 0.5 (normalisiert nach Tageszeit) = deutlich über Durchschnitt"
@@ -725,7 +725,7 @@ def apply_strategy(strategy_name, strategies_dict=None):
         # Strategie nicht gefunden - setze trotzdem auf den Namen
         st.session_state.current_strategy = strategy_name
         st.session_state.active_filters = {}
-        st.warning(f"⚠️ Strategie '{strategy_name}' nicht gefunden!")
+        st.warning(f" Strategie '{strategy_name}' nicht gefunden!")
 
 
 def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0, vol_ratio=1.0, float_cat="UNKNOWN"):
@@ -733,7 +733,7 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0, v
     Klassifiziert das PM Setup basierend auf Preis-Aktion + Position + Volume.
 
     V2: Jetzt mit Volume Ratio und Float-Awareness:
-    - vol_ratio < 0.3 → ⚠️ THIN suffix (unzuverlässig)
+    - vol_ratio < 0.3 → THIN suffix (unzuverlässig)
     - Low Float + >10% Move → SQUEEZE statt MOMENTUM
 
     Returns: (setup_type, setup_emoji, setup_description)
@@ -751,85 +751,85 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0, v
     if abs_change >= 10 and abs(rs_vs_spy) >= 5:
         if is_up and pm_position >= 60:
             if is_low_float:
-                label = ("SQUEEZE", "💥", "Low Float Squeeze! Extreme Move + RS — Parabolic Potential")
+                label = ("SQUEEZE", "", "Low Float Squeeze! Extreme Move + RS — Parabolic Potential")
             else:
-                label = ("SQUEEZE", "💥", "Extreme Move + Relative Strength = Possible Squeeze")
+                label = ("SQUEEZE", "", "Extreme Move + Relative Strength = Possible Squeeze")
         elif is_up and pm_position < 40:
-            label = ("FADING", "⚠️", "Extreme Gap but Fading Hard — Caution!")
+            label = ("FADING", "", "Extreme Gap but Fading Hard — Caution!")
         elif not is_up and pm_position <= 40:
-            label = ("CAPITULATION", "🔻", "Extreme Selling = Watch for Reversal")
+            label = ("CAPITULATION", "", "Extreme Selling = Watch for Reversal")
         elif not is_up and pm_position >= 60:
-            label = ("BOUNCE", "🔄", "Extreme Drop but Bounced — Wait!")
+            label = ("BOUNCE", "", "Extreme Drop but Bounced — Wait!")
         else:
-            label = ("CONTESTED", "⚔️", "Extreme Move but Indecisive — Wait!")
+            label = ("CONTESTED", "", "Extreme Move but Indecisive — Wait!")
 
         if is_thin:
-            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+            return (label[0] + " (THIN)", "", label[2] + " DÜNNES VOLUME — Vorsicht!")
         return label
 
     # === STARKE MOVES (>5%) ===
     if abs_change >= 5:
         if is_up and pm_position >= 70:
             if is_low_float and abs_change >= 7:
-                label = ("SQUEEZE", "💥", "Low Float + Strong Hold = Squeeze Setup")
+                label = ("SQUEEZE", "", "Low Float + Strong Hold = Squeeze Setup")
             elif abs_gap >= 5:
-                label = ("GAP & GO", "🚀", "Gap Up + Holding High = Momentum Long")
+                label = ("GAP & GO", "", "Gap Up + Holding High = Momentum Long")
             else:
-                label = ("MOMENTUM", "🚀", "Strong Move + Holding = Long Momentum")
+                label = ("MOMENTUM", "", "Strong Move + Holding = Long Momentum")
         elif is_up and pm_position < 40:
-            label = ("FADING", "⚠️", "Gapped Up but Fading — Caution, kein Long!")
+            label = ("FADING", "", "Gapped Up but Fading — Caution, kein Long!")
         elif not is_up and pm_position <= 30:
             if abs_gap >= 5:
-                label = ("GAP & FADE", "📉", "Gap Down + Near Low = Short Momentum")
+                label = ("GAP & FADE", "", "Gap Down + Near Low = Short Momentum")
             else:
-                label = ("WEAKNESS", "📉", "Strong Selling + Near Low = Short Setup")
+                label = ("WEAKNESS", "", "Strong Selling + Near Low = Short Setup")
         elif not is_up and pm_position >= 60:
-            label = ("BOUNCE", "🔄", "Gapped Down but Bounced — Wait for Rejection!")
+            label = ("BOUNCE", "", "Gapped Down but Bounced — Wait for Rejection!")
         elif is_up:
-            label = ("CONTESTED", "⚔️", "Strong Up but Mid-Range — Wait for Direction")
+            label = ("CONTESTED", "", "Strong Up but Mid-Range — Wait for Direction")
         else:
-            label = ("CONTESTED", "⚔️", "Strong Down but Mid-Range — Watch for Break")
+            label = ("CONTESTED", "", "Strong Down but Mid-Range — Watch for Break")
 
         if is_thin:
-            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+            return (label[0] + " (THIN)", "", label[2] + " DÜNNES VOLUME — Vorsicht!")
         return label
 
     # === MODERATE MOVES (3-5%) ===
     if 3 <= abs_change < 5:
         if is_up and pm_position >= 65:
-            label = ("CONTINUATION", "📈", "Steady Uptrend — Wait for Pullback Entry")
+            label = ("CONTINUATION", "", "Steady Uptrend — Wait for Pullback Entry")
         elif is_up and pm_position < 35:
-            label = ("FADING", "⚠️", "Moderate Up but Fading — No Long Entry")
+            label = ("FADING", "", "Moderate Up but Fading — No Long Entry")
         elif not is_up and pm_position <= 35:
-            label = ("CONTINUATION", "📉", "Steady Selling — Wait for Bounce or Break")
+            label = ("CONTINUATION", "", "Steady Selling — Wait for Bounce or Break")
         elif not is_up and pm_position >= 65:
-            label = ("RECOVERY", "🔄", "Down but Recovering — Don't Short Here")
+            label = ("RECOVERY", "", "Down but Recovering — Don't Short Here")
         elif is_up:
-            label = ("BUILDING", "📈", "Moderate Up, Mid-Range — Watch for Breakout or Fade")
+            label = ("BUILDING", "", "Moderate Up, Mid-Range — Watch for Breakout or Fade")
         else:
-            label = ("CONTESTED", "⚔️", "Moderate Down, Mid-Range — Watch for Break or Bounce")
+            label = ("CONTESTED", "", "Moderate Down, Mid-Range — Watch for Break or Bounce")
 
         if is_thin:
-            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+            return (label[0] + " (THIN)", "", label[2] + " DÜNNES VOLUME — Vorsicht!")
         return label
 
     # === KLEINE MOVES (2-3%) ===
     if 2 <= abs_change < 3:
         if 35 <= pm_position <= 65:
-            label = ("RANGE", "↔️", "Choppy — Wait for Direction")
+            label = ("RANGE", "↔", "Choppy — Wait for Direction")
         elif is_up and pm_position >= 65:
-            label = ("MILD STRENGTH", "📈", "Slight Up Bias — Watch for Catalyst")
+            label = ("MILD STRENGTH", "", "Slight Up Bias — Watch for Catalyst")
         elif not is_up and pm_position <= 35:
-            label = ("MILD WEAKNESS", "📉", "Slight Down Bias — Watch for Catalyst")
+            label = ("MILD WEAKNESS", "", "Slight Down Bias — Watch for Catalyst")
         else:
-            label = ("RANGE", "↔️", "Small Move — Wait for Direction")
+            label = ("RANGE", "↔", "Small Move — Wait for Direction")
 
         if is_thin:
-            return (label[0] + " (THIN)", "⚠️", label[2] + " ⚠️ DÜNNES VOLUME — Vorsicht!")
+            return (label[0] + " (THIN)", "", label[2] + " DÜNNES VOLUME — Vorsicht!")
         return label
 
     # DEFAULT
-    return ("WATCH", "👀", "Monitor for Setup Development")
+    return ("WATCH", "", "Monitor for Setup Development")
 
 
 BACKTEST_STRATEGY_RULES = {

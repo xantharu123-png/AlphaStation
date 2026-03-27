@@ -7,8 +7,8 @@ Extracted from scanner.py v68.0 to modularize scoring logic.
 import math
 
 # Catalyst Constants
-BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY", "🚨 REVERSE SPLIT"}
-BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT", "🔀 STOCK SPLIT"}
+BEARISH_CATALYSTS = {" OFFERING", " LEGAL", " DOWNGRADE", " BANKRUPTCY", " REVERSE SPLIT"}
+BULLISH_CATALYSTS = {" M&A", " CONTRACT", " UPGRADE", " DIVIDEND", " INSIDER", " PRODUCT", " STOCK SPLIT"}
 
 
 def _mcap_atr_baseline(market_cap):
@@ -125,7 +125,7 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             body_bot = min(open_price, close)
         elif prev_close and prev_close > 0:
             # Open nicht vorhanden, prev_close als Proxy
-            # 🔴 KRITISCH: Wenn prev_close AUSSERHALB [Low, High] liegt,
+            # KRITISCH: Wenn prev_close AUSSERHALB [Low, High] liegt,
             # gab es einen Gap. Dann ist prev_close KEIN guter Open-Proxy,
             # weil wir nicht wissen wo der Kurs wirklich eröffnet hat.
             if low <= prev_close <= high:
@@ -140,7 +140,7 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
                 estimated_open = (high + low) / 2
                 body_top = max(estimated_open, close)
                 body_bot = min(estimated_open, close)
-                warnings.append(f"⚠️ Gap erkannt (PrevClose ${prev_close:.2f} außerhalb Range ${low:.2f}-${high:.2f}) — Kerzen-Analyse geschätzt")
+                warnings.append(f" Gap erkannt (PrevClose ${prev_close:.2f} außerhalb Range ${low:.2f}-${high:.2f}) — Kerzen-Analyse geschätzt")
         else:
             # Weder Open noch PrevClose — nur High/Low/Close nutzen
             body_top = close
@@ -166,22 +166,22 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
         # --- Upper Wick (Verkaufsdruck) ---
         if upper_wick_pct > 0.45:
             health -= 20
-            warnings.append(f"🔴 Extremer Docht ({upper_wick_pct:.0%} der Range) — massiver Verkaufsdruck!")
+            warnings.append(f" Extremer Docht ({upper_wick_pct:.0%} der Range) — massiver Verkaufsdruck!")
         elif upper_wick_pct > 0.30:
             health -= 12
-            warnings.append(f"🔴 Langer Docht ({upper_wick_pct:.0%}) — Verkäufer drücken stark vom High")
+            warnings.append(f" Langer Docht ({upper_wick_pct:.0%}) — Verkäufer drücken stark vom High")
         elif upper_wick_pct > 0.20:
             health -= 5
-            warnings.append(f"⚠️ Oberer Docht ({upper_wick_pct:.0%}) — leichter Verkaufsdruck")
+            warnings.append(f" Oberer Docht ({upper_wick_pct:.0%}) — leichter Verkaufsdruck")
         elif upper_wick_pct < 0.08:
             health += 8
-            signals.append(f"🟢 Kaum Docht ({upper_wick_pct:.0%}) — kein Verkaufsdruck")
+            signals.append(f" Kaum Docht ({upper_wick_pct:.0%}) — kein Verkaufsdruck")
         else:
             health += 3
-            signals.append(f"🟢 Normaler Docht ({upper_wick_pct:.0%})")
+            signals.append(f" Normaler Docht ({upper_wick_pct:.0%})")
 
         # --- Body Size (Conviction) ---
-        # 🔴 KRITISCH: Body-RICHTUNG zählt! Ein großer BEARISHER Body
+        # KRITISCH: Body-RICHTUNG zählt! Ein großer BEARISHER Body
         # (Close < Open) bei einem Breakout Long = Verkaufsdruck, NICHT Überzeugung!
         is_bullish_candle = close >= body_bot + body_size * 0.5  # Close in oberer Hälfte
         if open_price and open_price > 0:
@@ -190,33 +190,33 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
         if is_bullish_candle:
             if body_pct > 0.75:
                 health += 8
-                signals.append(f"🟢 Großer bullisher Body ({body_pct:.0%}) — starke Überzeugung")
+                signals.append(f" Großer bullisher Body ({body_pct:.0%}) — starke Überzeugung")
             elif body_pct > 0.55:
                 health += 4
-                signals.append(f"🟢 Solider bullisher Body ({body_pct:.0%})")
+                signals.append(f" Solider bullisher Body ({body_pct:.0%})")
             elif body_pct < 0.20:
                 health -= 12
-                warnings.append(f"🔴 Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
+                warnings.append(f" Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
             elif body_pct < 0.35:
                 health -= 5
-                warnings.append(f"⚠️ Kleiner Body ({body_pct:.0%}) — schwache Conviction")
+                warnings.append(f" Kleiner Body ({body_pct:.0%}) — schwache Conviction")
         else:
             # BEARISH Kerze bei Long-Breakout = Warnung!
             if body_pct > 0.50:
                 health -= 12
-                warnings.append(f"🔴 Großer bearisher Body ({body_pct:.0%}) — Verkaufsdruck trotz Gap-Up!")
+                warnings.append(f" Großer bearisher Body ({body_pct:.0%}) — Verkaufsdruck trotz Gap-Up!")
             elif body_pct > 0.30:
                 health -= 5
-                warnings.append(f"⚠️ Bearisher Body ({body_pct:.0%}) — Käufer verlieren Kontrolle")
+                warnings.append(f" Bearisher Body ({body_pct:.0%}) — Käufer verlieren Kontrolle")
             elif body_pct < 0.20:
                 health -= 12
-                warnings.append(f"🔴 Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
+                warnings.append(f" Doji ({body_pct:.0%} Body) — totale Unentschlossenheit")
 
         # --- Lower Wick (Buying Support) ---
         # Ein langer Lower Wick bei einem Breakout = Käufer fingen den Dip auf
         if lower_wick_pct > 0.25 and upper_wick_pct < 0.15:
             health += 3
-            signals.append(f"🟢 Langer unterer Docht ({lower_wick_pct:.0%}) — Käufer verteidigten das Low")
+            signals.append(f" Langer unterer Docht ({lower_wick_pct:.0%}) — Käufer verteidigten das Low")
 
     # ================================================================
     # 2. VOLUME CONFIRMATION — Institutionelles Interesse
@@ -224,32 +224,32 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
     if has_volume_data:
         if rvol >= 3.0:
             health += 15
-            signals.append(f"🟢 Starkes Volume ({rvol:.1f}x) — institutionell getrieben")
+            signals.append(f" Starkes Volume ({rvol:.1f}x) — institutionell getrieben")
         elif rvol >= 2.0:
             health += 10
-            signals.append(f"🟢 Gutes Volume ({rvol:.1f}x) — bestätigt")
+            signals.append(f" Gutes Volume ({rvol:.1f}x) — bestätigt")
         elif rvol >= 1.5:
             health += 5
-            signals.append(f"🟡 Akzeptables Volume ({rvol:.1f}x)")
+            signals.append(f" Akzeptables Volume ({rvol:.1f}x)")
         elif rvol >= 1.0:
             health -= 5
-            warnings.append(f"⚠️ Schwaches Volume ({rvol:.1f}x) — Breakout kaum unterstützt")
+            warnings.append(f" Schwaches Volume ({rvol:.1f}x) — Breakout kaum unterstützt")
         else:
             health -= 15
-            warnings.append(f"🔴 LOW VOLUME ({rvol:.1f}x) — Fakeout-Risiko HOCH!")
+            warnings.append(f" LOW VOLUME ({rvol:.1f}x) — Fakeout-Risiko HOCH!")
 
         # Volume Climax — NUR gefährlich wenn der Run SCHON LÄUFT
         # Tag 1 mit RVOL 7x = perfekt (institutioneller Einstieg)
         # Tag 3+ mit RVOL 7x = alle haben schon gekauft = Top
         if rvol >= 5.0 and is_multi_day_run:
             health -= 10
-            warnings.append(f"🔴 Volume Climax ({rvol:.1f}x) nach mehrtägigem Run — oft das Top!")
+            warnings.append(f" Volume Climax ({rvol:.1f}x) nach mehrtägigem Run — oft das Top!")
         elif rvol >= 5.0:
             # Tag 1 = keine Strafe, nur Info
-            signals.append(f"ℹ️ Extremes Volume ({rvol:.1f}x) — Tag 1 = gut, beobachte Folgetage")
+            signals.append(f"ℹ Extremes Volume ({rvol:.1f}x) — Tag 1 = gut, beobachte Folgetage")
     else:
         # Kein Volume-Daten: Score-Ceiling begrenzen (am Ende angewandt)
-        warnings.append("⚠️ Kein Volume-Daten — Breakout-Qualität kann nicht vollständig bewertet werden")
+        warnings.append(" Kein Volume-Daten — Breakout-Qualität kann nicht vollständig bewertet werden")
 
     # ================================================================
     # 3. EXTENSION — Wie weit, relativ zur normalen Volatilität?
@@ -273,42 +273,42 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
 
         if atr_pct > atr_warning_threshold:
             health -= 10
-            warnings.append(f"🔴 Extrem volatile Phase (ATR {atr_pct:.1f}%) — Post-Spike/Crash, erhöhtes Risiko!")
+            warnings.append(f" Extrem volatile Phase (ATR {atr_pct:.1f}%) — Post-Spike/Crash, erhöhtes Risiko!")
         elif atr_pct > atr_caution_threshold:
             health -= 5
-            warnings.append(f"⚠️ Hohe Volatilität (ATR {atr_pct:.1f}%) — vorsichtig agieren")
+            warnings.append(f" Hohe Volatilität (ATR {atr_pct:.1f}%) — vorsichtig agieren")
 
         # ATR-normalisiert
         extension_ratio = change_pct / atr_pct
 
         if extension_ratio > 5.0:
             health -= 15
-            warnings.append(f"🔴 Extrem überdehnt ({extension_ratio:.1f}x ATR) — Reversion SEHR wahrscheinlich")
+            warnings.append(f" Extrem überdehnt ({extension_ratio:.1f}x ATR) — Reversion SEHR wahrscheinlich")
         elif extension_ratio > 3.0:
             health -= 8
-            warnings.append(f"⚠️ Überdehnt ({extension_ratio:.1f}x ATR) — Pullback wahrscheinlich")
+            warnings.append(f" Überdehnt ({extension_ratio:.1f}x ATR) — Pullback wahrscheinlich")
         elif extension_ratio > 2.0:
             health -= 3
-            warnings.append(f"🟡 Ausgedehnt ({extension_ratio:.1f}x ATR)")
+            warnings.append(f" Ausgedehnt ({extension_ratio:.1f}x ATR)")
         elif extension_ratio >= 1.0:
             health += 3
-            signals.append(f"🟢 Gesunde Extension ({extension_ratio:.1f}x ATR)")
+            signals.append(f" Gesunde Extension ({extension_ratio:.1f}x ATR)")
         else:
             health -= 3
-            warnings.append(f"🟡 Schwache Bewegung (nur {extension_ratio:.1f}x ATR)")
+            warnings.append(f" Schwache Bewegung (nur {extension_ratio:.1f}x ATR)")
 
-        # 🔴 ABSOLUTE DISTANZ — Fängt Fälle wo ATR aufgebläht ist
+        # ABSOLUTE DISTANZ — Fängt Fälle wo ATR aufgebläht ist
         # +10% ist IMMER weit gelaufen, egal was ATR sagt
         # Ein Einstieg bei +12% hat viel schlechteres R:R als bei +3%
         if change_pct > 20:
             health -= 15
-            warnings.append(f"🔴 Extreme Distanz +{change_pct:.1f}% — Einstieg hochriskant")
+            warnings.append(f" Extreme Distanz +{change_pct:.1f}% — Einstieg hochriskant")
         elif change_pct > 15:
             health -= 10
-            warnings.append(f"🔴 Absolute Distanz +{change_pct:.1f}% — weit vom Entry entfernt")
+            warnings.append(f" Absolute Distanz +{change_pct:.1f}% — weit vom Entry entfernt")
         elif change_pct > 10:
             health -= 7
-            warnings.append(f"⚠️ Absolute Distanz +{change_pct:.1f}% — schon weit gelaufen")
+            warnings.append(f" Absolute Distanz +{change_pct:.1f}% — schon weit gelaufen")
     else:
         # V69: Crypto ATR — zentrale Funktion mit echtem Range wenn verfügbar
         if market_type == "Krypto" and market_cap and market_cap > 0:
@@ -317,27 +317,27 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
             ext_r = change_pct / est_atr if est_atr and est_atr > 0 else 0
             if ext_r > 4.0:
                 health -= 12
-                warnings.append(f"🔴 Überdehnt ({ext_r:.1f}x est.ATR)")
+                warnings.append(f" Überdehnt ({ext_r:.1f}x est.ATR)")
             elif ext_r > 2.5:
                 health -= 6
-                warnings.append(f"⚠️ Ausgedehnt ({ext_r:.1f}x est.ATR)")
+                warnings.append(f" Ausgedehnt ({ext_r:.1f}x est.ATR)")
             elif ext_r >= 0.7:
                 health += 3
-                signals.append(f"🟢 Gesunde Extension ({ext_r:.1f}x est.ATR)")
+                signals.append(f" Gesunde Extension ({ext_r:.1f}x est.ATR)")
             else:
-                signals.append(f"ℹ️ Moderate Bewegung ({ext_r:.1f}x est.ATR)")
+                signals.append(f"ℹ Moderate Bewegung ({ext_r:.1f}x est.ATR)")
         else:
             if change_pct > 20:
                 health -= 12
-                warnings.append(f"🔴 Stark überdehnt (+{change_pct:.1f}%)")
+                warnings.append(f" Stark überdehnt (+{change_pct:.1f}%)")
             elif change_pct > 12:
                 health -= 6
-                warnings.append(f"⚠️ Überdehnt (+{change_pct:.1f}%)")
+                warnings.append(f" Überdehnt (+{change_pct:.1f}%)")
             elif change_pct >= 3:
                 health += 3
-                signals.append(f"🟢 Gesunde Breakout-Grösse (+{change_pct:.1f}%)")
+                signals.append(f" Gesunde Breakout-Grösse (+{change_pct:.1f}%)")
             else:
-                signals.append(f"ℹ️ Moderate Bewegung (+{change_pct:.1f}%)")
+                signals.append(f"ℹ Moderate Bewegung (+{change_pct:.1f}%)")
 
     # ================================================================
     # 4. CONTEXT — Woher kommt der Breakout?
@@ -346,15 +346,15 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
         if market_type == "Krypto":
             if -0.5 <= vortag_pct <= 0.5:
                 health += 8
-                signals.append(f"🟢 Breakout aus ruhiger Phase ({vortag_pct:+.1f}%/Tag avg)")
+                signals.append(f" Breakout aus ruhiger Phase ({vortag_pct:+.1f}%/Tag avg)")
             elif vortag_pct < -1.5:
-                warnings.append(f"🟡 Reversal nach Abwärtstrend ({vortag_pct:+.1f}%/Tag)")
+                warnings.append(f" Reversal nach Abwärtstrend ({vortag_pct:+.1f}%/Tag)")
             elif vortag_pct > 2.5:
                 health -= 8
-                warnings.append(f"⚠️ Heisser Trend ({vortag_pct:+.1f}%/Tag) — Erschöpfung")
+                warnings.append(f" Heisser Trend ({vortag_pct:+.1f}%/Tag) — Erschöpfung")
             elif vortag_pct > 1.0:
                 health -= 2
-                warnings.append(f"🟡 Continuation ({vortag_pct:+.1f}%/Tag)")
+                warnings.append(f" Continuation ({vortag_pct:+.1f}%/Tag)")
         else:
             vol_threshold = 6.0
             if close and close > 0 and close < 10:
@@ -366,18 +366,18 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
                 if is_high_vol_regime:
                     # V68: Konsolidierung in High-Vol = Akkumulation (Wyckoff)
                     health += 5
-                    signals.append(f"🟢 Akkumulation in volatiler Phase (Vortag {vortag_pct:+.1f}%, ATR {atr_pct:.1f}%) — Stabilisierung")
+                    signals.append(f" Akkumulation in volatiler Phase (Vortag {vortag_pct:+.1f}%, ATR {atr_pct:.1f}%) — Stabilisierung")
                 else:
                     health += 8
-                    signals.append(f"🟢 Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
+                    signals.append(f" Breakout aus Konsolidierung (Vortag {vortag_pct:+.1f}%) — bestes Setup")
             elif vortag_pct < -3.0:
-                warnings.append(f"🟡 Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein")
+                warnings.append(f" Reversal-Breakout (Vortag {vortag_pct:+.1f}%) — kann Bounce sein")
             elif vortag_pct > 5.0:
                 health -= 8
-                warnings.append(f"⚠️ Multi-Day Run (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
+                warnings.append(f" Multi-Day Run (Vortag {vortag_pct:+.1f}%) — Erschöpfung nähert sich")
             elif vortag_pct > 2.0:
                 health -= 2
-                warnings.append(f"🟡 Continuation (Vortag {vortag_pct:+.1f}%) — Trend läuft schon")
+                warnings.append(f" Continuation (Vortag {vortag_pct:+.1f}%) — Trend läuft schon")
 
     # ================================================================
     # 5. VOLUME IMBALANCE CONFLUENCE — Resistance voraus?
@@ -390,17 +390,17 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
 
             if dist < 1.0:
                 health -= 10
-                warnings.append(f"🔴 Bearish {nearest['type']} nur {dist:.1f}% entfernt "
+                warnings.append(f" Bearish {nearest['type']} nur {dist:.1f}% entfernt "
                                f"(${nearest['zone_low']:.2f}-${nearest['zone_high']:.2f}) — Resistance!")
             elif dist < 3.0:
                 health -= 5
-                warnings.append(f"⚠️ Bearish {nearest['type']} {dist:.1f}% entfernt — potentielle Resistance")
+                warnings.append(f" Bearish {nearest['type']} {dist:.1f}% entfernt — potentielle Resistance")
             else:
                 health += 3
-                signals.append(f"🟢 Keine nahe Resistance ({dist:.1f}% bis nächste Zone)")
+                signals.append(f" Keine nahe Resistance ({dist:.1f}% bis nächste Zone)")
         else:
             health += 3
-            signals.append("🟢 Keine unfilled Bearish Zones — freier Weg nach oben")
+            signals.append(" Keine unfilled Bearish Zones — freier Weg nach oben")
 
     # ================================================================
     # 6. SELLOFF RISK — Integriert in Health (kein separater Score)
@@ -530,7 +530,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     """
     10-Kategorie Confluence Engine — SUPER SIGNAL Erkennung.
 
-    Jede Kategorie gibt PASS (✅) oder FAIL (❌).
+    Jede Kategorie gibt PASS () oder FAIL ().
     Nur wenn genug Kategorien PASS → Signal.
 
     KATEGORIEN (alle UNABHÄNGIG voneinander):
@@ -572,7 +572,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
         categories["volume"] = {
             "name": "Volume",
-            "emoji": "📊",
+            "emoji": "",
             "pass": vol_pass,
             "value": f"RVOL {rvol:.1f}x",
             "detail": "Institutionell" if rvol >= 3.0 else "Bestätigt" if vol_pass else "Schwach"
@@ -580,7 +580,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     else:
         categories["volume"] = {
             "name": "Volume",
-            "emoji": "📊",
+            "emoji": "",
             "pass": False,
             "value": "N/A",
             "detail": "Keine Daten"
@@ -612,7 +612,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["candle"] = {
         "name": "Kerze",
-        "emoji": "🕯️",
+        "emoji": "",
         "pass": candle_pass,
         "value": candle_detail,
         "detail": "Stark" if candle_pass else "Schwach/Fakeout"
@@ -651,7 +651,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
                 ema20_above_50 = ema20 > ema50
                 if ema200:
                     trend_pass = price_above_20 and ema20_above_50 and ema50 > ema200
-                    trend_detail = f"{'✅' if trend_pass else '❌'} P>{('>' if ema20_above_50 else '<')}EMA20{('>' if ema20_above_50 else '<')}EMA50{('>' if ema50 > ema200 else '<') if ema200 else ''}{('EMA200' if ema200 else '')}"
+                    trend_detail = f"{'' if trend_pass else ''} P>{('>' if ema20_above_50 else '<')}EMA20{('>' if ema20_above_50 else '<')}EMA50{('>' if ema50 > ema200 else '<') if ema200 else ''}{('EMA200' if ema200 else '')}"
                 else:
                     trend_pass = price_above_20 and ema20_above_50
                     trend_detail = f"EMA20 {'>' if ema20_above_50 else '<'} EMA50 (kein EMA200)"
@@ -667,7 +667,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["trend"] = {
         "name": "Trend",
-        "emoji": "📈" if is_long else "📉",
+        "emoji": "" if is_long else "",
         "pass": trend_pass,
         "value": trend_detail,
         "detail": "Alignt" if trend_pass else "Nicht alignt"
@@ -698,7 +698,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["timing"] = {
         "name": "Timing",
-        "emoji": "⏰",
+        "emoji": "",
         "pass": timing_pass,
         "value": timing_detail,
         "detail": "Noch früh" if timing_pass else "Zu spät"
@@ -726,7 +726,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["pattern"] = {
         "name": "Pattern",
-        "emoji": "📐",
+        "emoji": "",
         "pass": pattern_pass,
         "value": pattern_detail,
         "detail": "Bestätigt" if pattern_pass else "Kein Setup"
@@ -755,14 +755,14 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
         market_detail = f"SPY {spy_change:+.1f}%"
     else:
-        # 🔴 Keine SPY-Daten = FAIL, nicht Gratis-PASS
+        # Keine SPY-Daten = FAIL, nicht Gratis-PASS
         # Ohne Markt-Kontext fehlt eine wichtige Bestätigung
         market_pass = False
         market_detail = "N/A (keine Daten)"
 
     categories["market"] = {
         "name": "Markt",
-        "emoji": "🌍",
+        "emoji": "",
         "pass": market_pass,
         "value": market_detail,
         "detail": "Unterstützend" if market_pass else "Gegenwind"
@@ -794,7 +794,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["rel_strength"] = {
         "name": "Rel. Stärke",
-        "emoji": "💪",
+        "emoji": "",
         "pass": rs_pass,
         "value": rs_detail,
         "detail": "Outperformer" if rs_pass else "Schwach vs Markt"
@@ -807,7 +807,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["liquidity"] = {
         "name": "Liquidität",
-        "emoji": "💰",
+        "emoji": "",
         "pass": liq_pass,
         "value": f"${dollar_volume/1e6:.1f}M" if dollar_volume and dollar_volume >= 1e6 else f"${dollar_volume/1e3:.0f}k" if dollar_volume else "N/A",
         "detail": "Tradeable" if liq_pass else "Zu dünn"
@@ -852,7 +852,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["resistance"] = {
         "name": "Freiraum",
-        "emoji": "🛤️",
+        "emoji": "",
         "pass": resistance_pass,
         "value": resistance_detail,
         "detail": "Frei" if resistance_pass else "Blockiert"
@@ -891,7 +891,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
 
     categories["multi_tf"] = {
         "name": "Multi-TF",
-        "emoji": "🔭",
+        "emoji": "",
         "pass": mtf_pass,
         "value": mtf_detail,
         "detail": "Alignt" if mtf_pass else "Widerspruch"
@@ -1371,20 +1371,20 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
 
         if extension_ratio >= 3.0:
             score += 20
-            details.append(f"🔥 Extrem überdehnt: {extension_ratio:.1f}x 7d-ATR ({change_7d:+.1f}% vs ±{expected_7d_range:.1f}%)")
+            details.append(f" Extrem überdehnt: {extension_ratio:.1f}x 7d-ATR ({change_7d:+.1f}% vs ±{expected_7d_range:.1f}%)")
         elif extension_ratio >= 2.0:
             score += 16
-            details.append(f"🔥 Stark überdehnt: {extension_ratio:.1f}x 7d-ATR")
+            details.append(f" Stark überdehnt: {extension_ratio:.1f}x 7d-ATR")
         elif extension_ratio >= 1.5:
             score += 11
-            details.append(f"✅ Überdehnt: {extension_ratio:.1f}x 7d-ATR")
+            details.append(f" Überdehnt: {extension_ratio:.1f}x 7d-ATR")
         elif extension_ratio >= 1.0:
             score += 6
-            details.append(f"⚠️ Leicht überdehnt: {extension_ratio:.1f}x 7d-ATR")
+            details.append(f" Leicht überdehnt: {extension_ratio:.1f}x 7d-ATR")
         else:
-            details.append(f"❌ Nicht überdehnt: {extension_ratio:.1f}x 7d-ATR")
+            details.append(f" Nicht überdehnt: {extension_ratio:.1f}x 7d-ATR")
     else:
-        details.append("❌ ATR-Extension: Keine Daten")
+        details.append(" ATR-Extension: Keine Daten")
 
     # ── 2. RSI-PROXY (0-15) ──
     # Ohne echte OHLCV-History nutzen wir 24h/7d-Momentum als RSI-Proxy:
@@ -1395,24 +1395,24 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         if avg_daily_7d > 0:
             if change_7d > 20 and change_24h > 5:
                 score += 15
-                details.append(f"🔥 Stark überkauft: 7d={change_7d:+.1f}%, 24h={change_24h:+.1f}%")
+                details.append(f" Stark überkauft: 7d={change_7d:+.1f}%, 24h={change_24h:+.1f}%")
             elif change_7d > 10 and change_24h < avg_daily_7d * 0.5:
                 # Momentum-Divergenz: 7d war stark aber 24h verliert Kraft
                 # Das ist oft das BESTE Signal — Smart Money steigt aus
                 score += 15
-                details.append(f"🔥 Momentum-Divergenz: 7d stark aber 24h verlangsamt ({change_24h:+.1f}% vs avg {avg_daily_7d:+.1f}%/d)")
+                details.append(f" Momentum-Divergenz: 7d stark aber 24h verlangsamt ({change_24h:+.1f}% vs avg {avg_daily_7d:+.1f}%/d)")
             elif change_7d > 15 and change_24h > 2:
                 score += 12
-                details.append(f"✅ Überkauft: 7d={change_7d:+.1f}%, 24h noch stark")
+                details.append(f" Überkauft: 7d={change_7d:+.1f}%, 24h noch stark")
             elif change_7d > 8:
                 score += 7
-                details.append(f"⚠️ Erhöht: 7d={change_7d:+.1f}%")
+                details.append(f" Erhöht: 7d={change_7d:+.1f}%")
             else:
-                details.append(f"❌ Nicht überkauft: 7d={change_7d:+.1f}%")
+                details.append(f" Nicht überkauft: 7d={change_7d:+.1f}%")
         else:
-            details.append(f"❌ 7d-Trend nicht positiv: {change_7d:+.1f}%")
+            details.append(f" 7d-Trend nicht positiv: {change_7d:+.1f}%")
     else:
-        details.append("❌ RSI-Proxy: Keine Daten")
+        details.append(" RSI-Proxy: Keine Daten")
 
     # ── 3. VOLUMEN-DIVERGENZ (0-15) ──
     # Preis steigt aber Volumen sinkt = Distribution (Smart Money verkauft in die Stärke)
@@ -1429,34 +1429,34 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
 
         if change_7d and change_7d > 10 and current_rvol < 0.8:
             score += 15
-            details.append(f"🔥 Volumen-Divergenz: Preis +{change_7d:.0f}% aber RVOL nur {current_rvol:.1f}x (Distribution)")
+            details.append(f" Volumen-Divergenz: Preis +{change_7d:.0f}% aber RVOL nur {current_rvol:.1f}x (Distribution)")
         elif change_7d and change_7d > 5 and current_rvol < 1.0:
             score += 9
-            details.append(f"✅ Leichte Vol-Divergenz: RVOL {current_rvol:.1f}x bei +{change_7d:.0f}%")
+            details.append(f" Leichte Vol-Divergenz: RVOL {current_rvol:.1f}x bei +{change_7d:.0f}%")
         elif current_rvol >= 2.0 and change_7d and change_7d > 10:
             score += 5
-            details.append(f"⚠️ Hohes Volume bei Pump: RVOL {current_rvol:.1f}x — könnte Klimax sein")
+            details.append(f" Hohes Volume bei Pump: RVOL {current_rvol:.1f}x — könnte Klimax sein")
         else:
-            details.append(f"❌ Keine Vol-Divergenz: RVOL {current_rvol:.1f}x")
+            details.append(f" Keine Vol-Divergenz: RVOL {current_rvol:.1f}x")
     else:
-        details.append("❌ Vol-Divergenz: Keine Daten")
+        details.append(" Vol-Divergenz: Keine Daten")
 
     # ── 4. WICK-REJECTION (0-13) ──
     # Grosse Upper Wicks = Seller drücken den Preis von oben → Exhaustion-Zeichen
     if upper_wick_pct is not None and close_pos is not None:
         if upper_wick_pct > 40 and close_pos < 0.50:
             score += 13
-            details.append(f"🔥 Starke Rejection: UW {upper_wick_pct:.0f}%, Close bei {close_pos:.0%} (Shooting Star)")
+            details.append(f" Starke Rejection: UW {upper_wick_pct:.0f}%, Close bei {close_pos:.0%} (Shooting Star)")
         elif upper_wick_pct > 30:
             score += 9
-            details.append(f"✅ Rejection-Wick: UW {upper_wick_pct:.0f}%")
+            details.append(f" Rejection-Wick: UW {upper_wick_pct:.0f}%")
         elif upper_wick_pct > 20:
             score += 5
-            details.append(f"⚠️ Leichte Rejection: UW {upper_wick_pct:.0f}%")
+            details.append(f" Leichte Rejection: UW {upper_wick_pct:.0f}%")
         else:
-            details.append(f"❌ Keine Rejection: UW {upper_wick_pct:.0f}%")
+            details.append(f" Keine Rejection: UW {upper_wick_pct:.0f}%")
     else:
-        details.append("❌ Wick-Rejection: Keine Daten")
+        details.append(" Wick-Rejection: Keine Daten")
 
     # ── 5. BTC-DIVERGENZ (0-12) ──
     # Je schwächer BTC, desto fragiler der Altcoin-Pump
@@ -1466,24 +1466,24 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         divergence = change_7d - btc_change_7d  # Positiv = Altcoin outperformt BTC
         if divergence > 25 and btc_change_7d < -5:
             score += 12
-            details.append(f"🔥 Extreme Divergenz 7d: Coin +{change_7d:.0f}% vs BTC {btc_change_7d:+.0f}% (Δ{divergence:+.0f}%)")
+            details.append(f" Extreme Divergenz 7d: Coin +{change_7d:.0f}% vs BTC {btc_change_7d:+.0f}% (Δ{divergence:+.0f}%)")
         elif divergence > 15 and btc_change_7d < 0:
             score += 9
-            details.append(f"✅ Starke Divergenz 7d: Δ{divergence:+.0f}% vs BTC {btc_change_7d:+.0f}%")
+            details.append(f" Starke Divergenz 7d: Δ{divergence:+.0f}% vs BTC {btc_change_7d:+.0f}%")
         elif divergence > 10 and btc_change_7d < 2:
             score += 6
-            details.append(f"⚠️ Moderate Divergenz 7d: Δ{divergence:+.0f}% vs BTC {btc_change_7d:+.0f}%")
+            details.append(f" Moderate Divergenz 7d: Δ{divergence:+.0f}% vs BTC {btc_change_7d:+.0f}%")
         elif divergence > 5 and btc_change_7d < 3:
             # Nur Punkte wenn BTC wenigstens seitwärts/schwach ist (<+3%)
             score += 3
-            details.append(f"⚠️ Leichte Divergenz 7d: Δ{divergence:+.0f}% (BTC {btc_change_7d:+.0f}%)")
+            details.append(f" Leichte Divergenz 7d: Δ{divergence:+.0f}% (BTC {btc_change_7d:+.0f}%)")
         elif divergence > 5:
             # BTC auch stark → keine echte Divergenz
-            details.append(f"❌ Keine echte Divergenz: BTC auch stark ({btc_change_7d:+.0f}%), Δ nur {divergence:+.0f}%")
+            details.append(f" Keine echte Divergenz: BTC auch stark ({btc_change_7d:+.0f}%), Δ nur {divergence:+.0f}%")
         else:
-            details.append(f"❌ Keine relevante Divergenz 7d: Δ{divergence:+.0f}%")
+            details.append(f" Keine relevante Divergenz 7d: Δ{divergence:+.0f}%")
     else:
-        details.append("❌ BTC-Divergenz: Keine Daten")
+        details.append(" BTC-Divergenz: Keine Daten")
 
     # ── 6. MICRO-TIMING (0-10) — 1h-Echtzeit-Signal ──
     # Die 1h-Kerze zeigt, ob der Coin GERADE kippt
@@ -1492,20 +1492,20 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         avg_hourly_expected = change_7d / (7 * 24)  # Erwartete stündliche Änderung
         if change_7d > 8 and change_1h < -2.0:
             score += 10
-            details.append(f"🔥 1h-Reversal: {change_1h:+.1f}% letzte Stunde! (7d war +{change_7d:.0f}%) — Kipp-Signal")
+            details.append(f" 1h-Reversal: {change_1h:+.1f}% letzte Stunde! (7d war +{change_7d:.0f}%) — Kipp-Signal")
         elif change_7d > 8 and change_1h < -0.5:
             score += 7
-            details.append(f"✅ 1h dreht: {change_1h:+.1f}% (erste Schwäche nach 7d +{change_7d:.0f}%)")
+            details.append(f" 1h dreht: {change_1h:+.1f}% (erste Schwäche nach 7d +{change_7d:.0f}%)")
         elif change_7d > 8 and change_1h < avg_hourly_expected * 0.3:
             score += 4
-            details.append(f"⚠️ 1h verlangsamt: {change_1h:+.2f}% (erwartet: {avg_hourly_expected:+.2f}%/h)")
+            details.append(f" 1h verlangsamt: {change_1h:+.2f}% (erwartet: {avg_hourly_expected:+.2f}%/h)")
         elif change_7d > 8 and change_1h > 3.0:
             score += 5
-            details.append(f"⚠️ 1h Blow-Off: {change_1h:+.1f}% Spike! Möglicher Klimax → Reversal folgt oft")
+            details.append(f" 1h Blow-Off: {change_1h:+.1f}% Spike! Möglicher Klimax → Reversal folgt oft")
         else:
-            details.append(f"❌ 1h neutral: {change_1h:+.2f}%")
+            details.append(f" 1h neutral: {change_1h:+.2f}%")
     else:
-        details.append("❌ Micro-Timing: Keine 1h-Daten")
+        details.append(" Micro-Timing: Keine 1h-Daten")
 
     # ── 7. MULTI-TIMEFRAME PERSISTENZ (0-15) — NEU ──
     # Divergenz die auf 14d und 30d bestätigt wird ist VIEL zuverlässiger
@@ -1535,19 +1535,19 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
     mtf_score = min(15, mtf_score)
     if mtf_score >= 10:
         score += mtf_score
-        details.append(f"🔥 Multi-TF bestätigt: {' · '.join(mtf_details)} — nachhaltige Divergenz!")
+        details.append(f" Multi-TF bestätigt: {' · '.join(mtf_details)} — nachhaltige Divergenz!")
     elif mtf_score >= 5:
         score += mtf_score
-        details.append(f"✅ Multi-TF Signal: {' · '.join(mtf_details)}")
+        details.append(f" Multi-TF Signal: {' · '.join(mtf_details)}")
     elif mtf_score > 0:
         score += mtf_score
-        details.append(f"⚠️ Teilweise Multi-TF: {' · '.join(mtf_details) if mtf_details else 'schwaches Signal'}")
+        details.append(f" Teilweise Multi-TF: {' · '.join(mtf_details) if mtf_details else 'schwaches Signal'}")
     else:
         # Keine 14d/30d Divergenz — nur kurzfristiger Pump → weniger zuverlässig
         if change_14d and change_30d:
-            details.append(f"❌ Nur kurzfristige Divergenz (14d: {change_14d:+.0f}%, 30d: {change_30d:+.0f}%)")
+            details.append(f" Nur kurzfristige Divergenz (14d: {change_14d:+.0f}%, 30d: {change_30d:+.0f}%)")
         else:
-            details.append("❌ Multi-TF: Keine 14d/30d-Daten")
+            details.append(" Multi-TF: Keine 14d/30d-Daten")
 
     # ── 8. FUNDING + OPEN INTEREST (0-10) — NEU ──
     # Hohe positive Funding Rate = Markt überhebelt long → Shorts werden bezahlt
@@ -1576,7 +1576,7 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
             # Schwelle von -0.05% auf -0.03% gesenkt und Malus erhöht
             if fr_pct <= -0.1:
                 fr_score -= 5  # Stark negativ = extrem crowded short → GEFAHR
-                fr_details.append(f"⚠️ FR {fr_pct:+.4f}% CROWDED SHORT — Squeeze-Gefahr!")
+                fr_details.append(f" FR {fr_pct:+.4f}% CROWDED SHORT — Squeeze-Gefahr!")
             else:
                 fr_score -= 3  # Negativ = crowded
                 fr_details.append(f"FR {fr_pct:+.4f}% (Shorts zahlen — crowded!)")
@@ -1596,28 +1596,28 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         fr_score = max(-5, min(10, fr_score))  # Clamp: -5 bis +10
         score += fr_score
         if fr_score >= 7:
-            details.append(f"🔥 Überhebelt: {' · '.join(fr_details)} — Liquidation cascade risk!")
+            details.append(f" Überhebelt: {' · '.join(fr_details)} — Liquidation cascade risk!")
         elif fr_score >= 4:
-            details.append(f"✅ Funding bestätigt: {' · '.join(fr_details)}")
+            details.append(f" Funding bestätigt: {' · '.join(fr_details)}")
         elif fr_score >= 1:
-            details.append(f"⚠️ Leichtes Funding-Signal: {' · '.join(fr_details)}")
+            details.append(f" Leichtes Funding-Signal: {' · '.join(fr_details)}")
         elif fr_score < 0:
-            details.append(f"❌ Crowded Short: {' · '.join(fr_details)} — Vorsicht!")
+            details.append(f" Crowded Short: {' · '.join(fr_details)} — Vorsicht!")
         else:
-            details.append(f"❌ Kein Funding-Signal: FR {fr_pct:+.4f}%")
+            details.append(f" Kein Funding-Signal: FR {fr_pct:+.4f}%")
     else:
-        details.append("❌ Funding/OI: Kein MEXC-Perp verfügbar")
+        details.append(" Funding/OI: Kein MEXC-Perp verfügbar")
 
     return min(100, max(0, score)), details
 
 
 def get_exhaustion_grade(score):
     """Exhaustion Grade basierend auf Score."""
-    if score >= 80: return "S", "🔴🔴🔴", "EXTREME EXHAUSTION"
-    elif score >= 65: return "A", "🔴🔴", "STRONG EXHAUSTION"
-    elif score >= 50: return "B", "🟠🔴", "MODERATE EXHAUSTION"
-    elif score >= 35: return "C", "🟡🟠", "EARLY SIGNS"
-    else: return "D", "⚪", "NO EXHAUSTION"
+    if score >= 80: return "S", "", "EXTREME EXHAUSTION"
+    elif score >= 65: return "A", "", "STRONG EXHAUSTION"
+    elif score >= 50: return "B", "", "MODERATE EXHAUSTION"
+    elif score >= 35: return "C", "", "EARLY SIGNS"
+    else: return "D", "", "NO EXHAUSTION"
 
 
 def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_ratio,
@@ -1765,10 +1765,10 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
         vol_score = 4   # Dünn
     elif vol_ratio >= 0.2:
         vol_score = 2   # Sehr dünn
-        warnings.append("⚠️ dünnes Volume")
+        warnings.append(" dünnes Volume")
     else:
         vol_score = 0   # DEAD Volume
-        warnings.append("🚫 kaum Volume")
+        warnings.append(" kaum Volume")
     breakdown["volume"] = round(vol_score, 1)
     score += vol_score
 
@@ -1809,7 +1809,7 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
         # Offering, Lawsuit, Downgrade → WARNUNG statt Bonus!
         cat_score -= 5
         _bear_cats = [c for c in _catalysts_list if c in BEARISH_CATALYSTS]
-        warnings.append(f"🚨 BEARISH Katalysator: {', '.join(_bear_cats)} — Vorsicht!")
+        warnings.append(f" BEARISH Katalysator: {', '.join(_bear_cats)} — Vorsicht!")
     elif has_catalyst and _has_bullish_cat:
         cat_score += 8
     elif has_catalyst:
@@ -1841,17 +1841,17 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
     if is_up and abs_change >= 5 and pm_position < 35:
         fading_penalty = -12
         penalty += fading_penalty
-        warnings.append("🔻 FADING: Starker Gap wird abverkauft!")
+        warnings.append(" FADING: Starker Gap wird abverkauft!")
     elif not is_up and abs_change >= 5 and pm_position > 65:
         fading_penalty = -12
         penalty += fading_penalty
-        warnings.append("🔺 BOUNCE: Gap Down wird aufgekauft!")
+        warnings.append(" BOUNCE: Gap Down wird aufgekauft!")
 
     # STALE GAP: Gap aber kein PM Momentum = keiner interessiert sich
     if abs_change >= 3 and abs_pm_momentum < 0.3:
         stale_penalty = -5
         penalty += stale_penalty
-        warnings.append("💤 Staler Gap: Kein PM-Interesse")
+        warnings.append(" Staler Gap: Kein PM-Interesse")
 
     # DEAD VOLUME KILL: VolR < 0.2 → Score gecapped bei 25
     # Egal wie gut alles andere aussieht — ohne Volume ist nichts zuverlässig
@@ -1866,17 +1866,17 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
     # Dead Volume Cap — NACH allen Berechnungen
     if is_dead_volume:
         score = min(score, 25)
-        warnings.insert(0, "🚫 DEAD VOLUME — Score gecapped!")
+        warnings.insert(0, " DEAD VOLUME — Score gecapped!")
 
     # Confidence Level
     if score >= 75:
-        confidence = "🟢 HIGH"
+        confidence = " HIGH"
     elif score >= 55:
-        confidence = "🟡 MEDIUM"
+        confidence = " MEDIUM"
     elif score >= 35:
-        confidence = "🟠 LOW"
+        confidence = " LOW"
     else:
-        confidence = "🔴 AVOID"
+        confidence = " AVOID"
 
     breakdown["warnings"] = warnings
 

@@ -29,7 +29,7 @@ from modules.helpers import calculate_sr_levels_simple
 
 def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
     """
-    🐻 SHORT BONUS SIGNALS — 5 zusätzliche Short-spezifische Signale
+     SHORT BONUS SIGNALS — 5 zusätzliche Short-spezifische Signale
 
     Berechnet Bonus-Punkte für Bear Scanner auf Basis von:
     1. Earnings Proximity (Post-Earnings Drop)
@@ -99,20 +99,20 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
                     # Stärke basiert auf Gap-Größe
                     if gap_pct <= -8.0:
                         earnings_bonus = 12
-                        details.append(f"🔥 Post-Earnings Crash: {gap_pct:.1f}% Gap Down (nicht recovered)")
+                        details.append(f" Post-Earnings Crash: {gap_pct:.1f}% Gap Down (nicht recovered)")
                     elif gap_pct <= -5.0:
                         earnings_bonus = 9
-                        details.append(f"✅ Post-Earnings Drop: {gap_pct:.1f}% Gap Down (nicht recovered)")
+                        details.append(f" Post-Earnings Drop: {gap_pct:.1f}% Gap Down (nicht recovered)")
                     else:
                         earnings_bonus = 6
-                        details.append(f"⚠️ Post-Earnings Schwäche: {gap_pct:.1f}% Gap Down")
+                        details.append(f" Post-Earnings Schwäche: {gap_pct:.1f}% Gap Down")
                     signals.append({"name": "Earnings Drop", "score": earnings_bonus, "gap_pct": round(gap_pct, 1)})
                     break  # Nur den neuesten zählen
                 else:
-                    details.append(f"❌ Gap Down {gap_pct:.1f}% aber recovered")
+                    details.append(f" Gap Down {gap_pct:.1f}% aber recovered")
 
     if earnings_bonus == 0:
-        details.append("❌ Kein Post-Earnings Drop in letzten 10 Tagen")
+        details.append(" Kein Post-Earnings Drop in letzten 10 Tagen")
     bonus += earnings_bonus
 
     # =====================================================================
@@ -133,28 +133,28 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
 
         if below_200 and death_cross and declining_200:
             sma200_bonus = 10
-            details.append(f"🔥 Stage 4 Breakdown: Preis unter fallender SMA200, Death Cross aktiv")
+            details.append(f" Stage 4 Breakdown: Preis unter fallender SMA200, Death Cross aktiv")
         elif below_200 and death_cross:
             sma200_bonus = 8
-            details.append(f"✅ Unter SMA200 + Death Cross (SMA50 < SMA200)")
+            details.append(f" Unter SMA200 + Death Cross (SMA50 < SMA200)")
         elif below_200:
             sma200_bonus = 5
-            details.append(f"⚠️ Preis unter SMA200 (${sma200:.2f})")
+            details.append(f" Preis unter SMA200 (${sma200:.2f})")
         else:
             dist_pct = (current_price - sma200) / sma200 * 100
             if dist_pct < 2.0:
                 sma200_bonus = 3
-                details.append(f"⚠️ Preis nur {dist_pct:.1f}% über SMA200 — Breakdown möglich")
+                details.append(f" Preis nur {dist_pct:.1f}% über SMA200 — Breakdown möglich")
             else:
-                details.append(f"❌ Preis {dist_pct:.1f}% über SMA200 — kein Breakdown")
+                details.append(f" Preis {dist_pct:.1f}% über SMA200 — kein Breakdown")
     elif sma50 is not None:
         if current_price < sma50 and sma20 and sma20 < sma50:
             sma200_bonus = 4
-            details.append(f"⚠️ Unter SMA50 + SMA20 < SMA50 (kein SMA200 verfügbar)")
+            details.append(f" Unter SMA50 + SMA20 < SMA50 (kein SMA200 verfügbar)")
         else:
-            details.append(f"❌ SMA200 nicht verfügbar, SMA50 Trend nicht bearisch")
+            details.append(f" SMA200 nicht verfügbar, SMA50 Trend nicht bearisch")
     else:
-        details.append("❌ SMA200: Nicht genug Daten")
+        details.append(" SMA200: Nicht genug Daten")
     bonus += sma200_bonus
     signals.append({"name": "SMA200 Breakdown", "score": sma200_bonus})
 
@@ -185,15 +185,15 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
 
     if unrecovered_gaps >= 3:
         gap_bonus = 8
-        details.append(f"🔥 {unrecovered_gaps} unrecovered Gap Downs ({total_gap_pct:.1f}% total) — massive Distribution")
+        details.append(f" {unrecovered_gaps} unrecovered Gap Downs ({total_gap_pct:.1f}% total) — massive Distribution")
     elif unrecovered_gaps >= 2:
         gap_bonus = 5
-        details.append(f"✅ {unrecovered_gaps} unrecovered Gap Downs — Distribution")
+        details.append(f" {unrecovered_gaps} unrecovered Gap Downs — Distribution")
     elif unrecovered_gaps == 1:
         gap_bonus = 3
-        details.append(f"⚠️ 1 unrecovered Gap Down")
+        details.append(f" 1 unrecovered Gap Down")
     else:
-        details.append("❌ Keine unrecovered Gap Downs in 20 Tagen")
+        details.append(" Keine unrecovered Gap Downs in 20 Tagen")
     bonus += gap_bonus
     signals.append({"name": "Gap Down Unrecovered", "score": gap_bonus, "count": unrecovered_gaps})
 
@@ -220,12 +220,12 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
                 if market_cap and market_cap > 0:
                     if market_cap < 500_000_000:  # Small Cap < $500M
                         si_bonus += 4
-                        details.append(f"✅ Small Cap (${market_cap/1e6:.0f}M) — anfälliger für Sell-Off")
+                        details.append(f" Small Cap (${market_cap/1e6:.0f}M) — anfälliger für Sell-Off")
                     elif market_cap < 2_000_000_000:  # Mid Cap < $2B
                         si_bonus += 2
-                        details.append(f"⚠️ Mid Cap (${market_cap/1e6:.0f}M)")
+                        details.append(f" Mid Cap (${market_cap/1e6:.0f}M)")
                     else:
-                        details.append(f"❌ Large Cap (${market_cap/1e6:.0f}M) — schwerer zu shorten")
+                        details.append(f" Large Cap (${market_cap/1e6:.0f}M) — schwerer zu shorten")
 
                 # Sektor-Info für Short-Anfälligkeit
                 sic_code = ticker_data.get("sic_code", "")
@@ -234,17 +234,17 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
                 cyclical_sics = ["3674", "7372", "5961", "4813", "3812", "3559"]  # Tech, Retail, Telecom
                 if any(sic in str(sic_code) for sic in cyclical_sics):
                     si_bonus += 3
-                    details.append(f"✅ Zyklischer Sektor ({sic_desc[:30]}) — Short-freundlich")
+                    details.append(f" Zyklischer Sektor ({sic_desc[:30]}) — Short-freundlich")
 
                 # Cap bei 10
                 si_bonus = min(10, si_bonus)
                 signals.append({"name": "Short Interest Proxy", "score": si_bonus, "market_cap": market_cap})
             else:
-                details.append(f"❌ Ticker-Details nicht verfügbar (HTTP {si_resp.status_code})")
+                details.append(f" Ticker-Details nicht verfügbar (HTTP {si_resp.status_code})")
         except Exception as e:
-            details.append(f"❌ Short Interest Fehler: {str(e)[:50]}")
+            details.append(f" Short Interest Fehler: {str(e)[:50]}")
     else:
-        details.append("❌ Short Interest: Kein API Key")
+        details.append(" Short Interest: Kein API Key")
     bonus += si_bonus
 
     # =====================================================================
@@ -287,28 +287,28 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
                 sentiment_ratio = neg_count - pos_count
                 if sentiment_ratio >= 4:
                     insider_bonus = 10
-                    details.append(f"🔥 Stark negatives News-Sentiment: {neg_count} negativ vs {pos_count} positiv")
+                    details.append(f" Stark negatives News-Sentiment: {neg_count} negativ vs {pos_count} positiv")
                 elif sentiment_ratio >= 2:
                     insider_bonus = 7
-                    details.append(f"✅ Negatives News-Sentiment: {neg_count} negativ vs {pos_count} positiv")
+                    details.append(f" Negatives News-Sentiment: {neg_count} negativ vs {pos_count} positiv")
                 elif sentiment_ratio >= 1:
                     insider_bonus = 4
-                    details.append(f"⚠️ Leicht negatives Sentiment: {neg_count} neg / {pos_count} pos")
+                    details.append(f" Leicht negatives Sentiment: {neg_count} neg / {pos_count} pos")
                 elif sentiment_ratio <= -2:
                     # Positive News = SCHLECHT für Short → Abzug
                     insider_bonus = -5
-                    details.append(f"⚠️ Positives Sentiment ({pos_count} pos) — Short riskanter")
+                    details.append(f" Positives Sentiment ({pos_count} pos) — Short riskanter")
                 else:
-                    details.append(f"❌ Neutrales News-Sentiment ({neg_count} neg / {pos_count} pos)")
+                    details.append(f" Neutrales News-Sentiment ({neg_count} neg / {pos_count} pos)")
 
                 signals.append({"name": "News Sentiment", "score": insider_bonus,
                                "neg": neg_count, "pos": pos_count})
             else:
-                details.append(f"❌ News nicht verfügbar (HTTP {ins_resp.status_code})")
+                details.append(f" News nicht verfügbar (HTTP {ins_resp.status_code})")
         except Exception as e:
-            details.append(f"❌ News-Sentiment Fehler: {str(e)[:50]}")
+            details.append(f" News-Sentiment Fehler: {str(e)[:50]}")
     else:
-        details.append("❌ News-Sentiment: Kein API Key")
+        details.append(" News-Sentiment: Kein API Key")
     bonus += insider_bonus
 
     # =====================================================================
@@ -320,19 +320,19 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
         atr_pct = (recent_atr / current_price * 100) if current_price > 0 else 0
         if atr_pct >= 4.0:
             bonus += 5
-            details.append(f"🔥 Hohe Daily ATR ({atr_pct:.1f}%) — ideal für Intraday Short")
+            details.append(f" Hohe Daily ATR ({atr_pct:.1f}%) — ideal für Intraday Short")
         elif atr_pct >= 2.5:
             bonus += 3
-            details.append(f"✅ Gute Volatilität ({atr_pct:.1f}%) für Intraday")
+            details.append(f" Gute Volatilität ({atr_pct:.1f}%) für Intraday")
 
         # Average Volume muss hoch sein für Intraday
         avg_vol = sum(volumes[-10:]) / max(1, len(volumes[-10:]))
         if avg_vol >= 5_000_000:
             bonus += 3
-            details.append(f"✅ Hohes Avg Volume ({avg_vol/1e6:.1f}M) — gute Liquidität")
+            details.append(f" Hohes Avg Volume ({avg_vol/1e6:.1f}M) — gute Liquidität")
         elif avg_vol >= 1_000_000:
             bonus += 1
-            details.append(f"⚠️ Mittleres Volume ({avg_vol/1e6:.1f}M)")
+            details.append(f" Mittleres Volume ({avg_vol/1e6:.1f}M)")
 
     return {
         "bonus_score": max(-25, min(50, bonus)),  # -25 bis +50 (symmetrischer)
@@ -813,15 +813,15 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
             
             if total_decline <= -5:
                 score += 35
-                details.append(f"✅ Starker Mehrtages-Decline: {total_decline:+.1f}%")
+                details.append(f" Starker Mehrtages-Decline: {total_decline:+.1f}%")
             elif total_decline <= -3:
                 score += 20
-                details.append(f"⚠️ Moderater Decline: {total_decline:+.1f}%")
+                details.append(f" Moderater Decline: {total_decline:+.1f}%")
             elif total_decline <= -1:
                 score += 10
-                details.append(f"⚠️ Leichter Decline: {total_decline:+.1f}%")
+                details.append(f" Leichter Decline: {total_decline:+.1f}%")
             else:
-                details.append(f"❌ Kein Downtrend vor Reversal: {total_decline:+.1f}%")
+                details.append(f" Kein Downtrend vor Reversal: {total_decline:+.1f}%")
             
             # Kriterium 2: Mindestens 2 von N Vortagen waren rot
             red_days = sum(1 for c in daily_changes[:-1] if c < 0)
@@ -830,12 +830,12 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
                 red_pct = red_days / total_pre_days
                 if red_pct >= 0.6:
                     score += 25
-                    details.append(f"✅ {red_days}/{total_pre_days} Vortage rot = Verkaufsdruck")
+                    details.append(f" {red_days}/{total_pre_days} Vortage rot = Verkaufsdruck")
                 elif red_pct >= 0.4:
                     score += 10
-                    details.append(f"⚠️ {red_days}/{total_pre_days} Vortage rot")
+                    details.append(f" {red_days}/{total_pre_days} Vortage rot")
                 else:
-                    details.append(f"❌ Nur {red_days}/{total_pre_days} rote Vortage")
+                    details.append(f" Nur {red_days}/{total_pre_days} rote Vortage")
             
             # Kriterium 3: Heutiges Reversal mit erhöhtem Volumen
             if len(volumes) >= 2:
@@ -845,14 +845,14 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
                 
                 if vol_ratio > 1.5:
                     score += 20
-                    details.append(f"✅ Reversal-Volumen: {vol_ratio:.1f}x über Vortage")
+                    details.append(f" Reversal-Volumen: {vol_ratio:.1f}x über Vortage")
                 elif vol_ratio > 1.0:
                     score += 10
-                    details.append(f"⚠️ Leicht erhöhtes Volumen: {vol_ratio:.1f}x")
+                    details.append(f" Leicht erhöhtes Volumen: {vol_ratio:.1f}x")
                 else:
-                    details.append(f"❌ Schwaches Reversal-Volumen: {vol_ratio:.1f}x")
+                    details.append(f" Schwaches Reversal-Volumen: {vol_ratio:.1f}x")
         else:
-            details.append("❌ Nicht genug Daten für Reversal-Validierung")
+            details.append(" Nicht genug Daten für Reversal-Validierung")
     
     # V67.5: Pattern-spezifische Schwellen (max Score variiert pro Type)
     threshold_map = {
@@ -1049,7 +1049,7 @@ def find_wyckoff_for_chart(ohlcv_data):
                         spring_low = min([e["price"] for e in events if e["name"] == "Spring"], default=rl)
                         stop_price = spring_low - atr * 0.3 if has_spring else rl - atr * 0.5
                         results.append({
-                            "type": "Accumulation", "direction": "LONG", "emoji": "🏦⬆️",
+                            "type": "Accumulation", "direction": "LONG", "emoji": "⬆",
                             "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
                             "range_high": rh, "range_low": rl,
                             "range_start_time": ohlcv_data[sc_idx]["time"],
@@ -1199,7 +1199,7 @@ def find_wyckoff_for_chart(ohlcv_data):
                         utad_high = max([e["price"] for e in events if e["name"] == "UTAD"], default=rh)
                         stop_price = utad_high + atr * 0.3 if has_utad else rh + atr * 0.5
                         results.append({
-                            "type": "Distribution", "direction": "SHORT", "emoji": "🏦⬇️",
+                            "type": "Distribution", "direction": "SHORT", "emoji": "⬇",
                             "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
                             "range_high": rh, "range_low": rl,
                             "range_start_time": ohlcv_data[bc_idx]["time"],
@@ -2052,29 +2052,29 @@ def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
         # Wyckoff Phase bestimmen
         if obv_trend > 10 and abs(price_change) < 5 and vol_change < 0:
             result["wyckoff_phase"] = "Phase C (Spring/Test)"
-            result["interpretation"] = "🟢 Ideale Akkumulation! OBV steigt, Preis flach, Volumen sinkt"
+            result["interpretation"] = " Ideale Akkumulation! OBV steigt, Preis flach, Volumen sinkt"
         elif obv_trend > 0 and range_pct < 20:
             result["wyckoff_phase"] = "Phase B (Accumulation)"
-            result["interpretation"] = "🟡 Akkumulation läuft - Smart Money kauft"
+            result["interpretation"] = " Akkumulation läuft - Smart Money kauft"
         elif obv_trend < -10 and range_pct < 20:
             result["wyckoff_phase"] = "Phase D (Distribution?)"
-            result["interpretation"] = "🟠 Vorsicht: OBV fällt - mögliche Distribution"
+            result["interpretation"] = " Vorsicht: OBV fällt - mögliche Distribution"
         elif range_pct > 25:
             result["wyckoff_phase"] = "Phase A (Selling Climax)"
-            result["interpretation"] = "⚪ Hohe Volatilität - noch keine klare Akkumulation"
+            result["interpretation"] = " Hohe Volatilität - noch keine klare Akkumulation"
         else:
             result["wyckoff_phase"] = "Phase B (Range)"
-            result["interpretation"] = "🔵 In Range - beobachten für Entry"
+            result["interpretation"] = " In Range - beobachten für Entry"
         
         # Score-Interpretation
         if total_score >= 80:
-            result["interpretation"] = "🟢 STRONG BUY ZONE! " + result["interpretation"]
+            result["interpretation"] = " STRONG BUY ZONE! " + result["interpretation"]
         elif total_score >= 60:
-            result["interpretation"] = "🟡 Good Setup. " + result["interpretation"]
+            result["interpretation"] = " Good Setup. " + result["interpretation"]
         elif total_score >= 40:
-            result["interpretation"] = "⚪ Neutral. " + result["interpretation"]
+            result["interpretation"] = " Neutral. " + result["interpretation"]
         else:
-            result["interpretation"] = "🔴 Weak Setup. " + result["interpretation"]
+            result["interpretation"] = " Weak Setup. " + result["interpretation"]
         
     except Exception as e:
         result["interpretation"] = f"Analyse-Fehler: {str(e)[:50]}"
@@ -2182,13 +2182,13 @@ def generate_ai_chart_analysis(ticker, ohlcv_data, patterns, sr_levels, fib_leve
         if supports:
             nearest_support = supports[0]
             dist = (current_price - nearest_support["price"]) / current_price * 100
-            analysis["summary"].append(f"📉 Nearest Support: ${nearest_support['price']:.2f} ({dist:.1f}% below)")
+            analysis["summary"].append(f" Nearest Support: ${nearest_support['price']:.2f} ({dist:.1f}% below)")
             analysis["key_levels"].append({"type": "support", "price": nearest_support["price"], "strength": nearest_support.get("strength", 1)})
         
         if resistances:
             nearest_resistance = resistances[0]
             dist = (nearest_resistance["price"] - current_price) / current_price * 100
-            analysis["summary"].append(f"📈 Nearest Resistance: ${nearest_resistance['price']:.2f} ({dist:.1f}% above)")
+            analysis["summary"].append(f" Nearest Resistance: ${nearest_resistance['price']:.2f} ({dist:.1f}% above)")
             analysis["key_levels"].append({"type": "resistance", "price": nearest_resistance["price"], "strength": nearest_resistance.get("strength", 1)})
     
     # Trade Idea Generation
@@ -2245,31 +2245,31 @@ def get_accumulation_display(ticker, market_type, poly_key=None):
     # Score-Farbe
     score = analysis["score"]
     if score >= 80:
-        score_color = "🟢"
+        score_color = ""
         score_label = "STRONG"
     elif score >= 60:
-        score_color = "🟡"
+        score_color = ""
         score_label = "GOOD"
     elif score >= 40:
-        score_color = "⚪"
+        score_color = ""
         score_label = "NEUTRAL"
     else:
-        score_color = "🔴"
+        score_color = ""
         score_label = "WEAK"
     
     # OBV Trend Interpretation
     obv = analysis["obv_trend"]
     if obv > 10:
-        obv_icon = "📈"
+        obv_icon = ""
         obv_text = "Steigend (Bullish)"
     elif obv > 0:
-        obv_icon = "↗️"
+        obv_icon = "↗"
         obv_text = "Leicht steigend"
     elif obv > -10:
-        obv_icon = "➡️"
+        obv_icon = ""
         obv_text = "Flach"
     else:
-        obv_icon = "📉"
+        obv_icon = ""
         obv_text = "Fallend (Bearish)"
     
     display = {
@@ -2296,7 +2296,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
     
     Returns: Dict mit Warnung oder None
     {
-        "warning": "⚠️ EARNINGS HEUTE (AMC)",
+        "warning": " EARNINGS HEUTE (AMC)",
         "level": "TODAY_AMC",  # TODAY_BMO, TODAY_AMC, TOMORROW, THIS_WEEK
         "date": "2026-02-26",
         "hour": "amc",
@@ -2342,7 +2342,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
         # Gestern AMC = Earnings sind GERADE passiert (Gap-Risiko heute!)
         if ear_date == yesterday and hour == "amc":
             return {
-                "warning": f"🚨 EARNINGS GESTERN AMC — Gap-Risiko!",
+                "warning": f" EARNINGS GESTERN AMC — Gap-Risiko!",
                 "level": "YESTERDAY_AMC",
                 "date": ear_date_str,
                 "hour": hour,
@@ -2355,7 +2355,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
         if ear_date == today:
             if hour == "bmo":
                 return {
-                    "warning": f"🚨 EARNINGS HEUTE {hour_short} — {hour_text}!",
+                    "warning": f" EARNINGS HEUTE {hour_short} — {hour_text}!",
                     "level": "TODAY_BMO",
                     "date": ear_date_str,
                     "hour": hour,
@@ -2365,7 +2365,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
                 }
             elif hour == "amc":
                 return {
-                    "warning": f"⛔ EARNINGS HEUTE {hour_short} — {hour_text}!",
+                    "warning": f" EARNINGS HEUTE {hour_short} — {hour_text}!",
                     "level": "TODAY_AMC",
                     "date": ear_date_str,
                     "hour": hour,
@@ -2375,7 +2375,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
                 }
             else:
                 return {
-                    "warning": f"🚨 EARNINGS HEUTE!",
+                    "warning": f" EARNINGS HEUTE!",
                     "level": "TODAY",
                     "date": ear_date_str,
                     "hour": hour,
@@ -2387,7 +2387,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
         # Morgen
         if ear_date == tomorrow:
             return {
-                "warning": f"⚠️ EARNINGS MORGEN{' '+hour_short if hour_short else ''}",
+                "warning": f" EARNINGS MORGEN{' '+hour_short if hour_short else ''}",
                 "level": "TOMORROW",
                 "date": ear_date_str,
                 "hour": hour,
@@ -2401,7 +2401,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
             weekdays = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
             day_name = weekdays[ear_date.weekday()]
             return {
-                "warning": f"📅 EARNINGS {day_name}{' '+hour_short if hour_short else ''} ({ear_date_str})",
+                "warning": f" EARNINGS {day_name}{' '+hour_short if hour_short else ''} ({ear_date_str})",
                 "level": "THIS_WEEK",
                 "date": ear_date_str,
                 "hour": hour,
@@ -2413,7 +2413,7 @@ def check_earnings_proximity(ticker, earnings_calendar):
         # Nächste Woche (6-7 Tage) — nur Info, kein Penalty
         if 6 <= days_until <= 7:
             return {
-                "warning": f"📋 Earnings nächste Woche ({ear_date_str})",
+                "warning": f" Earnings nächste Woche ({ear_date_str})",
                 "level": "NEXT_WEEK",
                 "date": ear_date_str,
                 "hour": hour,
@@ -2482,11 +2482,11 @@ def _earnings_flag(ear):
     if ear and isinstance(ear, dict):
         level = ear.get("level", "")
         if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
-            return "⛔ER"
+            return "ER"
         elif level == "TOMORROW":
-            return "⚠️ER"
+            return "ER"
         elif level == "THIS_WEEK":
-            return "📅ER"
+            return "ER"
     return ""
 
 

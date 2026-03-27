@@ -8,15 +8,15 @@
 ║  Author: Miroslav + Claude                                                   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  V68.0 STRATEGIE-AUDIT — Aktien + BI Scanner + BioTech Scanner:             ║
-║  ✅ Relative Strength: RS-Outperformance ohne abs > 0 (Korrekturen)        ║
-║  ✅ SPY-Override: Nur im Crash-Modus (<-3%), Rebounds nicht blockiert       ║
-║  ✅ Konsolidierung High-Vol → Akkumulation (Bonus statt Penalty)           ║
-║  ✅ Gap-Handling: Midpoint als Open-Schätzung statt Doji-Artefakt          ║
-║  ✅ Timing: Dynamisch max(8%, 3.5×ATR) statt hardcoded 8%                 ║
-║  ✅ BI: OBV Crypto symmetrisch, Resilience gecappt, Grading geglättet     ║
-║  ✅ BI: Order Block + Liquidity Level Key-Mismatch behoben (KeyError)      ║
-║  ✅ BioTech: Catalyst gewichtet, Momentum Floor, Readout-Cap bei 100       ║
-║  ✅ VP: Value Area Overshoot-Guard für exaktere 70%-Grenze                 ║
+║  Relative Strength: RS-Outperformance ohne abs > 0 (Korrekturen)       ║
+║  SPY-Override: Nur im Crash-Modus (<-3%), Rebounds nicht blockiert      ║
+║  Konsolidierung High-Vol → Akkumulation (Bonus statt Penalty)          ║
+║  Gap-Handling: Midpoint als Open-Schätzung statt Doji-Artefakt         ║
+║  Timing: Dynamisch max(8%, 3.5×ATR) statt hardcoded 8%                ║
+║  BI: OBV Crypto symmetrisch, Resilience gecappt, Grading geglättet    ║
+║  BI: Order Block + Liquidity Level Key-Mismatch behoben (KeyError)     ║
+║  BioTech: Catalyst gewichtet, Momentum Floor, Readout-Cap bei 100      ║
+║  VP: Value Area Overshoot-Guard für exaktere 70%-Grenze                ║
 ║  V70.7: Full Audit Fix — 14 Findings (Divergenz + Early Movers)              ║
 ║  V67.3: Strategy Audit & Fixes (8 Fixes)                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -161,7 +161,7 @@ from modules.helpers import (
 
 
 # =============================================================================
-# 🤖 AUTO-TRADER ENGINE V1.0 — Automated BI Signal → IBKR Order Pipeline
+# AUTO-TRADER ENGINE V1.0 — Automated BI Signal → IBKR Order Pipeline
 # =============================================================================
 
 _AUTOTRADER_CONFIG_FILE = "/tmp/alpha_autotrader_config.json"
@@ -412,19 +412,19 @@ if st.session_state.get("filter_version") != FILTER_VERSION:
 
 
 # =============================================================================
-# FUTURES STRATEGIEN 📈
+# FUTURES STRATEGIEN 
 # =============================================================================
 # FUTURES_STRATEGIES — Moved to modules/strategies.py (V69.6 refactoring)
 
 
 # =============================================================================
-# FOREX STRATEGIEN 💱
+# FOREX STRATEGIEN 
 # =============================================================================
 # FOREX_STRATEGIES — Moved to modules/strategies.py (V69.6 refactoring)
 
 
 # =============================================================================
-# KRYPTO STRATEGIEN 🌐 (angepasst - keine Gaps/Pre-Post)
+# KRYPTO STRATEGIEN (angepasst - keine Gaps/Pre-Post)
 # RVOL bei Krypto = Turnover Ratio normalisiert (10% Turnover = 1.0)
 # Typische Werte: 0.3-0.8 normal, >1.0 erhöht, >2.0 sehr hoch
 # =============================================================================
@@ -432,7 +432,7 @@ if st.session_state.get("filter_version") != FILTER_VERSION:
 
 
 # =============================================================================
-# INTERNATIONALE AKTIEN STRATEGIEN 🌍 (angepasste Schwellenwerte!)
+# INTERNATIONALE AKTIEN STRATEGIEN (angepasste Schwellenwerte!)
 # EU/UK/JP Aktien bewegen sich weniger als US-Aktien → niedrigere Thresholds
 # RVOL wird zur Laufzeit nach Tageszeit normalisiert
 # =============================================================================
@@ -577,7 +577,7 @@ _CANDLE_CACHE_TTL = 300  # 5 Minuten
 
 
 # =============================================================================
-# BREAKOUT IMMINENT SCANNER 🔮 — Multi-Signal Composite Prediction
+# BREAKOUT IMMINENT SCANNER — Multi-Signal Composite Prediction
 # Kombiniert 12 Faktoren um bevorstehende Breakouts vorherzusagen
 # =============================================================================
 
@@ -602,7 +602,7 @@ _CANDLE_CACHE_TTL = 300  # 5 Minuten
 
 
 # =============================================================================
-# HARMONIC PATTERN SCANNER 🦋
+# HARMONIC PATTERN SCANNER 
 # Erkennt Gartley, Butterfly, Bat, Crab, Shark Patterns
 # =============================================================================
 
@@ -1978,7 +1978,7 @@ _BI_DEFAULT_CONFIG = {
 
 
 # =====================================================
-# 🧬 BIOTECH SCANNER — FDA Catalysts & Pipeline Tracker
+# BIOTECH SCANNER — FDA Catalysts & Pipeline Tracker
 # =====================================================
 
 # Biotech SIC Codes (Pharmaceutical & Biotech Manufacturing)
@@ -2007,7 +2007,7 @@ FDA_CATALYST_KEYWORDS = {
                      "complete response letter", "adcom", "advisory committee",
                      "fda decision", "fda action date"],
         "score": 30,
-        "label": "🎯 FDA Event"
+        "label": "FDA Event"
     },
     # Hohe Priorität — Clinical Trial Milestones
     "tier2": {
@@ -2017,7 +2017,7 @@ FDA_CATALYST_KEYWORDS = {
                      "progression-free survival", "complete remission", "phase 2 results",
                      "phase ii data", "late-breaking", "interim analysis", "interim data"],
         "score": 22,
-        "label": "📊 Trial Results"
+        "label": "Trial Results"
     },
     # Mittlere Priorität — Pipeline & Partnership
     "tier3": {
@@ -2026,7 +2026,7 @@ FDA_CATALYST_KEYWORDS = {
                      "patient enrollment", "first patient dosed", "dosing initiated",
                      "expanded access", "compassionate use", "label expansion"],
         "score": 15,
-        "label": "🤝 Deal/Pipeline"
+        "label": "Deal/Pipeline"
     },
     # Niedrige Priorität — Allgemeine Pipeline Signals
     "tier4": {
@@ -2034,7 +2034,7 @@ FDA_CATALYST_KEYWORDS = {
                      "patent granted", "patent filed", "ip protection", "data presentation",
                      "conference presentation", "manuscript published", "peer review"],
         "score": 8,
-        "label": "🔬 Early Pipeline"
+        "label": "Early Pipeline"
     },
 }
 
@@ -2504,14 +2504,14 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     - Pattern Recognition
     - Trade Zones (Entry/Stop/Target)
     """
-    st.subheader(f"🤖 AI Chart Analyzer - {ticker}")
+    st.subheader(f"AI Chart Analyzer - {ticker}")
     
     # Timeframe Selector - V67.2: +Weekly für Langzeit-Ansicht
     tf_cols = st.columns(7)
     
     timeframes = ["5m", "15m", "1H", "4H", "1D", "1W"]
     tf_labels = ["5 Min", "15 Min", "1H", "4H", "Daily", "Weekly"]
-    tf_icons = ["⚡", "⏱️", "🕐", "📊", "📅", "📆"]
+    tf_icons = ["", "", "", "", "", ""]
     
     for i, (tf, label, icon) in enumerate(zip(timeframes, tf_labels, tf_icons)):
         with tf_cols[i]:
@@ -2529,26 +2529,26 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             "4H": "6 Monate", "1D": "2 Jahre", "1W": "5 Jahre"
         }
         current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
-        st.caption(f"📏 {tf_info.get(current_tf, '')}")
+        st.caption(f"{tf_info.get(current_tf, '')}")
     
     # Get current timeframe from session
     current_tf = st.session_state.get(f"chart_tf_{ticker}", timeframe)
     
     # Fetch Data
-    with st.spinner(f"📥 Lade {ticker} Chart Daten ({current_tf})..."):
+    with st.spinner(f"Lade {ticker} Chart Daten ({current_tf})..."):
         ohlcv = fetch_ohlcv_for_chart(ticker, poly_key, current_tf)
     
     if not ohlcv:
-        st.error(f"❌ Keine Chart-Daten für {ticker} im Timeframe {current_tf} verfügbar")
+        st.error(f"Keine Chart-Daten für {ticker} im Timeframe {current_tf} verfügbar")
         st.caption("Versuche einen anderen Timeframe oder prüfe ob der Ticker korrekt ist.")
         return
     
-    st.caption(f"📊 {len(ohlcv)} Bars geladen")
+    st.caption(f"{len(ohlcv)} Bars geladen")
     
     current_price = ohlcv[-1]["close"]
     
     # Calculate ALL Technical Analysis
-    with st.spinner("🔍 Berechne alle Indikatoren..."):
+    with st.spinner("Berechne alle Indikatoren..."):
         
         # ======== ECHTE S/R ANALYSE ========
         highs = [d["high"] for d in ohlcv]
@@ -2883,34 +2883,34 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             }
     
     # Display Options - ÜBERSICHTLICHER: Weniger default an
-    st.markdown("**⚙️ Chart Optionen:**")
+    st.markdown("**Chart Optionen:**")
     col_opt1, col_opt2, col_opt3, col_opt4, col_opt5, col_opt6, col_opt7, col_opt8 = st.columns(8)
     with col_opt1:
-        show_ema = st.checkbox("📈 EMAs", value=True, key=f"ema_{ticker}_{current_tf}")
+        show_ema = st.checkbox("EMAs", value=True, key=f"ema_{ticker}_{current_tf}")
     with col_opt2:
-        show_sr = st.checkbox("📏 S/R", value=True, key=f"sr_{ticker}_{current_tf}")
+        show_sr = st.checkbox("S/R", value=True, key=f"sr_{ticker}_{current_tf}")
     with col_opt3:
-        show_vwap = st.checkbox("📊 VWAP", value=False, key=f"vwap_{ticker}_{current_tf}")
+        show_vwap = st.checkbox("VWAP", value=False, key=f"vwap_{ticker}_{current_tf}")
     with col_opt4:
-        show_fib = st.checkbox("🎯 Fib", value=False, key=f"fib_{ticker}_{current_tf}")
+        show_fib = st.checkbox("Fib", value=False, key=f"fib_{ticker}_{current_tf}")
     with col_opt5:
-        show_voids = st.checkbox("🕳️ Voids", value=False, key=f"voids_{ticker}_{current_tf}")
+        show_voids = st.checkbox("Voids", value=False, key=f"voids_{ticker}_{current_tf}")
     with col_opt6:
-        show_harmonic = st.checkbox("🦋 Harmonic", value=False, key=f"harmonic_{ticker}_{current_tf}")
+        show_harmonic = st.checkbox("Harmonic", value=False, key=f"harmonic_{ticker}_{current_tf}")
     with col_opt7:
-        show_wyckoff = st.checkbox("🏦 Wyckoff", value=False, key=f"wyckoff_{ticker}_{current_tf}")
+        show_wyckoff = st.checkbox("Wyckoff", value=False, key=f"wyckoff_{ticker}_{current_tf}")
     with col_opt8:
-        show_zones = st.checkbox("🎯 Zones", value=False, key=f"zones_{ticker}_{current_tf}")
+        show_zones = st.checkbox("Zones", value=False, key=f"zones_{ticker}_{current_tf}")
     
     # PDH/PDL/PDC Anzeige
     if pdh > 0 and pdl > 0:
         col_pdh, col_pdl, col_pdc = st.columns(3)
         with col_pdh:
-            st.caption(f"📈 PDH: ${pdh:.2f}")
+            st.caption(f"PDH: ${pdh:.2f}")
         with col_pdl:
-            st.caption(f"📉 PDL: ${pdl:.2f}")
+            st.caption(f"PDL: ${pdl:.2f}")
         with col_pdc:
-            st.caption(f"📊 PDC: ${pdc:.2f}")
+            st.caption(f"PDC: ${pdc:.2f}")
     
     # Generate Chart HTML
     chart_html = create_lightweight_chart_html(
@@ -2939,7 +2939,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
     
     # === PATTERNS ===
     with col_patterns:
-        st.subheader("🔍 Patterns")
+        st.subheader("Patterns")
         
         # Harmonic Patterns (wenn erkannt)
         if harmonic_data:
@@ -2956,9 +2956,9 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             for wp in wyckoff_data[:2]:
                 direction_emoji = "🟢" if wp.get("direction", "LONG") == "LONG" else "🔴"
                 if wp.get("direction", "LONG") == "LONG":
-                    st.success(f"🏦 **Wyckoff {wp.get('type', 'Unknown')}** {direction_emoji} {wp.get('phase', 'Unknown')}")
+                    st.success(f"**Wyckoff {wp.get('type', 'Unknown')}** {direction_emoji} {wp.get('phase', 'Unknown')}")
                 else:
-                    st.error(f"🏦 **Wyckoff {wp.get('type', 'Unknown')}** {direction_emoji} {wp.get('phase', 'Unknown')}")
+                    st.error(f"**Wyckoff {wp.get('type', 'Unknown')}** {direction_emoji} {wp.get('phase', 'Unknown')}")
                 st.caption(f"Score: {wp.get('score', 0)} | Range: ${wp.get('range_low', 0):.2f}—${wp.get('range_high', 0):.2f}")
                 events_str = " → ".join([e.get('name', '') for e in wp.get('events', [])])
                 if events_str:
@@ -2969,7 +2969,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         
         if patterns:
             for p in patterns[:5]:
-                emoji = p.get("emoji", "📊")
+                emoji = p.get("emoji", "")
                 pattern_name = p.get("pattern", "Unknown")
                 pattern_type = p.get("type", "neutral")
                 confidence = p.get("confidence", "Medium")
@@ -2983,11 +2983,11 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                 
                 st.caption(f"{confidence} Confidence")
         else:
-            st.info("👀 Keine klaren Patterns")
+            st.info("Keine klaren Patterns")
     
     # === LEVELS ===
     with col_levels:
-        st.subheader("📏 Key Levels")
+        st.subheader("Key Levels")
         
         current_price = ohlcv[-1]["close"]
         st.metric("Aktuell", f"${current_price:.2f}")
@@ -2998,14 +2998,14 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             resistances = sr_levels.get("resistance_levels", [])
 
             if resistances and len(resistances) > 0:
-                st.caption(f"🔴 R1: ${resistances[0].get('price', 0):.2f}")
+                st.caption(f"R1: ${resistances[0].get('price', 0):.2f}")
             if supports and len(supports) > 0:
-                st.caption(f"🟢 S1: ${supports[0].get('price', 0):.2f}")
+                st.caption(f"S1: ${supports[0].get('price', 0):.2f}")
         
         # VWAP
         if vwap_data:
             vwap = vwap_data.get("vwap", 0)
-            st.caption(f"📊 VWAP: ${vwap:.2f}")
+            st.caption(f"VWAP: ${vwap:.2f}")
             if current_price > vwap:
                 st.caption("↑ Über VWAP (Bullish)")
             else:
@@ -3014,25 +3014,25 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # Volume Profile
         if vp:
             poc = vp.get("poc", current_price)
-            st.caption(f"📈 POC: ${poc:.2f}")
+            st.caption(f"POC: ${poc:.2f}")
             
         # Volume Voids
         if volume_voids:
-            st.caption(f"🕳️ {len(volume_voids)} Volume Voids gefunden")
+            st.caption(f"{len(volume_voids)} Volume Voids gefunden")
         
         # Harmonic Patterns count
         if harmonic_data:
             hp = harmonic_data[0]
-            st.caption(f"🦋 {hp.get('pattern', 'Unknown')} ({hp.get('direction', 'Unknown')}) Score={hp.get('score', 0)}")
+            st.caption(f"{hp.get('pattern', 'Unknown')} ({hp.get('direction', 'Unknown')}) Score={hp.get('score', 0)}")
         
         # Wyckoff Patterns
         if wyckoff_data:
             wp = wyckoff_data[0]
-            st.caption(f"🏦 Wyckoff {wp.get('type', 'Unknown')} ({wp.get('phase', 'Unknown')}) Score={wp.get('score', 0)}")
+            st.caption(f"Wyckoff {wp.get('type', 'Unknown')} ({wp.get('phase', 'Unknown')}) Score={wp.get('score', 0)}")
     
     # === TRADE SETUP ===
     with col_trade:
-        st.subheader("💡 Trade Setup")
+        st.subheader("Trade Setup")
         
         if ai_analysis and ai_analysis.get("trade_idea"):
             trade = ai_analysis.get("trade_idea", {})
@@ -3043,28 +3043,28 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             
             col_t1, col_t2 = st.columns(2)
             with col_t1:
-                st.metric("🎯 Entry", f"${trade.get('entry', 0):.2f}")
-                st.metric("🛑 Stop", f"${trade.get('stop', 0):.2f}")
+                st.metric("Entry", f"${trade.get('entry', 0):.2f}")
+                st.metric("Stop", f"${trade.get('stop', 0):.2f}")
             with col_t2:
-                st.metric("✅ Target", f"${trade.get('target', 0):.2f}")
+                st.metric("Target", f"${trade.get('target', 0):.2f}")
                 rr = trade.get("risk_reward", 0)
                 rr_color = "green" if rr >= 2 else "orange" if rr >= 1 else "red"
                 st.markdown(f"**R:R:** <span style='color:{rr_color};font-size:18px;'>{rr:.1f}:1</span>", unsafe_allow_html=True)
             
             # Rating
             if rr >= 2:
-                st.success("✅ Gutes Setup!")
+                st.success("Gutes Setup!")
             elif rr >= 1:
-                st.warning("⚠️ OK Setup")
+                st.warning("OK Setup")
             else:
-                st.error("❌ Schlechtes R:R")
+                st.error("Schlechtes R:R")
         else:
-            st.info("🔍 Warte auf klares Setup...")
+            st.info("Warte auf klares Setup...")
             st.caption("Kein eindeutiger Bias erkannt.")
     
     # Pattern Details Expander
     if patterns:
-        with st.expander("📋 Pattern Details"):
+        with st.expander("Pattern Details"):
             for p in patterns:
                 st.markdown(f"**{p.get('emoji', '')} {p.get('pattern', '')}**")
                 
@@ -3078,7 +3078,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
                     if events:
                         st.markdown("**Erkannte Events:**")
                         for event in events:
-                            st.caption(f"  ✓ {event}")
+                            st.caption(f"  {event}")
                 else:
                     st.caption(p.get("description", ""))
                 
@@ -3837,7 +3837,7 @@ def fetch_crypto_data():
                 
                 # Breakout Health für Crypto — ALLE Strategien
                 breakout_health = None
-                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇️", "Selling"]
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇", "Selling"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
 
                 if (setup_direction == "long" and change_24h > 0) or (setup_direction == "short" and change_24h < 0):
@@ -3855,14 +3855,14 @@ def fetch_crypto_data():
                         penalty = 20 if change_7d < -15 else 15 if change_7d < -10 else 10
                         bh["health_score"] = max(10, bh.get("health_score", 0) - penalty)
                         bh.setdefault("warnings", []).append(
-                            f"🔴 7d-Trend: {change_7d:+.1f}% — Bounce im Abwärtstrend, kein echter Breakout"
+                            f"7d-Trend: {change_7d:+.1f}% — Bounce im Abwärtstrend, kein echter Breakout"
                         )
                         h = bh.get("health_score", 0)
-                        if h >= 75: bh["verdict"], bh["verdict_emoji"] = "STRONG", "💪🟢"
-                        elif h >= 55: bh["verdict"], bh["verdict_emoji"] = "HEALTHY", "✅🟢"
-                        elif h >= 40: bh["verdict"], bh["verdict_emoji"] = "CAUTION", "⚠️🟡"
-                        elif h >= 25: bh["verdict"], bh["verdict_emoji"] = "WEAK", "⚠️🟠"
-                        else: bh["verdict"], bh["verdict_emoji"] = "FAKEOUT", "🚫🔴"
+                        if h >= 75: bh["verdict"], bh["verdict_emoji"] = "STRONG", ""
+                        elif h >= 55: bh["verdict"], bh["verdict_emoji"] = "HEALTHY", ""
+                        elif h >= 40: bh["verdict"], bh["verdict_emoji"] = "CAUTION", ""
+                        elif h >= 25: bh["verdict"], bh["verdict_emoji"] = "WEAK", ""
+                        else: bh["verdict"], bh["verdict_emoji"] = "FAKEOUT", ""
                         if h < 40:
                             bh["action"] = "KEIN ENTRY — 7d-Trend negativ, wahrscheinlich nur Bounce."
 
@@ -3890,17 +3890,17 @@ def fetch_crypto_data():
                 rel_strength_24h = round(change_24h - btc_change_24h, 2)
                 # Korrelations-Label
                 if abs(change_24h - btc_change_24h) <= 2.0:
-                    btc_corr_label = "🔗 BTC-korreliert"
+                    btc_corr_label = "BTC-korreliert"
                 elif change_24h > btc_change_24h + 5.0:
-                    btc_corr_label = "💪 Outperformer"
+                    btc_corr_label = "Outperformer"
                 elif change_24h < btc_change_24h - 5.0:
-                    btc_corr_label = "⚠️ Underperformer"
+                    btc_corr_label = "Underperformer"
                 elif change_24h > btc_change_24h + 2.0:
-                    btc_corr_label = "📈 Rel. stark"
+                    btc_corr_label = "Rel. stark"
                 elif change_24h < btc_change_24h - 2.0:
-                    btc_corr_label = "📉 Rel. schwach"
+                    btc_corr_label = "Rel. schwach"
                 else:
-                    btc_corr_label = "↔️ Neutral"
+                    btc_corr_label = "↔Neutral"
 
                 results.append({
                     "Ticker": ticker,
@@ -3950,49 +3950,49 @@ def fetch_crypto_data():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 🔥 EARLY MOVERS SCANNER V1.0 — Findet die nächsten 10x-Coins früh
+# EARLY MOVERS SCANNER V1.0 — Findet die nächsten 10x-Coins früh
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Narrative/Sektor-Mapping für bekannte Coins
 CRYPTO_NARRATIVES = {
     # AI / ML
-    "fetch-ai": "🤖 AI", "singularitynet": "🤖 AI", "ocean-protocol": "🤖 AI",
-    "render-token": "🤖 AI", "akash-network": "🤖 AI", "bittensor": "🤖 AI",
-    "artificial-superintelligence-alliance": "🤖 AI", "near": "🤖 AI",
-    "worldcoin-wld": "🤖 AI", "arkham": "🤖 AI", "numeraire": "🤖 AI",
-    "phala-network": "🤖 AI", "nosana": "🤖 AI", "virtuals-protocol": "🤖 AI",
-    "ai16z": "🤖 AI", "griffain": "🤖 AI", "goatseus-maximus": "🤖 AI",
-    "io-net": "🤖 AI", "grass": "🤖 AI",
+    "fetch-ai": "AI", "singularitynet": "AI", "ocean-protocol": "AI",
+    "render-token": "AI", "akash-network": "AI", "bittensor": "AI",
+    "artificial-superintelligence-alliance": "AI", "near": "AI",
+    "worldcoin-wld": "AI", "arkham": "AI", "numeraire": "AI",
+    "phala-network": "AI", "nosana": "AI", "virtuals-protocol": "AI",
+    "ai16z": "AI", "griffain": "AI", "goatseus-maximus": "AI",
+    "io-net": "AI", "grass": "AI",
     # Meme
-    "dogecoin": "🐶 Meme", "shiba-inu": "🐶 Meme", "pepe": "🐶 Meme",
-    "dogwifcoin": "🐶 Meme", "bonk": "🐶 Meme", "floki": "🐶 Meme",
-    "brett-based": "🐶 Meme", "mog-coin": "🐶 Meme", "popcat": "🐶 Meme",
-    "cat-in-a-dogs-world": "🐶 Meme", "neiro-on-eth": "🐶 Meme",
-    "fartcoin": "🐶 Meme", "trump": "🐶 Meme", "melania-meme": "🐶 Meme",
-    "peanut-the-squirrel": "🐶 Meme", "act-i-the-ai-prophecy": "🐶 Meme",
+    "dogecoin": "Meme", "shiba-inu": "Meme", "pepe": "Meme",
+    "dogwifcoin": "Meme", "bonk": "Meme", "floki": "Meme",
+    "brett-based": "Meme", "mog-coin": "Meme", "popcat": "Meme",
+    "cat-in-a-dogs-world": "Meme", "neiro-on-eth": "Meme",
+    "fartcoin": "Meme", "trump": "Meme", "melania-meme": "Meme",
+    "peanut-the-squirrel": "Meme", "act-i-the-ai-prophecy": "Meme",
     # RWA (Real World Assets)
-    "ondo-finance": "🏦 RWA", "mantra": "🏦 RWA", "polymesh": "🏦 RWA",
-    "centrifuge": "🏦 RWA", "goldfinch": "🏦 RWA", "maple": "🏦 RWA",
-    "clearpool": "🏦 RWA", "pendle": "🏦 RWA",
+    "ondo-finance": "RWA", "mantra": "RWA", "polymesh": "RWA",
+    "centrifuge": "RWA", "goldfinch": "RWA", "maple": "RWA",
+    "clearpool": "RWA", "pendle": "RWA",
     # DePIN
-    "helium": "📡 DePIN", "theta-token": "📡 DePIN", "filecoin": "📡 DePIN",
-    "arweave": "📡 DePIN", "hivemapper": "📡 DePIN",
-    "iotex": "📡 DePIN", "dimo-network": "📡 DePIN",
+    "helium": "DePIN", "theta-token": "DePIN", "filecoin": "DePIN",
+    "arweave": "DePIN", "hivemapper": "DePIN",
+    "iotex": "DePIN", "dimo-network": "DePIN",
     # L1 / L2
-    "solana": "⛓️ L1", "avalanche-2": "⛓️ L1", "sui": "⛓️ L1",
-    "aptos": "⛓️ L1", "sei-network": "⛓️ L1", "injective-protocol": "⛓️ L1",
-    "celestia": "⛓️ L1", "monad": "⛓️ L1", "berachain": "⛓️ L1",
-    "arbitrum": "🔗 L2", "optimism": "🔗 L2", "polygon-ecosystem-token": "🔗 L2",
-    "starknet": "🔗 L2", "zksync": "🔗 L2", "base-protocol": "🔗 L2",
+    "solana": "L1", "avalanche-2": "L1", "sui": "L1",
+    "aptos": "L1", "sei-network": "L1", "injective-protocol": "L1",
+    "celestia": "L1", "monad": "L1", "berachain": "L1",
+    "arbitrum": "L2", "optimism": "L2", "polygon-ecosystem-token": "L2",
+    "starknet": "L2", "zksync": "L2", "base-protocol": "L2",
     # DeFi
-    "uniswap": "💰 DeFi", "aave": "💰 DeFi", "lido-dao": "💰 DeFi",
-    "maker": "💰 DeFi", "curve-dao-token": "💰 DeFi", "compound-governance-token": "💰 DeFi",
-    "jupiter-exchange-solana": "💰 DeFi", "raydium": "💰 DeFi",
-    "hyperliquid": "💰 DeFi", "ethena": "💰 DeFi",
+    "uniswap": "DeFi", "aave": "DeFi", "lido-dao": "DeFi",
+    "maker": "DeFi", "curve-dao-token": "DeFi", "compound-governance-token": "DeFi",
+    "jupiter-exchange-solana": "DeFi", "raydium": "DeFi",
+    "hyperliquid": "DeFi", "ethena": "DeFi",
     # Gaming
-    "immutable-x": "🎮 Gaming", "the-sandbox": "🎮 Gaming", "axie-infinity": "🎮 Gaming",
-    "gala": "🎮 Gaming", "illuvium": "🎮 Gaming", "beam-2": "🎮 Gaming",
-    "ronin": "🎮 Gaming", "pixels": "🎮 Gaming",
+    "immutable-x": "Gaming", "the-sandbox": "Gaming", "axie-infinity": "Gaming",
+    "gala": "Gaming", "illuvium": "Gaming", "beam-2": "Gaming",
+    "ronin": "Gaming", "pixels": "Gaming",
 }
 
 
@@ -4037,15 +4037,15 @@ def _early_background_scan():
     """Background-Thread für Early Movers Scan."""
     try:
         _early_clear_stop()
-        _early_progress_write("running", "📡 Lade CoinGecko Marktdaten (Seite 1/4)...", 5)
+        _early_progress_write("running", "Lade CoinGecko Marktdaten (Seite 1/4)...", 5)
 
         # 1. CoinGecko Markets laden — mit Progress zwischen den Pages
         all_coins = []
         for page_num in range(1, 5):
             if _early_should_stop():
-                _early_progress_write("stopped", f"⏹️ Gestoppt bei Seite {page_num}/4")
+                _early_progress_write("stopped", f"Gestoppt bei Seite {page_num}/4")
                 return
-            _early_progress_write("running", f"📡 Lade CoinGecko Seite {page_num}/4...", page_num * 15)
+            _early_progress_write("running", f"Lade CoinGecko Seite {page_num}/4...", page_num * 15)
             url = "https://api.coingecko.com/api/v3/coins/markets"
             params = {
                 "vs_currency": "usd", "order": "market_cap_desc",
@@ -4058,7 +4058,7 @@ def _early_background_scan():
                     resp = rate_limited_get(url, params=params, timeout=30)
                     if resp.status_code == 429:
                         if _retry < 3:
-                            _early_progress_write("running", f"⏳ Rate Limit — warte {15*(_retry+1)}s...", page_num * 15)
+                            _early_progress_write("running", f"Rate Limit — warte {15*(_retry+1)}s...", page_num * 15)
                             time.sleep(15 * (_retry + 1))
                             continue
                         break
@@ -4087,7 +4087,7 @@ def _early_background_scan():
                 time.sleep(3.0)
 
         if _early_should_stop():
-            _early_progress_write("stopped", "⏹️ Gestoppt")
+            _early_progress_write("stopped", "Gestoppt")
             return
 
         if not all_coins:
@@ -4095,19 +4095,19 @@ def _early_background_scan():
             return
 
         # 2. Perp-Daten laden (einmal, dann an fetch_early_movers weitergeben)
-        _early_progress_write("running", f"📡 Lade Perp-Daten (Bitget + MEXC)...", 70)
+        _early_progress_write("running", f"Lade Perp-Daten (Bitget + MEXC)...", 70)
         perp_data = fetch_multi_exchange_perps()
 
         if _early_should_stop():
-            _early_progress_write("stopped", "⏹️ Gestoppt")
+            _early_progress_write("stopped", "Gestoppt")
             return
 
         # 3. Analyse — nutze die originale Funktion mit vorgeladenen Daten
-        _early_progress_write("running", f"🔍 Analysiere {len(all_coins)} Coins...", 85)
+        _early_progress_write("running", f"Analysiere {len(all_coins)} Coins...", 85)
         result = fetch_early_movers(_prefetched_perps=perp_data)
 
         if _early_should_stop():
-            _early_progress_write("stopped", "⏹️ Gestoppt")
+            _early_progress_write("stopped", "Gestoppt")
             return
 
         # Ergebnis in Cache-File speichern
@@ -4118,7 +4118,7 @@ def _early_background_scan():
         except Exception:
             pass
 
-        _early_progress_write("done", f"✅ Fertig — {result.get('stats', {}).get('volume_spikes', 0)} Volume Spikes", 100)
+        _early_progress_write("done", f"Fertig — {result.get('stats', {}).get('volume_spikes', 0)} Volume Spikes", 100)
     except Exception as e:
         _early_progress_write("error", f"Fehler: {e}")
 
@@ -4135,7 +4135,7 @@ def _early_results_load():
 @st.cache_data(ttl=120)
 def fetch_early_movers(_prefetched_perps=None):
     """
-    🔥 Early Movers Scanner V2.0 — Multi-Exchange (Bitget + MEXC)
+     Early Movers Scanner V2.0 — Multi-Exchange (Bitget + MEXC)
 
     5 Strategien um die nächsten 10x-Coins früh zu finden:
     1. Volume Spike Detector: Vol/MCap anomal hoch, Preis noch nicht explodiert
@@ -4337,13 +4337,13 @@ def fetch_early_movers(_prefetched_perps=None):
                             entry["RecencyScore"] = recency_score
                             entry["TrendingBonus"] = trending_score
                             if price_position >= 0.7 and change_1h > 3:
-                                entry["Signal"] = "🚨 Starker Kaufdruck + Live Pump!"
+                                entry["Signal"] = "Starker Kaufdruck + Live Pump!"
                             elif price_position >= 0.7:
-                                entry["Signal"] = "📊 Akkumulation (Preis nahe High)"
+                                entry["Signal"] = "Akkumulation (Preis nahe High)"
                             elif change_24h > 5:
-                                entry["Signal"] = "📈 Volume + positive 24h"
+                                entry["Signal"] = "Volume + positive 24h"
                             else:
-                                entry["Signal"] = "📊 Volume Spike (beobachten)"
+                                entry["Signal"] = "Volume Spike (beobachten)"
                             volume_spikes.append(entry)
 
             # ══════════════════════════════════════════════
@@ -4401,9 +4401,9 @@ def fetch_early_movers(_prefetched_perps=None):
 
                     entry = dict(base_entry)
                     entry["DegenScore"] = min(100, degen_score)
-                    entry["Signal"] = f"🔥 MicroCap +{change_7d:.0f}% 7d"
+                    entry["Signal"] = f"MicroCap +{change_7d:.0f}% 7d"
                     if is_trending:
-                        entry["Signal"] += " 🔥 TRENDING"
+                        entry["Signal"] += " TRENDING"
                     if is_newly_listed:
                         entry["Signal"] += " 🆕 NEU"
                     micro_caps.append(entry)
@@ -4420,10 +4420,10 @@ def fetch_early_movers(_prefetched_perps=None):
                 # OI/Volume Ratio hoch = Positionen werden aufgebaut
                 if oi_ratio >= 3.0:
                     whale_score += 30
-                    signals.append(f"🐋 OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
                 elif oi_ratio >= 1.5:
                     whale_score += 20
-                    signals.append(f"📈 OI/Vol {oi_ratio:.1f}x (Positionen aufgebaut)")
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (Positionen aufgebaut)")
                 elif oi_ratio >= 0.8:
                     whale_score += 10
 
@@ -4431,7 +4431,7 @@ def fetch_early_movers(_prefetched_perps=None):
                 fr_pct = funding_rate * 100
                 if fr_pct >= 0.05:
                     whale_score += 20
-                    signals.append(f"💰 FR +{fr_pct:.3f}% (Longs dominant)")
+                    signals.append(f"FR +{fr_pct:.3f}% (Longs dominant)")
                 elif fr_pct >= 0.01:
                     whale_score += 10
                 elif fr_pct <= -0.03:
@@ -4439,10 +4439,10 @@ def fetch_early_movers(_prefetched_perps=None):
                     # Aber ohne historische FR können wir keinen echten "Flip" bestätigen
                     if change_24h > 3:
                         whale_score += 20
-                        signals.append(f"⚡ FR negativ {fr_pct:.3f}% aber Preis +{change_24h:.1f}% → Squeeze-Potenzial")
+                        signals.append(f"FR negativ {fr_pct:.3f}% aber Preis +{change_24h:.1f}% → Squeeze-Potenzial")
                     elif change_1h > 1:
                         whale_score += 12
-                        signals.append(f"⚡ FR negativ {fr_pct:.3f}% + 1h-Pump → beobachten")
+                        signals.append(f"FR negativ {fr_pct:.3f}% + 1h-Pump → beobachten")
 
                 # Preis noch in früher Phase (nicht schon 3x)
                 if 5 < change_7d < 40:
@@ -4453,7 +4453,7 @@ def fetch_early_movers(_prefetched_perps=None):
                 # Multi-Exchange Coverage
                 if len(exchanges) >= 2:
                     whale_score += 10
-                    signals.append(f"🏦 Auf {' + '.join(exchanges)}")
+                    signals.append(f"Auf {' + '.join(exchanges)}")
 
                 if whale_score >= 35:
                     entry = dict(base_entry)
@@ -4697,7 +4697,7 @@ def fetch_multi_exchange_perps():
 @st.cache_data(ttl=60)
 def fetch_orb_scanner(poly_key):
     """
-    🔔 Opening Range Breakout (ORB) Scanner
+     Opening Range Breakout (ORB) Scanner
 
     Automatisch aktiv um 9:45 ET (15 Min nach Market Open).
 
@@ -5024,7 +5024,7 @@ def fetch_orb_scanner(poly_key):
             # 2. RVOL (max 20)
             if rvol >= 3:
                 score += 20
-                factors.append(f"RVOL {rvol:.1f}x 🔥")
+                factors.append(f"RVOL {rvol:.1f}x ")
             elif rvol >= 2:
                 score += 15
                 factors.append(f"RVOL {rvol:.1f}x")
@@ -5068,13 +5068,13 @@ def fetch_orb_scanner(poly_key):
             # 5. VWAP-Position (max 15)
             if breakout_dir == "LONG" and current_price > vwap:
                 score += 15
-                factors.append("Über VWAP ✅")
+                factors.append("Über VWAP ")
             elif breakout_dir == "SHORT" and current_price < vwap:
                 score += 15
-                factors.append("Unter VWAP ✅")
+                factors.append("Unter VWAP ")
             else:
                 score += 3
-                factors.append("VWAP gegen Breakout ⚠️")
+                factors.append("VWAP gegen Breakout ")
 
             # 6. Volumen-Bestätigung im Breakout-Bar (max 15)
             # Fix #10: Nutze die erste Candle die über OR bricht, nicht max() aller Bars
@@ -5108,10 +5108,10 @@ def fetch_orb_scanner(poly_key):
             # Fix #4: Breakout-Bestätigung Bonus/Malus
             if _bo_confirmed:
                 score += 5
-                factors.append("Bestätigt (2+ Bars) ✅")
+                factors.append("Bestätigt (2+ Bars) ")
             else:
                 score -= 5
-                factors.append("Unbestätigt (1 Bar) ⚠️")
+                factors.append("Unbestätigt (1 Bar) ")
 
             # ── FIX: Fakeout-Detection (Crabel/Fisher Best Practice) ──
             # Wenn Preis nach Breakout zurück in OR fällt → Fakeout
@@ -5131,7 +5131,7 @@ def fetch_orb_scanner(poly_key):
 
             if _is_fakeout:
                 score -= 20
-                factors.append("⛔ Fakeout — Preis zurück in OR")
+                factors.append("Fakeout — Preis zurück in OR")
 
             # ── FIX: Time-Decay — späte Breakouts verlieren Edge ──
             # Ideal: 9:45-10:15 (0-30 Min nach OR). Nach 10:30 sinkt Wahrscheinlichkeit
@@ -5143,15 +5143,15 @@ def fetch_orb_scanner(poly_key):
                 factors.append(f"Spät ({_mins_after_or}min nach OR)")
             elif _mins_after_or <= 90:
                 score -= 10
-                factors.append(f"Spät ({_mins_after_or}min nach OR) ⚠️")
+                factors.append(f"Spät ({_mins_after_or}min nach OR) ")
             else:
                 score -= 15
-                factors.append(f"Sehr spät ({_mins_after_or}min nach OR) ⚠️")
+                factors.append(f"Sehr spät ({_mins_after_or}min nach OR) ")
 
             # ── FIX: Überdehnt-Filter — >5% Extension = gefährlich ──
             if breakout_pct > 5:
                 score -= 15
-                factors.append(f"⚠️ Stark überdehnt ({breakout_pct:.1f}%)")
+                factors.append(f"Stark überdehnt ({breakout_pct:.1f}%)")
             elif breakout_pct > 3:
                 score -= 5
 
@@ -5312,7 +5312,7 @@ def fetch_btc_divergence_shorts():
                             "checked": _coin_idx,
                             "total": _div_total,
                             "hits": len(results),
-                            "detail": f"📊 {_coin_idx}/{_div_total} Coins geprüft — {len(results)} Divergenzen",
+                            "detail": f"{_coin_idx}/{_div_total} Coins geprüft — {len(results)} Divergenzen",
                             "timestamp": time.time()
                         }, _pf)
                 except Exception:
@@ -5440,33 +5440,33 @@ def fetch_btc_divergence_shorts():
 
                 if price_near_low and change_24h < -3:
                     # Preis schon weit unten + stark gefallen → Move gelaufen
-                    timing = "⚫ ZU SPÄT — Preis schon {:.0f}% vom High, Move gelaufen".format((1 - cp) * 100)
+                    timing = "ZU SPÄT — Preis schon {:.0f}% vom High, Move gelaufen".format((1 - cp) * 100)
                 elif exh_score >= 65 and price_near_high and change_1h < -1.5:
                     # Perfekter Short: Hohe Exhaustion + nahe High + gerade am Kippen
-                    timing = "🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%)".format(change_1h)
+                    timing = "JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%)".format(change_1h)
                 elif exh_score >= 65 and price_near_high and change_1h < -0.5:
-                    timing = "🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%)".format(change_1h)
+                    timing = "JETZT — Nahe High, erste Schwäche (1h {:+.1f}%)".format(change_1h)
                 elif exh_score >= 50 and price_near_high and change_1h < -2.0:
-                    timing = "🟢 JETZT — Nahe High, starker 1h-Dump ({:+.1f}%)".format(change_1h)
+                    timing = "JETZT — Nahe High, starker 1h-Dump ({:+.1f}%)".format(change_1h)
                 elif exh_score >= 65 and price_near_high:
-                    timing = "🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze"
+                    timing = "BEREIT — Nahe High, warte auf rote 1h-Kerze"
                 elif exh_score >= 65 and price_mid_range:
-                    timing = "🟡 BEREIT — Warte auf Bounce Richtung High für besseren Entry"
+                    timing = "BEREIT — Warte auf Bounce Richtung High für besseren Entry"
                 elif exh_score >= 50 and price_mid_range and change_1h < 0:
-                    timing = "🟠 WATCHLIST — Mittlerer Bereich, könnte noch bounzen"
+                    timing = "WATCHLIST — Mittlerer Bereich, könnte noch bounzen"
                 elif exh_score >= 65 and price_near_low:
-                    timing = "⚫ ZU SPÄT — Preis schon {:.0f}% vom High gefallen".format((1 - cp) * 100)
+                    timing = "ZU SPÄT — Preis schon {:.0f}% vom High gefallen".format((1 - cp) * 100)
                 elif exh_score >= 50:
-                    timing = "🟠 WATCHLIST — Noch nicht reif"
+                    timing = "WATCHLIST — Noch nicht reif"
                 else:
-                    timing = "⚪ ZU FRÜH"
+                    timing = "ZU FRÜH"
 
                 # Coins ohne Perp: Downgrade "JETZT" → "WATCHLIST" (nicht shortbar!)
                 if not perp_info:
                     if "JETZT" in timing:
-                        timing = "🟠 WATCHLIST — Kein Perp-Contract, nicht direkt shortbar ⚠️"
+                        timing = "WATCHLIST — Kein Perp-Contract, nicht direkt shortbar "
                     else:
-                        timing = timing + " ⚠️ KEIN PERP"
+                        timing = timing + " KEIN PERP"
 
                 # RVOL für Anzeige
                 if market_cap > 0 and vol_24h > 0:
@@ -5483,13 +5483,13 @@ def fetch_btc_divergence_shorts():
 
                 # Timing-Qualitätsstufe als Zahl (für SellProb statt String-Matching)
                 _timing_quality = 0
-                if "🔴 JETZT" in timing:
+                if "JETZT" in timing:
                     _timing_quality = 5  # Perfekt
-                elif "🟢 JETZT" in timing:
+                elif "JETZT" in timing:
                     _timing_quality = 4
-                elif "🟡 BEREIT" in timing:
+                elif "BEREIT" in timing:
                     _timing_quality = 3
-                elif "🟠 WATCHLIST" in timing:
+                elif "WATCHLIST" in timing:
                     _timing_quality = 2
                 elif "ZU SPÄT" in timing:
                     _timing_quality = -1
@@ -5550,13 +5550,13 @@ def fetch_btc_divergence_shorts():
             # Nutzt strukturierte TimingQuality statt fragiles String-Matching
             tq = r.get("TimingQuality", 0)
             if tq >= 5:
-                sell_prob += 25  # 🔴 JETZT SHORTEN — Perfekter Einstieg
+                sell_prob += 25 # JETZT SHORTEN — Perfekter Einstieg
             elif tq >= 4:
-                sell_prob += 20  # 🟢 JETZT
+                sell_prob += 20 # JETZT
             elif tq >= 3:
-                sell_prob += 12  # 🟡 BEREIT
+                sell_prob += 12 # BEREIT
             elif tq >= 2:
-                sell_prob += 5   # 🟠 WATCHLIST
+                sell_prob += 5  # WATCHLIST
             elif tq < 0:
                 sell_prob -= 10  # ZU SPÄT → ABZUG
             # ZU FRÜH (tq=0) = 0 Punkte
@@ -5851,9 +5851,9 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 
                 liquidity_strategies = [
                     "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
-                    "PM Gainers 🌅", "PM Losers 🌅", "PM Gap & Go 🌅", "PM Penny Movers 🌅",
-                    "AH Gainers 🌙", "AH Losers 🌙", "AH Earnings Gainers 🌙📈", "AH Earnings Losers 🌙📉",
-                    "Consolidation Breakout 🚀", "Reversal Setup 🪤"
+                    "PM Gainers ", "PM Losers ", "PM Gap & Go ", "PM Penny Movers ",
+                    "AH Gainers ", "AH Losers ", "AH Earnings Gainers ", "AH Earnings Losers ",
+                    "Consolidation Breakout ", "Reversal Setup "
                 ]
                 # HINWEIS: Breakout Long, Breakdown Short, Volume Surge, Whale Watch etc.
                 # haben bereits RVOL-Filter (2.0+) eingebaut → brauchen keinen extra Liquiditäts-Filter
@@ -5994,7 +5994,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
                 # V69: Multi-Day Candlestick-Analyse für ALLE Strategien
                 # Nur für Strategien die davon profitieren (nicht PM/AH Sessions)
                 candle_analysis = None
-                _session_strategy = any(kw in current_strategy for kw in ["PM ", "AH ", "🌅", "🌙"])
+                _session_strategy = any(kw in current_strategy for kw in ["PM ", "AH ", "", ""])
                 if not _session_strategy and poly_key:
                     _candles = fetch_daily_candles(poly_key, ticker_raw, days=25)
                     if _candles and len(_candles) >= 5:
@@ -6002,7 +6002,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
 
                 # Breakout Health Assessment — für ALLE Strategien mit positiver Change
                 breakout_health = None
-                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇️", "Selling"]
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇", "Selling"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
 
                 if (setup_direction == "long" and change > 0) or (setup_direction == "short" and change < 0):
@@ -6112,25 +6112,25 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
 # Katalysator-Keywords nach Kategorie + Sentiment-Klassifikation
 # sentiment: "bullish", "bearish", "neutral" (bestimmt Score-Effekt)
 CATALYST_KEYWORDS = {
-    "📊 EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
-    "💊 FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
-    "🚨 OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
-    "🤝 M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
-    "📋 CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
-    "⚖️ LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
-    "📈 UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
-    "📉 DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
-    "🚨 REVERSE SPLIT": {"keywords": ["reverse split", "reverse stock split", "r/s"], "sentiment": "bearish"},
-    "🔀 STOCK SPLIT": {"keywords": ["stock split", "forward split"], "sentiment": "bullish"},
-    "💵 DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
-    "👤 INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
-    "🚀 PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
-    "🔻 BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
+    "EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
+    "FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
+    "OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
+    "M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
+    "CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
+    "LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
+    "UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
+    "DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
+    "REVERSE SPLIT": {"keywords": ["reverse split", "reverse stock split", "r/s"], "sentiment": "bearish"},
+    "STOCK SPLIT": {"keywords": ["stock split", "forward split"], "sentiment": "bullish"},
+    "DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
+    "INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
+    "PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
+    "BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
 }
 
 # Bearish catalysts → Score-Penalty statt Bonus!
-BEARISH_CATALYSTS = {"🚨 OFFERING", "⚖️ LEGAL", "📉 DOWNGRADE", "🔻 BANKRUPTCY", "🚨 REVERSE SPLIT"}
-BULLISH_CATALYSTS = {"🤝 M&A", "📋 CONTRACT", "📈 UPGRADE", "💵 DIVIDEND", "👤 INSIDER", "🚀 PRODUCT", "🔀 STOCK SPLIT"}
+BEARISH_CATALYSTS = {"OFFERING", "LEGAL", "DOWNGRADE", "BANKRUPTCY", "REVERSE SPLIT"}
+BULLISH_CATALYSTS = {"M&A", "CONTRACT", "UPGRADE", "DIVIDEND", "INSIDER", "PRODUCT", "STOCK SPLIT"}
 
 # _detect_catalyst — Moved to modules/data_fetchers.py
 
@@ -6356,7 +6356,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         brk_stop = round(pm_vwap - pm_range * 0.05, 2)  # Knapp unter VWAP
                         setups.append({
                             "name": "Breakout",
-                            "emoji": "🚀",
+                            "emoji": "",
                             "desc": f"Entry bei Break über PM High ${pm_high:.2f}",
                             "entry": brk_entry,
                             "stop": brk_stop,
@@ -6368,7 +6368,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         vwap_stop = round(pm_low - pm_range * 0.05, 2)  # Knapp unter PM Low
                         setups.append({
                             "name": "VWAP Pullback",
-                            "emoji": "🔄",
+                            "emoji": "",
                             "desc": f"Entry bei Pullback zum VWAP ${pm_vwap:.2f}",
                             "entry": vwap_entry,
                             "stop": vwap_stop,
@@ -6388,7 +6388,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         
                         setups.append({
                             "name": "Support Retest",
-                            "emoji": "📐",
+                            "emoji": "",
                             "desc": f"Entry bei Retest von {retest_label}",
                             "entry": retest_entry,
                             "stop": retest_stop,
@@ -6397,13 +6397,13 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         # Primary/Alt Auswahl basierend auf Position
                         if pm_position >= 75:
                             primary_idx, alt_idx = 0, 1  # Breakout, VWAP
-                            entry_signal = "🎯 OR BREAK"
+                            entry_signal = "OR BREAK"
                         elif pm_position >= 40:
                             primary_idx, alt_idx = 1, 0  # VWAP, Breakout
-                            entry_signal = "🔄 PULLBACK"
+                            entry_signal = "PULLBACK"
                         else:
                             primary_idx, alt_idx = 2, 1  # Retest, VWAP
-                            entry_signal = "📐 RETEST"
+                            entry_signal = "RETEST"
                         
                         entry_detail = setups[primary_idx]["desc"]
                         
@@ -6438,7 +6438,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         brk_stop = round(pm_vwap + pm_range * 0.05, 2)
                         setups.append({
                             "name": "Breakdown",
-                            "emoji": "💥",
+                            "emoji": "",
                             "desc": f"Entry bei Break unter PM Low ${pm_low:.2f}",
                             "entry": brk_entry,
                             "stop": brk_stop,
@@ -6450,7 +6450,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         vwap_stop = round(pm_high + pm_range * 0.05, 2)
                         setups.append({
                             "name": "VWAP Rejection",
-                            "emoji": "🔄",
+                            "emoji": "",
                             "desc": f"Short bei Rejection am VWAP ${pm_vwap:.2f}",
                             "entry": vwap_entry,
                             "stop": vwap_stop,
@@ -6468,7 +6468,7 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         
                         setups.append({
                             "name": "Resistance Retest",
-                            "emoji": "📐",
+                            "emoji": "",
                             "desc": f"Short bei Retest von {retest_label}",
                             "entry": retest_entry,
                             "stop": retest_stop,
@@ -6476,13 +6476,13 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         
                         if pm_position <= 25:
                             primary_idx, alt_idx = 0, 1
-                            entry_signal = "🎯 OR BREAK"
+                            entry_signal = "OR BREAK"
                         elif pm_position <= 60:
                             primary_idx, alt_idx = 1, 0
-                            entry_signal = "🔄 REJECTION"
+                            entry_signal = "REJECTION"
                         else:
                             primary_idx, alt_idx = 2, 1
-                            entry_signal = "📐 RETEST"
+                            entry_signal = "RETEST"
                         
                         entry_detail = setups[primary_idx]["desc"]
                         
@@ -6550,14 +6550,14 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                         "Setups": setups,
                         "Primary_Idx": primary_idx,
                         "Alt_Idx": alt_idx,
-                        "Direction": "🟢 LONG" if cand.get("pm_change", 0) > 0 else "🔴 SHORT",
+                        "Direction": "LONG" if cand.get("pm_change", 0) > 0 else "SHORT",
                         "Move_Time": pm_data.get("first_move_time", "N/A"),
                         # Placeholder für News und Details (werden später gefüllt)
                         "News": [],
                         "Catalysts": [],  # FIX 2: Katalysator-Erkennung
                         "Shares_M": 0,
                         "Float_Cat": "UNKNOWN",
-                        "Float_Emoji": "❓",
+                        "Float_Emoji": "",
                         "Market_Cap_M": 0,
                         "Company_Name": "",
                     })
@@ -6646,13 +6646,13 @@ def fetch_premarket_watchlist(poly_key, min_change=2.0, min_volume=50000, min_pr
                             # Update Confidence nach Penalty
                             s = item.get("PM_Score", 0)
                             if s >= 75:
-                                item["PM_Confidence"] = "🟢 HIGH"
+                                item["PM_Confidence"] = "HIGH"
                             elif s >= 55:
-                                item["PM_Confidence"] = "🟡 MEDIUM"
+                                item["PM_Confidence"] = "MEDIUM"
                             elif s >= 35:
-                                item["PM_Confidence"] = "🟠 LOW"
+                                item["PM_Confidence"] = "LOW"
                             else:
-                                item["PM_Confidence"] = "🔴 AVOID"
+                                item["PM_Confidence"] = "AVOID"
         except Exception:
             pass  # Earnings sind optional, kein Absturz
         
@@ -6679,13 +6679,13 @@ def _render_pm_item(item, direction="long"):
         if ear_info:
             level = ear_info.get("level", "")
             if level in ("TODAY_AMC", "TODAY_BMO", "TODAY"):
-                st.error(f"⛔ {ear_info['warning']} — {ear_info.get('details', '')}")
+                st.error(f"{ear_info['warning']} — {ear_info.get('details', '')}")
             elif level == "YESTERDAY_AMC":
-                st.warning(f"🚨 {ear_info['warning']} — {ear_info.get('details', '')}")
+                st.warning(f"{ear_info['warning']} — {ear_info.get('details', '')}")
             elif level == "TOMORROW":
-                st.warning(f"⚠️ {ear_info['warning']} — {ear_info.get('details', '')}")
+                st.warning(f"{ear_info['warning']} — {ear_info.get('details', '')}")
             elif level == "THIS_WEEK":
-                st.info(f"📅 Earnings diese Woche: {ear_info.get('date', '')} — {ear_info.get('details', '')}")
+                st.info(f"Earnings diese Woche: {ear_info.get('date', '')} — {ear_info.get('details', '')}")
         
         # ── Header Row ──
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -6693,7 +6693,7 @@ def _render_pm_item(item, direction="long"):
         with col1:
             # Ticker + Score Badge
             pm_score = item.get("PM_Score", 0)
-            confidence = item.get("PM_Confidence", "🟡 MEDIUM")
+            confidence = item.get("PM_Confidence", "MEDIUM")
             
             # Score Color
             if pm_score >= 75:
@@ -6718,7 +6718,7 @@ def _render_pm_item(item, direction="long"):
             st.caption(f"{item.get('Setup_Emoji', '')} {item.get('Setup_Type', '')}")
             # Float Info
             if item.get('Shares_M', 0) > 0:
-                st.caption(f"{item.get('Float_Emoji', '❓')} {item.get('Shares_M', 0):.1f}M shares")
+                st.caption(f"{item.get('Float_Emoji', '')} {item.get('Shares_M', 0):.1f}M shares")
         
         with col2:
             # Preis & Levels
@@ -6726,20 +6726,20 @@ def _render_pm_item(item, direction="long"):
             vol_ratio_str = ""
             if vol_ratio > 0:
                 if vol_ratio < 0.3:
-                    vol_ratio_str = f" | VolR: **⚠️ {vol_ratio:.1f}x** (DÜNN!)"
+                    vol_ratio_str = f" | VolR: **{vol_ratio:.1f}x** (DÜNN!)"
                 elif vol_ratio < 0.5:
                     vol_ratio_str = f" | VolR: **{vol_ratio:.1f}x** (niedrig)"
                 elif vol_ratio >= 2.0:
-                    vol_ratio_str = f" | VolR: **🔥 {vol_ratio:.1f}x**"
+                    vol_ratio_str = f" | VolR: **{vol_ratio:.1f}x**"
                 else:
                     vol_ratio_str = f" | VolR: **{vol_ratio:.1f}x**"
             
-            st.markdown(f"**💰 ${item.get('PM_Preis', 0):.2f}** | Vol: {item.get('PM_Vol', 0):,.0f}{vol_ratio_str}")
+            st.markdown(f"**${item.get('PM_Preis', 0):.2f}** | Vol: {item.get('PM_Vol', 0):,.0f}{vol_ratio_str}")
             
             if is_long:
-                st.caption(f"📊 PM High: **${item.get('PM_High', 0):.2f}** | Low: ${item.get('PM_Low', 0):.2f} | VWAP: ${item.get('PM_VWAP', 0):.2f}")
+                st.caption(f"PM High: **${item.get('PM_High', 0):.2f}** | Low: ${item.get('PM_Low', 0):.2f} | VWAP: ${item.get('PM_VWAP', 0):.2f}")
             else:
-                st.caption(f"📊 PM High: ${item.get('PM_High', 0):.2f} | Low: **${item.get('PM_Low', 0):.2f}** | VWAP: ${item.get('PM_VWAP', 0):.2f}")
+                st.caption(f"PM High: ${item.get('PM_High', 0):.2f} | Low: **${item.get('PM_Low', 0):.2f}** | VWAP: ${item.get('PM_VWAP', 0):.2f}")
             
             # Gap + PM Momentum (NEU V2)
             pm_mom = item.get("PM_Breakdown", {}).get("pm_momentum", 0)
@@ -6747,18 +6747,18 @@ def _render_pm_item(item, direction="long"):
                 mom_sign = "+" if pm_mom > 0 else ""
                 mom_color = "green" if ((is_long and pm_mom > 0) or (not is_long and pm_mom < 0)) else "red"
                 mom_emoji = "🟢" if mom_color == "green" else "🔴"
-                st.caption(f"📈 Gap: {item.get('Gap%', 0):+.1f}% | PM Momentum: **{mom_emoji} {mom_sign}{pm_mom:.1f}%** | RS: {item.get('RS_vs_SPY', 0):+.1f}%")
+                st.caption(f"Gap: {item.get('Gap%', 0):+.1f}% | PM Momentum: **{mom_emoji} {mom_sign}{pm_mom:.1f}%** | RS: {item.get('RS_vs_SPY', 0):+.1f}%")
             else:
-                st.caption(f"📈 Gap: {item.get('Gap%', 0):+.1f}% | RS vs SPY: {item.get('RS_vs_SPY', 0):+.1f}%")
-            st.caption(f"📉 PDH: ${item.get('PDH', 0):.2f} | PDL: ${item.get('PDL', 0):.2f}")
+                st.caption(f"Gap: {item.get('Gap%', 0):+.1f}% | RS vs SPY: {item.get('RS_vs_SPY', 0):+.1f}%")
+            st.caption(f"PDH: ${item.get('PDH', 0):.2f} | PDL: ${item.get('PDL', 0):.2f}")
             
             # Market Cap
             if item.get('Market_Cap_M', 0) > 0:
                 mcap = item.get('Market_Cap_M', 0)
                 if mcap >= 1000:
-                    st.caption(f"💵 MCap: ${mcap/1000:.1f}B")
+                    st.caption(f"MCap: ${mcap/1000:.1f}B")
                 else:
-                    st.caption(f"💵 MCap: ${mcap:.0f}M")
+                    st.caption(f"MCap: ${mcap:.0f}M")
         
         with col3:
             # Entry Signal
@@ -6779,10 +6779,10 @@ def _render_pm_item(item, direction="long"):
             # Position Meter
             pos = item.get('PM_Position', '')
             if is_long:
-                pos_bar = "🟩" * int(pos/10) + "⬜" * (10 - int(pos/10))
+                pos_bar = "" * int(pos/10) + "⬜" * (10 - int(pos/10))
             else:
                 filled = 10 - int(pos/10)
-                pos_bar = "⬜" * int(pos/10) + "🟥" * filled
+                pos_bar = "⬜" * int(pos/10) + "" * filled
             st.caption(f"Range-Pos: {pos_bar} {pos:.0f}%")
             st.caption("↑ Preis in PM-Range (High/Low)", help="Zeigt wo der aktuelle Preis innerhalb der PreMarket-Spanne liegt. 100% = am PM-High. Nicht mit dem Setup-Score verwechseln!")
         
@@ -6791,7 +6791,7 @@ def _render_pm_item(item, direction="long"):
         if warnings_list:
             warn_str = " • ".join(warnings_list)
             st.markdown(f"<div style='background:#fef2f2;border-left:4px solid #ef4444;padding:4px 10px;margin:4px 0;border-radius:4px;font-size:13px;'>"
-                       f"⚠️ {warn_str}</div>", unsafe_allow_html=True)
+                       f"{warn_str}</div>", unsafe_allow_html=True)
         
         # ── Katalysator-Zeile (mit Bearish-Warnung) ──
         catalysts = item.get('Catalysts', [])
@@ -6801,10 +6801,10 @@ def _render_pm_item(item, direction="long"):
             if _bear_cats:
                 bear_str = " | ".join(_bear_cats)
                 st.markdown(f"<div style='background:#fef2f2;border-left:4px solid #ef4444;padding:4px 10px;margin:4px 0;border-radius:4px;font-size:13px;'>"
-                           f"🚨 <b>BEARISH Katalysator:</b> {bear_str} — Vorsicht bei Long!</div>", unsafe_allow_html=True)
+                           f"<b>BEARISH Katalysator:</b> {bear_str} — Vorsicht bei Long!</div>", unsafe_allow_html=True)
             if _bull_cats:
                 bull_str = " | ".join(_bull_cats)
-                st.markdown(f"🎯 **Katalysator:** {bull_str}")
+                st.markdown(f"**Katalysator:** {bull_str}")
         
         # ── News Row ──
         news_list = item.get('News', [])
@@ -6815,10 +6815,10 @@ def _render_pm_item(item, direction="long"):
                 cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
                 news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
             if news_text:
-                st.caption(f"📰 **News:** {news_text}")
+                st.caption(f"**News:** {news_text}")
         
         # ── Trade Setups + Score Breakdown Expander ──
-        with st.expander(f"📐 Trade Setups — {item.get('Setup_Desc', '')}"):
+        with st.expander(f"Trade Setups — {item.get('Setup_Desc', '')}"):
             # Score Breakdown V2
             breakdown = item.get("PM_Breakdown", {})
             if breakdown:
@@ -6834,7 +6834,7 @@ def _render_pm_item(item, direction="long"):
                     st.metric("Pos+VWAP", f"{breakdown.get('position', 0):.0f}/20")
                 with bc3:
                     v_score = breakdown.get('volume', 0)
-                    v_label = "Volume" if v_score >= 8 else "⚠️ Volume"
+                    v_label = "Volume" if v_score >= 8 else "Volume"
                     st.metric(v_label, f"{v_score:.0f}/25")
                 with bc4:
                     st.metric("RS", f"{breakdown.get('rs', 0):.0f}/15")
@@ -6844,12 +6844,12 @@ def _render_pm_item(item, direction="long"):
                 # Penalty anzeigen (wenn vorhanden)
                 total_penalty = breakdown.get("penalty", 0)
                 if total_penalty < 0:
-                    st.caption(f"🔻 Penalty: **{total_penalty}** Punkte (Fading/Stale/Contradiction)")
+                    st.caption(f"Penalty: **{total_penalty}** Punkte (Fading/Stale/Contradiction)")
                 
                 # Earnings Penalty anzeigen
                 if ear_info:
                     penalty = ear_info.get("score_penalty", 0)
-                    st.caption(f"⚠️ Earnings Penalty: {penalty} Punkte")
+                    st.caption(f"Earnings Penalty: {penalty} Punkte")
                 
                 st.markdown("---")
             
@@ -6862,9 +6862,9 @@ def _render_pm_item(item, direction="long"):
                 if si == primary_idx:
                     label = "⭐ PRIMARY"
                 elif si == alt_idx:
-                    label = "🔹 ALTERNATIVE"
+                    label = "ALTERNATIVE"
                 else:
-                    label = "⚪ OPTION"
+                    label = "OPTION"
                 
                 s_risk_pct = setup.get("risk_pct", 0)
                 
@@ -6893,7 +6893,7 @@ def _render_pm_item(item, direction="long"):
             
             st.caption(f"Move Start: {item.get('Move_Time', 'N/A')}")
             if item.get('Company_Name'):
-                st.caption(f"🏢 {item.get('Company_Name', '')}")
+                st.caption(f"{item.get('Company_Name', '')}")
         
         st.divider()
 
@@ -6904,15 +6904,15 @@ def display_premarket_watchlist(pm_data, spy_change=0):
     """
     
     if not pm_data:
-        st.warning("⏳ Keine Pre-Market Mover gefunden. PM Session: 4:00-9:30 AM ET")
+        st.warning("Keine Pre-Market Mover gefunden. PM Session: 4:00-9:30 AM ET")
         return
     
     # Header mit SPY Info + Score Distribution
     col_header1, col_header2, col_header3 = st.columns([2, 1, 2])
     with col_header1:
-        st.success(f"📋 **{len(pm_data)} Pre-Market Setups** gefunden")
+        st.success(f"**{len(pm_data)} Pre-Market Setups** gefunden")
     with col_header2:
-        spy_color = "🟢" if spy_change >= 0 else "🔴"
+        spy_color = "" if spy_change >= 0 else ""
         st.info(f"SPY PM: {spy_color} {spy_change:+.2f}%")
     with col_header3:
         n_high = sum(1 for x in pm_data if x.get("PM_Score", 0) >= 75)
@@ -6920,9 +6920,9 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         n_low = sum(1 for x in pm_data if 35 <= x.get("PM_Score", 0) < 55)
         n_avoid = sum(1 for x in pm_data if x.get("PM_Score", 0) < 35)
         n_earn = sum(1 for x in pm_data if x.get("EarningsWarning"))
-        score_str = f"🟢{n_high} 🟡{n_med} 🟠{n_low} 🔴{n_avoid}"
+        score_str = f"{n_high} {n_med} {n_low} {n_avoid}"
         if n_earn > 0:
-            score_str += f" | ⚠️ER:{n_earn}"
+            score_str += f" | ER:{n_earn}"
         st.caption(f"**Scores:** {score_str}")
     
     # Auto-Save Setups für Tracker
@@ -6932,7 +6932,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
             st.session_state._pm_setups_saved_today = True
     
     # Tabs für verschiedene Ansichten
-    tab_long, tab_short, tab_all, tab_tracker, tab_export = st.tabs(["🟢 LONG", "🔴 SHORT", "📊 Alle", "📈 Tracker", "📋 Export"])
+    tab_long, tab_short, tab_all, tab_tracker, tab_export = st.tabs(["LONG", "SHORT", "Alle", "Tracker", "Export"])
     
     # Aufteilen in Long und Short
     long_candidates = [x for x in pm_data if x["PM_Chg%"] > 0]
@@ -6968,7 +6968,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker"),
                     "PM_Score": st.column_config.ProgressColumn("Setup Score", format="%d", min_value=0, max_value=100),
-                    "PM_Confidence": st.column_config.TextColumn("Conf.", help="🟢HIGH 🟡MED 🟠LOW 🔴AVOID"),
+                    "PM_Confidence": st.column_config.TextColumn("Conf.", help="HIGH MED LOW AVOID"),
                     "PM_Chg%": st.column_config.NumberColumn("PM Chg%", format="%.1f%%"),
                     "PM_Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
                     "PM_High": st.column_config.NumberColumn("PM High", format="$%.2f"),
@@ -6987,7 +6987,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
     
     # === TRACKER TAB ===
     with tab_tracker:
-        st.subheader("📈 Setup Tracker — Hat es funktioniert?")
+        st.subheader("Setup Tracker — Hat es funktioniert?")
         st.caption("Verfolge ob die PM Setups im echten Markt funktioniert hätten")
         
         try:
@@ -6998,11 +6998,11 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         if tracker_poly_key:
             display_pm_tracker(tracker_poly_key)
         else:
-            st.warning("⚠️ Polygon API Key benötigt für Intraday-Auswertung")
+            st.warning("Polygon API Key benötigt für Intraday-Auswertung")
     
     # === EXPORT TAB ===
     with tab_export:
-        st.subheader("📋 Copy/Paste Watchlist")
+        st.subheader("Copy/Paste Watchlist")
         
         # OR BREAK Kandidaten
         or_break = [x for x in pm_data if "OR BREAK" in x["Entry_Signal"]]
@@ -7010,7 +7010,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         export_text = f"═══ PRE-MARKET WATCHLIST {datetime.now().strftime('%Y-%m-%d %H:%M')} ET ═══\n"
         export_text += f"SPY PM: {spy_change:+.2f}%\n\n"
         
-        export_text += "🎯 OR BREAK SETUPS (Entry bei Open):\n"
+        export_text += "OR BREAK SETUPS (Entry bei Open):\n"
         export_text += "─" * 60 + "\n"
         if or_break:
             for item in or_break[:10]:
@@ -7022,7 +7022,7 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         else:
             export_text += "Keine OR Break Kandidaten\n"
         
-        export_text += "\n👀 WATCH (Warte auf Entwicklung):\n"
+        export_text += "\nWATCH (Warte auf Entwicklung):\n"
         export_text += "─" * 50 + "\n"
         watch = [x for x in pm_data if "WATCH" in x["Entry_Signal"]][:5]
         for item in watch:
@@ -7032,30 +7032,30 @@ def display_premarket_watchlist(pm_data, spy_change=0):
         st.code(export_text)
         
         # Session State für Export in andere Teile der App
-        if st.button("💾 Zur Watchlist hinzufügen", key="add_pm_to_watchlist"):
+        if st.button("Zur Watchlist hinzufügen", key="add_pm_to_watchlist"):
             for item in or_break[:5]:
                 if item.get('Ticker', 'N/A') not in st.session_state.watchlist:
                     st.session_state.watchlist.append(item.get('Ticker', 'N/A'))
-            st.success(f"✅ {min(len(or_break), 5)} Ticker zur Watchlist hinzugefügt!")
+            st.success(f"{min(len(or_break), 5)} Ticker zur Watchlist hinzugefügt!")
         
         # Trading Tipps
-        with st.expander("💡 PM Watchlist Trading Anleitung"):
+        with st.expander("PM Watchlist Trading Anleitung"):
             st.markdown("""
             ### Setup-Typen erklärt:
             
             | Setup | Bedeutung | Trading Ansatz |
             |-------|-----------|----------------|
-            | 🚀 GAP & GO | Gap Up + hält High | Entry bei OR Break über PM High |
-            | 📉 GAP & FADE | Gap Down + schwach | Short bei OR Break unter PM Low |
-            | 💥 SQUEEZE | Extreme Bewegung | Vorsicht! Kann in beide Richtungen gehen |
-            | 📈 CONTINUATION | Stetiger Trend | Warte auf Pullback zum VWAP |
-            | ⚠️ REVERSAL WATCH | Verliert Momentum | Nicht gegen den Fade traden |
-            | ↔️ RANGE | Choppy | Warte auf klare Richtung |
+            | GAP & GO | Gap Up + hält High | Entry bei OR Break über PM High |
+            | GAP & FADE | Gap Down + schwach | Short bei OR Break unter PM Low |
+            | SQUEEZE | Extreme Bewegung | Vorsicht! Kann in beide Richtungen gehen |
+            | CONTINUATION | Stetiger Trend | Warte auf Pullback zum VWAP |
+            | REVERSAL WATCH | Verliert Momentum | Nicht gegen den Fade traden |
+            | ↔ RANGE | Choppy | Warte auf klare Richtung |
             
             ### Entry Strategie:
             
             1. **Pre-Market (6:00-9:30 ET):**
-               - Identifiziere 🎯 OR BREAK Kandidaten
+               - Identifiziere OR BREAK Kandidaten
                - Notiere Entry/Stop/Target Levels
                - Setze Alarme in TradingView
             
@@ -7100,14 +7100,14 @@ def display_pm_tracker(poly_key):
     tracker_data = _load_pm_tracker()
     
     if not tracker_data:
-        st.info("📊 Noch keine PM Setups gespeichert. Lade zuerst die PM Watchlist, dann werden Setups automatisch für Tracking gespeichert.")
+        st.info("Noch keine PM Setups gespeichert. Lade zuerst die PM Watchlist, dann werden Setups automatisch für Tracking gespeichert.")
         return
     
     available_dates = sorted(tracker_data.keys(), reverse=True)
     
     # Datum auswählen
     selected_date = st.selectbox(
-        "📅 Datum auswählen", 
+        "Datum auswählen", 
         available_dates,
         format_func=lambda d: f"{d} ({tracker_data[d].get('count', 0)} Setups)"
     )
@@ -7126,9 +7126,9 @@ def display_pm_tracker(poly_key):
     # Auswertung starten
     col_eval1, col_eval2 = st.columns([1, 2])
     with col_eval1:
-        if st.button("🔍 Setups auswerten", key=f"eval_{selected_date}", 
+        if st.button("Setups auswerten", key=f"eval_{selected_date}", 
                      help="Holt Intraday-Daten und prüft ob Entry/Stop/TP getroffen wurden"):
-            with st.spinner(f"⏳ Werte {len(tickers)} Ticker aus..."):
+            with st.spinner(f"Werte {len(tickers)} Ticker aus..."):
                 eval_results = evaluate_pm_setups(poly_key, selected_date, day_data)
                 
                 if eval_results:
@@ -7145,19 +7145,19 @@ def display_pm_tracker(poly_key):
                     except Exception as e:
                         _debug_log("Tracker result save failed", error=e)
                     
-                    st.success(f"✅ {len(eval_results)} Ticker ausgewertet!")
+                    st.success(f"{len(eval_results)} Ticker ausgewertet!")
                     st.rerun()
                 else:
                     st.warning("Keine Intraday-Daten verfügbar. Nur für vergangene Handelstage möglich.")
     
     with col_eval2:
         if has_results:
-            st.caption("✅ Bereits ausgewertet — Ergebnisse unten")
+            st.caption("Bereits ausgewertet — Ergebnisse unten")
     
     # Ergebnisse anzeigen
     if not has_results:
         # Zeige gespeicherte Setups ohne Auswertung
-        st.markdown("### 📋 Gespeicherte Setups")
+        st.markdown("### Gespeicherte Setups")
         for t in tickers[:10]:
             direction_emoji = "🟢" if t.get("direction", "") == "LONG" else "🔴"
             st.markdown(f"**{direction_emoji} {t.get('ticker', '')}** — {t.get('pm_change', 0):+.1f}% | {t.get('setup_type', '')} | Signal: {t.get('entry_signal', '')}")
@@ -7173,7 +7173,7 @@ def display_pm_tracker(poly_key):
         return
     
     # Gesamtstatistik
-    st.markdown("### 📊 Ergebnis-Übersicht")
+    st.markdown("### Ergebnis-Übersicht")
     
     # Sammle Stats pro Setup-Typ
     stats_by_type = {}  # {setup_name: {wins, losses, total_r, count, ...}}
@@ -7251,7 +7251,7 @@ def display_pm_tracker(poly_key):
                     st.caption(f"⭐ Als Primary: {prim_wr:.0f}% WR ({stats.get('primary_count', 0)}×)")
     
     # Einzelne Trades
-    st.markdown("### 📝 Einzelne Trades")
+    st.markdown("### Einzelne Trades")
     
     for t in evaluated:
         result = t["results"]
@@ -7273,10 +7273,10 @@ def display_pm_tracker(poly_key):
                     result_text = f"STOP → ${sr.get('exit_price', 0):.2f} ({sr.get('pnl_pct', 0):+.1f}% | {sr.get('r_multiple', 0):+.1f}R)"
                 elif sr.get("exit_reason", "") == "TP2":
                     color = "green"
-                    result_text = f"TP2 ✅ → ${sr.get('exit_price', 0):.2f} ({sr.get('pnl_pct', 0):+.1f}% | {sr.get('r_multiple', 0):+.1f}R)"
+                    result_text = f"TP2 → ${sr.get('exit_price', 0):.2f} ({sr.get('pnl_pct', 0):+.1f}% | {sr.get('r_multiple', 0):+.1f}R)"
                 elif sr.get("exit_reason", "") == "TP1+EOD":
                     color = "green"
-                    result_text = f"TP1 ✅ + EOD → ${sr.get('exit_price', 0):.2f} ({sr.get('pnl_pct', 0):+.1f}% | {sr.get('r_multiple', 0):+.1f}R)"
+                    result_text = f"TP1 + EOD → ${sr.get('exit_price', 0):.2f} ({sr.get('pnl_pct', 0):+.1f}% | {sr.get('r_multiple', 0):+.1f}R)"
                 else:
                     color = "orange" if sr.get("pnl_pct", 0) >= 0 else "red"
                     result_text = f"EOD Close → ${sr.get('exit_price', 0):.2f} ({sr.get('pnl_pct', 0):+.1f}% | {sr.get('r_multiple', 0):+.1f}R)"
@@ -7290,16 +7290,16 @@ def display_pm_tracker(poly_key):
     
     # Best/Worst Setup Summary
     if all_trades:
-        st.markdown("### 🏆 Best & Worst")
+        st.markdown("### Best & Worst")
         
         best = max(all_trades, key=lambda x: x["r_multiple"])
         worst = min(all_trades, key=lambda x: x["r_multiple"])
         
         col_best, col_worst = st.columns(2)
         with col_best:
-            st.success(f"🏆 Best: **{best.get('ticker', '')}** {best.get('setup', '')} → {best.get('r_multiple', 0):+.1f}R ({best.get('pnl_pct', 0):+.1f}%)")
+            st.success(f"Best: **{best.get('ticker', '')}** {best.get('setup', '')} → {best.get('r_multiple', 0):+.1f}R ({best.get('pnl_pct', 0):+.1f}%)")
         with col_worst:
-            st.error(f"💀 Worst: **{worst.get('ticker', '')}** {worst.get('setup', '')} → {worst.get('r_multiple', 0):+.1f}R ({worst.get('pnl_pct', 0):+.1f}%)")
+            st.error(f"Worst: **{worst.get('ticker', '')}** {worst.get('setup', '')} → {worst.get('r_multiple', 0):+.1f}R ({worst.get('pnl_pct', 0):+.1f}%)")
         
         # Avg R for primaries vs alternatives
         primary_trades = [t for t in all_trades if t["is_primary"]]
@@ -7310,16 +7310,16 @@ def display_pm_tracker(poly_key):
             avg_r_alt = sum(t["r_multiple"] for t in alt_trades) / len(alt_trades)
             
             st.markdown(f"⭐ **Primary Setups**: Avg {avg_r_primary:+.2f}R ({len(primary_trades)} Trades)")
-            st.markdown(f"🔹 **Alternative Setups**: Avg {avg_r_alt:+.2f}R ({len(alt_trades)} Trades)")
+            st.markdown(f"**Alternative Setups**: Avg {avg_r_alt:+.2f}R ({len(alt_trades)} Trades)")
             
             if avg_r_primary > avg_r_alt:
-                st.success("✅ Primary Selection schlägt Alternativen!")
+                st.success("Primary Selection schlägt Alternativen!")
             else:
-                st.warning("⚠️ Alternative Setups wären besser gewesen — Selektion überprüfen!")
+                st.warning("Alternative Setups wären besser gewesen — Selektion überprüfen!")
 
 
 # =============================================================================
-# 🧪 BACKTEST LAB — 6 Monate Strategietest mit echten Daten
+# BACKTEST LAB — 6 Monate Strategietest mit echten Daten
 # =============================================================================
 
 BACKTEST_CACHE_FILE = "/tmp/alpha_station_backtest_cache.json"
@@ -7384,7 +7384,7 @@ BACKTEST_UNIVERSE = [
 
 
 # =============================================================================
-# 🔮 CRYPTO BACKTEST — Breakout Imminent für Krypto (CoinGecko OHLC)
+# CRYPTO BACKTEST — Breakout Imminent für Krypto (CoinGecko OHLC)
 # =============================================================================
 
 DEFAULT_CRYPTO_COINS = [
@@ -7411,7 +7411,7 @@ DEFAULT_CRYPTO_COINS = [
 
 def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback=None):
     """
-    🔮 Crypto Breakout Imminent Backtest — Rolling-Window Analyse mit CoinGecko OHLC.
+     Crypto Breakout Imminent Backtest — Rolling-Window Analyse mit CoinGecko OHLC.
 
     Analog zu run_bi_v2_backtest() aber für Krypto angepasst:
     - Keine Volume-Confirmation (CoinGecko hat kein hist. Volume)
@@ -7457,7 +7457,7 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
 
     for i, symbol in enumerate(coins):
         if progress_callback:
-            progress_callback(i / total_coins * 0.3, f"📥 Lade {symbol} ({i+1}/{total_coins})...")
+            progress_callback(i / total_coins * 0.3, f"Lade {symbol} ({i+1}/{total_coins})...")
 
         coin_id = _resolve_coingecko_id(symbol)
         if not coin_id:
@@ -7492,7 +7492,7 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
 
     if not coin_histories:
         if progress_callback:
-            progress_callback(1.0, "❌ Keine Crypto-Daten geladen")
+            progress_callback(1.0, "Keine Crypto-Daten geladen")
         return {"trades": [], "stats_by_grade": {}, "summary": {
             "total_signals": 0, "total_filled": 0, "win_rate": 0,
             "total_pnl": 0, "n_coins": 0, "direction": direction, "days": days
@@ -7508,7 +7508,7 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
             windows_done += 1
             if progress_callback and windows_done % 20 == 0:
                 pct = 0.3 + (windows_done / max(1, total_windows)) * 0.5
-                progress_callback(min(pct, 0.8), f"🔍 Analysiere {symbol} ({windows_done}/{total_windows})...")
+                progress_callback(min(pct, 0.8), f"Analysiere {symbol} ({windows_done}/{total_windows})...")
 
             # Cooldown: Min 7 Bars zwischen Signalen pro Coin
             if symbol in cooldown:
@@ -7798,13 +7798,13 @@ def run_crypto_backtest(direction="long", days=90, coins=None, progress_callback
     }
 
     if progress_callback:
-        progress_callback(1.0, f"✅ Crypto Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
+        progress_callback(1.0, f"Crypto Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
 
     return {"trades": all_trades, "stats_by_grade": stats_by_grade, "summary": summary}
 
 
 # =============================================================================
-# 🧬 BIOTECH CATALYST BACKTEST — Technical Setup + Volume Confirmation
+# BIOTECH CATALYST BACKTEST — Technical Setup + Volume Confirmation
 # =============================================================================
 
 # Top-traded Biotech/Pharma Tickers für den Backtest
@@ -7859,31 +7859,31 @@ def display_backtest_lab(poly_key):
     import streamlit as st
     import json
     
-    st.header("🧪 Backtest Lab")
+    st.header("Backtest Lab")
     st.caption("Teste Strategien über historische Daten mit echten Polygon-Daten")
 
     # === MODUS: Standard vs BI V2 vs Crypto vs BioTech ===
-    bt_mode = st.radio("Backtest-Modus", ["📊 Standard Strategien", "🔮 Breakout Imminent V2", "🌐 Crypto BI", "🧬 BioTech Catalyst"],
+    bt_mode = st.radio("Backtest-Modus", ["Standard Strategien", "Breakout Imminent V2", "Crypto BI", "BioTech Catalyst"],
                         horizontal=True, key="bt_mode_radio")
 
     # =================================================================
-    # 🔮 BREAKOUT IMMINENT V2 BACKTEST
+    # BREAKOUT IMMINENT V2 BACKTEST
     # =================================================================
-    if bt_mode == "🔮 Breakout Imminent V2":
-        st.subheader("🔮 Breakout Imminent V2 — Historischer Backtest")
+    if bt_mode == "Breakout Imminent V2":
+        st.subheader("Breakout Imminent V2 — Historischer Backtest")
         st.caption("Rollt ein 30-Tage-Fenster über den gesamten Zeitraum und sucht nach BI V2 Signalen")
 
         col_b1, col_b2, col_b3 = st.columns(3)
         with col_b1:
-            bi_months = st.selectbox("📅 Zeitraum", [3, 6, 12], index=1, format_func=lambda x: f"{x} Monate", key="bi_months")
+            bi_months = st.selectbox("Zeitraum", [3, 6, 12], index=1, format_func=lambda x: f"{x} Monate", key="bi_months")
         with col_b2:
-            bi_direction = st.selectbox("📈 Richtung", ["long", "short"], key="bi_dir")
+            bi_direction = st.selectbox("Richtung", ["long", "short"], key="bi_dir")
         with col_b3:
-            bi_max_tickers = st.selectbox("🎯 Aktien (Mid-Cap Prio)", [100, 200, 500, 1000], index=1, key="bi_max")
+            bi_max_tickers = st.selectbox("Aktien (Mid-Cap Prio)", [100, 200, 500, 1000], index=1, key="bi_max")
 
-        st.caption(f"⏱️ Geschätzte Dauer: ~{bi_months * 22 // 5 + bi_max_tickers // 20} Min (Grouped Daily + Analyse)")
+        st.caption(f"Geschätzte Dauer: ~{bi_months * 22 // 5 + bi_max_tickers // 20} Min (Grouped Daily + Analyse)")
 
-        if st.button("🚀 BI V2 Backtest starten", type="primary", use_container_width=True, key="bi_bt_start"):
+        if st.button("BI V2 Backtest starten", type="primary", use_container_width=True, key="bi_bt_start"):
             progress_bar = st.progress(0, text="Starte BI V2 Backtest...")
 
             def update_progress(pct, text):
@@ -7910,7 +7910,7 @@ def display_backtest_lab(poly_key):
             trades = bi_results["trades"]
 
             st.divider()
-            st.subheader("📊 Ergebnisse")
+            st.subheader("Ergebnisse")
 
             # Summary Metrics
             col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -7924,14 +7924,14 @@ def display_backtest_lab(poly_key):
                 _total_pnl = summary["total_pnl"]
                 st.metric("Total P&L", f"{_total_pnl:+.1f}%", delta_color="normal" if _total_pnl >= 0 else "inverse")
 
-            st.caption(f"📈 Richtung: {summary.get('direction', 'LONG').upper()} | ⏱️ {summary.get('months', 0)} Monate | 🎯 {summary.get('n_tickers', 0)} Aktien analysiert (von {summary.get('n_tickers_total', 0)} gefiltert)")
+            st.caption(f"Richtung: {summary.get('direction', 'LONG').upper()} | {summary.get('months', 0)} Monate | {summary.get('n_tickers', 0)} Aktien analysiert (von {summary.get('n_tickers_total', 0)} gefiltert)")
 
             # Grade Breakdown
             if stats:
                 st.divider()
-                st.subheader("🏆 Performance nach Grade")
+                st.subheader("Performance nach Grade")
 
-                grade_emojis = {"S": "🏆", "A": "🔥", "B": "✅", "C": "⚠️", "D": "❌"}
+                grade_emojis = {"S": "", "A": "", "B": "", "C": "", "D": ""}
 
                 for g in ["S", "A", "B", "C", "D"]:
                     if g not in stats:
@@ -7964,7 +7964,7 @@ def display_backtest_lab(poly_key):
                 st.divider()
                 filled = [t for t in trades if t.get("outcome") != "NO_FILL"]
                 if filled:
-                    st.subheader(f"📋 Trade-Liste ({len(filled)} Trades)")
+                    st.subheader(f"Trade-Liste ({len(filled)} Trades)")
                     _trade_df_data = []
                     for t in sorted(filled, key=lambda x: x.get("pnl_pct", 0), reverse=True):
                         _trade_df_data.append({
@@ -7981,28 +7981,28 @@ def display_backtest_lab(poly_key):
                         })
                     st.dataframe(_trade_df_data, use_container_width=True)
         else:
-            st.info("🔄 Klicke 'BI V2 Backtest starten' um die Strategie zu testen.")
+            st.info("Klicke 'BI V2 Backtest starten' um die Strategie zu testen.")
 
         return  # BI V2 Modus → nicht weitermachen mit Standard
 
     # =================================================================
-    # 🌐 CRYPTO BREAKOUT IMMINENT BACKTEST
+    # CRYPTO BREAKOUT IMMINENT BACKTEST
     # =================================================================
-    elif bt_mode == "🌐 Crypto BI":
-        st.subheader("🌐 Crypto Breakout Imminent — Historischer Backtest")
+    elif bt_mode == "Crypto BI":
+        st.subheader("Crypto Breakout Imminent — Historischer Backtest")
         st.caption("Testet BI-Signale auf 13 Krypto-Coins via CoinGecko OHLC (kein Volume → Spread-Confirmation)")
 
         col_c1, col_c2 = st.columns(2)
         with col_c1:
-            crypto_days = st.selectbox("📅 Tage", [30, 60, 90], index=2,
+            crypto_days = st.selectbox("Tage", [30, 60, 90], index=2,
                                        format_func=lambda x: f"{x} Tage", key="crypto_bt_days")
         with col_c2:
-            crypto_direction = st.selectbox("📈 Richtung", ["long", "short"], key="crypto_bt_dir")
+            crypto_direction = st.selectbox("Richtung", ["long", "short"], key="crypto_bt_dir")
 
-        st.caption(f"🪙 {len(DEFAULT_CRYPTO_COINS)} Coins: Top 30 by Market Cap + DeFi + Memes")
-        st.caption(f"⏱️ ~6-8 Minuten ({len(DEFAULT_CRYPTO_COINS)} Coins × CoinGecko Rate Limit ~10 Calls/Min)")
+        st.caption(f"{len(DEFAULT_CRYPTO_COINS)} Coins: Top 30 by Market Cap + DeFi + Memes")
+        st.caption(f"~6-8 Minuten ({len(DEFAULT_CRYPTO_COINS)} Coins × CoinGecko Rate Limit ~10 Calls/Min)")
 
-        if st.button("🚀 Crypto Backtest starten", type="primary", use_container_width=True, key="crypto_bt_start"):
+        if st.button("Crypto Backtest starten", type="primary", use_container_width=True, key="crypto_bt_start"):
             progress_bar = st.progress(0, text="Starte Crypto Backtest...")
 
             def update_crypto_progress(pct, text):
@@ -8026,7 +8026,7 @@ def display_backtest_lab(poly_key):
 
             # Summary Metrics
             st.divider()
-            st.subheader("📊 Zusammenfassung")
+            st.subheader("Zusammenfassung")
             mc1, mc2, mc3, mc4, mc5 = st.columns(5)
             mc1.metric("Signale", summary["total_signals"])
             mc2.metric("Trades", summary["total_filled"])
@@ -8037,7 +8037,7 @@ def display_backtest_lab(poly_key):
             # Grade Breakdown
             if stats:
                 st.divider()
-                st.subheader("📊 Grade Breakdown")
+                st.subheader("Grade Breakdown")
                 for grade in ["S", "A", "B", "C"]:
                     if grade in stats:
                         s = stats[grade]
@@ -8058,7 +8058,7 @@ def display_backtest_lab(poly_key):
                 st.divider()
                 filled = [t for t in trades if t.get("outcome") != "NO_FILL"]
                 if filled:
-                    st.subheader(f"📋 Trade-Liste ({len(filled)} Trades)")
+                    st.subheader(f"Trade-Liste ({len(filled)} Trades)")
                     _crypto_df = []
                     for t in sorted(filled, key=lambda x: x.get("pnl_pct", 0), reverse=True):
                         _crypto_df.append({
@@ -8075,31 +8075,31 @@ def display_backtest_lab(poly_key):
                         })
                     st.dataframe(_crypto_df, use_container_width=True)
         else:
-            st.info("🔄 Klicke 'Crypto Backtest starten' um die Strategie zu testen.")
+            st.info("Klicke 'Crypto Backtest starten' um die Strategie zu testen.")
 
         return  # Crypto BI Modus → nicht weitermachen mit Standard
 
     # =================================================================
-    # 🧬 BIOTECH CATALYST BACKTEST
+    # BIOTECH CATALYST BACKTEST
     # =================================================================
-    elif bt_mode == "🧬 BioTech Catalyst":
-        st.subheader("🧬 BioTech Catalyst — Historischer Backtest")
+    elif bt_mode == "BioTech Catalyst":
+        st.subheader("BioTech Catalyst — Historischer Backtest")
         st.caption("Testet Catalyst-Proximate Entries auf Biotech-Aktien: Volume Spike + Technical Setup → Momentum Entry")
 
         col_bio1, col_bio2, col_bio3 = st.columns(3)
         with col_bio1:
-            bio_months = st.selectbox("📅 Zeitraum", [3, 6, 12], index=1,
+            bio_months = st.selectbox("Zeitraum", [3, 6, 12], index=1,
                                        format_func=lambda x: f"{x} Monate", key="bio_months")
         with col_bio2:
-            bio_max_tickers = st.selectbox("🎯 Max Tickers", [50, 100, 150], index=1, key="bio_max")
+            bio_max_tickers = st.selectbox("Max Tickers", [50, 100, 150], index=1, key="bio_max")
         with col_bio3:
-            bio_min_price = st.selectbox("💰 Min Preis", [1.0, 2.0, 5.0], index=1,
+            bio_min_price = st.selectbox("Min Preis", [1.0, 2.0, 5.0], index=1,
                                           format_func=lambda x: f"${x:.0f}", key="bio_min_price")
 
-        st.caption(f"🧬 {len(BIOTECH_BACKTEST_UNIVERSE)} kuratierte Biotech/Pharma Tickers | "
-                   f"⏱️ ~{bio_months * 22 // 5 + bio_max_tickers // 15} Min")
+        st.caption(f"{len(BIOTECH_BACKTEST_UNIVERSE)} kuratierte Biotech/Pharma Tickers | "
+                   f"~{bio_months * 22 // 5 + bio_max_tickers // 15} Min")
 
-        with st.expander("📖 Strategie-Regeln"):
+        with st.expander("Strategie-Regeln"):
             st.markdown("""
 **Entry-Signal:** RVOL ≥ 2.0 (Unusual Volume = Smart Money vor Catalyst) + Technical Score ≥ 10/20 + Aufwärtstrend (SMA20 > SMA50)
 
@@ -8114,7 +8114,7 @@ def display_backtest_lab(poly_key):
 **Max Hold:** 15 Tage | **Trail-Stop:** Nach TP1 → 66% des Weges Entry→TP1
             """)
 
-        if st.button("🚀 BioTech Backtest starten", type="primary", use_container_width=True, key="bio_bt_start"):
+        if st.button("BioTech Backtest starten", type="primary", use_container_width=True, key="bio_bt_start"):
             progress_bar = st.progress(0, text="Starte BioTech Backtest...")
 
             def update_bio_progress(pct, text):
@@ -8140,7 +8140,7 @@ def display_backtest_lab(poly_key):
             trades = bio_results["trades"]
 
             st.divider()
-            st.subheader("📊 Ergebnisse")
+            st.subheader("Ergebnisse")
 
             # Summary Metrics
             col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
@@ -8156,14 +8156,14 @@ def display_backtest_lab(poly_key):
             with col_s5:
                 st.metric("Biotech Tickers", f"{summary.get('n_tickers', 0)}/{summary.get('n_biotech_universe', 0)}")
 
-            st.caption(f"⏱️ {summary.get('months', 0)} Monate | 🧬 {summary.get('n_tickers', 0)} Biotech-Aktien analysiert "
+            st.caption(f"{summary.get('months', 0)} Monate | {summary.get('n_tickers', 0)} Biotech-Aktien analysiert "
                        f"(von {summary.get('n_tickers_total', 0)} im Markt gefunden)")
 
             # Grade Breakdown
             if stats:
                 st.divider()
-                st.subheader("🏆 Performance nach Grade")
-                grade_emojis = {"S": "🏆", "A": "🔥", "B": "✅", "C": "⚠️"}
+                st.subheader("Performance nach Grade")
+                grade_emojis = {"S": "", "A": "", "B": "", "C": ""}
 
                 for g in ["S", "A", "B", "C"]:
                     if g not in stats:
@@ -8200,7 +8200,7 @@ def display_backtest_lab(poly_key):
                 st.divider()
                 filled = [t for t in trades if t.get("outcome") != "NO_FILL"]
                 if filled:
-                    st.subheader(f"📋 Trade-Liste ({len(filled)} Trades)")
+                    st.subheader(f"Trade-Liste ({len(filled)} Trades)")
                     _bio_df = []
                     for t in sorted(filled, key=lambda x: x.get("pnl_pct", 0), reverse=True):
                         _bio_df.append({
@@ -8218,14 +8218,14 @@ def display_backtest_lab(poly_key):
                         })
                     st.dataframe(_bio_df, use_container_width=True)
         else:
-            st.info("🔄 Klicke 'BioTech Backtest starten' um die Strategie zu testen.")
+            st.info("Klicke 'BioTech Backtest starten' um die Strategie zu testen.")
 
         return  # BioTech Modus → nicht weitermachen mit Standard
 
     # =================================================================
-    # 📊 STANDARD STRATEGIEN BACKTEST (original code below)
+    # STANDARD STRATEGIEN BACKTEST (original code below)
     # =================================================================
-    elif bt_mode == "📊 Standard Strategien":
+    elif bt_mode == "Standard Strategien":
         pass  # Weiter unten — aber expliziter Guard verhindert Rendering bei falschem Tab
     else:
         st.warning("Unbekannter Backtest-Modus")
@@ -8235,13 +8235,13 @@ def display_backtest_lab(poly_key):
     col_set1, col_set2, col_set3 = st.columns(3)
 
     with col_set1:
-        months = st.selectbox("📅 Zeitraum", [1, 3, 6, 9, 12], index=2,
+        months = st.selectbox("Zeitraum", [1, 3, 6, 9, 12], index=2,
                               format_func=lambda x: f"{x} Monate", key="std_bt_months")
 
     with col_set2:
         strat_options = list(BACKTEST_STRATEGY_RULES.keys())
         selected_strats = st.multiselect(
-            "📋 Strategien",
+            "Strategien",
             strat_options,
             default=strat_options,
             help="Wähle welche Strategien getestet werden sollen",
@@ -8250,8 +8250,8 @@ def display_backtest_lab(poly_key):
 
     with col_set3:
         universe_size = st.selectbox(
-            "🌍 Universum",
-            ["Klein (30)", "Mittel (75)", "Groß (175)", "🔥 ALLE US-Aktien"],
+            "Universum",
+            ["Klein (30)", "Mittel (75)", "Groß (175)", "ALLE US-Aktien"],
             index=1,
             help="ALLE US-Aktien nutzt Grouped Daily API (1 Call/Tag → tausende Aktien)",
             key="std_bt_universe"
@@ -8270,23 +8270,23 @@ def display_backtest_lab(poly_key):
             use_grouped = True
     
     if use_grouped:
-        st.caption("🔥 **ALLE US-Aktien** — Grouped Daily API scannt tausende Aktien pro Tag")
-        st.caption(f"⏱️ Ca. {months * 22} API-Calls ({months * 22 // 5} Min bei Free Tier)")
-        st.caption("📊 Filter: Preis >$5, Volumen >200k/Tag, keine Leveraged/Inverse ETFs")
+        st.caption("**ALLE US-Aktien** — Grouped Daily API scannt tausende Aktien pro Tag")
+        st.caption(f"Ca. {months * 22} API-Calls ({months * 22 // 5} Min bei Free Tier)")
+        st.caption("Filter: Preis >$5, Volumen >200k/Tag, keine Leveraged/Inverse ETFs")
     else:
         st.caption(f"Tickers: {', '.join(tickers[:10])}{'...' if len(tickers) > 10 else ''}")
     
     # Strategie-Details anzeigen
-    with st.expander("📖 Strategie-Regeln"):
+    with st.expander("Strategie-Regeln"):
         for name, rules in BACKTEST_STRATEGY_RULES.items():
             if name in selected_strats:
-                direction = "🟢 LONG" if rules["direction"] == "long" else "🔴 SHORT"
+                direction = "LONG" if rules["direction"] == "long" else "SHORT"
                 st.markdown(f"**{direction} {name}**: {rules['description']}")
                 entry = rules['entry'].replace('next_open', 'Nächster Tag Open').replace('at_close', 'Signal-Tag Close').replace('prev_high', 'Vortags-High Breakout')
                 st.caption(f"Entry: {entry} | Stop: {rules['stop_pct']*100:.0f}% | TP1: {rules['tp1_rr']}R | TP2: {rules['tp2_rr']}R | Max Hold: {rules['max_hold_days']}d")
     
     # Run Button
-    if st.button("🚀 Backtest starten", type="primary", use_container_width=True, key="std_bt_start"):
+    if st.button("Backtest starten", type="primary", use_container_width=True, key="std_bt_start"):
         if not selected_strats:
             st.error("Bitte mindestens eine Strategie auswählen!")
             return
@@ -8324,7 +8324,7 @@ def display_backtest_lab(poly_key):
                     _dbg_start = (datetime.now() - timedelta(days=months * 30 + 30)).strftime("%Y-%m-%d")
                     _dbg_end = datetime.now().strftime("%Y-%m-%d")
                     _dbg_bars = fetch_backtest_daily_data(poly_key, tickers[0], _dbg_start, _dbg_end)
-                    with st.expander("🔍 Debug: 0 Trades — was ist passiert?", expanded=True):
+                    with st.expander("Debug: 0 Trades — was ist passiert?", expanded=True):
                         st.write(f"**Test-Ticker:** {tickers[0]} | Zeitraum: {_dbg_start} → {_dbg_end}")
                         st.write(f"**Bars geladen:** {len(_dbg_bars)}")
                         if _dbg_bars:
@@ -8343,7 +8343,7 @@ def display_backtest_lab(poly_key):
                                                 st.write(f"  Signal: {_sn} am {_dbg_bars[_i]['date']} | Chg={_m['change_pct']:.1f}% RVOL={_m['rvol']:.1f} ClosePos={_m['close_pos']:.2f}")
                             st.write(f"**Signale für {tickers[0]}:** {_sigs}")
                         else:
-                            st.error(f"⚠️ Polygon liefert KEINE Daten für {tickers[0]}! API-Key prüfen.")
+                            st.error(f"Polygon liefert KEINE Daten für {tickers[0]}! API-Key prüfen.")
                             # Zeige gespeicherte API-Fehler
                             if hasattr(fetch_backtest_daily_data, '_errors') and fetch_backtest_daily_data._errors:
                                 st.write("**API Fehler-Log:**")
@@ -8376,12 +8376,12 @@ def display_backtest_lab(poly_key):
             pass
     
     if not results:
-        st.info("🔄 Klicke 'Backtest starten' um die Strategien zu testen.")
+        st.info("Klicke 'Backtest starten' um die Strategien zu testen.")
         return
     
     # === ERGEBNIS-ANZEIGE ===
     st.divider()
-    st.subheader("📊 Ergebnisse")
+    st.subheader("Ergebnisse")
     
     total_trades = sum(len(trades) for trades in results.values())
     total_winners = sum(sum(1 for t in trades if t["is_winner"]) for trades in results.values())
@@ -8395,7 +8395,7 @@ def display_backtest_lab(poly_key):
     col_m4.metric("Aktien", n_tickers)
     
     # === STRATEGIE-VERGLEICH (RANGLISTE) ===
-    st.subheader("🏆 Strategie-Ranking")
+    st.subheader("Strategie-Ranking")
     
     strat_stats = {}
     for strat_name, trades in results.items():
@@ -8412,11 +8412,11 @@ def display_backtest_lab(poly_key):
             
             # Farbe basierend auf Performance
             if stats.get("total_r", 0) > 5:
-                medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else "✅"
+                medal = "" if rank == 1 else "" if rank == 2 else "" if rank == 3 else ""
             elif stats.get("total_r", 0) > 0:
-                medal = "🔶"
+                medal = ""
             else:
-                medal = "❌"
+                medal = ""
             
             with st.expander(f"{medal} #{rank} {dir_emoji} **{strat_name}** — Win Rate: {stats.get('win_rate', 0)}% | Total R: {stats.get('total_r', 0)}R | Trades: {stats['total_trades']}"):
                 
@@ -8438,20 +8438,20 @@ def display_backtest_lab(poly_key):
                 st.markdown("**Exit-Verteilung:**")
                 exit_cols = st.columns(4)
                 with exit_cols[0]:
-                    st.caption(f"🎯 TP2: {stats.get('tp2_rate', 0)}%")
+                    st.caption(f"TP2: {stats.get('tp2_rate', 0)}%")
                 with exit_cols[1]:
-                    st.caption(f"✅ TP1+EOD: {stats.get('tp1_rate', 0) - stats.get('tp2_rate', 0):.1f}%")
+                    st.caption(f"TP1+EOD: {stats.get('tp1_rate', 0) - stats.get('tp2_rate', 0):.1f}%")
                 with exit_cols[2]:
-                    st.caption(f"🔴 Stop: {stats['stop_rate']}%")
+                    st.caption(f"Stop: {stats['stop_rate']}%")
                 with exit_cols[3]:
-                    st.caption(f"⏰ EOD: {stats['eod_rate']}%")
+                    st.caption(f"EOD: {stats['eod_rate']}%")
                 
                 # Einzelne Trades (letzte 10)
                 trades = results[strat_name]
                 if trades:
                     st.markdown("**Letzte Trades:**")
                     for trade in sorted(trades, key=lambda x: x["signal_date"], reverse=True)[:10]:
-                        color = "🟢" if trade["is_winner"] else "🔴"
+                        color = "" if trade["is_winner"] else ""
                         st.caption(
                             f"{color} {trade['ticker']} | {trade['signal_date']} | "
                             f"Entry ${trade['entry_price']} → Exit ${trade['exit_price']} | "
@@ -8460,7 +8460,7 @@ def display_backtest_lab(poly_key):
                         )
     
     # === TOP TICKER ANALYSE ===
-    st.subheader("📈 Top Ticker Performance")
+    st.subheader("Top Ticker Performance")
     
     all_trades = []
     for strat_name, trades in results.items():
@@ -8482,19 +8482,19 @@ def display_backtest_lab(poly_key):
         col_best, col_worst = st.columns(2)
         
         with col_best:
-            st.markdown("**🏆 Beste Ticker:**")
+            st.markdown("**Beste Ticker:**")
             for ticker, stats in sorted_tickers[:5]:
                 wr = stats.get("wins", 0) / stats["trades"] * 100 if stats["trades"] > 0 else 0
-                st.caption(f"✅ **{ticker}**: {stats.get('total_r', 0):+.1f}R | {stats.get('trades', 0)} Trades | {wr:.0f}% WR")
+                st.caption(f"**{ticker}**: {stats.get('total_r', 0):+.1f}R | {stats.get('trades', 0)} Trades | {wr:.0f}% WR")
         
         with col_worst:
-            st.markdown("**💀 Schlechteste Ticker:**")
+            st.markdown("**Schlechteste Ticker:**")
             for ticker, stats in sorted_tickers[-5:]:
                 wr = stats.get("wins", 0) / stats["trades"] * 100 if stats["trades"] > 0 else 0
-                st.caption(f"❌ **{ticker}**: {stats.get('total_r', 0):+.1f}R | {stats.get('trades', 0)} Trades | {wr:.0f}% WR")
+                st.caption(f"**{ticker}**: {stats.get('total_r', 0):+.1f}R | {stats.get('trades', 0)} Trades | {wr:.0f}% WR")
     
     # === FAZIT ===
-    st.subheader("📋 Fazit")
+    st.subheader("Fazit")
     
     if strat_stats:
         profitable = [(n, s) for n, s in sorted_strats if s["total_r"] > 0]
@@ -8502,23 +8502,23 @@ def display_backtest_lab(poly_key):
         
         if profitable:
             best_name, best_stats = profitable[0]
-            st.success(f"🏆 **Beste Strategie: {best_name}** — {best_stats.get('win_rate', 0)}% Win Rate, {best_stats.get('total_r', 0)}R Total, PF {best_stats.get('profit_factor', 0)}")
+            st.success(f"**Beste Strategie: {best_name}** — {best_stats.get('win_rate', 0)}% Win Rate, {best_stats.get('total_r', 0)}R Total, PF {best_stats.get('profit_factor', 0)}")
         
         if len(profitable) > 1:
-            st.info(f"✅ **{len(profitable)} profitable Strategien**: {', '.join(n for n, _ in profitable)}")
+            st.info(f"**{len(profitable)} profitable Strategien**: {', '.join(n for n, _ in profitable)}")
         
         if unprofitable:
-            st.warning(f"❌ **{len(unprofitable)} unprofitable**: {', '.join(n for n, _ in unprofitable)} — diese Strategien überdenken!")
+            st.warning(f"**{len(unprofitable)} unprofitable**: {', '.join(n for n, _ in unprofitable)} — diese Strategien überdenken!")
         
         # Empfehlung
         st.markdown("---")
-        st.markdown("**💡 Empfehlung:**")
+        st.markdown("**Empfehlung:**")
         if profitable:
             best_pf = max(profitable, key=lambda x: x[1].get("profit_factor", 0))
             best_wr = max(profitable, key=lambda x: x[1]["win_rate"])
-            st.caption(f"🎯 Bestes Risiko/Ertrag: **{best_pf[0]}** (PF {best_pf[1]['profit_factor']})")
-            st.caption(f"🎯 Höchste Win Rate: **{best_wr[0]}** ({best_wr[1]['win_rate']}%)")
-            st.caption(f"💰 Fokus auf die Top-3 Strategien und vermeide unprofitable Setups")
+            st.caption(f"Bestes Risiko/Ertrag: **{best_pf[0]}** (PF {best_pf[1]['profit_factor']})")
+            st.caption(f"Höchste Win Rate: **{best_wr[0]}** ({best_wr[1]['win_rate']}%)")
+            st.caption(f"Fokus auf die Top-3 Strategien und vermeide unprofitable Setups")
 
 
 # =============================================================================
@@ -8923,14 +8923,14 @@ def fetch_forex_data(category):
     _debug_log = []  # DEBUG: Per-ticker log
     
     if category not in FOREX_PAIRS:
-        _debug_log.append(f"❌ category '{category}' not in FOREX_PAIRS")
+        _debug_log.append(f"category '{category}' not in FOREX_PAIRS")
         return [], 0, 0, _debug_log
     
     pairs = FOREX_PAIRS[category]["pairs"]
     
     f = st.session_state.active_filters
     af = st.session_state.additional_filters
-    _debug_log.append(f"📋 {len(pairs)} pairs | f={f} | af_gew={af.get('nur_gewinner')} af_verl={af.get('nur_verlierer')}")
+    _debug_log.append(f"{len(pairs)} pairs | f={f} | af_gew={af.get('nur_gewinner')} af_verl={af.get('nur_verlierer')}")
     
     try:
         for ticker, name in pairs:
@@ -9023,7 +9023,7 @@ def fetch_forex_data(category):
                     match = False
                     _fail_reason = "nur_verlierer"
                 
-                _debug_log.append(f"{'✅' if match else '❌'} {name}: chg={change:+.4f}% vtg={vortag_chg:+.4f}% {'| ' + _fail_reason if _fail_reason else ''}")
+                _debug_log.append(f"{'' if match else ''} {name}: chg={change:+.4f}% vtg={vortag_chg:+.4f}% {'| ' + _fail_reason if _fail_reason else ''}")
                 
                 if not match:
                     skipped_filter += 1
@@ -9045,13 +9045,13 @@ def fetch_forex_data(category):
                 })
                 
             except Exception as e:
-                _debug_log.append(f"💥 {ticker}: {e}")
+                _debug_log.append(f"{ticker}: {e}")
                 continue
         
         return results, skipped_no_price, skipped_filter, _debug_log
         
     except Exception as e:
-        _debug_log.append(f"💥 OUTER: {e}")
+        _debug_log.append(f"OUTER: {e}")
         st.error(f"Forex Fehler: {e}")
         return [], 0, 0, _debug_log
 
@@ -9072,18 +9072,18 @@ def fetch_international_stock_data(exchange_code):
     _debug_log = []
     
     if exchange_code not in INTERNATIONAL_STOCKS:
-        _debug_log.append(f"❌ exchange_code '{exchange_code}' not in INTERNATIONAL_STOCKS")
+        _debug_log.append(f"exchange_code '{exchange_code}' not in INTERNATIONAL_STOCKS")
         return [], 0, 0, _debug_log
     
     exchange = INTERNATIONAL_STOCKS[exchange_code]
     suffix = exchange["suffix"]
     stocks = exchange["stocks"]
-    _debug_log.append(f"📋 {len(stocks)} stocks, suffix={suffix}")
+    _debug_log.append(f"{len(stocks)} stocks, suffix={suffix}")
     
     f = st.session_state.active_filters
     af = st.session_state.additional_filters
-    _debug_log.append(f"🔍 f={f}")
-    _debug_log.append(f"🔍 af={af}")
+    _debug_log.append(f"f={f}")
+    _debug_log.append(f"af={af}")
     af = st.session_state.additional_filters
     
     try:
@@ -9281,7 +9281,7 @@ def fetch_international_stock_data(exchange_code):
                     match = False
                     _fail_reason = "af.nur_verlierer"
                 
-                _debug_log.append(f"{'✅' if match else '❌'} {ticker}: €{price:.2f} chg={change:+.2f}% rvol={rvol:.2f} {_fail_reason}")
+                _debug_log.append(f"{'' if match else ''} {ticker}: €{price:.2f} chg={change:+.2f}% rvol={rvol:.2f} {_fail_reason}")
                 
                 if not match:
                     skipped_filter += 1
@@ -9314,13 +9314,13 @@ def fetch_international_stock_data(exchange_code):
                 })
                 
             except Exception as e:
-                _debug_log.append(f"💥 {ticker}: {e}")
+                _debug_log.append(f"{ticker}: {e}")
                 continue
         
         return results, skipped_no_price, skipped_filter, _debug_log
         
     except Exception as e:
-        _debug_log.append(f"💥 OUTER: {e}")
+        _debug_log.append(f"OUTER: {e}")
         st.error(f"Yahoo Finance Fehler: {e}")
         return [], 0, 0, _debug_log
 
@@ -9338,55 +9338,55 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("💎 Alpha V70.7 Pro")
+    st.title("Alpha V70.7 Pro")
     st.caption("Pre/Post Market | Insider | Gaps | AI")
     
     st.divider()
     
     # Markt-Auswahl (4 Kategorien)
-    m_type = st.radio("📊 Markt:", ["Krypto", "Aktien", "Futures", "Forex"], horizontal=True)
+    m_type = st.radio("Markt:", ["Krypto", "Aktien", "Futures", "Forex"], horizontal=True)
     st.session_state.market_type = m_type
     
     if m_type == "Krypto":
-        st.caption("📡 CoinGecko (Top 500) - 24/7")
+        st.caption("CoinGecko (Top 500) - 24/7")
     
     elif m_type == "Futures":
         # FUTURES KATEGORIE-AUSWAHL
         futures_categories = {
-            "📈 Index Futures": "INDEX",
-            "🛢️ Energie (Öl, Gas)": "ENERGY",
-            "🥇 Metalle (Gold, Silber)": "METALS",
-            "🌾 Agrar (Weizen, Mais)": "AGRI",
-            "💵 Zinsen (Bonds)": "RATES"
+            "Index Futures": "INDEX",
+            "Energie (Öl, Gas)": "ENERGY",
+            "Metalle (Gold, Silber)": "METALS",
+            "Agrar (Weizen, Mais)": "AGRI",
+            "Zinsen (Bonds)": "RATES"
         }
         
         selected_futures = st.selectbox(
-            "📊 Futures-Kategorie:",
+            "Futures-Kategorie:",
             list(futures_categories.keys()),
             index=0,
             key="futures_selector"
         )
         st.session_state.selected_futures_cat = futures_categories[selected_futures]
-        st.caption("📡 Yahoo Finance - 15min verzögert")
-        st.caption("🕐 Handelszeiten: Fast 24/7 (So-Fr)")
+        st.caption("Yahoo Finance - 15min verzögert")
+        st.caption("Handelszeiten: Fast 24/7 (So-Fr)")
     
     elif m_type == "Forex":
         # FOREX KATEGORIE-AUSWAHL
         forex_categories = {
-            "💵 Majors (EUR, GBP, JPY)": "MAJORS",
-            "🌍 Minors (AUD, NZD, CAD)": "MINORS",
-            "🌏 Exotics (TRY, ZAR, MXN)": "EXOTICS"
+            "Majors (EUR, GBP, JPY)": "MAJORS",
+            "Minors (AUD, NZD, CAD)": "MINORS",
+            "Exotics (TRY, ZAR, MXN)": "EXOTICS"
         }
         
         selected_forex = st.selectbox(
-            "💱 Forex-Kategorie:",
+            "Forex-Kategorie:",
             list(forex_categories.keys()),
             index=0,
             key="forex_selector"
         )
         st.session_state.selected_forex_cat = forex_categories[selected_forex]
-        st.caption("📡 Yahoo Finance - 15min verzögert")
-        st.caption("🕐 Handelszeiten: 24/5 (So 22:00 - Fr 22:00 UTC)")
+        st.caption("Yahoo Finance - 15min verzögert")
+        st.caption("Handelszeiten: 24/5 (So 22:00 - Fr 22:00 UTC)")
     
     else:  # Aktien
         # BÖRSEN-AUSWAHL
@@ -9401,7 +9401,7 @@ with st.sidebar:
         }
         
         selected_exchange = st.selectbox(
-            "🌍 Börse:",
+            "Börse:",
             list(exchange_options.keys()),
             index=0,
             key="exchange_selector"
@@ -9410,9 +9410,9 @@ with st.sidebar:
         
         # API Info je nach Börse
         if st.session_state.selected_exchange == "US":
-            st.caption("📡 Polygon.io Realtime (Starter/Paid)")
+            st.caption("Polygon.io Realtime (Starter/Paid)")
         else:
-            st.caption("📡 Yahoo Finance - 15min verzögert")
+            st.caption("Yahoo Finance - 15min verzögert")
         
         # TRADING SESSION - Nur für US relevant
         if st.session_state.selected_exchange == "US":
@@ -9420,18 +9420,18 @@ with st.sidebar:
             auto_session, session_status = get_current_trading_session()
             
             # Override Option
-            manual_override = st.checkbox("⚙️ Session manuell wählen", key="session_override")
+            manual_override = st.checkbox("Session manuell wählen", key="session_override")
             
             if manual_override:
                 # Manueller Modus
                 trading_session = st.radio(
-                    "⏰ Session:",
+                    "Session:",
                     ["Regular", "Pre-Market", "After-Hours", "Extended"],
                     horizontal=True,
                     key="manual_session",
                     help="Regular: 9:30-16:00 ET | Pre: 4:00-9:30 ET | After: 16:00-20:00 ET"
                 )
-                st.caption(f"📌 Manuell: {trading_session}")
+                st.caption(f"Manuell: {trading_session}")
             else:
                 # Automatischer Modus
                 trading_session = auto_session
@@ -9454,12 +9454,12 @@ with st.sidebar:
             }
             hours = trading_hours.get(st.session_state.selected_exchange, "")
             if hours:
-                st.caption(f"🕐 Handelszeiten: {hours}")
+                st.caption(f"Handelszeiten: {hours}")
     
     st.divider()
     
     # AUTO-REFRESH CONTROLS
-    st.subheader("🔄 Auto-Refresh")
+    st.subheader("Auto-Refresh")
     col_ar1, col_ar2 = st.columns(2)
     with col_ar1:
         auto_refresh = st.checkbox("Aktiviert", value=st.session_state.auto_refresh_enabled, key="ar_toggle")
@@ -9469,16 +9469,16 @@ with st.sidebar:
         st.session_state.refresh_interval = refresh_mins
     
     if auto_refresh:
-        st.success(f"⏱️ Refresh alle {refresh_mins} Min")
+        st.success(f"Refresh alle {refresh_mins} Min")
     
     # DEBUG MODE
-    st.session_state.debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False), key="debug_toggle")
+    st.session_state.debug_mode = st.checkbox("Debug Mode", value=st.session_state.get("debug_mode", False), key="debug_toggle")
 
     # =================================================================
     # INTERACTIVE BROKERS TWS
     # =================================================================
     st.divider()
-    st.subheader("🤖 IBKR TWS")
+    st.subheader("IBKR TWS")
 
     if not IB_INSYNC_AVAILABLE:
         st.warning("ib_insync nicht installiert")
@@ -9492,28 +9492,28 @@ with st.sidebar:
                 if state.get("connect_time"):
                     delta = datetime.now() - state["connect_time"]
                     uptime = f" ({delta.seconds // 60}m)"
-                st.success(f"🟢 Connected{uptime}")
+                st.success(f"Connected{uptime}")
             else:
-                st.error("🔴 Offline")
+                st.error("Offline")
                 err = _get_ib_state().get("error")
                 if err:
-                    st.caption(f"⚠️ {err}")
+                    st.caption(f"{err}")
         with col_ib_b:
             if ib_is_connected():
-                if st.button("🔌 Trennen", use_container_width=True, key="ib_disconnect"):
+                if st.button("Trennen", use_container_width=True, key="ib_disconnect"):
                     ib_disconnect()
                     st.rerun()
             else:
-                if st.button("🔌 Connect", use_container_width=True, key="ib_connect"):
+                if st.button("Connect", use_container_width=True, key="ib_connect"):
                     success = ib_connect(port=st.session_state.ib_port)
                     if success:
                         st.rerun()
 
-        with st.expander("⚙️ TWS Settings"):
+        with st.expander("TWS Settings"):
             ib_port = st.selectbox("Port", [7497, 7496], index=0 if st.session_state.ib_port == 7497 else 1, key="ib_port_sel")
             st.session_state.ib_port = ib_port
             if ib_port == 7496:
-                st.warning("⚠️ LIVE Trading Port!")
+                st.warning("LIVE Trading Port!")
 
             st.divider()
             ib_size_type = st.radio("Position Size", ["Shares", "Dollar"], horizontal=True, key="ib_size_type_sel")
@@ -9527,17 +9527,17 @@ with st.sidebar:
 
         # Last orders
         if st.session_state.ib_orders_log:
-            with st.expander(f"📋 Orders ({len(st.session_state.ib_orders_log)})"):
+            with st.expander(f"Orders ({len(st.session_state.ib_orders_log)})"):
                 for o in st.session_state.ib_orders_log[-5:][::-1]:
-                    icon = "🟢" if o["direction"] == "LONG" else "🔴"
+                    icon = "" if o["direction"] == "LONG" else ""
                     st.caption(f"{icon} {o['ticker']} {o['direction']} @ ${o['entry']:.2f} — {o['time']}")
 
     # =================================================================
-    # 🤖 AUTO-TRADER
+    # AUTO-TRADER
     # =================================================================
     if IB_INSYNC_AVAILABLE:
         st.divider()
-        st.subheader("🤖 Auto-Trader")
+        st.subheader("Auto-Trader")
 
         at_config = _autotrader_config_load()
         at_state = _autotrader_state_read()
@@ -9548,16 +9548,16 @@ with st.sidebar:
             _last = at_state.get("last_scan", "—")
             _pos_count = len(at_state.get("positions", []))
             _trades = at_state.get("trades_today", 0)
-            mode_icon = "🟢" if at_config.get("mode") == "full" else "🟡"
+            mode_icon = "" if at_config.get("mode") == "full" else ""
             st.success(f"{mode_icon} Aktiv | {_pos_count} Pos | {_trades} Trades heute | Letzter Scan: {_last}")
         else:
-            st.info("⏸️ Gestoppt")
+            st.info("Gestoppt")
 
         # Start/Stop Buttons
         col_at1, col_at2 = st.columns(2)
         with col_at1:
             if not at_running:
-                if st.button("▶️ Starten", use_container_width=True, type="primary", key="at_start"):
+                if st.button("Starten", use_container_width=True, type="primary", key="at_start"):
                     if ib_is_connected():
                         import threading
                         try:
@@ -9579,39 +9579,39 @@ with st.sidebar:
                     else:
                         st.error("IBKR nicht verbunden!")
             else:
-                if st.button("⏹️ Stoppen", use_container_width=True, key="at_stop"):
+                if st.button("Stoppen", use_container_width=True, key="at_stop"):
                     _autotrader_request_stop()
                     st.rerun()
         with col_at2:
-            if st.button("🔄 1x Scan", use_container_width=True, key="at_once",
+            if st.button("1x Scan", use_container_width=True, key="at_once",
                          disabled=not ib_is_connected()):
                 try:
                     poly_key_at = st.secrets["POLYGON_KEY"]
                     with st.spinner("Scanne..."):
                         scan_res = autotrader_scan_once(poly_key_at)
-                    st.success(f"✅ {scan_res.get('signals_found', 0)} Signale, {scan_res.get('orders_placed', 0)} Orders")
+                    st.success(f"{scan_res.get('signals_found', 0)} Signale, {scan_res.get('orders_placed', 0)} Orders")
                     if scan_res["errors"]:
                         for e in scan_res["errors"]:
-                            st.caption(f"⚠️ {e}")
+                            st.caption(f"{e}")
                 except Exception as e:
                     st.error(f"Fehler: {str(e)[:80]}")
 
         # Settings
-        with st.expander("⚙️ Auto-Trader Settings"):
+        with st.expander("Auto-Trader Settings"):
             # Mode Toggle
             at_mode = st.radio(
                 "Modus",
-                ["🟢 Voll-Auto (transmit=True)", "🟡 Semi-Auto (bestätigen in TWS)"],
+                ["Voll-Auto (transmit=True)", "Semi-Auto (bestätigen in TWS)"],
                 index=0 if at_config.get("mode") == "full" else 1,
                 key="at_mode_sel"
             )
             new_mode = "full" if "Voll" in at_mode else "semi"
 
             if new_mode == "full":
-                st.warning("⚠️ Orders werden SOFORT ausgeführt!")
+                st.warning("Orders werden SOFORT ausgeführt!")
 
             # Position Size — übernimmt aus TWS Settings oben
-            st.caption(f"📐 Position Size: aus TWS Settings oben")
+            st.caption(f"Position Size: aus TWS Settings oben")
 
             # Risk Settings
             at_max_pos = st.slider("Max Positionen", 1, 15, at_config.get("max_positions", 5), key="at_max_pos")
@@ -9633,7 +9633,7 @@ with st.sidebar:
                                            key="at_market_hours", help="Deaktivieren zum Testen außerhalb der Börsenzeiten")
 
             # Save Button
-            if st.button("💾 Speichern", use_container_width=True, key="at_save"):
+            if st.button("Speichern", use_container_width=True, key="at_save"):
                 _ib_sz_type = st.session_state.get("ib_size_type_sel", "Shares")
                 _ib_sz_val = st.session_state.get("ib_position_size", 100)
                 new_config = {
@@ -9654,15 +9654,15 @@ with st.sidebar:
                     "min_volume": 200000,
                 }
                 _autotrader_config_save(new_config)
-                st.success("✅ Gespeichert!")
+                st.success("Gespeichert!")
                 st.rerun()
 
         # Aktive Positionen
         at_positions = at_state.get("positions", [])
         if at_positions:
-            with st.expander(f"📊 Positionen ({len(at_positions)})"):
+            with st.expander(f"Positionen ({len(at_positions)})"):
                 for p in at_positions:
-                    mode_lbl = "🟢" if p.get("mode") == "AUTO" else "🟡"
+                    mode_lbl = "" if p.get("mode") == "AUTO" else ""
                     st.caption(
                         f"{mode_lbl} **{p['ticker']}** Grade {p['grade']} | "
                         f"Entry ${p['entry']} | SL ${p['stop']} | "
@@ -9675,9 +9675,9 @@ with st.sidebar:
             with open(_AUTOTRADER_LOG_FILE, "r") as _lf:
                 at_log = json.load(_lf)
             if at_log:
-                with st.expander(f"📋 Log ({len(at_log)} Einträge)"):
+                with st.expander(f"Log ({len(at_log)} Einträge)"):
                     for entry in at_log[-10:][::-1]:
-                        _lvl_icon = {"INFO": "ℹ️", "WARN": "⚠️", "ERROR": "❌", "TRADE": "💰"}.get(entry.get("level"), "•")
+                        _lvl_icon = {"INFO": "ℹ", "WARN": "", "ERROR": "", "TRADE": ""}.get(entry.get("level"), "•")
                         st.caption(f"{_lvl_icon} {entry.get('time', '')} — {entry.get('msg', '')}")
         except Exception:
             pass
@@ -9687,29 +9687,29 @@ with st.sidebar:
         session_info = get_current_trading_session()
         if session_info[0] == "Pre-Market":
             st.divider()
-            st.subheader("🌅 Pre-Market Watchlist")
+            st.subheader("Pre-Market Watchlist")
             st.caption("Finde PM Movers VOR Market Open")
             
-            if st.button("📋 PM Watchlist laden", key="pm_watchlist_btn", use_container_width=True):
+            if st.button("PM Watchlist laden", key="pm_watchlist_btn", use_container_width=True):
                 st.session_state.show_pm_watchlist = True
                 st.session_state.pm_watchlist_data = None  # Reset für neue Daten
             
             if st.session_state.get("show_pm_watchlist", False):
-                st.success("✅ PM Watchlist aktiv")
-                if st.button("❌ Schließen", key="close_pm_watchlist"):
+                st.success("PM Watchlist aktiv")
+                if st.button("Schließen", key="close_pm_watchlist"):
                     st.session_state.show_pm_watchlist = False
                     st.rerun()
         else:
             # Außerhalb PM Session - zeige Hinweis
             st.divider()
-            with st.expander("🌅 Pre-Market Watchlist"):
-                st.info(f"⏰ PM Session: 4:00-9:30 AM ET\n\nAktuell: {session_info[1]}")
+            with st.expander("Pre-Market Watchlist"):
+                st.info(f"PM Session: 4:00-9:30 AM ET\n\nAktuell: {session_info[1]}")
                 st.caption("PM Watchlist verfügbar während Pre-Market Session")
     
     st.divider()
     
     # Strategie-Auswahl - DYNAMISCH basierend auf Markt!
-    st.subheader("🎯 Strategie")
+    st.subheader("Strategie")
     
     # Hole passende Strategien für aktuellen Markt
     _current_exchange = st.session_state.get("selected_exchange", "US")
@@ -9717,7 +9717,7 @@ with st.sidebar:
     strategy_list = list(current_strategies.keys())
     
     # Info welcher Markt
-    market_emoji = {"Krypto": "🌐", "Aktien": "📊", "Futures": "📈", "Forex": "💱"}.get(m_type, "📊")
+    market_emoji = {"Krypto": "", "Aktien": "", "Futures": "", "Forex": ""}.get(m_type, "")
     st.caption(f"{market_emoji} {len(strategy_list)} Strategien für **{m_type}**")
     
     # Prüfe ob aktuelle Strategie zum Markt passt, sonst Reset
@@ -9749,14 +9749,14 @@ with st.sidebar:
         expected_filters = current_strategies[strat]["filters"]
         current_filters = st.session_state.active_filters
         if current_filters != expected_filters:
-            st.toast("🔄 Filter aktualisiert (neue Version)")
+            st.toast("Filter aktualisiert (neue Version)")
             apply_strategy(strat, current_strategies)
             st.session_state.filters_synced = True
             st.rerun()
         else:
             st.session_state.filters_synced = True  # Filter stimmen bereits
     
-    with st.expander("ℹ️ Info"):
+    with st.expander("ℹInfo"):
         st.write(current_strategies[strat]["description"])
         st.caption(current_strategies[strat]['logic'])
         
@@ -9765,13 +9765,13 @@ with st.sidebar:
         if strategy_data.get("needs_history"):
             pattern_type = strategy_data.get("pattern_type", "unknown")
             history_days = strategy_data.get("history_days", 5)
-            st.info(f"📊 **Multi-Day Analyse:** {history_days} Tage Pattern ({pattern_type})")
-            st.caption("🔬 Pattern-Validierung mit historischen Daten für bessere Trefferquote")
+            st.info(f"**Multi-Day Analyse:** {history_days} Tage Pattern ({pattern_type})")
+            st.caption("Pattern-Validierung mit historischen Daten für bessere Trefferquote")
         
         # Session-Zeit Check für Futures/Forex Strategien
         if "best_time" in strategy_data:
             best_time = strategy_data["best_time"]
-            st.info(f"⏰ **Beste Zeit:** {best_time}")
+            st.info(f"**Beste Zeit:** {best_time}")
             
             # Aktive Session-Prüfung
             try:
@@ -9794,9 +9794,9 @@ with st.sidebar:
                             in_window = current_utc_hour >= start_hour or current_utc_hour < end_hour
                         
                         if in_window:
-                            st.success(f"✅ Aktuell im optimalen Zeitfenster ({current_utc_hour}:00 UTC)")
+                            st.success(f"Aktuell im optimalen Zeitfenster ({current_utc_hour}:00 UTC)")
                         else:
-                            st.warning(f"⚠️ **Außerhalb des optimalen Zeitfensters** ({current_utc_hour}:00 UTC) — "
+                            st.warning(f"**Außerhalb des optimalen Zeitfensters** ({current_utc_hour}:00 UTC) — "
                                        f"Signalqualität ist reduziert. Ergebnisse mit Vorsicht nutzen!")
             except Exception as e:
                 pass  # Fehler ignorieren
@@ -9804,20 +9804,20 @@ with st.sidebar:
         # Best Pairs für Forex
         if "best_pairs" in strategy_data:
             pairs = ", ".join(strategy_data["best_pairs"])
-            st.caption(f"💱 Beste Paare: {pairs}")
+            st.caption(f"Beste Paare: {pairs}")
         
         # Warnungen für marktspezifische Strategien (nur bei Aktien relevant)
         if m_type == "Aktien":
             if strat in ["Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)"]:
-                st.info("ℹ️ Gap-Strategien funktionieren nur bei US-Börse mit Polygon.io")
+                st.info("ℹGap-Strategien funktionieren nur bei US-Börse mit Polygon.io")
             if strat in ["Insider Buying", "Insider Selling"]:
-                st.warning("⚠️ Insider-Strategien benötigen Finnhub API Key!")
+                st.warning("Insider-Strategien benötigen Finnhub API Key!")
     
     st.divider()
     
     # Aktive Filter
     if st.session_state.active_filters:
-        st.subheader("⚙️ Filter")
+        st.subheader("Filter")
         
         # Dynamischer Key: Reset bei Strategiewechsel damit Slider neue Werte übernehmen
         _frc = st.session_state.get("filter_reset_counter", 0)
@@ -9832,7 +9832,7 @@ with st.sidebar:
             for filter_name, values in st.session_state.active_filters.items():
                 if isinstance(values, (tuple, list)) and len(values) == 2:
                     st.caption(f"**{filter_name}:** {values[0]} bis {values[1]}")
-            st.caption("🔄 *Filter aktualisiert — nächster Scan nutzt neue Werte*")
+            st.caption("*Filter aktualisiert — nächster Scan nutzt neue Werte*")
         else:
             # Kopie der Filter für Anzeige
             current_filters = st.session_state.active_filters.copy()
@@ -9874,7 +9874,7 @@ with st.sidebar:
             st.session_state.active_filters = updated_filters
         
         # Zusatzfilter kompakt
-        with st.expander("🔧 Zusatzfilter"):
+        with st.expander("Zusatzfilter"):
             c1, c2 = st.columns(2)
             with c1:
                 preis_min = st.number_input("Min $", 0.0, 100000.0, 0.0, key="af_min")
@@ -9883,14 +9883,14 @@ with st.sidebar:
             
             c3, c4 = st.columns(2)
             with c3:
-                nur_gewinner = st.checkbox("✅ Gewinner", key="af_win")
+                nur_gewinner = st.checkbox("Gewinner", key="af_win")
             with c4:
-                nur_verlierer = st.checkbox("🔻 Verlierer", key="af_lose")
+                nur_verlierer = st.checkbox("Verlierer", key="af_lose")
             
             # ETF Filter (nur bei Aktien relevant)
             if m_type == "Aktien":
                 st.divider()
-                exclude_etfs = st.checkbox("🚫 ETFs ausblenden", value=True, key="af_exclude_etf",
+                exclude_etfs = st.checkbox("ETFs ausblenden", value=True, key="af_exclude_etf",
                                           help="Filtert ETFs, Leveraged ETFs (TQQQ, SQQQ, etc.), ETNs, Warrants und Units")
                 
                 # Liquiditäts-Filter
@@ -9902,7 +9902,7 @@ with st.sidebar:
                     "$50M Minimum": 50_000_000,
                 }
                 liq_choice = st.selectbox(
-                    "💧 Min. Liquidität", 
+                    "Min. Liquidität", 
                     list(liq_options.keys()), 
                     index=3,  # Default: $10M
                     key="af_min_liq",
@@ -9925,12 +9925,12 @@ with st.sidebar:
     # BI Strategie → Hinweis auf eigenen Tab
     _bi_current_strat = st.session_state.get("current_strategy", "")
     if "Breakout Imminent" in _bi_current_strat:
-        st.info("🔮 **Breakout Imminent** hat einen eigenen Tab → Wechsle zum **🔮 BI Scanner** Tab!")
+        st.info("**Breakout Imminent** hat einen eigenen Tab → Wechsle zum **BI Scanner** Tab!")
 
     # SCAN Button (für ALLE anderen Strategien — BI hat eigenen Tab)
     if "Breakout Imminent" in _bi_current_strat:
         pass  # BI hat eigenen Tab
-    elif st.button("🚀 SCAN STARTEN", type="primary", use_container_width=True):
+    elif st.button("SCAN STARTEN", type="primary", use_container_width=True):
         # Reset Navigation Index für neue Ergebnisse
         st.session_state.selected_row_index = 0
         if "ticker_select_df" in st.session_state:
@@ -9941,31 +9941,31 @@ with st.sidebar:
         _dbg_ex = st.session_state.get("selected_exchange", "US")
         _dbg_strat = st.session_state.get("current_strategy", "KEINE")
         _dbg_af = st.session_state.active_filters
-        st.info(f"🔍 Scan-Pfad: m_type={_dbg_m} | exchange={_dbg_ex} | strategy={_dbg_strat} | filters={_dbg_af}")
+        st.info(f"Scan-Pfad: m_type={_dbg_m} | exchange={_dbg_ex} | strategy={_dbg_strat} | filters={_dbg_af}")
         
         # DEBUG: Zeige aktuelle Konfiguration
         if st.session_state.get("debug_mode", False):
-            st.caption(f"🔍 Debug: Markt={m_type}, Strategie={st.session_state.get('current_strategy', 'KEINE')}, Filter={st.session_state.active_filters}")
+            st.caption(f"Debug: Markt={m_type}, Strategie={st.session_state.get('current_strategy', 'KEINE')}, Filter={st.session_state.active_filters}")
         
         # Prüfe ob Insider-Strategie gewählt
         current_strat = st.session_state.get("current_strategy", "")
         is_insider_strategy = current_strat in ["Insider Buying", "Insider Selling"]
         is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
-        is_volume_void_strategy = current_strat in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
+        is_volume_void_strategy = current_strat in ["Volume Void Long ⬆", "Volume Void Short ⬇"]
         is_ma_bounce_strategy = "Bounce" in current_strat and ("SMA" in current_strat or "EMA" in current_strat)
         is_breakout_imminent = "Breakout Imminent" in current_strat
         
         # Warnung: Gap-Strategie bei Krypto
         if is_gap_strategy and m_type == "Krypto":
-            st.error("❌ Gap-Strategien funktionieren nicht bei Krypto! Krypto handelt 24/7 und hat keine echten Gaps. Bitte wechsle zu **Aktien**.")
+            st.error("Gap-Strategien funktionieren nicht bei Krypto! Krypto handelt 24/7 und hat keine echten Gaps. Bitte wechsle zu **Aktien**.")
         
         # Volume Void Strategie bei Krypto nicht verfügbar
         elif is_volume_void_strategy and m_type == "Krypto":
-            st.error("❌ Volume Void Scanner funktioniert nur für **Aktien**! Krypto hat andere Volumen-Dynamik.")
+            st.error("Volume Void Scanner funktioniert nur für **Aktien**! Krypto hat andere Volumen-Dynamik.")
         
         # VOLUME VOID SCAN - Spezielle Logik
         elif is_volume_void_strategy:
-            with st.status("🕳️ Scanne Volume Voids...") as status:
+            with st.status("Scanne Volume Voids...") as status:
                 try:
                     poly_key = st.secrets["POLYGON_KEY"]
                     
@@ -10027,23 +10027,23 @@ with st.sidebar:
                     st.session_state.market_type = "Aktien"
                     
                     direction_emoji = "⬆️" if direction == "long" else "⬇️"
-                    status.update(label=f"✅ {len(results)} Volume Voids {direction_emoji} gefunden", state="complete")
+                    status.update(label=f"{len(results)} Volume Voids {direction_emoji} gefunden", state="complete")
                     
                 except KeyError:
-                    st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    st.error("POLYGON_KEY fehlt in Secrets!")
                 except Exception as e:
                     st.error(f"Fehler: {e}")
         
-        # HARMONIC PATTERN SCAN - Spezielle Logik 🦋
-        elif current_strat in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]:
+        # HARMONIC PATTERN SCAN - Spezielle Logik 
+        elif current_strat in ["Harmonic Bullish ⬆", "Harmonic Bearish ⬇", "Harmonic All Patterns "]:
             if m_type != "Aktien":
-                st.error("❌ Harmonic Pattern Scanner funktioniert nur für **Aktien**!")
+                st.error("Harmonic Pattern Scanner funktioniert nur für **Aktien**!")
             else:
                 # Timeframe Selector für Harmonic Scan
                 htf_col1, htf_col2 = st.columns([1, 3])
                 with htf_col1:
                     harmonic_tf = st.selectbox(
-                        "🕐 Timeframe",
+                        "Timeframe",
                         options=["4H", "Daily", "1H"],
                         index=0,  # 4H = Default (bester TF für Harmonics)
                         key="harmonic_tf_select",
@@ -10053,7 +10053,7 @@ with st.sidebar:
                     tf_info = {"4H": "~1080 Bars (6 Monate) — Ideal für Swing-Patterns", 
                                "Daily": "~120 Bars (6 Monate) — Langfristige Patterns",
                                "1H": "~1560 Bars (3 Monate) — Kurzfristige Patterns, mehr Noise"}
-                    st.info(f"📊 {tf_info.get(harmonic_tf, '')}")
+                    st.info(f"{tf_info.get(harmonic_tf, '')}")
                 
                 # Map TF to API parameters
                 tf_map = {"4H": ("hour", 180), "Daily": ("day", 180), "1H": ("hour", 90)}
@@ -10062,7 +10062,7 @@ with st.sidebar:
                 if harmonic_tf == "1H":
                     api_tf = "1hour"  # Signal to use 1H instead of 4H
                 
-                with st.status("🦋 Scanne Harmonic Patterns...") as status:
+                with st.status("Scanne Harmonic Patterns...") as status:
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
                         
@@ -10127,25 +10127,25 @@ with st.sidebar:
                         st.session_state.market_type = "Aktien"
                         
                         direction_emoji = "⬆️" if direction == "LONG" else ("⬇️" if direction == "SHORT" else "🔄")
-                        status.update(label=f"✅ {len(results)} Harmonic Patterns {direction_emoji} gefunden", state="complete")
+                        status.update(label=f"{len(results)} Harmonic Patterns {direction_emoji} gefunden", state="complete")
                         
                     except KeyError:
-                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                        st.error("POLYGON_KEY fehlt in Secrets!")
                     except Exception as e:
                         st.error(f"Fehler: {e}")
         
         # =================================================================
         # WYCKOFF STRATEGIE - Akkumulation/Distribution Scanner
         # =================================================================
-        elif current_strat in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]:
+        elif current_strat in ["Wyckoff Accumulation ⬆", "Wyckoff Distribution ⬇"]:
             if m_type != "Aktien":
-                st.error("❌ Wyckoff Scanner funktioniert nur für **Aktien**!")
+                st.error("Wyckoff Scanner funktioniert nur für **Aktien**!")
             else:
                 # Timeframe Selector
                 wtf_col1, wtf_col2 = st.columns([1, 3])
                 with wtf_col1:
                     wyckoff_tf = st.selectbox(
-                        "🕐 Timeframe",
+                        "Timeframe",
                         options=["4H", "Daily", "1H"],
                         index=0,
                         key="wyckoff_tf_select",
@@ -10155,14 +10155,14 @@ with st.sidebar:
                     tf_info = {"4H": "~1080 Bars / 6 Monate — Ideal für Wyckoff Phasen",
                                "Daily": "~120 Bars / 6 Monate — Langfristige Schemen",
                                "1H": "~1560 Bars / 3 Monate — Kurzfristige Mini-Akkumulation"}
-                    st.info(f"📊 {tf_info.get(wyckoff_tf, '')}")
+                    st.info(f"{tf_info.get(wyckoff_tf, '')}")
                 
                 tf_map = {"4H": ("hour", 180), "Daily": ("day", 180), "1H": ("1hour", 90)}
                 api_tf, api_days = tf_map[wyckoff_tf]
                 
                 direction = "LONG" if "Accumulation" in current_strat else "SHORT"
                 
-                with st.status("🏦 Scanne Wyckoff Patterns...") as status:
+                with st.status("Scanne Wyckoff Patterns...") as status:
                     try:
                         poly_key = st.secrets["POLYGON_KEY"]
                         
@@ -10188,7 +10188,7 @@ with st.sidebar:
                             
                             results.append({
                                 "Ticker": wr["ticker"],
-                                "Name": f"🏦 {wr['type']}",
+                                "Name": f"{wr['type']}",
                                 "Preis": wr["current_price"],
                                 "Chg%": orig.get("Chg%", 0),
                                 "RVOL": orig.get("RVOL", 1.0),
@@ -10212,10 +10212,10 @@ with st.sidebar:
                         st.session_state.market_type = "Aktien"
                         
                         dir_emoji = "⬆️" if direction == "LONG" else "⬇️"
-                        status.update(label=f"✅ {len(results)} Wyckoff {wr['type'] if results else ''} {dir_emoji} Patterns gefunden", state="complete")
+                        status.update(label=f"{len(results)} Wyckoff {wr['type'] if results else ''} {dir_emoji} Patterns gefunden", state="complete")
                         
                     except KeyError:
-                        st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                        st.error("POLYGON_KEY fehlt in Secrets!")
                     except Exception as e:
                         st.error(f"Fehler: {e}")
         
@@ -10229,9 +10229,9 @@ with st.sidebar:
                     results, snp, sf = fetch_insider_transactions(finnhub_key, trans_type)
                     st.session_state.scan_results = results
                     st.session_state.market_type = "Aktien"  # Insider nur für Aktien
-                    status.update(label=f"✅ {len(results)} Insider-Signale gefunden", state="complete")
+                    status.update(label=f"{len(results)} Insider-Signale gefunden", state="complete")
                 except KeyError:
-                    st.error("❌ FINNHUB_KEY fehlt in Secrets! Füge ihn hinzu unter Settings → Secrets")
+                    st.error("FINNHUB_KEY fehlt in Secrets! Füge ihn hinzu unter Settings → Secrets")
                 except Exception as e:
                     st.error(f"Fehler: {e}")
         
@@ -10239,7 +10239,7 @@ with st.sidebar:
         # MA BOUNCE STRATEGIE - SMA/EMA Support/Resistance Scanner
         # =================================================================
         elif is_ma_bounce_strategy:
-            with st.status("📈 Scanne MA Bounce Setups...") as status:
+            with st.status("Scanne MA Bounce Setups...") as status:
                 try:
                     poly_key = st.secrets["POLYGON_KEY"]
                     
@@ -10309,7 +10309,7 @@ with st.sidebar:
                         if not closes or len(closes) < ma_period:
                             ma_no_data += 1
                             # DEBUG: Logge warum kein History
-                            ma_debug_log.append(f"❌ {ticker}: {len(closes) if closes else 0} Bars (brauche {ma_period})")
+                            ma_debug_log.append(f"{ticker}: {len(closes) if closes else 0} Bars (brauche {ma_period})")
                             continue
                         
                         # Berechne MA
@@ -10343,11 +10343,11 @@ with st.sidebar:
                                 if ma_approach == "from_above" and ma_slope < -0.5:
                                     # Long bounce but MA is falling > 0.5% = invalid
                                     ma_trend_valid = False
-                                    ma_debug_log.append(f"⛔ {ticker}: MA faellt ({ma_slope:+.2f}%) - kein Long Bounce")
+                                    ma_debug_log.append(f"{ticker}: MA faellt ({ma_slope:+.2f}%) - kein Long Bounce")
                                 elif ma_approach == "from_below" and ma_slope > 0.5:
                                     # Short bounce but MA is rising > 0.5% = invalid
                                     ma_trend_valid = False
-                                    ma_debug_log.append(f"⛔ {ticker}: MA steigt ({ma_slope:+.2f}%) - kein Short Bounce")
+                                    ma_debug_log.append(f"{ticker}: MA steigt ({ma_slope:+.2f}%) - kein Short Bounce")
 
                         if not ma_trend_valid:
                             ma_too_far += 1
@@ -10365,7 +10365,7 @@ with st.sidebar:
                             is_valid = -ma_distance_max <= ma_distance <= 1.0
                         
                         # DEBUG: Logge JEDEN geprüften Ticker
-                        status_icon = "✅" if is_valid else "⛔"
+                        status_icon = "" if is_valid else ""
                         ma_debug_log.append(
                             f"{status_icon} {ticker}: Preis=${price:.2f} | {ma_type}{ma_period}=${ma_value:.2f} | "
                             f"Dist={ma_distance:+.2f}% | Bars={len(closes)} | "
@@ -10444,53 +10444,53 @@ with st.sidebar:
                         pass
                     
                     direction_text = "Support (Long)" if ma_approach == "from_above" else "Resistance (Short)"
-                    status.update(label=f"✅ {len(results)} {ma_type}{ma_period} {direction_text} Setups gefunden", state="complete")
+                    status.update(label=f"{len(results)} {ma_type}{ma_period} {direction_text} Setups gefunden", state="complete")
                     
                     # DEBUG INFO — immer anzeigen bei 0 Ergebnissen
-                    debug_msg = f"🔍 Pipeline: {len(candidates)} liquide Aktien → {len(filtered)} Kandidaten → {ma_checked} MA berechnet ({ma_no_data} kein History) → {ma_too_far} zu weit → {len(results)} im Band"
+                    debug_msg = f"Pipeline: {len(candidates)} liquide Aktien → {len(filtered)} Kandidaten → {ma_checked} MA berechnet ({ma_no_data} kein History) → {ma_too_far} zu weit → {len(results)} im Band"
                     if len(results) == 0 or st.session_state.get("debug_mode", False):
                         st.caption(debug_msg)
                     
                     # DEBUG: Zeige Detail-Log für jeden geprüften Ticker
                     if ma_debug_log:
-                        with st.expander(f"🔍 MA Debug Log ({len(ma_debug_log)} Ticker)", expanded=(len(results) == 0)):
-                            # Zuerst die Treffer (✅), dann die Abgelehnten (⛔), dann fehlende Daten (❌)
-                            hits = [l for l in ma_debug_log if l.startswith("✅")]
-                            misses = [l for l in ma_debug_log if l.startswith("⛔")]
-                            no_data = [l for l in ma_debug_log if l.startswith("❌")]
+                        with st.expander(f"MA Debug Log ({len(ma_debug_log)} Ticker)", expanded=(len(results) == 0)):
+                            # Zuerst die Treffer (), dann die Abgelehnten (), dann fehlende Daten ()
+                            hits = [l for l in ma_debug_log if l.startswith("")]
+                            misses = [l for l in ma_debug_log if l.startswith("")]
+                            no_data = [l for l in ma_debug_log if l.startswith("")]
                             
                             if hits:
-                                st.markdown(f"**✅ Treffer ({len(hits)}):**")
+                                st.markdown(f"**Treffer ({len(hits)}):**")
                                 for line in hits:
                                     st.text(line)
                             
                             if misses:
-                                st.markdown(f"**⛔ Zu weit vom MA ({len(misses)}):**")
+                                st.markdown(f"**Zu weit vom MA ({len(misses)}):**")
                                 for line in misses[:20]:  # Max 20 zeigen
                                     st.text(line)
                                 if len(misses) > 20:
                                     st.text(f"... und {len(misses) - 20} weitere")
                             
                             if no_data:
-                                st.markdown(f"**❌ Kein History ({len(no_data)}):**")
+                                st.markdown(f"**Kein History ({len(no_data)}):**")
                                 for line in no_data[:10]:
                                     st.text(line)
                                 if len(no_data) > 10:
                                     st.text(f"... und {len(no_data) - 10} weitere")
                     
                     if len(results) == 0:
-                        st.info(f"ℹ️ Keine Aktien im {ma_type}{ma_period} Band (−1% bis +{ma_distance_max}%). "
-                               f"{'⚠️ Kein History für alle Aktien — Polygon API Problem?' if ma_no_data > 0 and ma_checked == 0 else 'Versuche später erneut.'}")
+                        st.info(f"ℹKeine Aktien im {ma_type}{ma_period} Band (−1% bis +{ma_distance_max}%). "
+                               f"{'Kein History für alle Aktien — Polygon API Problem?' if ma_no_data > 0 and ma_checked == 0 else 'Versuche später erneut.'}")
                     
                 except KeyError:
-                    st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                    st.error("POLYGON_KEY fehlt in Secrets!")
                 except Exception as e:
                     st.error(f"Fehler beim MA Bounce Scan: {e}")
                     import traceback
                     st.code(traceback.format_exc())
 
         # =================================================================
-        # BREAKOUT IMMINENT 🔮 — wird OBEN in der Sidebar gehandelt (Background-Scan)
+        # BREAKOUT IMMINENT — wird OBEN in der Sidebar gehandelt (Background-Scan)
         # Dieser Block ist nur noch ein Fallback falls _bi_handled nicht griff
         # =================================================================
         elif is_breakout_imminent:
@@ -10511,39 +10511,39 @@ with st.sidebar:
                     # Info wenn keine Ergebnisse
                     if len(results) == 0:
                         if "Gap %" in st.session_state.active_filters:
-                            st.warning("⚠️ Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
+                            st.warning("Keine Ergebnisse - Gap-Filter bei Krypto findet nichts (keine Gaps bei 24/7 Handel)")
                         else:
-                            st.warning(f"⚠️ Keine Krypto gefunden mit aktuellen Filtern. {sf} von 250 Coins gefiltert.")
+                            st.warning(f"Keine Krypto gefunden mit aktuellen Filtern. {sf} von 250 Coins gefiltert.")
                             st.caption(f"Aktive Filter: {st.session_state.active_filters}")
                 
                 elif m_type == "Futures":
                     # FUTURES SCAN
                     futures_cat = st.session_state.get("selected_futures_cat", "INDEX")
                     cat_names = {
-                        "INDEX": "📈 Index Futures",
-                        "ENERGY": "🛢️ Energie Futures",
-                        "METALS": "🥇 Metall Futures",
-                        "AGRI": "🌾 Agrar Futures",
-                        "RATES": "💵 Zins Futures"
+                        "INDEX": "Index Futures",
+                        "ENERGY": "Energie Futures",
+                        "METALS": "Metall Futures",
+                        "AGRI": "Agrar Futures",
+                        "RATES": "Zins Futures"
                     }
                     status.update(label=f"Scanne {cat_names.get(futures_cat, futures_cat)}...")
                     results, snp, sf = fetch_futures_data(futures_cat)
                     
                     if len(results) == 0:
-                        st.warning(f"⚠️ Keine Ergebnisse für {cat_names.get(futures_cat)} mit aktuellen Filtern")
+                        st.warning(f"Keine Ergebnisse für {cat_names.get(futures_cat)} mit aktuellen Filtern")
                 
                 elif m_type == "Forex":
                     # FOREX SCAN
                     forex_cat = st.session_state.get("selected_forex_cat", "MAJORS")
                     cat_names = {
-                        "MAJORS": "💵 Major Pairs",
-                        "MINORS": "🌍 Minor Pairs",
-                        "EXOTICS": "🌏 Exotic Pairs"
+                        "MAJORS": "Major Pairs",
+                        "MINORS": "Minor Pairs",
+                        "EXOTICS": "Exotic Pairs"
                     }
                     status.update(label=f"Scanne {cat_names.get(forex_cat, forex_cat)}...")
                     
                     # DEBUG
-                    with st.expander("🔍 DEBUG: Forex Scan-State", expanded=True):
+                    with st.expander("DEBUG: Forex Scan-State", expanded=True):
                         st.write(f"**Kategorie:** {forex_cat}")
                         st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'KEINE')}")
                         st.write(f"**active_filters:** {st.session_state.active_filters}")
@@ -10552,7 +10552,7 @@ with st.sidebar:
                     results, snp, sf, _forex_debug = fetch_forex_data(forex_cat)
                     
                     # DEBUG
-                    with st.expander("🔍 DEBUG: Forex Ergebnis", expanded=True):
+                    with st.expander("DEBUG: Forex Ergebnis", expanded=True):
                         st.write(f"**results:** {len(results)}, **skipped_price:** {snp}, **skipped_filter:** {sf}")
                         if results:
                             st.write(f"**Erster:** {results[0]}")
@@ -10560,7 +10560,7 @@ with st.sidebar:
                             st.text(_dl)
                     
                     if len(results) == 0:
-                        st.warning(f"⚠️ Keine Ergebnisse für {cat_names.get(forex_cat)} mit aktuellen Filtern")
+                        st.warning(f"Keine Ergebnisse für {cat_names.get(forex_cat)} mit aktuellen Filtern")
                 
                 elif exchange == "US":
                     # US-Aktien mit Polygon.io
@@ -10574,14 +10574,14 @@ with st.sidebar:
                     
                     # RVOL-Warnung für Pre/Post Market
                     if session in ["Pre-Market", "After-Hours"] and "RVOL" in st.session_state.active_filters:
-                        st.warning("⚠️ **RVOL im Pre/Post-Market ungenau!** RVOL vergleicht mit Tagesvolumen, aber der Tag hat gerade erst begonnen. Nutze besser PM/AH-Strategien ohne RVOL.")
+                        st.warning("**RVOL im Pre/Post-Market ungenau!** RVOL vergleicht mit Tagesvolumen, aber der Tag hat gerade erst begonnen. Nutze besser PM/AH-Strategien ohne RVOL.")
                     
                     poly_key = st.secrets["POLYGON_KEY"]
                     results, snp, sf, debug_stats = fetch_stock_data(poly_key, session=session)
                     
                     # Zeige Filter-Statistiken wenn 0 Ergebnisse (hilft bei Troubleshooting)
                     if len(results) == 0 and debug_stats:
-                        with st.expander("❓ Warum 0 Ergebnisse?", expanded=True):
+                        with st.expander("Warum 0 Ergebnisse?", expanded=True):
                             st.write(f"**Gesamt geprüfte Aktien:** {debug_stats.get('total_tickers', 0):,}")
                             st.write(f"**Session:** {session}")
                             st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'Keine')}")
@@ -10611,13 +10611,13 @@ with st.sidebar:
                                 
                                 # Dynamisch den Filter-Wert auslesen
                                 cp_filter = st.session_state.active_filters.get("Close Position", (0, 1))
-                                st.info(f"💡 Dein Filter: {cp_filter[0]}-{cp_filter[1]} | Durchschnitt: {avg_cp:.2f}")
+                                st.info(f"Dein Filter: {cp_filter[0]}-{cp_filter[1]} | Durchschnitt: {avg_cp:.2f}")
                             else:
-                                st.warning("⚠️ Keine Close Position Samples - Range zu klein oder Session Problem")
+                                st.warning("Keine Close Position Samples - Range zu klein oder Session Problem")
                     
                     # Info wenn wenig Ergebnisse
                     if len(results) < 5 and session in ["Pre-Market", "After-Hours"]:
-                        st.info(f"ℹ️ Wenige {session} Ergebnisse ({len(results)}) - probiere PM/AH-Strategien ohne RVOL!")
+                        st.info(f"ℹWenige {session} Ergebnisse ({len(results)}) - probiere PM/AH-Strategien ohne RVOL!")
                 
                 else:
                     # INTERNATIONALE BÖRSEN mit Yahoo Finance
@@ -10633,7 +10633,7 @@ with st.sidebar:
                     status.update(label=f"Scanne {exchange_name}...")
                     
                     # DEBUG: Zeige State vor Scan
-                    with st.expander("🔍 DEBUG: Scan-State", expanded=True):
+                    with st.expander("DEBUG: Scan-State", expanded=True):
                         st.write(f"**Exchange:** {exchange}")
                         st.write(f"**Strategie:** {st.session_state.get('current_strategy', 'KEINE')}")
                         st.write(f"**active_filters:** {st.session_state.active_filters}")
@@ -10644,7 +10644,7 @@ with st.sidebar:
                     results, snp, sf, _intl_debug = fetch_international_stock_data(exchange)
                     
                     # DEBUG: Zeige Ergebnis
-                    with st.expander("🔍 DEBUG: Scan-Ergebnis", expanded=True):
+                    with st.expander("DEBUG: Scan-Ergebnis", expanded=True):
                         st.write(f"**results:** {len(results)}")
                         st.write(f"**skipped_no_price:** {snp}")
                         st.write(f"**skipped_filter:** {sf}")
@@ -10654,10 +10654,10 @@ with st.sidebar:
                             st.text(_dl)
                     
                     if len(results) == 0:
-                        st.warning(f"⚠️ Keine Ergebnisse für {exchange_name} mit aktuellen Filtern")
-                        st.caption(f"💡 Tipp: Wähle **🌍 Alle zeigen** um alle Aktien zu sehen, oder **🌍 Gewinner/Verlierer** für weniger strenge Filter")
+                        st.warning(f"Keine Ergebnisse für {exchange_name} mit aktuellen Filtern")
+                        st.caption(f"Tipp: Wähle **Alle zeigen** um alle Aktien zu sehen, oder **Gewinner/Verlierer** für weniger strenge Filter")
                     elif sf > 0:
-                        st.caption(f"📊 {len(results)} Treffer | {sf} ausgefiltert | RVOL nach Tageszeit normalisiert")
+                        st.caption(f"{len(results)} Treffer | {sf} ausgefiltert | RVOL nach Tageszeit normalisiert")
                 
                 st.session_state.scan_results = sorted(results, key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), reverse=True)
                 
@@ -10675,7 +10675,7 @@ with st.sidebar:
                         pattern_type = pattern_type_k1 or "consolidation"
                         history_days = strategy_data.get("history_days", 5)
 
-                        status.update(label=f"📊 Validiere Multi-Day Pattern ({pattern_type})...")
+                        status.update(label=f"Validiere Multi-Day Pattern ({pattern_type})...")
                         
                         validated_results = []
                         checked = 0
@@ -10696,7 +10696,7 @@ with st.sidebar:
                             else:
                                 # Keine History = trotzdem behalten aber mit Score 0
                                 r["PatternScore"] = 0
-                                r["PatternDetails"] = ["⚠️ Keine Multi-Day Daten"]
+                                r["PatternDetails"] = ["Keine Multi-Day Daten"]
                                 validated_results.append(r)
                             
                             if checked % 10 == 0:
@@ -10704,9 +10704,9 @@ with st.sidebar:
                         
                         if validated_results:
                             st.session_state.scan_results = sorted(validated_results, key=lambda x: x.get("PatternScore", 0), reverse=True)
-                            status.update(label=f"✅ {len(validated_results)} validierte Patterns (von {len(results)})")
+                            status.update(label=f"{len(validated_results)} validierte Patterns (von {len(results)})")
                         else:
-                            status.update(label=f"⚠️ Keine Ergebnisse nach Multi-Day Validierung")
+                            status.update(label=f"Keine Ergebnisse nach Multi-Day Validierung")
                     except Exception as e:
                         if st.session_state.get("debug_mode"):
                             st.warning(f"Multi-Day Validierung Fehler: {e}")
@@ -10729,16 +10729,16 @@ with st.sidebar:
                 VP_ENRICHMENT_STRATEGIES = {
                     # Breakout-Typ
                     "Breakout Long", "Breakdown Short", "Early Momentum",
-                    "Whale Watch", "Whale Watch Short 🐻", "Volume Surge",
+                    "Whale Watch", "Whale Watch Short ", "Volume Surge",
                     "Gap Up", "Gap Down", "Gap Up (High Vol)", "Gap Down (High Vol)",
-                    "PM Gap & Go 🌅", "Penny Rockets",
+                    "PM Gap & Go ", "Penny Rockets",
                     # Bounce-Typ  
                     "Dip Buy", "Reversal Hunter",
                     # Flag (bekommen auch VP nach Multi-Day)
                     "Bull Flag", "Bear Flag",
                     # Breite Strategien
                     "Breakout Long (Ultra)", "Gap Up Momentum (Ultra)",
-                    "PM Gainers 🌅",
+                    "PM Gainers ",
                 }
                 
                 current_strat_vp = st.session_state.get("current_strategy", "")
@@ -10761,7 +10761,7 @@ with st.sidebar:
                         vp_direction = "short" if any(kw in current_strat_vp for kw in SHORT_KW) else "long"
                         
                         top_results = st.session_state.scan_results[:30]
-                        status.update(label=f"📊 Volume Profile für Top {len(top_results)} Aktien...")
+                        status.update(label=f"Volume Profile für Top {len(top_results)} Aktien...")
                         
                         vp_enriched = 0
                         for idx, r in enumerate(top_results):
@@ -10810,7 +10810,7 @@ with st.sidebar:
                                 # Rate Limiting
                                 if (idx + 1) % 10 == 0:
                                     time.sleep(0.3)
-                                    status.update(label=f"📊 VP: {idx+1}/{len(top_results)} analysiert...")
+                                    status.update(label=f"VP: {idx+1}/{len(top_results)} analysiert...")
                                     
                             except Exception:
                                 continue
@@ -10822,7 +10822,7 @@ with st.sidebar:
                                 key=lambda x: x.get("SetupScore", x.get("Alpha", 0)), 
                                 reverse=True
                             )
-                            status.update(label=f"✅ VP für {vp_enriched}/{len(top_results)} Aktien berechnet")
+                            status.update(label=f"VP für {vp_enriched}/{len(top_results)} Aktien berechnet")
                         
                     except Exception as e:
                         if st.session_state.get("debug_mode"):
@@ -10836,7 +10836,7 @@ with st.sidebar:
                     try:
                         finnhub_key = st.secrets.get("FINNHUB_KEY", "")
                         if finnhub_key:
-                            status.update(label="📅 Prüfe Earnings Calendar...")
+                            status.update(label="Prüfe Earnings Calendar...")
                             earnings_cal = fetch_earnings_calendar(finnhub_key, days_ahead=7)
                             
                             if earnings_cal:
@@ -10865,16 +10865,16 @@ with st.sidebar:
                 
                 # Session-Info in Status
                 if m_type == "Futures":
-                    status.update(label=f"✅ {len(st.session_state.scan_results)} Futures Signale", state="complete")
+                    status.update(label=f"{len(st.session_state.scan_results)} Futures Signale", state="complete")
                 elif m_type == "Forex":
-                    status.update(label=f"✅ {len(st.session_state.scan_results)} Forex Signale", state="complete")
+                    status.update(label=f"{len(st.session_state.scan_results)} Forex Signale", state="complete")
                 elif m_type == "Aktien" and exchange != "US":
-                    exchange_flag = {"DE": "🇩🇪", "UK": "🇬🇧", "CH": "🇨🇭", "EU": "🇪🇺", "JP": "🇯🇵", "HK": "🇭🇰"}.get(exchange, "🌍")
-                    status.update(label=f"✅ {len(st.session_state.scan_results)} {exchange_flag} Signale", state="complete")
+                    exchange_flag = {"DE": "🇩🇪", "UK": "🇬🇧", "CH": "🇨🇭", "EU": "🇪🇺", "JP": "🇯🇵", "HK": "🇭🇰"}.get(exchange, "")
+                    status.update(label=f"{len(st.session_state.scan_results)} {exchange_flag} Signale", state="complete")
                 elif m_type == "Aktien" and session != "Regular":
-                    status.update(label=f"✅ {len(st.session_state.scan_results)} {session} Signale", state="complete")
+                    status.update(label=f"{len(st.session_state.scan_results)} {session} Signale", state="complete")
                 else:
-                    status.update(label=f"✅ {len(st.session_state.scan_results)} Signale", state="complete")
+                    status.update(label=f"{len(st.session_state.scan_results)} Signale", state="complete")
 
 # -----------------------------------------------------------------------------
 # OPTIONS UNUSUAL ACTIVITY DETECTION (Free Polygon Plan)
@@ -11010,7 +11010,7 @@ def _detect_unusual_options(ticker, current_price, poly_key):
                     "rvol": c.get("rvol", 0),
                     "vol": c.get("last_vol", 0),
                     "avg": c.get("avg_vol", 0),
-                    "label": f"🔴 {c['type']} ${c['strike']:.0f}: {c['rvol']:.1f}x Volumen ({c['last_vol']} vs avg {c['avg_vol']:.0f})"
+                    "label": f"{c['type']} ${c['strike']:.0f}: {c['rvol']:.1f}x Volumen ({c['last_vol']} vs avg {c['avg_vol']:.0f})"
                 })
             elif c.get("rvol", 0) >= 2.0:
                 _signals.append({
@@ -11020,7 +11020,7 @@ def _detect_unusual_options(ticker, current_price, poly_key):
                     "rvol": c.get("rvol", 0),
                     "vol": c.get("last_vol", 0),
                     "avg": c.get("avg_vol", 0),
-                    "label": f"🟡 {c['type']} ${c['strike']:.0f}: {c['rvol']:.1f}x Volumen ({c['last_vol']} vs avg {c['avg_vol']:.0f})"
+                    "label": f"{c['type']} ${c['strike']:.0f}: {c['rvol']:.1f}x Volumen ({c['last_vol']} vs avg {c['avg_vol']:.0f})"
                 })
 
         # Put/Call Ratio Anomalie
@@ -11028,13 +11028,13 @@ def _detect_unusual_options(ticker, current_price, poly_key):
             _signals.append({
                 "severity": "HIGH", "type": "P/C_RATIO", "strike": 0,
                 "rvol": _pc_ratio, "vol": _total_put_vol, "avg": _total_call_vol,
-                "label": f"🔴 Put/Call Ratio: {_pc_ratio:.1f} — starke Put-Aktivität (bearish Signal)"
+                "label": f"Put/Call Ratio: {_pc_ratio:.1f} — starke Put-Aktivität (bearish Signal)"
             })
         elif _pc_ratio <= 0.3 and _total_call_vol > 50:
             _signals.append({
                 "severity": "MEDIUM", "type": "P/C_RATIO", "strike": 0,
                 "rvol": _pc_ratio, "vol": _total_call_vol, "avg": _total_put_vol,
-                "label": f"🟡 Put/Call Ratio: {_pc_ratio:.2f} — starke Call-Aktivität (bullish Signal)"
+                "label": f"Put/Call Ratio: {_pc_ratio:.2f} — starke Call-Aktivität (bullish Signal)"
             })
 
         # Gesamt-Label
@@ -11044,7 +11044,7 @@ def _detect_unusual_options(ticker, current_price, poly_key):
             _top = _signals[0]
             _label = _top["label"]
         else:
-            _label = f"✅ Normal (C:{_total_call_vol} P:{_total_put_vol} P/C:{_pc_ratio:.2f})"
+            _label = f"Normal (C:{_total_call_vol} P:{_total_put_vol} P/C:{_pc_ratio:.2f})"
 
         return {
             "has_unusual": _has_unusual,
@@ -11077,18 +11077,18 @@ def _render_options_activity_banner(ticker, current_price, poly_key):
             _medium = [s for s in _signals if s["severity"] == "MEDIUM"]
 
             if _high:
-                st.error(f"🎰 **UNUSUAL OPTIONS ACTIVITY** — {_signals[0]['label']}")
+                st.error(f"**UNUSUAL OPTIONS ACTIVITY** — {_signals[0]['label']}")
                 for s in _signals[1:3]:
                     st.warning(s["label"])
             elif _medium:
-                st.warning(f"🎰 **Options-Signal** — {_signals[0]['label']}")
+                st.warning(f"**Options-Signal** — {_signals[0]['label']}")
         else:
             # Nur im Detail View anzeigen, nicht als Banner
             _pc = _data["put_call_ratio"]
             _cv = _data["total_call_vol"]
             _pv = _data["total_put_vol"]
             if _cv + _pv > 0:
-                st.caption(f"🎰 Options: Call Vol {_cv} | Put Vol {_pv} | P/C Ratio {_pc:.2f}")
+                st.caption(f"Options: Call Vol {_cv} | Put Vol {_pv} | P/C Ratio {_pc:.2f}")
     except Exception:
         pass
 
@@ -11142,17 +11142,17 @@ _SIC_TO_SECTOR = {
 }
 
 _SECTOR_ETF_META = {
-    "XLK": {"name": "Technology", "emoji": "💻"},
-    "XLF": {"name": "Financials", "emoji": "🏦"},
-    "XLE": {"name": "Energy", "emoji": "⚡"},
-    "XLV": {"name": "Healthcare", "emoji": "🏥"},
-    "XLI": {"name": "Industrials", "emoji": "🏭"},
-    "XLY": {"name": "Consumer Disc.", "emoji": "🛒"},
-    "XLP": {"name": "Consumer Staples", "emoji": "🥫"},
-    "XLU": {"name": "Utilities", "emoji": "💡"},
-    "XLB": {"name": "Materials", "emoji": "🧱"},
-    "XLRE": {"name": "Real Estate", "emoji": "🏠"},
-    "XLC": {"name": "Communication", "emoji": "📱"},
+    "XLK": {"name": "Technology", "emoji": ""},
+    "XLF": {"name": "Financials", "emoji": ""},
+    "XLE": {"name": "Energy", "emoji": ""},
+    "XLV": {"name": "Healthcare", "emoji": ""},
+    "XLI": {"name": "Industrials", "emoji": ""},
+    "XLY": {"name": "Consumer Disc.", "emoji": ""},
+    "XLP": {"name": "Consumer Staples", "emoji": ""},
+    "XLU": {"name": "Utilities", "emoji": ""},
+    "XLB": {"name": "Materials", "emoji": ""},
+    "XLRE": {"name": "Real Estate", "emoji": ""},
+    "XLC": {"name": "Communication", "emoji": ""},
 }
 
 # Bekannte Ticker → Sektor Overrides (für Mega-Caps die jeder kennt)
@@ -11234,10 +11234,10 @@ def _render_sector_trend_banner(ticker, sic_code="", poly_key=None, all_tickers=
                 chg = perf.get(etf, 0)
                 emoji = meta.get("emoji", "")
                 name = meta.get("name", etf)
-                color = "🟢" if chg > 0.3 else ("🔴" if chg < -0.3 else "⚪")
+                color = "" if chg > 0.3 else ("" if chg < -0.3 else "")
                 parts.append(f"{emoji} {name} **{chg:+.1f}%** {color} ({count})")
 
-            st.markdown(f"📊 **Sektor-Trend:** {' · '.join(parts)}")
+            st.markdown(f"**Sektor-Trend:** {' · '.join(parts)}")
 
         elif ticker:
             etf = _resolve_sector_etf(ticker, sic_code)
@@ -11247,29 +11247,29 @@ def _render_sector_trend_banner(ticker, sic_code="", poly_key=None, all_tickers=
                 emoji = meta.get("emoji", "")
                 name = meta.get("name", etf)
                 if chg > 1.5:
-                    st.success(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Starker Rückenwind")
+                    st.success(f"**Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Starker Rückenwind")
                 elif chg > 0.3:
-                    st.info(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Leichter Rückenwind")
+                    st.info(f"**Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Leichter Rückenwind")
                 elif chg < -1.5:
-                    st.error(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Starker Gegenwind")
+                    st.error(f"**Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Starker Gegenwind")
                 elif chg < -0.3:
-                    st.warning(f"📊 **Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Leichter Gegenwind")
+                    st.warning(f"**Sektor-Trend:** {emoji} {name} ({etf}) **{chg:+.1f}%** — Leichter Gegenwind")
                 else:
-                    st.caption(f"📊 Sektor-Trend: {emoji} {name} ({etf}) {chg:+.1f}% — Neutral")
+                    st.caption(f"Sektor-Trend: {emoji} {name} ({etf}) {chg:+.1f}% — Neutral")
     except Exception:
         pass
 
 
 # =============================================================================
-# 🔴 CRASH MONITOR — SPY/VIX/Breadth/Sektoren
+# CRASH MONITOR — SPY/VIX/Breadth/Sektoren
 # =============================================================================
 
 # Sektor-ETFs für Rotation-Analyse
 SECTOR_ETFS = {
-    "XLK": ("Tech", "💻"), "XLF": ("Financials", "🏦"), "XLV": ("Healthcare", "🏥"),
-    "XLP": ("Consumer Staples", "🛒"), "XLU": ("Utilities", "⚡"), "XLE": ("Energy", "🛢️"),
-    "XLI": ("Industrials", "🏭"), "XLB": ("Materials", "⛏️"), "XLRE": ("Real Estate", "🏠"),
-    "XLC": ("Communication", "📡"), "XLY": ("Consumer Disc.", "🛍️"),
+    "XLK": ("Tech", ""), "XLF": ("Financials", ""), "XLV": ("Healthcare", ""),
+    "XLP": ("Consumer Staples", ""), "XLU": ("Utilities", ""), "XLE": ("Energy", ""),
+    "XLI": ("Industrials", ""), "XLB": ("Materials", ""), "XLRE": ("Real Estate", ""),
+    "XLC": ("Communication", ""), "XLY": ("Consumer Disc.", ""),
 }
 
 # Defensive vs Risk-On Sektoren
@@ -11427,7 +11427,7 @@ def _detect_wyckoff_distribution(closes, highs, lows, volumes):
 @st.cache_data(ttl=300)
 def fetch_crash_monitor_data(poly_key):
     """
-    🔴 Crash Monitor V2 — Professionelles Frühwarnsystem für Markt-Crashs.
+     Crash Monitor V2 — Professionelles Frühwarnsystem für Markt-Crashs.
 
     Fear Score 0-100 basierend auf 12+ Indikatoren:
     1. SPY Drawdown vom 52W-Hoch (0-25 pts)
@@ -11529,13 +11529,13 @@ def fetch_crash_monitor_data(poly_key):
                     sma50_prev = sum(closes[-51:-1]) / 50
                     sma200_prev = sum(closes[-201:-1]) / 200
                     if sma50_prev > sma200_prev and sma50 < sma200:
-                        cross_signal = "💀 DEATH CROSS (frisch!)"
+                        cross_signal = "DEATH CROSS (frisch!)"
                     elif sma50_prev < sma200_prev and sma50 > sma200:
-                        cross_signal = "✨ GOLDEN CROSS (frisch!)"
+                        cross_signal = "GOLDEN CROSS (frisch!)"
                     elif sma50 < sma200:
-                        cross_signal = "💀 Death Cross aktiv"
+                        cross_signal = "Death Cross aktiv"
                     else:
-                        cross_signal = "📈 Über Golden Cross"
+                        cross_signal = "Über Golden Cross"
                     # SMA50 nähert sich SMA200? Warnsignal
                     sma_gap_pct = ((sma50 - sma200) / sma200) * 100
                 else:
@@ -11596,16 +11596,16 @@ def fetch_crash_monitor_data(poly_key):
 
                 # 1. DRAWDOWN vom 52W-Hoch (max 25 pts)
                 if drawdown <= -20:
-                    signals.append(("🔴", "BÄRENMARKT", f"SPY {drawdown:.1f}% vom Hoch — offizieller Bärenmarkt"))
+                    signals.append(("", "BÄRENMARKT", f"SPY {drawdown:.1f}% vom Hoch — offizieller Bärenmarkt"))
                     fear += 25
                 elif drawdown <= -10:
-                    signals.append(("🔴", "KORREKTUR", f"SPY {drawdown:.1f}% vom Hoch — Korrektur-Territorium"))
+                    signals.append(("", "KORREKTUR", f"SPY {drawdown:.1f}% vom Hoch — Korrektur-Territorium"))
                     fear += 18
                 elif drawdown <= -5:
-                    signals.append(("🟠", "PULLBACK", f"SPY {drawdown:.1f}% vom Hoch — Pullback-Zone"))
+                    signals.append(("", "PULLBACK", f"SPY {drawdown:.1f}% vom Hoch — Pullback-Zone"))
                     fear += 12
                 elif drawdown <= -3:
-                    signals.append(("🟡", "SCHWÄCHE", f"SPY {drawdown:.1f}% vom 52W-Hoch"))
+                    signals.append(("", "SCHWÄCHE", f"SPY {drawdown:.1f}% vom 52W-Hoch"))
                     fear += 7
                 elif drawdown <= -1:
                     fear += 3
@@ -11614,79 +11614,79 @@ def fetch_crash_monitor_data(poly_key):
                 if current < sma50:
                     gap_50 = ((current - sma50) / sma50) * 100
                     if gap_50 <= -5:
-                        signals.append(("🔴", "WEIT UNTER SMA50", f"SPY ${current:.0f} | SMA50 ${sma50:.0f} ({gap_50:.1f}%)"))
+                        signals.append(("", "WEIT UNTER SMA50", f"SPY ${current:.0f} | SMA50 ${sma50:.0f} ({gap_50:.1f}%)"))
                         fear += 12
                     elif gap_50 <= -2:
-                        signals.append(("🟠", "UNTER SMA50", f"SPY ${current:.0f} < SMA50 ${sma50:.0f} ({gap_50:.1f}%)"))
+                        signals.append(("", "UNTER SMA50", f"SPY ${current:.0f} < SMA50 ${sma50:.0f} ({gap_50:.1f}%)"))
                         fear += 8
                     else:
-                        signals.append(("🟡", "KNAPP UNTER SMA50", f"SPY ${current:.0f} ≈ SMA50 ${sma50:.0f}"))
+                        signals.append(("", "KNAPP UNTER SMA50", f"SPY ${current:.0f} ≈ SMA50 ${sma50:.0f}"))
                         fear += 5
 
                 # 3. SPY vs SMA200 (max 15 pts) — nur wenn genug Daten vorhanden
                 if sma200 is not None and current < sma200:
                     gap_200 = ((current - sma200) / sma200) * 100
                     if gap_200 <= -10:
-                        signals.append(("🔴", "TIEF UNTER SMA200", f"SPY ${current:.0f} | SMA200 ${sma200:.0f} ({gap_200:.1f}%)"))
+                        signals.append(("", "TIEF UNTER SMA200", f"SPY ${current:.0f} | SMA200 ${sma200:.0f} ({gap_200:.1f}%)"))
                         fear += 15
                     elif gap_200 <= -3:
-                        signals.append(("🔴", "UNTER SMA200", f"SPY ${current:.0f} < SMA200 ${sma200:.0f}"))
+                        signals.append(("", "UNTER SMA200", f"SPY ${current:.0f} < SMA200 ${sma200:.0f}"))
                         fear += 12
                     else:
-                        signals.append(("🟠", "KNAPP UNTER SMA200", f"SPY nahe SMA200 ${sma200:.0f}"))
+                        signals.append(("", "KNAPP UNTER SMA200", f"SPY nahe SMA200 ${sma200:.0f}"))
                         fear += 8
                 elif sma200 is not None:
                     # Über SMA200 aber knapp?
                     pct_above = ((current - sma200) / sma200) * 100
                     if pct_above < 2:
-                        signals.append(("🟡", "SMA200 NAHE", f"SPY nur {pct_above:.1f}% über SMA200 — Unterstützung wackelt"))
+                        signals.append(("", "SMA200 NAHE", f"SPY nur {pct_above:.1f}% über SMA200 — Unterstützung wackelt"))
                         fear += 3
 
                 # 4. RSI (max 12 pts)
                 if rsi <= 20:
-                    signals.append(("🔴", "RSI PANIK", f"RSI {rsi:.0f} — extremes Panik-Level"))
+                    signals.append(("", "RSI PANIK", f"RSI {rsi:.0f} — extremes Panik-Level"))
                     fear += 12
                 elif rsi <= 30:
-                    signals.append(("🔴", "RSI ÜBERVERKAUFT", f"RSI {rsi:.0f} — starker Verkaufsdruck"))
+                    signals.append(("", "RSI ÜBERVERKAUFT", f"RSI {rsi:.0f} — starker Verkaufsdruck"))
                     fear += 10
                 elif rsi <= 40:
-                    signals.append(("🟠", "RSI SCHWACH", f"RSI {rsi:.0f} — bärisches Momentum"))
+                    signals.append(("", "RSI SCHWACH", f"RSI {rsi:.0f} — bärisches Momentum"))
                     fear += 6
                 elif rsi <= 45:
-                    signals.append(("🟡", "RSI NEUTRAL-SCHWACH", f"RSI {rsi:.0f}"))
+                    signals.append(("", "RSI NEUTRAL-SCHWACH", f"RSI {rsi:.0f}"))
                     fear += 3
 
                 # 5. MACD (max 8 pts)
                 if macd < 0:
                     fear += 3
                     if macd_hist < 0:
-                        signals.append(("🟠", "MACD BÄRISCH", f"MACD {macd:.2f} unter Signal-Linie — Abwärtstrend"))
+                        signals.append(("", "MACD BÄRISCH", f"MACD {macd:.2f} unter Signal-Linie — Abwärtstrend"))
                         fear += 5
                     else:
                         fear += 2
 
                 # 6. Konsekutive Verlusttage (max 8 pts)
                 if consec_down >= 5:
-                    signals.append(("🔴", f"{consec_down} VERLUSTTAGE", f"{consec_down} Tage in Folge Verlust — starker Abwärtstrend"))
+                    signals.append(("", f"{consec_down} VERLUSTTAGE", f"{consec_down} Tage in Folge Verlust — starker Abwärtstrend"))
                     fear += 8
                 elif consec_down >= 3:
-                    signals.append(("🟠", f"{consec_down} VERLUSTTAGE", f"{consec_down} aufeinanderfolgende Verlusttage"))
+                    signals.append(("", f"{consec_down} VERLUSTTAGE", f"{consec_down} aufeinanderfolgende Verlusttage"))
                     fear += 5
                 elif consec_down >= 2:
                     fear += 2
 
                 # 7. Momentum 5d/20d (max 10 pts)
                 if chg_5d <= -5:
-                    signals.append(("🔴", "5D CRASH", f"SPY {chg_5d:+.1f}% in 5 Tagen — Sell-Off"))
+                    signals.append(("", "5D CRASH", f"SPY {chg_5d:+.1f}% in 5 Tagen — Sell-Off"))
                     fear += 6
                 elif chg_5d <= -2:
-                    signals.append(("🟠", "5D SCHWACH", f"SPY {chg_5d:+.1f}% in 5 Tagen"))
+                    signals.append(("", "5D SCHWACH", f"SPY {chg_5d:+.1f}% in 5 Tagen"))
                     fear += 3
                 elif chg_5d < 0:
                     fear += 1
 
                 if chg_20d <= -5:
-                    signals.append(("🔴", "20D ABWÄRTSTREND", f"SPY {chg_20d:+.1f}% in 20 Tagen"))
+                    signals.append(("", "20D ABWÄRTSTREND", f"SPY {chg_20d:+.1f}% in 20 Tagen"))
                     fear += 4
                 elif chg_20d <= -2:
                     fear += 2
@@ -11695,35 +11695,35 @@ def fetch_crash_monitor_data(poly_key):
 
                 # 8. Sell-Volume Druck (max 8 pts)
                 if sell_pressure > 65:
-                    signals.append(("🔴", "SELL-DRUCK", f"{sell_pressure:.0f}% des Volumens an Down-Tagen (20d) — Distribution"))
+                    signals.append(("", "SELL-DRUCK", f"{sell_pressure:.0f}% des Volumens an Down-Tagen (20d) — Distribution"))
                     fear += 8
                 elif sell_pressure > 55:
-                    signals.append(("🟠", "ERHÖHTER SELL-DRUCK", f"{sell_pressure:.0f}% Sell-Volume (20d)"))
+                    signals.append(("", "ERHÖHTER SELL-DRUCK", f"{sell_pressure:.0f}% Sell-Volume (20d)"))
                     fear += 4
                 elif sell_pressure > 50:
                     fear += 2
 
                 # 9. Death Cross / SMA Konvergenz (max 15 pts)
                 if "DEATH CROSS (frisch" in cross_signal:
-                    signals.append(("🔴", "DEATH CROSS", "SMA50 kreuzt SMA200 nach unten — historisch starkes Bärensignal"))
+                    signals.append(("", "DEATH CROSS", "SMA50 kreuzt SMA200 nach unten — historisch starkes Bärensignal"))
                     fear += 15
                 elif "Death Cross aktiv" in cross_signal:
-                    signals.append(("🔴", "DEATH CROSS AKTIV", "SMA50 unter SMA200 — Bärenmarkt-Regime"))
+                    signals.append(("", "DEATH CROSS AKTIV", "SMA50 unter SMA200 — Bärenmarkt-Regime"))
                     fear += 12
                 elif sma_gap_pct is not None and 0 < sma_gap_pct < 1.5:
-                    signals.append(("🟡", "SMA KONVERGENZ", f"SMA50 nur {sma_gap_pct:.1f}% über SMA200 — Death Cross droht"))
+                    signals.append(("", "SMA KONVERGENZ", f"SMA50 nur {sma_gap_pct:.1f}% über SMA200 — Death Cross droht"))
                     fear += 5
 
                 # 10. Hohes Volumen bei Sell-Off (max 5 pts)
                 if vol_ratio > 2.0 and (current - prev_close) < 0:
-                    signals.append(("🔴", "PANIK-VOLUMEN", f"RVOL {vol_ratio:.1f}x bei Verlust — institutioneller Sell-Off"))
+                    signals.append(("", "PANIK-VOLUMEN", f"RVOL {vol_ratio:.1f}x bei Verlust — institutioneller Sell-Off"))
                     fear += 5
                 elif vol_ratio > 1.5 and (current - prev_close) < 0:
                     fear += 2
 
                 # 11. Range Position (Preis am 20d-Tief = mehr Angst)
                 if range_pos < 0.15:
-                    signals.append(("🔴", "AM 20D-TIEF", f"SPY nahe dem 20-Tage-Tief — keine Käufer"))
+                    signals.append(("", "AM 20D-TIEF", f"SPY nahe dem 20-Tage-Tief — keine Käufer"))
                     fear += 5
                 elif range_pos < 0.3:
                     fear += 2
@@ -11760,20 +11760,20 @@ def fetch_crash_monitor_data(poly_key):
 
                         # VIX Fear Scoring (max 15 pts)
                         if vix_spike > 2.0:
-                            signals.append(("🔴", "VIX EXTREM", f"{vix_etf} {vix_spike:.1f}x über 20d-Schnitt — Panik-Modus"))
+                            signals.append(("", "VIX EXTREM", f"{vix_etf} {vix_spike:.1f}x über 20d-Schnitt — Panik-Modus"))
                             fear += 15
                         elif vix_spike > 1.5:
-                            signals.append(("🔴", "VIX SPIKE", f"{vix_etf} {vix_spike:.1f}x über Durchschnitt — starke Angst"))
+                            signals.append(("", "VIX SPIKE", f"{vix_etf} {vix_spike:.1f}x über Durchschnitt — starke Angst"))
                             fear += 12
                         elif vix_spike > 1.2:
-                            signals.append(("🟠", "VIX ERHÖHT", f"{vix_etf} {vix_spike:.1f}x über Durchschnitt — erhöhte Nervosität"))
+                            signals.append(("", "VIX ERHÖHT", f"{vix_etf} {vix_spike:.1f}x über Durchschnitt — erhöhte Nervosität"))
                             fear += 7
                         elif vix_spike > 1.05:
                             fear += 3
 
                         # Trend: VIX steigt über mehrere Tage = zunehmende Angst
                         if vix_5d_chg > 20:
-                            signals.append(("🔴", "VIX TREND ↑", f"{vix_etf} steigt stark: 5d-Schnitt {vix_5d_chg:+.0f}% über 20d"))
+                            signals.append(("", "VIX TREND ↑", f"{vix_etf} steigt stark: 5d-Schnitt {vix_5d_chg:+.0f}% über 20d"))
                             fear += 5
                         elif vix_5d_chg > 10:
                             fear += 3
@@ -11786,10 +11786,10 @@ def fetch_crash_monitor_data(poly_key):
         ALL_MONITOR_ETFS = {}
         for _etf, (_name, _emoji) in SECTOR_ETFS.items():
             ALL_MONITOR_ETFS[_etf] = {"name": _name, "emoji": _emoji, "category": "sector"}
-        for _etf, (_name, _emoji) in [("TLT", ("US Treasury 20Y+", "🏦")), ("GLD", ("Gold", "🥇")), ("UUP", ("US Dollar", "💵"))]:
+        for _etf, (_name, _emoji) in [("TLT", ("US Treasury 20Y+", "")), ("GLD", ("Gold", "")), ("UUP", ("US Dollar", ""))]:
             ALL_MONITOR_ETFS[_etf] = {"name": _name, "emoji": _emoji, "category": "safe_haven"}
-        ALL_MONITOR_ETFS["HYG"] = {"name": "High Yield Bonds", "emoji": "💳", "category": "credit"}
-        ALL_MONITOR_ETFS["LQD"] = {"name": "Inv. Grade Bonds", "emoji": "💳", "category": "credit"}
+        ALL_MONITOR_ETFS["HYG"] = {"name": "High Yield Bonds", "emoji": "", "category": "credit"}
+        ALL_MONITOR_ETFS["LQD"] = {"name": "Inv. Grade Bonds", "emoji": "", "category": "credit"}
 
         _etf_start = (end_date - timedelta(days=40)).strftime('%Y-%m-%d')
         _etf_end = end_date.strftime('%Y-%m-%d')
@@ -11856,14 +11856,14 @@ def fetch_crash_monitor_data(poly_key):
             result.get("breadth", {})["total_sectors"] = len(sector_data)
 
             if rotation_gap > 3:
-                signals.append(("🔴", "RISK-OFF ROTATION", f"Defensive {def_avg:+.1f}% vs Risk-On {risk_avg:+.1f}% (5d) — Flight to Safety"))
+                signals.append(("", "RISK-OFF ROTATION", f"Defensive {def_avg:+.1f}% vs Risk-On {risk_avg:+.1f}% (5d) — Flight to Safety"))
                 fear += 10
             elif rotation_gap > 1.5:
-                signals.append(("🟡", "LEICHTE ROTATION", f"Defensive outperformen Risk-On um {rotation_gap:.1f}%"))
+                signals.append(("", "LEICHTE ROTATION", f"Defensive outperformen Risk-On um {rotation_gap:.1f}%"))
                 fear += 4
 
             if neg_pct >= 80:
-                signals.append(("🔴", "BREITE SEKTORSCHWÄCHE", f"{neg_sectors}/{len(sector_data)} Sektoren negativ (5d)"))
+                signals.append(("", "BREITE SEKTORSCHWÄCHE", f"{neg_sectors}/{len(sector_data)} Sektoren negativ (5d)"))
                 fear += 5
             elif neg_pct >= 60:
                 fear += 2
@@ -11910,19 +11910,19 @@ def fetch_crash_monitor_data(poly_key):
                 if total < 100:
                     pass  # Zu wenig Daten für aussagekräftige Breadth → kein Fear-Score Beitrag
                 elif ad_ratio < 0.4:
-                    signals.append(("🔴", "BREADTH KOLLAPS", f"A/D Ratio {ad_ratio:.2f} — Massiver Ausverkauf"))
+                    signals.append(("", "BREADTH KOLLAPS", f"A/D Ratio {ad_ratio:.2f} — Massiver Ausverkauf"))
                     fear += 12
                 elif ad_ratio < 0.6:
-                    signals.append(("🔴", "BREADTH SCHWACH", f"A/D Ratio {ad_ratio:.2f} — deutlich mehr Verlierer"))
+                    signals.append(("", "BREADTH SCHWACH", f"A/D Ratio {ad_ratio:.2f} — deutlich mehr Verlierer"))
                     fear += 8
                 elif ad_ratio < 0.8:
-                    signals.append(("🟠", "BREADTH NEGATIV", f"A/D Ratio {ad_ratio:.2f}"))
+                    signals.append(("", "BREADTH NEGATIV", f"A/D Ratio {ad_ratio:.2f}"))
                     fear += 4
                 elif ad_ratio < 1.0:
                     fear += 2
 
                 if extreme_losers > 50:
-                    signals.append(("🔴", "CRASH-SELLING", f"{extreme_losers} Aktien mit >10% Verlust heute"))
+                    signals.append(("", "CRASH-SELLING", f"{extreme_losers} Aktien mit >10% Verlust heute"))
                     fear += 5
         except Exception:
             pass
@@ -11955,10 +11955,10 @@ def fetch_crash_monitor_data(poly_key):
             if _sh_data["chg_5d"] > 0 and spy_5d < -1:
                 fts_count += 1
         if fts_count >= 3 and spy_5d < -2:
-            signals.append(("🔴", "FLIGHT TO SAFETY", f"TLT+GLD+UUP steigen bei SPY {spy_5d:+.1f}% — Institutionelle flüchten"))
+            signals.append(("", "FLIGHT TO SAFETY", f"TLT+GLD+UUP steigen bei SPY {spy_5d:+.1f}% — Institutionelle flüchten"))
             fear += 10
         elif fts_count >= 2 and spy_5d < -1:
-            signals.append(("🟠", "SAFE-HAVEN FLOWS", f"{fts_count}/3 Safe Havens steigen bei SPY-Schwäche"))
+            signals.append(("", "SAFE-HAVEN FLOWS", f"{fts_count}/3 Safe Havens steigen bei SPY-Schwäche"))
             fear += 5
         elif fts_count >= 1 and spy_5d < -2:
             fear += 2
@@ -11967,7 +11967,7 @@ def fetch_crash_monitor_data(poly_key):
         if safe_havens:
             all_falling = all(d["chg_5d"] < -1 for d in safe_havens.values()) and spy_5d < -2
             if all_falling:
-                signals.append(("🔴", "LIQUIDITÄTSKRISE", "SPY + Bonds + Gold + Dollar ALLE negativ — Cash is King"))
+                signals.append(("", "LIQUIDITÄTSKRISE", "SPY + Bonds + Gold + Dollar ALLE negativ — Cash is King"))
                 fear += 12
 
         # ══════════════════════════════════════════
@@ -11994,10 +11994,10 @@ def fetch_crash_monitor_data(poly_key):
                 "spread_change": round(credit_spread_chg, 2),
             }
             if credit_spread_chg > 2.0:
-                signals.append(("🔴", "CREDIT STRESS", f"HYG {hyg_5d:+.1f}% vs LQD {lqd_5d:+.1f}% — Credit Spreads weiten sich stark"))
+                signals.append(("", "CREDIT STRESS", f"HYG {hyg_5d:+.1f}% vs LQD {lqd_5d:+.1f}% — Credit Spreads weiten sich stark"))
                 fear += 8
             elif credit_spread_chg > 1.0:
-                signals.append(("🟠", "CREDIT WARNUNG", f"HYG underperformt LQD um {credit_spread_chg:.1f}% (5d)"))
+                signals.append(("", "CREDIT WARNUNG", f"HYG underperformt LQD um {credit_spread_chg:.1f}% (5d)"))
                 fear += 4
             elif credit_spread_chg > 0.5:
                 fear += 2
@@ -12091,7 +12091,7 @@ def fetch_crash_monitor_data(poly_key):
 @st.cache_data(ttl=300)
 def fetch_bear_scanner_data(poly_key):
     """
-    🐻 Bear Scanner — Findet Short-Opportunitäten und Inverse-ETF-Chancen.
+     Bear Scanner — Findet Short-Opportunitäten und Inverse-ETF-Chancen.
     """
     result = {"inverse_etfs": [], "short_candidates": [], "breakdown_stocks": []}
 
@@ -12120,13 +12120,13 @@ def fetch_bear_scanner_data(poly_key):
                         # Momentum-Signal: Inverse ETF steigt = Markt fällt
                         momentum = ""
                         if chg_5d > 10:
-                            momentum = "🔥 STARK"
+                            momentum = "STARK"
                         elif chg_5d > 5:
-                            momentum = "📈 Steigend"
+                            momentum = "Steigend"
                         elif chg_5d > 0:
-                            momentum = "↗️ Leicht"
+                            momentum = "↗Leicht"
                         else:
-                            momentum = "↘️ Fallend"
+                            momentum = "↘Fallend"
 
                         result["inverse_etfs"].append({
                             "Ticker": etf, "Name": desc, "Underlying": underlying,
@@ -12220,19 +12220,19 @@ def fetch_bear_scanner_data(poly_key):
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
-tab_scanner, tab_bi, tab_biotech, tab_divergence, tab_early, tab_newlisting, tab_search, tab_watchlist, tab_moneyflow, tab_calendar, tab_crash, tab_bear, tab_backtest, tab_guide = st.tabs(["📊 Scanner", "🔮 BI Scanner", "🧬 Biotech", "📉 BTC-Divergenz", "🔥 Early Movers", "🆕 New Listing", "🔍 Suche", "⭐ Watchlist", "💰 Money Flow", "📅 Kalender", "🔴 Crash Monitor", "🐻 Bear Scanner", "🧪 Backtest", "📖 Strategie Guide"])
+tab_scanner, tab_bi, tab_biotech, tab_divergence, tab_early, tab_newlisting, tab_search, tab_watchlist, tab_moneyflow, tab_calendar, tab_crash, tab_bear, tab_backtest, tab_guide = st.tabs(["Scanner", "BI Scanner", "Biotech", "BTC-Divergenz", "Early Movers", "🆕 New Listing", "Suche", "⭐ Watchlist", "Money Flow", "Kalender", "Crash Monitor", "Bear Scanner", "Backtest", "Strategie Guide"])
 
 with tab_scanner:
     # PRE-MARKET WATCHLIST ANZEIGE (wenn aktiv)
     if st.session_state.get("show_pm_watchlist", False):
-        st.header("🌅 Pre-Market Watchlist V2")
+        st.header("Pre-Market Watchlist V2")
         st.caption("Echte PM Session High/Low | Technical Levels | Risk Management")
         
         # PM Daten laden wenn noch nicht vorhanden
         if st.session_state.get("pm_watchlist_data") is None:
             try:
                 poly_key = st.secrets["POLYGON_KEY"]
-                with st.spinner("🔍 Lade Pre-Market Movers (echte PM Session Daten)..."):
+                with st.spinner("Lade Pre-Market Movers (echte PM Session Daten)..."):
                     pm_data, spy_change = fetch_premarket_watchlist(
                         poly_key, 
                         min_change=2.0,  # Min 2% Bewegung
@@ -12243,7 +12243,7 @@ with tab_scanner:
                     st.session_state.pm_watchlist_data = pm_data
                     st.session_state.pm_spy_change = spy_change
             except KeyError:
-                st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                st.error("POLYGON_KEY fehlt in Secrets!")
                 pm_data = []
                 spy_change = 0
             except Exception as e:
@@ -12259,7 +12259,7 @@ with tab_scanner:
         # Refresh Button
         col_ref1, col_ref2 = st.columns([3, 1])
         with col_ref2:
-            if st.button("🔄 Refresh", key="pm_refresh"):
+            if st.button("Refresh", key="pm_refresh"):
                 st.session_state.pm_watchlist_data = None
                 st.rerun()
         
@@ -12268,7 +12268,7 @@ with tab_scanner:
             display_premarket_watchlist(pm_data, spy_change)
         
         st.divider()
-        st.caption("👇 Normaler Scanner weiterhin verfügbar")
+        st.caption("Normaler Scanner weiterhin verfügbar")
     
     # AI CHART ANALYZER ANZEIGE (wenn aktiv)
     if st.session_state.get("show_ai_chart", False) and st.session_state.get("ai_chart_ticker"):
@@ -12276,9 +12276,9 @@ with tab_scanner:
         
         col_chart_header, col_chart_close = st.columns([4, 1])
         with col_chart_header:
-            st.header(f"🤖 AI Chart Analyzer")
+            st.header(f"AI Chart Analyzer")
         with col_chart_close:
-            if st.button("❌ Schließen", key="close_ai_chart"):
+            if st.button("Schließen", key="close_ai_chart"):
                 st.session_state.show_ai_chart = False
                 st.session_state.ai_chart_ticker = None
                 st.rerun()
@@ -12287,26 +12287,26 @@ with tab_scanner:
             poly_key = st.secrets["POLYGON_KEY"]
             display_ai_chart_analyzer(ticker, poly_key, timeframe="1H")
         except KeyError:
-            st.error("❌ POLYGON_KEY fehlt in Secrets!")
+            st.error("POLYGON_KEY fehlt in Secrets!")
         except Exception as e:
             st.error(f"Chart Fehler: {e}")
             import traceback
             st.code(traceback.format_exc())
         
         st.divider()
-        st.caption("👇 Normaler Scanner weiterhin verfügbar")
+        st.caption("Normaler Scanner weiterhin verfügbar")
     
     col_chart, col_journal = st.columns([3, 1])
     
     # Prüfe ob Insider-Strategie aktiv
     is_insider = st.session_state.current_strategy in ["Insider Buying", "Insider Selling"]
-    is_volume_void = st.session_state.current_strategy in ["Volume Void Long 🕳️⬆️", "Volume Void Short 🕳️⬇️"]
-    is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish 🦋⬆️", "Harmonic Bearish 🦋⬇️", "Harmonic All Patterns 🦋"]
-    is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation 🏦⬆️", "Wyckoff Distribution 🏦⬇️"]
+    is_volume_void = st.session_state.current_strategy in ["Volume Void Long ⬆", "Volume Void Short ⬇"]
+    is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish ⬆", "Harmonic Bearish ⬇", "Harmonic All Patterns "]
+    is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation ⬆", "Wyckoff Distribution ⬇"]
     is_bi = "Breakout Imminent" in st.session_state.current_strategy
     
     with col_journal:
-        st.caption(f"📋 **Ergebnisse** — {st.session_state.current_strategy or ''} | {st.session_state.get('active_trading_session', '') if st.session_state.market_type == 'Aktien' else '24/7'}")
+        st.caption(f"**Ergebnisse** — {st.session_state.current_strategy or ''} | {st.session_state.get('active_trading_session', '') if st.session_state.market_type == 'Aktien' else '24/7'}")
         
         if st.session_state.scan_results:
             df = pd.DataFrame(st.session_state.scan_results)
@@ -12437,7 +12437,7 @@ with tab_scanner:
             # ⬆ #1/46 ⬇
             nc1, nc2, nc3 = st.columns([1, 2, 1])
             with nc1:
-                if st.button("⬆️", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
+                if st.button("⬆", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
                     # Sync radio state
                     if "ticker_select_df" in st.session_state:
@@ -12446,7 +12446,7 @@ with tab_scanner:
             with nc2:
                 st.markdown(f"<div style='text-align:center;font-weight:bold;'>#{current_idx + 1}/{num_results}</div>", unsafe_allow_html=True)
             with nc3:
-                if st.button("⬇️", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
+                if st.button("⬇", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
                     if "ticker_select_df" in st.session_state:
                         del st.session_state["ticker_select_df"]
@@ -12461,11 +12461,11 @@ with tab_scanner:
                     if ear and isinstance(ear, dict):
                         level = ear.get("level", "")
                         if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
-                            er_col[i_e] = "⛔"
+                            er_col[i_e] = ""
                         elif level == "TOMORROW":
-                            er_col[i_e] = "⚠️"
+                            er_col[i_e] = ""
                         elif level == "THIS_WEEK":
-                            er_col[i_e] = "📅"
+                            er_col[i_e] = ""
             
             compact_data = {
                 "Ticker": df["Ticker"].tolist(),
@@ -12553,18 +12553,18 @@ with tab_scanner:
                             # Warnung wenn Preis stark abweicht (>3%)
                             if abs(price_diff_pct) > 3:
                                 if price_diff_pct > 0:
-                                    st.error(f"🚨 **LIVE: ${rt_price:.2f}** (+{price_diff_pct:.1f}% über Scanner!){time_info}")
+                                    st.error(f"**LIVE: ${rt_price:.2f}** (+{price_diff_pct:.1f}% über Scanner!){time_info}")
                                 else:
-                                    st.success(f"📉 **LIVE: ${rt_price:.2f}** ({price_diff_pct:.1f}% unter Scanner){time_info}")
+                                    st.success(f"**LIVE: ${rt_price:.2f}** ({price_diff_pct:.1f}% unter Scanner){time_info}")
                             elif abs(price_diff_pct) > 1:
-                                st.info(f"📡 **LIVE: ${rt_price:.2f}** ({price_diff_pct:+.1f}%){time_info}")
+                                st.info(f"**LIVE: ${rt_price:.2f}** ({price_diff_pct:+.1f}%){time_info}")
                             else:
-                                st.caption(f"📡 Live: ${rt_price:.2f} ✓{time_info}")
+                                st.caption(f"Live: ${rt_price:.2f} {time_info}")
                     except Exception as e:
                         pass  # Fehler ignorieren
 
                 # ═══════════════════════════════════════════════════════
-                # 📊 SEKTOR-TREND BANNER
+                # SEKTOR-TREND BANNER
                 # ═══════════════════════════════════════════════════════
                 if st.session_state.market_type == "Aktien":
                     try:
@@ -12577,7 +12577,7 @@ with tab_scanner:
                         pass
 
                 # ═══════════════════════════════════════════════════════
-                # ⚠️ EARNINGS WARNING — GANZ OBEN, VOR ALLEM ANDEREN!
+                # EARNINGS WARNING — GANZ OBEN, VOR ALLEM ANDEREN!
                 # ═══════════════════════════════════════════════════════
                 if "EarningsWarning" in df.columns:
                     try:
@@ -12590,37 +12590,37 @@ with tab_scanner:
                             
                             # Prominente Warnung je nach Level
                             if level in ("TODAY_AMC", "TODAY_BMO", "TODAY", "YESTERDAY_AMC"):
-                                st.error(f"⛔ **{warning_text}**")
+                                st.error(f"**{warning_text}**")
                                 if details:
-                                    st.error(f"📊 {details}")
+                                    st.error(f"{details}")
                                 if level == "TODAY_AMC":
-                                    st.error("🚫 **NICHT KAUFEN!** Earnings heute nach Börsenschluss — "
+                                    st.error("**NICHT KAUFEN!** Earnings heute nach Börsenschluss — "
                                             "massiver Gap-Risk morgen. Position VOR Close schliessen oder absichern!")
                                 elif level == "TODAY_BMO":
-                                    st.error("🚫 **VORSICHT!** Earnings heute vor Eröffnung — "
+                                    st.error("**VORSICHT!** Earnings heute vor Eröffnung — "
                                             "Preis kann sich durch Earnings massiv verändert haben!")
                                 elif level == "YESTERDAY_AMC":
-                                    st.error("🚫 **ACHTUNG!** Earnings gestern AMC — "
+                                    st.error("**ACHTUNG!** Earnings gestern AMC — "
                                             "heutiger Preis enthält Earnings-Reaktion!")
                                 if penalty:
                                     st.caption(f"SetupScore: {penalty:+d} Punkte wegen Earnings-Risiko")
                             
                             elif level == "TOMORROW":
-                                st.warning(f"⚠️ **{warning_text}**")
+                                st.warning(f"**{warning_text}**")
                                 if details:
-                                    st.caption(f"📊 {details}")
-                                st.warning("⚠️ Position-Sizing reduzieren oder vor Earnings schliessen!")
+                                    st.caption(f"{details}")
+                                st.warning("Position-Sizing reduzieren oder vor Earnings schliessen!")
                                 if penalty:
                                     st.caption(f"SetupScore: {penalty:+d} Punkte")
                             
                             elif level == "THIS_WEEK":
-                                st.info(f"📅 **{warning_text}**")
+                                st.info(f"**{warning_text}**")
                                 if details:
-                                    st.caption(f"📊 {details}")
-                                st.caption("💡 Earnings diese Woche — Haltezeit berücksichtigen!")
+                                    st.caption(f"{details}")
+                                st.caption("Earnings diese Woche — Haltezeit berücksichtigen!")
                             
                             elif level == "NEXT_WEEK":
-                                st.caption(f"📋 {warning_text}")
+                                st.caption(f"{warning_text}")
                     except Exception:
                         pass
                 
@@ -12630,7 +12630,7 @@ with tab_scanner:
                         transactions = row["Transactions"]
                         if transactions and isinstance(transactions, list):
                             st.divider()
-                            st.caption("📊 Letzte Transaktionen:")
+                            st.caption("Letzte Transaktionen:")
                             for t in transactions[:3]:
                                 emoji = "🟢" if t["type"] == "BUY" else "🔴"
                                 st.caption(f"{emoji} {t['name'][:20]}: {t['shares']:,.0f} Aktien (${t['value']:,.0f})")
@@ -12647,11 +12647,11 @@ with tab_scanner:
                         if flag_details and isinstance(flag_details, list) and len(flag_details) > 0:
                             st.divider()
                             if flag_score >= 80:
-                                st.success(f"🎯 Flag Score: **{flag_score}/100** (EXCELLENT)")
+                                st.success(f"Flag Score: **{flag_score}/100** (EXCELLENT)")
                             elif flag_score >= 60:
-                                st.info(f"✅ Flag Score: **{flag_score}/100** (GOOD)")
+                                st.info(f"Flag Score: **{flag_score}/100** (GOOD)")
                             else:
-                                st.warning(f"⚠️ Flag Score: **{flag_score}/100** (WEAK)")
+                                st.warning(f"Flag Score: **{flag_score}/100** (WEAK)")
                             
                             st.caption("**Pattern-Analyse:**")
                             for detail in flag_details:
@@ -12673,35 +12673,35 @@ with tab_scanner:
                             _ca_vol = _ca.get("volume_trend", "neutral")
 
                             # Trend + Volume auf einer Zeile
-                            _trend_icon = {"up": "📈", "down": "📉", "sideways": "➡️"}.get(_ca_trend, "❓")
+                            _trend_icon = {"up": "", "down": "", "sideways": ""}.get(_ca_trend, "")
                             _trend_label = {"up": "Aufwärtstrend", "down": "Abwärtstrend", "sideways": "Seitwärts"}.get(_ca_trend, "Unbekannt")
-                            _vol_icon = {"accumulation": "🟢 Akkumulation", "distribution": "🔴 Distribution", "neutral": "⚪ Neutral"}.get(_ca_vol, "")
+                            _vol_icon = {"accumulation": "Akkumulation", "distribution": "Distribution", "neutral": "Neutral"}.get(_ca_vol, "")
 
                             _col_t, _col_v = st.columns(2)
                             with _col_t:
                                 st.caption(f"{_trend_icon} **Trend:** {_trend_label} ({_ca_strength}%)")
                             with _col_v:
-                                st.caption(f"📊 **Volumen:** {_vol_icon}")
+                                st.caption(f"**Volumen:** {_vol_icon}")
 
                             # Support/Resistance
                             _supp = _ca.get("support", 0)
                             _resi = _ca.get("resistance", 0)
                             if _supp > 0 and _resi > 0:
-                                st.caption(f"🟢 Support: ${_supp:,.2f} | 🔴 Resistance: ${_resi:,.2f}")
+                                st.caption(f"Support: ${_supp:,.2f} | Resistance: ${_resi:,.2f}")
 
                             # Consolidation + Breakout Ready
                             if _ca.get("consolidation"):
                                 _cd = _ca.get("consol_days", 0)
                                 _cr = _ca.get("consol_range_pct", 0)
                                 if _ca.get("breakout_ready"):
-                                    st.success(f"🎯 **Breakout Ready!** {_cd} Tage Konsolidierung ({_cr:.1f}% Range) + steigendes Volumen")
+                                    st.success(f"**Breakout Ready!** {_cd} Tage Konsolidierung ({_cr:.1f}% Range) + steigendes Volumen")
                                 else:
-                                    st.info(f"📦 Konsolidierung seit {_cd} Tagen ({_cr:.1f}% Range)")
+                                    st.info(f"Konsolidierung seit {_cd} Tagen ({_cr:.1f}% Range)")
 
                             # Candlestick Patterns
                             if _ca_patterns:
                                 for _cp in _ca_patterns[:4]:  # Max 4 Patterns anzeigen
-                                    _cp_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(_cp.get("type", ""), "")
+                                    _cp_icon = {"bullish": "", "bearish": "", "neutral": ""}.get(_cp.get("type", ""), "")
                                     st.caption(f"{_cp_icon} **{_cp['name']}** ({_cp.get('pos', '')}) — {_cp.get('signal', '')}")
                     except Exception:
                         pass
@@ -12742,7 +12742,7 @@ with tab_scanner:
                                     st.error(f"{selloff_emoji} Selloff-Risiko: **{selloff}**")
                             
                             # Action
-                            st.info(f"💡 **{bh['action']}**")
+                            st.info(f"**{bh['action']}**")
                             
                             # Signals und Warnings
                             if bh.get("signals"):
@@ -12765,7 +12765,7 @@ with tab_scanner:
                             st.divider()
                             col_atr, col_liq = st.columns(2)
                             with col_atr:
-                                regime_emoji = {"LOW": "😴", "NORMAL": "📊", "HIGH": "⚡", "EXTREME": "🔥"}.get(vol_regime, "📊")
+                                regime_emoji = {"LOW": "", "NORMAL": "", "HIGH": "", "EXTREME": ""}.get(vol_regime, "")
                                 regime_color = {"LOW": "blue", "NORMAL": "gray", "HIGH": "orange", "EXTREME": "red"}.get(vol_regime, "gray")
                                 st.metric(
                                     f"{regime_emoji} Volatilität", 
@@ -12776,13 +12776,13 @@ with tab_scanner:
                             with col_liq:
                                 if dollar_vol >= 1000000:
                                     liq_str = f"${dollar_vol/1000000:.1f}M"
-                                    st.metric("💧 Liquidität", liq_str, delta="HIGH", delta_color="normal")
+                                    st.metric("Liquidität", liq_str, delta="HIGH", delta_color="normal")
                                 elif dollar_vol >= 100000:
                                     liq_str = f"${dollar_vol/1000:.0f}K"
-                                    st.metric("💧 Liquidität", liq_str, delta="OK", delta_color="off")
+                                    st.metric("Liquidität", liq_str, delta="OK", delta_color="off")
                                 else:
                                     liq_str = f"${dollar_vol/1000:.0f}K"
-                                    st.metric("💧 Liquidität", liq_str, delta="LOW ⚠️", delta_color="inverse")
+                                    st.metric("Liquidität", liq_str, delta="LOW ", delta_color="inverse")
                     except Exception as e:
                         pass
                 
@@ -12798,14 +12798,14 @@ with tab_scanner:
                     "Breakout Long (Ultra)": "breakout", "Breakout Short (Ultra)": "breakout",
                     "Breakdown Short": "breakout",
                     "Early Momentum": "breakout", "Penny Rockets": "breakout",
-                    "Whale Watch": "breakout", "Whale Watch Short 🐻": "breakout",
+                    "Whale Watch": "breakout", "Whale Watch Short ": "breakout",
                     "Consolidation Breakout": "breakout",
                     "Bull Flag": "breakout", "Bear Flag": "breakout",
                     "Volume Surge": "breakout", "High Volume Churn": "breakout",
                     # Gap Strategien
                     "Gap Up": "gap", "Gap Down": "gap", 
                     "Gap Up (High Vol)": "gap", "Gap Down (High Vol)": "gap",
-                    "PM Gainers 🌅": "gap", "PM Gap & Go 🌅": "gap", "AH Gainers 🌙": "gap",
+                    "PM Gainers ": "gap", "PM Gap & Go ": "gap", "AH Gainers ": "gap",
                     # MA Bounce Strategien
                     "EMA 21 Bounce (Long)": "ma_bounce", "EMA 21 Bounce (Short)": "ma_bounce",
                     "SMA 50 Bounce (Long)": "ma_bounce", "SMA 50 Bounce (Short)": "ma_bounce",
@@ -12815,7 +12815,7 @@ with tab_scanner:
                     "Oversold Bounce": "reversal", "Overbought Short": "reversal",
                     "RSI Oversold": "reversal", "RSI Overbought": "reversal",
                     "Reversal Hunter": "reversal",
-                    "Reversal Setup 🪤": "reversal",
+                    "Reversal Setup ": "reversal",
                     # Dip Buy = MA Bounce Charakter (Pullback im Trend)
                     "Dip Buy": "ma_bounce",
                     # Volume Void Strategien
@@ -12869,14 +12869,14 @@ with tab_scanner:
                         
                         # Titel basierend auf Strategie-Typ
                         timing_titles = {
-                            "breakout": "🎯 Breakout-Timing",
-                            "gap": "🌅 Gap-Timing",
-                            "ma_bounce": "📈 MA-Bounce Timing",
-                            "reversal": "🔄 Reversal-Timing",
-                            "void": "📊 Volume-Void Timing",
-                            "insider": "👔 Insider-Signal Stärke"
+                            "breakout": "Breakout-Timing",
+                            "gap": "Gap-Timing",
+                            "ma_bounce": "MA-Bounce Timing",
+                            "reversal": "Reversal-Timing",
+                            "void": "Volume-Void Timing",
+                            "insider": "Insider-Signal Stärke"
                         }
-                        title = timing_titles.get(strat_type, "🎯 Timing-Bewertung")
+                        title = timing_titles.get(strat_type, "Timing-Bewertung")
                         
                         st.subheader(f"{title}: {timing.get('emoji', '')} {timing.get('rating', '')}")
                         st.caption(f"Score: **{timing.get('score', 0)}/{timing.get('max_score', 1)}** | {timing.get('risk', '')}")
@@ -12886,36 +12886,36 @@ with tab_scanner:
                         
                         # Faktor-Überschriften je nach Strategie
                         factor_titles = {
-                            "breakout": ("📊 Technische Faktoren:", "📈 Bestätigungs-Faktoren:"),
-                            "gap": ("📊 Gap-Faktoren:", "📈 Bestätigung:"),
-                            "ma_bounce": ("📊 MA-Faktoren:", "📈 Bestätigung:"),
-                            "reversal": ("📊 Überdehnungs-Faktoren:", "📈 Umkehr-Signale:"),
-                            "void": ("📊 Void-Faktoren:", "📈 Setup-Qualität:"),
-                            "insider": ("📊 Signal-Stärke:", "📈 Timing-Faktoren:")
+                            "breakout": ("Technische Faktoren:", "Bestätigungs-Faktoren:"),
+                            "gap": ("Gap-Faktoren:", "Bestätigung:"),
+                            "ma_bounce": ("MA-Faktoren:", "Bestätigung:"),
+                            "reversal": ("Überdehnungs-Faktoren:", "Umkehr-Signale:"),
+                            "void": ("Void-Faktoren:", "Setup-Qualität:"),
+                            "insider": ("Signal-Stärke:", "Timing-Faktoren:")
                         }
-                        title1, title2 = factor_titles.get(strat_type, ("📊 Faktoren:", "📈 Bestätigung:"))
+                        title1, title2 = factor_titles.get(strat_type, ("Faktoren:", "Bestätigung:"))
                         
                         with col_tech:
                             st.markdown(f"**{title1}**")
                             for f in timing.get('factors', [])[:3]:
-                                icon = "✅" if f['ok'] else "❌"
+                                icon = "" if f['ok'] else ""
                                 st.caption(f"{icon} {f['name']}: {f['value']} ({f['detail']})")
                         
                         with col_conf:
                             st.markdown(f"**{title2}**")
                             for f in timing.get('factors', [])[3:]:
-                                icon = "✅" if f['ok'] else "❌"
+                                icon = "" if f['ok'] else ""
                                 st.caption(f"{icon} {f['name']}: {f['value']} ({f['detail']})")
                         
                         # Strategie-spezifische Empfehlung
                         recommendation = timing.get('recommendation', timing.get('risk', ''))
                         
                         if timing.get('rating', '') in ["FRÜH", "GO", "PERFEKT", "EXTREM", "STARK"]:
-                            st.success(f"💡 **Empfehlung:** {recommendation}")
+                            st.success(f"**Empfehlung:** {recommendation}")
                         elif timing.get('rating', '') in ["OK", "WARTEN", "GUT", "MÖGLICH", "MODERAT"]:
-                            st.warning(f"💡 **Empfehlung:** {recommendation}")
+                            st.warning(f"**Empfehlung:** {recommendation}")
                         else:
-                            st.error(f"💡 **Empfehlung:** {recommendation}")
+                            st.error(f"**Empfehlung:** {recommendation}")
                     except Exception as e:
                         pass
                 
@@ -12927,7 +12927,7 @@ with tab_scanner:
                         ma_type = row.get("MA_Type", "") if "MA_Type" in df.columns else "MA"
                         
                         st.divider()
-                        st.subheader(f"📈 {ma_type} Support/Resistance")
+                        st.subheader(f"{ma_type} Support/Resistance")
                         
                         col_ma1, col_ma2 = st.columns(2)
                         with col_ma1:
@@ -12941,11 +12941,11 @@ with tab_scanner:
                         # Setup Qualität
                         abs_dist = abs(ma_distance)
                         if abs_dist <= 1.0:
-                            st.success(f"🎯 **PERFEKT** - Nur {abs_dist:.1f}% vom {ma_type} entfernt!")
+                            st.success(f"**PERFEKT** - Nur {abs_dist:.1f}% vom {ma_type} entfernt!")
                         elif abs_dist <= 2.0:
-                            st.info(f"✅ **GUT** - {abs_dist:.1f}% vom {ma_type} entfernt")
+                            st.info(f"**GUT** - {abs_dist:.1f}% vom {ma_type} entfernt")
                         else:
-                            st.warning(f"⚠️ **OK** - {abs_dist:.1f}% vom {ma_type} entfernt")
+                            st.warning(f"**OK** - {abs_dist:.1f}% vom {ma_type} entfernt")
                         
                     except Exception as e:
                         pass
@@ -12956,7 +12956,7 @@ with tab_scanner:
                         vp_summary = row.get("VP_Summary", "N/A")
                         if vp_summary and vp_summary != "N/A":
                             st.divider()
-                            st.subheader("📊 Volume Profile")
+                            st.subheader("Volume Profile")
                             st.caption(vp_summary)
                             
                             # VP Signals als Detail-Liste
@@ -12990,16 +12990,16 @@ with tab_scanner:
                         
                         # Score Anzeige
                         if void_score >= 70:
-                            st.success(f"🕳️ **Volume Void Score: {void_score}/100** (EXCELLENT)")
+                            st.success(f"**Volume Void Score: {void_score}/100** (EXCELLENT)")
                         elif void_score >= 50:
-                            st.info(f"🕳️ **Volume Void Score: {void_score}/100** (GOOD)")
+                            st.info(f"**Volume Void Score: {void_score}/100** (GOOD)")
                         else:
-                            st.warning(f"🕳️ **Volume Void Score: {void_score}/100** (MODERATE)")
+                            st.warning(f"**Volume Void Score: {void_score}/100** (MODERATE)")
                         
                         # Void Details
                         col_v1, col_v2 = st.columns(2)
                         with col_v1:
-                            direction = "⬆️" if "Long" in st.session_state.current_strategy else "⬇️"
+                            direction = "⬆" if "Long" in st.session_state.current_strategy else "⬇"
                             st.metric(f"Entfernung zum Void {direction}", f"{void_dist:.1f}%")
                             st.metric("Void Größe", f"{void_size:.1f}%")
                         with col_v2:
@@ -13007,30 +13007,30 @@ with tab_scanner:
                             st.metric("Voids darunter", f"{voids_below}")
                         
                         # Volume Profile Levels
-                        st.caption("**📊 Volume Profile Levels:**")
+                        st.caption("**Volume Profile Levels:**")
                         current_price = row["Preis"]
                         
                         # VAH, POC, VAL als Levels
                         if vah > 0:
                             vah_dist = ((vah - current_price) / current_price * 100)
-                            st.caption(f"📈 VAH (Value Area High): ${vah:.2f} ({vah_dist:+.1f}%)")
+                            st.caption(f"VAH (Value Area High): ${vah:.2f} ({vah_dist:+.1f}%)")
                         if poc > 0:
                             poc_dist = ((poc - current_price) / current_price * 100)
-                            st.caption(f"🎯 POC (Point of Control): ${poc:.2f} ({poc_dist:+.1f}%)")
+                            st.caption(f"POC (Point of Control): ${poc:.2f} ({poc_dist:+.1f}%)")
                         if val > 0:
                             val_dist = ((val - current_price) / current_price * 100)
-                            st.caption(f"📉 VAL (Value Area Low): ${val:.2f} ({val_dist:+.1f}%)")
+                            st.caption(f"VAL (Value Area Low): ${val:.2f} ({val_dist:+.1f}%)")
                         
                         # Nearest Void Details
                         if nearest_void and isinstance(nearest_void, dict):
-                            st.caption("**🕳️ Nächstes Volume Void:**")
+                            st.caption("**Nächstes Volume Void:**")
                             st.caption(f"   Range: ${nearest_void.get('low', 0):.2f} - ${nearest_void.get('high', 0):.2f}")
                             st.caption(f"   Volumen: {nearest_void.get('volume_pct', 0):.0f}% des Durchschnitts")
                         
                     except Exception as e:
                         pass
                 
-                # Harmonic Pattern Details anzeigen 🦋
+                # Harmonic Pattern Details anzeigen 
                 if "PatternData" in df.columns and pd.notna(row.get("PatternData")):
                     try:
                         pattern_data = row["PatternData"]
@@ -13038,7 +13038,7 @@ with tab_scanner:
                             st.divider()
                             
                             # Pattern Header
-                            emoji = pattern_data.get("emoji", "🦋")
+                            emoji = pattern_data.get("emoji", "")
                             pattern_name = pattern_data.get("pattern", "Unknown")
                             direction = pattern_data.get("direction", "")
                             score = pattern_data.get("score", 0)
@@ -13050,11 +13050,11 @@ with tab_scanner:
                             entry_dist = pattern_data.get("entry_distance_pct", 0)
                             dist_warning = ""
                             if entry_dist > 20:
-                                dist_warning = " | 🚫 ABGELAUFEN"
+                                dist_warning = " | ABGELAUFEN"
                             elif entry_dist > 10:
-                                dist_warning = " | ⚠️ VERALTET"
+                                dist_warning = " | VERALTET"
                             elif entry_dist > 5:
-                                dist_warning = f" | 🟡 Entry {entry_dist:.0f}% entfernt"
+                                dist_warning = f" | Entry {entry_dist:.0f}% entfernt"
 
                             if score >= 80 and entry_dist <= 10:
                                 st.success(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100{dist_warning}")
@@ -13063,19 +13063,19 @@ with tab_scanner:
                             else:
                                 st.warning(f"{emoji} **{pattern_name}** | {dir_emoji} | Score: {score}/100{dist_warning}")
 
-                            st.caption(f"📊 Historische Erfolgsrate: **{success_rate}%**")
+                            st.caption(f"Historische Erfolgsrate: **{success_rate}%**")
                             
                             # XABCD Punkte
                             points = pattern_data.get("points", {})
                             if points:
-                                st.caption("**📍 XABCD Punkte:**")
+                                st.caption("**XABCD Punkte:**")
                                 point_str = " → ".join([f"{k}=${v}" for k, v in points.items()])
                                 st.caption(f"   {point_str}")
                             
                             # Fibonacci Ratios
                             ratios = pattern_data.get("ratios", {})
                             if ratios:
-                                st.caption("**📐 Fibonacci Verhältnisse:**")
+                                st.caption("**Fibonacci Verhältnisse:**")
                                 for ratio_name, ratio_val in ratios.items():
                                     st.caption(f"   {ratio_name}: {ratio_val}")
                             
@@ -13083,7 +13083,7 @@ with tab_scanner:
                             trade = pattern_data.get("trade", {})
                             if trade:
                                 st.divider()
-                                st.caption("**🎯 Trade Setup:**")
+                                st.caption("**Trade Setup:**")
                                 
                                 col_t1, col_t2 = st.columns(2)
                                 with col_t1:
@@ -13097,24 +13097,24 @@ with tab_scanner:
                                 
                                 rr = trade.get('risk_reward', 0)
                                 if rr >= 2:
-                                    st.success(f"✅ Risk/Reward: **{rr:.1f}:1** (Excellent)")
+                                    st.success(f"Risk/Reward: **{rr:.1f}:1** (Excellent)")
                                 elif rr >= 1.5:
-                                    st.info(f"📊 Risk/Reward: **{rr:.1f}:1** (Good)")
+                                    st.info(f"Risk/Reward: **{rr:.1f}:1** (Good)")
                                 else:
-                                    st.warning(f"⚠️ Risk/Reward: **{rr:.1f}:1** (Consider)")
+                                    st.warning(f"Risk/Reward: **{rr:.1f}:1** (Consider)")
                             
                             # Pattern Details (Matches)
                             details = pattern_data.get("details", [])
                             if details:
-                                with st.expander("📋 Pattern Details"):
+                                with st.expander("Pattern Details"):
                                     for detail in details:
                                         st.caption(detail)
                     except Exception as e:
                         pass
                 
-                # Wyckoff Pattern Details anzeigen 🏦
+                # Wyckoff Pattern Details anzeigen 
                 # =====================================================================
-                # 🔮 BREAKOUT IMMINENT — Detail-Anzeige
+                # BREAKOUT IMMINENT — Detail-Anzeige
                 # =====================================================================
                 if is_bi and "BI_Score" in df.columns:
                     try:
@@ -13126,40 +13126,40 @@ with tab_scanner:
                         bi_grade = row.get("BI_GradeLabel", "")
 
                         st.divider()
-                        dir_label = "⬆️ LONG" if bi_dir == "LONG" else "⬇️ SHORT"
+                        dir_label = "⬆LONG" if bi_dir == "LONG" else "⬇SHORT"
 
                         # Grade-basierte Farbe
                         bi_grade_letter = row.get("BI_Grade", "D")
                         if bi_grade_letter == "S":
-                            st.success(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                            st.success(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
                         elif bi_grade_letter == "A":
-                            st.success(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                            st.success(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
                         elif bi_grade_letter == "B":
-                            st.info(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                            st.info(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
                         else:
-                            st.warning(f"🔮 **Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                            st.warning(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
 
                         # Signal-Details nach Gruppen
                         if isinstance(bi_details, list):
-                            fire_signals = [d for d in bi_details if "🔥" in str(d)]
-                            ok_signals = [d for d in bi_details if "✅" in str(d)]
-                            weak_signals = [d for d in bi_details if "⚠️" in str(d) or "❌" in str(d)]
+                            fire_signals = [d for d in bi_details if "" in str(d)]
+                            ok_signals = [d for d in bi_details if "" in str(d)]
+                            weak_signals = [d for d in bi_details if "" in str(d) or "" in str(d)]
 
                             if fire_signals:
-                                st.caption(f"**🔥 Starke Signale ({len(fire_signals)}/20):**")
+                                st.caption(f"**Starke Signale ({len(fire_signals)}/20):**")
                                 for s in fire_signals:
                                     st.caption(f"  {s}")
                             if ok_signals:
-                                st.caption(f"**✅ Positive Signale ({len(ok_signals)}/20):**")
+                                st.caption(f"**Positive Signale ({len(ok_signals)}/20):**")
                                 for s in ok_signals:
                                     st.caption(f"  {s}")
                             if weak_signals:
-                                with st.expander(f"⚠️ Schwache/Fehlende Signale ({len(weak_signals)}/20)"):
+                                with st.expander(f"Schwache/Fehlende Signale ({len(weak_signals)}/20)"):
                                     for s in weak_signals:
                                         st.caption(f"  {s}")
 
                         # Range + Entry/SL/TP
-                        st.caption(f"📏 **Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
+                        st.caption(f"**Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
 
                         col_t1, col_t2 = st.columns(2)
                         with col_t1:
@@ -13171,11 +13171,11 @@ with tab_scanner:
 
                         rr = row.get('RiskReward', 0)
                         if rr >= 2:
-                            st.success(f"✅ R:R **{rr:.1f}:1**")
+                            st.success(f"R:R **{rr:.1f}:1**")
                         elif rr >= 1.5:
-                            st.info(f"📊 R:R **{rr:.1f}:1**")
+                            st.info(f"R:R **{rr:.1f}:1**")
                         else:
-                            st.warning(f"⚠️ R:R **{rr:.1f}:1**")
+                            st.warning(f"R:R **{rr:.1f}:1**")
                     except Exception:
                         pass
 
@@ -13190,17 +13190,17 @@ with tab_scanner:
                         dir_emoji = "⬆️ LONG" if "Accumulation" in w_type else "⬇️ SHORT"
                         
                         if w_score >= 70:
-                            st.success(f"🏦 **Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
+                            st.success(f"**Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
                         elif w_score >= 50:
-                            st.info(f"🏦 **Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
+                            st.info(f"**Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
                         else:
-                            st.warning(f"🏦 **Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
+                            st.warning(f"**Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
                         
-                        st.caption(f"📍 **Phase:** {w_phase}")
-                        st.caption(f"📏 **Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
+                        st.caption(f"**Phase:** {w_phase}")
+                        st.caption(f"**Range:** ${row.get('RangeLow', 0):.2f} — ${row.get('RangeHigh', 0):.2f}")
                         
                         if w_events:
-                            st.caption(f"📋 **Events:** {w_events}")
+                            st.caption(f"**Events:** {w_events}")
                         
                         col_t1, col_t2 = st.columns(2)
                         with col_t1:
@@ -13210,16 +13210,16 @@ with tab_scanner:
                             st.metric("TP1", f"${row.get('TP1', 0):.2f}")
                             rr = row.get('RiskReward', 0)
                             if rr >= 2:
-                                st.success(f"✅ R:R **{rr:.1f}:1**")
+                                st.success(f"R:R **{rr:.1f}:1**")
                             elif rr >= 1.5:
-                                st.info(f"📊 R:R **{rr:.1f}:1**")
+                                st.info(f"R:R **{rr:.1f}:1**")
                             else:
-                                st.warning(f"⚠️ R:R **{rr:.1f}:1**")
+                                st.warning(f"R:R **{rr:.1f}:1**")
                     except Exception:
                         pass
                 
                 # =====================================================================
-                # 🔥 CONFLUENCE CHECK — Automatisch bei Klick (alle Strategien)
+                # CONFLUENCE CHECK — Automatisch bei Klick (alle Strategien)
                 # Berechnet 10 unabhängige Kategorien für den gewählten Ticker
                 # =====================================================================
                 if st.session_state.market_type == "Aktien" and "ConfluenceScore" not in df.columns:
@@ -13298,15 +13298,15 @@ with tab_scanner:
                                 
                                 # Kompakte Header-Zeile
                                 if conf_pass >= 9:
-                                    st.success(f"🔥 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
+                                    st.success(f"Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
                                 elif conf_pass >= 8:
-                                    st.success(f"🔥 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
+                                    st.success(f"Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
                                 elif conf_pass >= 7:
-                                    st.info(f"🔥 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
+                                    st.info(f"Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
                                 elif conf_pass >= 6:
-                                    st.warning(f"⚠️ Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
+                                    st.warning(f"Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
                                 else:
-                                    st.error(f"🚫 Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
+                                    st.error(f"Confluence: **{conf_pass}/10** {dir_emoji} — {conf_result.get('action', '')}")
                                 
                                 # 10 Kategorien kompakt als 2x5 Grid
                                 conf_cats = conf_result.get("categories", {})
@@ -13316,7 +13316,7 @@ with tab_scanner:
                                     for i, cat in enumerate(cat_list):
                                         target_col = col_a if i < 5 else col_b
                                         with target_col:
-                                            icon = "✅" if cat["pass"] else "❌"
+                                            icon = "" if cat["pass"] else ""
                                             st.caption(f"{icon} {cat.get('emoji', '')} **{cat.get('name', '')}**: {cat.get('value', '')}")
                     except Exception:
                         pass
@@ -13343,31 +13343,31 @@ with tab_scanner:
 
                         # Interpretation
                         if abs(coin_chg - btc_chg) <= 2.0:
-                            st.warning(f"🔗 **Nur BTC-Korrelation!** Coin bewegt sich ≈ gleich wie BTC ({btc_chg:+.1f}%). Kein eigenständiger Breakout — warte auf Entkopplung.")
+                            st.warning(f"**Nur BTC-Korrelation!** Coin bewegt sich ≈ gleich wie BTC ({btc_chg:+.1f}%). Kein eigenständiger Breakout — warte auf Entkopplung.")
                         elif rel_str and rel_str > 5.0:
-                            st.success(f"💪 **Starke relative Stärke!** Coin outperformt BTC um {rel_str:+.1f}% — eigenständiger Move, echtes Signal.")
+                            st.success(f"**Starke relative Stärke!** Coin outperformt BTC um {rel_str:+.1f}% — eigenständiger Move, echtes Signal.")
                         elif rel_str and rel_str < -5.0:
-                            st.error(f"⚠️ **Relative Schwäche!** Coin underperformt BTC um {rel_str:+.1f}% — trotz BTC-Stärke schwach.")
+                            st.error(f"**Relative Schwäche!** Coin underperformt BTC um {rel_str:+.1f}% — trotz BTC-Stärke schwach.")
                         elif rel_str and rel_str > 2.0:
-                            st.info(f"📈 **Leicht relativ stark** vs BTC (+{rel_str:.1f}%) — gutes Zeichen, aber noch keine klare Entkopplung.")
+                            st.info(f"**Leicht relativ stark** vs BTC (+{rel_str:.1f}%) — gutes Zeichen, aber noch keine klare Entkopplung.")
 
                 # ACTION BUTTONS ROW
                 _btn_cols = st.columns(3)
                 with _btn_cols[0]:
                     if st.button(f"⭐ Watchlist", use_container_width=True, key=f"wl_{selected_row_idx}"):
                         if add_to_watchlist(row.get("Ticker", ""), row.to_dict()):
-                            st.success(f"✅ {row.get('Ticker', '')} hinzugefügt!")
+                            st.success(f"{row.get('Ticker', '')} hinzugefügt!")
                         else:
                             st.info("Bereits in Watchlist")
                 with _btn_cols[1]:
                     if st.session_state.market_type == "Aktien":
-                        if st.button(f"🤖 AI Chart", use_container_width=True, type="primary", key=f"ai_{selected_row_idx}"):
+                        if st.button(f"AI Chart", use_container_width=True, type="primary", key=f"ai_{selected_row_idx}"):
                             st.session_state.show_ai_chart = True
                             st.session_state.ai_chart_ticker = row.get('FullTicker', row.get('Ticker', ''))
                             st.rerun()
                 with _btn_cols[2]:
                     _ib_live = IB_INSYNC_AVAILABLE and ib_is_connected()
-                    if st.button(f"📤 IBKR", use_container_width=True, key=f"ib_{selected_row_idx}", disabled=not _ib_live,
+                    if st.button(f"IBKR", use_container_width=True, key=f"ib_{selected_row_idx}", disabled=not _ib_live,
                                  help=None if _ib_live else ("Verbinde TWS in der Sidebar" if IB_INSYNC_AVAILABLE else "ib_insync nicht installiert")):
                         if _ib_live:
                             st.session_state.ib_show_form = row.get('Ticker', '')
@@ -13375,7 +13375,7 @@ with tab_scanner:
                 # IBKR ORDER FORM (appears when button clicked)
                 if st.session_state.get("ib_show_form") == row.get('Ticker', ''):
                     with st.container(border=True):
-                        st.caption(f"📤 **Order für {row.get('Ticker', '')}** an TWS senden")
+                        st.caption(f"**Order für {row.get('Ticker', '')}** an TWS senden")
 
                         # Check for pre-calculated levels
                         has_entry = row.get("Entry") and float(row.get("Entry", 0)) > 0
@@ -13417,7 +13417,7 @@ with tab_scanner:
                         _risk = abs(_entry - _sl) if abs(_entry - _sl) > 0 else 0.01
                         _reward = abs(_tp1 - _entry)
                         _rr = _reward / _risk if _risk > 0 else 0
-                        _rr_color = "🟢" if _rr >= 2 else ("🟡" if _rr >= 1 else "🔴")
+                        _rr_color = "" if _rr >= 2 else ("" if _rr >= 1 else "")
                         _final_shares = ib_calc_shares(_entry, _shares_input, st.session_state.ib_size_type)
 
                         st.caption(f"{_rr_color} R:R = **{_rr:.1f}:1** | {_final_shares} Shares | Risk: ${_risk * _final_shares:.0f}")
@@ -13425,7 +13425,7 @@ with tab_scanner:
                         # Send / Cancel buttons
                         _sc1, _sc2 = st.columns(2)
                         with _sc1:
-                            if st.button("✅ An TWS senden", use_container_width=True, type="primary", key=f"ibsend_{row.get('Ticker', '')}"):
+                            if st.button("An TWS senden", use_container_width=True, type="primary", key=f"ibsend_{row.get('Ticker', '')}"):
                                 _tp_list = [_tp1]
                                 if _tp2 > 0:
                                     _tp_list.append(_tp2)
@@ -13437,7 +13437,7 @@ with tab_scanner:
                                     exchange=st.session_state.get("selected_exchange", "US")
                                 )
                                 if result["success"]:
-                                    st.success(f"✅ {result['message']}")
+                                    st.success(f"{result['message']}")
                                     st.session_state.ib_orders_log.append({
                                         "ticker": row.get("Ticker", ""), "direction": _direction,
                                         "entry": _entry, "sl": _sl, "tp1": _tp1,
@@ -13447,22 +13447,22 @@ with tab_scanner:
                                     })
                                     st.session_state.ib_show_form = None
                                 else:
-                                    st.error(f"❌ {result['message']}")
+                                    st.error(f"{result['message']}")
                         with _sc2:
-                            if st.button("❌ Abbrechen", use_container_width=True, key=f"ibcancel_{row.get('Ticker', '')}"):
+                            if st.button("Abbrechen", use_container_width=True, key=f"ibcancel_{row.get('Ticker', '')}"):
                                 st.session_state.ib_show_form = None
                                 st.rerun()
         else:
             st.info("Klicke 'SCAN STARTEN'")
     
     with col_chart:
-        st.subheader(f"📊 {st.session_state.selected_symbol}")
+        st.subheader(f"{st.session_state.selected_symbol}")
         
         # TIMEFRAME SELECTOR
         col_tf, col_empty = st.columns([1, 2])
         with col_tf:
             selected_tf = st.selectbox(
-                "⏱️ Timeframe",
+                "Timeframe",
                 ["1H", "4H", "1D", "1W", "1M"],
                 index=1,  # Default: 4H
                 key="tf_selector",
@@ -13510,7 +13510,7 @@ with tab_scanner:
         
         # S/R LEVELS ANZEIGE
         if st.session_state.sr_levels["support"] or st.session_state.sr_levels["resistance"]:
-            st.caption(f"🎯 **Support & Resistance** ({selected_tf})")
+            st.caption(f"**Support & Resistance** ({selected_tf})")
             
             # Hole Detail-Infos falls vorhanden
             fib_info = st.session_state.get("fib_info", {})
@@ -13519,7 +13519,7 @@ with tab_scanner:
             
             col_s, col_r = st.columns(2)
             with col_s:
-                st.markdown("**🟢 Support**")
+                st.markdown("**Support**")
                 if supports_detail:
                     for i, s in enumerate(supports_detail, 1):
                         # Stärke-Emoji basierend auf Score
@@ -13542,7 +13542,7 @@ with tab_scanner:
                         st.caption(f"S{i}: ${s:,.4f}")
                         
             with col_r:
-                st.markdown("**🔴 Resistance**")
+                st.markdown("**Resistance**")
                 if resistances_detail:
                     for i, r in enumerate(resistances_detail, 1):
                         strength = r.get("strength", 50)
@@ -13564,12 +13564,12 @@ with tab_scanner:
                         st.caption(f"R{i}: ${r:,.4f}")
             
             # Legende
-            st.caption("🔥=Sehr stark (PDH/PDL) | 💪=Stark (Multi-Touch) | ✓=OK")
+            st.caption("=Sehr stark (PDH/PDL) | =Stark (Multi-Touch) | =OK")
             
             # Previous Day Levels separat anzeigen
             if fib_info.get("prev_day_high"):
                 st.divider()
-                st.caption("**📅 Previous Day Levels**")
+                st.caption("**Previous Day Levels**")
                 col_pd1, col_pd2, col_pd3 = st.columns(3)
                 with col_pd1:
                     st.metric("PDH", f"${fib_info['prev_day_high']:,.4f}")
@@ -13581,13 +13581,13 @@ with tab_scanner:
             
             # Konsolidierungszonen anzeigen
             if fib_info.get("consolidation_zones"):
-                st.markdown("**🟣 Konsolidierungszonen** (High Activity)")
+                st.markdown("**Konsolidierungszonen** (High Activity)")
                 for i, zone in enumerate(fib_info["consolidation_zones"], 1):
                     st.caption(f"Zone {i}: ${zone['low']:,.4f} - ${zone['high']:,.4f} ({zone['days']} Kerzen, {zone['pct_time']}%)")
             
             # Fibonacci Zusatz-Info anzeigen
             if fib_info:
-                with st.expander("📊 Fibonacci Details"):
+                with st.expander("Fibonacci Details"):
                     fi = fib_info
                     if fi.get("period_high"):
                         st.caption(f"Periode High: ${fi['period_high']:,.4f}")
@@ -13602,7 +13602,7 @@ with tab_scanner:
             # =========================================
             # AKKUMULATIONS-ANALYSE (Wyckoff)
             # =========================================
-            with st.expander("📦 Akkumulations-Analyse (Wyckoff)", expanded=False):
+            with st.expander("Akkumulations-Analyse (Wyckoff)", expanded=False):
                 try:
                     ticker = st.session_state.selected_symbol
                     # FullTicker für internationale Aktien
@@ -13630,7 +13630,7 @@ with tab_scanner:
                         col_a1, col_a2, col_a3 = st.columns(3)
                         
                         with col_a1:
-                            range_icon = "✅" if display['range_pct'] < 15 else "⚠️" if display['range_pct'] < 25 else "❌"
+                            range_icon = "" if display['range_pct'] < 15 else "" if display['range_pct'] < 25 else ""
                             st.metric(
                                 f"{range_icon} Range (20T)",
                                 f"{display['range_pct']:.1f}%",
@@ -13645,7 +13645,7 @@ with tab_scanner:
                             )
                         
                         with col_a3:
-                            vol_icon = "✅" if display['volume_trend'] < -10 else "⚪"
+                            vol_icon = "" if display['volume_trend'] < -10 else ""
                             st.metric(
                                 f"{vol_icon} Vol-Trend",
                                 f"{display['volume_trend']:+.1f}%",
@@ -13655,7 +13655,7 @@ with tab_scanner:
                         col_b1, col_b2, col_b3 = st.columns(3)
                         
                         with col_b1:
-                            pos_icon = "🟢" if display['position'] < 0.4 else "🟡" if display['position'] < 0.6 else "🔴"
+                            pos_icon = "" if display['position'] < 0.4 else "" if display['position'] < 0.6 else ""
                             st.metric(
                                 f"{pos_icon} Pos. in Range",
                                 f"{display['position']:.0%}",
@@ -13663,7 +13663,7 @@ with tab_scanner:
                             )
                         
                         with col_b2:
-                            days_icon = "✅" if display.get('days_in_range', 0) >= 10 else "⚪"
+                            days_icon = "" if display.get('days_in_range', 0) >= 10 else ""
                             st.metric(
                                 f"{days_icon} Tage in Range",
                                 f"{display.get('days_in_range', 0)}",
@@ -13672,7 +13672,7 @@ with tab_scanner:
                         
                         with col_b3:
                             st.metric(
-                                "📊 Wyckoff Phase",
+                                "Wyckoff Phase",
                                 display['wyckoff_phase'].split('(')[0].strip(),
                                 help="Phase C = Idealer Entry, Phase B = Warten"
                             )
@@ -13687,13 +13687,13 @@ with tab_scanner:
                         
                         # Empfehlung basierend auf Score
                         if display.get('score', 0) >= 75:
-                            st.success("🎯 **BREAKOUT WATCH!** Dieses Asset zeigt starke Akkumulations-Signale. Beobachte für Ausbruch mit Volumen!")
+                            st.success("**BREAKOUT WATCH!** Dieses Asset zeigt starke Akkumulations-Signale. Beobachte für Ausbruch mit Volumen!")
                         elif display.get('score', 0) >= 55:
-                            st.info("👀 **BEOBACHTEN:** Gute Akkumulations-Tendenzen. Warte auf besseren Entry oder Volumen-Signal.")
+                            st.info("**BEOBACHTEN:** Gute Akkumulations-Tendenzen. Warte auf besseren Entry oder Volumen-Signal.")
                         elif display.get('score', 0) >= 35:
-                            st.warning("⏳ **NEUTRAL:** Noch keine klare Akkumulation. Weiter beobachten.")
+                            st.warning("**NEUTRAL:** Noch keine klare Akkumulation. Weiter beobachten.")
                         else:
-                            st.error("⚠️ **VORSICHT:** Schwache Akkumulations-Signale. Möglicherweise Distribution!")
+                            st.error("**VORSICHT:** Schwache Akkumulations-Signale. Möglicherweise Distribution!")
                         
                     else:
                         st.warning(f"Nicht genug Daten für Akkumulations-Analyse")
@@ -13711,7 +13711,7 @@ with tab_scanner:
             except Exception:
                 pass
             if not _has_vp and not any(_full_t.upper().endswith(s) for s in (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")):
-                st.info("💡 **Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
+                st.info("**Tipp:** Aktiviere im TradingView Chart den 'Volume Profile' Indikator für echte Volume-Daten")
         
         # =====================================================
         # CHART PATTERN WARNUNG — Umkehr-Patterns erkennen (Daily, 90 Tage)
@@ -13719,7 +13719,7 @@ with tab_scanner:
         _pattern_ticker = st.session_state.get("selected_symbol", "")
         _pattern_direction = "long"  # Default
         _cur_strat = st.session_state.get("current_strategy", "")
-        if any(kw in _cur_strat.lower() for kw in ["short", "distribution", "⬇️", "selling"]):
+        if any(kw in _cur_strat.lower() for kw in ["short", "distribution", "⬇", "selling"]):
             _pattern_direction = "short"
 
         if st.session_state.market_type == "Aktien" and _pattern_ticker:
@@ -13771,7 +13771,7 @@ with tab_scanner:
         
         if _is_international:
             # Eigener Chart via Yahoo Finance — alle Timeframes funktionieren
-            with st.spinner(f"📥 Lade {_full_ticker} Chart ({selected_tf})..."):
+            with st.spinner(f"Lade {_full_ticker} Chart ({selected_tf})..."):
                 _chart_ohlcv = _fetch_ohlcv_yahoo(_full_ticker, selected_tf)
             
             if _chart_ohlcv and len(_chart_ohlcv) > 10:
@@ -13792,9 +13792,9 @@ with tab_scanner:
                 )
                 import streamlit.components.v1 as components
                 components.html(_chart_html, height=420)
-                st.caption(f"📊 {len(_chart_ohlcv)} Bars | Yahoo Finance | {selected_tf}")
+                st.caption(f"{len(_chart_ohlcv)} Bars | Yahoo Finance | {selected_tf}")
             else:
-                st.warning(f"⚠️ Keine Chart-Daten für {_full_ticker} ({selected_tf})")
+                st.warning(f"Keine Chart-Daten für {_full_ticker} ({selected_tf})")
         else:
             # US-Aktien, Krypto, Forex, Futures: TradingView Widget
             if st.session_state.market_type == "Krypto":
@@ -13842,7 +13842,7 @@ with tab_scanner:
 # ORB SCANNER — Opening Range Breakout (im Scanner Tab, nach Hauptbereich)
 # =============================================================================
     st.divider()
-    st.header("🔔 Opening Range Breakout (ORB)")
+    st.header("Opening Range Breakout (ORB)")
     st.caption("Automatischer Scan der 15-Min Opening Range | Breakout-Detection mit Scoring")
 
     try:
@@ -13854,7 +13854,7 @@ with tab_scanner:
         # Auto-Scan Button + Status
         _orb_col1, _orb_col2 = st.columns([3, 1])
         with _orb_col2:
-            _orb_refresh = st.button("🔄 ORB Refresh", key="orb_refresh_btn")
+            _orb_refresh = st.button("ORB Refresh", key="orb_refresh_btn")
         with _orb_col1:
             pass
 
@@ -13862,20 +13862,20 @@ with tab_scanner:
             # Fix #9: Nur ORB-Cache leeren, nicht alle Caches
             fetch_orb_scanner.clear()
 
-        with st.spinner("🔍 Scanne Opening Range Breakouts..."):
+        with st.spinner("Scanne Opening Range Breakouts..."):
             orb_data = fetch_orb_scanner(_orb_poly_key)
 
         phase = orb_data.get("or_phase", "closed")
 
         # ── Phase-basierte Anzeige ──
         if phase == "weekend":
-            st.info("📅 Wochenende — ORB Scanner ist Mo-Fr 9:45-11:00 ET aktiv")
+            st.info("Wochenende — ORB Scanner ist Mo-Fr 9:45-11:00 ET aktiv")
         elif phase == "holiday":
-            st.info("🏛️ US-Feiertag — NYSE geschlossen, kein ORB-Scan heute")
+            st.info("US-Feiertag — NYSE geschlossen, kein ORB-Scan heute")
         elif phase == "pre_open":
-            st.info(f"⏳ **Pre-Market** ({orb_data.get('market_time', '')}) — ORB Scanner startet automatisch um 9:45 ET (15:45 CET)")
+            st.info(f"**Pre-Market** ({orb_data.get('market_time', '')}) — ORB Scanner startet automatisch um 9:45 ET (15:45 CET)")
         elif phase == "building":
-            st.warning(f"🔨 **Opening Range baut sich auf** — {orb_data.get('or_end_time', '')} ({orb_data.get('market_time', '')})")
+            st.warning(f"**Opening Range baut sich auf** — {orb_data.get('or_end_time', '')} ({orb_data.get('market_time', '')})")
             # Fix #11: Progress-Bar Parsing absichern
             try:
                 _or_end_str = orb_data.get('or_end_time', '15')
@@ -13884,7 +13884,7 @@ with tab_scanner:
             except (ValueError, TypeError, IndexError):
                 st.progress(0.0)
         elif phase == "expired":
-            st.info(f"⏰ **ORB-Fenster abgelaufen** ({orb_data.get('market_time', '')}) — ORB-Breakouts nach 11:00 ET verlieren Edge")
+            st.info(f"**ORB-Fenster abgelaufen** ({orb_data.get('market_time', '')}) — ORB-Breakouts nach 11:00 ET verlieren Edge")
         elif phase == "active":
             # ── Statistik ──
             stats = orb_data["stats"]
@@ -13898,7 +13898,7 @@ with tab_scanner:
             candidates_in_range = orb_data.get("candidates", [])
 
             if breakouts:
-                st.subheader(f"🚀 {len(breakouts)} Aktive Breakouts")
+                st.subheader(f"{len(breakouts)} Aktive Breakouts")
 
                 for bo in breakouts:
                     direction_emoji = "🟢 LONG" if bo.get("direction", "") == "LONG" else "🔴 SHORT"
@@ -13922,25 +13922,25 @@ with tab_scanner:
 
 | Level | Preis |
 |-------|-------|
-| 🎯 Target (Measured Move) | **${bo['target']}** |
-| ➡️ Entry (OR Break) | ${bo.get('entry', 0)} |
-| 🛑 Stop (OR {'Low' if bo.get('direction', 'LONG') == 'LONG' else 'High'}) | ${bo['stop']} |
+| Target (Measured Move) | **${bo['target']}** |
+| Entry (OR Break) | ${bo.get('entry', 0)} |
+| Stop (OR {'Low' if bo.get('direction', 'LONG') == 'LONG' else 'High'}) | ${bo['stop']} |
 """)
 
                         # Fakeout/Bestätigung Warnung
                         if bo.get("fakeout"):
-                            st.error("⛔ **FAKEOUT** — Preis ist nach Breakout zurück in OR gefallen!")
+                            st.error("**FAKEOUT** — Preis ist nach Breakout zurück in OR gefallen!")
                         elif not bo.get("confirmed", True):
-                            st.warning("⚠️ Unbestätigt — nur 1 Bar über OR, auf Bestätigung warten")
+                            st.warning("Unbestätigt — nur 1 Bar über OR, auf Bestätigung warten")
 
                         # Scoring Faktoren
                         st.markdown("**Faktoren:** " + " | ".join(bo["factors"]))
 
                         # TradingView Link
-                        st.markdown(f"[📈 {bo['ticker']} auf TradingView](https://www.tradingview.com/chart/?symbol={bo['ticker']}&interval=5)")
+                        st.markdown(f"[{bo['ticker']} auf TradingView](https://www.tradingview.com/chart/?symbol={bo['ticker']}&interval=5)")
 
             elif candidates_in_range:
-                st.info(f"⏳ {len(candidates_in_range)} Stocks in der Opening Range — noch kein Breakout")
+                st.info(f"{len(candidates_in_range)} Stocks in der Opening Range — noch kein Breakout")
                 # Kompakte Tabelle der Kandidaten
                 import pandas as pd
                 df_cand = pd.DataFrame(candidates_in_range)
@@ -13958,27 +13958,27 @@ with tab_scanner:
             else:
                 st.warning("Keine ORB-Kandidaten gefunden (zu wenig Gapper/Volume heute)")
         else:
-            st.info(f"📊 ORB Scanner — Markt geschlossen ({orb_data.get('market_time', '')})")
+            st.info(f"ORB Scanner — Markt geschlossen ({orb_data.get('market_time', '')})")
     else:
-        st.warning("⚠️ POLYGON_KEY fehlt — ORB Scanner braucht Polygon API")
+        st.warning("POLYGON_KEY fehlt — ORB Scanner braucht Polygon API")
 
 # =============================================================================
 # BI SCANNER TAB — Breakout Imminent mit Auto-Scan + Einstellungen
 # =============================================================================
 with tab_bi:
-    st.header("🔮 Breakout Imminent Scanner")
+    st.header("Breakout Imminent Scanner")
     st.caption("Automatischer Hintergrund-Scan für Breakout-Imminent Setups | 20-Signal Composite Scoring")
 
     # ── Config laden ──
     _bi_cfg = _bi_config_load()
 
     # ── Einstellungen (Expander) ──
-    with st.expander("⚙️ Einstellungen", expanded=False):
+    with st.expander("Einstellungen", expanded=False):
         bi_set_col1, bi_set_col2 = st.columns(2)
         with bi_set_col1:
             # BI Scanner = immer Long (Short → Bear Scanner Tab)
             st.session_state["bi_tab_direction"] = "long"
-            st.info("📈 **Long Only** — Für Short-Setups → 🐻 Bear Scanner Tab")
+            st.info("**Long Only** — Für Short-Setups → Bear Scanner Tab")
         with bi_set_col2:
             bi_tab_threshold = st.number_input(
                 "Score Threshold",
@@ -13989,7 +13989,7 @@ with tab_bi:
             st.session_state["bi_tab_threshold"] = bi_tab_threshold
 
         st.divider()
-        st.subheader("⏰ Auto-Scan Zeiten (CET)")
+        st.subheader("Auto-Scan Zeiten (CET)")
         bi_time_col1, bi_time_col2, bi_time_col3 = st.columns(3)
         with bi_time_col1:
             bi_scan1_h = st.number_input("Scan 1 — Stunde", min_value=9, max_value=22, value=_bi_cfg.get("scan1_h", 15), key="bi_s1h")
@@ -14007,15 +14007,15 @@ with tab_bi:
             bi_cache_ttl_h = st.number_input("Cache TTL (Std)", min_value=1, max_value=6, value=_bi_cfg.get("cache_ttl_h", 2), key="bi_ttl")
             st.session_state["bi_cache_ttl_h"] = bi_cache_ttl_h
             st.divider()
-            bi_crash_mode = st.toggle("🔴 **Crash Mode**", value=st.session_state.get("bi_crash_mode", False), key="bi_crash_toggle",
+            bi_crash_mode = st.toggle("**Crash Mode**", value=st.session_state.get("bi_crash_mode", False), key="bi_crash_toggle",
                                        help="Aktiviert: Scannt nach überkauften, volatilen Aktien die bei einem Crash am stärksten fallen. "
                                             "Filter: Change >3%, RVOL >1.5 (statt ruhige Aktien)")
             st.session_state["bi_crash_mode"] = bi_crash_mode
             if bi_crash_mode:
-                st.warning("🔴 **Crash Mode aktiv** — Sucht Aktien die bei Sell-Off am verwundbarsten sind: "
+                st.warning("**Crash Mode aktiv** — Sucht Aktien die bei Sell-Off am verwundbarsten sind: "
                            "hoher Recent-Move, hohes Volumen, nahe Highs → maximaler Downside bei Panik")
 
-        st.caption(f"📋 Scan 1: **{bi_scan1_h:02d}:{bi_scan1_m:02d}** CET | Scan 2: **{bi_scan2_h:02d}:{bi_scan2_m:02d}** CET | TTL: {bi_cache_ttl_h}h | Auto: {'✅' if bi_auto_enabled else '❌'}")
+        st.caption(f"Scan 1: **{bi_scan1_h:02d}:{bi_scan1_m:02d}** CET | Scan 2: **{bi_scan2_h:02d}:{bi_scan2_m:02d}** CET | TTL: {bi_cache_ttl_h}h | Auto: {'' if bi_auto_enabled else ''}")
 
         # ── Config speichern wenn geändert ──
         _bi_new_cfg = {
@@ -14081,11 +14081,11 @@ with tab_bi:
 
         # Status-Text: Phase 1 (Snapshot laden) vs Phase 2 (Analyse)
         if p_t == 0:
-            st.info(f"🔮 **BI Scan {bi_dir_label} {bi_dir_emoji}** — {p_detail or '📡 Lade Aktien-Snapshot...'}")
+            st.info(f"**BI Scan {bi_dir_label} {bi_dir_emoji}** — {p_detail or 'Lade Aktien-Snapshot...'}")
         else:
             pct = round(p_c / max(1, p_t) * 100)
             est = max(1, (p_t - p_c) // 75)
-            st.info(f"🔮 **BI Scan {bi_dir_label} {bi_dir_emoji} läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
+            st.info(f"**BI Scan {bi_dir_label} {bi_dir_emoji} läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
 
         # Progress-Bar + Stop-Button in einer Zeile
         _bi_prog_col1, _bi_prog_col2 = st.columns([5, 1])
@@ -14093,16 +14093,16 @@ with tab_bi:
             _bi_pct_val = min(1.0, p_c / max(1, p_t)) if p_t > 0 else 0.0
             st.progress(_bi_pct_val)
         with _bi_prog_col2:
-            if st.button("⏹️ Stop", key=f"bi_stop_btn_{bi_dir}", use_container_width=True, type="secondary"):
+            if st.button("Stop", key=f"bi_stop_btn_{bi_dir}", use_container_width=True, type="secondary"):
                 _bi_request_stop(bi_dir)
                 # Auch direkt Progress auf "stopped" setzen für sofortiges Feedback
                 _bi_progress_write(bi_dir, "stopped", checked=p_c, total=p_t, hits=p_h,
-                                   detail=f"⏹️ Manuell gestoppt bei {p_c}/{p_t}")
-                st.toast("⏹️ BI Scan wird gestoppt...")
+                                   detail=f"Manuell gestoppt bei {p_c}/{p_t}")
+                st.toast("BI Scan wird gestoppt...")
                 time.sleep(1)
                 st.rerun()
 
-        st.caption("💡 Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
+        st.caption("Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
 
         # Progress-Update: nutze globalen Sidebar Auto-Refresh statt eigenem
         # (eigener st_autorefresh sabotiert andere Tabs)
@@ -14113,7 +14113,7 @@ with tab_bi:
                 cache_t = datetime.fromtimestamp(bi_cached_ts).strftime("%H:%M") if bi_cached_ts else "?"
             except (ValueError, TypeError, OSError):
                 cache_t = "?"
-            if st.button(f"⚡ Vorherige Ergebnisse laden ({len(bi_cached_results)} Treffer von {cache_t})", use_container_width=True, key="bi_tab_load_while_running"):
+            if st.button(f"Vorherige Ergebnisse laden ({len(bi_cached_results)} Treffer von {cache_t})", use_container_width=True, key="bi_tab_load_while_running"):
                 st.session_state.bi_tab_results = bi_cached_results
 
     # ── FALL 2: Scan fertig ──
@@ -14121,10 +14121,10 @@ with tab_bi:
         fresh, _, _ = _bi_cache_load(bi_dir)
         if fresh is not None:
             st.session_state.bi_tab_results = fresh
-            st.success(f"✅ **BI Scan {bi_dir_label} fertig!** {len(fresh)} Treffer — automatisch geladen")
-            st.caption(f"🔍 {bi_progress.get('detail', '')}")
+            st.success(f"**BI Scan {bi_dir_label} fertig!** {len(fresh)} Treffer — automatisch geladen")
+            st.caption(f"{bi_progress.get('detail', '')}")
         else:
-            st.warning("⚠️ Scan fertig — keine Treffer")
+            st.warning("Scan fertig — keine Treffer")
         _bi_progress_clear(bi_dir)
 
     # ── FALL 2b: Scan manuell gestoppt ──
@@ -14132,7 +14132,7 @@ with tab_bi:
         _bp_hits = bi_progress.get("hits", 0)
         _bp_checked = bi_progress.get("checked", 0)
         _bp_total = bi_progress.get("total", 0)
-        st.warning(f"⏹️ BI Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
+        st.warning(f"BI Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
         # Ergebnisse aus Cache laden falls vorhanden
         if _bp_hits > 0:
             fresh, _, _ = _bi_cache_load(bi_dir)
@@ -14156,17 +14156,17 @@ with tab_bi:
     # ── FALL 3a: Keine Kandidaten (kein Error, aber auch keine Ergebnisse) ──
     elif bi_progress and bi_progress.get("status") == "no_candidates":
         _nc_age = time.time() - bi_progress.get("timestamp", 0)
-        st.info(f"📭 {bi_progress.get('detail', 'Keine Kandidaten')} — Nächster Auto-Scan in {max(0, 5 - int(_nc_age / 60))} Min")
-        if st.button(f"🔄 Erneut scannen {bi_dir_emoji}", use_container_width=True, key="bi_tab_retry_nc"):
+        st.info(f"{bi_progress.get('detail', 'Keine Kandidaten')} — Nächster Auto-Scan in {max(0, 5 - int(_nc_age / 60))} Min")
+        if st.button(f"Erneut scannen {bi_dir_emoji}", use_container_width=True, key="bi_tab_retry_nc"):
             _bi_progress_write(bi_dir, status="idle")
             st.rerun()
 
     # ── FALL 3b: Fehler ──
     elif bi_progress and bi_progress.get("status") == "error":
         _err_age = time.time() - bi_progress.get("timestamp", 0)
-        st.error(f"❌ BI Scan Fehler: {bi_progress.get('detail', 'Unbekannt')} — Retry in {max(0, 5 - int(_err_age / 60))} Min")
+        st.error(f"BI Scan Fehler: {bi_progress.get('detail', 'Unbekannt')} — Retry in {max(0, 5 - int(_err_age / 60))} Min")
         # Button trotzdem anzeigen damit User manuell neu starten kann
-        if st.button(f"🔄 Erneut scannen {bi_dir_emoji}", use_container_width=True, type="primary", key="bi_tab_retry_scan"):
+        if st.button(f"Erneut scannen {bi_dir_emoji}", use_container_width=True, type="primary", key="bi_tab_retry_scan"):
             _bi_progress_write(bi_dir, status="idle")  # Reset Error-Status
             st.rerun()
 
@@ -14177,22 +14177,22 @@ with tab_bi:
                 cache_t = datetime.fromtimestamp(bi_cached_ts).strftime("%H:%M") if bi_cached_ts else "?"
             except (ValueError, TypeError, OSError):
                 cache_t = "?"
-            st.success(f"⚡ **Cache {bi_dir_label}:** {len(bi_cached_results)} Treffer von {cache_t} ({_bi_cache_age_str(bi_cache_age)})")
+            st.success(f"**Cache {bi_dir_label}:** {len(bi_cached_results)} Treffer von {cache_t} ({_bi_cache_age_str(bi_cache_age)})")
             # Auto-Load
             if not st.session_state.get("bi_tab_results"):
                 st.session_state.bi_tab_results = bi_cached_results
 
         if bi_should_auto:
-            st.info(f"🤖 **{bi_auto_reason}** — Scan startet automatisch...")
+            st.info(f"**{bi_auto_reason}** — Scan startet automatisch...")
 
     # ── Scan Button — IMMER sichtbar wenn kein Scan läuft ──
     if not bi_running:
         bi_btn_col1, bi_btn_col2 = st.columns(2)
         with bi_btn_col1:
-            bi_manual_scan = st.button(f"🚀 Scan starten {bi_dir_emoji}", use_container_width=True, type="primary", key="bi_tab_manual_scan")
+            bi_manual_scan = st.button(f"Scan starten {bi_dir_emoji}", use_container_width=True, type="primary", key="bi_tab_manual_scan")
         with bi_btn_col2:
             if bi_cache_ok:
-                if st.button(f"⚡ Cache laden ({len(bi_cached_results)})", use_container_width=True, key="bi_tab_load_cache"):
+                if st.button(f"Cache laden ({len(bi_cached_results)})", use_container_width=True, key="bi_tab_load_cache"):
                     st.session_state.bi_tab_results = bi_cached_results
                     st.rerun()
 
@@ -14200,9 +14200,9 @@ with tab_bi:
         if bi_auto_on and bi_is_market:
             s1 = st.session_state.get("bi_scan1_h", 15) * 60 + st.session_state.get("bi_scan1_m", 45)
             s2 = st.session_state.get("bi_scan2_h", 18) * 60 + st.session_state.get("bi_scan2_m", 30)
-            st.caption(f"⏰ Auto-Scan: {s1//60:02d}:{s1%60:02d} + {s2//60:02d}:{s2%60:02d} CET | Nächster wenn Cache >{cache_ttl_min//60}h alt")
+            st.caption(f"Auto-Scan: {s1//60:02d}:{s1%60:02d} + {s2//60:02d}:{s2%60:02d} CET | Nächster wenn Cache >{cache_ttl_min//60}h alt")
         elif not bi_is_market:
-            st.caption("⏰ Markt geschlossen — Auto-Scan pausiert (Mo-Fr 10:00-23:00 CET inkl. Pre/After)")
+            st.caption("Markt geschlossen — Auto-Scan pausiert (Mo-Fr 10:00-23:00 CET inkl. Pre/After)")
 
     # --- Scan starten (Auto oder Manuell) ---
     if not bi_running and (bi_should_auto or bi_manual_scan):
@@ -14218,7 +14218,7 @@ with tab_bi:
                 def _bi_fetch_and_scan(pk, direction, is_crash=False):
                     try:
                         _bi_progress_write(direction, status="running", checked=0, total=0, hits=0,
-                                           detail="📡 Lade Aktien-Snapshot von Polygon...")
+                                           detail="Lade Aktien-Snapshot von Polygon...")
 
                         # Direkt Polygon API aufrufen (fetch_stock_data hat st.error/st.session_state
                         # die im Background-Thread crashen/hängen können)
@@ -14248,7 +14248,7 @@ with tab_bi:
                             return
 
                         _bi_progress_write(direction, status="running", checked=0, total=0, hits=0,
-                                           detail=f"📊 {len(_tickers)} Aktien geladen, filtere...")
+                                           detail=f"{len(_tickers)} Aktien geladen, filtere...")
 
                         # Basis-Daten extrahieren — nutze ALLE verfügbaren Polygon-Felder
                         # Preis-Kaskade: lastTrade.p > day.c > day.vw > prevDay.c > prevDay.vw > min.c
@@ -14321,7 +14321,7 @@ with tab_bi:
                         # Nur echte Aktien (type=CS) → filtert ALLE ETFs, Fonds, Warrants etc.
                         # 3-Stufen Cache: In-Memory → Datei → API (mit Datei-Persist)
                         _bi_progress_write(direction, status="running", checked=0, total=0, hits=0,
-                                           detail=f"📋 Lade Common Stock Liste...")
+                                           detail=f"Lade Common Stock Liste...")
                         _CS_FILE = "/tmp/cs_tickers_cache.json"
                         _cs_set = COMMON_STOCK_TICKERS  # 1) In-Memory
 
@@ -14366,7 +14366,7 @@ with tab_bi:
                                         and s.get("DollarVol", 0) >= 200_000
                                         and not _is_likely_spac(s.get("Name", ""), s.get("Ticker", ""))]
                             _bi_progress_write(direction, status="running", checked=0, total=0, hits=0,
-                                               detail=f"📋 {len(filtered)} Common Stocks (von {len(raw)} gesamt)")
+                                               detail=f"{len(filtered)} Common Stocks (von {len(raw)} gesamt)")
                         else:
                             # Fallback: is_etf_or_etp Blacklist (CS-Liste nicht ladbar)
                             filtered = [s for s in raw if isinstance(s, dict)
@@ -14375,7 +14375,7 @@ with tab_bi:
                                         and not is_etf_or_etp(s.get("Ticker", ""))
                                         and not is_spac(s.get("Name", ""))]
                             _bi_progress_write(direction, status="running", checked=0, total=0, hits=0,
-                                               detail=f"⚠️ CS-Liste nicht verfügbar, Blacklist-Filter: {len(filtered)} Kandidaten")
+                                               detail=f"CS-Liste nicht verfügbar, Blacklist-Filter: {len(filtered)} Kandidaten")
                         if not filtered:
                             _bi_progress_write(direction, status="no_candidates", detail=f"Keine Kandidaten nach Filter ({len(raw)} Aktien geprüft)")
                             return
@@ -14387,14 +14387,14 @@ with tab_bi:
 
                 thread = threading.Thread(target=_bi_fetch_and_scan, args=(poly_key, bi_dir, _bi_crash_mode_val), daemon=True)
                 thread.start()
-                st.info(f"🚀 **{reason}** — Scan startet im Hintergrund...")
-                st.caption("💡 Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
+                st.info(f"**{reason}** — Scan startet im Hintergrund...")
+                st.caption("Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
                 time.sleep(2)
                 st.rerun()
             except KeyError:
-                st.error("❌ POLYGON_KEY fehlt in secrets!")
+                st.error("POLYGON_KEY fehlt in secrets!")
             except Exception as e:
-                st.error(f"❌ BI Scanner Fehler: {e}")
+                st.error(f"BI Scanner Fehler: {e}")
 
     # ── Ergebnis-Tabelle ──
     st.divider()
@@ -14405,7 +14405,7 @@ with tab_bi:
         if "BI_Score" in bi_df.columns:
             bi_df = bi_df.sort_values(by="BI_Score", ascending=False).reset_index(drop=True)
 
-        st.subheader(f"🔮 {len(bi_df)} Treffer — {bi_dir_label} {bi_dir_emoji}")
+        st.subheader(f"{len(bi_df)} Treffer — {bi_dir_label} {bi_dir_emoji}")
 
         # ── Sektor-Trend Übersicht für alle BI-Ergebnisse ──
         try:
@@ -14465,13 +14465,13 @@ with tab_bi:
             # ── Keyboard Navigation: E (zurück) / W (vor) ──
             nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
             with nav_col1:
-                if st.button("◀ Zurück (E)", key="bi_nav_prev", use_container_width=True, disabled=bi_sel_idx <= 0):
+                if st.button("Zurück (E)", key="bi_nav_prev", use_container_width=True, disabled=bi_sel_idx <= 0):
                     st.session_state["bi_sel_idx"] = max(0, bi_sel_idx - 1)
                     st.rerun()
             with nav_col2:
-                st.caption(f"📌 **{bi_sel_idx + 1} / {len(bi_df)}** — Klicke Zeile in Tabelle oder nutze ◀ ▶ Buttons (Tastatur: **E** / **W**)")
+                st.caption(f"**{bi_sel_idx + 1} / {len(bi_df)}** — Klicke Zeile in Tabelle oder nutze Buttons (Tastatur: **E** / **W**)")
             with nav_col3:
-                if st.button("Vor ▶ (W)", key="bi_nav_next", use_container_width=True, disabled=bi_sel_idx >= len(bi_df) - 1):
+                if st.button("Vor (W)", key="bi_nav_next", use_container_width=True, disabled=bi_sel_idx >= len(bi_df) - 1):
                     st.session_state["bi_sel_idx"] = min(len(bi_df) - 1, bi_sel_idx + 1)
                     st.rerun()
 
@@ -14500,7 +14500,7 @@ with tab_bi:
             bi_row = bi_df.iloc[bi_sel_idx]
             ticker = bi_row.get("Ticker", "?")
             st.divider()
-            st.subheader(f"📌 {ticker}")
+            st.subheader(f"{ticker}")
 
             # Sektor-Trend für ausgewählten Ticker
             try:
@@ -14544,7 +14544,7 @@ with tab_bi:
                 rh = bi_row.get("RangeHigh", 0)
                 rl = bi_row.get("RangeLow", 0)
                 zone_text = f"${rl:.2f} — ${rh:.2f}" if rh > 0 else "N/A"
-            st.caption(f"🎯 Breakout Zone: **{zone_text}** | Preis: ${bi_row.get('Preis', 0):.2f} | Change: {bi_row.get('Change%', 0):.1f}% | RVOL: {bi_row.get('RVOL', 0):.2f}")
+            st.caption(f"Breakout Zone: **{zone_text}** | Preis: ${bi_row.get('Preis', 0):.2f} | Change: {bi_row.get('Change%', 0):.1f}% | RVOL: {bi_row.get('RVOL', 0):.2f}")
 
             # ── Chart-Pattern-Warnungen ──
             pattern_warns = bi_row.get("PatternWarnings", [])
@@ -14566,12 +14566,12 @@ with tab_bi:
                     else:
                         st.info(f"**{pat}** — {desc}")
             else:
-                st.success("✅ **Kein Umkehr-Pattern erkannt** — Chart ist clean")
+                st.success("**Kein Umkehr-Pattern erkannt** — Chart ist clean")
 
             # Signal-Details
             details = bi_row.get("BI_Details", "")
             if details:
-                with st.expander("🔬 Signal-Details", expanded=False):
+                with st.expander("Signal-Details", expanded=False):
                     st.text(details)
 
             # ── TradingView Chart ──
@@ -14606,29 +14606,29 @@ with tab_bi:
 
 
 # -----------------------------------------------------------------------------
-# 🧬 BIOTECH TAB — FDA Catalyst Scanner
+# BIOTECH TAB — FDA Catalyst Scanner
 # -----------------------------------------------------------------------------
 with tab_biotech:
-    st.subheader("🧬 Biotech Scanner — FDA Catalysts & Pipeline Tracker")
+    st.subheader("Biotech Scanner — FDA Catalysts & Pipeline Tracker")
     st.caption("Scannt Biotech/Pharma-Aktien nach FDA-Events, Clinical Trial Ergebnissen und Pipeline-Katalysatoren")
 
     # ── Settings aus Config laden ──
     _bio_cfg = _biotech_config_load()
 
     # ── Settings Expander ──
-    with st.expander("⚙️ Einstellungen", expanded=False):
+    with st.expander("Einstellungen", expanded=False):
         _bio_col1, _bio_col2, _bio_col3 = st.columns(3)
         with _bio_col1:
             _bio_min_score = st.slider("Min. Score", min_value=0, max_value=50,
                                         value=_bio_cfg.get("min_score", 20), key="bio_min_score")
-            _bio_auto_scan = st.toggle("🔄 Auto-Scan",
+            _bio_auto_scan = st.toggle("Auto-Scan",
                                        value=_bio_cfg.get("auto_scan", False), key="bio_auto_scan",
                                        help="Automatischer Scan im Intervall (nur wenn aktiviert)")
         with _bio_col2:
             _quick_options = [1, 2, 3, 4]
             _quick_default = _bio_cfg.get("quick_interval_h", 2)
             _quick_idx = _quick_options.index(_quick_default) if _quick_default in _quick_options else 1
-            _bio_quick_interval = st.selectbox("⚡ Quick Scan Intervall",
+            _bio_quick_interval = st.selectbox("Quick Scan Intervall",
                                                 options=_quick_options,
                                                 index=_quick_idx,
                                                 format_func=lambda x: f"Alle {x}h",
@@ -14637,7 +14637,7 @@ with tab_biotech:
             _full_options = [4, 6, 8, 12]
             _full_default = _bio_cfg.get("full_interval_h", 6)
             _full_idx = _full_options.index(_full_default) if _full_default in _full_options else 1
-            _bio_full_interval = st.selectbox("🔬 Full Scan Intervall",
+            _bio_full_interval = st.selectbox("Full Scan Intervall",
                                                options=_full_options,
                                                index=_full_idx,
                                                format_func=lambda x: f"Alle {x}h",
@@ -14645,10 +14645,10 @@ with tab_biotech:
                                                help="Full Scan = Universum + News + Pipeline + Technik (langsam, ~15-20 Min)")
         with _bio_col3:
             st.markdown("""
-            **⚡ Quick Scan** (alle 1-2h)
+            ** Quick Scan** (alle 1-2h)
             Nur News-Update für bekannte Tickers. Schnell (~2 Min).
 
-            **🔬 Full Scan** (alle 4-6h)
+            ** Full Scan** (alle 4-6h)
             Universum + News + BPIQ + Technik. Gründlich (~15 Min).
 
             FDA-News kommen **jederzeit** — Pre-Market, Regular, After-Hours.
@@ -14702,11 +14702,11 @@ with tab_biotech:
     _bio_col_a, _bio_col_b, _bio_col_c, _bio_col_d = st.columns([1, 1, 1, 1])
 
     with _bio_col_a:
-        _bio_full_btn = st.button("🔬 Full Scan", use_container_width=True, type="primary",
+        _bio_full_btn = st.button("Full Scan", use_container_width=True, type="primary",
                                    help="Kompletter Scan: Universum + News + Pipeline + Technik")
 
     with _bio_col_b:
-        _bio_quick_btn = st.button("⚡ Quick Scan", use_container_width=True,
+        _bio_quick_btn = st.button("Quick Scan", use_container_width=True,
                                     help="Schnell: Nur News-Update für bekannte Tickers")
 
     with _bio_col_c:
@@ -14715,16 +14715,16 @@ with tab_biotech:
             try:
                 _bio_cache_age = (time.time() - os.path.getmtime(_biotech_cache_file())) / 60
                 _bio_age_str = f"{_bio_cache_age:.0f} Min" if _bio_cache_age < 120 else f"{_bio_cache_age/60:.1f}h"
-                st.caption(f"📦 {len(_bio_cached)} Ergebnisse ({_bio_age_str} alt)")
+                st.caption(f"{len(_bio_cached)} Ergebnisse ({_bio_age_str} alt)")
             except Exception:
-                st.caption(f"📦 {len(_bio_cached)} Ergebnisse")
+                st.caption(f"{len(_bio_cached)} Ergebnisse")
 
     with _bio_col_d:
         if _bio_auto_scan:
-            st.caption(f"🔄 Quick: {_bio_quick_interval}h | Full: {_bio_full_interval}h")
+            st.caption(f"Quick: {_bio_quick_interval}h | Full: {_bio_full_interval}h")
         if _bio_auto_triggered:
-            _auto_label = "🔬 Full" if _bio_auto_type == "full" else "⚡ Quick"
-            st.info(f"🔄 Auto {_auto_label} Scan startet...")
+            _auto_label = "Full" if _bio_auto_type == "full" else "Quick"
+            st.info(f"Auto {_auto_label} Scan startet...")
 
     # ── Start Scan (manuell ODER auto-triggered) ──
     _bio_start_full = _bio_full_btn or (_bio_auto_triggered and _bio_auto_type == "full")
@@ -14734,7 +14734,7 @@ with tab_biotech:
         try:
             _bio_poly_key = st.secrets.get("POLYGON_KEY", "")
             if not _bio_poly_key:
-                st.error("❌ POLYGON_KEY fehlt in Secrets!")
+                st.error("POLYGON_KEY fehlt in Secrets!")
             else:
                 if _bio_start_full:
                     _bio_thread = threading.Thread(
@@ -14755,7 +14755,7 @@ with tab_biotech:
                 if _bio_auto_triggered:
                     st.session_state.bio_auto_scan_started_at = time.time()
                 _trigger = "Auto" if _bio_auto_triggered else "Manuell"
-                st.toast(f"🧬 {_scan_label} gestartet ({_trigger})...")
+                st.toast(f"{_scan_label} gestartet ({_trigger})...")
                 time.sleep(2)
                 st.rerun()
         except Exception as e:
@@ -14767,7 +14767,7 @@ with tab_biotech:
         # Timeout: Scan älter als 60 Min = abgebrochen
         _bio_age = time.time() - _bio_prog.get("timestamp", 0)
         if _bio_age > 7200:
-            st.error(f"⏰ Biotech Scan Timeout (>120 Min, letzte Aktivität vor {_bio_age/60:.0f} Min). Bitte neu starten.")
+            st.error(f"Biotech Scan Timeout (>120 Min, letzte Aktivität vor {_bio_age/60:.0f} Min). Bitte neu starten.")
             try:
                 os.remove(_biotech_progress_file())
             except Exception:
@@ -14781,11 +14781,11 @@ with tab_biotech:
 
             _bio_prog_col1, _bio_prog_col2 = st.columns([5, 1])
             with _bio_prog_col1:
-                st.progress(_bp_pct, text=f"🧬 {_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
+                st.progress(_bp_pct, text=f"{_bp_checked}/{_bp_total} | {_bp_hits} Treffer | {_bp_detail}")
             with _bio_prog_col2:
-                if st.button("⏹️ Stop", key="bio_stop_btn", use_container_width=True, type="secondary"):
+                if st.button("Stop", key="bio_stop_btn", use_container_width=True, type="secondary"):
                     _biotech_request_stop()
-                    st.toast("⏹️ Biotech Scan wird gestoppt...")
+                    st.toast("Biotech Scan wird gestoppt...")
                     time.sleep(1)
                     st.rerun()
 
@@ -14795,7 +14795,7 @@ with tab_biotech:
         _bp_hits = _bio_prog.get("hits", 0)
         _bp_checked = _bio_prog.get("checked", 0)
         _bp_total = _bio_prog.get("total", 0)
-        st.warning(f"⏹️ Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
+        st.warning(f"Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
         # Nach 30 Sek aufräumen
         if time.time() - _bio_prog.get("timestamp", 0) > 30:
             try:
@@ -14804,7 +14804,7 @@ with tab_biotech:
                 pass
 
     elif _bio_prog and _bio_prog.get("status") == "error":
-        st.error(f"❌ Scan Fehler: {_bio_prog.get('detail', 'Unbekannt')}")
+        st.error(f"Scan Fehler: {_bio_prog.get('detail', 'Unbekannt')}")
 
     elif _bio_prog and _bio_prog.get("status") == "done":
         _bp_hits = _bio_prog.get("hits", 0)
@@ -14813,7 +14813,7 @@ with tab_biotech:
         _bp_done_age = time.time() - _bio_prog.get("timestamp", 0)
         # Nur kurz "fertig" anzeigen, dann Progress-Datei aufräumen
         if _bp_done_age < 60:
-            st.success(f"✅ Scan fertig: {_bp_total} Biotech-Aktien → **{_bp_hits} mit Katalysator** (Top Score: {_bp_top})")
+            st.success(f"Scan fertig: {_bp_total} Biotech-Aktien → **{_bp_hits} mit Katalysator** (Top Score: {_bp_top})")
         else:
             # Progress-Datei entfernen damit kein dauerhaftes "done" hängen bleibt
             try:
@@ -14842,11 +14842,11 @@ with tab_biotech:
             _bio_fda_count = sum(1 for r in _bio_filtered if "FDA" in r.get("Catalyst", "") or "PDUFA" in r.get("Readout_Label", ""))
             _bio_bpiq_cat = sum(1 for r in _bio_filtered if r.get("BPIQ_Available") and r.get("Readout_Score", 0) > 0)
 
-            _bio_m1.metric("🧬 Treffer", len(_bio_filtered))
-            _bio_m2.metric("🅰️ Grade A", _bio_grade_a)
-            _bio_m3.metric("🅱️ Grade B", _bio_grade_b)
-            _bio_m4.metric("🎯 FDA/PDUFA", _bio_fda_count)
-            _bio_m5.metric("📊 BPIQ Catalysts", _bio_bpiq_cat)
+            _bio_m1.metric("Treffer", len(_bio_filtered))
+            _bio_m2.metric("🅰Grade A", _bio_grade_a)
+            _bio_m3.metric("🅱Grade B", _bio_grade_b)
+            _bio_m4.metric("FDA/PDUFA", _bio_fda_count)
+            _bio_m5.metric("BPIQ Catalysts", _bio_bpiq_cat)
 
             # ── Sektor-Trend: Healthcare / Biotech ──
             try:
@@ -14856,15 +14856,15 @@ with tab_biotech:
                     if _bio_perf and "XLV" in _bio_perf:
                         _xlv_chg = _bio_perf["XLV"]
                         if _xlv_chg > 1.5:
-                            st.success(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Starker Rückenwind für Biotech")
+                            st.success(f"**Sektor-Trend:** Healthcare (XLV) **{_xlv_chg:+.1f}%** — Starker Rückenwind für Biotech")
                         elif _xlv_chg > 0.3:
-                            st.info(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Leichter Rückenwind")
+                            st.info(f"**Sektor-Trend:** Healthcare (XLV) **{_xlv_chg:+.1f}%** — Leichter Rückenwind")
                         elif _xlv_chg < -1.5:
-                            st.error(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Starker Gegenwind für Biotech")
+                            st.error(f"**Sektor-Trend:** Healthcare (XLV) **{_xlv_chg:+.1f}%** — Starker Gegenwind für Biotech")
                         elif _xlv_chg < -0.3:
-                            st.warning(f"📊 **Sektor-Trend:** 🏥 Healthcare (XLV) **{_xlv_chg:+.1f}%** — Leichter Gegenwind")
+                            st.warning(f"**Sektor-Trend:** Healthcare (XLV) **{_xlv_chg:+.1f}%** — Leichter Gegenwind")
                         else:
-                            st.caption(f"📊 Sektor-Trend: 🏥 Healthcare (XLV) {_xlv_chg:+.1f}% — Neutral")
+                            st.caption(f"Sektor-Trend: Healthcare (XLV) {_xlv_chg:+.1f}% — Neutral")
             except Exception:
                 pass
 
@@ -14881,14 +14881,14 @@ with tab_biotech:
                 _bio_df[_bio_avail_cols],
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker", width="small"),
-                    "Risk_Flag": st.column_config.TextColumn("⚠️", width="small"),
+                    "Risk_Flag": st.column_config.TextColumn("", width="small"),
                     "Name": st.column_config.TextColumn("Name", width="medium"),
                     "Score": st.column_config.ProgressColumn("Catalyst Score", format="%d", min_value=0, max_value=100),
                     "Grade": st.column_config.TextColumn("Grade", width="small"),
                     "Chart": st.column_config.TextColumn("Chart", width="small"),
                     "Catalyst": st.column_config.TextColumn("Katalysator", width="medium"),
-                    "Event_Result": st.column_config.TextColumn("📋 Ergebnis", width="small"),
-                    "Readout_Label": st.column_config.TextColumn("⏰ Readout", width="large"),
+                    "Event_Result": st.column_config.TextColumn("Ergebnis", width="small"),
+                    "Readout_Label": st.column_config.TextColumn("Readout", width="large"),
                     "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
                     "MCap_M": st.column_config.NumberColumn("MCap (M$)", format="%.0f"),
                     "RVOL": st.column_config.NumberColumn("RVOL", format="%.1f"),
@@ -14918,7 +14918,7 @@ with tab_biotech:
                 _bio_score = _bio_item.get("Score", 0)
                 _bio_score_color = "#22c55e" if _bio_score >= 75 else "#eab308" if _bio_score >= 55 else "#f97316" if _bio_score >= 35 else "#ef4444"
                 st.markdown(
-                    f"## 🧬 {_bio_item.get('Ticker', 'N/A')} — {_bio_item.get('Name', '')} "
+                    f"## {_bio_item.get('Ticker', 'N/A')} — {_bio_item.get('Name', '')} "
                     f"<span style='background:{_bio_score_color};color:white;padding:4px 12px;border-radius:12px;"
                     f"font-size:18px;font-weight:bold;'>{_bio_item.get('Grade', '?')} ({_bio_score}/100)</span>",
                     unsafe_allow_html=True
@@ -14928,22 +14928,22 @@ with tab_biotech:
                 _bio_ev_result = _bio_item.get("Event_Result", "")
                 if _bio_ev_result and _bio_ev_result not in ("—", ""):
                     if "Positiv" in _bio_ev_result:
-                        st.success(f"📋 **Trial/Event Ergebnis:** {_bio_ev_result}")
+                        st.success(f"**Trial/Event Ergebnis:** {_bio_ev_result}")
                     elif "Negativ" in _bio_ev_result:
-                        st.error(f"📋 **Trial/Event Ergebnis:** {_bio_ev_result}")
+                        st.error(f"**Trial/Event Ergebnis:** {_bio_ev_result}")
                     elif "Gemischt" in _bio_ev_result:
-                        st.warning(f"📋 **Trial/Event Ergebnis:** {_bio_ev_result}")
+                        st.warning(f"**Trial/Event Ergebnis:** {_bio_ev_result}")
                     elif "Ausstehend" in _bio_ev_result:
-                        st.info(f"📋 **Trial/Event Ergebnis:** {_bio_ev_result}")
+                        st.info(f"**Trial/Event Ergebnis:** {_bio_ev_result}")
 
                 # ── Penny Stock / Micro Cap Warnung ──
                 _bio_risk_flag = _bio_item.get("Risk_Flag", "")
                 if "PENNY" in _bio_risk_flag:
-                    st.error("🚨 **PENNY STOCK WARNUNG** — MCap unter $50M und/oder Preis unter $1. "
+                    st.error("**PENNY STOCK WARNUNG** — MCap unter $50M und/oder Preis unter $1. "
                              "Extrem hohes Risiko: geringe Liquidität, große Spreads, anfällig für Manipulation. "
                              "Nur mit Spielgeld und striktem Stop-Loss traden!")
                 elif "MICRO" in _bio_risk_flag:
-                    st.warning("⚠️ **MICRO CAP** — MCap unter $100M. Erhöhte Volatilität und Liquiditätsrisiko. "
+                    st.warning("**MICRO CAP** — MCap unter $100M. Erhöhte Volatilität und Liquiditätsrisiko. "
                                "Position-Sizing reduzieren!")
 
                 # Chart Health Warnung (wenn schwach/kritisch)
@@ -14955,17 +14955,17 @@ with tab_biotech:
                     if _bio_dd > 0:
                         _ch_parts.append(f"−{_bio_dd:.0f}% vom High")
                     _td = _bio_item.get("Tech_Details", {})
-                    if _td.get("trend", "").startswith("📉"):
+                    if _td.get("trend", "").startswith(""):
                         _ch_parts.append(_td["trend"])
                     if _td.get("recent_action"):
                         _ch_parts.append(_td["recent_action"])
                     if _bio_sr:
-                        if "❓" in _bio_sr:
-                            st.warning(f"📉 **Chart schwach** ({' | '.join(_ch_parts)}) — Aber: **Kein negativer Catalyst gefunden** → mögliche Dip-Opportunity?")
+                        if "" in _bio_sr:
+                            st.warning(f"**Chart schwach** ({' | '.join(_ch_parts)}) — Aber: **Kein negativer Catalyst gefunden** → mögliche Dip-Opportunity?")
                         else:
-                            st.error(f"📉 **Chart schwach** ({' | '.join(_ch_parts)}) — Grund: **{_bio_sr}**")
+                            st.error(f"**Chart schwach** ({' | '.join(_ch_parts)}) — Grund: **{_bio_sr}**")
                     else:
-                        st.warning(f"📉 **Chart Achtung:** {' | '.join(_ch_parts)}")
+                        st.warning(f"**Chart Achtung:** {' | '.join(_ch_parts)}")
 
                 # ── Catalyst Kalender (BPIQ oder CT.gov Fallback) ──
                 _bio_has_bpiq = _bio_item.get("BPIQ_Available", False)
@@ -14990,43 +14990,43 @@ with tab_biotech:
                         # Status: Ergebnis war oder wird erwartet
                         _bc_status = ""
                         if _bc_cat == "OVERDUE":
-                            _bc_status = "⏰ Ergebnis ausstehend"
+                            _bc_status = "Ergebnis ausstehend"
                         elif _bc_cat in ("IMMINENT", "UPCOMING", "LATER"):
-                            _bc_status = "📅 Erwartet"
+                            _bc_status = "Erwartet"
                         elif not _bc_date and not _bc_cat:
-                            _bc_status = "📋 TBA"
+                            _bc_status = "TBA"
 
                         # Event-Typ Beschreibung
                         _bc_event_desc = f"{_bc_stage}" + (f" — {_bc_event}" if _bc_event else "")
 
                         if "PDUFA" in _bc_label:
                             if _bc_cat == "IMMINENT":
-                                st.error(f"🔴 **PDUFA** 📅 {_bc_date_txt} ({_bc_days}d) — {_bc_drug}"
+                                st.error(f"**PDUFA** {_bc_date_txt} ({_bc_days}d) — {_bc_drug}"
                                          f"{' | ' + _bc_ind if _bc_ind else ''}")
                             elif _bc_cat == "UPCOMING":
-                                st.warning(f"🟡 **PDUFA** 📅 {_bc_date_txt} (in {_bc_days}d) — {_bc_drug}"
+                                st.warning(f"**PDUFA** {_bc_date_txt} (in {_bc_days}d) — {_bc_drug}"
                                            f"{' | ' + _bc_ind if _bc_ind else ''}")
                             elif _bc_cat == "OVERDUE":
-                                st.error(f"🔴 **PDUFA ÜBERFÄLLIG** ({abs(_bc_days)}d seit {_bc_date_txt}) — {_bc_drug}")
+                                st.error(f"**PDUFA ÜBERFÄLLIG** ({abs(_bc_days)}d seit {_bc_date_txt}) — {_bc_drug}")
                             else:
-                                st.info(f"🟢 **PDUFA** ({_bc_date_txt or 'TBA'}) — {_bc_drug}")
+                                st.info(f"**PDUFA** ({_bc_date_txt or 'TBA'}) — {_bc_drug}")
                         else:
-                            _date_info = f"📅 {_bc_date_txt}" if _bc_date_txt and _bc_date_txt != "TBA" else "📅 TBA"
+                            _date_info = f"{_bc_date_txt}" if _bc_date_txt and _bc_date_txt != "TBA" else "TBA"
                             if _bc_cat == "OVERDUE":
-                                st.error(f"🔴 **{_bc_event_desc}** — ÜBERFÄLLIG ({abs(_bc_days)}d) — {_bc_drug}"
+                                st.error(f"**{_bc_event_desc}** — ÜBERFÄLLIG ({abs(_bc_days)}d) — {_bc_drug}"
                                          f"\n{_date_info}{' | ' + _bc_ind if _bc_ind else ''}")
                             elif _bc_cat == "IMMINENT":
-                                st.warning(f"🟡 **{_bc_event_desc}** — in {_bc_days}d ({_bc_date_txt}) — {_bc_drug}"
+                                st.warning(f"**{_bc_event_desc}** — in {_bc_days}d ({_bc_date_txt}) — {_bc_drug}"
                                            f"{' | ' + _bc_ind if _bc_ind else ''}")
                             elif _bc_cat == "UPCOMING":
-                                st.info(f"🟢 **{_bc_event_desc}** — in {_bc_days}d ({_bc_date_txt}) — {_bc_drug}"
+                                st.info(f"**{_bc_event_desc}** — in {_bc_days}d ({_bc_date_txt}) — {_bc_drug}"
                                         f"{' | ' + _bc_ind if _bc_ind else ''}")
                             else:
                                 # LATER oder TBA
-                                st.info(f"⚪ **{_bc_event_desc}** — {_bc_drug} ({_date_info})"
+                                st.info(f"**{_bc_event_desc}** — {_bc_drug} ({_date_info})"
                                         f"{' | ' + _bc_ind if _bc_ind else ''}")
                         if _bc_note:
-                            st.caption(f"📝 {_bc_note}")
+                            st.caption(f"{_bc_note}")
 
                 elif _bio_readouts:
                     # ── CT.gov Fallback (wenn kein BPIQ) ──
@@ -15036,17 +15036,17 @@ with tab_biotech:
                         _phase = _ro_top.get("phase", _ro_top.get("full_label", "?"))
                         _pc = _ro_top.get("primary_completion", _ro_top.get("catalyst_date_text", "?"))
                         _days = abs(_ro_top.get("days_until_readout", _ro_top.get("days_until", 0)))
-                        st.error(f"🔴 **TRIAL READOUT ÜBERFÄLLIG** — {_phase}: {_days}d überfällig. "
+                        st.error(f"**TRIAL READOUT ÜBERFÄLLIG** — {_phase}: {_days}d überfällig. "
                                  f"_{_ro_top.get('title', _ro_top.get('drug_name', ''))}_")
                     elif _ro_cat == "OVERDUE_STALE":
-                        st.caption(f"⚪ Trial Readout veraltet — wahrscheinlich abgeschlossen, Status nicht aktualisiert")
+                        st.caption(f"Trial Readout veraltet — wahrscheinlich abgeschlossen, Status nicht aktualisiert")
                     elif _ro_cat == "IMMINENT":
                         _days = _ro_top.get("days_until_readout", _ro_top.get("days_until", "?"))
-                        st.warning(f"🟡 **TRIAL READOUT IN {_days} TAGEN** — "
+                        st.warning(f"**TRIAL READOUT IN {_days} TAGEN** — "
                                    f"_{_ro_top.get('title', _ro_top.get('drug_name', ''))}_")
                     elif _ro_cat == "UPCOMING":
                         _days = _ro_top.get("days_until_readout", _ro_top.get("days_until", "?"))
-                        st.info(f"🟢 **Trial Readout in {_days} Tagen** — "
+                        st.info(f"**Trial Readout in {_days} Tagen** — "
                                 f"_{_ro_top.get('title', _ro_top.get('drug_name', ''))}_")
 
                 # ── Options Unusual Activity (on-demand, nur in Detail View) ──
@@ -15062,13 +15062,13 @@ with tab_biotech:
 
                 # Score Breakdown
                 _bio_bc1, _bio_bc2, _bio_bc3, _bio_bc4, _bio_bc5, _bio_bc6, _bio_bc7 = st.columns(7)
-                _bio_bc1.metric("🎯 Catalyst", f"{_bio_item.get('Catalyst_Score', 0)}/30", help="FDA/PDUFA Events, Approvals, Breakthrough")
-                _bio_bc2.metric("🔬 Pipeline", f"{_bio_item.get('Pipeline_Score', 0)}/20", help="Phase 3/2/1 Clinical Trials")
-                _bio_bc3.metric("⏰ Readout", f"{_bio_item.get('Readout_Score', 0)}/15", help="Überfällige/bevorstehende Trial-Readouts. OVERDUE=🔴, IMMINENT=🟡, UPCOMING=🟢")
-                _bio_bc4.metric("📈 Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
-                _bio_bc5.metric("🎰 Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
-                _bio_bc6.metric("📰 Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
-                _bio_bc7.metric("📊 Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}% vom High" if _bio_dd >= 10 else None, delta_color="normal", help="Chart Health: 10=perfekt, 0=Crash.")
+                _bio_bc1.metric("Catalyst", f"{_bio_item.get('Catalyst_Score', 0)}/30", help="FDA/PDUFA Events, Approvals, Breakthrough")
+                _bio_bc2.metric("Pipeline", f"{_bio_item.get('Pipeline_Score', 0)}/20", help="Phase 3/2/1 Clinical Trials")
+                _bio_bc3.metric("Readout", f"{_bio_item.get('Readout_Score', 0)}/15", help="Überfällige/bevorstehende Trial-Readouts. OVERDUE=, IMMINENT=, UPCOMING=")
+                _bio_bc4.metric("Technical", f"{_bio_item.get('Technical_Score', 0)}/20", help="Volume, Trend, Akkumulation")
+                _bio_bc5.metric("Opportunity", f"{_bio_item.get('Risk_Score', 0)}/15", help="Sweet Spot: $0.5-10B MCap, Low Float, keine Red Flags")
+                _bio_bc6.metric("Momentum", f"{_bio_item.get('Momentum_Score', 0)}/15", help="News Sentiment & Frequency")
+                _bio_bc7.metric("Chart", f"{_bio_ch}/10", delta=f"−{_bio_dd:.0f}% vom High" if _bio_dd >= 10 else None, delta_color="normal", help="Chart Health: 10=perfekt, 0=Crash.")
 
                 st.divider()
 
@@ -15076,32 +15076,32 @@ with tab_biotech:
                 _bio_dc1, _bio_dc2 = st.columns(2)
 
                 with _bio_dc1:
-                    st.markdown("### 🎯 Katalysator")
+                    st.markdown("### Katalysator")
                     _bio_cats = _bio_item.get("Catalysts_All", [])
                     if _bio_cats:
                         for cat in _bio_cats[:5]:
-                            _tier_color = {"tier1": "🔴", "tier2": "🟠", "tier3": "🟡", "tier4": "🟢"}.get(cat.get("tier"), "⚪")
+                            _tier_color = {"tier1": "", "tier2": "", "tier3": "", "tier4": ""}.get(cat.get("tier"), "")
                             st.markdown(f"{_tier_color} **{cat.get('label', '')}**: {cat.get('keyword', '')} ({cat.get('date', '')})")
                             if cat.get("headline"):
-                                st.caption(f"📰 {cat['headline']}")
+                                st.caption(f"{cat['headline']}")
                     else:
                         st.info("Kein direkter FDA-Catalyst gefunden — Signal basiert auf Pipeline/Momentum")
 
                     # Headline
                     if _bio_item.get("Headline"):
-                        st.markdown(f"**💡 Top Headline:** {_bio_item.get('Headline', '')}")
+                        st.markdown(f"**Top Headline:** {_bio_item.get('Headline', '')}")
 
                     # Negative Flags
                     _neg_flags = _bio_item.get("Negative_Flags", [])
                     if _neg_flags:
-                        st.markdown("#### ⚠️ Warnungen")
+                        st.markdown("#### Warnungen")
                         for nf in _neg_flags:
                             st.error(f"**{nf['flag'].upper()}** ({nf['date']}) — Penalty: {nf['penalty']} Punkte")
 
                 with _bio_dc2:
                     # ── BPIQ Drug Pipeline (kuratiert) ──
                     if _bio_item.get("BPIQ_Available") and _bio_item.get("BPIQ_Catalysts"):
-                        st.markdown("### 💊 Drug Pipeline (BPIQ)")
+                        st.markdown("### Drug Pipeline (BPIQ)")
                         _all_bpiq = _bio_item.get("BPIQ_Catalysts", [])
                         for _bd in _all_bpiq[:5]:
                             _bd_stage = _bd.get("stage_label", "")
@@ -15110,11 +15110,11 @@ with tab_biotech:
                             _bd_days = _bd.get("days_until")
                             _bd_badge = ""
                             if _bd_cat == "IMMINENT":
-                                _bd_badge = f" ⏰🟡 **{_bd_days}d**"
+                                _bd_badge = f" **{_bd_days}d**"
                             elif _bd_cat == "UPCOMING":
-                                _bd_badge = f" ⏰🟢 {_bd_days}d"
+                                _bd_badge = f" {_bd_days}d"
                             elif _bd_cat == "OVERDUE":
-                                _bd_badge = f" ⏰🔴 **{abs(_bd_days)}d**"
+                                _bd_badge = f" **{abs(_bd_days)}d**"
                             st.markdown(f"{_bd_emoji} **{_bd.get('full_label', '?')}** — {_bd.get('drug_name', '')}{_bd_badge}")
                             _bd_ind = _bd.get("indications", "")
                             if _bd_ind:
@@ -15122,7 +15122,7 @@ with tab_biotech:
                         st.caption("_Quelle: BPIQ (kuratiert, täglich aktualisiert)_")
                         st.divider()
 
-                    st.markdown("### 🔬 Catalyst Pipeline (BPIQ)")
+                    st.markdown("### Catalyst Pipeline (BPIQ)")
                     _bio_readouts = _bio_item.get("Readout_Details", [])
                     if _bio_readouts:
                         for _rd in _bio_readouts[:5]:
@@ -15142,7 +15142,7 @@ with tab_biotech:
                             st.markdown(f"{_rd_emoji} **{_rd_label}** — {_rd_drug}{_rd_timing}")
                             _rd_note = _rd.get("note", "")
                             if _rd_note:
-                                st.caption(f"📝 {_rd_note[:150]}")
+                                st.caption(f"{_rd_note[:150]}")
                     else:
                         st.info("Keine BPIQ Catalyst-Daten für diesen Ticker")
 
@@ -15150,13 +15150,13 @@ with tab_biotech:
                 _bio_tc1, _bio_tc2 = st.columns(2)
 
                 with _bio_tc1:
-                    st.markdown("### 📈 Technische Analyse")
+                    st.markdown("### Technische Analyse")
                     _tech = _bio_item.get("Tech_Details", {})
                     if _tech:
                         _tc_cols = st.columns(3)
-                        _tc_cols[0].metric("💰 Preis", f"${_tech.get('price', 0):.2f}")
-                        _tc_cols[1].metric("📊 RVOL", f"{_tech.get('RVOL', 0):.1f}x")
-                        _tc_cols[2].metric("📉 90D Pos", f"{_tech.get('pos_90d', 0):.0f}%")
+                        _tc_cols[0].metric("Preis", f"${_tech.get('price', 0):.2f}")
+                        _tc_cols[1].metric("RVOL", f"{_tech.get('RVOL', 0):.1f}x")
+                        _tc_cols[2].metric("90D Pos", f"{_tech.get('pos_90d', 0):.0f}%")
 
                         if _tech.get("vol_signal"):
                             st.caption(f"Volume: {_tech['vol_signal']}")
@@ -15173,26 +15173,26 @@ with tab_biotech:
                         _bio_resi = _tech.get("resistance", 0)
 
                         if _bio_support > 0 and _bio_resi > 0:
-                            st.caption(f"🟢 Support: ${_bio_support:,.2f} | 🔴 Resistance: ${_bio_resi:,.2f}")
+                            st.caption(f"Support: ${_bio_support:,.2f} | Resistance: ${_bio_resi:,.2f}")
 
                         if _tech.get("breakout_ready"):
-                            st.success("🎯 **Breakout Ready** — enge Range + steigendes Volumen!")
+                            st.success("**Breakout Ready** — enge Range + steigendes Volumen!")
 
                         if _bio_vol_trend == "accumulation":
-                            st.caption("📊 Volumen: 🟢 Akkumulation (Käufer aktiv)")
+                            st.caption("Volumen: Akkumulation (Käufer aktiv)")
                         elif _bio_vol_trend == "distribution":
-                            st.caption("📊 Volumen: 🔴 Distribution (Verkäufer aktiv)")
+                            st.caption("Volumen: Distribution (Verkäufer aktiv)")
 
                         if _bio_patterns:
-                            st.markdown("**🕯️ Candlestick-Patterns:**")
+                            st.markdown("**Candlestick-Patterns:**")
                             for _bp in _bio_patterns[:4]:
-                                _bp_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(_bp.get("type", ""), "")
+                                _bp_icon = {"bullish": "", "bearish": "", "neutral": ""}.get(_bp.get("type", ""), "")
                                 st.caption(f"{_bp_icon} **{_bp['name']}** ({_bp.get('pos', '')}) — {_bp.get('signal', '')}")
 
                     # Risk Details
                     _risk_details = _bio_item.get("Risk_Details", [])
                     if _risk_details:
-                        st.markdown("**🛡️ Risiko-Profil:**")
+                        st.markdown("**Risiko-Profil:**")
                         for rd in _risk_details:
                             st.caption(rd)
 
@@ -15200,7 +15200,7 @@ with tab_biotech:
                     # ── FDA/Trial Catalysts Detail ──
                     _bio_all_cats = _bio_item.get("Catalysts_All", [])
                     if _bio_all_cats:
-                        st.markdown("### 🎯 Erkannte Katalysatoren")
+                        st.markdown("### Erkannte Katalysatoren")
                         for _ac in _bio_all_cats[:5]:
                             _ac_tier = _ac.get("tier", "")
                             _ac_kw = _ac.get("keyword", "").title()
@@ -15210,10 +15210,10 @@ with tab_biotech:
                             _tier_badge = {"tier1": "FDA", "tier2": "Trial", "tier3": "Deal", "tier4": "Pipeline"}.get(_ac_tier, "")
                             st.markdown(f"{_tier_emoji} **[{_tier_badge}]** {_ac_kw} — {_ac_date}")
                             if _ac_head:
-                                st.caption(f"📰 {_ac_head}")
+                                st.caption(f"{_ac_head}")
                         st.divider()
 
-                    st.markdown("### 📰 Aktuelle News")
+                    st.markdown("### Aktuelle News")
                     _bio_news = _bio_item.get("News", [])
                     if _bio_news:
                         for n in _bio_news[:5]:
@@ -15256,35 +15256,35 @@ with tab_biotech:
         # Kein Cache — Willkommens-Seite
         st.markdown("---")
         st.markdown("""
-        ### 🧬 Willkommen beim Biotech Scanner
+        ### Willkommen beim Biotech Scanner
 
         Dieser Scanner analysiert **Biotech- und Pharma-Aktien** auf:
 
-        **🎯 FDA-Katalysatoren (30 Punkte)**
+        ** FDA-Katalysatoren (30 Punkte)**
         PDUFA Dates, FDA Approvals, Breakthrough Therapy, Fast Track, Priority Review, AdCom Meetings
 
-        **🔬 Catalyst Pipeline (20 Punkte)**
+        ** Catalyst Pipeline (20 Punkte)**
         BPIQ kuratierte Catalyst-Dates — PDUFA, Phase 3 Readouts, AdCom
 
-        **📈 Technische Analyse (20 Punkte)**
+        ** Technische Analyse (20 Punkte)**
         Unusual Volume, Volume-Trend, Akkumulation, Price Position, Trend-Richtung
 
-        **📰 News Momentum (15 Punkte)**
+        ** News Momentum (15 Punkte)**
         Sentiment-Analyse, News-Frequenz, Katalysator-Dichte
 
-        **🛡️ Risiko-Bewertung (15 Punkte)**
+        ** Risiko-Bewertung (15 Punkte)**
         Market Cap, Float, Penny Stock Check, negative Signale (Clinical Hold, Offerings, etc.)
 
         ---
-        **Drücke "🔬 Full Scan" um zu beginnen!**
+        **Drücke "Full Scan" um zu beginnen!**
         """)
 
 
 # =============================================================================
-# TAB: BTC-DIVERGENZ SHORT SCANNER 📉
+# TAB: BTC-DIVERGENZ SHORT SCANNER 
 # =============================================================================
 with tab_divergence:
-    st.header("📉 BTC-Divergenz Short Scanner V2")
+    st.header("BTC-Divergenz Short Scanner V2")
     st.caption("Findet Altcoins die gegen BTC-Schwäche pumpen — mit 1h-Echtzeit-Timing für präzise Short-Entries")
 
     col_info, col_scan, col_refresh = st.columns([2, 1, 1])
@@ -15298,9 +15298,9 @@ with tab_divergence:
         **1h-Timing:** Erkennt den exakten Kipp-Moment für den Entry
         """)
     with col_scan:
-        scan_divergence = st.button("🔍 Divergenz-Scan starten (1000 Coins)", type="primary", key="btn_div_scan")
+        scan_divergence = st.button("Divergenz-Scan starten (1000 Coins)", type="primary", key="btn_div_scan")
     with col_refresh:
-        div_auto_refresh = st.checkbox("🔄 Auto-Refresh (5 Min)", key="div_auto_refresh",
+        div_auto_refresh = st.checkbox("Auto-Refresh (5 Min)", key="div_auto_refresh",
                                         help="Scannt alle 5 Minuten automatisch — warnt bei Timing-Änderungen")
         if div_auto_refresh:
             st_autorefresh(interval=300_000, key="div_autorefresh_timer")  # 5 Minuten
@@ -15321,8 +15321,8 @@ with tab_divergence:
                     _div_data = json.load(_f)
                 new_results = _div_data.get("results", [])
                 _div_defaults = {
-                    "Timing": "⚪ Früh", "SellProb": 0, "ExhScore": 0, "ExhGrade": "—",
-                    "GradeEmoji": "⚪", "1h%": 0, "24h%": 0, "14d%": 0, "30d%": 0,
+                    "Timing": "Früh", "SellProb": 0, "ExhScore": 0, "ExhGrade": "—",
+                    "GradeEmoji": "", "1h%": 0, "24h%": 0, "14d%": 0, "30d%": 0,
                     "7d%": 0, "BestTF": "—", "FundingRate": None, "OI_Ratio": None,
                     "Divergenz%": 0, "Div7d%": 0, "Div14d%": 0, "Div30d%": 0,
                     "RVOL": 0, "UpperWick%": 0, "MarketCap": 0, "Vol24h": 0,
@@ -15337,7 +15337,7 @@ with tab_divergence:
                 st.session_state["div_btc"] = _div_data.get("btc")
                 st.session_state["div_stats"] = _div_data.get("stats")
                 st.session_state["div_last_update"] = time.strftime("%H:%M:%S", time.localtime(os.path.getmtime(_DIV_RESULTS)))
-                st.caption(f"⚡ BTC-Divergenz Daten aus Background-Service (vor {_res_age/60:.0f} Min)")
+                st.caption(f"BTC-Divergenz Daten aus Background-Service (vor {_res_age/60:.0f} Min)")
         except Exception:
             pass
 
@@ -15352,7 +15352,7 @@ with tab_divergence:
 
             with open(_DIV_PROGRESS, "w") as _f:
                 json.dump({"status": "running", "checked": 0, "total": 0, "hits": 0,
-                           "detail": "📡 Lade CoinGecko Marktdaten (4 Seiten × 250)...",
+                           "detail": "Lade CoinGecko Marktdaten (4 Seiten × 250)...",
                            "timestamp": time.time()}, _f)
 
             # CoinGecko Daten DIREKT laden (kein st.cache_data!)
@@ -15370,13 +15370,13 @@ with tab_divergence:
                             _cg_coins.extend(_pg_data)
                         with open(_DIV_PROGRESS, "w") as _f:
                             json.dump({"status": "running", "checked": 0, "total": 0, "hits": 0,
-                                       "detail": f"📡 CoinGecko Seite {_pg}/4 geladen ({len(_cg_coins)} Coins)...",
+                                       "detail": f"CoinGecko Seite {_pg}/4 geladen ({len(_cg_coins)} Coins)...",
                                        "timestamp": time.time()}, _f)
                     elif _cg_resp.status_code == 429:
                         # Rate Limit — nutze was wir haben
                         with open(_DIV_PROGRESS, "w") as _f:
                             json.dump({"status": "running", "checked": 0, "total": 0, "hits": 0,
-                                       "detail": f"⚠️ CoinGecko Rate Limit bei Seite {_pg} — nutze {len(_cg_coins)} Coins",
+                                       "detail": f"CoinGecko Rate Limit bei Seite {_pg} — nutze {len(_cg_coins)} Coins",
                                        "timestamp": time.time()}, _f)
                         break
                 except Exception as _cg_err:
@@ -15399,7 +15399,7 @@ with tab_divergence:
 
             with open(_DIV_PROGRESS, "w") as _f:
                 json.dump({"status": "running", "checked": 0, "total": len(_cg_coins), "hits": 0,
-                           "detail": f"📊 {len(_cg_coins)} Coins geladen, starte Divergenz-Analyse...",
+                           "detail": f"{len(_cg_coins)} Coins geladen, starte Divergenz-Analyse...",
                            "timestamp": time.time()}, _f)
 
             # Jetzt fetch_btc_divergence_shorts aufrufen — die Funktion hat @st.cache_data
@@ -15416,7 +15416,7 @@ with tab_divergence:
             with open(_DIV_RESULTS, "w") as _f:
                 json.dump({"results": _dr, "btc": _bi, "stats": _ds, "ts": time.time()}, _f)
             with open(_DIV_PROGRESS, "w") as _f:
-                json.dump({"status": "done", "detail": f"✅ {len(_dr)} Divergenzen gefunden",
+                json.dump({"status": "done", "detail": f"{len(_dr)} Divergenzen gefunden",
                            "timestamp": time.time()}, _f)
         except Exception as _e:
             import traceback
@@ -15436,7 +15436,7 @@ with tab_divergence:
 
     if _div_should_scan and not _div_running:
         threading.Thread(target=_div_bg_scan, args=(scan_divergence,), daemon=True).start()
-        st.toast("📡 BTC-Divergenz Scan gestartet...")
+        st.toast("BTC-Divergenz Scan gestartet...")
         time.sleep(2)
         st.rerun()
 
@@ -15448,7 +15448,7 @@ with tab_divergence:
         _dv_pct = int(_dv_checked / _dv_total * 100) if _dv_total > 0 else 0
         _dv_detail = _div_prog.get("detail", "Scanne...")
 
-        st.info(f"📡 BTC-Divergenz Scan läuft — {_dv_checked}/{_dv_total} ({_dv_pct}%) | {_dv_hits} Treffer | {_dv_detail}")
+        st.info(f"BTC-Divergenz Scan läuft — {_dv_checked}/{_dv_total} ({_dv_pct}%) | {_dv_hits} Treffer | {_dv_detail}")
         if _dv_total > 0:
             st.progress(_dv_pct / 100, text=f"{_dv_checked}/{_dv_total} Coins")
 
@@ -15466,11 +15466,11 @@ with tab_divergence:
                     old_t = old_timing.get(coin.get("Ticker", ""), "")
                     new_t = coin.get("Timing", "")
                     if "JETZT" in new_t and "JETZT" not in old_t and old_t:
-                        st.toast(f"🚨 {coin.get('Ticker', '?')} → {new_t}", icon="🔴")
+                        st.toast(f"{coin.get('Ticker', '?')} → {new_t}", icon="")
             # Fehlende Felder mit Defaults auffüllen (bg_service hat vereinfachte Analyse)
             _div_defaults = {
-                "Timing": "⚪ Früh", "SellProb": 0, "ExhScore": 0, "ExhGrade": "—",
-                "GradeEmoji": "⚪", "1h%": 0, "24h%": 0, "14d%": 0, "30d%": 0,
+                "Timing": "Früh", "SellProb": 0, "ExhScore": 0, "ExhGrade": "—",
+                "GradeEmoji": "", "1h%": 0, "24h%": 0, "14d%": 0, "30d%": 0,
                 "7d%": 0, "BestTF": "—", "FundingRate": None, "OI_Ratio": None,
                 "Divergenz%": 0, "Div7d%": 0, "Div14d%": 0, "Div30d%": 0,
                 "RVOL": 0, "UpperWick%": 0, "MarketCap": 0, "Vol24h": 0,
@@ -15491,8 +15491,8 @@ with tab_divergence:
             pass
 
     if _div_prog and _div_prog.get("status") == "error":
-        st.error(f"❌ Divergenz-Scan Fehler: {_div_prog.get('detail', 'Unbekannt')}")
-        if st.button("🔄 Erneut scannen", key="div_retry_btn"):
+        st.error(f"Divergenz-Scan Fehler: {_div_prog.get('detail', 'Unbekannt')}")
+        if st.button("Erneut scannen", key="div_retry_btn"):
             try:
                 os.remove(_DIV_PROGRESS)
             except Exception:
@@ -15512,16 +15512,16 @@ with tab_divergence:
 
     if div_stats and "error" in div_stats:
         if "Rate Limit" in str(div_stats["error"]):
-            st.warning("⏳ CoinGecko Rate Limit — Daten werden aus Cache geladen. Einfach nochmal klicken.")
+            st.warning("CoinGecko Rate Limit — Daten werden aus Cache geladen. Einfach nochmal klicken.")
         elif div_stats["error"] == "Keine Daten":
-            st.error("🚫 Keine Daten von CoinGecko erhalten — API evtl. nicht erreichbar.")
+            st.error("Keine Daten von CoinGecko erhalten — API evtl. nicht erreichbar.")
         else:
-            st.warning(f"⚠️ {div_stats['error']}")
+            st.warning(f"{div_stats['error']}")
 
     # BTC-Bullish-Warnung (Scan läuft trotzdem, aber Qualität der Setups ist geringer)
     if div_stats and div_stats.get("btc_bullish"):
         st.warning(
-            f"⚠️ **BTC ist auf allen Zeitfenstern bullisch** "
+            f"**BTC ist auf allen Zeitfenstern bullisch** "
             f"(7d: {div_stats.get('btc_7d', 0):+.1f}%) — "
             f"Divergenz-Setups sind weniger zuverlässig wenn BTC stark ist. "
             f"Die besten Shorts kommen wenn BTC auf mind. einem Zeitfenster schwach ist. "
@@ -15558,7 +15558,7 @@ with tab_divergence:
         # Letztes Update anzeigen
         last_update = st.session_state.get("div_last_update")
         if last_update:
-            st.caption(f"🕐 Letztes Update: {last_update}" + (" · Auto-Refresh aktiv" if st.session_state.get("div_auto_refresh") else ""))
+            st.caption(f"Letztes Update: {last_update}" + (" · Auto-Refresh aktiv" if st.session_state.get("div_auto_refresh") else ""))
 
     if div_results:
         st.markdown("---")
@@ -15566,7 +15566,7 @@ with tab_divergence:
         # ── Echtzeit-Alerts: Coins die JETZT kippen ──
         jetzt_coins = [c for c in div_results if "JETZT" in c.get("Timing", "")]
         if jetzt_coins:
-            st.error(f"🚨 **{len(jetzt_coins)} AKTIVE SHORT-SIGNALE** — Diese Coins kippen gerade!")
+            st.error(f"**{len(jetzt_coins)} AKTIVE SHORT-SIGNALE** — Diese Coins kippen gerade!")
             for jc in jetzt_coins:
                 st.markdown(
                     f"  **{jc.get('Ticker', '?')}** — 1h: **{jc.get('1h%', 0):+.1f}%** | "
@@ -15577,9 +15577,9 @@ with tab_divergence:
 
         is_watch_only = div_stats and div_stats.get("btc_bullish", False)
         if is_watch_only:
-            st.subheader(f"👁️ {len(div_results)} Coins auf Watchlist (BTC bullisch — Watch Only)")
+            st.subheader(f"{len(div_results)} Coins auf Watchlist (BTC bullisch — Watch Only)")
         else:
-            st.subheader(f"🎯 {len(div_results)} Short-Kandidaten gefunden")
+            st.subheader(f"{len(div_results)} Short-Kandidaten gefunden")
 
         # ── Klickbare Tabelle (wie BI Scanner) ──
         import pandas as pd
@@ -15607,11 +15607,11 @@ with tab_divergence:
         # Timing kürzen für Tabelle
         timing_short = []
         for t in div_df["Timing"].tolist():
-            if "SHORTEN" in t: timing_short.append("🔴 JETZT")
-            elif "JETZT" in t: timing_short.append("🟢 JETZT")
-            elif "BEREIT" in t: timing_short.append("🟡 BEREIT")
-            elif "WATCHLIST" in t: timing_short.append("🟠 WATCH")
-            else: timing_short.append("⚪ FRÜH")
+            if "SHORTEN" in t: timing_short.append("JETZT")
+            elif "JETZT" in t: timing_short.append("JETZT")
+            elif "BEREIT" in t: timing_short.append("BEREIT")
+            elif "WATCHLIST" in t: timing_short.append("WATCH")
+            else: timing_short.append("FRÜH")
         div_display_data["Timing"] = timing_short
 
         div_table_df = pd.DataFrame(div_display_data)
@@ -15639,13 +15639,13 @@ with tab_divergence:
         # ── Keyboard Navigation: W (zurück) / E (vor) ──
         div_nav1, div_nav2, div_nav3 = st.columns([1, 3, 1])
         with div_nav1:
-            if st.button("◀ Zurück (W)", key="div_nav_prev", use_container_width=True, disabled=div_sel_idx <= 0):
+            if st.button("Zurück (W)", key="div_nav_prev", use_container_width=True, disabled=div_sel_idx <= 0):
                 st.session_state["div_sel_idx"] = max(0, div_sel_idx - 1)
                 st.rerun()
         with div_nav2:
-            st.caption(f"📌 **{div_sel_idx + 1} / {div_num}** — Klicke Zeile in Tabelle oder nutze ◀ ▶ Buttons (Tastatur: **W** = zurück / **E** = vor)")
+            st.caption(f"**{div_sel_idx + 1} / {div_num}** — Klicke Zeile in Tabelle oder nutze Buttons (Tastatur: **W** = zurück / **E** = vor)")
         with div_nav3:
-            if st.button("Vor ▶ (E)", key="div_nav_next", use_container_width=True, disabled=div_sel_idx >= div_num - 1):
+            if st.button("Vor (E)", key="div_nav_next", use_container_width=True, disabled=div_sel_idx >= div_num - 1):
                 st.session_state["div_sel_idx"] = min(div_num - 1, div_sel_idx + 1)
                 st.rerun()
 
@@ -15706,23 +15706,23 @@ with tab_divergence:
         # ── Detail-Ansicht für ausgewählten Coin ──
         coin = div_results[div_sel_idx]
         grade = coin.get("ExhGrade", "—")
-        emoji = coin.get("GradeEmoji", "⚪")
-        timing = coin.get("Timing", "⚪ Früh")
+        emoji = coin.get("GradeEmoji", "")
+        timing = coin.get("Timing", "Früh")
 
         st.divider()
         # Sell-Off Probability Badge
         _sp = coin.get("SellProb", 0)
         if _sp >= 70:
-            _sp_color = "🔴"
+            _sp_color = ""
             _sp_label = "SEHR WAHRSCHEINLICH"
         elif _sp >= 50:
-            _sp_color = "🟠"
+            _sp_color = ""
             _sp_label = "WAHRSCHEINLICH"
         elif _sp >= 35:
-            _sp_color = "🟡"
+            _sp_color = ""
             _sp_label = "MÖGLICH"
         else:
-            _sp_color = "⚪"
+            _sp_color = ""
             _sp_label = "UNWAHRSCHEINLICH"
         _c_ticker = coin.get('Ticker', '?')
         _c_name = coin.get('Name', '?')
@@ -15810,11 +15810,11 @@ with tab_divergence:
         st.caption(
             f"MarketCap: ${_c_mcap/1e6:.0f}M · "
             f"Vol24h: ${_c_vol/1e6:.0f}M · "
-            f"{'🟢 Perp: ' + ' + '.join(coin.get('Exchanges', [])) if _has_perp else '⚪ Kein Perp'}"
+            f"{'Perp: ' + ' + '.join(coin.get('Exchanges', [])) if _has_perp else 'Kein Perp'}"
         )
 
         # Exhaustion-Analyse Details
-        with st.expander("🔬 Exhaustion-Analyse (8 Dimensionen)", expanded=False):
+        with st.expander("Exhaustion-Analyse (8 Dimensionen)", expanded=False):
             for detail in coin.get("ExhDetails", []):
                 st.markdown(f"  {detail}")
 
@@ -15881,14 +15881,14 @@ with tab_divergence:
         </div>
         '''
         st.components.v1.html(div_tv_html, height=500)
-        st.caption(f"📊 Chart: {div_tv_full} | Falls Symbol nicht gefunden: oben im Chart nach **{_div_ticker_tv}USDT** suchen")
+        st.caption(f"Chart: {div_tv_full} | Falls Symbol nicht gefunden: oben im Chart nach **{_div_ticker_tv}USDT** suchen")
 
     elif div_results is not None and len(div_results) == 0 and btc_info:
         st.info("Keine Coins mit genug Divergenz gefunden. Kriterien: Altcoin 7d > +10% UND Divergenz vs BTC > 10%.")
 
-    # ── 🔴 CRYPTO RISK-OFF TRACKER (zusätzliche Sektion, ändert bestehende Logik nicht) ──
+    # ── CRYPTO RISK-OFF TRACKER (zusätzliche Sektion, ändert bestehende Logik nicht) ──
     st.divider()
-    with st.expander("🔴 **Crypto Risk-Off Tracker** — Welche Coins fallen am stärksten wenn SPY kippt?", expanded=False):
+    with st.expander("**Crypto Risk-Off Tracker** — Welche Coins fallen am stärksten wenn SPY kippt?", expanded=False):
         st.caption("Zeigt Coins die bei Markt-Stress am verwundbarsten sind: hohe MCap-Verluste, negatives Momentum, Funding negativ")
 
         _roff_data = st.session_state.get("div_results")
@@ -15901,9 +15901,9 @@ with tab_divergence:
             st.markdown(f"**BTC Benchmark:** 7d `{_btc_7d:+.1f}%` · 30d `{_btc_30d:+.1f}%`")
 
             if _btc_7d < -3 or _btc_30d < -5:
-                st.error("🔴 **BTC ist schwach** — Risk-Off für Crypto aktiv. Altcoins fallen typisch 2-3x stärker.")
+                st.error("**BTC ist schwach** — Risk-Off für Crypto aktiv. Altcoins fallen typisch 2-3x stärker.")
             elif _btc_7d < 0:
-                st.warning("🟡 **BTC leicht negativ** — Vorsicht bei Altcoin-Longs")
+                st.warning("**BTC leicht negativ** — Vorsicht bei Altcoin-Longs")
 
             # Risk-Off Ranking: Coins die am stärksten gegen BTC gefallen sind
             _roff_candidates = []
@@ -15919,28 +15919,28 @@ with tab_divergence:
                 })
 
             if _roff_candidates:
-                st.markdown("**🐻 Top Short-Targets bei Risk-Off (aus Divergenz-Daten):**")
+                st.markdown("**Top Short-Targets bei Risk-Off (aus Divergenz-Daten):**")
                 import pandas as pd
                 _roff_df = pd.DataFrame(_roff_candidates)
                 _roff_df = _roff_df.sort_values("ExhScore", ascending=False).head(15)
                 st.dataframe(_roff_df, use_container_width=True, hide_index=True)
 
                 st.markdown("""
-                **💡 Risk-Off Crypto Strategie:**
+                ** Risk-Off Crypto Strategie:**
                 - **Funding negativ + BTC schwach** = Shorts bereits überfüllt → Squeeze-Gefahr!
                 - **ExhScore > 60 + BTC schwach** = Bestes Short-Setup (Altcoin hat gepumpt ohne Rückenwind)
                 - **BTC -5% oder mehr** = Altcoins fallen typisch 10-30%, besonders Small/Mid-Caps
                 - Für Short-Execution: **Bitget/MEXC** Perps nutzen (siehe BTC-Divergenz Ergebnisse oben)
                 """)
         else:
-            st.info("💡 Erst einen **Divergenz-Scan** oben starten — die Daten werden dann hier für den Risk-Off Tracker genutzt.")
+            st.info("Erst einen **Divergenz-Scan** oben starten — die Daten werden dann hier für den Risk-Off Tracker genutzt.")
 
 
 # -----------------------------------------------------------------------------
-# 🔥 EARLY MOVERS TAB - Volume Spikes, Micro-Caps, Narrative Tracker
+# EARLY MOVERS TAB - Volume Spikes, Micro-Caps, Narrative Tracker
 # -----------------------------------------------------------------------------
 with tab_early:
-    st.subheader("🔥 Early Movers Scanner")
+    st.subheader("Early Movers Scanner")
     st.caption("Finde die nächsten 10x-Coins bevor sie explodieren — Volume Spikes, Micro-Cap Momentum, Sektor-Rotation")
 
     # ── Progress/Status lesen ──
@@ -15951,15 +15951,15 @@ with tab_early:
     if _early_is_running:
         _ep_detail = _early_prog.get("detail", "Scanne...")
         _ep_pct = _early_prog.get("pct", 0)
-        st.info(f"🔥 **Early Movers Scan läuft** — {_ep_detail}")
+        st.info(f"**Early Movers Scan läuft** — {_ep_detail}")
         _early_col1, _early_col2 = st.columns([5, 1])
         with _early_col1:
             st.progress(min(1.0, _ep_pct / 100))
         with _early_col2:
-            if st.button("⏹️ Stop", key="early_stop_btn", use_container_width=True, type="secondary"):
+            if st.button("Stop", key="early_stop_btn", use_container_width=True, type="secondary"):
                 _early_request_stop()
-                _early_progress_write("stopped", "⏹️ Manuell gestoppt")
-                st.toast("⏹️ Early Movers Scan wird gestoppt...")
+                _early_progress_write("stopped", "Manuell gestoppt")
+                st.toast("Early Movers Scan wird gestoppt...")
                 time.sleep(1)
                 st.rerun()
         # Progress-Update: nutze globalen Sidebar Auto-Refresh statt eigenem
@@ -15973,18 +15973,18 @@ with tab_early:
 
     # ── Scan gestoppt ──
     elif _early_prog and _early_prog.get("status") == "stopped":
-        st.warning(f"⏹️ {_early_prog.get('detail', 'Gestoppt')}")
+        st.warning(f"{_early_prog.get('detail', 'Gestoppt')}")
         _early_clear_stop()
         _early_progress_clear()
 
     # ── Fehler ──
     elif _early_prog and _early_prog.get("status") == "error":
-        st.error(f"❌ {_early_prog.get('detail', 'Fehler')}")
+        st.error(f"{_early_prog.get('detail', 'Fehler')}")
         _early_progress_clear()
 
     # ── Scan-Button (nur wenn kein Scan läuft) ──
     if not _early_is_running:
-        if st.button("🔥 EARLY MOVERS SCANNEN", type="primary", use_container_width=True, key="early_scan_btn"):
+        if st.button("EARLY MOVERS SCANNEN", type="primary", use_container_width=True, key="early_scan_btn"):
             st.session_state["early_data"] = None
             _fetch_coingecko_markets.clear()
             fetch_early_movers.clear()
@@ -15992,7 +15992,7 @@ with tab_early:
             import threading
             _early_thread = threading.Thread(target=_early_background_scan, daemon=True)
             _early_thread.start()
-            st.toast("🔥 Early Movers Scan gestartet...")
+            st.toast("Early Movers Scan gestartet...")
             time.sleep(2)
             st.rerun()
 
@@ -16004,14 +16004,14 @@ with tab_early:
             if _cached:
                 st.session_state["early_data"] = _cached
             else:
-                st.info("💡 Klicke auf **EARLY MOVERS SCANNEN** um den Scan zu starten.")
+                st.info("Klicke auf **EARLY MOVERS SCANNEN** um den Scan zu starten.")
 
     early_data = st.session_state.get("early_data") or {}
     stats = early_data.get("stats", {}) if early_data else {}
 
     if "error" in stats:
-        st.error(f"❌ {stats['error']}")
-        st.info("💡 **Tipp:** CoinGecko Free API hat Rate Limits (~30 Req/Min). "
+        st.error(f"{stats['error']}")
+        st.info("**Tipp:** CoinGecko Free API hat Rate Limits (~30 Req/Min). "
                 "Klicke nochmals auf 'EARLY MOVERS SCANNEN' — beim zweiten Versuch klappt es meistens.")
     else:
         # Stats Header
@@ -16026,11 +16026,11 @@ with tab_early:
         **Perps:** `{stats.get('perps_bitget', 0)} Bitget + {stats.get('perps_mexc', 0)} MEXC`
         """)
 
-        early_tab1, early_tab2, early_tab3, early_tab4, early_tab5 = st.tabs(["📊 Volume Spikes", "🐋 Whale Accumulation", "🔥 Micro-Cap Degen", "🆕 Neu Gelistet", "🏷️ Narrative Tracker"])
+        early_tab1, early_tab2, early_tab3, early_tab4, early_tab5 = st.tabs(["Volume Spikes", "Whale Accumulation", "Micro-Cap Degen", "🆕 Neu Gelistet", "Narrative Tracker"])
 
         # ── TAB 1: Volume Spikes (nur bullish!) ──
         with early_tab1:
-            st.markdown("### 📊 Volume Akkumulation (Bullish)")
+            st.markdown("### Volume Akkumulation (Bullish)")
             st.caption("Coins mit hohem Kaufvolumen — Abverkäufe werden gefiltert. Preis nahe 24h-High = Käufer dominant.")
 
             vol_spikes = early_data.get("volume_spikes", [])
@@ -16046,15 +16046,15 @@ with tab_early:
                     if coin["HasPerp"]:
                         perp_tag = " + ".join(exch_list) if exch_list else "Perp"
                     else:
-                        perp_tag = "⚠️ kein Perp"
+                        perp_tag = "kein Perp"
 
                     # Color based on score
                     if score >= 70:
-                        score_color = "🟢"
+                        score_color = ""
                     elif score >= 50:
-                        score_color = "🟡"
+                        score_color = ""
                     else:
-                        score_color = "🟠"
+                        score_color = ""
 
                     with st.expander(f"{score_color} **{symbol}** — Score {score}/100 · {signal} · `{perp_tag}`", expanded=(i < 3)):
                         c1, c2, c3, c4 = st.columns(4)
@@ -16071,23 +16071,23 @@ with tab_early:
                         c8.metric("30d", f"{coin.get('Change30d', 0) or 0:+.1f}%")
                         # Price Position: Wo steht der Preis im 24h-Range
                         pp = coin.get("PricePosition", 0.5)
-                        pp_label = "🟢 Käufer" if pp >= 0.7 else "🟡 Neutral" if pp >= 0.4 else "🔴 Verkäufer"
+                        pp_label = "Käufer" if pp >= 0.7 else "Neutral" if pp >= 0.4 else "Verkäufer"
                         c9.metric("24h Position", f"{pp*100:.0f}%", help=f"{pp_label} — 100% = am Tageshoch, 0% = am Tagestief")
 
                         if coin.get("HasPerp") and best_exch:
                             tv_prefix = "BITGET" if best_exch == "Bitget" else "MEXC"
                             fr_val = (coin.get('FundingRate', 0) or 0) * 100
-                            st.markdown(f"📈 **TradingView:** `{tv_prefix}:{symbol}USDT.P` · **Funding:** {fr_val:.4f}% · **Exchange:** {' + '.join(exch_list)}")
+                            st.markdown(f"**TradingView:** `{tv_prefix}:{symbol}USDT.P` · **Funding:** {fr_val:.4f}% · **Exchange:** {' + '.join(exch_list)}")
                         if coin.get("Narrative"):
                             st.markdown(f"**Narrativ:** {coin.get('Narrative', '')}")
 
         # ── TAB 2: Whale Accumulation ──
         with early_tab2:
-            st.markdown("### 🐋 Whale Accumulation Detector")
+            st.markdown("### Whale Accumulation Detector")
             st.caption("Hohes OI/Vol Ratio + positive Funding = Überzeugung im Markt. FR-Flip = Short Squeeze Potential.")
-            st.info("ℹ️ **Hinweis:** OI/Vol Ratio zeigt das aktuelle Verhältnis, nicht die Veränderung. "
+            st.info("ℹ**Hinweis:** OI/Vol Ratio zeigt das aktuelle Verhältnis, nicht die Veränderung. "
                     "Hohes Ratio kann Akkumulation ODER festsitzende Positionen bedeuten. "
-                    "Kombiniere mit 24h/7d-Trend für bessere Einschätzung.", icon="ℹ️")
+                    "Kombiniere mit 24h/7d-Trend für bessere Einschätzung.", icon="ℹ")
 
             whale_acc = early_data.get("whale_acc", [])
             if not whale_acc:
@@ -16132,16 +16132,16 @@ with tab_early:
                         # TradingView Link mit bestem Exchange
                         if best_exch:
                             tv_prefix = "BITGET" if best_exch == "Bitget" else "MEXC"
-                            st.markdown(f"📈 **TradingView:** `{tv_prefix}:{symbol}USDT.P` · **Exchange:** {exch_tag}")
+                            st.markdown(f"**TradingView:** `{tv_prefix}:{symbol}USDT.P` · **Exchange:** {exch_tag}")
 
                         if coin.get("Narrative"):
                             st.markdown(f"**Narrativ:** {coin.get('Narrative', '')}")
 
         # ── TAB 3: Micro-Cap Degen ──
         with early_tab3:
-            st.markdown("### 🔥 Micro-Cap Momentum")
+            st.markdown("### Micro-Cap Momentum")
             st.caption("Kleine Coins ($1M-$50M MCap) die gerade anfangen zu laufen — hohes Risiko, hohes Potential")
-            st.warning("⚠️ DEGEN ZONE: Micro-Caps sind extrem volatil und oft illiquid. Nur mit Spielgeld!")
+            st.warning("DEGEN ZONE: Micro-Caps sind extrem volatil und oft illiquid. Nur mit Spielgeld!")
 
             micro_caps = early_data.get("micro_caps", [])
             if not micro_caps:
@@ -16153,9 +16153,9 @@ with tab_early:
                     exch_list = coin.get("Exchanges", [])
                     best_exch = coin.get("BestExchange", "")
                     if coin.get("HasPerp"):
-                        perp_tag = "✅ " + (" + ".join(exch_list) if exch_list else "Perp")
+                        perp_tag = "" + (" + ".join(exch_list) if exch_list else "Perp")
                     else:
-                        perp_tag = "⚠️ kein Perp"
+                        perp_tag = "kein Perp"
 
                     if score >= 70:
                         emoji = "🚀"
@@ -16187,7 +16187,7 @@ with tab_early:
 
                         if coin.get("HasPerp") and best_exch:
                             tv_prefix = "BITGET" if best_exch == "Bitget" else "MEXC"
-                            st.markdown(f"📈 `{tv_prefix}:{symbol}USDT.P` · {' + '.join(exch_list)}")
+                            st.markdown(f"`{tv_prefix}:{symbol}USDT.P` · {' + '.join(exch_list)}")
 
         # ── TAB 4: Neu Gelistet (FIX 9) ──
         with early_tab4:
@@ -16207,7 +16207,7 @@ with tab_early:
 
         # ── TAB 5: Narrative Tracker ──
         with early_tab5:
-            st.markdown("### 🏷️ Sektor-Rotation Tracker")
+            st.markdown("### Sektor-Rotation Tracker")
             st.caption("Welcher Narrativ zieht gerade Geld an? Finde die Nachzügler bevor sie aufholen.")
 
             narrative_data = early_data.get("narratives", {})
@@ -16246,19 +16246,19 @@ with tab_early:
                     with st.expander(f"{narr} — **{data['avg_7d']:+.1f}%** 7d · {data['count']} Coins"):
                         # Leaders
                         if data.get("leaders"):
-                            st.markdown("**🏆 Top Performer:**")
+                            st.markdown("**Top Performer:**")
                             for c in data["leaders"]:
-                                exch = " + ".join(c.get("Exchanges", [])) if c.get("HasPerp") else "❌"
-                                perp = f"✅ {exch}" if c.get("HasPerp", False) else "❌ kein Perp"
+                                exch = " + ".join(c.get("Exchanges", [])) if c.get("HasPerp") else ""
+                                perp = f"{exch}" if c.get("HasPerp", False) else "kein Perp"
                                 st.markdown(f"- **{c.get('Symbol', '')}** {c.get('Change7d', 0):+.1f}% 7d · ${c.get('MCap', 0)/1e6:.0f}M MCap · {perp}")
 
                         # Laggards (potentielle Nachzügler)
                         if data.get("laggards"):
-                            st.markdown("**🐌 Nachzügler (Aufholpotential):**")
+                            st.markdown("**Nachzügler (Aufholpotential):**")
                             for c in data["laggards"]:
                                 delta_to_avg = data.get("avg_7d", 0) - c.get("Change7d", 0)
-                                exch = " + ".join(c.get("Exchanges", [])) if c.get("HasPerp") else "❌"
-                                perp = f"✅ {exch}" if c.get("HasPerp", False) else "❌ kein Perp"
+                                exch = " + ".join(c.get("Exchanges", [])) if c.get("HasPerp") else ""
+                                perp = f"{exch}" if c.get("HasPerp", False) else "kein Perp"
                                 st.markdown(f"- **{c.get('Symbol', '')}** {c.get('Change7d', 0):+.1f}% 7d *(Sektor-Avg: {data['avg_7d']:+.1f}%, Gap: {delta_to_avg:.1f}%)* · {perp}")
 
 
@@ -16272,24 +16272,24 @@ with tab_newlisting:
     # ── Scan Button ──
     _nls_col_btn, _nls_col_info = st.columns([1, 3])
     with _nls_col_btn:
-        _nls_scan_btn = st.button("🔍 New Listing Scan", type="primary", use_container_width=True, key="nls_scan_btn")
+        _nls_scan_btn = st.button("New Listing Scan", type="primary", use_container_width=True, key="nls_scan_btn")
     with _nls_col_info:
         st.markdown("**Scannt Crypto.com** nach neuen PERP-Listings und berechnet Pump-Exhaustion Scores")
 
     if _nls_scan_btn:
-        with st.spinner("🔍 Scanne Crypto.com für neue Listings..."):
+        with st.spinner("Scanne Crypto.com für neue Listings..."):
             try:
                 import sys as _sys
                 _sys.path.insert(0, os.path.dirname(__file__))
                 from modules.new_listing_scanner import run_new_listing_scanner, seed_instrument_cache
                 seed_instrument_cache()
                 _nls_live_results = run_new_listing_scanner()
-                st.success(f"✅ Scan abgeschlossen: {len(_nls_live_results.get('signals', []))} Signale, "
+                st.success(f"Scan abgeschlossen: {len(_nls_live_results.get('signals', []))} Signale, "
                            f"{len(_nls_live_results.get('watchlist', []))} Watchlist, "
                            f"{len(_nls_live_results.get('monitoring', []))} monitoring "
                            f"({_nls_live_results.get('duration_sec', '?')}s)")
             except Exception as _nls_e:
-                st.error(f"❌ Scan Fehler: {_nls_e}")
+                st.error(f"Scan Fehler: {_nls_e}")
 
     # ── Background Service Cache laden ──
     _nls_cache_file = os.path.join(os.path.dirname(__file__), "data_cache", "new_listing_scanner.json")
@@ -16313,7 +16313,7 @@ with tab_newlisting:
 
         # ── Signale (Short Entry) ──
         if _nls_signals:
-            st.subheader(f"🔴 {len(_nls_signals)} Short-Signal{'e' if len(_nls_signals) != 1 else ''}")
+            st.subheader(f"{len(_nls_signals)} Short-Signal{'e' if len(_nls_signals) != 1 else ''}")
             for sig_entry in _nls_signals:
                 sig = sig_entry.get("signal", {})
                 pd_ = sig.get("pump_data", {})
@@ -16352,7 +16352,7 @@ with tab_newlisting:
 
         # ── Watchlist ──
         if _nls_watchlist:
-            st.subheader(f"🟡 {len(_nls_watchlist)} auf der Watchlist")
+            st.subheader(f"{len(_nls_watchlist)} auf der Watchlist")
             for w_entry in _nls_watchlist:
                 sig = w_entry.get("signal", {})
                 pd_ = sig.get("pump_data", {})
@@ -16363,7 +16363,7 @@ with tab_newlisting:
 
         # ── Monitoring Übersicht ──
         if _nls_monitoring:
-            st.subheader(f"📡 {len(_nls_monitoring)} Listings in Überwachung")
+            st.subheader(f"{len(_nls_monitoring)} Listings in Überwachung")
             import pandas as pd
             _mon_df = pd.DataFrame(_nls_monitoring)
             _mon_cols = {
@@ -16393,7 +16393,7 @@ with tab_newlisting:
             st.markdown(", ".join(f"**{s}**" for s in _new_detected))
 
         # ── Strategie-Info ──
-        with st.expander("📖 So funktioniert der Scanner"):
+        with st.expander("So funktioniert der Scanner"):
             st.markdown("""
 **Strategie: New Listing Dump**
 
@@ -16417,7 +16417,7 @@ Basierend auf Marktdaten 2024-2026:
 - Max Leverage: 10x empfohlen
 """)
     else:
-        st.warning("⏳ New Listing Scanner läuft noch nicht. Starte den Background Service.")
+        st.warning("New Listing Scanner läuft noch nicht. Starte den Background Service.")
         st.code("sudo systemctl start tradingbot-bg.service", language="bash")
 
 
@@ -16425,7 +16425,7 @@ Basierend auf Marktdaten 2024-2026:
 # SUCHE TAB - Manuelle Ticker-Suche
 # -----------------------------------------------------------------------------
 with tab_search:
-    st.subheader("🔍 Manuelle Suche")
+    st.subheader("Manuelle Suche")
     st.caption("Suche nach einer bestimmten Aktie oder Kryptowährung")
     
     col_search1, col_search2, col_search3 = st.columns([2, 1, 1])
@@ -16442,7 +16442,7 @@ with tab_search:
     
     with col_search3:
         st.write("")  # Spacer
-        search_clicked = st.button("🔍 Suchen", type="primary", key="search_btn")
+        search_clicked = st.button("Suchen", type="primary", key="search_btn")
     
     if search_clicked and search_input:
         with st.spinner(f"Suche {search_input}..."):
@@ -16579,7 +16579,7 @@ with tab_search:
             
             # Ergebnis anzeigen
             if search_result:
-                st.success(f"✅ {search_result.get('Ticker', '')} gefunden!")
+                st.success(f"{search_result.get('Ticker', '')} gefunden!")
                 
                 # In Session State speichern
                 st.session_state.selected_symbol = search_result["Ticker"]
@@ -16606,12 +16606,12 @@ with tab_search:
                 # Details
                 col_info1, col_info2 = st.columns(2)
                 with col_info1:
-                    st.caption(f"📈 24h High: ${search_result.get('High24h', 0):,.4f}")
-                    st.caption(f"📉 24h Low: ${search_result.get('Low24h', 0):,.4f}")
+                    st.caption(f"24h High: ${search_result.get('High24h', 0):,.4f}")
+                    st.caption(f"24h Low: ${search_result.get('Low24h', 0):,.4f}")
                 with col_info2:
-                    st.caption(f"📊 Volume: {search_result.get('Volume', 0):,.0f}")
+                    st.caption(f"Volume: {search_result.get('Volume', 0):,.0f}")
                     if 'MarketCap' in search_result:
-                        st.caption(f"💰 Market Cap: ${search_result.get('MarketCap', 0):,.0f}")
+                        st.caption(f"Market Cap: ${search_result.get('MarketCap', 0):,.0f}")
                 
                 # Aktionen
                 st.divider()
@@ -16623,12 +16623,12 @@ with tab_search:
                         else:
                             st.info("Bereits in Watchlist")
                 with col_act2:
-                    if st.button("🤖 AI-Analyse starten", key="search_ai_btn", type="primary", use_container_width=True):
+                    if st.button("AI-Analyse starten", key="search_ai_btn", type="primary", use_container_width=True):
                         st.session_state.run_search_analysis = True
                 
                 # Chart direkt anzeigen
                 st.divider()
-                st.subheader(f"📊 Chart: {search_result.get('Ticker', '')}")
+                st.subheader(f"Chart: {search_result.get('Ticker', '')}")
 
                 if search_market == "Krypto":
                     tv_symbol = f"BINANCE:{get_binance_tradingview_symbol(search_result.get('Ticker', ''))}"
@@ -16673,7 +16673,7 @@ with tab_search:
                 # AI-Analyse wenn Button geklickt wurde
                 if st.session_state.get("run_search_analysis", False):
                     st.divider()
-                    st.subheader("🤖 AI-Analyse")
+                    st.subheader("AI-Analyse")
                     with st.spinner("Claude analysiert..."):
                         try:
                             client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
@@ -16709,7 +16709,7 @@ Keine Disclaimers. Direkt und knapp."""
                             st.error(f"Fehler: {e}")
                 
             else:
-                st.warning(f"❌ '{search_input}' nicht gefunden. Prüfe die Schreibweise.")
+                st.warning(f"'{search_input}' nicht gefunden. Prüfe die Schreibweise.")
                 st.caption("Beispiele: TSLA, AAPL, NVDA, BTC, ETH, SOL")
 
 # -----------------------------------------------------------------------------
@@ -16732,17 +16732,17 @@ with tab_watchlist:
                 with c3:
                     st.caption(f"Hinzugefügt: {item['added']}")
                 with c4:
-                    if st.button("🗑️", key=f"del_{i}"):
+                    if st.button("", key=f"del_{i}"):
                         remove_from_watchlist(item['ticker'])
                         st.rerun()
                 st.divider()
         
         # Watchlist Export
-        if st.button("📋 Watchlist kopieren"):
+        if st.button("Watchlist kopieren"):
             tickers = ", ".join([w['ticker'] for w in st.session_state.watchlist])
             st.code(tickers)
         
-        if st.button("🗑️ Alle löschen", type="secondary"):
+        if st.button("Alle löschen", type="secondary"):
             st.session_state.watchlist = []
             _save_watchlist()
             st.rerun()
@@ -16756,7 +16756,7 @@ st.divider()
 
 col_ai1, col_ai2 = st.columns([3, 1])
 with col_ai1:
-    st.subheader("🤖 Claude AI Analyse")
+    st.subheader("Claude AI Analyse")
 with col_ai2:
     analyze_btn = st.button("Analyse starten", type="primary", use_container_width=True)
 
@@ -17046,7 +17046,7 @@ VERBOTEN:
                     messages=[{"role": "user", "content": prompt}]
                 )
                 
-                st.markdown(f"### 🎯 ALPHA REPORT: {d['Ticker']}")
+                st.markdown(f"### ALPHA REPORT: {d['Ticker']}")
                 
                 # Info-Box mit Key-Metriken
                 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
@@ -17070,20 +17070,20 @@ VERBOTEN:
 # MONEY FLOW TAB - Sektor Rotation & Smart Money Tracking
 # -----------------------------------------------------------------------------
 with tab_moneyflow:
-    st.subheader("💰 Money Flow Heatmap")
+    st.subheader("Money Flow Heatmap")
     st.caption("Wohin fließt das Smart Money? Sektor-Rotation auf einen Blick")
     
     # Zeitraum Auswahl
     col_period, col_refresh, col_empty = st.columns([2, 1, 2])
     with col_period:
         period = st.selectbox(
-            "📅 Zeitraum",
+            "Zeitraum",
             ["1 Tag", "1 Woche", "1 Monat", "3 Monate"],
             index=1,  # Default: 1 Woche
             key="moneyflow_period"
         )
     with col_refresh:
-        if st.button("🔄", key="refresh_moneyflow", help="Daten aktualisieren"):
+        if st.button("", key="refresh_moneyflow", help="Daten aktualisieren"):
             st.cache_data.clear()
             st.rerun()
     
@@ -17098,34 +17098,34 @@ with tab_moneyflow:
         
         sectors = {
             # US Sektor ETFs (SPDR)
-            "XLK": {"name": "Technology", "emoji": "💻", "category": "Sektoren"},
-            "XLF": {"name": "Financials", "emoji": "🏦", "category": "Sektoren"},
-            "XLE": {"name": "Energy", "emoji": "⚡", "category": "Sektoren"},
-            "XLV": {"name": "Healthcare", "emoji": "🏥", "category": "Sektoren"},
-            "XLI": {"name": "Industrials", "emoji": "🏭", "category": "Sektoren"},
-            "XLY": {"name": "Consumer Disc.", "emoji": "🛒", "category": "Sektoren"},
-            "XLP": {"name": "Consumer Staples", "emoji": "🥫", "category": "Sektoren"},
-            "XLU": {"name": "Utilities", "emoji": "💡", "category": "Sektoren"},
-            "XLB": {"name": "Materials", "emoji": "🧱", "category": "Sektoren"},
-            "XLRE": {"name": "Real Estate", "emoji": "🏠", "category": "Sektoren"},
-            "XLC": {"name": "Communication", "emoji": "📱", "category": "Sektoren"},
+            "XLK": {"name": "Technology", "emoji": "", "category": "Sektoren"},
+            "XLF": {"name": "Financials", "emoji": "", "category": "Sektoren"},
+            "XLE": {"name": "Energy", "emoji": "", "category": "Sektoren"},
+            "XLV": {"name": "Healthcare", "emoji": "", "category": "Sektoren"},
+            "XLI": {"name": "Industrials", "emoji": "", "category": "Sektoren"},
+            "XLY": {"name": "Consumer Disc.", "emoji": "", "category": "Sektoren"},
+            "XLP": {"name": "Consumer Staples", "emoji": "", "category": "Sektoren"},
+            "XLU": {"name": "Utilities", "emoji": "", "category": "Sektoren"},
+            "XLB": {"name": "Materials", "emoji": "", "category": "Sektoren"},
+            "XLRE": {"name": "Real Estate", "emoji": "", "category": "Sektoren"},
+            "XLC": {"name": "Communication", "emoji": "", "category": "Sektoren"},
             # Thematische ETFs
-            "SMH": {"name": "Semiconductors", "emoji": "🔌", "category": "Themen"},
-            "ARKK": {"name": "Innovation", "emoji": "🚀", "category": "Themen"},
-            "HACK": {"name": "Cybersecurity", "emoji": "🔒", "category": "Themen"},
-            "TAN": {"name": "Solar", "emoji": "☀️", "category": "Themen"},
-            "BOTZ": {"name": "AI & Robotics", "emoji": "🤖", "category": "Themen"},
+            "SMH": {"name": "Semiconductors", "emoji": "", "category": "Themen"},
+            "ARKK": {"name": "Innovation", "emoji": "", "category": "Themen"},
+            "HACK": {"name": "Cybersecurity", "emoji": "", "category": "Themen"},
+            "TAN": {"name": "Solar", "emoji": "", "category": "Themen"},
+            "BOTZ": {"name": "AI & Robotics", "emoji": "", "category": "Themen"},
             # Asset Klassen
-            "GLD": {"name": "Gold", "emoji": "🥇", "category": "Assets"},
-            "SLV": {"name": "Silver", "emoji": "🥈", "category": "Assets"},
-            "USO": {"name": "Oil", "emoji": "🛢️", "category": "Assets"},
-            "TLT": {"name": "Bonds 20Y", "emoji": "📜", "category": "Assets"},
-            "UUP": {"name": "US Dollar", "emoji": "💵", "category": "Assets"},
+            "GLD": {"name": "Gold", "emoji": "", "category": "Assets"},
+            "SLV": {"name": "Silver", "emoji": "", "category": "Assets"},
+            "USO": {"name": "Oil", "emoji": "", "category": "Assets"},
+            "TLT": {"name": "Bonds 20Y", "emoji": "", "category": "Assets"},
+            "UUP": {"name": "US Dollar", "emoji": "", "category": "Assets"},
             # Indices
-            "SPY": {"name": "S&P 500", "emoji": "📊", "category": "Indices"},
-            "QQQ": {"name": "Nasdaq 100", "emoji": "📈", "category": "Indices"},
-            "IWM": {"name": "Russell 2000", "emoji": "📉", "category": "Indices"},
-            "DIA": {"name": "Dow Jones", "emoji": "🏛️", "category": "Indices"},
+            "SPY": {"name": "S&P 500", "emoji": "", "category": "Indices"},
+            "QQQ": {"name": "Nasdaq 100", "emoji": "", "category": "Indices"},
+            "IWM": {"name": "Russell 2000", "emoji": "", "category": "Indices"},
+            "DIA": {"name": "Dow Jones", "emoji": "", "category": "Indices"},
         }
         
         results = []
@@ -17188,7 +17188,7 @@ with tab_moneyflow:
                 categories[cat] = sorted(categories[cat], key=lambda x: x["change"], reverse=True)
             
             # HEATMAP ANZEIGE
-            st.markdown(f"### 🗺️ Sektor Heatmap ({period})")
+            st.markdown(f"### Sektor Heatmap ({period})")
             
             # Reihenfolge der Kategorien
             cat_order = ["Indices", "Sektoren", "Themen", "Assets"]
@@ -17239,19 +17239,19 @@ with tab_moneyflow:
             col_top, col_bottom = st.columns(2)
             
             with col_top:
-                st.markdown("### 🚀 Top Performer")
+                st.markdown("### Top Performer")
                 for item in all_sorted[:5]:
-                    st.markdown(f"🟢 **{item['emoji']} {item['name']}**: {item['change']:+.1f}%")
+                    st.markdown(f"**{item['emoji']} {item['name']}**: {item['change']:+.1f}%")
             
             with col_bottom:
-                st.markdown("### 📉 Schwächste")
+                st.markdown("### Schwächste")
                 for item in all_sorted[-5:]:
-                    st.markdown(f"🔴 **{item['emoji']} {item['name']}**: {item['change']:+.1f}%")
+                    st.markdown(f"**{item['emoji']} {item['name']}**: {item['change']:+.1f}%")
             
             st.divider()
             
             # MONEY FLOW INTERPRETATION
-            st.markdown("### 🧠 Money Flow Analyse")
+            st.markdown("### Money Flow Analyse")
             
             # Risk-On vs Risk-Off
             risk_on_tickers = ["XLK", "QQQ", "IWM", "ARKK", "SMH", "XLY"]
@@ -17267,15 +17267,15 @@ with tab_moneyflow:
             
             with col_ro1:
                 if risk_on_avg > risk_off_avg + 1:
-                    st.success(f"🟢 **RISK-ON** Modus")
+                    st.success(f"**RISK-ON** Modus")
                     st.caption(f"Wachstum: {risk_on_avg:+.1f}% vs Sicherheit: {risk_off_avg:+.1f}%")
                     st.caption("→ Geld fließt in Tech, Small Caps, Growth")
                 elif risk_off_avg > risk_on_avg + 1:
-                    st.warning(f"🟡 **RISK-OFF** Modus")
+                    st.warning(f"**RISK-OFF** Modus")
                     st.caption(f"Sicherheit: {risk_off_avg:+.1f}% vs Wachstum: {risk_on_avg:+.1f}%")
                     st.caption("→ Geld fließt in Bonds, Gold, Defensive")
                 else:
-                    st.info(f"⚖️ **NEUTRAL** - Kein klarer Trend")
+                    st.info(f"**NEUTRAL** - Kein klarer Trend")
                     st.caption(f"Risk-On: {risk_on_avg:+.1f}% | Risk-Off: {risk_off_avg:+.1f}%")
             
             with col_ro2:
@@ -17287,22 +17287,22 @@ with tab_moneyflow:
                     spread = best["change"] - worst["change"]
                     
                     st.markdown("**Sektor Rotation:**")
-                    st.caption(f"🚀 Leader: **{best['name']}** ({best['change']:+.1f}%)")
-                    st.caption(f"📉 Laggard: **{worst['name']}** ({worst['change']:+.1f}%)")
+                    st.caption(f"Leader: **{best['name']}** ({best['change']:+.1f}%)")
+                    st.caption(f"Laggard: **{worst['name']}** ({worst['change']:+.1f}%)")
                     
                     if spread > 10:
-                        st.caption(f"⚠️ Hohe Dispersion ({spread:.0f}%) - Stockpicking wichtig!")
+                        st.caption(f"Hohe Dispersion ({spread:.0f}%) - Stockpicking wichtig!")
                     else:
-                        st.caption(f"✅ Moderate Dispersion ({spread:.0f}%)")
+                        st.caption(f"Moderate Dispersion ({spread:.0f}%)")
             
             st.divider()
-            st.caption(f"💡 Daten von Polygon.io | Letzte {days} Handelstage | Cache: 10 Min")
+            st.caption(f"Daten von Polygon.io | Letzte {days} Handelstage | Cache: 10 Min")
         
         else:
             st.warning("Keine Daten verfügbar. Markt evtl. geschlossen?")
         
     except KeyError:
-        st.error("❌ POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
+        st.error("POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
     except Exception as e:
         st.error(f"Fehler beim Laden: {e}")
 
@@ -17310,7 +17310,7 @@ with tab_moneyflow:
 # TAB: WIRTSCHAFTSKALENDER
 # =============================================================================
 with tab_calendar:
-    st.subheader("📅 Wirtschaftskalender — Makro-Events")
+    st.subheader("Wirtschaftskalender — Makro-Events")
     st.caption("FOMC, CPI, NFP, GDP, PCE und weitere marktbewegende Events")
 
     try:
@@ -17390,7 +17390,7 @@ with tab_calendar:
                                     border: 1px solid #e94560; border-radius: 12px; padding: 16px;
                                     margin-bottom: 16px; text-align: center;">
                             <div style="font-size: 12px; color: #e94560; text-transform: uppercase; letter-spacing: 2px;">
-                                ⏰ Nächstes HIGH-Impact Event
+                                 Nächstes HIGH-Impact Event
                             </div>
                             <div style="font-size: 20px; font-weight: bold; color: #fff; margin: 8px 0;">
                                 {_next_high['event']}
@@ -17421,27 +17421,27 @@ with tab_calendar:
                     _weekday_names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
                     _day_label = f"{_weekday_names[_dt_obj.weekday()]}, {_dt_obj.strftime('%d.%m.%Y')}"
                     if _cal_date == _today_str:
-                        _day_label = f"🔴 HEUTE — {_day_label}"
+                        _day_label = f"HEUTE — {_day_label}"
                     elif _cal_date == (_cal_now + timedelta(days=1)).strftime("%Y-%m-%d"):
-                        _day_label = f"🟡 MORGEN — {_day_label}"
+                        _day_label = f"MORGEN — {_day_label}"
                 except Exception:
                     _day_label = _cal_date
 
                 _high_count = sum(1 for e in _day_events if e.get("impact") == "HIGH")
-                _header_suffix = f" — ⚡ {_high_count} HIGH" if _high_count > 0 else ""
+                _header_suffix = f" — {_high_count} HIGH" if _high_count > 0 else ""
 
-                with st.expander(f"📆 {_day_label}{_header_suffix}", expanded=(_cal_date == _today_str)):
+                with st.expander(f"{_day_label}{_header_suffix}", expanded=(_cal_date == _today_str)):
                     for ev in _day_events:
                         _imp = ev.get("impact", "LOW")
                         if _imp == "HIGH":
                             _imp_color = "#e94560"
-                            _imp_icon = "🔴"
+                            _imp_icon = ""
                         elif _imp == "MEDIUM":
                             _imp_color = "#f5a623"
-                            _imp_icon = "🟡"
+                            _imp_icon = ""
                         else:
                             _imp_color = "#4ecdc4"
-                            _imp_icon = "🟢"
+                            _imp_icon = ""
 
                         _ev_time = ev.get("time", "—")
                         _ev_name = ev.get("event", "Unknown")
@@ -17466,11 +17466,11 @@ with tab_calendar:
                         if _ev_actual is not None and _ev_estimate is not None:
                             try:
                                 if float(_ev_actual) > float(_ev_estimate):
-                                    _beat_miss = " ✅ BEAT"
+                                    _beat_miss = " BEAT"
                                 elif float(_ev_actual) < float(_ev_estimate):
-                                    _beat_miss = " ❌ MISS"
+                                    _beat_miss = " MISS"
                                 else:
-                                    _beat_miss = " ➡️ INLINE"
+                                    _beat_miss = " INLINE"
                             except (ValueError, TypeError):
                                 pass
 
@@ -17489,26 +17489,26 @@ with tab_calendar:
             _total_low = sum(1 for e in _cal_filtered if e.get("impact") == "LOW")
             _sum_c1, _sum_c2, _sum_c3, _sum_c4 = st.columns(4)
             _sum_c1.metric("Total Events", len(_cal_filtered))
-            _sum_c2.metric("🔴 HIGH", _total_high)
-            _sum_c3.metric("🟡 MEDIUM", _total_med)
-            _sum_c4.metric("🟢 LOW", _total_low)
+            _sum_c2.metric("HIGH", _total_high)
+            _sum_c3.metric("MEDIUM", _total_med)
+            _sum_c4.metric("LOW", _total_low)
 
             if not _cal_finnhub_key:
-                st.info("💡 Für Live-Daten: Füge FINNHUB_KEY in Settings → Secrets hinzu. Aktuell wird der kuratierte Kalender angezeigt.")
+                st.info("Für Live-Daten: Füge FINNHUB_KEY in Settings → Secrets hinzu. Aktuell wird der kuratierte Kalender angezeigt.")
 
     except Exception as e:
         st.error(f"Fehler im Wirtschaftskalender: {e}")
 
 # =============================================================================
-# TAB: 🔴 CRASH MONITOR
+# TAB: CRASH MONITOR
 # =============================================================================
 with tab_crash:
-    st.header("🔴 S&P 500 Crash Monitor")
+    st.header("S&P 500 Crash Monitor")
     st.caption("Echtzeit-Frühwarnsystem für Markt-Crashs — SPY · VIX · Breadth · Sektor-Rotation")
 
     _crash_col_btn, _crash_col_info = st.columns([1, 3])
     with _crash_col_btn:
-        _crash_scan = st.button("🔴 CRASH CHECK", type="primary", use_container_width=True, key="crash_scan_btn")
+        _crash_scan = st.button("CRASH CHECK", type="primary", use_container_width=True, key="crash_scan_btn")
     with _crash_col_info:
         st.markdown("**Analysiert:** SPY Technicals (SMA50/200, RSI, MACD) · VIX · Safe Havens (TLT/GLD/UUP) · Credit Stress (HYG/LQD) · Breadth · Sektor-Rotation · Support/Resistance · Fear Score Trend")
 
@@ -17525,23 +17525,23 @@ with tab_crash:
                 if _bg_age < 43200:  # Max 12h alt (bg_service scannt 2x/Tag)
                     st.session_state["crash_data"] = _bg_meta.get("data", {})
                     _bg_cache_loaded = True
-                    st.caption(f"⚡ Daten aus Background-Service (vor {_bg_age:.0f}s)")
+                    st.caption(f"Daten aus Background-Service (vor {_bg_age:.0f}s)")
         except Exception:
             pass
 
     if _crash_scan:
         fetch_crash_monitor_data.clear()
         try:
-            with st.spinner("📡 Lade Crash-Monitor Daten (SPY + VIX + Safe Havens + Credit + Sektoren + Breadth)..."):
+            with st.spinner("Lade Crash-Monitor Daten (SPY + VIX + Safe Havens + Credit + Sektoren + Breadth)..."):
                 _crash_pk = st.secrets["POLYGON_KEY"]
                 st.session_state["crash_data"] = fetch_crash_monitor_data(_crash_pk)
         except KeyError:
-            st.error("❌ POLYGON_KEY fehlt in secrets!")
+            st.error("POLYGON_KEY fehlt in secrets!")
         except Exception as _ce:
-            st.error(f"❌ Fehler: {_ce}")
+            st.error(f"Fehler: {_ce}")
 
     if "crash_data" not in st.session_state:
-        st.info("💡 Klicke auf **CRASH CHECK** um den Monitor zu starten.\n\n🔄 **Tipp:** Starte `python bg_service.py start` für automatische Hintergrund-Updates — dann sind die Daten sofort da!")
+        st.info("Klicke auf **CRASH CHECK** um den Monitor zu starten.\n\n**Tipp:** Starte `python bg_service.py start` für automatische Hintergrund-Updates — dann sind die Daten sofort da!")
 
     _cd = st.session_state.get("crash_data", {})
     if _cd:
@@ -17554,27 +17554,27 @@ with tab_crash:
 
         # ── Fear Score Banner ──
         if _fear >= 60:
-            _fear_color = "🔴"
+            _fear_color = ""
             _fear_label = "EXTREME ANGST"
-            st.error(f"🔴 **FEAR SCORE: {_fear}/100 — {_fear_label}** — Crash-Risiko HOCH")
+            st.error(f"**FEAR SCORE: {_fear}/100 — {_fear_label}** — Crash-Risiko HOCH")
         elif _fear >= 40:
-            _fear_color = "🟠"
+            _fear_color = ""
             _fear_label = "ERHÖHTE ANGST"
-            st.warning(f"🟠 **FEAR SCORE: {_fear}/100 — {_fear_label}** — Vorsicht geboten")
+            st.warning(f"**FEAR SCORE: {_fear}/100 — {_fear_label}** — Vorsicht geboten")
         elif _fear >= 20:
-            _fear_color = "🟡"
+            _fear_color = ""
             _fear_label = "LEICHTE ANSPANNUNG"
-            st.info(f"🟡 **FEAR SCORE: {_fear}/100 — {_fear_label}**")
+            st.info(f"**FEAR SCORE: {_fear}/100 — {_fear_label}**")
         else:
-            _fear_color = "🟢"
+            _fear_color = ""
             _fear_label = "RUHIG"
-            st.success(f"🟢 **FEAR SCORE: {_fear}/100 — {_fear_label}** — Markt stabil")
+            st.success(f"**FEAR SCORE: {_fear}/100 — {_fear_label}** — Markt stabil")
 
         st.progress(min(1.0, _fear / 100))
 
         # ── SPY Metrics ──
         if _spy:
-            st.markdown("### 📊 S&P 500 (SPY)")
+            st.markdown("### S&P 500 (SPY)")
             _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
             _spy_price = _spy.get('price', 0) or 0
             _spy_chg = _spy.get('change_pct', 0) or 0
@@ -17613,7 +17613,7 @@ with tab_crash:
 
         # ── Erweiterte SPY Metriken ──
         if _spy:
-            st.markdown("### 📉 Momentum & Druck")
+            st.markdown("### Momentum & Druck")
             _mm1, _mm2, _mm3, _mm4, _mm5, _mm6 = st.columns(6)
             _mm1.metric("5d Perf.", f"{_spy.get('chg_5d', 0):+.2f}%",
                         delta_color="normal" if _spy.get('chg_5d', 0) >= 0 else "inverse")
@@ -17622,16 +17622,16 @@ with tab_crash:
             _mm3.metric("50d Perf.", f"{_spy.get('chg_50d', 0):+.2f}%",
                         delta_color="normal" if _spy.get('chg_50d', 0) >= 0 else "inverse")
             _mm4.metric("Sell-Druck", f"{_spy.get('sell_pressure', 50):.0f}%",
-                        "🔴 Distribution" if _spy.get('sell_pressure', 50) > 60 else "Normal")
+                        "Distribution" if _spy.get('sell_pressure', 50) > 60 else "Normal")
             _mm5.metric("Verlust-Tage", f"{_spy.get('consec_down', 0)} in Folge",
-                        "🔴" if _spy.get('consec_down', 0) >= 3 else "")
+                        "" if _spy.get('consec_down', 0) >= 3 else "")
             _mm6.metric("20d Range-Pos.", f"{_spy.get('range_pos', 0.5):.0%}",
                         "Am Tief" if _spy.get('range_pos', 0.5) < 0.2 else ("Am Hoch" if _spy.get('range_pos', 0.5) > 0.8 else "Mitte"))
 
             if _spy.get('sma_gap_pct') is not None:
                 _gap = _spy.get('sma_gap_pct', 0) or 0
                 if 0 < _gap < 2:
-                    st.warning(f"⚠️ SMA50/SMA200 Gap nur **{_gap:.1f}%** — Death Cross droht!")
+                    st.warning(f"SMA50/SMA200 Gap nur **{_gap:.1f}%** — Death Cross droht!")
 
         # ── Wyckoff Distribution Analysis ──
         _wyckoff = _spy.get("wyckoff", {}) if _spy else {}
@@ -17640,19 +17640,19 @@ with tab_crash:
             _wk_conf = _wyckoff.get("confidence", 0)
             _wk_detail = _wyckoff.get("detail", "")
 
-            st.markdown("### 📐 Wyckoff Distribution Analyse")
+            st.markdown("### Wyckoff Distribution Analyse")
 
             # Phase-Banner
             if "Phase E" in _wk_phase:
-                st.error(f"🔴 **{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
+                st.error(f"**{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
             elif "Phase D" in _wk_phase:
-                st.error(f"🟠 **{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
+                st.error(f"**{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
             elif "Phase C" in _wk_phase:
-                st.warning(f"🟡 **{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
+                st.warning(f"**{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
             elif "Phase B" in _wk_phase:
-                st.warning(f"🟡 **{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
+                st.warning(f"**{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
             else:
-                st.info(f"📊 **{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
+                st.info(f"**{_wk_phase}** (Confidence: {_wk_conf}%) — {_wk_detail}")
 
             # Key Levels
             _wk1, _wk2, _wk3, _wk4 = st.columns(4)
@@ -17666,39 +17666,39 @@ with tab_crash:
             # Wyckoff Events
             _wk_signals = _wyckoff.get("signals", [])
             if _wk_signals:
-                with st.expander(f"📋 Wyckoff Events ({len(_wk_signals)} erkannt)", expanded=True):
+                with st.expander(f"Wyckoff Events ({len(_wk_signals)} erkannt)", expanded=True):
                     for _ws in _wk_signals:
                         if "UTAD" in _ws or "SOW" in _ws or "MARKDOWN" in _ws:
-                            st.error(f"🔴 {_ws}")
+                            st.error(f"{_ws}")
                         elif "LPSY" in _ws or "Secondary" in _ws:
-                            st.warning(f"🟠 {_ws}")
+                            st.warning(f"{_ws}")
                         else:
-                            st.info(f"📊 {_ws}")
+                            st.info(f"{_ws}")
 
             # Interpretation
             if _wyckoff.get("utad") and _wyckoff.get("sow"):
-                st.error("⚠️ **UTAD + SOW bestätigt** — Wyckoff Distribution fast abgeschlossen. Phase E (Markdown) droht!")
+                st.error("**UTAD + SOW bestätigt** — Wyckoff Distribution fast abgeschlossen. Phase E (Markdown) droht!")
             elif _wyckoff.get("utad"):
-                st.warning("⚠️ **UTAD erkannt** — Fake-Breakout. Smart Money hat an Retail verkauft. Vorsicht!")
+                st.warning("**UTAD erkannt** — Fake-Breakout. Smart Money hat an Retail verkauft. Vorsicht!")
             elif _wyckoff.get("sow"):
-                st.warning("⚠️ **SOW erkannt** — Preis hat Support gebrochen. Distribution bestätigt sich.")
+                st.warning("**SOW erkannt** — Preis hat Support gebrochen. Distribution bestätigt sich.")
 
         # ── VIX ──
         if _vix:
             _vix_ticker = _vix.get('ticker', 'UVXY')
-            st.markdown(f"### 😱 VIX ({_vix_ticker} Proxy)")
+            st.markdown(f"### VIX ({_vix_ticker} Proxy)")
             _vc1, _vc2, _vc3, _vc4 = st.columns(4)
             _vc1.metric(_vix_ticker, f"${_vix.get('price', 0)}", f"{_vix.get('change_pct', 0):+.1f}%")
             _vc2.metric("20d Durchschnitt", f"${_vix.get('avg20', 0)}")
             _vc3.metric("Spike-Ratio", f"{_vix.get('spike_ratio', 1):.2f}x",
-                        "🔴 SPIKE!" if _vix.get('spike_ratio', 1) > 1.5 else ("🟠 Erhöht" if _vix.get('spike_ratio', 1) > 1.2 else "Normal"))
+                        "SPIKE!" if _vix.get('spike_ratio', 1) > 1.5 else ("Erhöht" if _vix.get('spike_ratio', 1) > 1.2 else "Normal"))
             _vc4.metric("5d Trend", f"{_vix.get('trend_5d', 0):+.1f}%",
                         "↑ Steigend" if _vix.get('trend_5d', 0) > 5 else ("↓ Fallend" if _vix.get('trend_5d', 0) < -5 else "Stabil"))
 
         # ── Fear Score Trend ──
         _fear_trend = _cd.get("fear_trend")
         if _fear_trend:
-            st.caption(f"📈 Trend seit letztem Check: **{_fear_trend}**")
+            st.caption(f"Trend seit letztem Check: **{_fear_trend}**")
 
         # ── Fear History Mini-Chart ──
         _fear_hist = _cd.get("fear_history", [])
@@ -17711,7 +17711,7 @@ with tab_crash:
         # ── Safe-Haven Tracker ──
         _safe_havens = _cd.get("safe_havens", {})
         if _safe_havens:
-            st.markdown("### 🛡️ Safe-Haven Tracker (Flight to Safety)")
+            st.markdown("### Safe-Haven Tracker (Flight to Safety)")
             _sh_cols = st.columns(len(_safe_havens))
             for _i, (_sh_etf, _sh_data) in enumerate(_safe_havens.items()):
                 _sh_chg5 = _sh_data.get("chg_5d", 0)
@@ -17725,142 +17725,142 @@ with tab_crash:
             _spy_5d = _cd.get("spy", {}).get("chg_5d", 0)
             _sh_up = sum(1 for d in _safe_havens.values() if d.get("chg_5d", 0) > 0)
             if _sh_up >= 2 and _spy_5d < -1:
-                st.warning(f"⚠️ **{_sh_up}/3 Safe Havens steigen** bei SPY {_spy_5d:+.1f}% — Geld fließt in Sicherheit")
+                st.warning(f"**{_sh_up}/3 Safe Havens steigen** bei SPY {_spy_5d:+.1f}% — Geld fließt in Sicherheit")
             elif all(d.get("chg_5d", 0) < -1 for d in _safe_havens.values()) and _spy_5d < -2:
-                st.error("🔴 **ALLES fällt** (SPY + Bonds + Gold + Dollar) — Liquiditätskrise möglich!")
+                st.error("**ALLES fällt** (SPY + Bonds + Gold + Dollar) — Liquiditätskrise möglich!")
 
         # ── Credit Stress ──
         _credit = _cd.get("credit", {})
         if _credit:
-            st.markdown("### 💳 Credit Stress (HYG vs LQD)")
+            st.markdown("### Credit Stress (HYG vs LQD)")
             _cr1, _cr2, _cr3 = st.columns(3)
             _cr1.metric("HYG (High Yield)", f"{_credit['hyg_5d']:+.1f}% (5d)")
             _cr2.metric("LQD (Inv. Grade)", f"{_credit['lqd_5d']:+.1f}% (5d)")
             _spread_chg = _credit.get("spread_change", 0)
             _cr3.metric("Spread-Änderung", f"{_spread_chg:+.1f}%",
-                        "🔴 Weitet sich" if _spread_chg > 1 else ("Normal" if _spread_chg < 0.5 else "↑ Leicht"))
+                        "Weitet sich" if _spread_chg > 1 else ("Normal" if _spread_chg < 0.5 else "↑ Leicht"))
 
         # ── SPY Support/Resistance ──
         if _spy:
             _next_sup = _spy.get("next_support")
             _next_res = _spy.get("next_resistance")
             if _next_sup or _next_res:
-                st.markdown("### 📐 SPY Key Levels")
+                st.markdown("### SPY Key Levels")
                 _lv1, _lv2 = st.columns(2)
                 if _next_sup:
                     _sup_dist = ((_spy.get("price", 1) - _next_sup.get("level", 0)) / _spy.get("price", 1)) * 100
-                    _lv1.metric(f"🟢 Nächster Support", f"${_next_sup.get('level', 0):.0f}",
+                    _lv1.metric(f"Nächster Support", f"${_next_sup.get('level', 0):.0f}",
                                 f"{_next_sup.get('label', 'N/A')} ({_sup_dist:.1f}% entfernt)")
                 if _next_res:
                     _res_dist = ((_next_res.get("level", 0) - _spy.get("price", 1)) / _spy.get("price", 1)) * 100
-                    _lv2.metric(f"🔴 Nächster Widerstand", f"${_next_res.get('level', 0):.0f}",
+                    _lv2.metric(f"Nächster Widerstand", f"${_next_res.get('level', 0):.0f}",
                                 f"{_next_res.get('label', 'N/A')} ({_res_dist:.1f}% entfernt)")
 
                 # Alle Key Levels anzeigen
                 _all_levels = _spy.get("key_levels", [])
                 if _all_levels:
-                    with st.expander("📊 Alle Key Levels", expanded=False):
+                    with st.expander("Alle Key Levels", expanded=False):
                         import pandas as pd
                         _lvl_df = pd.DataFrame(_all_levels)
                         _sp_p = _spy.get('price', 1) or 1
                         _lvl_df["Entfernung"] = _lvl_df["level"].apply(lambda l, p=_sp_p: f"{((l - p) / p) * 100:+.1f}%")
                         _lvl_df["Level"] = _lvl_df["level"].apply(lambda l: f"${l:.0f}")
-                        _lvl_df["Typ"] = _lvl_df["type"].apply(lambda t: "🟢 Support" if t == "support" else "🔴 Resistance")
+                        _lvl_df["Typ"] = _lvl_df["type"].apply(lambda t: "Support" if t == "support" else "Resistance")
                         _lvl_df["Label"] = _lvl_df["label"]
                         st.dataframe(_lvl_df[["Level", "Typ", "Label", "Entfernung"]], use_container_width=True, hide_index=True)
 
         # ── Signale ──
         if _signals:
-            st.markdown("### ⚠️ Aktive Signale")
+            st.markdown("### Aktive Signale")
             for _s_icon, _s_name, _s_detail in _signals:
-                if _s_icon == "🔴":
+                if _s_icon == "":
                     st.error(f"{_s_icon} **{_s_name}** — {_s_detail}")
-                elif _s_icon == "🟠":
+                elif _s_icon == "":
                     st.warning(f"{_s_icon} **{_s_name}** — {_s_detail}")
                 else:
                     st.info(f"{_s_icon} **{_s_name}** — {_s_detail}")
         else:
-            st.info("✅ Keine Warnsignale aktiv — Markt sieht stabil aus")
+            st.info("Keine Warnsignale aktiv — Markt sieht stabil aus")
 
         # ── Breadth ──
         if _breadth:
-            st.markdown("### 📊 Markt-Breadth")
+            st.markdown("### Markt-Breadth")
             _bc1, _bc2, _bc3, _bc4 = st.columns(4)
             _bc1.metric("Gewinner", f"{_breadth.get('advancing', 0):,}")
             _bc2.metric("Verlierer", f"{_breadth.get('declining', 0):,}",
                         f"{_breadth.get('pct_declining', 0):.0f}% des Marktes" if _breadth.get('pct_declining') else "")
             _bc3.metric("A/D Ratio", f"{_breadth.get('ad_ratio', 0):.2f}",
-                        "🔴 Schwach" if _breadth.get('ad_ratio', 1) < 0.6 else ("🟠 Negativ" if _breadth.get('ad_ratio', 1) < 0.8 else "OK"))
+                        "Schwach" if _breadth.get('ad_ratio', 1) < 0.6 else ("Negativ" if _breadth.get('ad_ratio', 1) < 0.8 else "OK"))
             _bc4.metric("Starke Verluste (>5%)", f"{_breadth.get('heavy_losers', 0):,}",
                         f"davon {_breadth.get('extreme_losers', 0):,} > 10%" if _breadth.get('extreme_losers', 0) > 0 else "")
 
             if _breadth.get("rotation_gap"):
                 _rot = _breadth["rotation_gap"]
                 if _rot > 1.5:
-                    st.warning(f"🔄 **Sektor-Rotation:** Defensive Sektoren outperformen Risk-On um **{_rot:.1f}%** (5d) — Flight to Safety")
+                    st.warning(f"**Sektor-Rotation:** Defensive Sektoren outperformen Risk-On um **{_rot:.1f}%** (5d) — Flight to Safety")
                 elif _rot < -1.5:
-                    st.success(f"🚀 **Risk-On Modus:** Risk-On Sektoren outperformen Defensive um **{abs(_rot):.1f}%** (5d)")
+                    st.success(f"**Risk-On Modus:** Risk-On Sektoren outperformen Defensive um **{abs(_rot):.1f}%** (5d)")
 
         # ── Sektor-Performance Tabelle ──
         if _sectors:
-            st.markdown("### 🏢 Sektor-Performance (Rotation-Check)")
+            st.markdown("### Sektor-Performance (Rotation-Check)")
             import pandas as pd
             _sec_df = pd.DataFrame(_sectors)
             _sec_df["Sektor"] = _sec_df.apply(lambda r: f"{r['emoji']} {r['name']}", axis=1)
-            _sec_df["Typ"] = _sec_df.apply(lambda r: "🛡️ Defensiv" if r["is_defensive"] else ("🎯 Risk-On" if r["is_risk_on"] else "Neutral"), axis=1)
+            _sec_df["Typ"] = _sec_df.apply(lambda r: "Defensiv" if r["is_defensive"] else ("Risk-On" if r["is_risk_on"] else "Neutral"), axis=1)
             _sec_display = _sec_df[["Sektor", "etf", "Typ", "chg_1d", "chg_5d", "chg_20d"]].rename(columns={
                 "etf": "ETF", "chg_1d": "1d%", "chg_5d": "5d%", "chg_20d": "20d%"
             })
             st.dataframe(_sec_display, use_container_width=True, hide_index=True)
 
         # ── Strategie-Empfehlung ──
-        st.markdown("### 💡 Strategie-Hinweise")
+        st.markdown("### Strategie-Hinweise")
         if _fear >= 60:
             st.markdown("""
             **Bei Fear Score > 60:**
-            - 🐻 **Bear Scanner** Tab für Short/Inverse-ETF Opportunitäten nutzen
-            - 🛡️ Defensiv: XLP, XLU, XLV outperformen typisch in Crashs
-            - 💵 Cash-Quote erhöhen, Stop-Losses enger setzen
-            - ⏳ Warte auf Kapitulations-Signal (VIX Spike + Reversal) für Dip-Buys
+            - **Bear Scanner** Tab für Short/Inverse-ETF Opportunitäten nutzen
+            - Defensiv: XLP, XLU, XLV outperformen typisch in Crashs
+            - Cash-Quote erhöhen, Stop-Losses enger setzen
+            - Warte auf Kapitulations-Signal (VIX Spike + Reversal) für Dip-Buys
             """)
         elif _fear >= 30:
             st.markdown("""
             **Bei Fear Score 30-60:**
-            - 🔍 Selektiv Long: Nur beste Setups, reduzierte Positionsgrößen
-            - 🐻 Bear Scanner für Absicherungs-Ideen checken
-            - 📊 Breadth beobachten: Verschlechtert sich A/D Ratio weiter?
+            - Selektiv Long: Nur beste Setups, reduzierte Positionsgrößen
+            - Bear Scanner für Absicherungs-Ideen checken
+            - Breadth beobachten: Verschlechtert sich A/D Ratio weiter?
             """)
         else:
             st.markdown("""
             **Bei Fear Score < 30:**
-            - 📈 Normaler Scan-Modus: BI Scanner + Biotech für Long-Setups
-            - 🔥 Risk-On Sektoren (Tech, Consumer Disc.) performen typisch gut
-            - 👀 Trotzdem Crash Monitor regelmäßig checken!
+            - Normaler Scan-Modus: BI Scanner + Biotech für Long-Setups
+            - Risk-On Sektoren (Tech, Consumer Disc.) performen typisch gut
+            - Trotzdem Crash Monitor regelmäßig checken!
             """)
 
 
 # =============================================================================
-# TAB: 🐻 BEAR SCANNER V2 — Short Scanner mit BI-Score + Confluence
+# TAB: BEAR SCANNER V2 — Short Scanner mit BI-Score + Confluence
 # =============================================================================
 with tab_bear:
-    st.header("🐻 Short Scanner V2")
+    st.header("Short Scanner V2")
     st.caption("20-Signal Composite Scoring für Short-Setups | Gleiche Analyse-Tiefe wie BI Scanner")
 
     # Fear Score Info
     _crash_fear = st.session_state.get("crash_data", {}).get("fear_score", 0) if isinstance(st.session_state.get("crash_data"), dict) else 0
     if _crash_fear >= 40:
-        st.error(f"🔴 Fear Score: **{_crash_fear}/100** — Bear-Setups sollten gut funktionieren!")
+        st.error(f"Fear Score: **{_crash_fear}/100** — Bear-Setups sollten gut funktionieren!")
     elif _crash_fear >= 20:
-        st.warning(f"🟡 Fear Score: **{_crash_fear}/100** — Selektive Short-Chancen möglich")
+        st.warning(f"Fear Score: **{_crash_fear}/100** — Selektive Short-Chancen möglich")
     else:
-        st.info(f"🟢 Fear Score: **{_crash_fear}/100** — Markt ruhig, Shorts riskanter")
+        st.info(f"Fear Score: **{_crash_fear}/100** — Markt ruhig, Shorts riskanter")
 
     # ── Trading-Modus Toggle ──
     bear_mode_col1, bear_mode_col2 = st.columns([1, 3])
     with bear_mode_col1:
         bear_trade_mode = st.radio(
             "Trading-Modus",
-            ["🔄 Swing", "⚡ Intraday"],
+            ["Swing", "Intraday"],
             horizontal=True,
             key="bear_trade_mode_radio",
             help="Swing: Mehrtägig, weiter Stop/Target. Intraday: Rein bei Open, raus vor Close."
@@ -17869,9 +17869,9 @@ with tab_bear:
     with bear_mode_col2:
         _btm = st.session_state.get("bear_trade_mode", "swing")
         if _btm == "intraday":
-            st.info("⚡ **Intraday** — Entry bei Open, Exit vor Close | Stop: 0.5% | TP1: 1.0R, TP2: 1.5R | Min DollarVol: $1M")
+            st.info("**Intraday** — Entry bei Open, Exit vor Close | Stop: 0.5% | TP1: 1.0R, TP2: 1.5R | Min DollarVol: $1M")
         else:
-            st.caption("🔄 **Swing** — Mehrtägige Trades | Stop: 1.5% | TP1: 2.0R, TP2: 3.5R | Min DollarVol: $500k")
+            st.caption("**Swing** — Mehrtägige Trades | Stop: 1.5% | TP1: 2.0R, TP2: 3.5R | Min DollarVol: $500k")
 
     st.divider()
 
@@ -17889,32 +17889,32 @@ with tab_bear:
         p_top = bear_progress.get("top_score", 0)
         p_detail = bear_progress.get("detail", "")
         if p_t == 0:
-            st.info(f"🐻 **Short Scan ⬇️** — {p_detail or '📡 Lade Aktien-Snapshot...'}")
+            st.info(f"**Short Scan ⬇** — {p_detail or 'Lade Aktien-Snapshot...'}")
         else:
             pct = round(p_c / max(1, p_t) * 100)
             est = max(1, (p_t - p_c) // 75)
-            st.info(f"🐻 **Short Scan ⬇️ läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
+            st.info(f"**Short Scan ⬇läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
         _bear_prog_col1, _bear_prog_col2 = st.columns([5, 1])
         with _bear_prog_col1:
             st.progress(min(1.0, p_c / max(1, p_t)) if p_t > 0 else 0.0)
         with _bear_prog_col2:
-            if st.button("⏹️ Stop", key="bear_stop_btn", use_container_width=True):
+            if st.button("Stop", key="bear_stop_btn", use_container_width=True):
                 _bi_request_stop("short")
                 _bi_progress_write("short", "stopped", checked=p_c, total=p_t, hits=p_h,
-                                   detail=f"⏹️ Manuell gestoppt bei {p_c}/{p_t}")
+                                   detail=f"Manuell gestoppt bei {p_c}/{p_t}")
                 time.sleep(1)
                 st.rerun()
-        st.caption("💡 Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
+        st.caption("Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
 
     # ── FALL 2: Scan fertig ──
     elif bear_progress and bear_progress.get("status") == "done":
         fresh, _, _ = _bi_cache_load("short")
         if fresh is not None:
             st.session_state.bear_tab_results = fresh
-            st.success(f"✅ **Short Scan fertig!** {len(fresh)} Treffer — automatisch geladen")
-            st.caption(f"🔍 {bear_progress.get('detail', '')}")
+            st.success(f"**Short Scan fertig!** {len(fresh)} Treffer — automatisch geladen")
+            st.caption(f"{bear_progress.get('detail', '')}")
         else:
-            st.warning("⚠️ Scan fertig — keine Treffer")
+            st.warning("Scan fertig — keine Treffer")
         _bi_progress_clear("short")
 
     # ── FALL 2b: Gestoppt ──
@@ -17922,7 +17922,7 @@ with tab_bear:
         _bp_hits = bear_progress.get("hits", 0)
         _bp_checked = bear_progress.get("checked", 0)
         _bp_total = bear_progress.get("total", 0)
-        st.warning(f"⏹️ Short Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
+        st.warning(f"Short Scan gestoppt bei {_bp_checked}/{_bp_total} — {_bp_hits} Treffer gespeichert")
         if _bp_hits > 0:
             fresh, _, _ = _bi_cache_load("short")
             if fresh is not None:
@@ -17937,15 +17937,15 @@ with tab_bear:
 
     # ── FALL 3a: Keine Kandidaten ──
     elif bear_progress and bear_progress.get("status") == "no_candidates":
-        st.info(f"📭 {bear_progress.get('detail', 'Keine Kandidaten')}")
-        if st.button("🔄 Erneut scannen ⬇️", use_container_width=True, key="bear_tab_retry_nc"):
+        st.info(f"{bear_progress.get('detail', 'Keine Kandidaten')}")
+        if st.button("Erneut scannen ⬇", use_container_width=True, key="bear_tab_retry_nc"):
             _bi_progress_write("short", status="idle")
             st.rerun()
 
     # ── FALL 3b: Fehler ──
     elif bear_progress and bear_progress.get("status") == "error":
-        st.error(f"❌ Short Scan Fehler: {bear_progress.get('detail', 'Unbekannt')}")
-        if st.button("🔄 Erneut scannen ⬇️", use_container_width=True, type="primary", key="bear_tab_retry_scan"):
+        st.error(f"Short Scan Fehler: {bear_progress.get('detail', 'Unbekannt')}")
+        if st.button("Erneut scannen ⬇", use_container_width=True, type="primary", key="bear_tab_retry_scan"):
             _bi_progress_write("short", status="idle")
             st.rerun()
 
@@ -17956,16 +17956,16 @@ with tab_bear:
                 cache_t = datetime.fromtimestamp(bear_cached_ts).strftime("%H:%M") if bear_cached_ts else "?"
             except (ValueError, TypeError, OSError):
                 cache_t = "?"
-            st.success(f"⚡ **Cache Short:** {len(bear_cached_results)} Treffer von {cache_t} ({_bi_cache_age_str(bear_cache_age)})")
+            st.success(f"**Cache Short:** {len(bear_cached_results)} Treffer von {cache_t} ({_bi_cache_age_str(bear_cache_age)})")
             if not st.session_state.get("bear_tab_results"):
                 st.session_state.bear_tab_results = bear_cached_results
 
         bear_btn_col1, bear_btn_col2 = st.columns(2)
         with bear_btn_col1:
-            bear_manual_scan = st.button("🚀 Short Scan starten ⬇️", use_container_width=True, type="primary", key="bear_tab_manual_scan")
+            bear_manual_scan = st.button("Short Scan starten ⬇", use_container_width=True, type="primary", key="bear_tab_manual_scan")
         with bear_btn_col2:
             if bear_cache_ok:
-                if st.button(f"⚡ Cache laden ({len(bear_cached_results)})", use_container_width=True, key="bear_tab_load_cache"):
+                if st.button(f"Cache laden ({len(bear_cached_results)})", use_container_width=True, key="bear_tab_load_cache"):
                     st.session_state.bear_tab_results = bear_cached_results
                     st.rerun()
 
@@ -17977,7 +17977,7 @@ with tab_bear:
                 def _bear_fetch_and_scan(pk):
                     try:
                         _bi_progress_write("short", status="running", checked=0, total=0, hits=0,
-                                           detail="📡 Lade Aktien-Snapshot von Polygon...")
+                                           detail="Lade Aktien-Snapshot von Polygon...")
                         import requests as _req
                         try:
                             _snap_resp = _req.get(
@@ -17998,7 +17998,7 @@ with tab_bear:
                             return
 
                         _bi_progress_write("short", status="running", checked=0, total=0, hits=0,
-                                           detail=f"📊 {len(_tickers)} Aktien geladen, filtere Short-Kandidaten...")
+                                           detail=f"{len(_tickers)} Aktien geladen, filtere Short-Kandidaten...")
 
                         # Basis-Daten extrahieren
                         raw = []
@@ -18034,7 +18034,7 @@ with tab_bear:
 
                         # CS-Whitelist
                         _bi_progress_write("short", status="running", checked=0, total=0, hits=0,
-                                           detail="📋 Lade Common Stock Liste...")
+                                           detail="Lade Common Stock Liste...")
                         _CS_FILE = "/tmp/cs_tickers_cache.json"
                         _cs_set = COMMON_STOCK_TICKERS
                         if not _cs_set:
@@ -18053,23 +18053,36 @@ with tab_bear:
                             except Exception:
                                 _cs_set = set()
 
-                        # Short Pre-Filter: Verschärft — echte Schwäche filtern
-                        # Change <= -2% ODER (RVOL >= 1.8 UND Change <= -1%)
+                        # FIX 3: Short Pre-Filter — erweitert um Near-Resistance Kandidaten
+                        # Kriterium 1: Bereits fallend (Change <= -2% ODER RVOL >= 1.8 + Change <= -1%)
+                        # Kriterium 2: NEU — Schwäche bei hohem Preis (Change -0.5% bis -2%, RVOL >= 1.5)
+                        #   → Fängt Aktien die gerade anfangen zu kippen, bevor der grosse Drop kommt
+                        def _short_prefilter(s):
+                            if not isinstance(s, dict):
+                                return False
+                            if s.get("Preis", 0) < 5 or s.get("DollarVol", 0) < 500_000:
+                                return False
+                            chg = s.get("Change%", 0)
+                            rvol = s.get("RVOL", 0)
+                            # Kriterium 1: Bereits klar fallend
+                            if chg <= -2.0:
+                                return True
+                            # Kriterium 1b: Hohes Volumen + leichter Verlust
+                            if rvol >= 1.8 and chg <= -1.0:
+                                return True
+                            # Kriterium 2 (NEU): Leichte Schwäche + erhöhtes Volumen
+                            # → Distribution-Kandidaten die gerade anfangen abzuschwächen
+                            if chg <= -0.5 and rvol >= 1.5:
+                                return True
+                            return False
+
                         if _cs_set:
-                            filtered = [s for s in raw if isinstance(s, dict)
-                                        and s.get("Ticker", "").upper() in _cs_set
-                                        and s.get("Preis", 0) >= 5
-                                        and s.get("DollarVol", 0) >= 500_000
-                                        and (s.get("Change%", 0) <= -2.0
-                                             or (s.get("RVOL", 0) >= 1.8 and s.get("Change%", 0) <= -1.0))]
+                            filtered = [s for s in raw if _short_prefilter(s)
+                                        and s.get("Ticker", "").upper() in _cs_set]
                         else:
-                            filtered = [s for s in raw if isinstance(s, dict)
-                                        and s.get("Preis", 0) >= 5
-                                        and s.get("DollarVol", 0) >= 500_000
+                            filtered = [s for s in raw if _short_prefilter(s)
                                         and not is_etf_or_etp(s.get("Ticker", ""))
-                                        and not is_spac(s.get("Name", ""))
-                                        and (s.get("Change%", 0) <= -2.0
-                                             or (s.get("RVOL", 0) >= 1.8 and s.get("Change%", 0) <= -1.0))]
+                                        and not is_spac(s.get("Name", ""))]
 
                         if not filtered:
                             _bi_progress_write("short", status="no_candidates",
@@ -18085,14 +18098,14 @@ with tab_bear:
 
                 thread = threading.Thread(target=_bear_fetch_and_scan, args=(poly_key,), daemon=True)
                 thread.start()
-                st.info("🚀 **Short Scan gestartet** — Hintergrund-Analyse läuft...")
-                st.caption("💡 Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
+                st.info("**Short Scan gestartet** — Hintergrund-Analyse läuft...")
+                st.caption("Andere Tabs normal benutzen — Scan läuft im Hintergrund!")
                 time.sleep(2)
                 st.rerun()
             except KeyError:
-                st.error("❌ POLYGON_KEY fehlt in secrets!")
+                st.error("POLYGON_KEY fehlt in secrets!")
             except Exception as e:
-                st.error(f"❌ Short Scanner Fehler: {e}")
+                st.error(f"Short Scanner Fehler: {e}")
 
     # ── Ergebnis-Tabelle (gleich wie BI Scanner) ──
     st.divider()
@@ -18109,7 +18122,7 @@ with tab_bear:
                 _entry = bear_df.at[idx_row, "Entry"] if "Entry" in bear_df.columns else 0
                 if _entry and _entry > 0:
                     bear_df.at[idx_row, "StopLoss"] = round(_entry * 1.005, 2)   # 0.5% Stop
-                    _risk_id = bear_df.at[idx_row, "StopLoss"] - _entry
+                    _risk_id = max(0.01, bear_df.at[idx_row, "StopLoss"] - _entry)  # FIX 7: Guard
                     bear_df.at[idx_row, "TP1"] = round(_entry - _risk_id * 1.0, 2)  # 1.0R
                     bear_df.at[idx_row, "RiskReward"] = 1.0
             # Filter: Nur DollarVol >= $1M für Intraday
@@ -18119,8 +18132,8 @@ with tab_bear:
         if "BI_Score" in bear_df.columns:
             bear_df = bear_df.sort_values(by="BI_Score", ascending=False).reset_index(drop=True)
 
-        _mode_label = "⚡ Intraday" if _bear_mode == "intraday" else "🔄 Swing"
-        st.subheader(f"🐻 {len(bear_df)} Treffer — Short ⬇️ ({_mode_label})")
+        _mode_label = "Intraday" if _bear_mode == "intraday" else "Swing"
+        st.subheader(f"{len(bear_df)} Treffer — Short ⬇({_mode_label})")
 
         # Display-Spalten
         _bear_display_cols = [c for c in ["Ticker", "Preis", "Change%", "BI_Score", "ShortBonusScore",
@@ -18134,7 +18147,7 @@ with tab_bear:
                 "Preis": st.column_config.NumberColumn("Preis", format="$%.2f"),
                 "Change%": st.column_config.NumberColumn("Change%", format="%.2f%%"),
                 "BI_Score": st.column_config.ProgressColumn("BI Score", format="%d", min_value=0, max_value=250),
-                "ShortBonusScore": st.column_config.NumberColumn("🐻 Bonus", format="%+d", help="5 Short-Bonus-Signale: Earnings, SMA200, Gaps, MarketCap, News"),
+                "ShortBonusScore": st.column_config.NumberColumn("Bonus", format="%+d", help="5 Short-Bonus-Signale: Earnings, SMA200, Gaps, MarketCap, News"),
                 "BI_GradeLabel": st.column_config.TextColumn("Grade", width="medium"),
                 "PatternLabel": st.column_config.TextColumn("Pattern", width="large"),
                 "RiskReward": st.column_config.NumberColumn("R:R", format="%.1f"),
@@ -18163,7 +18176,7 @@ with tab_bear:
 
             _bear_score = _bear_item.get("BI_Score", 0)
             _bear_grade = _bear_item.get("BI_GradeLabel", _bear_item.get("BI_Grade", "?"))
-            st.markdown(f"## 🐻 {_bear_item.get('Ticker', 'N/A')} — Short Setup | {_bear_grade} ({_bear_score}/200)")
+            st.markdown(f"## {_bear_item.get('Ticker', 'N/A')} — Short Setup | {_bear_grade} ({_bear_score}/200)")
 
             # Metriken
             _bm1, _bm2, _bm3, _bm4 = st.columns(4)
@@ -18176,11 +18189,11 @@ with tab_bear:
             _bm4.metric("TP1", f"${_bear_item.get('TP1', 0):.2f}")
             _bm4.metric("TP2", f"${_bear_item.get('TP2', 0):.2f}")
 
-            st.caption(f"🎯 Range: ${_bear_item.get('RangeLow', 0):.2f}−${_bear_item.get('RangeHigh', 0):.2f} | "
+            st.caption(f"Range: ${_bear_item.get('RangeLow', 0):.2f}−${_bear_item.get('RangeHigh', 0):.2f} | "
                        f"Preis: ${_bear_item.get('Preis', 0):.2f} | Change: {_bear_item.get('Change%', 0):.1f}% | "
                        f"RVOL: {_bear_item.get('RVOL', 0):.2f}")
 
-            # 🐻 Short Bonus Signals Detail
+            # Short Bonus Signals Detail
             _short_bonus = _bear_item.get("ShortBonusScore", 0)
             _short_details = _bear_item.get("ShortBonusDetails", [])
             if isinstance(_short_details, str):
@@ -18189,14 +18202,14 @@ with tab_bear:
                 except Exception:
                     _short_details = []
             if _short_details:
-                with st.expander(f"🐻 Short Bonus Signals ({_short_bonus:+d} Punkte)", expanded=True):
+                with st.expander(f"Short Bonus Signals ({_short_bonus:+d} Punkte)", expanded=True):
                     for _sd in _short_details:
                         if isinstance(_sd, str):
-                            if _sd.startswith("🔥"):
+                            if _sd.startswith(""):
                                 st.success(_sd)
-                            elif _sd.startswith("✅"):
+                            elif _sd.startswith(""):
                                 st.info(_sd)
-                            elif _sd.startswith("⚠️"):
+                            elif _sd.startswith(""):
                                 st.warning(_sd)
                             else:
                                 st.caption(_sd)
@@ -18226,15 +18239,15 @@ with tab_bear:
                 _bc_total = len(_bc_cats)
                 _bc_sig = _bear_conf.get("signal", "")
                 _bc_act = _bear_conf.get("action", "")
-                st.markdown(f"**🔥 Confluence: {_bc_pass}/{_bc_total}** {_bear_conf.get('signal_emoji', '')} **{_bc_sig}** — {_bc_act}")
+                st.markdown(f"**Confluence: {_bc_pass}/{_bc_total}** {_bear_conf.get('signal_emoji', '')} **{_bc_sig}** — {_bc_act}")
                 for _ck, _cv in _bc_cats.items():
-                    _c_icon = "✅" if _cv.get("pass") else "❌"
+                    _c_icon = "" if _cv.get("pass") else ""
                     st.markdown(f"{_c_icon} {_cv.get('emoji', '')} **{_cv.get('name', _ck)}:** {_cv.get('value', '')} ({_cv.get('detail', '')})")
 
             # Signal Details
             _bear_details = _bear_item.get("BI_Details", "")
             if _bear_details:
-                with st.expander("🔬 Signal-Details (20 Faktoren)", expanded=False):
+                with st.expander("Signal-Details (20 Faktoren)", expanded=False):
                     if isinstance(_bear_details, list):
                         for d in _bear_details:
                             st.markdown(f"• {d}")
@@ -18242,6 +18255,44 @@ with tab_bear:
                         st.text(str(_bear_details))
     else:
         st.info("Noch keine Short-Ergebnisse. **Scan starten** um Short-Kandidaten zu finden.")
+
+    # FIX 10: Inverse ETFs + Breakdown-Stocks aus fetch_bear_scanner_data anzeigen
+    st.divider()
+    with st.expander("Inverse ETFs + Breakdown-Stocks", expanded=False):
+        try:
+            _bear_poly = st.secrets["POLYGON_KEY"]
+            if st.button("Inverse ETFs laden", key="bear_inv_etf_btn"):
+                with st.spinner("Lade Inverse ETF + Breakdown Daten..."):
+                    _bear_extra = fetch_bear_scanner_data(_bear_poly)
+                    st.session_state["bear_extra_data"] = _bear_extra
+
+            _bear_extra = st.session_state.get("bear_extra_data", None)
+            if _bear_extra:
+                _inv_etfs = _bear_extra.get("inverse_etfs", [])
+                _breakdowns = _bear_extra.get("breakdown_stocks", [])
+
+                if _inv_etfs:
+                    st.subheader(f"Inverse ETFs ({len(_inv_etfs)})")
+                    st.caption("Inverse ETFs mit positivem Momentum = Markt-Schwäche")
+                    import pandas as pd
+                    _inv_df = pd.DataFrame(_inv_etfs)
+                    _inv_cols = [c for c in ["Ticker", "Name", "Underlying", "Preis", "1d%", "5d%", "20d%", "RVOL", "Momentum"] if c in _inv_df.columns]
+                    st.dataframe(_inv_df[_inv_cols] if _inv_cols else _inv_df,
+                                 use_container_width=True, hide_index=True, height=min(400, 40 + len(_inv_df) * 35))
+
+                if _breakdowns:
+                    st.subheader(f"Breakdown-Stocks ({len(_breakdowns)})")
+                    st.caption("Grösste Tagesverlierer (>= -4%) — potenzielle Short-Kandidaten")
+                    _bd_df = pd.DataFrame(_breakdowns)
+                    st.dataframe(_bd_df, use_container_width=True, hide_index=True,
+                                 height=min(400, 40 + len(_bd_df) * 35))
+
+                if not _inv_etfs and not _breakdowns:
+                    st.info("Keine Daten geladen")
+        except KeyError:
+            st.warning("POLYGON_KEY fehlt")
+        except Exception as e:
+            st.error(f"Fehler: {e}")
 
 
 # =============================================================================
@@ -18252,15 +18303,15 @@ with tab_backtest:
         bt_poly_key = st.secrets["POLYGON_KEY"]
         display_backtest_lab(bt_poly_key)
     except KeyError:
-        st.error("❌ POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
+        st.error("POLYGON_KEY fehlt! Füge ihn in Settings → Secrets hinzu.")
     except Exception as e:
         st.error(f"Fehler: {e}")
 
 # =============================================================================
-# TAB: STRATEGIE GUIDE 📖
+# TAB: STRATEGIE GUIDE 
 # =============================================================================
 with tab_guide:
-    st.header("📖 Strategie Guide — Alle Strategien erklärt")
+    st.header("Strategie Guide — Alle Strategien erklärt")
     st.caption("Detaillierte Erklärung jeder Strategie: Wie sie funktioniert, was sie erkennt und wann du sie einsetzen solltest.")
 
     # =========================================================================
@@ -18268,7 +18319,7 @@ with tab_guide:
     # =========================================================================
     with st.expander("🇺🇸 US Aktien Strategien (Haupt-Scanner)", expanded=True):
 
-        st.subheader("📊 Momentum & Volumen")
+        st.subheader("Momentum & Volumen")
 
         st.markdown("""
 **Volume Surge**
@@ -18281,7 +18332,7 @@ Sucht Aktien mit >3% Tagesanstieg, RVOL >1.5 und einem Close nahe dem Tageshoch 
 Der Close nahe High bestätigt, dass das Momentum intakt ist — kein Fake-Spike der sofort abverkauft wurde.
 *Empfohlen für:* Day Trading, Intraday-Swings. Preis $5-500 filtert Penny Stocks und illiquide Werte raus.
 
-**Whale Watch / Whale Watch Short 🐻**
+**Whale Watch / Whale Watch Short **
 Erkennt extremes Volumen (RVOL >3.0) MIT klarer Richtung — Long wenn Change >2% + Close nahe High, Short wenn Change <-2% + Close nahe Low.
 RVOL >3x bedeutet 3-mal mehr gehandelt als normal — das sind keine Retail-Trader, sondern Big Player (Institutionen, Fonds).
 Der Close-Position-Filter eliminiert „Churn" (hohes Volumen ohne Richtung = Distribution).
@@ -18292,7 +18343,7 @@ Niedrigpreisige Aktien unter $5 mit RVOL >3.0 und >3% Anstieg. Zusätzlich: Mind
 *Empfohlen für:* Spekulative Day Trades. HOHES Risiko! Nur mit striktem Stop-Loss und kleiner Position.
 """)
 
-        st.subheader("🚀 Breakout & Breakdown")
+        st.subheader("Breakout & Breakdown")
 
         st.markdown("""
 **Breakout Long**
@@ -18305,13 +18356,13 @@ Das Gegenstück: >3% Abverkauf + RVOL >1.5 + Close nahe dem Tagestief.
 *Empfohlen für:* Short Day Trades. Achtung: Shorts haben unbegrenztes Risiko — strenger Stop-Loss pflicht!
 """)
 
-        st.subheader("📈🐻 Flag Patterns (Multi-Day)")
+        st.subheader("Flag Patterns (Multi-Day)")
 
         st.markdown("""
 **Bull Flag**
 Klassisches Fortsetzungsmuster: Starke bullische Vortagskerze (+4% bis +25%), dann heute enge Konsolidierung (±2%) bei sinkendem Volumen.
 Die Analyse nutzt 5 Tage History und prüft das Muster über mehrere Tage.
-⚠️ **Wichtig:** „Vortag %" zeigt die Kerzenstärke (Close vs Open), NICHT die Tagesperformance!
+ **Wichtig:** „Vortag %" zeigt die Kerzenstärke (Close vs Open), NICHT die Tagesperformance!
 *Empfohlen für:* Swing Trading (2-5 Tage). Entry über dem Flag-High, Target = Pole-Höhe ab Breakout.
 
 **Bear Flag**
@@ -18319,7 +18370,7 @@ Das Short-Gegenstück: Starke bärische Vortagskerze (-4% bis -25%), dann Konsol
 *Empfohlen für:* Short Swing Trades. Entry unter dem Flag-Low, Target = Pole-Tiefe ab Breakdown.
 """)
 
-        st.subheader("💰 Dip Buy & Reversals")
+        st.subheader("Dip Buy & Reversals")
 
         st.markdown("""
 **Dip Buy**
@@ -18330,11 +18381,11 @@ Zusätzlich: Mindestens $500k Dollar-Volumen für Liquidität.
 
 **Reversal Hunter**
 Bounce nach roter Kerze: Bärische Vortagskerze (>-3%), heute Käufer (+2%+) mit erhöhtem Volumen.
-⚠️ **Wichtig:** Bei Aktien im Uptrend ist das kein Reversal sondern ein „Continuation Dip Buy". Echte Reversals sind nur bei Downtrend-Aktien relevant.
+ **Wichtig:** Bei Aktien im Uptrend ist das kein Reversal sondern ein „Continuation Dip Buy". Echte Reversals sind nur bei Downtrend-Aktien relevant.
 *Empfohlen für:* Swing Trading. Aggressive Entry bei Bestätigung, konservativ erst am nächsten Tag.
 """)
 
-        st.subheader("🌅 Pre-Market Strategien")
+        st.subheader("Pre-Market Strategien")
 
         st.markdown("""
 **PM Gainers / PM Losers / PM Gap & Go / PM Penny Movers**
@@ -18347,7 +18398,7 @@ Speziell für die Pre-Market Session (4:00-9:30 AM ET). Kein RVOL-Filter (PM-Vol
 *Empfohlen für:* Planung der Opening-Trades. Gap & Go ist die zuverlässigste PM-Strategie.
 """)
 
-        st.subheader("🌙 After-Hours Strategien")
+        st.subheader("After-Hours Strategien")
 
         st.markdown("""
 **AH Gainers / AH Losers / AH Earnings Gainers / AH Earnings Losers**
@@ -18358,7 +18409,7 @@ Für die After-Hours Session (16:00-20:00 ET). Erkennt Earnings-Reaktionen und N
 *Empfohlen für:* Nächster-Tag-Planung. AH-Moves zeigen oft die Richtung für den nächsten Handelstag.
 """)
 
-        st.subheader("📈📉 Gap Strategien")
+        st.subheader("Gap Strategien")
 
         st.markdown("""
 **Gap Up / Gap Down / Gap Up (High Vol) / Gap Down (High Vol)**
@@ -18369,7 +18420,7 @@ Erkennt Gaps zwischen dem Schlusskurs und dem heutigen Open. Nur für Aktien (Kr
 *Empfohlen für:* Day Trading bei Market Open. Gap-Fill-Trades (Erwartung dass der Gap geschlossen wird) oder Gap & Go (Momentum in Gap-Richtung).
 """)
 
-        st.subheader("🕯️ Wick Strategien")
+        st.subheader("Wick Strategien")
 
         st.markdown("""
 **Long Wick Up**
@@ -18383,7 +18434,7 @@ Das ist ein **Long-Signal** — Kaufdruck auf niedrigem Niveau.
 *Empfohlen für:* Long Trades (konträr). Besonders stark an bekannten Support-Zonen.
 """)
 
-        st.subheader("🔍 Insider Strategien")
+        st.subheader("Insider Strategien")
 
         st.markdown("""
 **Insider Buying / Insider Selling**
@@ -18394,37 +18445,37 @@ Erkennt offizielle SEC-Filings wenn Firmen-Insider (CEO, CFO, Directors, 10%+ Ak
 *Empfohlen für:* Swing/Position Trading. Insider Buying ist eines der stärksten fundamentalen Signale. Am besten kombiniert mit technischer Bestätigung.
 """)
 
-        st.subheader("📦 Konsolidierungs-Strategien")
+        st.subheader("Konsolidierungs-Strategien")
 
         st.markdown("""
-**Consolidation 📦**
+**Consolidation **
 Multi-Day Seitwärtsphase: Heute UND gestern enge Range (±2%) + sinkendes Volumen (RVOL 0.2-1.2).
 Nutzt 5 Tage History um echte mehrtägige Konsolidierungen zu finden.
 *Empfohlen für:* Breakout-Vorbereitung. Setze Alerts für den Ausbruch aus der Range.
 
-**Consolidation Breakout 🚀**
+**Consolidation Breakout **
 Ausbruch aus mehrtägiger Range: Vortag war ruhig (±3%), heute >1.5% Anstieg + RVOL >1.5.
 Nutzt 15 Tage History für bessere Pattern-Erkennung.
 *Empfohlen für:* Swing Trading. Der Volumen-bestätigte Breakout aus einer Konsolidierung ist eines der zuverlässigsten Setups.
 
-**Reversal Setup 🪤**
+**Reversal Setup **
 Mehrtägiger Abverkauf + heute bullische Umkehr: Vortag -2% bis -8%, heute +2% bis +15% mit erhöhtem Volumen.
 *Empfohlen für:* Aggressive Swing Trades. Höheres Risiko — Downtrends können weitergehen.
 
-**Tight Range 📐**
+**Tight Range **
 Extrem enge Tagesrange (±1%) + sehr niedriges Volumen (RVOL 0.2-0.8). „Ruhe vor dem Sturm" — Richtung unklar!
 *Empfohlen für:* Straddle/Strangle-Optionsstrategien oder Breakout-Alerts in beide Richtungen.
 
-**High Volume Churn 📤**
+**High Volume Churn **
 Hohes Volumen (RVOL >1.8) OHNE Preisfortschritt (±2%). Das ist Smart Money in Aktion!
 Akkumulation (bei Support) oder Distribution (bei Widerstand).
 *Empfohlen für:* Analyse-Tool — zeigt wo sich Big Player positionieren. Warte auf den Breakout in die Richtung.
 """)
 
-        st.subheader("🕳️ Volume Void Strategien")
+        st.subheader("Volume Void Strategien")
 
         st.markdown("""
-**Volume Void Long 🕳️⬆️ / Volume Void Short 🕳️⬇️**
+**Volume Void Long ⬆ / Volume Void Short ⬇**
 Analysiert das Volume Profile (wo wurde wie viel gehandelt) und findet „Löcher" — Preiszonen mit wenig historischem Volumen.
 - *Long:* Preis liegt UNTER einem Volume Void → wenig Widerstand, Preis kann schnell hochschießen
 - *Short:* Preis liegt ÜBER einem Volume Void → wenig Support, Preis kann schnell fallen
@@ -18432,10 +18483,10 @@ Analysiert das Volume Profile (wo wurde wie viel gehandelt) und findet „Löche
 *Empfohlen für:* Day/Swing Trading mit klaren Zielzonen. Volume Voids werden oft schnell durchlaufen.
 """)
 
-        st.subheader("🦋 Harmonic Patterns")
+        st.subheader("Harmonic Patterns")
 
         st.markdown("""
-**Harmonic Bullish 🦋⬆️ / Harmonic Bearish 🦋⬇️ / Harmonic All 🦋**
+**Harmonic Bullish ⬆ / Harmonic Bearish ⬇ / Harmonic All **
 Erkennt XABCD-Patterns basierend auf Fibonacci-Verhältnissen: Gartley, Bat, Butterfly, Crab.
 - Der Entry erfolgt am Punkt D (Completion Zone)
 - Stop-Loss knapp unter/über Punkt D
@@ -18444,47 +18495,47 @@ Erkennt XABCD-Patterns basierend auf Fibonacci-Verhältnissen: Gartley, Bat, But
 *Empfohlen für:* Erfahrene Swing Trader. Harmonic Patterns haben hohe Trefferquoten wenn korrekt identifiziert. Preis $5-500.
 """)
 
-        st.subheader("🔮 Breakout Imminent V2 (20-Signal Composite)")
+        st.subheader("Breakout Imminent V2 (20-Signal Composite)")
 
         st.markdown("""
-**Breakout Imminent Long 🔮⬆️ / Breakout Imminent Short 🔮⬇️**
+**Breakout Imminent Long ⬆ / Breakout Imminent Short ⬇**
 Das fortschrittlichste Setup im Scanner. Kombiniert **20 unabhängige Signale** aus 5 Kategorien zu einem Composite Score (max 200 Punkte):
 
-🔋 **ENERGIE (Compression-Signale):**
+ **ENERGIE (Compression-Signale):**
 1. **ATR Squeeze** — Volatilität schrumpft → Energie baut sich auf
 2. **Volume Dry-Up** — Volumen sinkt → Desinteresse vor Explosion
 3. **StdDev Compression** — Standardabweichung sinkt → statistische Breakout-Wahrscheinlichkeit steigt
 4. **Candle Body Compression** — Kerzenkörper werden kleiner (Doji-Cluster) → Gleichgewicht vor Ausbruch
 
-📊 **MOMENTUM (Frühindikatoren):**
+ **MOMENTUM (Frühindikatoren):**
 5. **RSI Drift** — RSI driftet Richtung 55+ (Long) / unter 45 (Short) → subtiler Bias
 6. **MACD Histogram Divergenz** — Histogram dreht bei flachem Preis → unsichtbares Momentum
 7. **Stochastic Momentum** — %K kreuzt %D in Extremzonen → Timing-Signal
 8. **ADX Turning** — ADX < 20 + steigend → neuer Trend formiert sich JETZT
 
-🏦 **SMART MONEY (Institutionelle Aktivität):**
+ **SMART MONEY (Institutionelle Aktivität):**
 9. **OBV Divergenz** — OBV vs. Preis divergiert → Smart Money positioniert sich
 10. **Institutional Accumulation Days** — Hohes Volumen + kleine Kerzen → Fonds laden auf
 11. **Order Block Confluence** — Breakout-Level nahe institutioneller Kauf/Verkaufszone
 12. **Liquidity Pool Proximity** — Stop-Cluster über/unter Range → explosiver Stop-Hunt Effekt
 
-📐 **STRUKTUR (Pattern-Signale):**
+ **STRUKTUR (Pattern-Signale):**
 13. **Range Duration** — Konsolidierung >10 Tage → stärkerer Ausbruch
 14. **Boundary Tests** — 4+ Tests an Resistance/Support → Wand wird schwächer
 15. **Higher Lows / Lower Highs** — Strukturelle Verengung → Kontrolle wird übernommen
 16. **Fibonacci Confluence** — Preis nahe Key-Fib-Level (38.2%, 50%, 61.8%) → starker Wendepunkt
 
-🎯 **TARGETS (Breakout-Ziele):**
+ **TARGETS (Breakout-Ziele):**
 17. **Volume Void Above/Below** — Low-Volume-Zone über/unter Preis = Vakuum-Effekt
 18. **FVG/Volume Imbalance** — Unfilled Fair Value Gaps = Preismagneten
 19. **Relative Stärke** — Resilience nach Dips (Long) / Schwäche nach Bounces (Short)
 20. **Close Position Clustering** — Closes nahe Highs (Long) / Lows (Short) → Bias bestätigt
 
 **Grade-System:**
-- 🏆 **S-Tier** (≥140): ELITE SETUP — höchste Wahrscheinlichkeit
-- 🔥 **A-Tier** (≥120): STARK — sehr guter Kandidat
-- ✅ **B-Tier** (≥100): SOLIDE — tradeworthy
-- ⚠️ **C-Tier** (≥80): WATCHLIST — beobachten
+- **S-Tier** (≥140): ELITE SETUP — höchste Wahrscheinlichkeit
+- **A-Tier** (≥120): STARK — sehr guter Kandidat
+- **B-Tier** (≥100): SOLIDE — tradeworthy
+- **C-Tier** (≥80): WATCHLIST — beobachten
 
 **Schwellenwerte:** Long ≥100 Punkte, Short ≥90 Punkte. Nutzt 30 Tage History.
 Entry/SL/TP automatisch berechnet (ATR-basierter Stop, Measured Move Targets).
@@ -18492,21 +18543,21 @@ Entry/SL/TP automatisch berechnet (ATR-basierter Stop, Measured Move Targets).
 *Empfohlen für:* Swing Trading (2-10 Tage). DAS beste Setup für frühzeitige Breakout-Erkennung.
 """)
 
-        st.subheader("🏦 Wyckoff Strategien")
+        st.subheader("Wyckoff Strategien")
 
         st.markdown("""
-**Wyckoff Accumulation 🏦⬆️ / Wyckoff Distribution 🏦⬇️**
+**Wyckoff Accumulation ⬆ / Wyckoff Distribution ⬇**
 Basiert auf Richard Wyckoff's Theorie der Akkumulations- und Distributions-Phasen:
 - *Accumulation:* Smart Money kauft leise in einer Trading Range. Erkennt: Enge Range + abnehmendes Volumen + steigende OBV-Divergenz.
 - *Distribution:* Smart Money verkauft leise. Erkennt: Enge Range + abnehmendes Volumen + fallende OBV-Divergenz.
 
 Nutzt 30 Tage History für die Analyse.
-⚠️ **Hinweis:** Echte Wyckoff-Analyse erfordert Wochen/Monate. Diese Strategien sind vereinfachte Versionen.
+ **Hinweis:** Echte Wyckoff-Analyse erfordert Wochen/Monate. Diese Strategien sind vereinfachte Versionen.
 
 *Empfohlen für:* Swing/Position Trading (Wochen). Einer der stärksten Ansätze für „Smart Money Following".
 """)
 
-        st.subheader("📈 MA Bounce Strategien")
+        st.subheader("MA Bounce Strategien")
 
         st.markdown("""
 **SMA 50 Bounce Long / Short**
@@ -18514,12 +18565,12 @@ Findet Aktien die sich dem 50-Tage Simple Moving Average nähern (max 3% Abstand
 - *Long:* Preis kommt von OBEN → SMA50 als Support + SMA50 muss steigen
 - *Short:* Preis kommt von UNTEN → SMA50 als Resistance + SMA50 muss fallen
 
-**SMA 200 Bounce Long / Short 🏛️**
+**SMA 200 Bounce Long / Short **
 Wie SMA 50, aber mit dem 200-Tage MA — dem wichtigsten MA überhaupt!
 Paul Tudor Jones: „Nichts ist so zuverlässig wie der SMA 200 als Support/Resistance."
 *Empfohlen für:* Position Trading. SMA200-Bounces sind langfristig sehr zuverlässig.
 
-**EMA 21 Bounce (Swing) 🎯**
+**EMA 21 Bounce (Swing) **
 Linda Raschke's „Holy Grail" Setup: Pullback zur EMA 21 im Uptrend.
 EMA 21 ist DER Swing-Trading Moving Average. Max 2% Abstand.
 *Empfohlen für:* Swing Trading (3-10 Tage). Sehr zuverlässig in klaren Trends.
@@ -18528,29 +18579,29 @@ EMA 21 ist DER Swing-Trading Moving Average. Max 2% Abstand.
     # =========================================================================
     # FUTURES STRATEGIEN
     # =========================================================================
-    with st.expander("📈 Futures Strategien", expanded=False):
+    with st.expander("Futures Strategien", expanded=False):
 
         st.markdown("""
-**📈 Alle zeigen**
+** Alle zeigen**
 Zeigt alle verfügbaren Futures ohne Filter. Nützlich für einen schnellen Marktüberblick.
 
 ---
 
-**Futures Momentum 📈**
+**Futures Momentum **
 Futures mit >1% Tagesbewegung nach oben. Für Futures ist 1% bereits signifikant (gehebelt!).
 *Empfohlen für:* Intraday Trend-Following. Funktioniert besonders gut bei ES, NQ, CL.
 
-**Futures Breakdown 📉**
+**Futures Breakdown **
 Futures mit >1% Abverkauf. Short-Opportunity bei klarem Verkaufsdruck.
 *Empfohlen für:* Short Day Trades mit engen Stops.
 
-**Futures Reversal 🔄**
+**Futures Reversal **
 Vorherige Session gefallen (>-2%), aktuelle Session steigend (+0.5%+). Mögliche Trendumkehr.
 *Empfohlen für:* Contrarian Day Trades. Bestätigung abwarten bevor du einsteigst!
 
 ---
 
-**Globex Gap 🌙**
+**Globex Gap **
 Overnight Gap zwischen US Close und Asia/Europe Session. Mind. +0.3%.
 *Beste Zeit:* 18:00-08:00 UTC (Globex Overnight). Gap-Fill-Trades sind hier profitabel.
 
@@ -18558,21 +18609,21 @@ Overnight Gap zwischen US Close und Asia/Europe Session. Mind. +0.3%.
 Neue Richtung bei Eröffnung der London Session (+0.2%+).
 *Beste Zeit:* 07:00-10:00 UTC. Die Europa-Session setzt oft den Ton für den ganzen Tag.
 
-**NY Open Breakout 🗽**
+**NY Open Breakout **
 Breakout bei US-Börsenöffnung (+0.3%+). Höchste Liquidität des Tages.
 *Beste Zeit:* 13:30-16:00 UTC. Die „Power Hour" der Futures.
 
 ---
 
-**High Volatility ⚡**
+**High Volatility **
 Überdurchschnittliche Tagesbewegung (>2%). Für Futures bereits extrem — hohes Risiko, hohe Chance.
 *Empfohlen für:* Erfahrene Scalper mit striktem Risikomanagement.
 
-**Low Volatility Squeeze 🎯**
+**Low Volatility Squeeze **
 Extrem enge Tagesrange (±0.3%). Breakout-Setup — die Feder ist gespannt!
 *Empfohlen für:* Breakout-Trades in beide Richtungen. Stop-Loss eng, Target weit.
 
-**VIX Spike Alert 🔥**
+**VIX Spike Alert **
 Nur für VIX/VX Kontrakte! >5% Anstieg = Angst im Markt steigt massiv.
 *Empfohlen für:* Absicherung und Marktanalyse. VIX >25 = erhöhte Vorsicht bei Long-Positionen.
 """)
@@ -18580,23 +18631,23 @@ Nur für VIX/VX Kontrakte! >5% Anstieg = Angst im Markt steigt massiv.
     # =========================================================================
     # FOREX STRATEGIEN
     # =========================================================================
-    with st.expander("💱 Forex Strategien", expanded=False):
+    with st.expander("Forex Strategien", expanded=False):
 
         st.markdown("""
-**💱 Alle zeigen**
+** Alle zeigen**
 Zeigt alle Forex-Paare ohne Filter.
 
 ---
 
-**Forex Momentum 💹**
+**Forex Momentum **
 Starke Pip-Bewegung >0.3%. Für Forex ist das bereits signifikant!
 *Empfohlen für:* Intraday Trend-Following. Am besten während der London/NY Overlap.
 
-**Forex Reversal 🔄**
+**Forex Reversal **
 Letzte 24h gefallen (-0.5% bis -3%), jetzt steigend (+0.1%+). Mögliche Umkehr.
 *Empfohlen für:* Swing Trades. Bestätigung bei Support-Zonen abwarten.
 
-**Pip Hunter 🎯**
+**Pip Hunter **
 Die größten Pip-Bewegungen des Tages (>0.5%). Top Movers nach absoluter Bewegung.
 *Empfohlen für:* Momentum Scalps. Folge der Richtung der größten Moves.
 
@@ -18610,31 +18661,31 @@ Asiatische Session — oft ruhiger, aber JPY-Paare (USDJPY, EURJPY, GBPJPY, AUDJ
 Höchste Liquidität! EUR/GBP-Paare besonders aktiv. >0.2% Move = Momentum.
 *Empfohlen für:* Die produktivste Forex-Session. Trend-Trades + Breakouts.
 
-**NY Session 🗽** (13:00-22:00 UTC)
+**NY Session ** (13:00-22:00 UTC)
 USD-Paare am aktivsten: EURUSD, GBPUSD, USDJPY, USDCHF.
 *Empfohlen für:* USD-basierte Trades. News-Trades bei US-Wirtschaftsdaten.
 
-**London/NY Overlap 🔥** (13:00-17:00 UTC)
+**London/NY Overlap ** (13:00-17:00 UTC)
 Maximale Liquidität und Volatilität! >0.3% Move. BESTE Trading-Zeit im Forex.
 *Empfohlen für:* Alle Forex-Strategien. Hier passiert das meiste Volumen.
 
 ---
 
-**Safe Haven Flow 🛡️**
+**Safe Haven Flow **
 USD/CHF oder USD/JPY fallen >0.4% = Investoren flüchten in sichere Währungen (CHF, JPY).
 Risk-Off Signal für den gesamten Markt!
 *Empfohlen für:* Marktanalyse und Absicherung. Bei starkem Risk-Off → vorsichtig mit Aktien-Longs.
 
-**Risk-On Rally 🚀**
+**Risk-On Rally **
 AUD/USD, NZD/USD steigen >0.3% = Investoren gehen ins Risiko.
 Risk-On Signal — Aktienmärkte oft ebenfalls stark.
 *Empfohlen für:* Sentiment-Analyse. Risk-On → aggressive Trades möglich.
 
-**Exotic Movers 🌍**
+**Exotic Movers **
 Große Bewegungen (>0.5%) in Emerging Market Währungen. Hohe Volatilität!
 *Empfohlen für:* Erfahrene Forex-Trader. Exotics haben wider Spreads → größere Positionsgrößen nötig.
 
-**Range Bound 📊**
+**Range Bound **
 Minimale Bewegung (±0.15%). Seitwärtsmarkt = Range Trading möglich.
 *Empfohlen für:* Mean-Reversion Trades innerhalb der Range. Buy Low / Sell High.
 """)
@@ -18642,13 +18693,13 @@ Minimale Bewegung (±0.15%). Seitwärtsmarkt = Range Trading möglich.
     # =========================================================================
     # KRYPTO STRATEGIEN
     # =========================================================================
-    with st.expander("🌐 Krypto Strategien", expanded=False):
+    with st.expander("Krypto Strategien", expanded=False):
 
         st.markdown("""
-**🌐 Alle zeigen**
+** Alle zeigen**
 Zeigt alle Krypto-Assets ohne Filter.
 
-⚠️ **Krypto-Besonderheiten:** RVOL bei Krypto = Turnover Ratio normalisiert (10% Turnover = RVOL 1.0).
+ **Krypto-Besonderheiten:** RVOL bei Krypto = Turnover Ratio normalisiert (10% Turnover = RVOL 1.0).
 Typische Werte: 0.3-0.8 normal, >1.0 erhöht, >2.0 sehr hoch. Keine Gaps/Pre-Post Sessions.
 
 ---
@@ -18665,7 +18716,7 @@ Basiert auf 6-Tage Durchschnitt (nicht Vortag!). Bull Flag: Avg >+0.5%/Tag + heu
 >4% Bewegung + Close nahe High (Long) bzw. nahe Low (Short).
 *Empfohlen für:* Momentum Trades. Bei Krypto sind 4% normal — das ist der angepasste Threshold.
 
-**Low Cap Rockets 🚀**
+**Low Cap Rockets **
 Market Cap <$500M + RVOL >1.2 + Change >5%. Die explosivsten Altcoins!
 *Empfohlen für:* Hochspekulative Trades. Extrem hohes Risiko! Nur mit Kapital das du verlieren kannst.
 
@@ -18681,11 +18732,11 @@ Rücksetzer -3% bis -15% bei normalem Volumen (RVOL 0.3-1.5). Kein Panik-Dump.
 >3% Anstieg + RVOL >1.0. Positive Bewegung mit Volumen-Bestätigung.
 *Empfohlen für:* Trend-Following. Im 24/7 Krypto-Markt = aktuelles Momentum.
 
-**Whale Watch 🐋**
+**Whale Watch **
 RVOL >2.5 + Change >5%. Extrem hohes Volumen mit klarer Richtung.
 *Empfohlen für:* Folge den Walen! Whale-Buys bei Krypto sind oft über On-Chain Daten verifizierbar.
 
-**Accumulation 📦**
+**Accumulation **
 Seitwärts (±2%) + leicht erhöhtes Volumen (RVOL 1.2-3.0). Jemand sammelt leise ein.
 *Empfohlen für:* Position Trading (Wochen/Monate). Akkumulation vor großen Moves erkennen.
 """)
@@ -18693,49 +18744,49 @@ Seitwärts (±2%) + leicht erhöhtes Volumen (RVOL 1.2-3.0). Jemand sammelt leis
     # =========================================================================
     # INTERNATIONALE STRATEGIEN
     # =========================================================================
-    with st.expander("🌍 Internationale Aktien Strategien", expanded=False):
+    with st.expander("Internationale Aktien Strategien", expanded=False):
 
         st.markdown("""
-⚠️ **Besonderheiten:** EU/UK/JP Aktien bewegen sich WENIGER als US-Aktien → niedrigere Thresholds!
+ **Besonderheiten:** EU/UK/JP Aktien bewegen sich WENIGER als US-Aktien → niedrigere Thresholds!
 RVOL wird nach Tageszeit normalisiert (am Morgen niedrigeres Volumen = normal).
 
 ---
 
-**🌍 Alle zeigen** — Alle Aktien der Börse ohne Filter.
+** Alle zeigen** — Alle Aktien der Börse ohne Filter.
 
-**🌍 Gewinner / 🌍 Verlierer**
+** Gewinner / Verlierer**
 Einfach: Aktien im Plus (>0.3%) bzw. Minus (<-0.3%) heute. Für EU reicht das als Filter.
 *Empfohlen für:* Schnellen Marktüberblick.
 
-**🌍 Momentum**
+** Momentum**
 Change >1%. Für europäische Blue-Chips ist 1% bereits echtes Momentum!
 *Empfohlen für:* Trend-Following bei DAX, FTSE, CAC Aktien.
 
-**🌍 Breakout / 🌍 Breakdown**
+** Breakout / Breakdown**
 >1.5% Bewegung + Close nahe High (Breakout) bzw. Low (Breakdown).
 *Empfohlen für:* Day/Swing Trading an europäischen Börsen.
 
-**🌍 Dip Buy**
+** Dip Buy**
 Moderate Schwäche (-0.5% bis -5%). Kaufchance bei soliden Aktien.
 *Empfohlen für:* Value-orientierte Trades bei europäischen Dividenden-Aktien.
 
-**🌍 Volume Spike**
+** Volume Spike**
 RVOL >0.4 (normalisiert!) + positive Bewegung. Bei EU-Aktien selten >1.0 untertags.
 *Empfohlen für:* Erkennung von News-Events und institutioneller Aktivität.
 
-**🌍 Reversal**
+** Reversal**
 Vortag -1.5%+, heute +0.5%+. Bounce nach Schwäche.
 *Empfohlen für:* Contrarian Trades. Europäische Aktien kehren schneller zum Mittelwert zurück.
 
-**🌍 Bull Flag / 🌍 Bear Flag**
+** Bull Flag / Bear Flag**
 Starker Vortag (±1.5%+), heute enge Range (±1%). Angepasste Thresholds für EU!
 *Empfohlen für:* Swing Trading (2-5 Tage).
 
-**🌍 Big Movers**
+** Big Movers**
 Change >2%. Das ist VIEL für europäische Verhältnisse — meistens News-getrieben.
 *Empfohlen für:* Event-basiertes Trading. Earnings, M&A, Profit Warnings.
 
-**🌍 Whale Watch**
+** Whale Watch**
 RVOL >0.5 (normalisiert nach Tageszeit). Deutlich über Durchschnitt = Big Player aktiv.
 *Empfohlen für:* Smart Money Detection. Große Fonds bewegen europäische Aktien stärker als US.
 """)
@@ -18743,7 +18794,7 @@ RVOL >0.5 (normalisiert nach Tageszeit). Deutlich über Durchschnitt = Big Playe
     # =========================================================================
     # ALLGEMEINE TIPPS
     # =========================================================================
-    with st.expander("💡 Allgemeine Trading-Tipps", expanded=False):
+    with st.expander("Allgemeine Trading-Tipps", expanded=False):
 
         st.markdown("""
 ### Strategie-Kombination
@@ -18770,7 +18821,7 @@ Die besten Trades entstehen wenn **mehrere Strategien gleichzeitig** auf dieselb
 """)
 
     st.divider()
-    st.caption("📖 Alpha Station V70.7 PRO — Strategy Guide | Alle Strategien werden kontinuierlich optimiert.")
+    st.caption("Alpha Station V70.7 PRO — Strategy Guide | Alle Strategien werden kontinuierlich optimiert.")
 
 # -----------------------------------------------------------------------------
 # FOOTER
@@ -18783,6 +18834,6 @@ with c2:
     st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
 with c3:
     if st.session_state.auto_refresh_enabled:
-        st.caption(f"🔄 Auto-Refresh: {st.session_state.refresh_interval} Min")
+        st.caption(f"Auto-Refresh: {st.session_state.refresh_interval} Min")
     else:
-        st.caption("🔄 Auto-Refresh: Aus")
+        st.caption("Auto-Refresh: Aus")
