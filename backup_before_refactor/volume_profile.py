@@ -163,14 +163,12 @@ def _calculate_value_area(volume_bins, poc_bin, price_low, bin_size, total_volum
             break
         vol_up = float(volume_bins[va_high_bin + 1]) if can_go_up else -1
         vol_down = float(volume_bins[va_low_bin - 1]) if can_go_down else -1
-        # V68: Overshoot-Guard + Boundary-Exhaustion-Check
-        remaining = target_volume - accumulated
         if vol_up >= vol_down:
             va_high_bin += 1
-            accumulated += min(vol_up, remaining)
+            accumulated += vol_up
         else:
             va_low_bin -= 1
-            accumulated += min(vol_down, remaining)
+            accumulated += vol_down
     
     # VA High = obere Kante des hoechsten Bins, VA Low = untere Kante des niedrigsten Bins
     va_high_price = price_low + (va_high_bin + 1) * bin_size

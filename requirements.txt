@@ -1,7 +1,9 @@
 streamlit
 pandas
+numpy
 requests
-plotly
 pytz
 streamlit-autorefresh
 anthropic
+ib_insync
+nest_asyncio
