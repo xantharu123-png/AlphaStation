@@ -472,7 +472,7 @@ def detect_new_listings():
                if not any(pat in n["symbol"].upper() for pat in STOCK_PATTERNS)]
     filtered = before_filter - len(all_new)
     if filtered:
-        log.info(f"🏦 NLS: {filtered} Stock-Tokens/Indices gefiltert (kein Crypto-Pump-Dump)")
+        log.info(f" NLS: {filtered} Stock-Tokens/Indices gefiltert (kein Crypto-Pump-Dump)")
 
     # ── MEXC isNew-Flag als Bonus-Erkennung ──
     # Coins die schon im Cache waren aber von MEXC als "isNew" markiert sind
@@ -484,7 +484,7 @@ def detect_new_listings():
             if sym not in known_new and not any(pat in sym.upper() for pat in STOCK_PATTERNS):
                 all_new.append(p)
                 known_new.add(sym)
-                log.info(f"🏷️ NLS: {sym} via MEXC isNew-Flag erkannt (war schon im Cache)")
+                log.info(f" NLS: {sym} via MEXC isNew-Flag erkannt (war schon im Cache)")
 
     # ── Bitget launchTime Bonus-Erkennung ──
     # Coins mit launchTime in den letzten 7 Tagen = kürzlich gelistet
@@ -496,7 +496,7 @@ def detect_new_listings():
                 all_new.append(p)
                 known_new.add(sym)
                 lt_str = datetime.fromtimestamp(p["launch_time"] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
-                log.info(f"🏷️ NLS: {sym} via Bitget launchTime erkannt (gelistet {lt_str})")
+                log.info(f" NLS: {sym} via Bitget launchTime erkannt (gelistet {lt_str})")
 
     if all_new:
         log.info(f"🆕 NLS TOTAL: {len(all_new)} neue/kürzliche Listings über alle Exchanges")
@@ -528,7 +528,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     details = []
 
     if not candles or len(candles) < 3:
-        return 0, ["❌ Zu wenige Candles (<3)"], {}
+        return 0, ["[X] Zu wenige Candles (<3)"], {}
 
     # ── Basisdaten ──
     first_price = candles[0]["open"]
@@ -538,7 +538,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     n = len(candles)
 
     if first_price <= 0 or current_price <= 0 or ath <= 0:
-        return 0, ["❌ Ungültige Preisdaten"], {}
+        return 0, ["[X] Ungültige Preisdaten"], {}
 
     pump_pct = (ath - first_price) / first_price * 100
     current_from_ath = (ath - current_price) / ath * 100 if ath > 0 else 0
@@ -571,7 +571,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     else:
         pts = 0
     score += pts
-    details.append(f"📈 Pump: {pump_pct:+.0f}% vom Start → {pts}/20 Punkte")
+    details.append(f"UP Pump: {pump_pct:+.0f}% vom Start → {pts}/20 Punkte")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 2. VOLUME DECLINE (0-20)
@@ -600,7 +600,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
 
     score += pts
     pump_data["vol_ratio"] = round(vol_ratio, 2)
-    details.append(f"📊 Volume Decline: {vol_ratio:.0%} der ersten Hälfte → {pts}/20")
+    details.append(f" Volume Decline: {vol_ratio:.0%} der ersten Hälfte → {pts}/20")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 3. MOMENTUM DECAY (0-15)
@@ -637,9 +637,9 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
         score += pts
         pump_data["momentum_recent"] = round(avg_recent, 3)
         pump_data["momentum_earlier"] = round(avg_earlier, 3)
-        details.append(f"🔄 Momentum: {avg_earlier:+.2f}%/h → {avg_recent:+.2f}%/h → {pts}/15")
+        details.append(f" Momentum: {avg_earlier:+.2f}%/h → {avg_recent:+.2f}%/h → {pts}/15")
     else:
-        details.append("🔄 Momentum: zu wenig Candles (<6)")
+        details.append(" Momentum: zu wenig Candles (<6)")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 4. WICK REJECTION (0-15)
@@ -670,7 +670,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
 
     score += pts
     pump_data["avg_upper_wick_pct"] = round(avg_wick, 1)
-    details.append(f"🕯️ Wick Rejection: ∅{avg_wick:.0f}% obere Dochte → {pts}/15")
+    details.append(f" Wick Rejection: ∅{avg_wick:.0f}% obere Dochte → {pts}/15")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 5. PRICE vs ATH (0-15)
@@ -705,7 +705,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
 
     score += pts
     pump_data["pos_in_range"] = round(pos_in_range, 2)
-    details.append(f"📍 Position: {pos_in_range:.0%} im Range, {current_from_ath:.1f}% unter ATH → {pts}/15")
+    details.append(f" Position: {pos_in_range:.0%} im Range, {current_from_ath:.1f}% unter ATH → {pts}/15")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 6. SPREAD & DEPTH (0-10)
@@ -726,9 +726,9 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
             pts = 1
 
         pump_data["spread_pct"] = round(spread_pct, 3)
-        details.append(f"💧 Spread: {spread_pct:.2f}% → {pts}/10")
+        details.append(f" Spread: {spread_pct:.2f}% → {pts}/10")
     else:
-        details.append("💧 Spread: keine Daten")
+        details.append(" Spread: keine Daten")
 
     if book:
         bid_depth = sum(p * q for p, q in book.get("bids", []))
@@ -753,16 +753,16 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
         # Hohe OI bei fallenden Preisen = trapped longs
         if current_from_ath >= 5 and oi > 0:
             pts = 5
-            details.append(f"🔗 OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/5 (Trapped Longs)")
+            details.append(f" OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/5 (Trapped Longs)")
         elif current_from_ath >= 2:
             pts = 2
-            details.append(f"🔗 OI: {oi:,.0f} → {pts}/5")
+            details.append(f" OI: {oi:,.0f} → {pts}/5")
         else:
             pts = 0
-            details.append(f"🔗 OI: {oi:,.0f} (neutral)")
+            details.append(f" OI: {oi:,.0f} (neutral)")
         score += pts
     else:
-        details.append("🔗 OI: keine Daten")
+        details.append(" OI: keine Daten")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 8. FUNDING RATE (0-5 Bonus)
@@ -782,15 +782,15 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
             pts = 0
         score += pts
         pump_data["funding_rate"] = round(fr_pct, 4)
-        details.append(f"💰 Funding: {fr_pct:.3f}% (positive = Longs zahlen) → {pts}/5")
+        details.append(f" Funding: {fr_pct:.3f}% (positive = Longs zahlen) → {pts}/5")
     elif fr and fr < 0:
         # Negative Funding = Shorts zahlen → gegen uns, Score-Malus
         fr_pct = fr * 100
         score = max(0, score - 3)
         pump_data["funding_rate"] = round(fr_pct, 4)
-        details.append(f"💰 Funding: {fr_pct:.3f}% (negativ! Shorts zahlen) → -3 Malus")
+        details.append(f" Funding: {fr_pct:.3f}% (negativ! Shorts zahlen) → -3 Malus")
     else:
-        details.append("💰 Funding: keine Daten (Crypto.com)")
+        details.append(" Funding: keine Daten (Crypto.com)")
 
     return min(100, score), details, pump_data
 
@@ -811,7 +811,7 @@ def check_safety(ticker, book, candles):
     # 1. Volume Minimum
     vol_24h = ticker.get("volume_usd_24h", 0) if ticker else 0
     if vol_24h < CONFIG["min_volume_24h_usd"]:
-        warnings.append(f"⚠️ Volume zu niedrig: ${vol_24h:,.0f} (min ${CONFIG['min_volume_24h_usd']:,})")
+        warnings.append(f"[!] Volume zu niedrig: ${vol_24h:,.0f} (min ${CONFIG['min_volume_24h_usd']:,})")
         is_safe = False
 
     # 2. Spread Maximum
@@ -819,7 +819,7 @@ def check_safety(ticker, book, candles):
         mid = (ticker["bid"] + ticker["ask"]) / 2
         spread = (ticker["ask"] - ticker["bid"]) / mid * 100 if mid > 0 else 99
         if spread > CONFIG["max_spread_pct"]:
-            warnings.append(f"⚠️ Spread zu weit: {spread:.2f}% (max {CONFIG['max_spread_pct']}%)")
+            warnings.append(f"[!] Spread zu weit: {spread:.2f}% (max {CONFIG['max_spread_pct']}%)")
             is_safe = False
 
     # 3. Orderbook Depth
@@ -828,7 +828,7 @@ def check_safety(ticker, book, candles):
         ask_depth = sum(p * q for p, q in book.get("asks", []))
         min_side = min(bid_depth, ask_depth)
         if min_side < CONFIG["min_book_depth_usd"]:
-            warnings.append(f"⚠️ Orderbuch dünn: ${min_side:,.0f}/Seite (min ${CONFIG['min_book_depth_usd']:,})")
+            warnings.append(f"[!] Orderbuch dünn: ${min_side:,.0f}/Seite (min ${CONFIG['min_book_depth_usd']:,})")
             is_safe = False
 
     # 4. Candle-Anomalie: Keine Trades in letzter Stunde = tot
@@ -836,7 +836,7 @@ def check_safety(ticker, book, candles):
         last_vol = candles[-1].get("volume_usd", 0)
         prev_vol = candles[-2].get("volume_usd", 0)
         if last_vol == 0 and prev_vol == 0:
-            warnings.append("⚠️ Kein Volume in letzten 2 Stunden — Coin möglicherweise tot")
+            warnings.append("[!] Kein Volume in letzten 2 Stunden — Coin möglicherweise tot")
             is_safe = False
 
     # 5. Preis-Crash Detection (Rug Pull Schutz)
@@ -847,11 +847,11 @@ def check_safety(ticker, book, candles):
                 drop = (candles[i]["close"] - candles[i]["open"]) / candles[i]["open"] * 100
                 recent_drop += drop
         if recent_drop < -30:
-            warnings.append(f"🚨 Möglicher Rug Pull: {recent_drop:.0f}% in 3 Stunden!")
+            warnings.append(f"[!!] Möglicher Rug Pull: {recent_drop:.0f}% in 3 Stunden!")
             is_safe = False
 
     if is_safe:
-        warnings.append("✅ Alle Safety-Checks bestanden")
+        warnings.append("[OK] Alle Safety-Checks bestanden")
 
     return is_safe, warnings
 
@@ -888,34 +888,34 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
 
     # ── Timing Score ──
     if exh_score >= CONFIG["exh_short_entry"] and safety_ok:
-        timing = "🔴 JETZT SHORTEN"
+        timing = "[-] JETZT SHORTEN"
         timing_quality = 5
     elif exh_score >= CONFIG["exh_short_entry"] and not safety_ok:
-        timing = "🟡 SIGNAL aber Liquiditäts-Risiko"
+        timing = "[~] SIGNAL aber Liquiditäts-Risiko"
         timing_quality = 3
     elif exh_score >= CONFIG["exh_watch"]:
-        timing = "🟢 WATCHLIST — noch nicht reif"
+        timing = "[+] WATCHLIST — noch nicht reif"
         timing_quality = 2
     else:
-        timing = "⚪ Kein Signal — Pump noch aktiv"
+        timing = "[o] Kein Signal — Pump noch aktiv"
         timing_quality = 0
 
     # ── Grading ──
     if exh_score >= 80 and rr1 >= 2.0 and safety_ok:
         grade = "S"
-        grade_label = "🏆 S — ELITE SHORT"
+        grade_label = " S — ELITE SHORT"
     elif exh_score >= 65 and rr1 >= 1.5 and safety_ok:
         grade = "A"
-        grade_label = "🅰️ A — STRONG SHORT"
+        grade_label = " A — STRONG SHORT"
     elif exh_score >= 50 and rr1 >= 1.0:
         grade = "B"
-        grade_label = "🅱️ B — MODERATE"
+        grade_label = " B — MODERATE"
     elif exh_score >= 40:
         grade = "C"
-        grade_label = "©️ C — WEAK"
+        grade_label = " C — WEAK"
     else:
         grade = "D"
-        grade_label = "❌ D — NO TRADE"
+        grade_label = "[X] D — NO TRADE"
 
     return {
         "symbol": symbol,
@@ -1038,7 +1038,7 @@ def run_new_listing_scanner():
         active = {k: v for k, v in monitoring.items()
                   if v.get("status") == "monitoring"}
 
-        log.info(f"🔍 NLS: {len(active)} Listings in Überwachung, "
+        log.info(f" NLS: {len(active)} Listings in Überwachung, "
                  f"{len(new_listings)} neu erkannt, "
                  f"{len(all_perps)} PERP-Instrumente total")
 
@@ -1082,7 +1082,7 @@ def run_new_listing_scanner():
                 # Wenn Preis schon >40% unter ATH ist, shorten wir NICHT (falling knife)
                 from_ath = pump_data.get("from_ath_pct", 0)
                 if from_ath > 40:
-                    log.info(f"⏭️ NLS: {symbol} übersprungen — bereits {from_ath:.0f}% unter ATH (falling knife)")
+                    log.info(f" NLS: {symbol} übersprungen — bereits {from_ath:.0f}% unter ATH (falling knife)")
                     mon_data["status"] = "expired_dumped"
                     results["monitoring"].append({
                         "symbol": symbol,
@@ -1092,7 +1092,7 @@ def run_new_listing_scanner():
                         "volume_ratio": pump_data.get("vol_ratio", 0),
                         "safety_ok": safety_ok,
                         "grade": "SKIP",
-                        "timing": "⏭️ Already dumped",
+                        "timing": " Already dumped",
                         "hours_tracked": pump_data.get("hours_tracked", 0),
                     })
                     continue
@@ -1116,7 +1116,7 @@ def run_new_listing_scanner():
                 if signal["timing_quality"] >= 4:
                     results["signals"].append(entry)
                     mon_data["status"] = "signal"
-                    log.info(f"🔴 NLS SHORT SIGNAL: {symbol} — ExhScore {exh_score}, "
+                    log.info(f"[-] NLS SHORT SIGNAL: {symbol} — ExhScore {exh_score}, "
                              f"Pump {pump_data.get('pump_pct', 0):.0f}%, "
                              f"RR {signal['rr1']:.1f}x, Grade {signal['grade']}")
                 elif signal["timing_quality"] >= 2:
@@ -1182,7 +1182,7 @@ def seed_instrument_cache():
     if all_seeded:
         return False  # Alle Caches existieren schon
 
-    log.info("🌱 NLS: Erster Start — lade initiale Instrument-Listen für 3 Exchanges...")
+    log.info(" NLS: Erster Start — lade initiale Instrument-Listen für 3 Exchanges...")
     total = 0
 
     # Crypto.com
@@ -1208,7 +1208,7 @@ def seed_instrument_cache():
                     "seeded": True,
                 }, indent=2))
                 total += len(symbols)
-                log.info(f"🌱 NLS: {len(symbols)} Perps von {ex_name} gecached")
+                log.info(f" NLS: {len(symbols)} Perps von {ex_name} gecached")
             time.sleep(1)
         except Exception as e:
             log.warning(f"NLS Seed {ex_name}: {e}\n{traceback.format_exc()}")
@@ -1223,5 +1223,5 @@ def seed_instrument_cache():
             "note": "Multi-Exchange: siehe nls_cache_*.json",
         }, indent=2))
 
-    log.info(f"🌱 NLS: Total {total} Perps über 3 Exchanges gecached")
+    log.info(f" NLS: Total {total} Perps über 3 Exchanges gecached")
     return total > 0

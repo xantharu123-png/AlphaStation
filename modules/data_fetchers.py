@@ -35,20 +35,20 @@ def _load_bpiq_catalyst_cache():
 
 # Catalyst detection keywords (used by _detect_catalyst)
 CATALYST_KEYWORDS = {
-    "📊 EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
-    "💊 FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
-    "🚨 OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
-    "🤝 M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
-    "📋 CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
-    "⚖️ LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
-    "📈 UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
-    "📉 DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
-    "🚨 REVERSE SPLIT": {"keywords": ["reverse split", "reverse stock split", "r/s"], "sentiment": "bearish"},
-    "🔀 STOCK SPLIT": {"keywords": ["stock split", "forward split"], "sentiment": "bullish"},
-    "💵 DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
-    "👤 INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
-    "🚀 PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
-    "🔻 BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
+    " EARNINGS": {"keywords": ["earnings", "revenue", "profit", "EPS", "guidance", "quarterly", "fiscal", "beat", "miss", "outlook"], "sentiment": "neutral"},
+    " FDA/BIO": {"keywords": ["FDA", "approval", "trial", "phase", "drug", "clinical", "PDUFA", "NDA", "breakthrough", "therapy", "patent"], "sentiment": "neutral"},
+    "[!!] OFFERING": {"keywords": ["offering", "dilution", "shelf", "secondary", "ATM", "warrant", "convertible", "raise", "registered direct", "public offering"], "sentiment": "bearish"},
+    " M&A": {"keywords": ["acquisition", "merger", "takeover", "buyout", "deal", "purchase agreement"], "sentiment": "bullish"},
+    " CONTRACT": {"keywords": ["contract", "awarded", "partnership", "agreement", "collaboration", "deal with"], "sentiment": "bullish"},
+    " LEGAL": {"keywords": ["lawsuit", "SEC", "investigation", "settlement", "subpoena", "fraud", "class action", "indictment"], "sentiment": "bearish"},
+    "UP UPGRADE": {"keywords": ["upgrade", "price target", "buy rating", "overweight", "outperform"], "sentiment": "bullish"},
+    "DN DOWNGRADE": {"keywords": ["downgrade", "sell rating", "underweight", "underperform", "cut"], "sentiment": "bearish"},
+    "[!!] REVERSE SPLIT": {"keywords": ["reverse split", "reverse stock split", "r/s"], "sentiment": "bearish"},
+    " STOCK SPLIT": {"keywords": ["stock split", "forward split"], "sentiment": "bullish"},
+    " DIVIDEND": {"keywords": ["dividend", "payout", "distribution"], "sentiment": "bullish"},
+    " INSIDER": {"keywords": ["insider", "CEO buy", "director purchase", "10b5"], "sentiment": "bullish"},
+    "[>>] PRODUCT": {"keywords": ["launch", "release", "new product", "unveil", "announce"], "sentiment": "bullish"},
+    " BANKRUPTCY": {"keywords": ["bankruptcy", "chapter 11", "chapter 7", "delisting", "going concern"], "sentiment": "bearish"},
 }
 
 
@@ -531,22 +531,22 @@ def get_ticker_details(poly_key, ticker):
         # Float Kategorie schätzen (Shares Outstanding als Proxy)
         # Echtes Float = Shares - Insider - Institutional, aber das haben wir nicht
         float_category = "UNKNOWN"
-        float_emoji = "❓"
+        float_emoji = "?"
         
         if shares_out > 0:
             shares_millions = shares_out / 1_000_000
             if shares_millions < 10:
                 float_category = "MICRO"
-                float_emoji = "🔥🔥🔥"  # Sehr explosiv
+                float_emoji = "[*][*][*]"  # Sehr explosiv
             elif shares_millions < 20:
                 float_category = "LOW"
-                float_emoji = "🔥🔥"  # Explosiv
+                float_emoji = "[*][*]"  # Explosiv
             elif shares_millions < 50:
                 float_category = "MEDIUM"
-                float_emoji = "🔥"
+                float_emoji = "[*]"
             else:
                 float_category = "HIGH"
-                float_emoji = "📊"
+                float_emoji = ""
         
         return {
             "shares_outstanding": shares_out,
@@ -565,7 +565,7 @@ def get_ticker_details(poly_key, ticker):
             "market_cap": 0,
             "market_cap_millions": 0,
             "float_category": "UNKNOWN",
-            "float_emoji": "❓",
+            "float_emoji": "?",
             "name": "",
             "description": ""
         }
@@ -700,7 +700,7 @@ def _get_bpiq_catalysts(ticker):
 
     Felder:
     - readout_score: 0-15 (Bonus für Score-Berechnung)
-    - readout_label: UI-Label (🔴 PDUFA, 🟡 Readout etc.)
+    - readout_label: UI-Label ([-] PDUFA, [~] Readout etc.)
     - catalyst_readouts: Liste der Catalyst-Events
     - bpiq_available: True wenn BPIQ-Daten vorhanden
     """
@@ -749,18 +749,18 @@ def _get_bpiq_catalysts(ticker):
         if "PDUFA" in stage:
             # PDUFA = besonders wichtig, eigenes Format
             if cat == "IMMINENT":
-                readout_label = f"🔴 PDUFA {top['catalyst_date_text']} — {drug_name}"
+                readout_label = f"[-] PDUFA {top['catalyst_date_text']} — {drug_name}"
             elif cat == "UPCOMING":
-                readout_label = f"🟡 PDUFA in {days}d — {drug_name}"
+                readout_label = f"[~] PDUFA in {days}d — {drug_name}"
             elif cat == "OVERDUE":
-                readout_label = f"🔴 PDUFA ÜBERFÄLLIG ({abs(days)}d) — {drug_name}"
+                readout_label = f"[-] PDUFA ÜBERFÄLLIG ({abs(days)}d) — {drug_name}"
         else:
             if cat == "OVERDUE":
-                readout_label = f"🔴 {stage} ÜBERFÄLLIG ({abs(days)}d) — {drug_name}"
+                readout_label = f"[-] {stage} ÜBERFÄLLIG ({abs(days)}d) — {drug_name}"
             elif cat == "IMMINENT":
-                readout_label = f"🟡 {stage} in {days}d — {drug_name}"
+                readout_label = f"[~] {stage} in {days}d — {drug_name}"
             elif cat == "UPCOMING":
-                readout_label = f"🟢 {stage} in {days}d — {drug_name}"
+                readout_label = f"[+] {stage} in {days}d — {drug_name}"
 
     return {
         "readout_score": readout_score,

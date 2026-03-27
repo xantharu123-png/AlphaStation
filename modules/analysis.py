@@ -2505,7 +2505,7 @@ def calculate_breakout_timing(row_data, fib_info=None):
         dict mit:
         - score: 0-6 Punkte
         - rating: "FRÜH", "OK", oder "ZU SPÄT"
-        - emoji: ✅, ⚠️, oder ❌
+        - emoji: [OK], [!], oder [X]
         - factors: Liste der Einzelbewertungen
         - risk: Risiko-Einschätzung
     """
@@ -2614,17 +2614,17 @@ def calculate_breakout_timing(row_data, fib_info=None):
     
     if score >= 5:
         rating = "FRÜH"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Niedrig - Guter Einstieg möglich"
         color = "green"
     elif score >= 3:
         rating = "OK"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Mittel - Vorsichtig positionieren"
         color = "orange"
     else:
         rating = "ZU SPÄT"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Hoch - Besser auf Pullback warten"
         color = "red"
     
@@ -2748,17 +2748,17 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     
     if score >= 4.5:
         rating = "GO"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Gap & Go Setup - Trend folgen"
         recommendation = "Gap hält wahrscheinlich - Trend folgen"
     elif score >= 3:
         rating = "WARTEN"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Abwarten - Opening Range beobachten"
         recommendation = "15-30min warten, dann entscheiden"
     else:
         rating = "FADE"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Gap Fill wahrscheinlich - Vorsicht"
         recommendation = "Gap könnte füllen - Gegen-Trade oder Skip"
     
@@ -2873,17 +2873,17 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     
     if score >= 4:
         rating = "PERFEKT"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Idealer Bounce-Einstieg"
         recommendation = "Entry am MA mit Stop darunter"
     elif score >= 2.5:
         rating = "GUT"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Akzeptabler Einstieg"
         recommendation = "Entry möglich, engerer Stop"
     else:
         rating = "WARTEN"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Kein klarer Bounce"
         recommendation = "Auf besseren Entry warten"
     
@@ -3013,17 +3013,17 @@ def calculate_reversal_timing(row_data, is_long=True):
     
     if score >= 4.5:
         rating = "EXTREM"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Stark überdehnt - Reversal wahrscheinlich"
         recommendation = "Entry mit Stop unter Extrem"
     elif score >= 3:
         rating = "MÖGLICH"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Überdehnt - Reversal möglich"
         recommendation = "Auf Bestätigung warten"
     else:
         rating = "ZU FRÜH"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Nicht genug überdehnt"
         recommendation = "Warten auf stärkere Überdehnung"
     
@@ -3129,17 +3129,17 @@ def calculate_void_timing(row_data):
     
     if score >= 4:
         rating = "STARK"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Klares Void-Setup"
         recommendation = "Entry Richtung Void mit Target am Void-Ende"
     elif score >= 2.5:
         rating = "OK"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Akzeptables Setup"
         recommendation = "Entry möglich, konservatives Target"
     else:
         rating = "SCHWACH"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Kein klares Void-Setup"
         recommendation = "Besseres Setup abwarten"
     
@@ -3248,17 +3248,17 @@ def calculate_insider_timing(row_data):
     
     if score >= 4:
         rating = "STARK"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Starkes Insider-Signal"
         recommendation = "Entry mit Stop unter Recent Low"
     elif score >= 2.5:
         rating = "MODERAT"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Moderates Signal"
         recommendation = "Auf weitere Bestätigung achten"
     else:
         rating = "SCHWACH"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Schwaches Signal"
         recommendation = "Nicht allein auf Insider verlassen"
     

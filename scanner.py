@@ -1017,7 +1017,7 @@ def calculate_breakout_timing(row_data, fib_info=None):
         dict mit:
         - score: 0-6 Punkte
         - rating: "FRÜH", "OK", oder "ZU SPÄT"
-        - emoji: ✅, ⚠️, oder ❌
+        - emoji: [OK], [!], oder [X]
         - factors: Liste der Einzelbewertungen
         - risk: Risiko-Einschätzung
     """
@@ -1126,17 +1126,17 @@ def calculate_breakout_timing(row_data, fib_info=None):
     
     if score >= 5:
         rating = "FRÜH"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Niedrig - Guter Einstieg möglich"
         color = "green"
     elif score >= 3:
         rating = "OK"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Mittel - Vorsichtig positionieren"
         color = "orange"
     else:
         rating = "ZU SPÄT"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Hoch - Besser auf Pullback warten"
         color = "red"
     
@@ -1260,17 +1260,17 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     
     if score >= 4.5:
         rating = "GO"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Gap & Go Setup - Trend folgen"
         recommendation = "Gap hält wahrscheinlich - Trend folgen"
     elif score >= 3:
         rating = "WARTEN"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Abwarten - Opening Range beobachten"
         recommendation = "15-30min warten, dann entscheiden"
     else:
         rating = "FADE"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Gap Fill wahrscheinlich - Vorsicht"
         recommendation = "Gap könnte füllen - Gegen-Trade oder Skip"
     
@@ -1385,17 +1385,17 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     
     if score >= 4:
         rating = "PERFEKT"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Idealer Bounce-Einstieg"
         recommendation = "Entry am MA mit Stop darunter"
     elif score >= 2.5:
         rating = "GUT"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Akzeptabler Einstieg"
         recommendation = "Entry möglich, engerer Stop"
     else:
         rating = "WARTEN"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Kein klarer Bounce"
         recommendation = "Auf besseren Entry warten"
     
@@ -1525,17 +1525,17 @@ def calculate_reversal_timing(row_data, is_long=True):
     
     if score >= 4.5:
         rating = "EXTREM"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Stark überdehnt - Reversal wahrscheinlich"
         recommendation = "Entry mit Stop unter Extrem"
     elif score >= 3:
         rating = "MÖGLICH"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Überdehnt - Reversal möglich"
         recommendation = "Auf Bestätigung warten"
     else:
         rating = "ZU FRÜH"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Nicht genug überdehnt"
         recommendation = "Warten auf stärkere Überdehnung"
     
@@ -1641,17 +1641,17 @@ def calculate_void_timing(row_data):
     
     if score >= 4:
         rating = "STARK"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Klares Void-Setup"
         recommendation = "Entry Richtung Void mit Target am Void-Ende"
     elif score >= 2.5:
         rating = "OK"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Akzeptables Setup"
         recommendation = "Entry möglich, konservatives Target"
     else:
         rating = "SCHWACH"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Kein klares Void-Setup"
         recommendation = "Besseres Setup abwarten"
     
@@ -1760,17 +1760,17 @@ def calculate_insider_timing(row_data):
     
     if score >= 4:
         rating = "STARK"
-        emoji = "✅"
+        emoji = "[OK]"
         risk = "Starkes Insider-Signal"
         recommendation = "Entry mit Stop unter Recent Low"
     elif score >= 2.5:
         rating = "MODERAT"
-        emoji = "⚠️"
+        emoji = "[!]"
         risk = "Moderates Signal"
         recommendation = "Auf weitere Bestätigung achten"
     else:
         rating = "SCHWACH"
-        emoji = "❌"
+        emoji = "[X]"
         risk = "Schwaches Signal"
         recommendation = "Nicht allein auf Insider verlassen"
     
@@ -2944,7 +2944,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # Harmonic Patterns (wenn erkannt)
         if harmonic_data:
             for hp in harmonic_data[:2]:
-                direction_emoji = "🟢" if hp.get("direction", "LONG") == "LONG" else "🔴"
+                direction_emoji = "[+]" if hp.get("direction", "LONG") == "LONG" else "[-]"
                 st.success(f"{hp.get('emoji', '')} **{hp.get('pattern', 'Unknown')}** {direction_emoji} {hp['direction']}") if hp.get("direction", "LONG") == "LONG" else st.error(f"{hp.get('emoji', '')} **{hp.get('pattern', 'Unknown')}** {direction_emoji} {hp['direction']}")
                 st.caption(f"Score: {hp.get('score', 0)} | Matches: {hp['matches']} | Erfolg: {hp.get('success_rate', '?')}%")
                 if hp.get("trade"):
@@ -2954,7 +2954,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
         # Wyckoff Patterns (wenn erkannt)
         if wyckoff_data:
             for wp in wyckoff_data[:2]:
-                direction_emoji = "🟢" if wp.get("direction", "LONG") == "LONG" else "🔴"
+                direction_emoji = "[+]" if wp.get("direction", "LONG") == "LONG" else "[-]"
                 if wp.get("direction", "LONG") == "LONG":
                     st.success(f"**Wyckoff {wp.get('type', 'Unknown')}** {direction_emoji} {wp.get('phase', 'Unknown')}")
                 else:
@@ -3038,7 +3038,7 @@ def display_ai_chart_analyzer(ticker, poly_key, timeframe="1H"):
             trade = ai_analysis.get("trade_idea", {})
             bias = ai_analysis.get("bias", "Neutral")
             
-            bias_emoji = "🟢" if trade.get("direction", "LONG") == "LONG" else "🔴"
+            bias_emoji = "[+]" if trade.get("direction", "LONG") == "LONG" else "[-]"
             st.markdown(f"### {bias_emoji} {trade.get('direction', 'LONG')}")
             
             col_t1, col_t2 = st.columns(2)
@@ -3837,7 +3837,7 @@ def fetch_crypto_data():
                 
                 # Breakout Health für Crypto — ALLE Strategien
                 breakout_health = None
-                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇", "Selling"]
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "DN", "Selling"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
 
                 if (setup_direction == "long" and change_24h > 0) or (setup_direction == "short" and change_24h < 0):
@@ -5161,19 +5161,19 @@ def fetch_orb_scanner(poly_key):
             # Rating
             if score >= 75:
                 rating = "A+"
-                emoji = "🟢"
+                emoji = "[+]"
             elif score >= 60:
                 rating = "A"
-                emoji = "🟢"
+                emoji = "[+]"
             elif score >= 45:
                 rating = "B"
-                emoji = "🟡"
+                emoji = "[~]"
             elif score >= 30:
                 rating = "C"
-                emoji = "🟠"
+                emoji = "[!]"
             else:
                 rating = "D"
-                emoji = "🔴"
+                emoji = "[-]"
 
             # ── FIX: Entry/Stop/Target — nutze aktuellen Preis als Entry ──
             # Alter Code: Entry = OR-High → R:R war immer fix 1.5:1
@@ -6002,7 +6002,7 @@ def fetch_stock_data(poly_key, session="Regular", skip_filters=False):
 
                 # Breakout Health Assessment — für ALLE Strategien mit positiver Change
                 breakout_health = None
-                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "⬇", "Selling"]
+                SHORT_KEYWORDS = ["Short", "Bear", "Breakdown", "Losers", "Down", "Distribution", "DN", "Selling"]
                 setup_direction = "short" if any(kw in current_strategy for kw in SHORT_KEYWORDS) else "long"
 
                 if (setup_direction == "long" and change > 0) or (setup_direction == "short" and change < 0):
@@ -6746,7 +6746,7 @@ def _render_pm_item(item, direction="long"):
             if pm_mom != 0:
                 mom_sign = "+" if pm_mom > 0 else ""
                 mom_color = "green" if ((is_long and pm_mom > 0) or (not is_long and pm_mom < 0)) else "red"
-                mom_emoji = "🟢" if mom_color == "green" else "🔴"
+                mom_emoji = "[+]" if mom_color == "green" else "[-]"
                 st.caption(f"Gap: {item.get('Gap%', 0):+.1f}% | PM Momentum: **{mom_emoji} {mom_sign}{pm_mom:.1f}%** | RS: {item.get('RS_vs_SPY', 0):+.1f}%")
             else:
                 st.caption(f"Gap: {item.get('Gap%', 0):+.1f}% | RS vs SPY: {item.get('RS_vs_SPY', 0):+.1f}%")
@@ -6811,7 +6811,7 @@ def _render_pm_item(item, direction="long"):
         if news_list:
             news_text = ""
             for n in news_list[:2]:
-                sentiment_emoji = "🟢" if n.get('sentiment') == 'positive' else "🔴" if n.get('sentiment') == 'negative' else "⚪"
+                sentiment_emoji = "[+]" if n.get('sentiment') == 'positive' else "[-]" if n.get('sentiment') == 'negative' else "[o]"
                 cat_tag = f" [{n.get('catalyst', '')}]" if n.get('catalyst') else ""
                 news_text += f"{sentiment_emoji} {n.get('title', '')[:60]}...{cat_tag} ({n.get('published', '')})\n"
             if news_text:
@@ -7159,7 +7159,7 @@ def display_pm_tracker(poly_key):
         # Zeige gespeicherte Setups ohne Auswertung
         st.markdown("### Gespeicherte Setups")
         for t in tickers[:10]:
-            direction_emoji = "🟢" if t.get("direction", "") == "LONG" else "🔴"
+            direction_emoji = "[+]" if t.get("direction", "") == "LONG" else "[-]"
             st.markdown(f"**{direction_emoji} {t.get('ticker', '')}** — {t.get('pm_change', 0):+.1f}% | {t.get('setup_type', '')} | Signal: {t.get('entry_signal', '')}")
             for si, s in enumerate(t.get("setups", [])):
                 is_primary = "⭐" if si == t.get("primary_idx", 0) else "  "
@@ -7235,7 +7235,7 @@ def display_pm_tracker(poly_key):
                 win_rate = (stats.get("wins", 0) / entries * 100) if entries > 0 else 0
                 avg_r = stats.get("total_r", 0) / entries if entries > 0 else 0
                 
-                emoji = "🚀" if "Breakout" in sname or "Breakdown" in sname else "🔄" if "VWAP" in sname or "Rejection" in sname else "📐"
+                emoji = "[>>]" if "Breakout" in sname or "Breakdown" in sname else "[<>]" if "VWAP" in sname or "Rejection" in sname else "[~]"
                 
                 st.markdown(f"**{emoji} {sname}**")
                 
@@ -7255,7 +7255,7 @@ def display_pm_tracker(poly_key):
     
     for t in evaluated:
         result = t["results"]
-        direction_emoji = "🟢" if t.get("direction", "") == "LONG" else "🔴"
+        direction_emoji = "[+]" if t.get("direction", "") == "LONG" else "[-]"
         day_chg = result.get("day_change_pct", 0)
         day_color = "green" if day_chg > 0 else "red"
         
@@ -8408,7 +8408,7 @@ def display_backtest_lab(poly_key):
         
         for rank, (strat_name, stats) in enumerate(sorted_strats, 1):
             direction = BACKTEST_STRATEGY_RULES.get(strat_name, {}).get("direction", "long")
-            dir_emoji = "🟢" if direction == "long" else "🔴"
+            dir_emoji = "[+]" if direction == "long" else "[-]"
             
             # Farbe basierend auf Performance
             if stats.get("total_r", 0) > 5:
@@ -9329,6 +9329,543 @@ def fetch_international_stock_data(exchange_code):
 # =============================================================================
 st.set_page_config(page_title="Alpha V70.7 Pro", layout="wide")
 
+# =============================================================================
+# THEME ENGINE — Clean White (Light) / Dark Mode Toggle
+# =============================================================================
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "light"
+
+_is_light = st.session_state.theme_mode == "light"
+
+# --- CLEAN WHITE (Light) Theme ---
+_CSS_LIGHT = """
+<style>
+/* ===== GLOBAL ===== */
+.stApp {
+    background-color: #f8f9fb !important;
+    color: #1a1a2e !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+}
+
+/* Hide default Streamlit header bar */
+header[data-testid="stHeader"] {
+    background-color: #f8f9fb !important;
+    border-bottom: 1px solid #e5e7eb !important;
+}
+
+/* ===== SIDEBAR ===== */
+section[data-testid="stSidebar"] {
+    background-color: #ffffff !important;
+    border-right: 1px solid #e5e7eb !important;
+}
+section[data-testid="stSidebar"] * {
+    color: #1a1a2e !important;
+}
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stCheckbox label {
+    color: #374151 !important;
+    font-weight: 500 !important;
+}
+section[data-testid="stSidebar"] hr {
+    border-color: #e5e7eb !important;
+}
+section[data-testid="stSidebar"] .stButton > button {
+    background-color: #f0f2f5 !important;
+    color: #1a1a2e !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+    background-color: #e5e7eb !important;
+    border-color: #9ca3af !important;
+}
+
+/* ===== TABS ===== */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #ffffff !important;
+    border-bottom: 2px solid #e5e7eb !important;
+    gap: 0px !important;
+    padding: 0 16px !important;
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: transparent !important;
+    color: #6b7280 !important;
+    border: none !important;
+    border-bottom: 3px solid transparent !important;
+    padding: 12px 20px !important;
+    font-weight: 500 !important;
+    font-size: 14px !important;
+    transition: all 0.2s ease !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #1a1a2e !important;
+    background-color: #f3f4f6 !important;
+}
+.stTabs [aria-selected="true"] {
+    color: #2563eb !important;
+    border-bottom: 3px solid #2563eb !important;
+    font-weight: 600 !important;
+    background-color: transparent !important;
+}
+
+/* ===== METRICS ===== */
+[data-testid="stMetric"] {
+    background-color: #ffffff !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 12px !important;
+    padding: 16px 20px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
+}
+[data-testid="stMetricLabel"] {
+    color: #6b7280 !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+}
+[data-testid="stMetricValue"] {
+    color: #1a1a2e !important;
+    font-weight: 700 !important;
+}
+[data-testid="stMetricDelta"] svg { display: inline !important; }
+
+/* ===== DATAFRAMES / TABLES ===== */
+.stDataFrame {
+    border: 1px solid #e5e7eb !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+.stDataFrame [data-testid="stDataFrameResizable"] {
+    border-radius: 12px !important;
+}
+[data-testid="stDataFrame"] th {
+    background-color: #f0f2f5 !important;
+    color: #374151 !important;
+    font-weight: 600 !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    border-bottom: 2px solid #d1d5db !important;
+}
+[data-testid="stDataFrame"] td {
+    color: #1a1a2e !important;
+    border-bottom: 1px solid #f0f2f5 !important;
+    font-size: 13px !important;
+}
+
+/* ===== BUTTONS ===== */
+.stButton > button {
+    background-color: #2563eb !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    padding: 8px 24px !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 1px 2px rgba(37,99,235,0.2) !important;
+}
+.stButton > button:hover {
+    background-color: #1d4ed8 !important;
+    box-shadow: 0 4px 12px rgba(37,99,235,0.3) !important;
+}
+
+/* ===== EXPANDERS ===== */
+.streamlit-expanderHeader {
+    background-color: #ffffff !important;
+    color: #1a1a2e !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 10px !important;
+    font-weight: 500 !important;
+}
+.streamlit-expanderContent {
+    background-color: #ffffff !important;
+    border: 1px solid #e5e7eb !important;
+    border-top: none !important;
+    border-radius: 0 0 10px 10px !important;
+}
+details {
+    border: 1px solid #e5e7eb !important;
+    border-radius: 10px !important;
+    background-color: #ffffff !important;
+}
+details summary {
+    color: #1a1a2e !important;
+    font-weight: 500 !important;
+}
+
+/* ===== TEXT ELEMENTS ===== */
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+    color: #1a1a2e !important;
+    font-weight: 700 !important;
+}
+p, span, label, .stMarkdown p, .stMarkdown span {
+    color: #374151 !important;
+}
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: #9ca3af !important;
+}
+
+/* ===== SELECT / INPUT ===== */
+.stSelectbox > div > div,
+.stMultiSelect > div > div,
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input {
+    background-color: #ffffff !important;
+    color: #1a1a2e !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 8px !important;
+}
+.stSelectbox [data-baseweb="select"] > div {
+    background-color: #ffffff !important;
+    border-color: #d1d5db !important;
+}
+
+/* ===== RADIO BUTTONS ===== */
+.stRadio > div {
+    background-color: transparent !important;
+}
+.stRadio label {
+    color: #374151 !important;
+}
+
+/* ===== PROGRESS BAR ===== */
+.stProgress > div > div {
+    background-color: #e5e7eb !important;
+}
+.stProgress > div > div > div {
+    background: linear-gradient(90deg, #2563eb, #3b82f6) !important;
+}
+
+/* ===== ALERTS / INFO / WARNING ===== */
+.stAlert, [data-testid="stAlert"] {
+    border-radius: 10px !important;
+    border: 1px solid #e5e7eb !important;
+}
+
+/* ===== DIVIDER ===== */
+hr {
+    border-color: #e5e7eb !important;
+}
+
+/* ===== GRADE BADGES (via custom classes in markdown) ===== */
+.grade-s { border-left: 4px solid #7c3aed !important; background: linear-gradient(135deg, #f5f3ff, #ede9fe) !important; }
+.grade-a { border-left: 4px solid #059669 !important; background: linear-gradient(135deg, #ecfdf5, #d1fae5) !important; }
+.grade-b { border-left: 4px solid #2563eb !important; background: linear-gradient(135deg, #eff6ff, #dbeafe) !important; }
+.grade-c { border-left: 4px solid #d97706 !important; background: linear-gradient(135deg, #fffbeb, #fef3c7) !important; }
+.grade-d { border-left: 4px solid #6b7280 !important; background: linear-gradient(135deg, #f9fafb, #f3f4f6) !important; }
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f0f2f5; }
+::-webkit-scrollbar-thumb { background: #c4c9d4; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ===== COLUMNS GAP ===== */
+[data-testid="column"] {
+    padding: 0 8px !important;
+}
+
+/* ===== TOAST / SNACKBAR ===== */
+.stToast {
+    background-color: #ffffff !important;
+    color: #1a1a2e !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 10px !important;
+}
+
+/* ===== CODE BLOCKS ===== */
+code, .stCode {
+    background-color: #f0f2f5 !important;
+    color: #1a1a2e !important;
+    border-radius: 6px !important;
+}
+
+/* ===== CHECKBOX ===== */
+.stCheckbox label span {
+    color: #374151 !important;
+}
+
+/* ===== MULTISELECT TAGS ===== */
+[data-baseweb="tag"] {
+    background-color: #eff6ff !important;
+    color: #2563eb !important;
+    border: 1px solid #bfdbfe !important;
+}
+</style>
+"""
+
+# --- DARK Theme ---
+_CSS_DARK = """
+<style>
+/* ===== GLOBAL ===== */
+.stApp {
+    background-color: #0f1117 !important;
+    color: #e2e8f0 !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+}
+
+header[data-testid="stHeader"] {
+    background-color: #0f1117 !important;
+    border-bottom: 1px solid #1e2130 !important;
+}
+
+/* ===== SIDEBAR ===== */
+section[data-testid="stSidebar"] {
+    background-color: #161822 !important;
+    border-right: 1px solid #1e2130 !important;
+}
+section[data-testid="stSidebar"] * {
+    color: #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stCheckbox label {
+    color: #94a3b8 !important;
+    font-weight: 500 !important;
+}
+section[data-testid="stSidebar"] hr {
+    border-color: #1e2130 !important;
+}
+section[data-testid="stSidebar"] .stButton > button {
+    background-color: #1e2130 !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #2d3348 !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+    background-color: #2d3348 !important;
+    border-color: #4b5563 !important;
+}
+
+/* ===== TABS ===== */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #161822 !important;
+    border-bottom: 2px solid #1e2130 !important;
+    gap: 0px !important;
+    padding: 0 16px !important;
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: transparent !important;
+    color: #64748b !important;
+    border: none !important;
+    border-bottom: 3px solid transparent !important;
+    padding: 12px 20px !important;
+    font-weight: 500 !important;
+    font-size: 14px !important;
+    transition: all 0.2s ease !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #e2e8f0 !important;
+    background-color: #1e2130 !important;
+}
+.stTabs [aria-selected="true"] {
+    color: #60a5fa !important;
+    border-bottom: 3px solid #3b82f6 !important;
+    font-weight: 600 !important;
+    background-color: transparent !important;
+}
+
+/* ===== METRICS ===== */
+[data-testid="stMetric"] {
+    background-color: #161822 !important;
+    border: 1px solid #1e2130 !important;
+    border-radius: 12px !important;
+    padding: 16px 20px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
+}
+[data-testid="stMetricLabel"] {
+    color: #64748b !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+}
+[data-testid="stMetricValue"] {
+    color: #e2e8f0 !important;
+    font-weight: 700 !important;
+}
+
+/* ===== DATAFRAMES / TABLES ===== */
+.stDataFrame {
+    border: 1px solid #1e2130 !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+[data-testid="stDataFrame"] th {
+    background-color: #1e2130 !important;
+    color: #94a3b8 !important;
+    font-weight: 600 !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    border-bottom: 2px solid #2d3348 !important;
+}
+[data-testid="stDataFrame"] td {
+    color: #e2e8f0 !important;
+    border-bottom: 1px solid #1e2130 !important;
+    font-size: 13px !important;
+}
+
+/* ===== BUTTONS ===== */
+.stButton > button {
+    background-color: #3b82f6 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    padding: 8px 24px !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 1px 2px rgba(59,130,246,0.3) !important;
+}
+.stButton > button:hover {
+    background-color: #2563eb !important;
+    box-shadow: 0 4px 12px rgba(59,130,246,0.4) !important;
+}
+
+/* ===== EXPANDERS ===== */
+details {
+    border: 1px solid #1e2130 !important;
+    border-radius: 10px !important;
+    background-color: #161822 !important;
+}
+details summary {
+    color: #e2e8f0 !important;
+    font-weight: 500 !important;
+}
+.streamlit-expanderContent {
+    background-color: #161822 !important;
+    border: 1px solid #1e2130 !important;
+    border-top: none !important;
+}
+
+/* ===== TEXT ELEMENTS ===== */
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+    color: #e2e8f0 !important;
+    font-weight: 700 !important;
+}
+p, span, label, .stMarkdown p, .stMarkdown span {
+    color: #cbd5e1 !important;
+}
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: #64748b !important;
+}
+
+/* ===== SELECT / INPUT ===== */
+.stSelectbox > div > div,
+.stMultiSelect > div > div,
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input {
+    background-color: #1e2130 !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #2d3348 !important;
+    border-radius: 8px !important;
+}
+.stSelectbox [data-baseweb="select"] > div {
+    background-color: #1e2130 !important;
+    border-color: #2d3348 !important;
+}
+
+/* ===== RADIO BUTTONS ===== */
+.stRadio > div {
+    background-color: transparent !important;
+}
+.stRadio label {
+    color: #94a3b8 !important;
+}
+
+/* ===== PROGRESS BAR ===== */
+.stProgress > div > div {
+    background-color: #1e2130 !important;
+}
+.stProgress > div > div > div {
+    background: linear-gradient(90deg, #3b82f6, #60a5fa) !important;
+}
+
+/* ===== ALERTS ===== */
+.stAlert, [data-testid="stAlert"] {
+    border-radius: 10px !important;
+    border: 1px solid #1e2130 !important;
+}
+
+/* ===== DIVIDER ===== */
+hr {
+    border-color: #1e2130 !important;
+}
+
+/* ===== GRADE BADGES ===== */
+.grade-s { border-left: 4px solid #a78bfa !important; background: linear-gradient(135deg, #1e1640, #2d1f6b) !important; }
+.grade-a { border-left: 4px solid #34d399 !important; background: linear-gradient(135deg, #0d2818, #134e2a) !important; }
+.grade-b { border-left: 4px solid #60a5fa !important; background: linear-gradient(135deg, #0c1a3a, #1e3a5f) !important; }
+.grade-c { border-left: 4px solid #fbbf24 !important; background: linear-gradient(135deg, #2a1f0a, #3d2e0f) !important; }
+.grade-d { border-left: 4px solid #4b5563 !important; background: linear-gradient(135deg, #1a1c24, #21242e) !important; }
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0f1117; }
+::-webkit-scrollbar-thumb { background: #2d3348; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+/* ===== COLUMNS ===== */
+[data-testid="column"] {
+    padding: 0 8px !important;
+}
+
+/* ===== CODE BLOCKS ===== */
+code, .stCode {
+    background-color: #1e2130 !important;
+    color: #e2e8f0 !important;
+    border-radius: 6px !important;
+}
+
+/* ===== MULTISELECT TAGS ===== */
+[data-baseweb="tag"] {
+    background-color: #1e3a5f !important;
+    color: #60a5fa !important;
+    border: 1px solid #2d4a7c !important;
+}
+</style>
+"""
+
+# Inject the selected theme CSS
+if _is_light:
+    st.markdown(_CSS_LIGHT, unsafe_allow_html=True)
+else:
+    st.markdown(_CSS_DARK, unsafe_allow_html=True)
+
+
+def _theme_grade_card(grade_letter, content_html):
+    """Render a grade-colored card with left border accent."""
+    _gc = {"S": "grade-s", "A": "grade-a", "B": "grade-b", "C": "grade-c"}.get(grade_letter, "grade-d")
+    return (
+        f"<div class='{_gc}' style='padding:14px 18px;border-radius:10px;margin:8px 0;'>"
+        f"{content_html}</div>"
+    )
+
+
+def _theme_score_bar(score, max_score, label="Score"):
+    """Render a themed score progress bar with percentage."""
+    pct = min(100, int(score * 100 / max(max_score, 1)))
+    if pct >= 60:
+        bar_color = "#059669" if _is_light else "#34d399"
+    elif pct >= 40:
+        bar_color = "#2563eb" if _is_light else "#60a5fa"
+    else:
+        bar_color = "#d97706" if _is_light else "#fbbf24"
+    bg = "#e5e7eb" if _is_light else "#1e2130"
+    return (
+        f"<div style='margin:4px 0;'>"
+        f"<span style='font-size:12px;font-weight:500;opacity:0.7;'>{label}: {score}/{max_score} ({pct}%)</span>"
+        f"<div style='width:100%;height:6px;background:{bg};border-radius:3px;margin-top:3px;'>"
+        f"<div style='width:{pct}%;height:100%;background:{bar_color};border-radius:3px;transition:width 0.3s;'></div>"
+        f"</div></div>"
+    )
+
+
 # AUTO-REFRESH (wenn aktiviert)
 if st.session_state.auto_refresh_enabled:
     refresh_interval = st.session_state.get("refresh_interval", 5) * 60 * 1000  # in ms
@@ -9338,9 +9875,17 @@ if st.session_state.auto_refresh_enabled:
 # SIDEBAR
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("Alpha V70.7 Pro")
+    # --- Theme Toggle ---
+    _theme_cols = st.columns([3, 1])
+    with _theme_cols[0]:
+        st.title("Alpha V70.7 Pro")
+    with _theme_cols[1]:
+        _theme_icon = "Light" if _is_light else "Dark"
+        if st.button(_theme_icon, key="theme_toggle_btn", help="Light / Dark Mode umschalten"):
+            st.session_state.theme_mode = "dark" if _is_light else "light"
+            st.rerun()
     st.caption("Pre/Post Market | Insider | Gaps | AI")
-    
+
     st.divider()
     
     # Markt-Auswahl (4 Kategorien)
@@ -9951,7 +10496,7 @@ with st.sidebar:
         current_strat = st.session_state.get("current_strategy", "")
         is_insider_strategy = current_strat in ["Insider Buying", "Insider Selling"]
         is_gap_strategy = current_strat in ["Gap Up", "Gap Down"]
-        is_volume_void_strategy = current_strat in ["Volume Void Long ⬆", "Volume Void Short ⬇"]
+        is_volume_void_strategy = current_strat in ["Volume Void Long UP", "Volume Void Short DN"]
         is_ma_bounce_strategy = "Bounce" in current_strat and ("SMA" in current_strat or "EMA" in current_strat)
         is_breakout_imminent = "Breakout Imminent" in current_strat
         
@@ -10026,7 +10571,7 @@ with st.sidebar:
                     st.session_state.scan_results = results
                     st.session_state.market_type = "Aktien"
                     
-                    direction_emoji = "⬆️" if direction == "long" else "⬇️"
+                    direction_emoji = "UP" if direction == "long" else "DN"
                     status.update(label=f"{len(results)} Volume Voids {direction_emoji} gefunden", state="complete")
                     
                 except KeyError:
@@ -10035,7 +10580,7 @@ with st.sidebar:
                     st.error(f"Fehler: {e}")
         
         # HARMONIC PATTERN SCAN - Spezielle Logik 
-        elif current_strat in ["Harmonic Bullish ⬆", "Harmonic Bearish ⬇", "Harmonic All Patterns "]:
+        elif current_strat in ["Harmonic Bullish UP", "Harmonic Bearish DN", "Harmonic All Patterns "]:
             if m_type != "Aktien":
                 st.error("Harmonic Pattern Scanner funktioniert nur für **Aktien**!")
             else:
@@ -10126,7 +10671,7 @@ with st.sidebar:
                         st.session_state.scan_results = results
                         st.session_state.market_type = "Aktien"
                         
-                        direction_emoji = "⬆️" if direction == "LONG" else ("⬇️" if direction == "SHORT" else "🔄")
+                        direction_emoji = "UP" if direction == "LONG" else ("DN" if direction == "SHORT" else "[<>]")
                         status.update(label=f"{len(results)} Harmonic Patterns {direction_emoji} gefunden", state="complete")
                         
                     except KeyError:
@@ -10137,7 +10682,7 @@ with st.sidebar:
         # =================================================================
         # WYCKOFF STRATEGIE - Akkumulation/Distribution Scanner
         # =================================================================
-        elif current_strat in ["Wyckoff Accumulation ⬆", "Wyckoff Distribution ⬇"]:
+        elif current_strat in ["Wyckoff Accumulation UP", "Wyckoff Distribution DN"]:
             if m_type != "Aktien":
                 st.error("Wyckoff Scanner funktioniert nur für **Aktien**!")
             else:
@@ -10211,7 +10756,7 @@ with st.sidebar:
                         st.session_state.scan_results = results
                         st.session_state.market_type = "Aktien"
                         
-                        dir_emoji = "⬆️" if direction == "LONG" else "⬇️"
+                        dir_emoji = "UP" if direction == "LONG" else "DN"
                         status.update(label=f"{len(results)} Wyckoff {wr['type'] if results else ''} {dir_emoji} Patterns gefunden", state="complete")
                         
                     except KeyError:
@@ -12220,7 +12765,7 @@ def fetch_bear_scanner_data(poly_key):
 # -----------------------------------------------------------------------------
 # HAUPTBEREICH - TABS
 # -----------------------------------------------------------------------------
-tab_scanner, tab_bi, tab_biotech, tab_divergence, tab_early, tab_newlisting, tab_search, tab_watchlist, tab_moneyflow, tab_calendar, tab_crash, tab_bear, tab_backtest, tab_guide = st.tabs(["Scanner", "BI Scanner", "Biotech", "BTC-Divergenz", "Early Movers", "🆕 New Listing", "Suche", "⭐ Watchlist", "Money Flow", "Kalender", "Crash Monitor", "Bear Scanner", "Backtest", "Strategie Guide"])
+tab_scanner, tab_bi, tab_biotech, tab_divergence, tab_early, tab_newlisting, tab_search, tab_watchlist, tab_moneyflow, tab_calendar, tab_crash, tab_bear, tab_backtest, tab_guide = st.tabs(["Scanner", "BI Scanner", "Biotech", "BTC-Divergenz", "Early Movers", "New Listing", "Suche", "Watchlist", "Money Flow", "Kalender", "Crash Monitor", "Bear Scanner", "Backtest", "Strategie Guide"])
 
 with tab_scanner:
     # PRE-MARKET WATCHLIST ANZEIGE (wenn aktiv)
@@ -12300,9 +12845,9 @@ with tab_scanner:
     
     # Prüfe ob Insider-Strategie aktiv
     is_insider = st.session_state.current_strategy in ["Insider Buying", "Insider Selling"]
-    is_volume_void = st.session_state.current_strategy in ["Volume Void Long ⬆", "Volume Void Short ⬇"]
-    is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish ⬆", "Harmonic Bearish ⬇", "Harmonic All Patterns "]
-    is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation ⬆", "Wyckoff Distribution ⬇"]
+    is_volume_void = st.session_state.current_strategy in ["Volume Void Long UP", "Volume Void Short DN"]
+    is_harmonic = st.session_state.current_strategy in ["Harmonic Bullish UP", "Harmonic Bearish DN", "Harmonic All Patterns "]
+    is_wyckoff = st.session_state.current_strategy in ["Wyckoff Accumulation UP", "Wyckoff Distribution DN"]
     is_bi = "Breakout Imminent" in st.session_state.current_strategy
     
     with col_journal:
@@ -12417,8 +12962,8 @@ with tab_scanner:
                             if (ae.isContentEditable || ae.getAttribute('role') === 'textbox') return;
                             if ((e.target.tagName||'').toLowerCase() === 'input') return;
                             var k = e.key.toLowerCase();
-                            if ((k==='w'||k==='arrowup') && currentIdx > 0) {{ e.preventDefault(); clickBtn('⬆'); }}
-                            if ((k==='e'||k==='arrowdown') && currentIdx < maxIdx) {{ e.preventDefault(); clickBtn('⬇'); }}
+                            if ((k==='w'||k==='arrowup') && currentIdx > 0) {{ e.preventDefault(); clickBtn('UP'); }}
+                            if ((k==='e'||k==='arrowdown') && currentIdx < maxIdx) {{ e.preventDefault(); clickBtn('DN'); }}
                         }}
                         try {{ window.parent.document.removeEventListener('keydown', window.parent._alphaNav);
                                window.parent._alphaNav = onKey;
@@ -12434,10 +12979,10 @@ with tab_scanner:
             """
             html(keyboard_html, height=0)
             
-            # ⬆ #1/46 ⬇
+            # UP #1/46 DN
             nc1, nc2, nc3 = st.columns([1, 2, 1])
             with nc1:
-                if st.button("⬆", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
+                if st.button("UP", key="nav_prev_btn", disabled=current_idx <= 0, use_container_width=True):
                     st.session_state.selected_row_index = max(0, current_idx - 1)
                     # Sync radio state
                     if "ticker_select_df" in st.session_state:
@@ -12446,7 +12991,7 @@ with tab_scanner:
             with nc2:
                 st.markdown(f"<div style='text-align:center;font-weight:bold;'>#{current_idx + 1}/{num_results}</div>", unsafe_allow_html=True)
             with nc3:
-                if st.button("⬇", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
+                if st.button("DN", key="next_nav_btn", disabled=current_idx >= num_results - 1, use_container_width=True):
                     st.session_state.selected_row_index = min(num_results - 1, current_idx + 1)
                     if "ticker_select_df" in st.session_state:
                         del st.session_state["ticker_select_df"]
@@ -12632,7 +13177,7 @@ with tab_scanner:
                             st.divider()
                             st.caption("Letzte Transaktionen:")
                             for t in transactions[:3]:
-                                emoji = "🟢" if t["type"] == "BUY" else "🔴"
+                                emoji = "[+]" if t["type"] == "BUY" else "[-]"
                                 st.caption(f"{emoji} {t['name'][:20]}: {t['shares']:,.0f} Aktien (${t['value']:,.0f})")
                     except Exception as e:
                         pass
@@ -12999,7 +13544,7 @@ with tab_scanner:
                         # Void Details
                         col_v1, col_v2 = st.columns(2)
                         with col_v1:
-                            direction = "⬆" if "Long" in st.session_state.current_strategy else "⬇"
+                            direction = "UP" if "Long" in st.session_state.current_strategy else "DN"
                             st.metric(f"Entfernung zum Void {direction}", f"{void_dist:.1f}%")
                             st.metric("Void Größe", f"{void_size:.1f}%")
                         with col_v2:
@@ -13044,7 +13589,7 @@ with tab_scanner:
                             score = pattern_data.get("score", 0)
                             success_rate = pattern_data.get("success_rate", 0)
                             
-                            dir_emoji = "⬆️ LONG" if direction == "LONG" else "⬇️ SHORT"
+                            dir_emoji = "UP LONG" if direction == "LONG" else "DN SHORT"
                             
                             # Distanz-Warnung wenn Entry weit vom Preis
                             entry_dist = pattern_data.get("entry_distance_pct", 0)
@@ -13126,18 +13671,18 @@ with tab_scanner:
                         bi_grade = row.get("BI_GradeLabel", "")
 
                         st.divider()
-                        dir_label = "⬆LONG" if bi_dir == "LONG" else "⬇SHORT"
+                        dir_label = "UPLONG" if bi_dir == "LONG" else "DNSHORT"
 
-                        # Grade-basierte Farbe
+                        # Grade-basierte Farbe (themed card)
                         bi_grade_letter = row.get("BI_Grade", "D")
-                        if bi_grade_letter == "S":
-                            st.success(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
-                        elif bi_grade_letter == "A":
-                            st.success(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
-                        elif bi_grade_letter == "B":
-                            st.info(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
-                        else:
-                            st.warning(f"**Breakout Imminent V2** {dir_label} | {bi_grade} | Score: **{bi_score}/{bi_max}** ({bi_score*100//bi_max}%) | Konfidenz: {bi_conf}%")
+                        _gc = {"S": "grade-s", "A": "grade-a", "B": "grade-b", "C": "grade-c"}.get(bi_grade_letter, "grade-d")
+                        _pct = bi_score * 100 // max(bi_max, 1)
+                        st.markdown(
+                            f"<div class='{_gc}' style='padding:14px 18px;border-radius:10px;margin:8px 0;'>"
+                            f"<strong>Breakout Imminent V2</strong> {dir_label} | {bi_grade} | "
+                            f"Score: <strong>{bi_score}/{bi_max}</strong> ({_pct}%) | Konfidenz: {bi_conf}%</div>",
+                            unsafe_allow_html=True
+                        )
 
                         # Signal-Details nach Gruppen
                         if isinstance(bi_details, list):
@@ -13187,7 +13732,7 @@ with tab_scanner:
                         w_score = row.get("WyckoffScore", 0)
                         w_events = row.get("WyckoffEvents", "")
                         
-                        dir_emoji = "⬆️ LONG" if "Accumulation" in w_type else "⬇️ SHORT"
+                        dir_emoji = "UP LONG" if "Accumulation" in w_type else "DN SHORT"
                         
                         if w_score >= 70:
                             st.success(f"**Wyckoff {w_type}** | {dir_emoji} | Score: {w_score}")
@@ -13294,7 +13839,7 @@ with tab_scanner:
                                 conf_pass = conf_result["total_pass"]
                                 conf_signal = conf_result["signal"]
                                 conf_dir = conf_result.get("direction", "")
-                                dir_emoji = "🟢 LONG" if conf_dir == "long" else "🔴 SHORT"
+                                dir_emoji = "[+] LONG" if conf_dir == "long" else "[-] SHORT"
                                 
                                 # Kompakte Header-Zeile
                                 if conf_pass >= 9:
@@ -13354,7 +13899,7 @@ with tab_scanner:
                 # ACTION BUTTONS ROW
                 _btn_cols = st.columns(3)
                 with _btn_cols[0]:
-                    if st.button(f"⭐ Watchlist", use_container_width=True, key=f"wl_{selected_row_idx}"):
+                    if st.button(f"Watchlist", use_container_width=True, key=f"wl_{selected_row_idx}"):
                         if add_to_watchlist(row.get("Ticker", ""), row.to_dict()):
                             st.success(f"{row.get('Ticker', '')} hinzugefügt!")
                         else:
@@ -13525,11 +14070,11 @@ with tab_scanner:
                         # Stärke-Emoji basierend auf Score
                         strength = s.get("strength", 50)
                         if strength >= 90:
-                            emoji = "🔥"  # Sehr stark
+                            emoji = "[***]"  # Sehr stark
                         elif strength >= 70:
-                            emoji = "💪"  # Stark
+                            emoji = "[**]"  # Stark
                         elif strength >= 50:
-                            emoji = "✓"   # OK
+                            emoji = "[*]"   # OK
                         else:
                             emoji = "○"   # Schwach
                         
@@ -13547,11 +14092,11 @@ with tab_scanner:
                     for i, r in enumerate(resistances_detail, 1):
                         strength = r.get("strength", 50)
                         if strength >= 90:
-                            emoji = "🔥"
+                            emoji = "[***]"
                         elif strength >= 70:
-                            emoji = "💪"
+                            emoji = "[**]"
                         elif strength >= 50:
-                            emoji = "✓"
+                            emoji = "[*]"
                         else:
                             emoji = "○"
                         
@@ -13719,7 +14264,7 @@ with tab_scanner:
         _pattern_ticker = st.session_state.get("selected_symbol", "")
         _pattern_direction = "long"  # Default
         _cur_strat = st.session_state.get("current_strategy", "")
-        if any(kw in _cur_strat.lower() for kw in ["short", "distribution", "⬇", "selling"]):
+        if any(kw in _cur_strat.lower() for kw in ["short", "distribution", "DN", "selling"]):
             _pattern_direction = "short"
 
         if st.session_state.market_type == "Aktien" and _pattern_ticker:
@@ -13901,7 +14446,7 @@ with tab_scanner:
                 st.subheader(f"{len(breakouts)} Aktive Breakouts")
 
                 for bo in breakouts:
-                    direction_emoji = "🟢 LONG" if bo.get("direction", "") == "LONG" else "🔴 SHORT"
+                    direction_emoji = "[+] LONG" if bo.get("direction", "") == "LONG" else "[-] SHORT"
                     with st.expander(
                         f"{bo.get('emoji', '')} **{bo['ticker']}** — {direction_emoji} | "
                         f"Score: {bo['score']}/100 ({bo['rating']}) | "
@@ -14035,7 +14580,7 @@ with tab_bi:
     st.divider()
 
     bi_dir = st.session_state.get("bi_tab_direction", "long")
-    bi_dir_emoji = "⬆️" if bi_dir == "long" else "⬇️"
+    bi_dir_emoji = "UP" if bi_dir == "long" else "DN"
     bi_dir_label = "Long" if bi_dir == "long" else "Short"
     cache_ttl_min = max(720, st.session_state.get("bi_cache_ttl_h", 12) * 60)  # Min 12h (bg_service scannt 3x/Tag)
 
@@ -15105,7 +15650,7 @@ with tab_biotech:
                         _all_bpiq = _bio_item.get("BPIQ_Catalysts", [])
                         for _bd in _all_bpiq[:5]:
                             _bd_stage = _bd.get("stage_label", "")
-                            _bd_emoji = "🔴" if "3" in _bd_stage or "PDUFA" in _bd_stage else "🟠" if "2" in _bd_stage else "🟢"
+                            _bd_emoji = "[-]" if "3" in _bd_stage or "PDUFA" in _bd_stage else "[!]" if "2" in _bd_stage else "[+]"
                             _bd_cat = _bd.get("category", "")
                             _bd_days = _bd.get("days_until")
                             _bd_badge = ""
@@ -15131,7 +15676,7 @@ with tab_biotech:
                             _rd_days = _rd.get("days_until")
                             _rd_cat = _rd.get("category", "")
                             _rd_date = _rd.get("catalyst_date_text", "TBA")
-                            _rd_emoji = "🔴" if _rd_cat == "OVERDUE" else "🟡" if _rd_cat == "IMMINENT" else "🟢" if _rd_cat in ("UPCOMING", "LATER") else "⚪"
+                            _rd_emoji = "[-]" if _rd_cat == "OVERDUE" else "[~]" if _rd_cat == "IMMINENT" else "[+]" if _rd_cat in ("UPCOMING", "LATER") else "[o]"
                             _rd_timing = ""
                             if _rd_days is not None and _rd_cat == "OVERDUE":
                                 _rd_timing = f" — **ÜBERFÄLLIG** ({abs(_rd_days)}d)"
@@ -15206,7 +15751,7 @@ with tab_biotech:
                             _ac_kw = _ac.get("keyword", "").title()
                             _ac_date = _ac.get("date", "")
                             _ac_head = _ac.get("headline", "")
-                            _tier_emoji = "🔴" if _ac_tier == "tier1" else "🟡" if _ac_tier == "tier2" else "🟢" if _ac_tier == "tier3" else "⚪"
+                            _tier_emoji = "[-]" if _ac_tier == "tier1" else "[~]" if _ac_tier == "tier2" else "[+]" if _ac_tier == "tier3" else "[o]"
                             _tier_badge = {"tier1": "FDA", "tier2": "Trial", "tier3": "Deal", "tier4": "Pipeline"}.get(_ac_tier, "")
                             st.markdown(f"{_tier_emoji} **[{_tier_badge}]** {_ac_kw} — {_ac_date}")
                             if _ac_head:
@@ -15217,7 +15762,7 @@ with tab_biotech:
                     _bio_news = _bio_item.get("News", [])
                     if _bio_news:
                         for n in _bio_news[:5]:
-                            sent_emoji = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
+                            sent_emoji = "[+]" if n.get("sentiment") == "positive" else "[-]" if n.get("sentiment") == "negative" else "[o]"
                             cat_badge = f" **{n['catalyst']}**" if n.get("catalyst") else ""
                             st.markdown(f"{sent_emoji}{cat_badge} {n.get('title', '')} ({n.get('published', '')})")
                     else:
@@ -16026,7 +16571,7 @@ with tab_early:
         **Perps:** `{stats.get('perps_bitget', 0)} Bitget + {stats.get('perps_mexc', 0)} MEXC`
         """)
 
-        early_tab1, early_tab2, early_tab3, early_tab4, early_tab5 = st.tabs(["Volume Spikes", "Whale Accumulation", "Micro-Cap Degen", "🆕 Neu Gelistet", "Narrative Tracker"])
+        early_tab1, early_tab2, early_tab3, early_tab4, early_tab5 = st.tabs(["Volume Spikes", "Whale Accumulation", "Micro-Cap Degen", "Neu Gelistet", "Narrative Tracker"])
 
         # ── TAB 1: Volume Spikes (nur bullish!) ──
         with early_tab1:
@@ -16102,11 +16647,11 @@ with tab_early:
                     exch_tag = " + ".join(exch_list) if exch_list else "?"
 
                     if w_score >= 70:
-                        emoji = "🐋"
+                        emoji = "[XL]"
                     elif w_score >= 50:
-                        emoji = "🦈"
+                        emoji = "[L]"
                     else:
-                        emoji = "🐟"
+                        emoji = "[S]"
 
                     with st.expander(f"{emoji} **{symbol}** — Whale Score {w_score}/100 · `{exch_tag}` · OI/Vol {coin.get('OI_Ratio', 0):.1f}x", expanded=(i < 3)):
                         c1, c2, c3, c4 = st.columns(4)
@@ -16158,11 +16703,11 @@ with tab_early:
                         perp_tag = "kein Perp"
 
                     if score >= 70:
-                        emoji = "🚀"
+                        emoji = "[>>]"
                     elif score >= 50:
-                        emoji = "🔥"
+                        emoji = "[***]"
                     else:
-                        emoji = "💫"
+                        emoji = "[*]"
 
                     _dm = coin.get('MCap', 0) or 0
                     _dp = coin.get('Price', 0) or 0
@@ -16191,7 +16736,7 @@ with tab_early:
 
         # ── TAB 4: Neu Gelistet (FIX 9) ──
         with early_tab4:
-            st.markdown("### 🆕 Neu Gelistete Coins")
+            st.markdown("### Neu Gelistete Coins")
             st.caption("Coins die erst kürzlich auf CoinGecko gelistet wurden (< 14 Tage). Frische Listings = hohes Momentum-Potential.")
 
             _newly = early_data.get("recently_listed", [])
@@ -16266,7 +16811,7 @@ with tab_early:
 # TAB: 🆕 NEW LISTING DUMP SCANNER
 # =============================================================================
 with tab_newlisting:
-    st.header("🆕 New Listing Dump Scanner")
+    st.header("New Listing Dump Scanner")
     st.caption("Short-Signale für neue PERP-Listings — Crypto.com + MEXC (755 Perps!) + Bitget = 1.500+ Instrumente")
 
     # ── Scan Button ──
@@ -17889,11 +18434,11 @@ with tab_bear:
         p_top = bear_progress.get("top_score", 0)
         p_detail = bear_progress.get("detail", "")
         if p_t == 0:
-            st.info(f"**Short Scan ⬇** — {p_detail or 'Lade Aktien-Snapshot...'}")
+            st.info(f"**Short Scan DN** — {p_detail or 'Lade Aktien-Snapshot...'}")
         else:
             pct = round(p_c / max(1, p_t) * 100)
             est = max(1, (p_t - p_c) // 75)
-            st.info(f"**Short Scan ⬇läuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
+            st.info(f"**Short Scan DNläuft** — {p_c}/{p_t} ({pct}%) | {p_h} Treffer | Top: {p_top} | ~{est} Min")
         _bear_prog_col1, _bear_prog_col2 = st.columns([5, 1])
         with _bear_prog_col1:
             st.progress(min(1.0, p_c / max(1, p_t)) if p_t > 0 else 0.0)
@@ -17938,14 +18483,14 @@ with tab_bear:
     # ── FALL 3a: Keine Kandidaten ──
     elif bear_progress and bear_progress.get("status") == "no_candidates":
         st.info(f"{bear_progress.get('detail', 'Keine Kandidaten')}")
-        if st.button("Erneut scannen ⬇", use_container_width=True, key="bear_tab_retry_nc"):
+        if st.button("Erneut scannen DN", use_container_width=True, key="bear_tab_retry_nc"):
             _bi_progress_write("short", status="idle")
             st.rerun()
 
     # ── FALL 3b: Fehler ──
     elif bear_progress and bear_progress.get("status") == "error":
         st.error(f"Short Scan Fehler: {bear_progress.get('detail', 'Unbekannt')}")
-        if st.button("Erneut scannen ⬇", use_container_width=True, type="primary", key="bear_tab_retry_scan"):
+        if st.button("Erneut scannen DN", use_container_width=True, type="primary", key="bear_tab_retry_scan"):
             _bi_progress_write("short", status="idle")
             st.rerun()
 
@@ -17962,7 +18507,7 @@ with tab_bear:
 
         bear_btn_col1, bear_btn_col2 = st.columns(2)
         with bear_btn_col1:
-            bear_manual_scan = st.button("Short Scan starten ⬇", use_container_width=True, type="primary", key="bear_tab_manual_scan")
+            bear_manual_scan = st.button("Short Scan starten DN", use_container_width=True, type="primary", key="bear_tab_manual_scan")
         with bear_btn_col2:
             if bear_cache_ok:
                 if st.button(f"Cache laden ({len(bear_cached_results)})", use_container_width=True, key="bear_tab_load_cache"):
@@ -18133,7 +18678,7 @@ with tab_bear:
             bear_df = bear_df.sort_values(by="BI_Score", ascending=False).reset_index(drop=True)
 
         _mode_label = "Intraday" if _bear_mode == "intraday" else "Swing"
-        st.subheader(f"{len(bear_df)} Treffer — Short ⬇({_mode_label})")
+        st.subheader(f"{len(bear_df)} Treffer — Short DN({_mode_label})")
 
         # Display-Spalten
         _bear_display_cols = [c for c in ["Ticker", "Preis", "Change%", "BI_Score", "ShortBonusScore",
@@ -18176,7 +18721,13 @@ with tab_bear:
 
             _bear_score = _bear_item.get("BI_Score", 0)
             _bear_grade = _bear_item.get("BI_GradeLabel", _bear_item.get("BI_Grade", "?"))
-            st.markdown(f"## {_bear_item.get('Ticker', 'N/A')} — Short Setup | {_bear_grade} ({_bear_score}/200)")
+            _bear_gl = _bear_item.get("BI_Grade", "D")
+            _bgc = {"S": "grade-s", "A": "grade-a", "B": "grade-b", "C": "grade-c"}.get(_bear_gl, "grade-d")
+            st.markdown(
+                f"<div class='{_bgc}' style='padding:16px 20px;border-radius:12px;margin:8px 0;'>"
+                f"<h3 style='margin:0;'>{_bear_item.get('Ticker', 'N/A')} — Short Setup | {_bear_grade} ({_bear_score}/200)</h3></div>",
+                unsafe_allow_html=True
+            )
 
             # Metriken
             _bm1, _bm2, _bm3, _bm4 = st.columns(4)
@@ -18475,7 +19026,7 @@ Akkumulation (bei Support) oder Distribution (bei Widerstand).
         st.subheader("Volume Void Strategien")
 
         st.markdown("""
-**Volume Void Long ⬆ / Volume Void Short ⬇**
+**Volume Void Long UP / Volume Void Short DN**
 Analysiert das Volume Profile (wo wurde wie viel gehandelt) und findet „Löcher" — Preiszonen mit wenig historischem Volumen.
 - *Long:* Preis liegt UNTER einem Volume Void → wenig Widerstand, Preis kann schnell hochschießen
 - *Short:* Preis liegt ÜBER einem Volume Void → wenig Support, Preis kann schnell fallen
@@ -18486,7 +19037,7 @@ Analysiert das Volume Profile (wo wurde wie viel gehandelt) und findet „Löche
         st.subheader("Harmonic Patterns")
 
         st.markdown("""
-**Harmonic Bullish ⬆ / Harmonic Bearish ⬇ / Harmonic All **
+**Harmonic Bullish UP / Harmonic Bearish DN / Harmonic All **
 Erkennt XABCD-Patterns basierend auf Fibonacci-Verhältnissen: Gartley, Bat, Butterfly, Crab.
 - Der Entry erfolgt am Punkt D (Completion Zone)
 - Stop-Loss knapp unter/über Punkt D
@@ -18498,7 +19049,7 @@ Erkennt XABCD-Patterns basierend auf Fibonacci-Verhältnissen: Gartley, Bat, But
         st.subheader("Breakout Imminent V2 (20-Signal Composite)")
 
         st.markdown("""
-**Breakout Imminent Long ⬆ / Breakout Imminent Short ⬇**
+**Breakout Imminent Long UP / Breakout Imminent Short DN**
 Das fortschrittlichste Setup im Scanner. Kombiniert **20 unabhängige Signale** aus 5 Kategorien zu einem Composite Score (max 200 Punkte):
 
  **ENERGIE (Compression-Signale):**
@@ -18546,7 +19097,7 @@ Entry/SL/TP automatisch berechnet (ATR-basierter Stop, Measured Move Targets).
         st.subheader("Wyckoff Strategien")
 
         st.markdown("""
-**Wyckoff Accumulation ⬆ / Wyckoff Distribution ⬇**
+**Wyckoff Accumulation UP / Wyckoff Distribution DN**
 Basiert auf Richard Wyckoff's Theorie der Akkumulations- und Distributions-Phasen:
 - *Accumulation:* Smart Money kauft leise in einer Trading Range. Erkennt: Enge Range + abnehmendes Volumen + steigende OBV-Divergenz.
 - *Distribution:* Smart Money verkauft leise. Erkennt: Enge Range + abnehmendes Volumen + fallende OBV-Divergenz.

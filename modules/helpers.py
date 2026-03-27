@@ -91,22 +91,22 @@ def get_current_trading_session():
         
         # Wochenende = Markt geschlossen → Nutze Regular (Freitag-Daten)
         if now_et.weekday() >= 5:  # Samstag = 5, Sonntag = 6
-            return "Regular", "📅 Wochenende - zeige Freitag-Daten"
+            return "Regular", " Wochenende - zeige Freitag-Daten"
         
         # Session bestimmen
         if 4.0 <= current_time < 9.5:
-            return "Pre-Market", f"🌅 Pre-Market ({now_et.strftime('%H:%M')} ET)"
+            return "Pre-Market", f" Pre-Market ({now_et.strftime('%H:%M')} ET)"
         elif 9.5 <= current_time < 16.0:
-            return "Regular", f"🟢 Regular Hours ({now_et.strftime('%H:%M')} ET)"
+            return "Regular", f"[+] Regular Hours ({now_et.strftime('%H:%M')} ET)"
         elif 16.0 <= current_time < 20.0:
-            return "After-Hours", f"🌙 After-Hours ({now_et.strftime('%H:%M')} ET)"
+            return "After-Hours", f" After-Hours ({now_et.strftime('%H:%M')} ET)"
         else:
             # Nachts → Nutze Regular (letzte Tagesdaten)
-            return "Regular", f"😴 Markt geschlossen ({now_et.strftime('%H:%M')} ET) - zeige letzte Daten"
+            return "Regular", f" Markt geschlossen ({now_et.strftime('%H:%M')} ET) - zeige letzte Daten"
             
     except Exception as e:
         # Fallback wenn pytz nicht funktioniert
-        return "Regular", "📊 Regular Hours"
+        return "Regular", " Regular Hours"
 
 
 def get_volatility_regime(atr_pct):

@@ -448,41 +448,41 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
 
     if health >= 75:
         verdict = "STRONG"
-        verdict_emoji = "💪🟢"
+        verdict_emoji = "[**][+]"
     elif health >= 55:
         verdict = "HEALTHY"
-        verdict_emoji = "✅🟢"
+        verdict_emoji = "[OK][+]"
     elif health >= 40:
         verdict = "CAUTION"
-        verdict_emoji = "⚠️🟡"
+        verdict_emoji = "[!][~]"
     elif health >= 25:
         if is_exhaustion:
             verdict = "EXHAUSTED"
-            verdict_emoji = "🔋🟠"
+            verdict_emoji = "[!]"
         else:
             verdict = "WEAK"
-            verdict_emoji = "⚠️🟠"
+            verdict_emoji = "[!][!]"
     else:
         if is_exhaustion:
             verdict = "EXHAUSTED"
-            verdict_emoji = "🔋🔴"
+            verdict_emoji = "[-]"
         else:
             verdict = "FAKEOUT"
-            verdict_emoji = "🚫🔴"
+            verdict_emoji = "[X][-]"
 
     # Selloff Risk Label
     if selloff_pressure >= 45:
         selloff_risk = "IMMINENT"
-        selloff_emoji = "🚨"
+        selloff_emoji = "[!!]"
     elif selloff_pressure >= 25:
         selloff_risk = "HIGH"
-        selloff_emoji = "🔴"
+        selloff_emoji = "[-]"
     elif selloff_pressure >= 10:
         selloff_risk = "MEDIUM"
-        selloff_emoji = "🟡"
+        selloff_emoji = "[~]"
     else:
         selloff_risk = "LOW"
-        selloff_emoji = "🟢"
+        selloff_emoji = "[+]"
 
     # Action
     if verdict == "FAKEOUT":
@@ -935,27 +935,27 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     # Signal-Level
     if total_pass >= 9:
         signal = "SUPER"
-        signal_emoji = "🔥🔥🔥"
+        signal_emoji = "[*][*][*]"
         signal_color = "green"
         action = f"FULL SEND {'LONG' if is_long else 'SHORT'} — {total_pass}/10 Kategorien bestätigt!"
     elif total_pass >= 8:
         signal = "STARK"
-        signal_emoji = "🔥🔥"
+        signal_emoji = "[*][*]"
         signal_color = "green"
         action = f"STRONG {'LONG' if is_long else 'SHORT'} — {total_pass}/10 bestätigt"
     elif total_pass >= 7:
         signal = "GUT"
-        signal_emoji = "🔥"
+        signal_emoji = "[*]"
         signal_color = "yellow"
         action = f"{'LONG' if is_long else 'SHORT'} mit normalem Risk — {total_pass}/10"
     elif total_pass >= 6:
         signal = "MÖGLICH"
-        signal_emoji = "⚠️"
+        signal_emoji = "[!]"
         signal_color = "orange"
         action = f"Kleine Position möglich — nur {total_pass}/10"
     else:
         signal = "KEIN TRADE"
-        signal_emoji = "🚫"
+        signal_emoji = "[X]"
         signal_color = "red"
         action = f"KEIN TRADE — nur {total_pass}/10 Kategorien"
 

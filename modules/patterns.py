@@ -4486,11 +4486,11 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         event_strs = [e["label"] if isinstance(e, dict) else str(e) for e in w_events[:3]]
                         
                         if w_type == "Accumulation":
-                            phase_emoji = "🟢" if "D" in w_phase else "🟡" if "C" in w_phase else "🔵"
+                            phase_emoji = "[+]" if "D" in w_phase else "[~]" if "C" in w_phase else "[o]"
                             target = round(w_rh + w_rw, 2)
                             p_type = "bullish"
                         else:
-                            phase_emoji = "🔴" if "D" in w_phase else "🟠" if "C" in w_phase else "🔵"
+                            phase_emoji = "[-]" if "D" in w_phase else "[!]" if "C" in w_phase else "[o]"
                             target = round(w_rl - w_rw, 2)
                             p_type = "bearish"
                         
@@ -4524,7 +4524,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     pts = ww["points"]
                     conf = ww.get("confirmation", 0)
                     if ww["direction"] == "bullish":
-                        emoji = "🐺🟢"
+                        emoji = "W[+]"
                         desc = (f"Wolfe Wave Long — Entry Zone ${ww['entry']:.2f}, "
                                 f"Bestätigung über ${conf:.2f}, "
                                 f"Stop ${ww['stop']:.2f}, Target ${ww['target']:.2f} "
@@ -4533,7 +4533,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 f"Punkte: ${pts['p1']['price']:.2f}→${pts['p2']['price']:.2f}→"
                                 f"${pts['p3']['price']:.2f}→${pts['p4']['price']:.2f}→${pts['p5']['price']:.2f}")
                     else:
-                        emoji = "🐺🔴"
+                        emoji = "W[-]"
                         desc = (f"Wolfe Wave Short — Entry Zone ${ww['entry']:.2f}, "
                                 f"Bestätigung unter ${conf:.2f}, "
                                 f"Stop ${ww['stop']:.2f}, Target ${ww['target']:.2f} "
@@ -4673,18 +4673,18 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     # Dragonfly Doji (langer unterer Schatten)
                     if lower_shadow0 > range0 * 0.6:
                         doji_type = "Dragonfly Doji"
-                        doji_emoji = "🐉"
+                        doji_emoji = "D"
                         doji_bias = "bullish" if is_downtrend else "neutral"
                         doji_desc = "Dragonfly Doji — Starke Ablehnung vom Tief"
                     # Gravestone Doji (langer oberer Schatten)
                     elif upper_shadow0 > range0 * 0.6:
                         doji_type = "Gravestone Doji"
-                        doji_emoji = "🪦"
+                        doji_emoji = "G"
                         doji_bias = "bearish" if is_uptrend else "neutral"
                         doji_desc = "Gravestone Doji — Starke Ablehnung vom Hoch"
                     else:
                         doji_type = "Doji"
-                        doji_emoji = "➕"
+                        doji_emoji = "+"
                         doji_bias = "neutral"
                         doji_desc = "Doji — Markt unentschlossen, warte auf Richtung"
                     
@@ -4699,7 +4699,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 # MARUBOZU — Große Kerze fast ohne Schatten (starkes Momentum)
                 if body0 > range0 * 0.85 and body0 > atr * 1.2:
                     maru_type = "Bullish Marubozu" if is_green0 else "Bearish Marubozu"
-                    maru_emoji = "💪⬆️" if is_green0 else "💪⬇️"
+                    maru_emoji = "[**]UP" if is_green0 else "[**]DN"
                     patterns.append({
                         "pattern": maru_type,
                         "emoji": maru_emoji,

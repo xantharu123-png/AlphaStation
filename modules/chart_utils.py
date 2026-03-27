@@ -280,7 +280,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
             '''}
             
             // Build Legend
-            let legendHtml = '<div class="legend-section">📈 EMAs</div>';
+            let legendHtml = '<div class="legend-section">UP EMAs</div>';
             
             // EMA Lines
             const emaLines = {ema_json};
@@ -298,7 +298,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
             // VWAP Lines
             const vwapLines = {vwap_json};
             if (vwapLines.length > 0) {{
-                legendHtml += '<div class="legend-section">📊 VWAP</div>';
+                legendHtml += '<div class="legend-section"> VWAP</div>';
                 vwapLines.forEach((vwap, index) => {{
                     const lineSeries = chart.addLineSeries({{
                         color: vwap.color,
@@ -316,7 +316,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
             // Support/Resistance Lines
             const srLines = {sr_json};
             if (srLines.length > 0) {{
-                legendHtml += '<div class="legend-section">📏 S/R Levels</div>';
+                legendHtml += '<div class="legend-section"> S/R Levels</div>';
                 srLines.forEach(sr => {{
                     candleSeries.createPriceLine({{
                         price: sr.price,
@@ -326,7 +326,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
                         axisLabelVisible: true,
                         title: sr.label,
                     }});
-                    const icon = sr.type === 'support' ? '🟢' : '🔴';
+                    const icon = sr.type === 'support' ? '[+]' : '[-]';
                     legendHtml += `<div class="legend-item">${{icon}} ${{sr.price.toFixed(2)}}</div>`;
                 }});
             }}
@@ -349,21 +349,21 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
             // Trade Zones (as price lines with different styles)
             const tradeZones = {zones_json};
             if (tradeZones.length > 0) {{
-                legendHtml += '<div class="legend-section">🎯 Trade Setup</div>';
+                legendHtml += '<div class="legend-section"> Trade Setup</div>';
                 tradeZones.forEach(zone => {{
                     let lineColor, lineStyle, icon;
                     if (zone.type === 'entry') {{
                         lineColor = '#4CAF50';
                         lineStyle = LightweightCharts.LineStyle.Solid;
-                        icon = '🎯';
+                        icon = '';
                     }} else if (zone.type === 'stop') {{
                         lineColor = '#F44336';
                         lineStyle = LightweightCharts.LineStyle.Solid;
-                        icon = '🛑';
+                        icon = '';
                     }} else {{
                         lineColor = '#2196F3';
                         lineStyle = LightweightCharts.LineStyle.Dashed;
-                        icon = '✅';
+                        icon = '[OK]';
                     }}
                     
                     candleSeries.createPriceLine({{
@@ -402,7 +402,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
                 // Add void indicator
                 const voidDiv = document.createElement('div');
                 voidDiv.className = 'void-indicator';
-                voidDiv.innerHTML = `🕳️ ${{volumeVoids.length}} Volume Void${{volumeVoids.length > 1 ? 's' : ''}}`;
+                voidDiv.innerHTML = ` ${{volumeVoids.length}} Volume Void${{volumeVoids.length > 1 ? 's' : ''}}`;
                 container.appendChild(voidDiv);
             }}
             
@@ -599,7 +599,7 @@ def create_lightweight_chart_html(ohlcv_data, ticker, sr_levels=None, patterns=N
             // Pattern Box
             const patterns = {json.dumps([{"pattern": p.get("pattern", ""), "type": p.get("type", "neutral"), "confidence": p.get("confidence", "Medium")} for p in (patterns or [])[:3]])};
             if (patterns.length > 0) {{
-                let patternHtml = '<strong>🔍 Patterns:</strong><br>';
+                let patternHtml = '<strong> Patterns:</strong><br>';
                 patterns.forEach(p => {{
                     const cls = p.type === 'bullish' ? 'pattern-bullish' : p.type === 'bearish' ? 'pattern-bearish' : '';
                     patternHtml += `<div class="${{cls}}">${{p.pattern}} (${{p.confidence}})</div>`;

@@ -112,7 +112,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
         if progress_callback:
             progress_callback(
                 (day_idx / len(trading_days)) * 0.7,  # 70% für Laden
-                f"📥 Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
+                f" Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
             )
         
         day_data = fetch_grouped_daily(poly_key, date_str)
@@ -169,7 +169,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
         if progress_callback and t_idx % 500 == 0:
             progress_callback(
                 0.7 + (t_idx / len(tickers_with_data)) * 0.3,  # 30% für Simulation
-                f"🔍 Scanne {ticker} ({t_idx+1}/{len(tickers_with_data)})"
+                f" Scanne {ticker} ({t_idx+1}/{len(tickers_with_data)})"
             )
         
         bars = ticker_history[ticker]
@@ -206,7 +206,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     del ticker_history
     
     if progress_callback:
-        progress_callback(1.0, f"✅ Fertig! {len(total_tickers_seen)} Aktien gescannt")
+        progress_callback(1.0, f"[OK] Fertig! {len(total_tickers_seen)} Aktien gescannt")
 
     return all_results, len(total_tickers_seen)
 
@@ -214,7 +214,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
 def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         min_price=5.0, min_volume=200000, progress_callback=None):
     """
-    🔮 Breakout Imminent V2.1 Backtest — Rolling-Window Analyse (Pro-Reweighted).
+     Breakout Imminent V2.1 Backtest — Rolling-Window Analyse (Pro-Reweighted).
 
     V2.1 Upgrades:
     - Signal-Gewichte rebalanciert: Smart Money BOOSTED, Dead Stock CUT
@@ -265,7 +265,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         if progress_callback:
             progress_callback(
                 (day_idx / len(trading_days)) * 0.5,
-                f"📥 Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
+                f" Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
             )
 
         day_data = fetch_grouped_daily(poly_key, date_str)
@@ -335,7 +335,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         if progress_callback and t_idx % 20 == 0:
             progress_callback(
                 0.5 + (t_idx / len(tickers_to_test)) * 0.5,
-                f"🔍 Analysiere {ticker} ({t_idx+1}/{len(tickers_to_test)}) | {signals_found} Signale"
+                f" Analysiere {ticker} ({t_idx+1}/{len(tickers_to_test)}) | {signals_found} Signale"
             )
 
         bars = ticker_history[ticker]
@@ -369,7 +369,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if grade == "D":
                 continue
 
-            # SMART MONEY MINIMUM: Min 2 Boosted-Signale müssen feuern (🔥 oder ✅)
+            # SMART MONEY MINIMUM: Min 2 Boosted-Signale müssen feuern ([*] oder [OK])
             # Das ist der WR-Booster — ohne Smart Money = kein Trade
             if sm_hits < 2:
                 continue
@@ -761,7 +761,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     del ticker_history
 
     if progress_callback:
-        progress_callback(1.0, f"✅ BI V2 Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
+        progress_callback(1.0, f"[OK] BI V2 Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
 
     return {"trades": all_trades, "stats_by_grade": stats_by_grade, "summary": summary}
 
@@ -769,7 +769,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                           min_price=2.0, min_volume=100000, progress_callback=None):
     """
-    🧬 BioTech Catalyst Backtest — Technisches Setup + Volume Confirmation.
+     BioTech Catalyst Backtest — Technisches Setup + Volume Confirmation.
 
     KONZEPT: Biotech-Aktien werden CATALYST-GETRIEBEN getradet.
     Da historische Catalyst-Daten (FDA Dates, News) nicht verfügbar sind,
@@ -829,7 +829,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         if progress_callback:
             progress_callback(
                 (day_idx / len(trading_days)) * 0.5,
-                f"📥 Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
+                f" Lade Tag {day_idx+1}/{len(trading_days)}: {date_str}"
             )
 
         day_data = fetch_grouped_daily(poly_key, date_str)
@@ -887,7 +887,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         if progress_callback and t_idx % 10 == 0:
             progress_callback(
                 0.5 + (t_idx / len(tickers_to_test)) * 0.5,
-                f"🧬 Analysiere {ticker} ({t_idx+1}/{len(tickers_to_test)}) | {signals_found} Signale"
+                f" Analysiere {ticker} ({t_idx+1}/{len(tickers_to_test)}) | {signals_found} Signale"
             )
 
         bars = ticker_history[ticker]
@@ -1148,7 +1148,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
     del ticker_history
 
     if progress_callback:
-        progress_callback(1.0, f"✅ BioTech Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
+        progress_callback(1.0, f"[OK] BioTech Backtest fertig! {signals_found} Signale, {len(filled_trades)} Trades")
 
     return {"trades": all_trades, "stats_by_grade": stats_by_grade, "summary": summary}
 
@@ -1357,7 +1357,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     
     for t_idx, ticker in enumerate(tickers):
         if progress_callback:
-            progress_callback(t_idx / total_tickers, f"📥 {ticker} ({t_idx+1}/{total_tickers})")
+            progress_callback(t_idx / total_tickers, f" {ticker} ({t_idx+1}/{total_tickers})")
         
         # Daten holen (mit Cache)
         if ticker not in ticker_data_cache:
@@ -1414,7 +1414,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     
     if progress_callback:
         loaded = len(ticker_data_cache)
-        progress_callback(1.0, f"✅ Fertig! {loaded} geladen, {skipped_no_data} keine Daten, {skipped_too_short} zu kurz, {total_signals} Signale")
+        progress_callback(1.0, f"[OK] Fertig! {loaded} geladen, {skipped_no_data} keine Daten, {skipped_too_short} zu kurz, {total_signals} Signale")
     
     return all_results
 
