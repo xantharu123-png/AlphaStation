@@ -38,10 +38,8 @@ from modules.scanners import (
     _bi_cache_load,
     _biotech_cache_load,
 )
-from modules.helpers import get_market_session
-
-# Import scanner functions from main scanner.py
-from scanner import fetch_bear_scanner_data
+from modules.helpers import get_current_trading_session
+from modules.data_fetchers import rate_limited_get
 
 # Strategies are defined inline here to avoid Streamlit import at module level
 # (they are only needed when imported in a Streamlit context)
@@ -91,6 +89,18 @@ FOREX_STRATEGIES = {
         "description": "FX pair momentum trades",
         "filters": {"RVOL": (1.0, 20.0)},
     },
+}
+
+INVERSE_ETFS = {
+    "SQQQ": ("3x Short Nasdaq", "QQQ"), "SPXS": ("3x Short S&P 500", "SPY"),
+    "SDOW": ("3x Short Dow", "DIA"), "SH": ("1x Short S&P 500", "SPY"),
+    "PSQ": ("1x Short Nasdaq", "QQQ"), "DOG": ("1x Short Dow", "DIA"),
+    "SPXU": ("3x Short S&P 500", "SPY"), "QID": ("2x Short Nasdaq", "QQQ"),
+    "RWM": ("1x Short Russell", "IWM"), "SRTY": ("3x Short Russell", "IWM"),
+    "SOXS": ("3x Short Semis", "SOXX"), "LABD": ("3x Short Biotech", "XBI"),
+    "FAZ": ("3x Short Financials", "XLF"), "ERY": ("3x Short Energy", "XLE"),
+    "TZA": ("3x Short SmallCap", "IWM"),
+    "UVXY": ("1.5x Long VIX", "VIX"), "VIXY": ("1x Long VIX", "VIX"),
 }
 
 
@@ -219,10 +229,94 @@ def _biotech_scan_wrapper() -> None:
 
 
 def _bear_scan_wrapper() -> None:
-    """Wrapper to run bear scanner in background."""
+    """Run bear scanner in background — finds inverse ETF opportunities and breakdown stocks."""
     try:
-        results = fetch_bear_scanner_data(POLYGON_KEY)
-        save_cache_file(BEAR_CACHE, [results] if isinstance(results, dict) else results)
+        result = {"inverse_etfs": [], "short_candidates": [], "breakdown_stocks": []}
+
+        # --- Section 1: Inverse ETF performance ---
+        for ticker, (desc, underlying) in INVERSE_ETFS.items():
+            try:
+                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 40, "sort": "desc"})
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if len(bars) < 2:
+                    continue
+
+                close = bars[0]["c"]
+                prev_close = bars[1]["c"]
+                chg_1d = ((close - prev_close) / prev_close) * 100
+
+                chg_5d = 0
+                if len(bars) >= 6:
+                    chg_5d = ((close - bars[5]["c"]) / bars[5]["c"]) * 100
+
+                chg_20d = 0
+                if len(bars) >= 21:
+                    chg_20d = ((close - bars[20]["c"]) / bars[20]["c"]) * 100
+
+                vol = bars[0].get("v", 0)
+                avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(len(bars) - 1, 20) if len(bars) > 1 else 1
+                rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+
+                if chg_5d > 5:
+                    signal = "STARK"
+                elif chg_5d > 2:
+                    signal = "Steigend"
+                elif chg_5d > 0:
+                    signal = "Leicht"
+                else:
+                    signal = "Fallend"
+
+                result["inverse_etfs"].append({
+                    "ticker": ticker, "name": desc, "underlying": underlying,
+                    "price": round(close, 2), "change_1d": round(chg_1d, 2),
+                    "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2),
+                    "volume": vol, "rvol": rvol, "signal": signal,
+                })
+            except Exception:
+                continue
+
+        result["inverse_etfs"].sort(key=lambda x: x.get("change_5d", 0), reverse=True)
+
+        # --- Section 2: Breakdown stocks (big single-day losers) ---
+        try:
+            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
+            if snap_resp.status_code == 200:
+                tickers = snap_resp.json().get("tickers", [])
+                losers = []
+                for t in tickers:
+                    try:
+                        day = t.get("day", {})
+                        prev = t.get("prevDay", {})
+                        price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                        prev_close = prev.get("c", 0)
+                        if not price or not prev_close or price < 5:
+                            continue
+                        vol = day.get("v", 0)
+                        dollar_vol = price * vol
+                        if dollar_vol < 500000:
+                            continue
+                        chg_pct = ((price - prev_close) / prev_close) * 100
+                        if chg_pct > -4:
+                            continue
+                        losers.append({
+                            "ticker": t.get("ticker", ""),
+                            "price": round(price, 2),
+                            "change_pct": round(chg_pct, 2),
+                            "volume": vol,
+                            "dollar_volume": round(dollar_vol, 0),
+                        })
+                    except Exception:
+                        continue
+                losers.sort(key=lambda x: x.get("change_pct", 0))
+                result["breakdown_stocks"] = losers[:30]
+        except Exception as e:
+            print(f"Breakdown stocks error: {e}")
+
+        save_cache_file(BEAR_CACHE, [result])
     except Exception as e:
         print(f"Bear scanner error: {e}")
 
@@ -264,7 +358,7 @@ def get_health():
 @app.get("/api/market-status", response_model=MarketStatusResponse)
 def get_market_status():
     """Get current market session (Pre-Market, Regular, After-Hours)."""
-    session, detail = get_market_session()
+    session, detail = get_current_trading_session()
     return MarketStatusResponse(
         session=session,
         detail=detail,
