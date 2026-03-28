@@ -430,8 +430,52 @@
             );
         }
 
+        // ── Reusable ScanControl Component ──
+        function ScanControl({ scanName, postEndpoint, scanStatus }) {
+            const [triggering, setTriggering] = useState(false);
+            const status = scanStatus[scanName] || {};
+            const isRunning = status.running || triggering;
+
+            const triggerScan = async () => {
+                setTriggering(true);
+                const body = scanName === 'bi_long' ? { direction: 'long' } : scanName === 'bi_short' ? { direction: 'short' } : {};
+                await apiFetch(postEndpoint, { method: 'POST', body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined });
+                setTimeout(() => setTriggering(false), 3000);
+            };
+
+            const formatTime = (iso) => {
+                if (!iso) return '-';
+                try { return new Date(iso).toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}); }
+                catch(e) { return '-'; }
+            };
+
+            return (
+                <div className="flex items-center gap-4 mb-4 p-3 rounded-lg" style={{backgroundColor:'var(--bg-primary)', border:'1px solid var(--border-color)'}}>
+                    <button onClick={triggerScan} disabled={isRunning}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition flex items-center gap-2 ${isRunning ? 'bg-orange-500' : 'bg-green-600 hover:bg-green-700'}`}>
+                        {isRunning ? (
+                            <React.Fragment>
+                                <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                Scan läuft...
+                            </React.Fragment>
+                        ) : 'Scan starten'}
+                    </button>
+                    <div className="flex gap-6 text-xs" style={{color:'var(--text-muted)'}}>
+                        <span>Letzter Scan: <strong>{formatTime(status.last_run)}</strong></span>
+                        <span>Nächster: <strong>{formatTime(status.next_run)}</strong></span>
+                        <span>Intervall: <strong>{status.interval_min || '?'} Min</strong></span>
+                    </div>
+                    {isRunning && (
+                        <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden ml-2">
+                            <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{width:'60%'}}></div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         // ── Scanner Tab ──
-        function ScannerTab({ apiOk, onSelectTicker }) {
+        function ScannerTab({ apiOk, onSelectTicker, scanStatus }) {
             const [data, setData] = useState([]);
             const [settings, setSettings] = useState({ market: 'stocks', strategy: 'Volume Surge', timeframe: '1D' });
             const [showSettings, setShowSettings] = useState(false);
@@ -555,7 +599,7 @@
         }
 
         // ── BI Scanner Tab ──
-        function BIScannerTab({ onSelectTicker }) {
+        function BIScannerTab({ onSelectTicker, scanStatus }) {
             const [direction, setDirection] = useState('long');
             const [data, setData] = useState([]);
             const [cacheAge, setCacheAge] = useState(null);
@@ -615,6 +659,8 @@
                             className="w-full" />
                     </div>
 
+                    <ScanControl scanName={direction === 'long' ? 'bi_long' : 'bi_short'} postEndpoint="/api/bi-scan" scanStatus={scanStatus} />
+
                     {loading ? <Spinner /> : items.length === 0 ?
                         <EmptyState title="Keine BI Kandidaten" subtitle="Scans laufen automatisch im Hintergrund" /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -646,7 +692,7 @@
         }
 
         // ── Biotech Tab ──
-        function BiotechTab() {
+        function BiotechTab({ onSelectTicker, scanStatus }) {
             const [data, setData] = useState([]);
             const [cacheAge, setCacheAge] = useState(null);
 
@@ -675,6 +721,8 @@
                         <MetricCard label="CACHE" value={cacheAge != null ? Math.round(cacheAge/60) + ' Min' : '-'} sub={cacheAge != null ? 'alt' : 'Kein Scan'} />
                     </div>
 
+                    <ScanControl scanName="biotech" postEndpoint="/api/biotech-scan" scanStatus={scanStatus} />
+
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">Biotech Scanner</h2>
                         <button onClick={() => downloadCSV(sorted, 'biotech-candidates.csv')} className="icon-button p-2" title="Als CSV exportieren">
@@ -691,7 +739,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map(item => (
-                                            <tr key={item.id} className="table-row border-b">
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.ticker)} className="table-row border-b cursor-pointer">
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm">{item.name}</td>
                                                 <td className="px-5 py-4 text-sm font-medium">{item.catalyst}</td>
@@ -711,7 +759,7 @@
         }
 
         // ── Short / Bear Scanner Tab ──
-        function ShortScannerTab() {
+        function ShortScannerTab({ onSelectTicker, scanStatus }) {
             const [data, setData] = useState({});
             const [view, setView] = useState('etfs');
             const [cacheAge, setCacheAge] = useState(null);
@@ -761,6 +809,8 @@
                         </button>
                     </div>
 
+                    <ScanControl scanName="bear" postEndpoint="/api/bear-scan" scanStatus={scanStatus} />
+
                     {loading ? <Spinner /> : items.length === 0 ?
                         <EmptyState title={view === 'etfs' ? 'Keine ETF-Daten' : 'Keine Breakdown-Daten'} subtitle="Scans laufen automatisch im Hintergrund" /> :
                         view === 'etfs' ? (
@@ -771,7 +821,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map((e) => (
-                                            <tr key={e.id} className="table-row border-b">
+                                            <tr key={e.id} onClick={() => onSelectTicker(e.ticker)} className="table-row border-b cursor-pointer">
                                                 <td className="px-5 py-4 font-semibold text-red-600">{e.ticker}</td>
                                                 <td className="px-5 py-4 text-sm">{e.name}</td>
                                                 <td className="px-5 py-4 text-sm text-gray-500">{e.underlying}</td>
@@ -795,7 +845,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map((b) => (
-                                            <tr key={b.id} className="table-row border-b">
+                                            <tr key={b.id} onClick={() => onSelectTicker(b.ticker)} className="table-row border-b cursor-pointer">
                                                 <td className="px-5 py-4 font-semibold text-red-600">{b.ticker}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(b.price)}</td>
                                                 <td className="px-5 py-4 text-sm font-medium text-red-600">{fmt(b.change_pct)}%</td>
@@ -813,7 +863,7 @@
         }
 
         // ── Early Movers Tab ──
-        function EarlyMoversTab() {
+        function EarlyMoversTab({ onSelectTicker, scanStatus }) {
             const [data, setData] = useState({});
             const [view, setView] = useState('gainers');
 
@@ -859,6 +909,8 @@
                         </button>
                     </div>
 
+                    <ScanControl scanName="early_movers" postEndpoint="/api/early-movers-scan" scanStatus={scanStatus} />
+
                     {loading ? <Spinner /> : items.length === 0 ?
                         <EmptyState title="Keine Daten" subtitle="Scans laufen automatisch im Hintergrund" /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -868,7 +920,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map((item) => (
-                                            <tr key={item.id} className="table-row border-b">
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.ticker)} className="table-row border-b cursor-pointer">
                                                 <td className="px-5 py-4 text-sm text-gray-400 font-medium">{item.id + 1}</td>
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
@@ -886,7 +938,7 @@
         }
 
         // ── BTC Divergenz Tab ──
-        function BTCDivergenzTab() {
+        function BTCDivergenzTab({ onSelectTicker, scanStatus }) {
             const [data, setData] = useState([]);
 
             const loadResults = useCallback(async () => {
@@ -924,6 +976,8 @@
                         </button>
                     </div>
 
+                    <ScanControl scanName="btc_divergenz" postEndpoint="/api/btc-divergenz-scan" scanStatus={scanStatus} />
+
                     {loading ? <Spinner /> : data.length === 0 ?
                         <EmptyState title="Keine Divergenz-Daten" subtitle="Scans laufen automatisch im Hintergrund" /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -933,7 +987,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map((item) => (
-                                            <tr key={item.id} className={`table-row border-b ${item.ticker === 'X:BTCUSD' ? 'bg-purple-50' : ''}`}>
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.symbol)} className={`table-row border-b cursor-pointer ${item.ticker === 'X:BTCUSD' ? 'bg-purple-50' : ''}`}>
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.symbol}</td>
                                                 <td className="px-5 py-4 text-sm">{item.name}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${item.ticker === 'X:BTCUSD' ? Number(item.price).toLocaleString() : fmt(item.price)}</td>
@@ -954,7 +1008,7 @@
         }
 
         // ── Money Flow Tab ──
-        function MoneyFlowTab() {
+        function MoneyFlowTab({ onSelectTicker, scanStatus }) {
             const [data, setData] = useState([]);
 
             const loadResults = useCallback(async () => {
@@ -992,6 +1046,8 @@
                         </button>
                     </div>
 
+                    <ScanControl scanName="money_flow" postEndpoint="/api/money-flow-scan" scanStatus={scanStatus} />
+
                     {loading ? <Spinner /> : data.length === 0 ?
                         <EmptyState title="Keine Sektor-Daten" subtitle="Scans laufen automatisch im Hintergrund" /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -1001,7 +1057,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map((item) => (
-                                            <tr key={item.id} className="table-row border-b">
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.ticker)} className="table-row border-b cursor-pointer">
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm font-medium">{item.sector}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
@@ -1104,7 +1160,7 @@
         }
 
         // ── Crash Monitor Tab ──
-        function CrashMonitorTab() {
+        function CrashMonitorTab({ onSelectTicker, scanStatus }) {
             const [data, setData] = useState({});
 
             const loadResults = useCallback(async () => {
@@ -1157,6 +1213,8 @@
                         </button>
                     </div>
 
+                    <ScanControl scanName="crash_monitor" postEndpoint="/api/crash-monitor-scan" scanStatus={scanStatus} />
+
                     {loading ? <Spinner /> : indices.length === 0 ?
                         <EmptyState title="Keine Monitor-Daten" subtitle="Scans laufen automatisch im Hintergrund" /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -1166,7 +1224,7 @@
                                         onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
                                         {sorted.map((item) => (
-                                            <tr key={item.id} className="table-row border-b">
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.ticker)} className="table-row border-b cursor-pointer">
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm">{item.name}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
@@ -1572,21 +1630,21 @@
 
             const renderTab = () => {
                 switch (activeTab) {
-                    case 'Scanner': return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} />;
-                    case 'BI Scanner': return <BIScannerTab onSelectTicker={onSelectTicker} />;
-                    case 'Biotech': return <BiotechTab />;
-                    case 'Short Scanner': return <ShortScannerTab />;
-                    case 'BTC-Divergenz': return <BTCDivergenzTab />;
-                    case 'Early Movers': return <EarlyMoversTab />;
-                    case 'Money Flow': return <MoneyFlowTab />;
+                    case 'Scanner': return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
+                    case 'BI Scanner': return <BIScannerTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
+                    case 'Biotech': return <BiotechTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
+                    case 'Short Scanner': return <ShortScannerTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
+                    case 'BTC-Divergenz': return <BTCDivergenzTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
+                    case 'Early Movers': return <EarlyMoversTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
+                    case 'Money Flow': return <MoneyFlowTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
                     case 'Kalender': return <KalenderTab />;
-                    case 'Crash Monitor': return <CrashMonitorTab />;
+                    case 'Crash Monitor': return <CrashMonitorTab onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
                     case 'Watchlist': return <WatchlistTab onSelectTicker={onSelectTicker} />;
                     case 'Backtest': return <BacktestTab />;
                     case 'Strategie Guide': return <StrategieGuideTab />;
                     case 'New Listing': return <NewListingTab />;
                     case 'Suche': return <SucheTab onSelectTicker={onSelectTicker} />;
-                    default: return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} />;
+                    default: return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} scanStatus={scanStatus} />;
                 }
             };
 
@@ -1603,9 +1661,11 @@
                                     <div className="flex items-center gap-2 justify-end">
                                         <span className={apiOk ? 'status-online' : 'status-offline'}></span>
                                         <span>{apiOk ? 'Server Online' : 'Server Offline'}</span>
-                                        {Object.values(scanStatus).some(s => s.running) && (
-                                            <span className="text-xs text-blue-500 font-medium ml-1">Scannt...</span>
-                                        )}
+                                        {(() => {
+                                            const running = Object.entries(scanStatus).filter(([k,v]) => v.running).map(([k]) => k);
+                                            if (running.length === 0) return null;
+                                            return <span className="text-xs text-blue-500 font-medium ml-1" title={running.join(', ')}>{running.length} Scan(s) aktiv</span>;
+                                        })()}
                                     </div>
                                     <div>{marketSession.session} {marketSession.detail ? `- ${marketSession.detail}` : ''}</div>
                                 </div>
