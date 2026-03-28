@@ -524,6 +524,343 @@ def get_biotech_results():
     )
 
 
+# ── Early Movers ──
+EARLY_MOVERS_CACHE = "/tmp/early_movers_cache.json"
+
+def _early_movers_wrapper() -> None:
+    """Fetch pre/post market movers via Polygon snapshot."""
+    try:
+        url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/gainers"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY})
+        gainers = []
+        if resp.status_code == 200:
+            for t in resp.json().get("tickers", [])[:20]:
+                day = t.get("day", {})
+                prev = t.get("prevDay", {})
+                price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                prev_c = prev.get("c", 0)
+                chg = ((price - prev_c) / prev_c * 100) if prev_c else 0
+                vol = day.get("v", 0)
+                gainers.append({"ticker": t.get("ticker",""), "price": round(price,2), "change_pct": round(chg,2), "volume": vol})
+
+        url2 = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
+        resp2 = rate_limited_get(url2, params={"apiKey": POLYGON_KEY})
+        losers = []
+        if resp2.status_code == 200:
+            for t in resp2.json().get("tickers", [])[:20]:
+                day = t.get("day", {})
+                prev = t.get("prevDay", {})
+                price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                prev_c = prev.get("c", 0)
+                chg = ((price - prev_c) / prev_c * 100) if prev_c else 0
+                vol = day.get("v", 0)
+                losers.append({"ticker": t.get("ticker",""), "price": round(price,2), "change_pct": round(chg,2), "volume": vol})
+
+        save_cache_file(EARLY_MOVERS_CACHE, [{"gainers": gainers, "losers": losers}])
+    except Exception as e:
+        print(f"Early movers error: {e}")
+
+
+@app.post("/api/early-movers-scan")
+def trigger_early_movers(background_tasks: BackgroundTasks):
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+    background_tasks.add_task(_early_movers_wrapper)
+    return {"status": "started", "message": "Early Movers scan started"}
+
+
+@app.get("/api/early-movers-results")
+def get_early_movers():
+    results, cached_at = load_cache_file(EARLY_MOVERS_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except:
+            pass
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── Crash Monitor (VIX + Market Breadth) ──
+CRASH_MONITOR_CACHE = "/tmp/crash_monitor_cache.json"
+
+def _crash_monitor_wrapper() -> None:
+    """Fetch VIX, major indices, and market breadth data."""
+    try:
+        result = {"vix": {}, "indices": [], "breadth": {}}
+
+        # VIX via Polygon
+        vix_tickers = [
+            ("I:VIX", "VIX", "Volatility Index"),
+            ("SPY", "S&P 500", "S&P 500 ETF"),
+            ("QQQ", "Nasdaq", "Nasdaq 100 ETF"),
+            ("DIA", "Dow Jones", "Dow Jones ETF"),
+            ("IWM", "Russell 2000", "Russell 2000 ETF"),
+        ]
+
+        for sym, name, desc in vix_tickers:
+            try:
+                if sym.startswith("I:"):
+                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
+                else:
+                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if len(bars) < 2:
+                    continue
+                close = bars[0]["c"]
+                prev = bars[1]["c"]
+                chg_1d = ((close - prev) / prev) * 100
+                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
+                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
+
+                entry = {"ticker": sym, "name": name, "description": desc,
+                         "price": round(close, 2), "change_1d": round(chg_1d, 2),
+                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
+
+                if sym == "I:VIX":
+                    result["vix"] = entry
+                    # Stress level
+                    if close >= 30:
+                        entry["level"] = "EXTREME"
+                    elif close >= 25:
+                        entry["level"] = "HIGH"
+                    elif close >= 20:
+                        entry["level"] = "ELEVATED"
+                    else:
+                        entry["level"] = "LOW"
+                else:
+                    result["indices"].append(entry)
+            except Exception:
+                continue
+
+        # Market breadth - count gainers vs losers via snapshot
+        try:
+            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
+            if snap_resp.status_code == 200:
+                tickers = snap_resp.json().get("tickers", [])
+                up = 0
+                down = 0
+                unchanged = 0
+                for t in tickers:
+                    day = t.get("day", {})
+                    prev = t.get("prevDay", {})
+                    pc = day.get("c", 0)
+                    pp = prev.get("c", 0)
+                    if pc and pp:
+                        if pc > pp:
+                            up += 1
+                        elif pc < pp:
+                            down += 1
+                        else:
+                            unchanged += 1
+                total = up + down + unchanged
+                ratio = round(up / down, 2) if down > 0 else 0
+                result["breadth"] = {
+                    "advancing": up, "declining": down, "unchanged": unchanged,
+                    "total": total, "ad_ratio": ratio,
+                    "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
+                }
+        except Exception:
+            pass
+
+        save_cache_file(CRASH_MONITOR_CACHE, [result])
+    except Exception as e:
+        print(f"Crash monitor error: {e}")
+
+
+@app.post("/api/crash-monitor-scan")
+def trigger_crash_monitor(background_tasks: BackgroundTasks):
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+    background_tasks.add_task(_crash_monitor_wrapper)
+    return {"status": "started", "message": "Crash monitor scan started"}
+
+
+@app.get("/api/crash-monitor-results")
+def get_crash_monitor():
+    results, cached_at = load_cache_file(CRASH_MONITOR_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except:
+            pass
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── BTC Divergenz ──
+BTC_DIVERGENZ_CACHE = "/tmp/btc_divergenz_cache.json"
+
+def _btc_divergenz_wrapper() -> None:
+    """Compare BTC vs correlated assets for divergence signals."""
+    try:
+        assets = [
+            ("X:BTCUSD", "BTC", "Bitcoin"),
+            ("X:ETHUSD", "ETH", "Ethereum"),
+            ("MSTR", "MSTR", "MicroStrategy"),
+            ("COIN", "COIN", "Coinbase"),
+            ("MARA", "MARA", "Marathon Digital"),
+            ("RIOT", "RIOT", "Riot Platforms"),
+            ("CLSK", "CLSK", "CleanSpark"),
+            ("BITF", "BITF", "Bitfarms"),
+            ("GBTC", "GBTC", "Grayscale BTC Trust"),
+        ]
+        results = []
+        btc_data = None
+
+        for sym, short, name in assets:
+            try:
+                url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if len(bars) < 2:
+                    continue
+                close = bars[0]["c"]
+                prev = bars[1]["c"]
+                chg_1d = ((close - prev) / prev) * 100
+                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
+                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
+
+                entry = {"ticker": sym, "symbol": short, "name": name,
+                         "price": round(close, 2), "change_1d": round(chg_1d, 2),
+                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
+
+                if sym == "X:BTCUSD":
+                    btc_data = entry
+                results.append(entry)
+            except Exception:
+                continue
+
+        # Calculate divergence vs BTC
+        if btc_data:
+            for r in results:
+                if r["ticker"] != "X:BTCUSD":
+                    r["div_1d"] = round(r["change_1d"] - btc_data["change_1d"], 2)
+                    r["div_5d"] = round(r["change_5d"] - btc_data["change_5d"], 2)
+                    # Signal
+                    div = r["div_5d"]
+                    if div > 5:
+                        r["signal"] = "OUTPERFORM"
+                    elif div < -5:
+                        r["signal"] = "UNDERPERFORM"
+                    elif abs(div) < 2:
+                        r["signal"] = "KORRELIERT"
+                    else:
+                        r["signal"] = "LEICHTE DIV."
+                else:
+                    r["div_1d"] = 0
+                    r["div_5d"] = 0
+                    r["signal"] = "REFERENZ"
+
+        save_cache_file(BTC_DIVERGENZ_CACHE, results)
+    except Exception as e:
+        print(f"BTC divergenz error: {e}")
+
+
+@app.post("/api/btc-divergenz-scan")
+def trigger_btc_divergenz(background_tasks: BackgroundTasks):
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+    background_tasks.add_task(_btc_divergenz_wrapper)
+    return {"status": "started", "message": "BTC Divergenz scan started"}
+
+
+@app.get("/api/btc-divergenz-results")
+def get_btc_divergenz():
+    results, cached_at = load_cache_file(BTC_DIVERGENZ_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except:
+            pass
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── Money Flow (Sector Performance) ──
+MONEY_FLOW_CACHE = "/tmp/money_flow_cache.json"
+
+SECTOR_ETFS = {
+    "XLK": "Technologie", "XLF": "Finanzen", "XLV": "Gesundheit",
+    "XLE": "Energie", "XLI": "Industrie", "XLY": "Konsum (zyklisch)",
+    "XLP": "Konsum (defensiv)", "XLU": "Versorger", "XLRE": "Immobilien",
+    "XLB": "Grundstoffe", "XLC": "Kommunikation",
+}
+
+def _money_flow_wrapper() -> None:
+    """Fetch sector ETF performance for money flow analysis."""
+    try:
+        sectors = []
+        for ticker, name in SECTOR_ETFS.items():
+            try:
+                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if len(bars) < 2:
+                    continue
+                close = bars[0]["c"]
+                prev = bars[1]["c"]
+                chg_1d = ((close - prev) / prev) * 100
+                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
+                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
+
+                vol = bars[0].get("v", 0)
+                avg_vol = sum(b.get("v", 0) for b in bars[1:11]) / min(len(bars)-1, 10) if len(bars) > 1 else 1
+                rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+
+                # Flow signal
+                if chg_5d > 2 and rvol > 1.2:
+                    flow = "ZUFLUSS"
+                elif chg_5d < -2 and rvol > 1.2:
+                    flow = "ABFLUSS"
+                elif rvol > 1.5:
+                    flow = "HOHE AKTIVITAET"
+                else:
+                    flow = "NEUTRAL"
+
+                sectors.append({
+                    "ticker": ticker, "sector": name, "price": round(close, 2),
+                    "change_1d": round(chg_1d, 2), "change_5d": round(chg_5d, 2),
+                    "change_20d": round(chg_20d, 2), "volume": vol, "rvol": rvol,
+                    "flow_signal": flow,
+                })
+            except Exception:
+                continue
+
+        sectors.sort(key=lambda x: x.get("change_5d", 0), reverse=True)
+        save_cache_file(MONEY_FLOW_CACHE, sectors)
+    except Exception as e:
+        print(f"Money flow error: {e}")
+
+
+@app.post("/api/money-flow-scan")
+def trigger_money_flow(background_tasks: BackgroundTasks):
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+    background_tasks.add_task(_money_flow_wrapper)
+    return {"status": "started", "message": "Money Flow scan started"}
+
+
+@app.get("/api/money-flow-results")
+def get_money_flow():
+    results, cached_at = load_cache_file(MONEY_FLOW_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except:
+            pass
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
 @app.get("/")
 def root():
     """Root endpoint — API info."""
