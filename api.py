@@ -44,6 +44,20 @@ from modules.scanners import (
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get
 
+# Import new listing scanner
+try:
+    from modules.new_listing_scanner import (
+        detect_new_listings,
+        calculate_listing_exhaustion,
+        fetch_ticker_for,
+        fetch_candles_for,
+        fetch_cryptocom_orderbook,
+    )
+    HAS_NEW_LISTING_SCANNER = True
+except ImportError:
+    HAS_NEW_LISTING_SCANNER = False
+    print("[Warning] new_listing_scanner module not found - new listing endpoints will not work")
+
 # ── Load ALL 65+ strategies from modules/strategies.py ──
 # Mock streamlit to avoid ImportError (strategies.py imports streamlit for apply_strategy)
 import importlib.util
@@ -325,6 +339,8 @@ _scan_status = {
     "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
     "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 20},
+    "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
 }
 
 def _run_scan_safe(name, func):
@@ -356,7 +372,12 @@ def _scheduler_loop():
         ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("bear", _bear_scan_wrapper),
         ("biotech", _biotech_scan_wrapper),
+        ("volume_spikes", _volume_spikes_wrapper),
     ]
+
+    # Only add new_listing scan if module is available
+    if HAS_NEW_LISTING_SCANNER:
+        scan_tasks.append(("new_listing", _new_listing_wrapper))
 
     # Stagger initial scans to avoid API rate limits
     for name, func in scan_tasks:
@@ -1071,95 +1092,9 @@ def get_early_movers():
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
-# ── Crash Monitor (VIX + Market Breadth) ──
+# ── Crash Monitor (VIX + Market Breadth) + Fear Score ──
+# Note: _crash_monitor_wrapper is defined later with fear score functionality
 CRASH_MONITOR_CACHE = "/tmp/crash_monitor_cache.json"
-
-def _crash_monitor_wrapper() -> None:
-    """Fetch VIX, major indices, and market breadth data."""
-    try:
-        result = {"vix": {}, "indices": [], "breadth": {}}
-
-        # VIX via Polygon
-        vix_tickers = [
-            ("I:VIX", "VIX", "Volatility Index"),
-            ("SPY", "S&P 500", "S&P 500 ETF"),
-            ("QQQ", "Nasdaq", "Nasdaq 100 ETF"),
-            ("DIA", "Dow Jones", "Dow Jones ETF"),
-            ("IWM", "Russell 2000", "Russell 2000 ETF"),
-        ]
-
-        for sym, name, desc in vix_tickers:
-            try:
-                if sym.startswith("I:"):
-                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
-                else:
-                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
-                if resp.status_code != 200:
-                    continue
-                bars = resp.json().get("results", [])
-                if len(bars) < 2:
-                    continue
-                close = bars[0]["c"]
-                prev = bars[1]["c"]
-                chg_1d = ((close - prev) / prev) * 100
-                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
-                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
-
-                entry = {"ticker": sym, "name": name, "description": desc,
-                         "price": round(close, 2), "change_1d": round(chg_1d, 2),
-                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
-
-                if sym == "I:VIX":
-                    result["vix"] = entry
-                    # Stress level
-                    if close >= 30:
-                        entry["level"] = "EXTREME"
-                    elif close >= 25:
-                        entry["level"] = "HIGH"
-                    elif close >= 20:
-                        entry["level"] = "ELEVATED"
-                    else:
-                        entry["level"] = "LOW"
-                else:
-                    result["indices"].append(entry)
-            except Exception:
-                continue
-
-        # Market breadth - count gainers vs losers via snapshot
-        try:
-            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
-            if snap_resp.status_code == 200:
-                tickers = snap_resp.json().get("tickers", [])
-                up = 0
-                down = 0
-                unchanged = 0
-                for t in tickers:
-                    day = t.get("day", {})
-                    prev = t.get("prevDay", {})
-                    pc = day.get("c", 0)
-                    pp = prev.get("c", 0)
-                    if pc and pp:
-                        if pc > pp:
-                            up += 1
-                        elif pc < pp:
-                            down += 1
-                        else:
-                            unchanged += 1
-                total = up + down + unchanged
-                ratio = round(up / down, 2) if down > 0 else 0
-                result["breadth"] = {
-                    "advancing": up, "declining": down, "unchanged": unchanged,
-                    "total": total, "ad_ratio": ratio,
-                    "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
-                }
-        except Exception:
-            pass
-
-        save_cache_file(CRASH_MONITOR_CACHE, [result])
-    except Exception as e:
-        print(f"Crash monitor error: {e}")
 
 
 @app.post("/api/crash-monitor-scan")
@@ -1349,6 +1284,809 @@ def get_money_flow():
         except Exception:
             pass
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── New Listing Scanner ──
+NEW_LISTING_CACHE = "/tmp/new_listing_scanner.json"
+
+def _new_listing_wrapper() -> None:
+    """Detect new listings and calculate exhaustion scores."""
+    if not HAS_NEW_LISTING_SCANNER:
+        print("[New Listing] Module not available")
+        return
+
+    try:
+        Path("/opt/tradingbot/data_cache").mkdir(parents=True, exist_ok=True)
+
+        # Detect new listings
+        new_listings, all_perps = detect_new_listings()
+        if not new_listings:
+            print("[New Listing] No new listings detected")
+            save_cache_file(NEW_LISTING_CACHE, [])
+            return
+
+        results = []
+        for listing in new_listings[:20]:  # Limit to 20
+            try:
+                symbol = listing.get("symbol", "")
+                exchange = listing.get("exchange", "crypto_com")
+
+                # Fetch ticker data
+                ticker_data = fetch_ticker_for(symbol, exchange)
+                if not ticker_data:
+                    continue
+
+                # Fetch candles
+                candles = fetch_candles_for(symbol, exchange)
+
+                # Fetch orderbook
+                orderbook = fetch_cryptocom_orderbook(f"{symbol}_PERP") if exchange == "crypto_com" else None
+
+                # Calculate exhaustion
+                exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
+                    candles or [], symbol, orderbook
+                )
+
+                results.append({
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "price": ticker_data.get("price", 0),
+                    "change_24h": ticker_data.get("change_24h", 0),
+                    "volume_24h": ticker_data.get("volume_24h", 0),
+                    "market_cap": ticker_data.get("market_cap", 0),
+                    "exhaustion_score": exhaustion_score,
+                    "exhaustion_details": exhaustion_details,
+                    "pump_data": pump_data,
+                    "listing_date": listing.get("listing_date"),
+                    "time_since_listing_hours": listing.get("time_since_listing_hours"),
+                })
+            except Exception as e:
+                print(f"[New Listing] Error processing {listing.get('symbol', 'unknown')}: {e}")
+                continue
+
+        save_cache_file(NEW_LISTING_CACHE, results)
+        print(f"[New Listing] Processed {len(results)} new listings")
+    except Exception as e:
+        print(f"New listing wrapper error: {e}")
+
+
+@app.post("/api/new-listing-scan")
+def trigger_new_listing_scan(background_tasks: BackgroundTasks):
+    """Trigger new listing scanner (Crypto.com and other exchanges)."""
+    if not HAS_NEW_LISTING_SCANNER:
+        raise HTTPException(status_code=400, detail="New listing scanner module not available")
+
+    background_tasks.add_task(_new_listing_wrapper)
+    return {"status": "started", "message": "New Listing scan started"}
+
+
+@app.get("/api/new-listing-results")
+def get_new_listing_results():
+    """Get cached new listing scan results."""
+    results, cached_at = load_cache_file(NEW_LISTING_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except Exception:
+            pass
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── Volume Spikes Scanner ──
+VOLUME_SPIKES_CACHE = "/tmp/volume_spikes_cache.json"
+
+def _volume_spikes_wrapper() -> None:
+    """Find stocks with unusual volume (RVOL > 3.0, price > $2)."""
+    try:
+        # Fetch market snapshot
+        snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+        snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
+
+        spikes = []
+        if snap_resp.status_code == 200:
+            tickers = snap_resp.json().get("tickers", [])
+            for t in tickers:
+                try:
+                    day = t.get("day", {})
+                    prev = t.get("prevDay", {})
+
+                    price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                    if not price or price < 2:
+                        continue
+
+                    vol = day.get("v", 0)
+                    prev_vol = prev.get("v", 0)
+
+                    # Calculate RVOL
+                    if prev_vol > 0:
+                        rvol = vol / prev_vol
+                    else:
+                        continue
+
+                    if rvol > 3.0:
+                        prev_close = prev.get("c", 0)
+                        chg = ((price - prev_close) / prev_close * 100) if prev_close else 0
+
+                        spikes.append({
+                            "ticker": t.get("ticker", ""),
+                            "price": round(price, 2),
+                            "change_pct": round(chg, 2),
+                            "volume": vol,
+                            "rvol": round(rvol, 2),
+                            "dollar_volume": round(price * vol, 0),
+                        })
+                except Exception:
+                    continue
+
+        # Sort by RVOL descending
+        spikes.sort(key=lambda x: x.get("rvol", 0), reverse=True)
+        save_cache_file(VOLUME_SPIKES_CACHE, spikes[:50])  # Keep top 50
+    except Exception as e:
+        print(f"Volume spikes error: {e}")
+
+
+@app.post("/api/volume-spikes-scan")
+def trigger_volume_spikes(background_tasks: BackgroundTasks):
+    """Trigger volume spikes scanner."""
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+
+    background_tasks.add_task(_volume_spikes_wrapper)
+    return {"status": "started", "message": "Volume Spikes scan started"}
+
+
+@app.get("/api/volume-spikes-results")
+def get_volume_spikes():
+    """Get cached volume spikes results."""
+    results, cached_at = load_cache_file(VOLUME_SPIKES_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except Exception:
+            pass
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── Fear Score (12-factor) ──
+def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List[Dict]) -> tuple[int, str, Dict]:
+    """
+    Calculate comprehensive fear/panic score (0-100).
+    Returns (score, fear_level_string, details_dict)
+    """
+    score = 0
+    details = {}
+
+    # 1. VIX Level (0-8 points)
+    if vix_data and "price" in vix_data:
+        vix = vix_data["price"]
+        if vix >= 30:
+            score += 8
+            details["vix_level"] = 8
+        elif vix >= 25:
+            score += 6
+            details["vix_level"] = 6
+        elif vix >= 20:
+            score += 4
+            details["vix_level"] = 4
+        elif vix >= 15:
+            score += 2
+            details["vix_level"] = 2
+        else:
+            details["vix_level"] = 0
+
+    # 2. VIX Change 1D (0-8 points)
+    if vix_data and "change_1d" in vix_data:
+        vix_chg_1d = abs(vix_data["change_1d"])
+        if vix_chg_1d > 10:
+            score += 8
+            details["vix_change_1d"] = 8
+        elif vix_chg_1d > 5:
+            score += 6
+            details["vix_change_1d"] = 6
+        elif vix_chg_1d > 2:
+            score += 4
+            details["vix_change_1d"] = 4
+        else:
+            details["vix_change_1d"] = 0
+
+    # 3. VIX Change 5D (0-8 points)
+    if vix_data and "change_5d" in vix_data:
+        vix_chg_5d = abs(vix_data["change_5d"])
+        if vix_chg_5d > 20:
+            score += 8
+            details["vix_change_5d"] = 8
+        elif vix_chg_5d > 10:
+            score += 6
+            details["vix_change_5d"] = 6
+        elif vix_chg_5d > 5:
+            score += 4
+            details["vix_change_5d"] = 4
+        else:
+            details["vix_change_5d"] = 0
+
+    # Helper to find index by ticker
+    def get_index_data(ticker):
+        for idx in indices_data:
+            if idx.get("ticker") == ticker:
+                return idx
+        return None
+
+    spy_data = get_index_data("SPY")
+    qqq_data = get_index_data("QQQ")
+    dia_data = get_index_data("DIA")
+    iwm_data = get_index_data("IWM")
+
+    # 4. S&P 500 Change 1D (0-8 points)
+    if spy_data and "change_1d" in spy_data:
+        spy_chg_1d = spy_data["change_1d"]
+        if spy_chg_1d < -2:
+            score += 8
+            details["spy_change_1d"] = 8
+        elif spy_chg_1d < -1:
+            score += 6
+            details["spy_change_1d"] = 6
+        elif spy_chg_1d < -0.5:
+            score += 4
+            details["spy_change_1d"] = 4
+        else:
+            details["spy_change_1d"] = 0
+
+    # 5. S&P 500 Change 5D (0-8 points)
+    if spy_data and "change_5d" in spy_data:
+        spy_chg_5d = spy_data["change_5d"]
+        if spy_chg_5d < -5:
+            score += 8
+            details["spy_change_5d"] = 8
+        elif spy_chg_5d < -3:
+            score += 6
+            details["spy_change_5d"] = 6
+        elif spy_chg_5d < -1:
+            score += 4
+            details["spy_change_5d"] = 4
+        else:
+            details["spy_change_5d"] = 0
+
+    # 6. Nasdaq Change 1D (0-8 points)
+    if qqq_data and "change_1d" in qqq_data:
+        qqq_chg_1d = qqq_data["change_1d"]
+        if qqq_chg_1d < -2:
+            score += 8
+            details["qqq_change_1d"] = 8
+        elif qqq_chg_1d < -1:
+            score += 6
+            details["qqq_change_1d"] = 6
+        elif qqq_chg_1d < -0.5:
+            score += 4
+            details["qqq_change_1d"] = 4
+        else:
+            details["qqq_change_1d"] = 0
+
+    # 7. Nasdaq Change 5D (0-8 points)
+    if qqq_data and "change_5d" in qqq_data:
+        qqq_chg_5d = qqq_data["change_5d"]
+        if qqq_chg_5d < -5:
+            score += 8
+            details["qqq_change_5d"] = 8
+        elif qqq_chg_5d < -3:
+            score += 6
+            details["qqq_change_5d"] = 6
+        elif qqq_chg_5d < -1:
+            score += 4
+            details["qqq_change_5d"] = 4
+        else:
+            details["qqq_change_5d"] = 0
+
+    # 8. A/D Ratio (0-8 points)
+    if breadth_data and "ad_ratio" in breadth_data:
+        ad_ratio = breadth_data["ad_ratio"]
+        if ad_ratio < 0.5:
+            score += 8
+            details["ad_ratio"] = 8
+        elif ad_ratio < 0.7:
+            score += 6
+            details["ad_ratio"] = 6
+        elif ad_ratio < 1.0:
+            score += 4
+            details["ad_ratio"] = 4
+        else:
+            details["ad_ratio"] = 0
+
+    # 9. Russell vs S&P divergence (0-8 points)
+    if iwm_data and spy_data:
+        iwm_chg = iwm_data.get("change_5d", 0)
+        spy_chg = spy_data.get("change_5d", 0)
+        divergence = spy_chg - iwm_chg  # If SPY up and IWM down = positive divergence
+        if divergence > 5:  # IWM significantly underperforming
+            score += 8
+            details["russell_spy_div"] = 8
+        elif divergence > 3:
+            score += 6
+            details["russell_spy_div"] = 6
+        elif divergence > 1:
+            score += 4
+            details["russell_spy_div"] = 4
+        else:
+            details["russell_spy_div"] = 0
+
+    # 10. Count indices with negative 5D change (0-8 points)
+    negative_count = 0
+    for idx in indices_data:
+        if idx.get("change_5d", 0) < 0:
+            negative_count += 1
+
+    if negative_count == 4:
+        score += 8
+        details["negative_indices"] = 8
+    elif negative_count == 3:
+        score += 6
+        details["negative_indices"] = 6
+    elif negative_count == 2:
+        score += 4
+        details["negative_indices"] = 4
+    else:
+        details["negative_indices"] = 0
+
+    # 11. VIX term structure (skip for now - would need futures data)
+    details["vix_term_structure"] = 0
+
+    # 12. Consecutive red days for S&P (0-8 points)
+    # This would require historical data - estimate from 1D and 5D
+    if spy_data:
+        spy_1d = spy_data.get("change_1d", 0)
+        if spy_1d < 0:  # Red today
+            score += 4  # Assume multiple red days if in downtrend
+            details["consecutive_red_days"] = 4
+        else:
+            details["consecutive_red_days"] = 0
+
+    # Cap at 100
+    score = min(score, 100)
+
+    # Determine fear level
+    if score >= 80:
+        fear_level = "PANIK"
+    elif score >= 60:
+        fear_level = "ANGST"
+    elif score >= 40:
+        fear_level = "NEUTRAL"
+    elif score >= 20:
+        fear_level = "OPTIMISMUS"
+    else:
+        fear_level = "GIER"
+
+    return score, fear_level, details
+
+
+# Update crash monitor to include fear score
+def _crash_monitor_wrapper() -> None:
+    """Fetch VIX, major indices, and market breadth data with fear score."""
+    try:
+        result = {"vix": {}, "indices": [], "breadth": {}, "fear_score": 0, "fear_level": ""}
+
+        # VIX via Polygon
+        vix_tickers = [
+            ("I:VIX", "VIX", "Volatility Index"),
+            ("SPY", "S&P 500", "S&P 500 ETF"),
+            ("QQQ", "Nasdaq", "Nasdaq 100 ETF"),
+            ("DIA", "Dow Jones", "Dow Jones ETF"),
+            ("IWM", "Russell 2000", "Russell 2000 ETF"),
+        ]
+
+        for sym, name, desc in vix_tickers:
+            try:
+                if sym.startswith("I:"):
+                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
+                else:
+                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if len(bars) < 2:
+                    continue
+                close = bars[0]["c"]
+                prev = bars[1]["c"]
+                chg_1d = ((close - prev) / prev) * 100
+                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
+                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
+
+                entry = {"ticker": sym, "name": name, "description": desc,
+                         "price": round(close, 2), "change_1d": round(chg_1d, 2),
+                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
+
+                if sym == "I:VIX":
+                    result["vix"] = entry
+                    # Stress level
+                    if close >= 30:
+                        entry["level"] = "EXTREME"
+                    elif close >= 25:
+                        entry["level"] = "HIGH"
+                    elif close >= 20:
+                        entry["level"] = "ELEVATED"
+                    else:
+                        entry["level"] = "LOW"
+                else:
+                    result["indices"].append(entry)
+            except Exception:
+                continue
+
+        # Market breadth - count gainers vs losers via snapshot
+        try:
+            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
+            if snap_resp.status_code == 200:
+                tickers = snap_resp.json().get("tickers", [])
+                up = 0
+                down = 0
+                unchanged = 0
+                for t in tickers:
+                    day = t.get("day", {})
+                    prev = t.get("prevDay", {})
+                    pc = day.get("c", 0)
+                    pp = prev.get("c", 0)
+                    if pc and pp:
+                        if pc > pp:
+                            up += 1
+                        elif pc < pp:
+                            down += 1
+                        else:
+                            unchanged += 1
+                total = up + down + unchanged
+                ratio = round(up / down, 2) if down > 0 else 0
+                result["breadth"] = {
+                    "advancing": up, "declining": down, "unchanged": unchanged,
+                    "total": total, "ad_ratio": ratio,
+                    "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
+                }
+        except Exception:
+            pass
+
+        # Calculate fear score
+        fear_score, fear_level, fear_details = _calculate_fear_score(
+            result.get("vix", {}),
+            result.get("breadth", {}),
+            result.get("indices", [])
+        )
+        result["fear_score"] = fear_score
+        result["fear_level"] = fear_level
+        result["fear_details"] = fear_details
+
+        save_cache_file(CRASH_MONITOR_CACHE, [result])
+    except Exception as e:
+        print(f"Crash monitor error: {e}")
+
+
+# ── Kalender (Economic Calendar) ──
+def _calculate_next_occurrence(month: int, day: int) -> str:
+    """Calculate next occurrence of a recurring event."""
+    from datetime import date, timedelta
+    today = date.today()
+    next_date = date(today.year, month, day)
+    if next_date < today:
+        next_date = date(today.year + 1, month, day)
+    return next_date.isoformat()
+
+
+@app.get("/api/kalender")
+def get_economic_calendar():
+    """Get upcoming economic events and important dates."""
+    try:
+        events = []
+
+        # Major recurring events (simplified - hardcoded with dynamic dates)
+        # In production, would fetch from economic calendar API
+
+        # FOMC meetings (typically 8 per year, Jan/Mar/May/Jun/Jul/Sep/Nov/Dec)
+        fomc_months = [1, 3, 5, 6, 7, 9, 11, 12]
+        fomc_day = 14  # Approximate
+        for month in fomc_months:
+            try:
+                next_date = _calculate_next_occurrence(month, fomc_day)
+                events.append({
+                    "date": next_date,
+                    "event": "FOMC Meeting",
+                    "importance": "high",
+                    "description": "Federal Reserve Interest Rate Decision",
+                    "impact": "Sehr Hoch"
+                })
+            except Exception:
+                pass
+
+        # CPI (1st week of each month, reported ~12 days after month end)
+        try:
+            next_cpi = _calculate_next_occurrence(4, 10)  # Approximate next
+            events.append({
+                "date": next_cpi,
+                "event": "CPI (Verbraucherpreisindex)",
+                "importance": "high",
+                "description": "US Consumer Price Index YoY",
+                "impact": "Sehr Hoch"
+            })
+        except Exception:
+            pass
+
+        # NFP (1st Friday of each month)
+        try:
+            next_nfp = _calculate_next_occurrence(4, 3)  # Approximate
+            events.append({
+                "date": next_nfp,
+                "event": "NFP (Non-Farm Payroll)",
+                "importance": "high",
+                "description": "US Employment Report",
+                "impact": "Sehr Hoch"
+            })
+        except Exception:
+            pass
+
+        # GDP (end of each quarter)
+        for month in [3, 6, 9, 12]:
+            try:
+                next_gdp = _calculate_next_occurrence(month, 28)
+                events.append({
+                    "date": next_gdp,
+                    "event": "GDP",
+                    "importance": "high",
+                    "description": "Gross Domestic Product Report",
+                    "impact": "Sehr Hoch"
+                })
+            except Exception:
+                pass
+
+        # Earnings seasons (approximate)
+        earnings_months = [4, 7, 10, 1]  # Q1, Q2, Q3, Q4
+        for month in earnings_months:
+            try:
+                next_earnings = _calculate_next_occurrence(month, 15)
+                events.append({
+                    "date": next_earnings,
+                    "event": "Earnings Season",
+                    "importance": "high",
+                    "description": "Corporate Earnings Reports",
+                    "impact": "Hoch"
+                })
+            except Exception:
+                pass
+
+        # Fed Fund Rate Decision (typically day 14)
+        try:
+            next_rate = _calculate_next_occurrence(3, 18)
+            events.append({
+                "date": next_rate,
+                "event": "Fed Funds Rate Decision",
+                "importance": "high",
+                "description": "Federal Reserve Interest Rate Announcement",
+                "impact": "Sehr Hoch"
+            })
+        except Exception:
+            pass
+
+        # Sort by date
+        events.sort(key=lambda x: x["date"])
+
+        return {
+            "status": "success",
+            "events": events,
+            "timestamp": datetime.now().isoformat(),
+            "note": "Simplified calendar - dates are approximate for recurring events"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+# ── Backtest Engine ──
+BACKTEST_CACHE = "/tmp/backtest_cache.json"
+
+
+class BacktestRequest(BaseModel):
+    ticker: str = "AAPL"
+    strategy: str = "sma_crossover"  # sma_crossover, rsi_mean_reversion, ema_crossover
+    months: int = 6
+
+
+def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
+    """Run a simple backtest on historical data."""
+    try:
+        # Fetch daily bars
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": months * 22 + 60, "sort": "desc"})
+        if resp.status_code != 200:
+            return {"error": f"Keine Daten fuer {ticker}"}
+        bars = resp.json().get("results", [])
+        if len(bars) < 60:
+            return {"error": f"Zu wenige Daten fuer {ticker} ({len(bars)} Bars)"}
+
+        # Reverse to chronological
+        bars = list(reversed(bars))
+        closes = [b["c"] for b in bars]
+        dates = [datetime.fromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d") for b in bars]
+
+        trades = []
+        position = None  # None = no position, dict = open position
+
+        if strategy == "sma_crossover":
+            # SMA20/SMA50 crossover
+            for i in range(50, len(closes)):
+                sma20 = sum(closes[i-20:i]) / 20
+                sma50 = sum(closes[i-50:i]) / 50
+                prev_sma20 = sum(closes[i-21:i-1]) / 20
+                prev_sma50 = sum(closes[i-51:i-1]) / 50
+
+                if position is None:
+                    # Buy signal: SMA20 crosses above SMA50
+                    if prev_sma20 <= prev_sma50 and sma20 > sma50:
+                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                else:
+                    # Sell signal: SMA20 crosses below SMA50
+                    if prev_sma20 >= prev_sma50 and sma20 < sma50:
+                        pnl = ((closes[i] - position["entry_price"]) / position["entry_price"]) * 100
+                        trades.append({
+                            "entry_date": position["entry_date"],
+                            "entry_price": round(position["entry_price"], 2),
+                            "exit_date": dates[i],
+                            "exit_price": round(closes[i], 2),
+                            "pnl_pct": round(pnl, 2),
+                            "type": "LONG"
+                        })
+                        position = None
+
+        elif strategy == "rsi_mean_reversion":
+            # RSI oversold/overbought mean reversion
+            for i in range(15, len(closes)):
+                gains, losses = [], []
+                for j in range(14):
+                    diff = closes[i-j] - closes[i-j-1]
+                    if diff > 0:
+                        gains.append(diff)
+                    else:
+                        losses.append(abs(diff))
+                avg_gain = sum(gains) / 14 if gains else 0.001
+                avg_loss = sum(losses) / 14 if losses else 0.001
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+
+                if position is None:
+                    if rsi < 30:  # Oversold → Buy
+                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                else:
+                    if rsi > 70:  # Overbought → Sell
+                        pnl = ((closes[i] - position["entry_price"]) / position["entry_price"]) * 100
+                        trades.append({
+                            "entry_date": position["entry_date"],
+                            "entry_price": round(position["entry_price"], 2),
+                            "exit_date": dates[i],
+                            "exit_price": round(closes[i], 2),
+                            "pnl_pct": round(pnl, 2),
+                            "type": "LONG"
+                        })
+                        position = None
+
+        elif strategy == "ema_crossover":
+            # EMA9/EMA21 crossover (faster signals)
+            def calc_ema_series(data, period):
+                emas = [sum(data[:period]) / period]
+                k = 2 / (period + 1)
+                for val in data[period:]:
+                    emas.append(val * k + emas[-1] * (1 - k))
+                return emas
+
+            if len(closes) > 21:
+                ema9 = calc_ema_series(closes, 9)
+                ema21 = calc_ema_series(closes, 21)
+                # Align: ema9 starts at index 8, ema21 starts at index 20
+                for i in range(1, min(len(ema9), len(ema21))):
+                    bar_idx = 20 + i  # offset for ema21 start
+                    if bar_idx >= len(dates):
+                        break
+                    if position is None:
+                        if i > 0 and ema9[i + 12] > ema21[i] and ema9[i + 11] <= ema21[i - 1]:
+                            position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
+                    else:
+                        if i > 0 and ema9[i + 12] < ema21[i] and ema9[i + 11] >= ema21[i - 1]:
+                            pnl = ((closes[bar_idx] - position["entry_price"]) / position["entry_price"]) * 100
+                            trades.append({
+                                "entry_date": position["entry_date"],
+                                "entry_price": round(position["entry_price"], 2),
+                                "exit_date": dates[bar_idx],
+                                "exit_price": round(closes[bar_idx], 2),
+                                "pnl_pct": round(pnl, 2),
+                                "type": "LONG"
+                            })
+                            position = None
+
+        # Close any open position at last bar
+        if position is not None:
+            pnl = ((closes[-1] - position["entry_price"]) / position["entry_price"]) * 100
+            trades.append({
+                "entry_date": position["entry_date"],
+                "entry_price": round(position["entry_price"], 2),
+                "exit_date": dates[-1],
+                "exit_price": round(closes[-1], 2),
+                "pnl_pct": round(pnl, 2),
+                "type": "LONG (offen)"
+            })
+
+        # Calculate statistics
+        total_trades = len(trades)
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        losses_list = [t for t in trades if t["pnl_pct"] <= 0]
+        win_rate = round(len(wins) / total_trades * 100, 1) if total_trades > 0 else 0
+        avg_pnl = round(sum(t["pnl_pct"] for t in trades) / total_trades, 2) if total_trades > 0 else 0
+        total_return = round(sum(t["pnl_pct"] for t in trades), 2)
+        avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
+        avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
+        best_trade = round(max(t["pnl_pct"] for t in trades), 2) if trades else 0
+        worst_trade = round(min(t["pnl_pct"] for t in trades), 2) if trades else 0
+
+        # Max drawdown
+        max_dd = 0
+        peak = 0
+        equity = 0
+        for t in trades:
+            equity += t["pnl_pct"]
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+        max_drawdown = round(max_dd, 2)
+
+        return {
+            "ticker": ticker,
+            "strategy": strategy,
+            "months": months,
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "total_return": total_return,
+            "max_drawdown": max_drawdown,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade,
+            "trades": trades[-50:],  # Last 50 trades max
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker, "strategy": strategy}
+
+
+@app.post("/api/backtest")
+def run_backtest(request: BacktestRequest, background_tasks: BackgroundTasks):
+    """Run a backtest for a ticker with given strategy."""
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+
+    result = _run_backtest(request.ticker, request.strategy, request.months)
+
+    # Cache result
+    try:
+        cache_key = f"/tmp/backtest_{request.ticker}_{request.strategy}.json"
+        with open(cache_key, "w") as f:
+            json.dump({"cached_at": datetime.now().isoformat(), "results": result}, f, default=_serialize_json)
+    except Exception:
+        pass
+
+    return {"status": "success", "data": result}
+
+
+@app.get("/api/backtest-results")
+def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma_crossover")):
+    """Get cached backtest results."""
+    cache_key = f"/tmp/backtest_{ticker}_{strategy}.json"
+    if Path(cache_key).exists():
+        try:
+            with open(cache_key, "r") as f:
+                data = json.load(f)
+            return {"status": "success", "data": data.get("results", {}), "cached_at": data.get("cached_at")}
+        except Exception:
+            pass
+    return {"status": "success", "data": {}, "cached_at": None}
 
 
 @app.get("/")

@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-requests
-pytz
-streamlit-autorefresh
-anthropic
-ib_insync
-nest_asyncio

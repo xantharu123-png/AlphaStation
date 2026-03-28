@@ -1,8 +1,0 @@
-.cache/
-.local/
-.config/
-.npm-global/
-__pycache__/
-*.pyc
-.env
-scanner_backup.py
