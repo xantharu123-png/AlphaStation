@@ -175,7 +175,12 @@ class ScanResultsResponse(BaseModel):
 
 # ── Utility Functions ──
 def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
-    """Load cache file and return (data, cached_at_timestamp)."""
+    """Load cache file and return (data, cached_at_timestamp).
+
+    Supports two cache formats:
+    - New format: {"cached_at": "ISO-string", "results": [...]}
+    - Scanner format: {"timestamp": unix_epoch_float, "results": [...]}
+    """
     if not Path(filepath).exists():
         return [], None
 
@@ -185,7 +190,16 @@ def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], 
 
         cached_at = None
         if isinstance(data, dict):
+            # Try new format first (ISO string)
             cached_at = data.get("cached_at")
+            # Fall back to scanner format (Unix epoch float)
+            if not cached_at and "timestamp" in data:
+                try:
+                    ts = data["timestamp"]
+                    if isinstance(ts, (int, float)) and ts > 1000000000:
+                        cached_at = datetime.fromtimestamp(ts).isoformat()
+                except Exception:
+                    pass
             if "results" in data:
                 data = data.get("results", [])
             else:
@@ -403,6 +417,11 @@ def _scheduler_loop():
             break
         print(f"[Scheduler] Initial scan: {name}")
         _run_scan_safe(name, func)
+        # Set next_run after initial scan
+        interval_sec = _scan_status[name]["interval_min"] * 60
+        _scan_status[name]["next_run"] = datetime.fromtimestamp(
+            time.time() + interval_sec
+        ).isoformat()
         time.sleep(10)  # 10s pause between initial scans
 
     # Then loop with interval checks

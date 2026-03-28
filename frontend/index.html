@@ -322,14 +322,21 @@ function SchedulerStatus({ status }) {
 
     if (!status) return null;
 
-    const getRelativeTime = (timestamp) => {
+    const getRelativeTime = (timestamp, isFuture = false) => {
         if (!timestamp) return 'nie';
         const date = new Date(timestamp);
         const now = new Date();
-        const diffMs = now - date;
+        const diffMs = isFuture ? (date - now) : (now - date);
         const diffMins = Math.floor(diffMs / 60000);
         const diffHours = Math.floor(diffMs / 3600000);
 
+        if (isFuture) {
+            if (diffMs < 0) return 'überfällig';
+            if (diffMins < 1) return 'gleich';
+            if (diffMins < 60) return `in ${diffMins} min`;
+            if (diffHours < 24) return `in ${diffHours}h`;
+            return date.toLocaleDateString('de-DE');
+        }
         if (diffMins < 1) return 'gerade eben';
         if (diffMins < 60) return `vor ${diffMins} min`;
         if (diffHours < 24) return `vor ${diffHours}h`;
@@ -366,7 +373,7 @@ function SchedulerStatus({ status }) {
                                         {scan.running ? '⏳ läuft' : `alle ${scan.interval_min} min`}
                                     </span>
                                 </div>
-                                <div className="text-gray-500 mt-1">Letzter: {getRelativeTime(scan.last_run)} | Nächster: {getRelativeTime(scan.next_run)}</div>
+                                <div className="text-gray-500 mt-1">Letzter: {getRelativeTime(scan.last_run)} | Nächster: {getRelativeTime(scan.next_run, true)}</div>
                             </div>
                         ))}
                     </div>
@@ -471,9 +478,15 @@ function DetailSidebar({ ticker, onClose }) {
             try {
                 const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
                 const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`);
-                if (res.ok) setChartData(await res.json());
+                if (res.ok) {
+                    setChartData(await res.json());
+                } else {
+                    // Set empty chart data so sidebar doesn't stay in loading state
+                    setChartData({ ticker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
+                }
             } catch (err) {
                 console.error('Chart data error:', err);
+                setChartData({ ticker, timeframe, candles: [], error: 'Chart-Daten konnten nicht geladen werden' });
             }
         };
         fetchChart();
@@ -507,6 +520,7 @@ function DetailSidebar({ ticker, onClose }) {
     // Render chart with all overlays
     useEffect(() => {
         if (!chartData || !chartContainer.current) return;
+        if (!chartData.candles || chartData.candles.length === 0) return; // No data to render
         try {
             // Cleanup
             if (chart.current) chart.current.remove();
@@ -874,7 +888,14 @@ function DetailSidebar({ ticker, onClose }) {
                 </div>
 
                 {/* Chart */}
-                <div ref={chartContainer} className="chart-container mb-4" style={{ borderRadius: '8px', overflow: 'hidden' }}></div>
+                {chartData && chartData.candles && chartData.candles.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500 text-sm bg-gray-800 rounded-lg mb-4">
+                        {chartData.error || 'Keine Chart-Daten verfügbar'}
+                    </div>
+                ) : !chartData ? (
+                    <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>
+                ) : null}
+                <div ref={chartContainer} className="chart-container mb-4" style={{ borderRadius: '8px', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
 
                 {/* Pattern Info */}
                 {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (
@@ -1091,6 +1112,7 @@ function App() {
         { id: 'backtest', label: 'Backtest' },
         { id: 'strategie-guide', label: 'Strategie Guide' },
         { id: 'new-listing', label: 'New Listing' },
+        { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'suche', label: 'Suche' }
     ];
 
@@ -1150,6 +1172,7 @@ function App() {
                 {activeTab === 'backtest' && <BacktestTab />}
                 {activeTab === 'strategie-guide' && <StrategieGuideTab />}
                 {activeTab === 'new-listing' && <NewListingTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'suche' && <SucheTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
             </div>
 
@@ -1194,6 +1217,16 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('scanner_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const dir = strategy.toLowerCase().includes('short') ? 'short' : 'long';
+            const preCheck = await fetch(`${API}/api/scan-results?direction=${dir}`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/scan`, { method: 'POST', body: JSON.stringify({ strategy, market_type: marketType }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
@@ -1212,8 +1245,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (items.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setResults(items);
                                 updateScanCache('scanner_results', items);
                                 setIsScanning(false);
@@ -1306,6 +1339,15 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('bi_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/bi-results?direction=${direction}`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
@@ -1323,8 +1365,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (items.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setResults(items);
                                 updateScanCache('bi_results', items);
                                 setIsScanning(false);
@@ -1419,6 +1461,15 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('biotech_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/biotech-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/biotech-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1436,8 +1487,8 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (items.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setResults(items);
                                 updateScanCache('biotech_results', items);
                                 setIsScanning(false);
@@ -1522,6 +1573,15 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('btc_divergenz_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/btc-divergenz-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/btc-divergenz-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1539,8 +1599,8 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (items.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setResults(items);
                                 updateScanCache('btc_divergenz_results', items);
                                 setIsScanning(false);
@@ -1695,6 +1755,15 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('em_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/early-movers-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1714,8 +1783,8 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const em = (data.data && data.data[0]) || {};
                             const winners = em.gainers || [];
                             const losers = em.losers || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (winners.length > 0 || losers.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setWinnerResults(winners);
                                 setLoserResults(losers);
                                 updateScanCache('em_winners', winners);
@@ -1861,6 +1930,15 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('short_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/bear-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/bear-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1880,8 +1958,8 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             const bear = (data.data && data.data[0]) || {};
                             const inverse = bear.inverse_etfs || [];
                             const breakdown = bear.breakdown_stocks || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (inverse.length > 0 || breakdown.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setInverseETFs(inverse);
                                 setBreakdownStocks(breakdown);
                                 updateScanCache('short_inverse', inverse);
@@ -2006,6 +2084,15 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('moneyflow_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/money-flow-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/money-flow-scan`, { method: 'POST' });
             if (response.ok) {
@@ -2023,8 +2110,8 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (items.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setResults(items);
                                 updateScanCache('moneyflow_results', items);
                                 setIsScanning(false);
@@ -2191,6 +2278,15 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('crash_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/crash-monitor-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/crash-monitor-scan`, { method: 'POST' });
             if (response.ok) {
@@ -2208,9 +2304,8 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         if (res.ok) {
                             const data = await res.json();
                             const cm = (data.data && data.data[0]) || {};
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            const hasData = cm.fear_score !== undefined || (cm.indices && cm.indices.length > 0) || freshScan;
-                            if (hasData) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
                                 setFearData(fearData);
                                 setIndices(cm.indices || []);
@@ -2713,6 +2808,15 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('newlisting_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/new-listing-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/new-listing-scan`, { method: 'POST' });
             if (response.ok) {
@@ -2730,8 +2834,8 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.listings || [];
-                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
-                            if (items.length > 0 || freshScan) {
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
                                 setResults(items);
                                 setStats(data.stats);
                                 updateScanCache('newlisting_results', items);
@@ -2807,6 +2911,120 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
                                 <td className="py-3 px-2 text-center"><span className="signal-badge signal-bullish">{item.signal}</span></td>
                                 <td className={`py-3 px-2 text-right ${item.funding_rate >= 0 ? 'color-positive' : 'color-negative'}`}>{item.funding_rate?.toFixed(3)}%</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
+// Volume Spikes Tab
+function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+    const [isScanning, setIsScanning] = useState(scanCache.vs_scanning || false);
+    const [results, setResults] = useState(scanCache.vs_results || []);
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+
+    const handleScan = async () => {
+        setIsScanning(true);
+        updateScanCache('vs_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/volume-spikes-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
+        try {
+            const response = await fetch(`${API}/api/volume-spikes-scan`, { method: 'POST' });
+            if (response.ok) {
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('vs_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/volume-spikes-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
+                                setResults(items);
+                                updateScanCache('vs_results', items);
+                                setIsScanning(false);
+                                updateScanCache('vs_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('vs_scanning', false);
+            }
+        } catch (err) {
+            console.error('Error:', err);
+            setIsScanning(false);
+            updateScanCache('vs_scanning', false);
+        }
+    };
+
+    useEffect(() => {
+        if (scanCache.vs_results && scanCache.vs_results.length > 0) {
+            setResults(scanCache.vs_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/volume-spikes-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('vs_results', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
+                }
+            };
+            fetchResults();
+        }
+    }, [scanCache.vs_results]);
+
+    return (
+        <div className="space-y-6">
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
+
+            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                <table className="w-full text-sm">
+                    <thead className="border-b border-gray-200">
+                        <tr>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung%</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('dollar_volume')}>$-Volumen</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sorted.map((item, idx) => (
+                            <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
+                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{(item.dollar_volume / 1000000).toFixed(2)}M</td>
                             </tr>
                         ))}
                     </tbody>
