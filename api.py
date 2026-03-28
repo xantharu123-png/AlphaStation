@@ -174,6 +174,36 @@ class ScanResultsResponse(BaseModel):
 
 
 # ── Utility Functions ──
+
+# Key mapping: Scanner output → Frontend expected keys
+_BI_KEY_MAP = {
+    "Ticker": "ticker", "Name": "name", "Preis": "price", "Change%": "change_pct",
+    "BI_Score": "score", "BI_MaxScore": "max_score", "BI_Grade": "grade",
+    "BI_GradeLabel": "grade_label", "BI_Confidence": "confidence", "BI_Details": "details",
+    "Entry": "entry", "StopLoss": "stop_loss", "TP1": "tp1", "TP2": "tp2",
+    "RiskReward": "risk_reward", "RVOL": "rvol", "SmartMoney": "smart_money",
+}
+_BIOTECH_KEY_MAP = {
+    "Ticker": "ticker", "Name": "name", "Score": "score", "Grade": "grade",
+    "Risk_Flag": "risk_flag", "Catalyst": "catalyst", "Catalyst_Score": "catalyst_score",
+    "Pipeline_Score": "pipeline_score", "Readout_Score": "readout_score",
+    "Technical_Score": "technical_score", "Risk_Score": "risk_score",
+    "News_Momentum": "news_momentum", "RVOL": "rvol", "Price": "price",
+    "Market_Cap": "market_cap", "Chart_Health": "chart_health",
+}
+
+def _normalize_keys(results: list, key_map: dict) -> list:
+    """Normalize scanner result keys to lowercase frontend-compatible format."""
+    normalized = []
+    for item in results:
+        new_item = {}
+        for k, v in item.items():
+            new_key = key_map.get(k, k.lower() if k[0].isupper() else k)
+            new_item[new_key] = v
+        normalized.append(new_item)
+    return normalized
+
+
 def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
     """Load cache file and return (data, cached_at_timestamp).
 
@@ -1225,6 +1255,7 @@ def get_scan_results(direction: str = Query("long", description="long or short")
 
     cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
     results, cached_at = load_cache_file(cache_file)
+    results = _normalize_keys(results, _BI_KEY_MAP)
 
     cache_age = None
     if cached_at:
@@ -1269,6 +1300,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
 
     cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
     results, cached_at = load_cache_file(cache_file)
+    results = _normalize_keys(results, _BI_KEY_MAP)
 
     cache_age = None
     if cached_at:
@@ -1341,6 +1373,7 @@ def trigger_biotech_scan(background_tasks: BackgroundTasks):
 def get_biotech_results():
     """Get cached biotech scan results."""
     results, cached_at = load_cache_file(BIOTECH_CACHE)
+    results = _normalize_keys(results, _BIOTECH_KEY_MAP)
 
     cache_age = None
     if cached_at:
