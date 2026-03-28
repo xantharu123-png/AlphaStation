@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import requests as req
 
 # Import scanner modules
 from modules.scanners import (
@@ -486,11 +487,13 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         if len(closes) >= 15:
             gains, losses = [], []
             for i in range(14):
-                diff = closes[i] - closes[i+1]  # bars sorted desc
+                diff = closes[i] - closes[i+1]  # bars sorted desc: [0]=newest
                 if diff > 0:
-                    losses.append(abs(diff))
+                    # Price went UP (newer > older) = gain
+                    gains.append(diff)
                 else:
-                    gains.append(abs(diff))
+                    # Price went DOWN = loss
+                    losses.append(abs(diff))
             avg_gain = sum(gains) / 14 if gains else 0.001
             avg_loss = sum(losses) / 14 if losses else 0.001
             rs = avg_gain / avg_loss
@@ -549,11 +552,10 @@ def get_ai_analysis(ticker: str = Query(..., description="Ticker symbol")):
             low_20 = round(min(b["l"] for b in bars[:20]), 2)
             vol = bars[0].get("v", 0)
             price_info = f"Preis: ${close}, Veraenderung: {chg}%, MA20: ${ma20}, 20d-Hoch: ${high_20}, 20d-Tief: ${low_20}, Vol: {vol}"
-    except:
+    except Exception:
         price_info = "Preisdaten nicht verfuegbar"
 
     # Call Claude API
-    import requests as req
     try:
         claude_resp = req.post(
             "https://api.anthropic.com/v1/messages",
@@ -661,7 +663,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except:
+        except Exception:
             pass
 
     return ScanResultsResponse(
@@ -697,7 +699,7 @@ def get_bear_results():
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except:
+        except Exception:
             pass
 
     return ScanResultsResponse(
@@ -733,7 +735,7 @@ def get_biotech_results():
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except:
+        except Exception:
             pass
 
     return ScanResultsResponse(
@@ -797,7 +799,7 @@ def get_early_movers():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except:
+        except Exception:
             pass
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
@@ -908,7 +910,7 @@ def get_crash_monitor():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except:
+        except Exception:
             pass
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
@@ -999,7 +1001,7 @@ def get_btc_divergenz():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except:
+        except Exception:
             pass
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
@@ -1077,7 +1079,7 @@ def get_money_flow():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except:
+        except Exception:
             pass
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 

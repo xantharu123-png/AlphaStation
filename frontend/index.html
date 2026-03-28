@@ -123,6 +123,13 @@
 
         .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
 
+        /* Toast Notifications */
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 12px; }
+        .toast { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px 16px; font-size: 13px; animation: slideInToast 0.3s ease-out; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .toast.error { border-color: var(--danger); background: rgba(220,38,38,0.05); color: var(--danger); }
+        .toast.success { border-color: var(--success); background: rgba(5,150,105,0.05); color: var(--success); }
+        @keyframes slideInToast { from { opacity: 0; transform: translateX(400px); } to { opacity: 1; transform: translateX(0); } }
+
         /* Detail Sidebar */
         .detail-sidebar {
             position: fixed; top: 0; right: 0; width: 420px; height: 100vh;
@@ -130,6 +137,9 @@
             z-index: 100; overflow-y: auto; padding: 0;
             animation: slideInFromRight 0.3s ease-out;
             box-shadow: -4px 0 24px rgba(0,0,0,0.08);
+        }
+        @media (max-width: 768px) {
+            .detail-sidebar { width: 100%; }
         }
         @keyframes slideInFromRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
         .sidebar-header { position: sticky; top: 0; background-color: var(--bg-secondary); padding: 16px 20px; border-bottom: 1px solid var(--border-color); z-index: 10; }
@@ -142,6 +152,11 @@
         .ai-analysis-box { background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(124,58,237,0.05)); border: 1px solid rgba(37,99,235,0.15); border-radius: 8px; padding: 16px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
         .mini-chart { width: 100%; height: 120px; background-color: var(--bg-primary); border-radius: 8px; border: 1px solid var(--border-color); overflow: hidden; }
         .overlay-bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.2); z-index: 99; }
+
+        /* Sortable Table */
+        .table-header { cursor: pointer; user-select: none; }
+        .table-header:hover { color: var(--accent); }
+        .sort-indicator { display: inline-block; margin-left: 4px; font-size: 11px; }
     </style>
 </head>
 <body>
@@ -155,16 +170,26 @@
             ? 'http://localhost:8000'
             : `http://${window.location.hostname}:8000`;
 
+        // ── Toast Context ──
+        let toastCallback = () => {};
+        function showToast(msg, type = 'error') {
+            toastCallback({ msg, type, id: Date.now() });
+        }
+
         async function apiFetch(endpoint, options = {}) {
             try {
                 const resp = await fetch(`${API_BASE}${endpoint}`, {
                     ...options,
                     headers: { 'Content-Type': 'application/json', ...options.headers },
                 });
-                if (!resp.ok) throw new Error(`API ${resp.status}`);
+                if (!resp.ok) {
+                    showToast(`API Error ${resp.status}`, 'error');
+                    throw new Error(`API ${resp.status}`);
+                }
                 return await resp.json();
             } catch (err) {
                 console.error(`API Error ${endpoint}:`, err);
+                showToast(`Failed: ${endpoint}`, 'error');
                 return null;
             }
         }
@@ -178,6 +203,58 @@
         const fmt = (v, d=2) => v != null && !isNaN(v) ? Number(v).toFixed(d) : '-';
         const fmtVol = (v) => { if (!v) return '-'; if (v >= 1e9) return (v/1e9).toFixed(1)+'B'; if (v >= 1e6) return (v/1e6).toFixed(1)+'M'; if (v >= 1e3) return (v/1e3).toFixed(0)+'K'; return String(v); };
         const signalBadgeCls = (s) => ({ STARK: 'signal-stark', Steigend: 'signal-steigend', Leicht: 'signal-leicht', Fallend: 'signal-fallend' }[s] || '');
+
+        // ── Download CSV Helper ──
+        function downloadCSV(data, filename) {
+            if (!data || data.length === 0) return;
+            const headers = Object.keys(data[0]);
+            const csv = [headers.join(','), ...data.map(row => headers.map(h => `"${row[h] || ''}"`).join(','))].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // ── Sortable Hook ──
+        function useSortable(data, defaultKey, defaultDir = 'desc') {
+            const [sortKey, setSortKey] = useState(defaultKey);
+            const [sortDir, setSortDir] = useState(defaultDir);
+            const toggle = (key) => {
+                if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+                else { setSortKey(key); setSortDir('desc'); }
+            };
+            const sorted = [...data].sort((a, b) => {
+                const va = a[sortKey] ?? '';
+                const vb = b[sortKey] ?? '';
+                let cmp = 0;
+                if (typeof va === 'number' && typeof vb === 'number') {
+                    cmp = va - vb;
+                } else {
+                    cmp = String(va).localeCompare(String(vb));
+                }
+                return sortDir === 'asc' ? cmp : -cmp;
+            });
+            return { sorted, sortKey, sortDir, toggle };
+        }
+
+        // ── Toast Component ──
+        function ToastContainer() {
+            const [toasts, setToasts] = useState([]);
+            toastCallback = ({ msg, type, id }) => {
+                setToasts(prev => [...prev, { msg, type, id }]);
+                setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+            };
+            return (
+                <div className="toast-container">
+                    {toasts.map(t => (
+                        <div key={t.id} className={`toast ${t.type}`}>{t.msg}</div>
+                    ))}
+                </div>
+            );
+        }
 
         // ── Detail Sidebar Component ──
         function DetailSidebar({ ticker, onClose }) {
@@ -206,7 +283,6 @@
             if (!ticker) return null;
             const d = detail || {};
 
-            // Mini sparkline chart from candle data
             const MiniChart = ({ candles }) => {
                 if (!candles || candles.length < 2) return <div className="mini-chart flex items-center justify-center text-gray-400 text-sm">Keine Chartdaten</div>;
                 const prices = candles.map(c => c.c);
@@ -250,13 +326,11 @@
                         <div className="sidebar-body">
                             {detailLoading ? <Spinner /> : (
                                 <React.Fragment>
-                                    {/* Chart */}
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">30-Tage Chart</div>
                                         <MiniChart candles={d.candles} />
                                     </div>
 
-                                    {/* Key Metrics */}
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">Kennzahlen</div>
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">Open</span><span className="sidebar-metric-value">${fmt(d.open)}</span></div>
@@ -269,7 +343,6 @@
                                         {d.ma50 && <div className="sidebar-metric"><span className="sidebar-metric-label">MA50</span><span className="sidebar-metric-value">${fmt(d.ma50)}</span></div>}
                                     </div>
 
-                                    {/* Performance */}
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">Performance</div>
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">1 Tag</span><span className={`sidebar-metric-value ${changeColor(d.change_1d)}`}>{d.change_1d > 0 ? '+' : ''}{fmt(d.change_1d)}%</span></div>
@@ -278,7 +351,6 @@
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">20D Range Pos.</span><span className="sidebar-metric-value">{fmt(d.range_position, 0)}%</span></div>
                                     </div>
 
-                                    {/* Levels */}
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">Levels</div>
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">Widerstand R1</span><span className="sidebar-metric-value text-red-500">${fmt(d.resistance_1)}</span></div>
@@ -288,7 +360,6 @@
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">20D Tief</span><span className="sidebar-metric-value">${fmt(d.low_20d)}</span></div>
                                     </div>
 
-                                    {/* AI Analysis */}
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">KI Analyse</div>
                                         {aiAnalysis ? (
@@ -308,7 +379,7 @@
             );
         }
 
-        // ── Auto-Refresh Hook — polls API every N ms, no manual scan needed ──
+        // ── Auto-Refresh Hook ──
         function useAutoRefresh(fetchFn, intervalMs = 30000) {
             const [initialLoad, setInitialLoad] = useState(true);
             const fetchRef = useRef(fetchFn);
@@ -345,10 +416,16 @@
                 </div>
             );
         }
-        function TableHead({ columns }) {
+        function TableHead({ columns, onSort, sortKey, sortDir }) {
             return (
                 <thead><tr className="border-b border-gray-200 bg-gray-50">
-                    {columns.map(c => <th key={c} className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">{c}</th>)}
+                    {columns.map(c => (
+                        <th key={c} className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase cursor-pointer hover:text-blue-600"
+                            onClick={() => onSort && onSort(c)}>
+                            {c}
+                            {onSort && sortKey === c && <span className="sort-indicator">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                        </th>
+                    ))}
                 </tr></thead>
             );
         }
@@ -359,8 +436,8 @@
             const [settings, setSettings] = useState({ market: 'stocks', strategy: 'Volume Surge', timeframe: '1D' });
             const [showSettings, setShowSettings] = useState(false);
             const [strategies, setStrategies] = useState({});
+            const [minScore, setMinScore] = useState(0);
 
-            // Load available strategies for selected market
             useEffect(() => {
                 apiFetch(`/api/strategies?market_type=${settings.market}`).then(res => {
                     if (res && res.strategies) setStrategies(res.strategies);
@@ -383,7 +460,9 @@
                 volume: d.volume || d.vol || 0, rvol: d.rvol || d.relative_volume || 0,
                 change: d.change_pct || d.change || 0, price: d.price || d.close || 0,
                 rsi: d.rsi || '-', ma20: d.ma20 || '-', description: d.reason || d.description || '',
-            }));
+            })).filter(c => c.score >= minScore);
+
+            const { sorted, sortKey, sortDir, toggle } = useSortable(candidates, 'score');
 
             const gradeCount = { S: candidates.filter(c=>c.grade==='S').length, A: candidates.filter(c=>c.grade==='A').length };
             const avgScore = candidates.length ? Math.round(candidates.reduce((s,c)=>s+c.score,0)/candidates.length) : 0;
@@ -391,7 +470,7 @@
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-                        <MetricCard label="KANDIDATEN" value={candidates.length} sub={candidates.length > 0 ? `${candidates.length} gefunden` : 'Kein Scan'} subColor={candidates.length > 0 ? 'text-green-600' : ''} />
+                        <MetricCard label="KANDIDATEN" value={sorted.length} sub={`${sorted.length} / ${data.length} gefunden`} subColor={sorted.length > 0 ? 'text-green-600' : ''} />
                         <MetricCard label="GRADE S/A" value={gradeCount.S + gradeCount.A} sub="Top-Setups" />
                         <MetricCard label="DURCHSCHN. SCORE" value={avgScore || '-'} sub={avgScore > 70 ? 'Stark' : avgScore > 50 ? 'Mittel' : '-'} subColor={avgScore > 70 ? 'text-green-600' : ''} />
                         <MetricCard label="STATUS" value={loading ? 'Scannt...' : 'Bereit'} sub={apiOk ? 'API verbunden' : 'API offline'} subColor={apiOk ? 'text-green-600' : 'text-red-600'} />
@@ -399,15 +478,20 @@
 
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">Trading Candidates</h2>
-                        <button onClick={() => setShowSettings(!showSettings)} className="icon-button p-2" title="Einstellungen">
-                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd"/></svg>
-                        </button>
+                        <div className="flex gap-2">
+                            <button onClick={() => downloadCSV(sorted, 'scanner-candidates.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                            </button>
+                            <button onClick={() => setShowSettings(!showSettings)} className="icon-button p-2" title="Einstellungen">
+                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd"/></svg>
+                            </button>
+                        </div>
                     </div>
 
                     {showSettings && (
                         <div className="settings-panel mb-6">
                             <h3 className="text-lg font-semibold mb-4">Einstellungen</h3>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
                                 <div>
                                     <label className="block text-sm font-medium mb-2">Markt</label>
                                     <select value={settings.market} onChange={e => setSettings({...settings, market: e.target.value})}
@@ -432,17 +516,23 @@
                                     </select>
                                 </div>
                             </div>
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Min. Score: {minScore}</label>
+                                <input type="range" min="0" max="100" value={minScore} onChange={e => setMinScore(parseInt(e.target.value))}
+                                    className="w-full" />
+                            </div>
                         </div>
                     )}
 
-                    {loading ? <Spinner /> : candidates.length === 0 ?
+                    {loading ? <Spinner /> : sorted.length === 0 ?
                         <EmptyState title="Keine Kandidaten" subtitle="Scans laufen automatisch im Hintergrund — Daten erscheinen in Kuerze" /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Ticker','Score','Grade','Signal','R:R','Entry','Stop','Target']} />
+                                    <TableHead columns={['Ticker','Score','Grade','Signal','R:R','Entry','Stop','Target']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {candidates.map(c => (
+                                        {sorted.map(c => (
                                             <tr key={c.id} onClick={() => onSelectTicker(c.ticker)}
                                                 className={`table-row border-b cursor-pointer ${gradeBorder(c.grade)}`}>
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{c.ticker}</td>
@@ -469,6 +559,7 @@
             const [direction, setDirection] = useState('long');
             const [data, setData] = useState([]);
             const [cacheAge, setCacheAge] = useState(null);
+            const [minScore, setMinScore] = useState(0);
 
             const loadResults = useCallback(async () => {
                 const res = await apiFetch(`/api/bi-results?direction=${direction}`);
@@ -485,7 +576,9 @@
                 rvol: d.rvol || d.relative_volume || 0, volume: d.volume || 0,
                 pattern: d.pattern || d.setup || '-', reason: d.reason || d.description || '',
                 entry: d.entry || d.entry_price || 0, stop: d.stop || d.stop_loss || 0, target: d.target || d.take_profit || 0,
-            }));
+            })).filter(i => i.score >= minScore);
+
+            const { sorted, sortKey, sortDir, toggle } = useSortable(items, 'score');
 
             const topCount = items.filter(i => i.score >= 75).length;
             const avgScore = items.length ? Math.round(items.reduce((s,i)=>s+i.score,0)/items.length) : 0;
@@ -511,7 +604,15 @@
                                     SHORT</button>
                             </div>
                         </div>
-                        <div className="text-xs text-gray-400">{cacheAge != null ? `Aktualisiert vor ${Math.round(cacheAge/60)} Min` : 'Lade...'}</div>
+                        <button onClick={() => downloadCSV(sorted, 'bi-candidates.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
+                    </div>
+
+                    <div className="mb-4">
+                        <label className="block text-sm font-medium mb-2">Min. Score: {minScore}</label>
+                        <input type="range" min="0" max="100" value={minScore} onChange={e => setMinScore(parseInt(e.target.value))}
+                            className="w-full" />
                     </div>
 
                     {loading ? <Spinner /> : items.length === 0 ?
@@ -519,9 +620,10 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Ticker','Score','Grade','Richtung','Preis','Change %','RVOL','Pattern']} />
+                                    <TableHead columns={['Ticker','Score','Grade','Richtung','Preis','Change %','RVOL','Pattern']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {items.map(item => (
+                                        {sorted.map(item => (
                                             <tr key={item.id} onClick={() => onSelectTicker(item.ticker)}
                                                 className={`table-row border-b cursor-pointer ${gradeBorder(item.grade)}`}>
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
@@ -562,6 +664,8 @@
                 change: d.change_pct || d.change || 0, mcap: d.market_cap || d.mcap || 0,
             }));
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(items, 'score');
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -573,7 +677,9 @@
 
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">Biotech Scanner</h2>
-                        <div className="text-xs text-gray-400">{cacheAge != null ? `Aktualisiert vor ${Math.round(cacheAge/60)} Min` : 'Lade...'}</div>
+                        <button onClick={() => downloadCSV(sorted, 'biotech-candidates.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : items.length === 0 ?
@@ -581,9 +687,10 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Ticker','Name','Katalysator','Datum','Phase','Preis','Change %']} />
+                                    <TableHead columns={['Ticker','Name','Katalysator','Datum','Phase','Preis','Change %']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {items.map(item => (
+                                        {sorted.map(item => (
                                             <tr key={item.id} className="table-row border-b">
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm">{item.name}</td>
@@ -623,6 +730,11 @@
             const breakdowns = (data.breakdown_stocks || []);
             const items = view === 'etfs' ? etfs : breakdowns;
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(
+                items.map((d, i) => ({ id: i, ...d })),
+                view === 'etfs' ? 'ticker' : 'ticker'
+            );
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -644,7 +756,9 @@
                                     Breakdowns</button>
                             </div>
                         </div>
-                        <div className="text-xs text-gray-400">{cacheAge != null ? `Aktualisiert vor ${Math.round(cacheAge/60)} Min` : 'Lade...'}</div>
+                        <button onClick={() => downloadCSV(sorted, `short-scanner-${view}.csv`)} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : items.length === 0 ?
@@ -653,10 +767,11 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Ticker','Name','Underlying','Preis','1D %','5D %','20D %','RVOL','Signal']} />
+                                    <TableHead columns={['Ticker','Name','Underlying','Preis','1D %','5D %','20D %','RVOL','Signal']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {etfs.map((e, i) => (
-                                            <tr key={i} className="table-row border-b">
+                                        {sorted.map((e) => (
+                                            <tr key={e.id} className="table-row border-b">
                                                 <td className="px-5 py-4 font-semibold text-red-600">{e.ticker}</td>
                                                 <td className="px-5 py-4 text-sm">{e.name}</td>
                                                 <td className="px-5 py-4 text-sm text-gray-500">{e.underlying}</td>
@@ -676,10 +791,11 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Ticker','Preis','Change %','Volume','Dollar Volume']} />
+                                    <TableHead columns={['Ticker','Preis','Change %','Volume','Dollar Volume']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {breakdowns.map((b, i) => (
-                                            <tr key={i} className="table-row border-b">
+                                        {sorted.map((b) => (
+                                            <tr key={b.id} className="table-row border-b">
                                                 <td className="px-5 py-4 font-semibold text-red-600">{b.ticker}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(b.price)}</td>
                                                 <td className="px-5 py-4 text-sm font-medium text-red-600">{fmt(b.change_pct)}%</td>
@@ -712,6 +828,11 @@
             const losers = data.losers || [];
             const items = view === 'gainers' ? gainers : losers;
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(
+                items.map((d, i) => ({ id: i, ...d })),
+                'change_pct'
+            );
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -733,6 +854,9 @@
                                     Verlierer</button>
                             </div>
                         </div>
+                        <button onClick={() => downloadCSV(sorted, `early-movers-${view}.csv`)} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : items.length === 0 ?
@@ -740,11 +864,12 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['#','Ticker','Preis','Change %','Volume']} />
+                                    <TableHead columns={['#','Ticker','Preis','Change %','Volume']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {items.map((item, i) => (
-                                            <tr key={i} className="table-row border-b">
-                                                <td className="px-5 py-4 text-sm text-gray-400 font-medium">{i+1}</td>
+                                        {sorted.map((item) => (
+                                            <tr key={item.id} className="table-row border-b">
+                                                <td className="px-5 py-4 text-sm text-gray-400 font-medium">{item.id + 1}</td>
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
                                                 <td className={`px-5 py-4 text-sm font-bold ${changeColor(item.change_pct)}`}>{item.change_pct > 0 ? '+' : ''}{fmt(item.change_pct)}%</td>
@@ -781,6 +906,8 @@
                 'REFERENZ': 'bg-purple-100 text-purple-700',
             }[s] || 'bg-gray-100 text-gray-600');
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(data.map((d,i) => ({id:i,...d})), 'ticker');
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -792,6 +919,9 @@
 
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">BTC-Divergenz Scanner</h2>
+                        <button onClick={() => downloadCSV(sorted, 'btc-divergenz.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : data.length === 0 ?
@@ -799,10 +929,11 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Asset','Name','Preis','1D %','5D %','Div. 1D','Div. 5D','Signal']} />
+                                    <TableHead columns={['Asset','Name','Preis','1D %','5D %','Div. 1D','Div. 5D','Signal']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {data.map((item, i) => (
-                                            <tr key={i} className={`table-row border-b ${item.ticker === 'X:BTCUSD' ? 'bg-purple-50' : ''}`}>
+                                        {sorted.map((item) => (
+                                            <tr key={item.id} className={`table-row border-b ${item.ticker === 'X:BTCUSD' ? 'bg-purple-50' : ''}`}>
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.symbol}</td>
                                                 <td className="px-5 py-4 text-sm">{item.name}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${item.ticker === 'X:BTCUSD' ? Number(item.price).toLocaleString() : fmt(item.price)}</td>
@@ -843,6 +974,8 @@
             const zufluss = data.filter(d=>d.flow_signal==='ZUFLUSS').length;
             const abfluss = data.filter(d=>d.flow_signal==='ABFLUSS').length;
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(data.map((d,i) => ({id:i,...d})), 'ticker');
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -854,6 +987,9 @@
 
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">Money Flow - Sektorrotation</h2>
+                        <button onClick={() => downloadCSV(sorted, 'money-flow.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : data.length === 0 ?
@@ -861,10 +997,11 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['ETF','Sektor','Preis','1D %','5D %','20D %','RVOL','Flow Signal']} />
+                                    <TableHead columns={['ETF','Sektor','Preis','1D %','5D %','20D %','RVOL','Flow Signal']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {data.map((item, i) => (
-                                            <tr key={i} className="table-row border-b">
+                                        {sorted.map((item) => (
+                                            <tr key={item.id} className="table-row border-b">
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm font-medium">{item.sector}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
@@ -884,7 +1021,7 @@
             );
         }
 
-        // ── Kalender Tab (Polygon Earnings Calendar) ──
+        // ── Kalender Tab ──
         function KalenderTab() {
             const [data, setData] = useState([]);
             const [loading, setLoading] = useState(false);
@@ -892,11 +1029,6 @@
             const loadEarnings = useCallback(async () => {
                 setLoading(true);
                 try {
-                    const today = new Date().toISOString().split('T')[0];
-                    const next7 = new Date(Date.now() + 7*86400000).toISOString().split('T')[0];
-                    const resp = await fetch(`${API_BASE}/api/health`);
-                    // Use Polygon grouped endpoint for upcoming earnings-like data
-                    // For now show major upcoming events as static + dynamic market data
                     setData([
                         { event: 'FOMC Meeting', date: 'Naechste Sitzung', type: 'FED', impact: 'HOCH' },
                         { event: 'CPI Daten', date: 'Monatlich', type: 'INFLATION', impact: 'HOCH' },
@@ -929,6 +1061,8 @@
                 'EARNINGS': 'bg-yellow-100 text-yellow-700',
             }[t] || 'bg-gray-100 text-gray-600');
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(data.map((d,i) => ({id:i,...d})), 'event');
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -940,16 +1074,20 @@
 
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">Wirtschaftskalender</h2>
+                        <button onClick={() => downloadCSV(sorted, 'kalender.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : (
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Event','Zeitraum','Typ','Impact']} />
+                                    <TableHead columns={['Event','Zeitraum','Typ','Impact']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {data.map((item, i) => (
-                                            <tr key={i} className="table-row border-b">
+                                        {sorted.map((item) => (
+                                            <tr key={item.id} className="table-row border-b">
                                                 <td className="px-5 py-4 font-semibold">{item.event}</td>
                                                 <td className="px-5 py-4 text-sm">{item.date}</td>
                                                 <td className="px-5 py-4"><span className={`px-2 py-1 rounded text-xs font-semibold ${typeCls(item.type)}`}>{item.type}</span></td>
@@ -993,6 +1131,8 @@
                 'NEUTRAL': 'bg-gray-100 text-gray-600',
             }[s] || 'bg-gray-100 text-gray-600');
 
+            const { sorted, sortKey, sortDir, toggle } = useSortable(indices.map((d,i) => ({id:i,...d})), 'ticker');
+
             return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -1012,6 +1152,9 @@
 
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-lg font-semibold">Crash Monitor</h2>
+                        <button onClick={() => downloadCSV(sorted, 'crash-monitor.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                        </button>
                     </div>
 
                     {loading ? <Spinner /> : indices.length === 0 ?
@@ -1019,10 +1162,11 @@
                         <div className="card border border-gray-200 rounded-lg overflow-hidden">
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <TableHead columns={['Index','Name','Preis','1D %','5D %','20D %']} />
+                                    <TableHead columns={['Index','Name','Preis','1D %','5D %','20D %']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
                                     <tbody>
-                                        {indices.map((item, i) => (
-                                            <tr key={i} className="table-row border-b">
+                                        {sorted.map((item) => (
+                                            <tr key={item.id} className="table-row border-b">
                                                 <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
                                                 <td className="px-5 py-4 text-sm">{item.name}</td>
                                                 <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
@@ -1036,6 +1180,270 @@
                             </div>
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // ── Watchlist Tab ──
+        function WatchlistTab({ onSelectTicker }) {
+            const [watchlist, setWatchlist] = useState(() => {
+                const saved = localStorage.getItem('watchlist');
+                return saved ? JSON.parse(saved) : [];
+            });
+            const [input, setInput] = useState('');
+            const [tickerDetails, setTickerDetails] = useState({});
+            const [loading, setLoading] = useState(false);
+
+            useEffect(() => {
+                localStorage.setItem('watchlist', JSON.stringify(watchlist));
+                if (watchlist.length > 0) {
+                    const refreshDetails = async () => {
+                        setLoading(true);
+                        const details = {};
+                        for (const ticker of watchlist) {
+                            const res = await apiFetch(`/api/ticker-detail?ticker=${encodeURIComponent(ticker)}`);
+                            if (res) details[ticker] = res;
+                        }
+                        setTickerDetails(details);
+                        setLoading(false);
+                    };
+                    refreshDetails();
+                    const iv = setInterval(refreshDetails, 30000);
+                    return () => clearInterval(iv);
+                }
+            }, [watchlist]);
+
+            const addTicker = () => {
+                const ticker = input.trim().toUpperCase();
+                if (ticker && !watchlist.includes(ticker)) {
+                    setWatchlist([...watchlist, ticker]);
+                    setInput('');
+                }
+            };
+
+            const removeTicker = (ticker) => {
+                setWatchlist(watchlist.filter(t => t !== ticker));
+            };
+
+            const items = watchlist.map((ticker, i) => {
+                const detail = tickerDetails[ticker] || {};
+                return {
+                    id: i, ticker, price: detail.price || 0, change_1d: detail.change_1d || 0,
+                    change_5d: detail.change_5d || 0, rvol: detail.rvol || 0, rsi: detail.rsi || '-',
+                };
+            });
+
+            const { sorted, sortKey, sortDir, toggle } = useSortable(items, 'ticker');
+
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="WATCHLIST" value={watchlist.length} sub="Ticker beobachtet" />
+                        <MetricCard label="IM MINUS" value={items.filter(i => i.change_1d < 0).length} sub="1D Verlust" subColor="text-red-600" />
+                        <MetricCard label="IM PLUS" value={items.filter(i => i.change_1d > 0).length} sub="1D Gewinn" subColor="text-green-600" />
+                        <MetricCard label="STATUS" value={loading ? 'Aktualisiert...' : 'Bereit'} sub={watchlist.length > 0 ? 'Auto-Refresh aktiv' : 'Ticker hinzufuegen'} />
+                    </div>
+
+                    <div className="mb-6">
+                        <h2 className="text-lg font-semibold mb-4">Watchlist verwalten</h2>
+                        <div className="flex gap-3">
+                            <input type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTicker()}
+                                placeholder="Ticker eingeben (z.B. AAPL, NVDA)"
+                                className="flex-1 px-4 py-3 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                            <button onClick={addTicker}
+                                className="px-6 py-3 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition">
+                                Hinzufuegen
+                            </button>
+                            <button onClick={() => downloadCSV(sorted, 'watchlist.csv')} className="icon-button p-2" title="Als CSV exportieren">
+                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm4 2h8v4H6V8z"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    {watchlist.length === 0 ? (
+                        <EmptyState title="Watchlist leer" subtitle="Fuege Ticker hinzu um sie zu beobachten und Preise zu verfolgen" />
+                    ) : (
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <TableHead columns={['Ticker','Preis','1D %','5D %','RVOL','RSI','Aktion']}
+                                        onSort={toggle} sortKey={sortKey} sortDir={sortDir} />
+                                    <tbody>
+                                        {sorted.map(item => (
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.ticker)}
+                                                className="table-row border-b cursor-pointer">
+                                                <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(item.change_1d)}`}>{item.change_1d > 0 ? '+' : ''}{fmt(item.change_1d)}%</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(item.change_5d)}`}>{item.change_5d > 0 ? '+' : ''}{fmt(item.change_5d)}%</td>
+                                                <td className="px-5 py-4 text-sm">{fmt(item.rvol)}x</td>
+                                                <td className="px-5 py-4 text-sm">{item.rsi}</td>
+                                                <td className="px-5 py-4 text-sm">
+                                                    <button onClick={(e) => { e.stopPropagation(); removeTicker(item.ticker); }}
+                                                        className="text-red-600 hover:text-red-800 font-semibold">X</button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ── Backtest Tab ──
+        function BacktestTab() {
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="BACKTEST LAB" value="-" sub="Kommt bald" />
+                        <MetricCard label="MODUL STATUS" value="In Entwicklung" sub="V70.8+" />
+                        <MetricCard label="VERFUEGBARE TESTS" value="4" sub="Planiert" />
+                        <MetricCard label="DATENBEREICH" value="2020-2026" sub="Historische Daten" />
+                    </div>
+
+                    <div className="mb-6">
+                        <h2 className="text-lg font-semibold mb-4">Backtest Lab - Coming Soon</h2>
+                        <p className="text-gray-600 mb-4">Testen Sie Ihre Strategien gegen historische Marktdaten und optimieren Sie Ihre Einstellungen.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Backtest mit Scanner Strategies</h3>
+                            <p className="text-sm text-gray-600 mb-3">Teste die Volume Surge, Breakout Imminent und andere Scanning Strategies gegen historische Daten.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Parameter Optimierung</h3>
+                            <p className="text-sm text-gray-600 mb-3">Optimiere RSI, MA-Perioden, Volume Thresholds und weitere Parameter fuer maximale Performance.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Equity Curve Analysis</h3>
+                            <p className="text-sm text-gray-600 mb-3">Visualisiere Gewinn- und Verlustverlauf, Drawdown und Sharpe Ratio fuer detailed insights.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Walk Forward Testing</h3>
+                            <p className="text-sm text-gray-600 mb-3">Teste mit verschiedenen Datenabschnitten und validiere die Robustheit deiner Strategie.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ── Strategie Guide Tab ──
+        function StrategieGuideTab() {
+            const [marketType, setMarketType] = useState('stocks');
+            const [strategies, setStrategies] = useState([]);
+            const [loading, setLoading] = useState(false);
+
+            useEffect(() => {
+                const loadStrategies = async () => {
+                    setLoading(true);
+                    const res = await apiFetch(`/api/strategies?market_type=${marketType}`);
+                    if (res && res.strategies) {
+                        const stratList = Object.entries(res.strategies).map(([name, desc]) => ({
+                            name, desc, emoji: '📈'
+                        }));
+                        setStrategies(stratList);
+                    }
+                    setLoading(false);
+                };
+                loadStrategies();
+            }, [marketType]);
+
+            const emojis = {
+                'Volume': '📊', 'Breakout': '🚀', 'Divergence': '📉', 'Money': '💰',
+                'Momentum': '⚡', 'Mean': '🎯', 'Reversal': '🔄', 'Trend': '📈'
+            };
+
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="STRATEGIES" value={strategies.length} sub="Verfuegbar" />
+                        <MetricCard label="MARKT" value={marketType.charAt(0).toUpperCase() + marketType.slice(1)} sub="Ausgewaehlt" />
+                        <MetricCard label="DOKUMENTATION" value="100%" sub="Vollstaendig" subColor="text-green-600" />
+                        <MetricCard label="LAST UPDATE" value="V70.7" sub="Aktuell" />
+                    </div>
+
+                    <div className="mb-6">
+                        <h2 className="text-lg font-semibold mb-4">Strategie Guide</h2>
+                        <div className="flex gap-2 flex-wrap">
+                            {['stocks', 'crypto', 'futures', 'forex'].map(mt => (
+                                <button key={mt} onClick={() => setMarketType(mt)}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition ${marketType === mt ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                                    {mt === 'stocks' ? 'Aktien' : mt === 'crypto' ? 'Krypto' : mt === 'futures' ? 'Futures' : 'Forex'}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {loading ? <Spinner /> : strategies.length === 0 ? (
+                        <EmptyState title="Keine Strategies geladen" subtitle="Versuchen Sie einen anderen Markt-Typ" />
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {strategies.map((strat, i) => {
+                                const emoji = Object.keys(emojis).find(k => strat.name.includes(k)) ? emojis[Object.keys(emojis).find(k => strat.name.includes(k))] : '📈';
+                                return (
+                                    <div key={i} className="card border border-gray-200 rounded-lg p-5">
+                                        <div className="flex items-start gap-3">
+                                            <span className="text-2xl">{emoji}</span>
+                                            <div className="flex-1">
+                                                <h3 className="font-semibold mb-2">{strat.name}</h3>
+                                                <p className="text-sm text-gray-600">{strat.desc || 'Professionelle Handelsstrategie fuer ' + marketType}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ── New Listing Tab ──
+        function NewListingTab() {
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="NEW LISTING SCANNER" value="-" sub="Kommt bald" />
+                        <MetricCard label="EXCHANGES" value="7" sub="Ueberwacht" />
+                        <MetricCard label="CANDLESTICKS" value="30 Min" sub="Monitoring" />
+                        <MetricCard label="STATUS" value="Vorbereitung" sub="V70.8+" />
+                    </div>
+
+                    <div className="mb-6">
+                        <h2 className="text-lg font-semibold mb-4">Perp Dump Scanner - Coming Soon</h2>
+                        <p className="text-gray-600 mb-4">Automatische Ueberwachung neuer Listings auf den groessten Crypto-Exchanges und Erkennung von Pump & Dump Patterns.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Bitget</h3>
+                            <p className="text-sm text-gray-600 mb-3">Ueberwache neue Listings auf Bitget mit Echtzeit-Daten.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">MEXC</h3>
+                            <p className="text-sm text-gray-600 mb-3">Ueberwache neue Listings auf MEXC Global Exchange.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Crypto.com</h3>
+                            <p className="text-sm text-gray-600 mb-3">Ueberwache neue Listings auf Crypto.com Exchange.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                        <div className="card border border-gray-200 rounded-lg p-6">
+                            <h3 className="font-semibold mb-2">Dump Detection AI</h3>
+                            <p className="text-sm text-gray-600 mb-3">KI-gesteuerte Erkennung von Pump & Dump Patterns.</p>
+                            <div className="text-xs text-gray-400">Verfuegbar in V70.8</div>
+                        </div>
+                    </div>
                 </div>
             );
         }
@@ -1140,7 +1548,6 @@
             const onSelectTicker = (ticker) => setSidebarTicker(ticker);
             const closeSidebar = () => setSidebarTicker(null);
 
-            // Check API health + scan status on mount
             useEffect(() => {
                 const check = async () => {
                     const res = await apiFetch('/api/health');
@@ -1161,7 +1568,7 @@
                 document.documentElement.setAttribute('data-theme', next);
             };
 
-            const tabs = ['Scanner', 'BI Scanner', 'Biotech', 'BTC-Divergenz', 'Early Movers', 'Short Scanner', 'Money Flow', 'Kalender', 'Crash Monitor', 'Suche'];
+            const tabs = ['Scanner', 'BI Scanner', 'Biotech', 'BTC-Divergenz', 'Early Movers', 'Short Scanner', 'Money Flow', 'Kalender', 'Crash Monitor', 'Watchlist', 'Backtest', 'Strategie Guide', 'New Listing', 'Suche'];
 
             const renderTab = () => {
                 switch (activeTab) {
@@ -1174,6 +1581,10 @@
                     case 'Money Flow': return <MoneyFlowTab />;
                     case 'Kalender': return <KalenderTab />;
                     case 'Crash Monitor': return <CrashMonitorTab />;
+                    case 'Watchlist': return <WatchlistTab onSelectTicker={onSelectTicker} />;
+                    case 'Backtest': return <BacktestTab />;
+                    case 'Strategie Guide': return <StrategieGuideTab />;
+                    case 'New Listing': return <NewListingTab />;
                     case 'Suche': return <SucheTab onSelectTicker={onSelectTicker} />;
                     default: return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} />;
                 }
@@ -1181,7 +1592,8 @@
 
             return (
                 <div data-theme={theme} className="min-h-screen">
-                    {/* Header */}
+                    <ToastContainer />
+
                     <header className="card border-b border-gray-200 sticky top-0 z-50">
                         <div className="max-w-full px-6 py-4 flex items-center justify-between">
                             <h1 className="text-2xl font-bold">Alpha Station</h1>
@@ -1204,7 +1616,6 @@
                         </div>
                     </header>
 
-                    {/* Tab Navigation */}
                     <nav className="card border-b border-gray-200 px-6 py-0 sticky top-16 z-40">
                         <div className="flex gap-8 overflow-x-auto">
                             {tabs.map(tab => (
@@ -1216,15 +1627,12 @@
                         </div>
                     </nav>
 
-                    {/* Main Content */}
                     <main className="max-w-full px-6 py-6">
                         {renderTab()}
                     </main>
 
-                    {/* Detail Sidebar */}
                     {sidebarTicker && <DetailSidebar ticker={sidebarTicker} onClose={closeSidebar} />}
 
-                    {/* Footer */}
                     <footer className="text-center py-4 text-xs" style={{color: 'var(--text-muted)'}}>
                         Alpha Station V70.7 Pro &middot; {marketSession.session}
                     </footer>
