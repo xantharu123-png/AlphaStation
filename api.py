@@ -42,7 +42,16 @@ from modules.scanners import (
     _biotech_cache_load,
 )
 from modules.helpers import get_current_trading_session
-from modules.data_fetchers import rate_limited_get
+from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart
+from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd
+
+# Import pattern detection
+try:
+    from modules.patterns import find_harmonic_for_chart, detect_chart_patterns, find_pivots, detect_order_blocks, detect_liquidity_levels
+    HAS_PATTERNS = True
+except ImportError:
+    HAS_PATTERNS = False
+    print("[Warning] patterns module not fully loaded")
 
 # Import new listing scanner
 try:
@@ -811,6 +820,188 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             "trade_setup": trade_setup,
             "candles": candles,
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/chart-data")
+def get_chart_data(
+    ticker: str = Query(..., description="Ticker symbol"),
+    timeframe: str = Query("1D", description="5m, 15m, 1H, 4H, 1D, 1W"),
+    overlays: str = Query("ema,vwap,sr,fib", description="Comma-separated: ema,vwap,sr,fib,patterns")
+):
+    """Get OHLCV data with chart overlays for TradingView Lightweight Charts."""
+    try:
+        # Fetch OHLCV bars for the requested timeframe
+        ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe=timeframe, bars=300)
+        if not ohlcv or len(ohlcv) < 5:
+            raise HTTPException(status_code=404, detail=f"No chart data for '{ticker}' ({timeframe})")
+
+        overlay_list = [x.strip().lower() for x in overlays.split(",")]
+        result = {
+            "ticker": ticker,
+            "timeframe": timeframe,
+            "candles": ohlcv,  # Already in {time, open, high, low, close, volume} format
+        }
+
+        closes = [bar["close"] for bar in ohlcv]
+        highs = [bar["high"] for bar in ohlcv]
+        lows = [bar["low"] for bar in ohlcv]
+        volumes = [bar.get("volume", 0) for bar in ohlcv]
+        times = [bar["time"] for bar in ohlcv]
+
+        # EMA Overlays (as time-series for line drawing)
+        if "ema" in overlay_list:
+            ema_overlays = {}
+            for period in [9, 20, 50, 100, 200]:
+                if len(closes) >= period:
+                    try:
+                        ema_vals = calculate_ema_series(closes, period)
+                        ema_data = []
+                        start = len(times) - len(ema_vals)
+                        for i, val in enumerate(ema_vals):
+                            if val is not None:
+                                ema_data.append({"time": times[start + i], "value": round(val, 2)})
+                        if ema_data:
+                            ema_overlays[f"ema{period}"] = ema_data
+                    except Exception:
+                        pass
+            result["ema"] = ema_overlays
+
+        # VWAP (cumulative per-bar)
+        if "vwap" in overlay_list and len(ohlcv) >= 10:
+            try:
+                vwap_data = []
+                cum_tp_vol = 0
+                cum_vol = 0
+                for bar in ohlcv:
+                    tp = (bar["high"] + bar["low"] + bar["close"]) / 3
+                    vol = bar.get("volume", 0)
+                    cum_tp_vol += tp * vol
+                    cum_vol += vol
+                    if cum_vol > 0:
+                        vwap_data.append({"time": bar["time"], "value": round(cum_tp_vol / cum_vol, 2)})
+                result["vwap"] = vwap_data
+            except Exception:
+                pass
+
+        # Support/Resistance levels
+        if "sr" in overlay_list:
+            try:
+                last = ohlcv[-1]
+                h = last["high"]
+                l = last["low"]
+                c = last["close"]
+                pivot = round((h + l + c) / 3, 2)
+                s1 = round(2 * pivot - h, 2)
+                r1 = round(2 * pivot - l, 2)
+                s2 = round(pivot - (h - l), 2)
+                r2 = round(pivot + (h - l), 2)
+                h20 = round(max(highs[-20:]), 2) if len(highs) >= 20 else round(max(highs), 2)
+                l20 = round(min(lows[-20:]), 2) if len(lows) >= 20 else round(min(lows), 2)
+                result["sr"] = {
+                    "pivot": pivot, "s1": s1, "r1": r1, "s2": s2, "r2": r2,
+                    "high_20": h20, "low_20": l20,
+                }
+            except Exception:
+                pass
+
+        # Fibonacci levels
+        if "fib" in overlay_list and len(ohlcv) >= 20:
+            try:
+                h20 = max(highs[-20:])
+                l20 = min(lows[-20:])
+                rng = h20 - l20
+                fib = {}
+                for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
+                    fib[f"{int(ratio*100)}%"] = round(l20 + rng * ratio, 2)
+                result["fib"] = fib
+            except Exception:
+                pass
+
+        # Pattern detection (Harmonic, Chart Patterns, Order Blocks, Liquidity)
+        if "patterns" in overlay_list and HAS_PATTERNS:
+            try:
+                # find_harmonic_for_chart needs {time, open, high, low, close, volume}
+                # detect_chart_patterns / detect_order_blocks need same format
+                # find_pivots needs {date, high, low, close}
+                patterns_result = {}
+
+                # Harmonic patterns
+                try:
+                    harmonics = find_harmonic_for_chart(ohlcv)
+                    if harmonics:
+                        patterns_result["harmonic"] = harmonics[:3]
+                except Exception as e:
+                    print(f"Harmonic error: {e}")
+
+                # Chart patterns (Double Top/Bottom, H&S, Triangles)
+                try:
+                    chart_pats = detect_chart_patterns(ohlcv)
+                    if chart_pats:
+                        patterns_result["chart_patterns"] = chart_pats[:5]
+                except Exception as e:
+                    print(f"Chart patterns error: {e}")
+
+                # Pivots (for marker annotations)
+                try:
+                    pivot_input = [{"date": str(b["time"]), "high": b["high"], "low": b["low"], "close": b["close"]} for b in ohlcv]
+                    pivots_list = find_pivots(pivot_input, window=3)
+                    if pivots_list:
+                        # Add time reference for chart markers
+                        for p in pivots_list:
+                            if p.get("index") is not None and p["index"] < len(ohlcv):
+                                p["time"] = ohlcv[p["index"]]["time"]
+                        patterns_result["pivots"] = pivots_list[-15:]
+                except Exception as e:
+                    print(f"Pivots error: {e}")
+
+                # Order blocks
+                try:
+                    obs = detect_order_blocks(ohlcv)
+                    if obs:
+                        patterns_result["order_blocks"] = obs
+                except Exception as e:
+                    print(f"Order blocks error: {e}")
+
+                # Liquidity levels
+                try:
+                    liq = detect_liquidity_levels(ohlcv)
+                    if liq:
+                        patterns_result["liquidity"] = liq
+                except Exception as e:
+                    print(f"Liquidity error: {e}")
+
+                result["patterns"] = patterns_result
+            except Exception as e:
+                print(f"Pattern detection error: {e}")
+
+        # Bollinger Bands
+        if len(closes) >= 20:
+            try:
+                bb_data = []
+                for i in range(19, len(closes)):
+                    window = closes[i-19:i+1]
+                    ma = sum(window) / 20
+                    std = (sum((x - ma) ** 2 for x in window) / 20) ** 0.5
+                    bb_data.append({
+                        "time": times[i],
+                        "upper": round(ma + 2 * std, 2),
+                        "middle": round(ma, 2),
+                        "lower": round(ma - 2 * std, 2)
+                    })
+                result["bollinger"] = bb_data
+            except Exception:
+                pass
+
+        # Volume data
+        vol_data = [{"time": bar["time"], "value": bar.get("volume", 0), "color": "rgba(16,185,129,0.3)" if bar["close"] >= bar["open"] else "rgba(220,38,38,0.3)"} for bar in ohlcv]
+        result["volume"] = vol_data
+
+        return result
+
     except HTTPException:
         raise
     except Exception as e:

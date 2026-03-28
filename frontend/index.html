@@ -146,7 +146,7 @@
         .signal-factor { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
         .signal-dot { width: 12px; height: 12px; border-radius: 50%; }
 
-        .chart-container { width: 100%; height: 250px; margin: 16px 0; }
+        .chart-container { width: 100%; min-height: 250px; margin: 16px 0; background: #1a1a2e; border-radius: 8px; }
 
         .sortable-header { cursor: pointer; user-select: none; }
         .sortable-header:hover { opacity: 0.7; }
@@ -401,15 +401,23 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
 // DetailSidebar Component
 function DetailSidebar({ ticker, onClose }) {
     const [tickerData, setTickerData] = useState(null);
+    const [chartData, setChartData] = useState(null);
     const [aiData, setAiData] = useState(null);
     const [aiLoading, setAiLoading] = useState(false);
     const [loading, setLoading] = useState(true);
-    const [sidebarMode, setSidebarMode] = useState('normal'); // normal, wide, full
+    const [sidebarMode, setSidebarMode] = useState('normal');
     const [customWidth, setCustomWidth] = useState(null);
+    const [timeframe, setTimeframe] = useState('1D');
+    const [overlays, setOverlays] = useState({ ema: true, vwap: true, sr: true, fib: false, patterns: true, bb: false, vol: true });
     const chartContainer = useRef(null);
     const chart = useRef(null);
+    const candleSeries = useRef(null);
+    const overlaySeriesRef = useRef([]);
     const sidebarRef = useRef(null);
     const isDragging = useRef(false);
+
+    const TIMEFRAMES = ['5m', '15m', '1H', '4H', '1D', '1W'];
+    const EMA_COLORS = { ema9: '#f59e0b', ema20: '#3b82f6', ema50: '#ef4444', ema100: '#8b5cf6', ema200: '#14b8a6' };
 
     // Drag-Resize Handler
     const startResize = (e) => {
@@ -440,6 +448,7 @@ function DetailSidebar({ ticker, onClose }) {
         setSidebarMode(prev => prev === 'normal' ? 'wide' : prev === 'wide' ? 'full' : 'normal');
     };
 
+    // Fetch ticker detail data (metrics)
     useEffect(() => {
         const fetchData = async () => {
             try {
@@ -455,6 +464,20 @@ function DetailSidebar({ ticker, onClose }) {
         };
         fetchData();
     }, [ticker]);
+
+    // Fetch chart data (separate endpoint with timeframe + overlays)
+    useEffect(() => {
+        const fetchChart = async () => {
+            try {
+                const overlayStr = Object.entries(overlays).filter(([_, v]) => v).map(([k]) => k).join(',');
+                const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${overlayStr}`);
+                if (res.ok) setChartData(await res.json());
+            } catch (err) {
+                console.error('Chart data error:', err);
+            }
+        };
+        fetchChart();
+    }, [ticker, timeframe]);
 
     const loadAiAnalysis = async () => {
         setAiLoading(true);
@@ -472,7 +495,6 @@ function DetailSidebar({ ticker, onClose }) {
         }
     };
 
-    // Resize chart when sidebar width changes
     const getChartWidth = () => {
         if (customWidth) return customWidth - 60;
         if (sidebarMode === 'full') return Math.min(window.innerWidth - 60, 900);
@@ -480,26 +502,228 @@ function DetailSidebar({ ticker, onClose }) {
         return 430;
     };
 
+    const getChartHeight = () => sidebarMode === 'full' ? 450 : sidebarMode === 'wide' ? 320 : 250;
+
+    // Render chart with all overlays
     useEffect(() => {
-        if (!tickerData || !chartContainer.current) return;
+        if (!chartData || !chartContainer.current) return;
         try {
+            // Cleanup
             if (chart.current) chart.current.remove();
-            const { createChart } = window.LightweightCharts;
+            overlaySeriesRef.current = [];
+
+            const { createChart, LineStyle, CrosshairMode } = window.LightweightCharts;
             const chartWidth = getChartWidth();
+            const chartHeight = getChartHeight();
+
             chart.current = createChart(chartContainer.current, {
-                layout: { textColor: '#666', background: { color: '#fafafa' } },
-                width: chartWidth, height: sidebarMode === 'full' ? 350 : 220,
-                timeScale: { timeVisible: true, secondsVisible: false }
+                layout: { textColor: '#999', background: { color: '#1a1a2e' }, fontSize: 11 },
+                grid: { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.04)' } },
+                width: chartWidth, height: chartHeight,
+                crosshair: { mode: CrosshairMode.Normal },
+                rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+                timeScale: { timeVisible: timeframe.includes('m') || timeframe.includes('H'), secondsVisible: false, borderColor: 'rgba(255,255,255,0.1)' },
             });
-            const series = chart.current.addCandlestickSeries();
-            const candles = (tickerData.candles || []).map(c => ({
-                time: Math.floor(c.t / 1000), open: c.o, high: c.h, low: c.l, close: c.c
+
+            // Candlestick series
+            candleSeries.current = chart.current.addCandlestickSeries({
+                upColor: '#10b981', downColor: '#ef4444',
+                borderUpColor: '#10b981', borderDownColor: '#ef4444',
+                wickUpColor: '#10b981', wickDownColor: '#ef4444',
+            });
+            const candles = (chartData.candles || []).map(c => ({
+                time: c.time, open: c.open, high: c.high, low: c.low, close: c.close
             }));
-            if (candles.length > 0) series.setData(candles);
+            if (candles.length > 0) candleSeries.current.setData(candles);
+
+            // Volume overlay
+            if (overlays.vol && chartData.volume) {
+                const volSeries = chart.current.addHistogramSeries({
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: 'vol',
+                });
+                chart.current.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+                volSeries.setData(chartData.volume);
+                overlaySeriesRef.current.push(volSeries);
+            }
+
+            // EMA lines
+            if (overlays.ema && chartData.ema) {
+                Object.entries(chartData.ema).forEach(([key, data]) => {
+                    if (data && data.length > 0) {
+                        const line = chart.current.addLineSeries({
+                            color: EMA_COLORS[key] || '#888',
+                            lineWidth: key === 'ema200' ? 2 : 1,
+                            priceLineVisible: false,
+                            lastValueVisible: false,
+                            title: key.toUpperCase(),
+                        });
+                        line.setData(data);
+                        overlaySeriesRef.current.push(line);
+                    }
+                });
+            }
+
+            // VWAP line
+            if (overlays.vwap && chartData.vwap && chartData.vwap.length > 0) {
+                const vwapLine = chart.current.addLineSeries({
+                    color: '#f97316', lineWidth: 2,
+                    lineStyle: LineStyle.Dotted,
+                    priceLineVisible: false, lastValueVisible: false,
+                    title: 'VWAP',
+                });
+                vwapLine.setData(chartData.vwap);
+                overlaySeriesRef.current.push(vwapLine);
+            }
+
+            // Bollinger Bands
+            if (overlays.bb && chartData.bollinger && chartData.bollinger.length > 0) {
+                const bbUpper = chart.current.addLineSeries({
+                    color: 'rgba(147,51,234,0.5)', lineWidth: 1,
+                    priceLineVisible: false, lastValueVisible: false, title: 'BB+',
+                });
+                const bbLower = chart.current.addLineSeries({
+                    color: 'rgba(147,51,234,0.5)', lineWidth: 1,
+                    priceLineVisible: false, lastValueVisible: false, title: 'BB-',
+                });
+                bbUpper.setData(chartData.bollinger.map(b => ({ time: b.time, value: b.upper })));
+                bbLower.setData(chartData.bollinger.map(b => ({ time: b.time, value: b.lower })));
+                overlaySeriesRef.current.push(bbUpper, bbLower);
+            }
+
+            // Support/Resistance horizontal lines
+            if (overlays.sr && chartData.sr) {
+                const sr = chartData.sr;
+                const addPriceLine = (price, title, color, style) => {
+                    if (price) {
+                        candleSeries.current.createPriceLine({
+                            price, color, lineWidth: 1,
+                            lineStyle: style || LineStyle.Dashed,
+                            axisLabelVisible: true, title,
+                        });
+                    }
+                };
+                addPriceLine(sr.r2, 'R2', '#ef4444', LineStyle.Dotted);
+                addPriceLine(sr.r1, 'R1', '#f87171');
+                addPriceLine(sr.pivot, 'Pivot', '#fbbf24', LineStyle.Solid);
+                addPriceLine(sr.s1, 'S1', '#34d399');
+                addPriceLine(sr.s2, 'S2', '#10b981', LineStyle.Dotted);
+                addPriceLine(sr.high_20, '20D High', '#94a3b8', LineStyle.Dotted);
+                addPriceLine(sr.low_20, '20D Low', '#94a3b8', LineStyle.Dotted);
+            }
+
+            // Fibonacci levels
+            if (overlays.fib && chartData.fib) {
+                const fibColors = { '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e', '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7' };
+                Object.entries(chartData.fib).forEach(([level, price]) => {
+                    candleSeries.current.createPriceLine({
+                        price, color: fibColors[level] || '#6b7280', lineWidth: 1,
+                        lineStyle: LineStyle.Dotted,
+                        axisLabelVisible: true, title: `Fib ${level}`,
+                    });
+                });
+            }
+
+            // Pattern markers
+            if (overlays.patterns && chartData.patterns) {
+                const markers = [];
+
+                // Pivot markers (swing highs/lows)
+                if (chartData.patterns.pivots) {
+                    chartData.patterns.pivots.forEach(p => {
+                        if (p.time) {
+                            markers.push({
+                                time: p.time,
+                                position: p.type === 'high' ? 'aboveBar' : 'belowBar',
+                                color: p.type === 'high' ? '#ef4444' : '#10b981',
+                                shape: p.type === 'high' ? 'arrowDown' : 'arrowUp',
+                                text: p.type === 'high' ? 'H' : 'L',
+                            });
+                        }
+                    });
+                }
+
+                // Chart pattern markers
+                if (chartData.patterns.chart_patterns) {
+                    chartData.patterns.chart_patterns.forEach(p => {
+                        const lastCandle = candles[candles.length - 1];
+                        if (lastCandle) {
+                            markers.push({
+                                time: lastCandle.time,
+                                position: p.type === 'bullish' ? 'belowBar' : 'aboveBar',
+                                color: p.type === 'bullish' ? '#10b981' : '#ef4444',
+                                shape: 'circle',
+                                text: (p.pattern || '').substring(0, 12),
+                            });
+                        }
+                    });
+                }
+
+                // Harmonic pattern lines
+                if (chartData.patterns.harmonic) {
+                    chartData.patterns.harmonic.forEach(h => {
+                        if (h.points && h.points.length >= 5) {
+                            const hLine = chart.current.addLineSeries({
+                                color: h.direction === 'LONG' ? '#10b981' : '#ef4444',
+                                lineWidth: 2, lastValueVisible: false, priceLineVisible: false,
+                                title: h.pattern || 'Harmonic',
+                            });
+                            const points = h.points.map(pt => ({ time: pt.time || pt.t, value: pt.price || pt.p })).filter(pt => pt.time && pt.value);
+                            if (points.length > 0) hLine.setData(points);
+                            overlaySeriesRef.current.push(hLine);
+                        }
+                    });
+                }
+
+                // Order block levels
+                if (chartData.patterns.order_blocks) {
+                    const obs = chartData.patterns.order_blocks;
+                    if (obs.nearest_bull_ob) {
+                        candleSeries.current.createPriceLine({
+                            price: obs.nearest_bull_ob.ob_high || obs.nearest_bull_ob.level,
+                            color: '#10b981', lineWidth: 2, lineStyle: LineStyle.Solid,
+                            axisLabelVisible: true, title: 'Bull OB',
+                        });
+                    }
+                    if (obs.nearest_bear_ob) {
+                        candleSeries.current.createPriceLine({
+                            price: obs.nearest_bear_ob.ob_low || obs.nearest_bear_ob.level,
+                            color: '#ef4444', lineWidth: 2, lineStyle: LineStyle.Solid,
+                            axisLabelVisible: true, title: 'Bear OB',
+                        });
+                    }
+                }
+
+                // Liquidity levels
+                if (chartData.patterns.liquidity) {
+                    const liq = chartData.patterns.liquidity;
+                    if (liq.nearest_buyside) {
+                        candleSeries.current.createPriceLine({
+                            price: liq.nearest_buyside.level,
+                            color: '#3b82f6', lineWidth: 1, lineStyle: LineStyle.Dashed,
+                            axisLabelVisible: true, title: 'Buy Liq',
+                        });
+                    }
+                    if (liq.nearest_sellside) {
+                        candleSeries.current.createPriceLine({
+                            price: liq.nearest_sellside.level,
+                            color: '#f59e0b', lineWidth: 1, lineStyle: LineStyle.Dashed,
+                            axisLabelVisible: true, title: 'Sell Liq',
+                        });
+                    }
+                }
+
+                // Sort markers by time and set them
+                if (markers.length > 0) {
+                    markers.sort((a, b) => a.time - b.time);
+                    candleSeries.current.setMarkers(markers);
+                }
+            }
+
             chart.current.timeScale().fitContent();
         } catch (err) { console.error('Chart error:', err); }
         return () => { if (chart.current) { chart.current.remove(); chart.current = null; } };
-    }, [tickerData, sidebarMode, customWidth]);
+    }, [chartData, sidebarMode, customWidth, overlays]);
 
     if (loading) {
         return (
@@ -567,8 +791,62 @@ function DetailSidebar({ ticker, onClose }) {
                     )}
                 </div>
 
+                {/* Timeframe Selector */}
+                <div className="flex gap-1 mb-2 flex-wrap">
+                    {TIMEFRAMES.map(tf => (
+                        <button key={tf} onClick={() => setTimeframe(tf)}
+                            className={`px-2 py-1 text-xs rounded ${timeframe === tf ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+                            {tf}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Overlay Toggles */}
+                <div className="flex gap-1 mb-3 flex-wrap">
+                    {[
+                        { key: 'ema', label: 'EMA', color: '#3b82f6' },
+                        { key: 'vwap', label: 'VWAP', color: '#f97316' },
+                        { key: 'sr', label: 'S/R', color: '#fbbf24' },
+                        { key: 'fib', label: 'Fib', color: '#8b5cf6' },
+                        { key: 'bb', label: 'BB', color: '#9333ea' },
+                        { key: 'patterns', label: 'Patterns', color: '#10b981' },
+                        { key: 'vol', label: 'Vol', color: '#6b7280' },
+                    ].map(({ key, label, color }) => (
+                        <button key={key}
+                            onClick={() => setOverlays(prev => ({...prev, [key]: !prev[key]}))}
+                            className="px-2 py-1 text-xs rounded"
+                            style={{
+                                background: overlays[key] ? color : 'rgba(55,65,81,0.5)',
+                                color: overlays[key] ? 'white' : '#9ca3af',
+                                border: `1px solid ${overlays[key] ? color : 'transparent'}`,
+                            }}>
+                            {label}
+                        </button>
+                    ))}
+                </div>
+
                 {/* Chart */}
-                <div ref={chartContainer} className="chart-container mb-4"></div>
+                <div ref={chartContainer} className="chart-container mb-4" style={{ borderRadius: '8px', overflow: 'hidden' }}></div>
+
+                {/* Pattern Info */}
+                {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (
+                    <div className="mb-3 text-xs">
+                        {chartData.patterns.chart_patterns.map((p, i) => (
+                            <span key={i} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                                {p.pattern} ({p.confidence || ''})
+                            </span>
+                        ))}
+                    </div>
+                )}
+                {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (
+                    <div className="mb-3 text-xs">
+                        {chartData.patterns.harmonic.map((h, i) => (
+                            <span key={i} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${h.direction === 'LONG' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                                {h.pattern} {h.direction} (Score: {h.score || ''})
+                            </span>
+                        ))}
+                    </div>
+                )}
 
                 {/* Content Grid - 2 columns when wide */}
                 <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
