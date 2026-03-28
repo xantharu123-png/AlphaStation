@@ -497,12 +497,12 @@ function DetailSidebar({ ticker, onClose }) {
 
     const getChartWidth = () => {
         if (customWidth) return customWidth - 60;
-        if (sidebarMode === 'full') return Math.min(window.innerWidth - 60, 900);
-        if (sidebarMode === 'wide') return 660;
-        return 430;
+        if (sidebarMode === 'full') return window.innerWidth - 60;
+        if (sidebarMode === 'wide') return 720 - 60;
+        return 480 - 60;
     };
 
-    const getChartHeight = () => sidebarMode === 'full' ? 450 : sidebarMode === 'wide' ? 320 : 250;
+    const getChartHeight = () => sidebarMode === 'full' ? Math.max(500, window.innerHeight * 0.55) : sidebarMode === 'wide' ? 380 : 250;
 
     // Render chart with all overlays
     useEffect(() => {
