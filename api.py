@@ -44,6 +44,7 @@ from modules.scanners import (
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd
+from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
 # Import pattern detection
 try:
@@ -52,6 +53,14 @@ try:
 except ImportError:
     HAS_PATTERNS = False
     print("[Warning] patterns module not fully loaded")
+
+# Import real S/R calculation
+try:
+    from modules.analysis import calculate_sr_from_historical
+    HAS_REAL_SR = True
+except ImportError:
+    HAS_REAL_SR = False
+    print("[Warning] analysis module not fully loaded - using simple S/R")
 
 # Import new listing scanner
 try:
@@ -887,26 +896,76 @@ def get_chart_data(
             except Exception:
                 pass
 
-        # Support/Resistance levels
+        # Support/Resistance levels — REAL calculation from swing points + volume clusters
         if "sr" in overlay_list:
             try:
-                last = ohlcv[-1]
-                h = last["high"]
-                l = last["low"]
-                c = last["close"]
-                pivot = round((h + l + c) / 3, 2)
-                s1 = round(2 * pivot - h, 2)
-                r1 = round(2 * pivot - l, 2)
-                s2 = round(pivot - (h - l), 2)
-                r2 = round(pivot + (h - l), 2)
-                h20 = round(max(highs[-20:]), 2) if len(highs) >= 20 else round(max(highs), 2)
-                l20 = round(min(lows[-20:]), 2) if len(lows) >= 20 else round(min(lows), 2)
-                result["sr"] = {
-                    "pivot": pivot, "s1": s1, "r1": r1, "s2": s2, "r2": r2,
-                    "high_20": h20, "low_20": l20,
-                }
-            except Exception:
-                pass
+                current_price = closes[-1] if closes else 0
+                if HAS_REAL_SR and len(ohlcv) >= 20:
+                    # Convert to format expected by calculate_sr_from_historical
+                    # It expects: [(date, open, high, low, close, volume), ...]
+                    ohlc_tuples = [(b["time"], b["open"], b["high"], b["low"], b["close"], b.get("volume", 0)) for b in ohlcv]
+                    sr_result = calculate_sr_from_historical(ohlc_tuples, current_price)
+                    # sr_result returns: ((supports_prices, resistances_prices), fib_info)
+                    # fib_info has: supports_detail [{price, type, strength}], resistances_detail [{price, type, strength}]
+                    if sr_result and isinstance(sr_result, tuple) and len(sr_result) == 2:
+                        (sr_prices, fib_info) = sr_result
+                        sup_detail = fib_info.get("supports_detail", []) if isinstance(fib_info, dict) else []
+                        res_detail = fib_info.get("resistances_detail", []) if isinstance(fib_info, dict) else []
+                        # If no detail, build from price lists
+                        if not sup_detail and isinstance(sr_prices, tuple) and len(sr_prices) >= 1:
+                            sup_detail = [{"price": p, "strength": 3, "type": "Swing"} for p in (sr_prices[0] if isinstance(sr_prices[0], list) else [])]
+                        if not res_detail and isinstance(sr_prices, tuple) and len(sr_prices) >= 2:
+                            res_detail = [{"price": p, "strength": 3, "type": "Swing"} for p in (sr_prices[1] if isinstance(sr_prices[1], list) else [])]
+                        result["sr"] = {
+                            "support_levels": sup_detail,
+                            "resistance_levels": res_detail,
+                            "period_high": fib_info.get("period_high") if isinstance(fib_info, dict) else None,
+                            "period_low": fib_info.get("period_low") if isinstance(fib_info, dict) else None,
+                            "pdh": fib_info.get("prev_day_high") if isinstance(fib_info, dict) else None,
+                            "pdl": fib_info.get("prev_day_low") if isinstance(fib_info, dict) else None,
+                        }
+                    else:
+                        result["sr"] = {"support_levels": [], "resistance_levels": []}
+                else:
+                    # Simple fallback
+                    last = ohlcv[-1]
+                    h, l, c = last["high"], last["low"], last["close"]
+                    pivot = round((h + l + c) / 3, 2)
+                    result["sr"] = {
+                        "support_levels": [
+                            {"price": round(2 * pivot - h, 2), "strength": 3, "type": "Pivot S1"},
+                            {"price": round(pivot - (h - l), 2), "strength": 2, "type": "Pivot S2"},
+                        ],
+                        "resistance_levels": [
+                            {"price": round(2 * pivot - l, 2), "strength": 3, "type": "Pivot R1"},
+                            {"price": round(pivot + (h - l), 2), "strength": 2, "type": "Pivot R2"},
+                        ],
+                        "pivot": pivot,
+                    }
+            except Exception as e:
+                print(f"S/R error: {e}")
+
+        # Volume Profile (VRVP)
+        if "vrvp" in overlay_list and len(ohlcv) >= 10:
+            try:
+                vp = calculate_volume_profile(ohlcv, num_bins=24)
+                if vp:
+                    # Add POC, VAH, VAL as price lines
+                    # Add bins for histogram rendering
+                    result["vrvp"] = {
+                        "poc": round(vp["poc"], 2),
+                        "vah": round(vp["vah"], 2),
+                        "val": round(vp["val"], 2),
+                        "bins": [{"low": round(b["low"], 2), "high": round(b["high"], 2), "mid": round(b["mid"], 2), "volume": int(b["volume"])} for b in vp["bins"]],
+                        "hvns": [{"mid": round(h["mid"], 2), "volume": int(h["volume"])} for h in (vp.get("hvns") or [])],
+                        "lvns": [{"mid": round(l["mid"], 2), "volume": int(l["volume"])} for l in (vp.get("lvns") or [])],
+                    }
+                    # Also find volume voids
+                    voids = find_volume_voids(closes[-1], vp)
+                    if voids:
+                        result["vrvp"]["voids"] = voids
+            except Exception as e:
+                print(f"VRVP error: {e}")
 
         # Fibonacci levels
         if "fib" in overlay_list and len(ohlcv) >= 20:

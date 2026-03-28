@@ -408,7 +408,7 @@ function DetailSidebar({ ticker, onClose }) {
     const [sidebarMode, setSidebarMode] = useState('normal');
     const [customWidth, setCustomWidth] = useState(null);
     const [timeframe, setTimeframe] = useState('1D');
-    const [overlays, setOverlays] = useState({ ema: true, vwap: true, sr: true, fib: false, patterns: true, bb: false, vol: true });
+    const [overlays, setOverlays] = useState({ ema: true, vwap: true, sr: true, fib: false, patterns: true, bb: false, vrvp: false, vol: true });
     const chartContainer = useRef(null);
     const chart = useRef(null);
     const candleSeries = useRef(null);
@@ -465,12 +465,12 @@ function DetailSidebar({ ticker, onClose }) {
         fetchData();
     }, [ticker]);
 
-    // Fetch chart data (separate endpoint with timeframe + overlays)
+    // Fetch chart data — always request ALL overlays so toggles work instantly
     useEffect(() => {
         const fetchChart = async () => {
             try {
-                const overlayStr = Object.entries(overlays).filter(([_, v]) => v).map(([k]) => k).join(',');
-                const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${overlayStr}`);
+                const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
+                const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`);
                 if (res.ok) setChartData(await res.json());
             } catch (err) {
                 console.error('Chart data error:', err);
@@ -591,25 +591,71 @@ function DetailSidebar({ ticker, onClose }) {
                 overlaySeriesRef.current.push(bbUpper, bbLower);
             }
 
-            // Support/Resistance horizontal lines
+            // Support/Resistance — REAL swing-based levels from backend
             if (overlays.sr && chartData.sr) {
                 const sr = chartData.sr;
-                const addPriceLine = (price, title, color, style) => {
-                    if (price) {
+                const addPriceLine = (price, title, color, style, width) => {
+                    if (price && price > 0) {
                         candleSeries.current.createPriceLine({
-                            price, color, lineWidth: 1,
+                            price, color, lineWidth: width || 1,
                             lineStyle: style || LineStyle.Dashed,
                             axisLabelVisible: true, title,
                         });
                     }
                 };
-                addPriceLine(sr.r2, 'R2', '#ef4444', LineStyle.Dotted);
-                addPriceLine(sr.r1, 'R1', '#f87171');
-                addPriceLine(sr.pivot, 'Pivot', '#fbbf24', LineStyle.Solid);
-                addPriceLine(sr.s1, 'S1', '#34d399');
-                addPriceLine(sr.s2, 'S2', '#10b981', LineStyle.Dotted);
-                addPriceLine(sr.high_20, '20D High', '#94a3b8', LineStyle.Dotted);
-                addPriceLine(sr.low_20, '20D Low', '#94a3b8', LineStyle.Dotted);
+                // Real support levels (from swing analysis)
+                if (sr.support_levels) {
+                    sr.support_levels.slice(0, 4).forEach((lvl, i) => {
+                        const strength = lvl.strength || 1;
+                        const lw = Math.min(3, Math.max(1, Math.ceil(strength / 2)));
+                        addPriceLine(lvl.price, `S${i+1} ${lvl.type || ''}`, '#10b981', strength >= 4 ? LineStyle.Solid : LineStyle.Dashed, lw);
+                    });
+                }
+                // Real resistance levels
+                if (sr.resistance_levels) {
+                    sr.resistance_levels.slice(0, 4).forEach((lvl, i) => {
+                        const strength = lvl.strength || 1;
+                        const lw = Math.min(3, Math.max(1, Math.ceil(strength / 2)));
+                        addPriceLine(lvl.price, `R${i+1} ${lvl.type || ''}`, '#ef4444', strength >= 4 ? LineStyle.Solid : LineStyle.Dashed, lw);
+                    });
+                }
+                // Pivot if available
+                if (sr.pivot) addPriceLine(sr.pivot, 'Pivot', '#fbbf24', LineStyle.Solid, 1);
+                // PDH/PDL (Previous Day High/Low)
+                if (sr.pdh) addPriceLine(sr.pdh, 'PDH', '#94a3b8', LineStyle.Dotted, 1);
+                if (sr.pdl) addPriceLine(sr.pdl, 'PDL', '#94a3b8', LineStyle.Dotted, 1);
+                // Period High/Low
+                if (sr.period_high) addPriceLine(sr.period_high, 'Period High', '#64748b', LineStyle.Dotted, 1);
+                if (sr.period_low) addPriceLine(sr.period_low, 'Period Low', '#64748b', LineStyle.Dotted, 1);
+            }
+
+            // VRVP — Volume Profile as horizontal price lines
+            if (overlays.vrvp && chartData.vrvp) {
+                const vp = chartData.vrvp;
+                const addVPLine = (price, title, color, style, width) => {
+                    if (price && price > 0) {
+                        candleSeries.current.createPriceLine({
+                            price, color, lineWidth: width || 1,
+                            lineStyle: style || LineStyle.Dashed,
+                            axisLabelVisible: true, title,
+                        });
+                    }
+                };
+                addVPLine(vp.poc, 'POC', '#06b6d4', LineStyle.Solid, 2);
+                addVPLine(vp.vah, 'VAH', '#0891b2', LineStyle.Dashed, 1);
+                addVPLine(vp.val, 'VAL', '#0891b2', LineStyle.Dashed, 1);
+                // HVNs (High Volume Nodes)
+                if (vp.hvns) {
+                    vp.hvns.slice(0, 3).forEach((h, i) => {
+                        addVPLine(h.mid, `HVN${i+1}`, '#22d3ee', LineStyle.Dotted, 1);
+                    });
+                }
+                // LVNs (Low Volume Nodes / Volume Voids)
+                if (vp.lvns) {
+                    vp.lvns.slice(0, 3).forEach((l, i) => {
+                        addVPLine(l.mid, `LVN${i+1}`, '#f59e0b', LineStyle.Dotted, 1);
+                    });
+                }
             }
 
             // Fibonacci levels
@@ -809,16 +855,18 @@ function DetailSidebar({ ticker, onClose }) {
                         { key: 'sr', label: 'S/R', color: '#fbbf24' },
                         { key: 'fib', label: 'Fib', color: '#8b5cf6' },
                         { key: 'bb', label: 'BB', color: '#9333ea' },
+                        { key: 'vrvp', label: 'VRVP', color: '#06b6d4' },
                         { key: 'patterns', label: 'Patterns', color: '#10b981' },
                         { key: 'vol', label: 'Vol', color: '#6b7280' },
                     ].map(({ key, label, color }) => (
                         <button key={key}
                             onClick={() => setOverlays(prev => ({...prev, [key]: !prev[key]}))}
-                            className="px-2 py-1 text-xs rounded"
+                            className="px-2 py-1 text-xs rounded font-semibold"
                             style={{
-                                background: overlays[key] ? color : 'rgba(55,65,81,0.5)',
-                                color: overlays[key] ? 'white' : '#9ca3af',
-                                border: `1px solid ${overlays[key] ? color : 'transparent'}`,
+                                background: overlays[key] ? color : `${color}22`,
+                                color: overlays[key] ? '#fff' : color,
+                                border: `1.5px solid ${overlays[key] ? color : `${color}55`}`,
+                                opacity: overlays[key] ? 1 : 0.6,
                             }}>
                             {label}
                         </button>
