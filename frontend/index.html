@@ -1168,7 +1168,7 @@ function App() {
 function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [strategy, setStrategy] = useState('');
     const [marketType, setMarketType] = useState('stocks');
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.scanner_scanning || false);
     const [results, setResults] = useState(scanCache.scanner_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
@@ -1212,7 +1212,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            if (items.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (items.length > 0 || freshScan) {
                                 setResults(items);
                                 updateScanCache('scanner_results', items);
                                 setIsScanning(false);
@@ -1298,7 +1299,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 // BI Scanner Tab
 function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [direction, setDirection] = useState('long');
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.bi_scanning || false);
     const [results, setResults] = useState(scanCache.bi_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
 
@@ -1322,7 +1323,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            if (items.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (items.length > 0 || freshScan) {
                                 setResults(items);
                                 updateScanCache('bi_results', items);
                                 setIsScanning(false);
@@ -1410,7 +1412,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 
 // Biotech Tab
 function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
@@ -1434,7 +1436,8 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            if (items.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (items.length > 0 || freshScan) {
                                 setResults(items);
                                 updateScanCache('biotech_results', items);
                                 setIsScanning(false);
@@ -1512,7 +1515,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
 // BTC-Divergenz Tab
 function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.btc_divergenz_scanning || false);
     const [results, setResults] = useState(scanCache.btc_divergenz_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
@@ -1536,7 +1539,8 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            if (items.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (items.length > 0 || freshScan) {
                                 setResults(items);
                                 updateScanCache('btc_divergenz_results', items);
                                 setIsScanning(false);
@@ -1639,7 +1643,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [winnerResults, setWinnerResults] = useState(scanCache.em_winners || []);
     const [loserResults, setLoserResults] = useState(scanCache.em_losers || []);
     const [spikeResults, setSpikeResults] = useState(scanCache.em_spikes || []);
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.em_scanning || false);
     const { sorted: sortedWinners, toggleSort: toggleWinnerSort, sortKey: winnerSortKey } = useSortable(winnerResults, 'change_pct');
     const { sorted: sortedLosers, toggleSort: toggleLoserSort, sortKey: loserSortKey } = useSortable(loserResults, 'change_pct');
     const { sorted: sortedSpikes, toggleSort: toggleSpikeSort, sortKey: spikeSortKey } = useSortable(spikeResults, 'volume');
@@ -1710,7 +1714,8 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const em = (data.data && data.data[0]) || {};
                             const winners = em.gainers || [];
                             const losers = em.losers || [];
-                            if (winners.length > 0 || losers.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (winners.length > 0 || losers.length > 0 || freshScan) {
                                 setWinnerResults(winners);
                                 setLoserResults(losers);
                                 updateScanCache('em_winners', winners);
@@ -1825,7 +1830,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [subTab, setSubTab] = useState('inverse-etfs');
     const [inverseETFs, setInverseETFs] = useState(scanCache.short_inverse || []);
     const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
     const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'ticker');
     const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'ticker');
 
@@ -1875,7 +1880,8 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             const bear = (data.data && data.data[0]) || {};
                             const inverse = bear.inverse_etfs || [];
                             const breakdown = bear.breakdown_stocks || [];
-                            if (inverse.length > 0 || breakdown.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (inverse.length > 0 || breakdown.length > 0 || freshScan) {
                                 setInverseETFs(inverse);
                                 setBreakdownStocks(breakdown);
                                 updateScanCache('short_inverse', inverse);
@@ -1974,7 +1980,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 // Money Flow Tab
 function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [results, setResults] = useState(scanCache.moneyflow_results || []);
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.mf_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'sector');
 
     useEffect(() => {
@@ -2017,7 +2023,8 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
-                            if (items.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (items.length > 0 || freshScan) {
                                 setResults(items);
                                 updateScanCache('moneyflow_results', items);
                                 setIsScanning(false);
@@ -2150,7 +2157,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [fearData, setFearData] = useState(scanCache.crash_fear_data || null);
     const [indices, setIndices] = useState(scanCache.crash_indices || []);
     const [breadth, setBreadth] = useState(scanCache.crash_breadth || null);
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.crash_scanning || false);
     const { sorted, toggleSort } = useSortable(indices, 'name');
 
     useEffect(() => {
@@ -2201,7 +2208,8 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         if (res.ok) {
                             const data = await res.json();
                             const cm = (data.data && data.data[0]) || {};
-                            const hasData = cm.fear_score !== undefined || (cm.indices && cm.indices.length > 0);
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            const hasData = cm.fear_score !== undefined || (cm.indices && cm.indices.length > 0) || freshScan;
                             if (hasData) {
                                 const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
                                 setFearData(fearData);
@@ -2676,7 +2684,7 @@ function StrategieGuideTab() {
 function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [results, setResults] = useState(scanCache.newlisting_results || []);
     const [stats, setStats] = useState(scanCache.newlisting_stats || null);
-    const [isScanning, setIsScanning] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.nl_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'pump_pct');
 
     useEffect(() => {
@@ -2722,7 +2730,8 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.listings || [];
-                            if (items.length > 0) {
+                            const freshScan = data.cache_age_seconds !== null && data.cache_age_seconds !== undefined && data.cache_age_seconds < 120;
+                            if (items.length > 0 || freshScan) {
                                 setResults(items);
                                 setStats(data.stats);
                                 updateScanCache('newlisting_results', items);
