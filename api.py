@@ -196,9 +196,12 @@ def _normalize_keys(results: list, key_map: dict) -> list:
     """Normalize scanner result keys to lowercase frontend-compatible format."""
     normalized = []
     for item in results:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
         new_item = {}
         for k, v in item.items():
-            new_key = key_map.get(k, k.lower() if k[0].isupper() else k)
+            new_key = key_map.get(k, k.lower() if k and k[0].isupper() else k)
             new_item[new_key] = v
         normalized.append(new_item)
     return normalized

@@ -796,11 +796,18 @@ function DetailSidebar({ ticker, onClose }) {
         return () => { if (chart.current) { chart.current.remove(); chart.current = null; } };
     }, [chartData, sidebarMode, customWidth, overlays]);
 
-    if (loading) {
+    if (loading && !tickerData) {
         return (
             <div className={`detail-sidebar sidebar-${sidebarMode}`} style={customWidth ? {width: customWidth + 'px'} : {}}>
-                <div className="detail-sidebar-content flex items-center justify-center h-full">
-                    <div className="loading-spinner"></div>
+                <div className="detail-sidebar-content" style={{ padding: '24px' }}>
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-xl font-bold">{ticker}</h2>
+                        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+                    </div>
+                    <div style={{ width: '100%', height: '4px', backgroundColor: '#e5e7eb', borderRadius: '2px', overflow: 'hidden', marginBottom: '12px' }}>
+                        <div style={{ width: '100%', height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s infinite', borderRadius: '2px' }}></div>
+                    </div>
+                    <div className="text-sm text-gray-500">Daten werden geladen...</div>
                 </div>
             </div>
         );
