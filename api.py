@@ -528,22 +528,26 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         avg_vol = sum(volumes[1:21]) / min(len(volumes) - 1, 20) if len(volumes) > 1 else 1
         rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
 
-        # RSI (14-period)
+        # RSI (14-period) — Wilder's Smoothing (industry standard)
         rsi = None
         if len(closes) >= 15:
-            gains, losses = [], []
-            for i in range(14):
-                diff = closes[i] - closes[i+1]  # bars sorted desc: [0]=newest
-                if diff > 0:
-                    # Price went UP (newer > older) = gain
-                    gains.append(diff)
+            # closes[0]=newest, need chronological for Wilder's
+            chron_closes = list(reversed(closes[:30]))  # Last 30 bars chronological
+            if len(chron_closes) >= 15:
+                changes = [chron_closes[i] - chron_closes[i-1] for i in range(1, len(chron_closes))]
+                gains_init = [max(c, 0) for c in changes[:14]]
+                losses_init = [abs(min(c, 0)) for c in changes[:14]]
+                avg_gain = sum(gains_init) / 14
+                avg_loss = sum(losses_init) / 14
+                # Wilder's smoothing for remaining bars
+                for c in changes[14:]:
+                    avg_gain = (avg_gain * 13 + max(c, 0)) / 14
+                    avg_loss = (avg_loss * 13 + abs(min(c, 0))) / 14
+                if avg_loss > 0:
+                    rs = avg_gain / avg_loss
+                    rsi = round(100 - (100 / (1 + rs)), 1)
                 else:
-                    # Price went DOWN = loss
-                    losses.append(abs(diff))
-            avg_gain = sum(gains) / 14 if gains else 0.001
-            avg_loss = sum(losses) / 14 if losses else 0.001
-            rs = avg_gain / avg_loss
-            rsi = round(100 - (100 / (1 + rs)), 1)
+                    rsi = 100.0
 
         # High/Low 20d
         high_20d = round(max(highs[:20]), 2) if len(highs) >= 20 else round(max(highs), 2)
@@ -559,13 +563,15 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
 
         # 1. ADDITIONAL EMAs (exponential moving averages)
         def calculate_ema(data, period):
-            """Calculate EMA using formula: EMA = price * k + EMA_prev * (1-k)"""
+            """Calculate EMA — data is DESCENDING (newest first), returns EMA of newest bar."""
             if len(data) < period:
                 return None
+            # Reverse to chronological (oldest first)
+            chron = list(reversed(data[:max(len(data), period + 20)]))
             k = 2 / (period + 1)
-            ema = sum(data[-period:]) / period  # Start with SMA
-            for i in range(len(data) - period - 1, -1, -1):
-                ema = data[i] * k + ema * (1 - k)
+            ema = sum(chron[:period]) / period  # Seed with SMA
+            for i in range(period, len(chron)):
+                ema = chron[i] * k + ema * (1 - k)
             return round(ema, 2)
 
         ema9 = calculate_ema(closes, 9)
@@ -574,12 +580,16 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         ema100 = calculate_ema(closes, 100)
         ema200 = calculate_ema(closes, 200)
 
-        # 2. VWAP (from last 20 bars)
+        # 2. VWAP (cumulative over all available bars)
         vwap = None
-        if len(bars) >= 20:
-            vwap_bars = bars[:20]  # Most recent 20
-            cum_tp_vol = sum(((b["h"] + b["l"] + b["c"]) / 3) * b.get("v", 0) for b in vwap_bars)
-            cum_vol = sum(b.get("v", 0) for b in vwap_bars)
+        if len(bars) >= 5:
+            cum_tp_vol = 0
+            cum_vol = 0
+            for b in reversed(bars):  # chronological order
+                tp = (b["h"] + b["l"] + b["c"]) / 3
+                vol = b.get("v", 0)
+                cum_tp_vol += tp * vol
+                cum_vol += vol
             if cum_vol > 0:
                 vwap = round(cum_tp_vol / cum_vol, 2)
 
@@ -680,13 +690,18 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             else:
                 signals.append({"name": "MACD", "status": "bearish", "detail": f"MACD below signal", "points": 0})
 
-        # 5. Bollinger Position
+        # 5. Bollinger Position (CONTEXT-AWARE)
         if bb_upper is not None and bb_lower is not None:
             bb_range = bb_upper - bb_lower
             if bb_range > 0:
                 bb_pos = (close - bb_lower) / bb_range
+                is_uptrend = close > ma20 and (ma50 is None or close > ma50)
                 if bb_pos > 0.8:
-                    signals.append({"name": "Bollinger", "status": "bearish", "detail": "Near upper band", "points": 0})
+                    if is_uptrend:
+                        signals.append({"name": "Bollinger", "status": "neutral", "detail": "Upper band (Trend)", "points": 1})
+                        score += 1
+                    else:
+                        signals.append({"name": "Bollinger", "status": "bearish", "detail": "Near upper band", "points": 0})
                 elif bb_pos < 0.2:
                     signals.append({"name": "Bollinger", "status": "bullish", "detail": "Near lower band", "points": 2})
                     score += 2
@@ -694,14 +709,17 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                     signals.append({"name": "Bollinger", "status": "neutral", "detail": "Within bands", "points": 1})
                     score += 1
 
-        # 6. ATR (volatility)
+        # 6. ATR (volatility) — Low ATR = tight stops possible
         if atr is not None:
             avg_price = (high + low) / 2
             atr_pct = (atr / avg_price) * 100 if avg_price > 0 else 0
             if atr_pct < 1:
-                signals.append({"name": "Volatility", "status": "bearish", "detail": f"Low ATR ({atr_pct:.1f}%)", "points": 0})
+                signals.append({"name": "Volatility", "status": "neutral", "detail": f"Low ATR ({atr_pct:.1f}%) - tight stops", "points": 1})
+                score += 1
+            elif atr_pct > 5:
+                signals.append({"name": "Volatility", "status": "bearish", "detail": f"Very high ATR ({atr_pct:.1f}%)", "points": 0})
             elif atr_pct > 3:
-                signals.append({"name": "Volatility", "status": "bullish", "detail": f"High ATR ({atr_pct:.1f}%)", "points": 2})
+                signals.append({"name": "Volatility", "status": "bullish", "detail": f"Good ATR ({atr_pct:.1f}%)", "points": 2})
                 score += 2
             else:
                 signals.append({"name": "Volatility", "status": "neutral", "detail": f"Normal ATR ({atr_pct:.1f}%)", "points": 1})
@@ -763,26 +781,37 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             "direction": confluence_direction
         }
 
-        # 9. Trade Setup
+        # 9. Trade Setup — ATR-based, uses confluence direction
         trade_setup = None
-        if signal_grade in ['S', 'A']:
-            entry = close
-            # Stop = support_1 or low_20d (whichever is closer below)
-            stop = max(support_1, low_20d) if support_1 > low_20d else support_1
-            risk = entry - stop
-            if risk > 0:
-                tp1 = entry + risk
-                tp2 = entry + risk * 1.618
-                rr = (tp1 - entry) / risk if risk > 0 else 0
-                direction = "LONG" if chg_5d > 0 else "SHORT"
-                trade_setup = {
-                    "entry": round(entry, 2),
-                    "stop": round(stop, 2),
-                    "tp1": round(tp1, 2),
-                    "tp2": round(tp2, 2),
-                    "rr": round(rr, 2),
-                    "direction": direction
-                }
+        if signal_grade in ['S', 'A'] and confluence_direction != "NEUTRAL":
+            if confluence_direction == "LONG":
+                entry = round(close, 2)
+                atr_stop = atr * 2 if atr else (close * 0.03)
+                stop = round(max(support_1, close - atr_stop), 2)
+                risk = entry - stop
+                if risk > 0:
+                    tp1 = round(entry + risk, 2)
+                    tp2 = round(entry + risk * 1.618, 2)
+                    trade_setup = {
+                        "entry": entry, "stop": stop,
+                        "tp1": tp1, "tp2": tp2,
+                        "rr": round((tp1 - entry) / risk, 2),
+                        "direction": "LONG"
+                    }
+            else:  # SHORT
+                entry = round(close, 2)
+                atr_stop = atr * 2 if atr else (close * 0.03)
+                stop = round(min(resist_1, close + atr_stop), 2)
+                risk = stop - entry
+                if risk > 0:
+                    tp1 = round(entry - risk, 2)
+                    tp2 = round(entry - risk * 1.618, 2)
+                    trade_setup = {
+                        "entry": entry, "stop": stop,
+                        "tp1": tp1, "tp2": tp2,
+                        "rr": round((entry - tp1) / risk, 2),
+                        "direction": "SHORT"
+                    }
 
         # 10. Candlestick data for chart (last 60 bars, reversed to chronological, with EMA overlays)
         candles = []
@@ -1413,6 +1442,8 @@ def _btc_divergenz_wrapper() -> None:
         results = []
         btc_data = None
 
+        btc_bars_raw = []
+
         for sym, short, name in assets:
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
@@ -1430,34 +1461,89 @@ def _btc_divergenz_wrapper() -> None:
 
                 entry = {"ticker": sym, "symbol": short, "name": name,
                          "price": round(close, 2), "change_1d": round(chg_1d, 2),
-                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
+                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2),
+                         "_bars": bars}
 
                 if sym == "X:BTCUSD":
                     btc_data = entry
+                    btc_bars_raw = bars
                 results.append(entry)
             except Exception:
                 continue
 
-        # Calculate divergence vs BTC
+        # Calculate divergence vs BTC — PROFESSIONAL: Beta-adjusted Z-Score
         if btc_data:
+            # Get all 20d returns for beta/correlation calculation
+            btc_returns_20d = []
+            for i in range(min(19, len(btc_bars_raw)-1)):
+                if btc_bars_raw[i+1]["c"] > 0:
+                    btc_returns_20d.append((btc_bars_raw[i]["c"] - btc_bars_raw[i+1]["c"]) / btc_bars_raw[i+1]["c"] * 100)
+
             for r in results:
                 if r["ticker"] != "X:BTCUSD":
                     r["div_1d"] = round(r["change_1d"] - btc_data["change_1d"], 2)
                     r["div_5d"] = round(r["change_5d"] - btc_data["change_5d"], 2)
-                    # Signal - actionable Labels
-                    div = r["div_5d"]
-                    if div > 5:
+
+                    # Beta + Correlation calculation from stored bars
+                    asset_bars = r.get("_bars", [])
+                    asset_returns = []
+                    for i in range(min(19, len(asset_bars)-1)):
+                        if asset_bars[i+1]["c"] > 0:
+                            asset_returns.append((asset_bars[i]["c"] - asset_bars[i+1]["c"]) / asset_bars[i+1]["c"] * 100)
+
+                    # Calculate beta and correlation
+                    beta = 1.0
+                    correlation = 0.0
+                    z_score = 0.0
+                    n = min(len(asset_returns), len(btc_returns_20d))
+
+                    if n >= 5:
+                        # Mean
+                        mean_a = sum(asset_returns[:n]) / n
+                        mean_b = sum(btc_returns_20d[:n]) / n
+                        # Covariance and variance
+                        cov = sum((asset_returns[i] - mean_a) * (btc_returns_20d[i] - mean_b) for i in range(n)) / n
+                        var_b = sum((btc_returns_20d[i] - mean_b) ** 2 for i in range(n)) / n
+                        var_a = sum((asset_returns[i] - mean_a) ** 2 for i in range(n)) / n
+                        std_a = var_a ** 0.5 if var_a > 0 else 1
+                        std_b = var_b ** 0.5 if var_b > 0 else 1
+
+                        beta = cov / var_b if var_b > 0 else 1.0
+                        correlation = cov / (std_a * std_b) if (std_a * std_b) > 0 else 0.0
+
+                        # Expected 5D move based on beta
+                        expected_5d = btc_data["change_5d"] * beta
+                        actual_5d = r["change_5d"]
+                        divergence = actual_5d - expected_5d
+
+                        # Z-score: how many std devs from expected
+                        z_score = divergence / max(std_a, 0.5)
+
+                    r["beta"] = round(beta, 2)
+                    r["correlation"] = round(correlation, 2)
+                    r["z_score"] = round(z_score, 2)
+
+                    # Signal based on z-score + correlation strength
+                    if z_score > 1.5 and correlation > 0.5:
                         r["signal"] = "KAUFEN"
-                    elif div < -5:
+                    elif z_score < -1.5 and correlation > 0.5:
                         r["signal"] = "MEIDEN"
-                    elif abs(div) < 2:
+                    elif abs(z_score) < 0.5:
                         r["signal"] = "ABWARTEN"
                     else:
                         r["signal"] = "BEOBACHTEN"
                 else:
                     r["div_1d"] = 0
                     r["div_5d"] = 0
+                    r["beta"] = 1.0
+                    r["correlation"] = 1.0
+                    r["z_score"] = 0
                     r["signal"] = "BTC"
+
+        # Remove _bars before saving to cache
+        for r in results:
+            if "_bars" in r:
+                del r["_bars"]
 
         save_cache_file(BTC_DIVERGENZ_CACHE, results)
     except Exception as e:

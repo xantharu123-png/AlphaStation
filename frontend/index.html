@@ -1198,22 +1198,37 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             const response = await fetch(`${API}/api/scan`, { method: 'POST', body: JSON.stringify({ strategy, market_type: marketType }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
                 if (window.addToast) window.addToast('Scan gestartet...', 'info');
-                // Poll for results after background scan completes
-                setTimeout(async () => {
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('scanner_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
                     try {
                         const dir = strategy.toLowerCase().includes('short') ? 'short' : 'long';
                         const res = await fetch(`${API}/api/scan-results?direction=${dir}`);
                         if (res.ok) {
                             const data = await res.json();
-                            setResults(data.data || []);
-                            updateScanCache('scanner_results', data.data || []);
-                            if (window.addToast) window.addToast('Scan abgeschlossen', 'success');
+                            const items = data.data || [];
+                            if (items.length > 0) {
+                                setResults(items);
+                                updateScanCache('scanner_results', items);
+                                setIsScanning(false);
+                                updateScanCache('scanner_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
                         }
                     } catch (e) { console.error(e); }
-                    setIsScanning(false);
-                    updateScanCache('scanner_scanning', false);
-                }, 15000);
-            } else { setIsScanning(false); updateScanCache('scanner_scanning', false); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('scanner_scanning', false);
+            }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
             setIsScanning(false);
@@ -1293,13 +1308,39 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
         try {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
-                const data = await response.json();
-                setResults(data.data || []);
-                updateScanCache('bi_results', data.data || []);
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('bi_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            if (items.length > 0) {
+                                setResults(items);
+                                updateScanCache('bi_results', items);
+                                setIsScanning(false);
+                                updateScanCache('bi_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('bi_scanning', false);
             }
         } catch (err) {
             console.error('Error:', err);
-        } finally {
             setIsScanning(false);
             updateScanCache('bi_scanning', false);
         }
@@ -1379,13 +1420,39 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         try {
             const response = await fetch(`${API}/api/biotech-scan`, { method: 'POST' });
             if (response.ok) {
-                const data = await response.json();
-                setResults(data.data || []);
-                updateScanCache('biotech_results', data.data || []);
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('biotech_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/biotech-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            if (items.length > 0) {
+                                setResults(items);
+                                updateScanCache('biotech_results', items);
+                                setIsScanning(false);
+                                updateScanCache('biotech_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('biotech_scanning', false);
             }
         } catch (err) {
             console.error('Error:', err);
-        } finally {
             setIsScanning(false);
             updateScanCache('biotech_scanning', false);
         }
@@ -1455,13 +1522,39 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         try {
             const response = await fetch(`${API}/api/btc-divergenz-scan`, { method: 'POST' });
             if (response.ok) {
-                const data = await response.json();
-                setResults(data.data || []);
-                updateScanCache('btc_divergenz_results', data.data || []);
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('btc_divergenz_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/btc-divergenz-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            if (items.length > 0) {
+                                setResults(items);
+                                updateScanCache('btc_divergenz_results', items);
+                                setIsScanning(false);
+                                updateScanCache('btc_divergenz_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('btc_divergenz_scanning', false);
             }
         } catch (err) {
             console.error('Error:', err);
-        } finally {
             setIsScanning(false);
             updateScanCache('btc_divergenz_scanning', false);
         }
@@ -1511,6 +1604,9 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             <th className="text-right py-2 px-2">5D%</th>
                             <th className="text-right py-2 px-2">Div 1D</th>
                             <th className="text-right py-2 px-2">Div 5D</th>
+                            <th className="text-right py-2 px-2">Beta</th>
+                            <th className="text-right py-2 px-2">Korrelation</th>
+                            <th className="text-right py-2 px-2">Z-Score</th>
                             <th className="text-center py-2 px-2">Signal</th>
                         </tr>
                     </thead>
@@ -1524,6 +1620,9 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.div_1d?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right">{item.div_5d?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">{item.beta?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">{item.correlation?.toFixed(3)}</td>
+                                <td className="py-3 px-2 text-right">{item.z_score?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${getSignalClass(item.signal)}`}>{item.signal}</span></td>
                             </tr>
                         ))}
@@ -1595,12 +1694,43 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         try {
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
             if (response.ok) {
-                const data = await response.json();
-                if (window.addToast) window.addToast('Early Movers Scan abgeschlossen', 'success');
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('em_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/early-movers-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const em = (data.data && data.data[0]) || {};
+                            const winners = em.gainers || [];
+                            const losers = em.losers || [];
+                            if (winners.length > 0 || losers.length > 0) {
+                                setWinnerResults(winners);
+                                setLoserResults(losers);
+                                updateScanCache('em_winners', winners);
+                                updateScanCache('em_losers', losers);
+                                setIsScanning(false);
+                                updateScanCache('em_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${winners.length + losers.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('em_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
-        } finally {
             setIsScanning(false);
             updateScanCache('em_scanning', false);
         }
@@ -1729,11 +1859,43 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         try {
             const response = await fetch(`${API}/api/bear-scan`, { method: 'POST' });
             if (response.ok) {
-                if (window.addToast) window.addToast('Bear Scanner Scan abgeschlossen', 'success');
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('short_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/bear-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const bear = (data.data && data.data[0]) || {};
+                            const inverse = bear.inverse_etfs || [];
+                            const breakdown = bear.breakdown_stocks || [];
+                            if (inverse.length > 0 || breakdown.length > 0) {
+                                setInverseETFs(inverse);
+                                setBreakdownStocks(breakdown);
+                                updateScanCache('short_inverse', inverse);
+                                updateScanCache('short_breakdown', breakdown);
+                                setIsScanning(false);
+                                updateScanCache('short_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${inverse.length + breakdown.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('short_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
-        } finally {
             setIsScanning(false);
             updateScanCache('short_scanning', false);
         }
@@ -1841,11 +2003,39 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
         try {
             const response = await fetch(`${API}/api/money-flow-scan`, { method: 'POST' });
             if (response.ok) {
-                if (window.addToast) window.addToast('Money Flow Scan abgeschlossen', 'success');
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('moneyflow_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/money-flow-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            if (items.length > 0) {
+                                setResults(items);
+                                updateScanCache('moneyflow_results', items);
+                                setIsScanning(false);
+                                updateScanCache('moneyflow_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('moneyflow_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
-        } finally {
             setIsScanning(false);
             updateScanCache('moneyflow_scanning', false);
         }
@@ -1997,11 +2187,45 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         try {
             const response = await fetch(`${API}/api/crash-monitor-scan`, { method: 'POST' });
             if (response.ok) {
-                if (window.addToast) window.addToast('Crash Monitor Scan abgeschlossen', 'success');
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('crash_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/crash-monitor-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const cm = (data.data && data.data[0]) || {};
+                            const hasData = cm.fear_score !== undefined || (cm.indices && cm.indices.length > 0);
+                            if (hasData) {
+                                const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
+                                setFearData(fearData);
+                                setIndices(cm.indices || []);
+                                setBreadth(cm.breadth || null);
+                                updateScanCache('crash_fear_data', fearData);
+                                updateScanCache('crash_indices', cm.indices || []);
+                                updateScanCache('crash_breadth', cm.breadth || null);
+                                setIsScanning(false);
+                                updateScanCache('crash_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: Daten aktualisiert`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('crash_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
-        } finally {
             setIsScanning(false);
             updateScanCache('crash_scanning', false);
         }
@@ -2484,11 +2708,41 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
         try {
             const response = await fetch(`${API}/api/new-listing-scan`, { method: 'POST' });
             if (response.ok) {
-                if (window.addToast) window.addToast('New Listing Scan abgeschlossen', 'success');
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('newlisting_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/new-listing-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.listings || [];
+                            if (items.length > 0) {
+                                setResults(items);
+                                setStats(data.stats);
+                                updateScanCache('newlisting_results', items);
+                                updateScanCache('newlisting_stats', data.stats);
+                                setIsScanning(false);
+                                updateScanCache('newlisting_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+            } else {
+                setIsScanning(false);
+                updateScanCache('newlisting_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
-        } finally {
             setIsScanning(false);
             updateScanCache('newlisting_scanning', false);
         }
