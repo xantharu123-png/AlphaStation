@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -19,9 +19,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <style>
-        * {
-            font-family: 'Inter', sans-serif;
-        }
+        * { font-family: 'Inter', sans-serif; }
 
         :root {
             --bg-primary: #f8f9fb;
@@ -53,451 +51,664 @@
             --warning: #f59e0b;
         }
 
-        body {
-            background-color: var(--bg-primary);
-            color: var(--text-primary);
-            transition: background-color 0.3s, color 0.3s;
-        }
-
-        .card {
-            background-color: var(--bg-secondary);
-            border-color: var(--border-color);
-            transition: background-color 0.3s, border-color 0.3s;
-        }
-
-        .table-row {
-            border-color: var(--border-color);
-            transition: background-color 0.2s;
-        }
-
-        .table-row:hover {
-            background-color: var(--bg-secondary);
-        }
-
-        [data-theme="dark"] .table-row:hover {
-            background-color: rgba(22, 24, 34, 0.5);
-        }
+        body { background-color: var(--bg-primary); color: var(--text-primary); transition: background-color 0.3s, color 0.3s; }
+        .card { background-color: var(--bg-secondary); border-color: var(--border-color); transition: background-color 0.3s, border-color 0.3s; }
+        .table-row { border-color: var(--border-color); transition: background-color 0.2s; }
+        .table-row:hover { background-color: rgba(37, 99, 235, 0.04); }
+        [data-theme="dark"] .table-row:hover { background-color: rgba(59, 130, 246, 0.08); }
 
         .metric-card {
             background-color: var(--bg-secondary);
-            border-color: var(--border-color);
-            border: 1px solid;
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 16px;
         }
 
         .score-badge {
             background: linear-gradient(135deg, var(--score-start) 0%, var(--score-end) 100%);
-            color: white;
-            padding: 4px 10px;
-            border-radius: 16px;
-            font-size: 12px;
-            font-weight: 600;
+            color: white; padding: 4px 10px; border-radius: 16px; font-size: 12px; font-weight: 600;
         }
 
-        .grade-badge {
-            padding: 4px 10px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 600;
-            color: white;
-        }
-
+        .grade-badge { padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; color: white; }
         .grade-s { background-color: var(--grade-s); }
         .grade-a { background-color: var(--grade-a); }
         .grade-b { background-color: var(--grade-b); }
         .grade-c { background-color: var(--grade-c); }
+        .grade-d { background-color: #9ca3af; }
 
         .border-left-s { border-left: 3px solid var(--grade-s); }
         .border-left-a { border-left: 3px solid var(--grade-a); }
         .border-left-b { border-left: 3px solid var(--grade-b); }
         .border-left-c { border-left: 3px solid var(--grade-c); }
+        .border-left-d { border-left: 3px solid #9ca3af; }
 
-        .tab-active {
-            border-bottom: 2px solid var(--accent);
-            color: var(--accent);
-        }
+        .tab-active { border-bottom: 2px solid var(--accent); color: var(--accent); }
+        .tab-inactive { color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+        .tab-inactive:hover { color: var(--text-primary); }
 
-        .tab-inactive {
-            color: var(--text-muted);
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s;
-        }
+        .icon-button { cursor: pointer; transition: transform 0.2s, color 0.2s; }
+        .icon-button:hover { transform: scale(1.1); color: var(--accent); }
 
-        .tab-inactive:hover {
-            color: var(--text-primary);
-        }
-
-        .icon-button {
-            cursor: pointer;
-            transition: transform 0.2s, color 0.2s;
-        }
-
-        .icon-button:hover {
-            transform: scale(1.1);
-            color: var(--accent);
-        }
-
-        .settings-panel {
+        .settings-panel, .detail-panel {
             background-color: var(--bg-secondary);
-            border-color: var(--border-color);
-            border: 1px solid;
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 20px;
-            animation: slideInRight 0.3s ease-out;
         }
+        .detail-panel { margin-top: 16px; animation: slideDown 0.3s ease-out; }
+        .settings-panel { animation: slideInRight 0.3s ease-out; }
 
-        @keyframes slideInRight {
-            from {
-                opacity: 0;
-                transform: translateX(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateX(0);
-            }
-        }
+        @keyframes slideInRight { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
 
-        .detail-panel {
-            background-color: var(--bg-secondary);
-            border-color: var(--border-color);
-            border: 1px solid;
-            border-radius: 8px;
-            padding: 20px;
-            margin-top: 16px;
-            animation: slideDown 0.3s ease-out;
-        }
+        .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--border-color); transition: 0.3s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: 0.3s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--accent); }
+        input:checked + .slider:before { transform: translateX(20px); }
 
-        @keyframes slideDown {
-            from {
-                opacity: 0;
-                transform: translateY(-10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+        .status-online { background-color: var(--success); width: 8px; height: 8px; border-radius: 50%; display: inline-block; animation: pulse 2s infinite; }
+        .status-offline { background-color: var(--danger); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 44px;
-            height: 24px;
-        }
+        .spinner { border: 3px solid var(--border-color); border-top: 3px solid var(--accent); border-radius: 50%; width: 32px; height: 32px; animation: spin 0.8s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
+        .signal-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+        .signal-stark { background-color: rgba(220, 38, 38, 0.12); color: #dc2626; }
+        .signal-steigend { background-color: rgba(234, 88, 12, 0.12); color: #ea580c; }
+        .signal-leicht { background-color: rgba(217, 119, 6, 0.12); color: #d97706; }
+        .signal-fallend { background-color: rgba(5, 150, 105, 0.12); color: #059669; }
 
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: var(--border-color);
-            transition: 0.3s;
-            border-radius: 24px;
-        }
-
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 18px;
-            width: 18px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: 0.3s;
-            border-radius: 50%;
-        }
-
-        input:checked + .slider {
-            background-color: var(--accent);
-        }
-
-        input:checked + .slider:before {
-            transform: translateX(20px);
-        }
-
-        .status-online {
-            background-color: var(--success);
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-            animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
+        .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useCallback, useRef } = React;
 
-        // Mock Data
-        const MOCK_CANDIDATES = [
-            {
-                id: 1,
-                ticker: 'NVDA',
-                score: 92,
-                grade: 'S',
-                signal: 'BUY',
-                rr: '1:3.2',
-                entry: '128.50',
-                stop: '125.20',
-                target: '141.80',
-                lastUpdate: 'vor 2 Min',
-                volume: '45.2M',
-                ma20: '127.80',
-                rsi: 68,
-                description: 'NVIDIA showing strong bullish momentum with golden cross pattern confirmed.',
-            },
-            {
-                id: 2,
-                ticker: 'TSLA',
-                score: 87,
-                grade: 'A',
-                signal: 'BUY',
-                rr: '1:2.8',
-                entry: '245.30',
-                stop: '242.10',
-                target: '313.40',
-                lastUpdate: 'vor 5 Min',
-                volume: '52.1M',
-                ma20: '244.50',
-                rsi: 65,
-                description: 'Tesla breaking through resistance with increasing volume. Good setup.',
-            },
-            {
-                id: 3,
-                ticker: 'AAPL',
-                score: 76,
-                grade: 'A',
-                signal: 'BUY',
-                rr: '1:2.5',
-                entry: '182.40',
-                stop: '180.20',
-                target: '213.80',
-                lastUpdate: 'vor 1 Min',
-                volume: '38.5M',
-                ma20: '181.90',
-                rsi: 62,
-                description: 'Apple consolidating near MA20 with positive divergence.',
-            },
-            {
-                id: 4,
-                ticker: 'MSFT',
-                score: 69,
-                grade: 'B',
-                signal: 'WATCH',
-                rr: '1:2.1',
-                entry: '415.20',
-                stop: '411.80',
-                target: '480.30',
-                lastUpdate: 'vor 8 Min',
-                volume: '28.3M',
-                ma20: '416.50',
-                rsi: 58,
-                description: 'Microsoft approaching key support level. Watch for bounce.',
-            },
-            {
-                id: 5,
-                ticker: 'AMZN',
-                score: 82,
-                grade: 'A',
-                signal: 'BUY',
-                rr: '1:3.0',
-                entry: '198.75',
-                stop: '195.40',
-                target: '244.30',
-                lastUpdate: 'vor 3 Min',
-                volume: '41.7M',
-                ma20: '198.20',
-                rsi: 66,
-                description: 'Amazon breaking previous resistance with strong buying pressure.',
-            },
-            {
-                id: 6,
-                ticker: 'GOOGL',
-                score: 58,
-                grade: 'B',
-                signal: 'WATCH',
-                rr: '1:1.8',
-                entry: '165.30',
-                stop: '162.90',
-                target: '183.40',
-                lastUpdate: 'vor 12 Min',
-                volume: '22.1M',
-                ma20: '164.80',
-                rsi: 51,
-                description: 'Alphabet consolidating with neutral momentum.',
-            },
-            {
-                id: 7,
-                ticker: 'META',
-                score: 79,
-                grade: 'A',
-                signal: 'BUY',
-                rr: '1:2.9',
-                entry: '528.40',
-                stop: '524.10',
-                target: '605.30',
-                lastUpdate: 'vor 4 Min',
-                volume: '35.4M',
-                ma20: '527.60',
-                rsi: 64,
-                description: 'Meta showing strong recovery with institutional buying.',
-            },
-            {
-                id: 8,
-                ticker: 'CRM',
-                score: 71,
-                grade: 'B',
-                signal: 'BUY',
-                rr: '1:2.3',
-                entry: '312.80',
-                stop: '309.50',
-                target: '385.20',
-                lastUpdate: 'vor 6 Min',
-                volume: '18.9M',
-                ma20: '311.40',
-                rsi: 59,
-                description: 'Salesforce breaking out from consolidation zone.',
-            },
-            {
-                id: 9,
-                ticker: 'NFLX',
-                score: 65,
-                grade: 'B',
-                signal: 'WATCH',
-                rr: '1:2.0',
-                entry: '289.50',
-                stop: '286.20',
-                target: '338.20',
-                lastUpdate: 'vor 9 Min',
-                volume: '24.6M',
-                ma20: '288.90',
-                rsi: 55,
-                description: 'Netflix near support with watching for reversal signals.',
-            },
-            {
-                id: 10,
-                ticker: 'UBER',
-                score: 85,
-                grade: 'A',
-                signal: 'BUY',
-                rr: '1:2.7',
-                entry: '92.30',
-                stop: '89.80',
-                target: '117.20',
-                lastUpdate: 'vor 2 Min',
-                volume: '31.2M',
-                ma20: '91.50',
-                rsi: 63,
-                description: 'Uber showing strong uptrend with support holding well.',
-            },
-        ];
+        // ── API Configuration ──
+        const API_BASE = window.location.hostname === 'localhost'
+            ? 'http://localhost:8000'
+            : `http://${window.location.hostname}:8000`;
 
+        async function apiFetch(endpoint, options = {}) {
+            try {
+                const resp = await fetch(`${API_BASE}${endpoint}`, {
+                    ...options,
+                    headers: { 'Content-Type': 'application/json', ...options.headers },
+                });
+                if (!resp.ok) throw new Error(`API ${resp.status}`);
+                return await resp.json();
+            } catch (err) {
+                console.error(`API Error ${endpoint}:`, err);
+                return null;
+            }
+        }
+
+        // ── Helper Functions ──
+        const gradeFor = (score) => score >= 90 ? 'S' : score >= 75 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D';
+        const gradeBorder = (g) => ({ S: 'border-left-s', A: 'border-left-a', B: 'border-left-b', C: 'border-left-c', D: 'border-left-d' }[g] || '');
+        const gradeBadgeCls = (g) => ({ S: 'grade-s', A: 'grade-a', B: 'grade-b', C: 'grade-c', D: 'grade-d' }[g] || 'grade-d');
+        const signalColor = (s) => s === 'BUY' || s === 'LONG' ? 'text-green-600' : s === 'SELL' || s === 'SHORT' ? 'text-red-600' : 'text-yellow-600';
+        const changeColor = (v) => v > 0 ? 'text-green-600' : v < 0 ? 'text-red-600' : 'text-gray-500';
+        const fmt = (v, d=2) => v != null && !isNaN(v) ? Number(v).toFixed(d) : '-';
+        const fmtVol = (v) => { if (!v) return '-'; if (v >= 1e9) return (v/1e9).toFixed(1)+'B'; if (v >= 1e6) return (v/1e6).toFixed(1)+'M'; if (v >= 1e3) return (v/1e3).toFixed(0)+'K'; return String(v); };
+        const signalBadgeCls = (s) => ({ STARK: 'signal-stark', Steigend: 'signal-steigend', Leicht: 'signal-leicht', Fallend: 'signal-fallend' }[s] || '');
+
+        // ── Reusable Components ──
+        function Spinner() { return <div className="flex justify-center py-12"><div className="spinner"></div></div>; }
+        function EmptyState({ title, subtitle }) {
+            return <div className="empty-state"><div className="text-lg font-medium mb-2">{title}</div><div className="text-sm">{subtitle}</div></div>;
+        }
+        function MetricCard({ label, value, sub, subColor }) {
+            return (
+                <div className="metric-card">
+                    <div className="text-sm font-medium text-gray-500 mb-2">{label}</div>
+                    <div className="text-3xl font-bold mb-1">{value}</div>
+                    {sub && <div className={`text-sm font-medium ${subColor || 'text-gray-500'}`}>{sub}</div>}
+                </div>
+            );
+        }
+        function ScanButton({ onClick, loading, label }) {
+            return (
+                <button onClick={onClick} disabled={loading}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                    {loading ? 'Scanning...' : label || 'Scan starten'}
+                </button>
+            );
+        }
+        function TableHead({ columns }) {
+            return (
+                <thead><tr className="border-b border-gray-200 bg-gray-50">
+                    {columns.map(c => <th key={c} className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">{c}</th>)}
+                </tr></thead>
+            );
+        }
+
+        // ── Scanner Tab ──
+        function ScannerTab({ apiOk }) {
+            const [data, setData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [selected, setSelected] = useState(null);
+            const [settings, setSettings] = useState({ market: 'stocks', strategy: 'Volume Surge', timeframe: '1D' });
+            const [showSettings, setShowSettings] = useState(false);
+
+            const loadResults = useCallback(async () => {
+                const res = await apiFetch('/api/bi-results?direction=long');
+                if (res && res.data) setData(res.data);
+            }, []);
+
+            useEffect(() => { loadResults(); }, [loadResults]);
+
+            const startScan = async () => {
+                setLoading(true);
+                await apiFetch('/api/scan', { method: 'POST', body: JSON.stringify({ strategy: settings.strategy, market_type: settings.market }) });
+                setTimeout(async () => { await loadResults(); setLoading(false); }, 8000);
+            };
+
+            const candidates = data.map((d, i) => ({
+                id: i, ticker: d.ticker || d.symbol || '-', score: d.score || d.total_score || 0,
+                grade: d.grade || gradeFor(d.score || d.total_score || 0),
+                signal: d.signal || d.direction || 'WATCH',
+                rr: d.rr || d.risk_reward || '-', entry: d.entry || d.entry_price || '-',
+                stop: d.stop || d.stop_loss || '-', target: d.target || d.take_profit || '-',
+                volume: d.volume || d.vol || 0, rvol: d.rvol || d.relative_volume || 0,
+                change: d.change_pct || d.change || 0, price: d.price || d.close || 0,
+                rsi: d.rsi || '-', ma20: d.ma20 || '-', description: d.reason || d.description || '',
+            }));
+
+            const gradeCount = { S: candidates.filter(c=>c.grade==='S').length, A: candidates.filter(c=>c.grade==='A').length };
+            const avgScore = candidates.length ? Math.round(candidates.reduce((s,c)=>s+c.score,0)/candidates.length) : 0;
+
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="KANDIDATEN" value={candidates.length} sub={candidates.length > 0 ? `${candidates.length} gefunden` : 'Kein Scan'} subColor={candidates.length > 0 ? 'text-green-600' : ''} />
+                        <MetricCard label="GRADE S/A" value={gradeCount.S + gradeCount.A} sub="Top-Setups" />
+                        <MetricCard label="DURCHSCHN. SCORE" value={avgScore || '-'} sub={avgScore > 70 ? 'Stark' : avgScore > 50 ? 'Mittel' : '-'} subColor={avgScore > 70 ? 'text-green-600' : ''} />
+                        <MetricCard label="STATUS" value={loading ? 'Scannt...' : 'Bereit'} sub={apiOk ? 'API verbunden' : 'API offline'} subColor={apiOk ? 'text-green-600' : 'text-red-600'} />
+                    </div>
+
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-lg font-semibold">Trading Candidates</h2>
+                        <div className="flex gap-3">
+                            <ScanButton onClick={startScan} loading={loading} />
+                            <button onClick={() => setShowSettings(!showSettings)} className="icon-button p-2" title="Settings">
+                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    {showSettings && (
+                        <div className="settings-panel mb-6">
+                            <h3 className="text-lg font-semibold mb-4">Einstellungen</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Markt</label>
+                                    <select value={settings.market} onChange={e => setSettings({...settings, market: e.target.value})}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option value="stocks">US Aktien</option><option value="crypto">Krypto</option><option value="futures">Futures</option><option value="forex">Forex</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Strategie</label>
+                                    <select value={settings.strategy} onChange={e => setSettings({...settings, strategy: e.target.value})}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option>Volume Surge</option><option>Bull Flag</option><option>Bear Flag</option><option>Breakout Long</option><option>Breakdown Short</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Timeframe</label>
+                                    <select value={settings.timeframe} onChange={e => setSettings({...settings, timeframe: e.target.value})}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option>5M</option><option>15M</option><option>1H</option><option>4H</option><option>1D</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {loading ? <Spinner /> : candidates.length === 0 ?
+                        <EmptyState title="Keine Kandidaten" subtitle="Starte einen Scan um Trading-Kandidaten zu finden" /> : (
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <TableHead columns={['Ticker','Score','Grade','Signal','R:R','Entry','Stop','Target']} />
+                                    <tbody>
+                                        {candidates.map(c => (
+                                            <React.Fragment key={c.id}>
+                                                <tr onClick={() => setSelected(selected?.id === c.id ? null : c)}
+                                                    className={`table-row border-b cursor-pointer ${gradeBorder(c.grade)}`}>
+                                                    <td className="px-5 py-4 font-semibold text-blue-600">{c.ticker}</td>
+                                                    <td className="px-5 py-4"><span className="score-badge">{c.score}</span></td>
+                                                    <td className="px-5 py-4"><span className={`grade-badge ${gradeBadgeCls(c.grade)}`}>{c.grade}</span></td>
+                                                    <td className={`px-5 py-4 font-medium ${signalColor(c.signal)}`}>{c.signal}</td>
+                                                    <td className="px-5 py-4 text-sm">{c.rr}</td>
+                                                    <td className="px-5 py-4 text-sm font-semibold">${fmt(c.entry)}</td>
+                                                    <td className="px-5 py-4 text-sm font-semibold text-red-600">${fmt(c.stop)}</td>
+                                                    <td className="px-5 py-4 text-sm font-semibold text-green-600">${fmt(c.target)}</td>
+                                                </tr>
+                                                {selected?.id === c.id && (
+                                                    <tr><td colSpan="8" className="px-5 py-4">
+                                                        <div className="detail-panel">
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                                <div>
+                                                                    <h4 className="font-semibold text-lg mb-3">{c.ticker} - Analyse</h4>
+                                                                    <p className="text-gray-500 mb-4">{c.description || 'Keine Details verfuegbar.'}</p>
+                                                                    <div className="space-y-2 text-sm">
+                                                                        <div><strong>Preis:</strong> ${fmt(c.price)}</div>
+                                                                        <div><strong>Volume:</strong> {fmtVol(c.volume)}</div>
+                                                                        <div><strong>RVOL:</strong> {fmt(c.rvol)}x</div>
+                                                                        <div><strong>RSI:</strong> {c.rsi}</div>
+                                                                    </div>
+                                                                </div>
+                                                                <div>
+                                                                    <h4 className="font-semibold mb-3">Trade Setup</h4>
+                                                                    <div className="space-y-3 text-sm">
+                                                                        <div className="p-3 bg-blue-50 rounded-lg"><div className="text-gray-500">Entry</div><div className="text-lg font-bold text-blue-600">${fmt(c.entry)}</div></div>
+                                                                        <div className="p-3 bg-red-50 rounded-lg"><div className="text-gray-500">Stop Loss</div><div className="text-lg font-bold text-red-600">${fmt(c.stop)}</div></div>
+                                                                        <div className="p-3 bg-green-50 rounded-lg"><div className="text-gray-500">Target</div><div className="text-lg font-bold text-green-600">${fmt(c.target)}</div></div>
+                                                                        <div className="p-3 bg-gray-100 rounded-lg"><div className="text-gray-500">R:R</div><div className="text-lg font-bold">{c.rr}</div></div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </td></tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ── BI Scanner Tab ──
+        function BIScannerTab() {
+            const [direction, setDirection] = useState('long');
+            const [data, setData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [selected, setSelected] = useState(null);
+            const [cacheAge, setCacheAge] = useState(null);
+
+            const loadResults = useCallback(async () => {
+                const res = await apiFetch(`/api/bi-results?direction=${direction}`);
+                if (res && res.data) { setData(res.data); setCacheAge(res.cache_age_seconds); }
+            }, [direction]);
+
+            useEffect(() => { loadResults(); }, [loadResults]);
+
+            const startScan = async () => {
+                setLoading(true);
+                await apiFetch('/api/bi-scan', { method: 'POST', body: JSON.stringify({ direction }) });
+                setTimeout(async () => { await loadResults(); setLoading(false); }, 15000);
+            };
+
+            const items = data.map((d, i) => ({
+                id: i, ticker: d.ticker || d.symbol || '-', score: d.score || d.total_score || 0,
+                grade: d.grade || gradeFor(d.score || d.total_score || 0),
+                direction: d.direction || direction.toUpperCase(),
+                price: d.price || d.close || 0, change: d.change_pct || d.change || 0,
+                rvol: d.rvol || d.relative_volume || 0, volume: d.volume || 0,
+                pattern: d.pattern || d.setup || '-', reason: d.reason || d.description || '',
+                entry: d.entry || d.entry_price || 0, stop: d.stop || d.stop_loss || 0, target: d.target || d.take_profit || 0,
+            }));
+
+            const topCount = items.filter(i => i.score >= 75).length;
+            const avgScore = items.length ? Math.round(items.reduce((s,i)=>s+i.score,0)/items.length) : 0;
+
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="BI KANDIDATEN" value={items.length} sub={items.length > 0 ? 'Breakout Imminent' : 'Kein Scan'} subColor="text-blue-600" />
+                        <MetricCard label="TOP SETUPS" value={topCount} sub="Score >= 75" subColor="text-green-600" />
+                        <MetricCard label="DURCHSCHN. SCORE" value={avgScore || '-'} />
+                        <MetricCard label="CACHE ALTER" value={cacheAge != null ? Math.round(cacheAge/60) + ' Min' : '-'} sub={cacheAge != null ? 'Letzte Aktualisierung' : 'Noch kein Scan'} />
+                    </div>
+
+                    <div className="flex justify-between items-center mb-4">
+                        <div className="flex items-center gap-4">
+                            <h2 className="text-lg font-semibold">BI Scanner</h2>
+                            <div className="flex bg-gray-100 rounded-lg p-1">
+                                <button onClick={() => setDirection('long')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${direction==='long' ? 'bg-green-600 text-white' : 'text-gray-600 hover:text-gray-900'}`}>
+                                    LONG</button>
+                                <button onClick={() => setDirection('short')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${direction==='short' ? 'bg-red-600 text-white' : 'text-gray-600 hover:text-gray-900'}`}>
+                                    SHORT</button>
+                            </div>
+                        </div>
+                        <ScanButton onClick={startScan} loading={loading} label="BI Scan starten" />
+                    </div>
+
+                    {loading ? <Spinner /> : items.length === 0 ?
+                        <EmptyState title="Keine BI Kandidaten" subtitle={`Starte einen ${direction.toUpperCase()} Scan`} /> : (
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <TableHead columns={['Ticker','Score','Grade','Richtung','Preis','Change %','RVOL','Pattern']} />
+                                    <tbody>
+                                        {items.map(item => (
+                                            <React.Fragment key={item.id}>
+                                                <tr onClick={() => setSelected(selected?.id === item.id ? null : item)}
+                                                    className={`table-row border-b cursor-pointer ${gradeBorder(item.grade)}`}>
+                                                    <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
+                                                    <td className="px-5 py-4"><span className="score-badge">{item.score}</span></td>
+                                                    <td className="px-5 py-4"><span className={`grade-badge ${gradeBadgeCls(item.grade)}`}>{item.grade}</span></td>
+                                                    <td className={`px-5 py-4 font-medium ${item.direction === 'LONG' || item.direction === 'long' ? 'text-green-600' : 'text-red-600'}`}>{item.direction}</td>
+                                                    <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
+                                                    <td className={`px-5 py-4 text-sm font-medium ${changeColor(item.change)}`}>{item.change > 0 ? '+' : ''}{fmt(item.change)}%</td>
+                                                    <td className="px-5 py-4 text-sm">{fmt(item.rvol)}x</td>
+                                                    <td className="px-5 py-4 text-sm">{item.pattern}</td>
+                                                </tr>
+                                                {selected?.id === item.id && (
+                                                    <tr><td colSpan="8" className="px-5 py-4">
+                                                        <div className="detail-panel">
+                                                            <h4 className="font-semibold text-lg mb-3">{item.ticker} - BI Analyse</h4>
+                                                            <p className="text-gray-500 mb-4">{item.reason}</p>
+                                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                                                                <div className="p-3 bg-blue-50 rounded-lg"><div className="text-gray-500">Entry</div><div className="font-bold text-blue-600">${fmt(item.entry)}</div></div>
+                                                                <div className="p-3 bg-red-50 rounded-lg"><div className="text-gray-500">Stop</div><div className="font-bold text-red-600">${fmt(item.stop)}</div></div>
+                                                                <div className="p-3 bg-green-50 rounded-lg"><div className="text-gray-500">Target</div><div className="font-bold text-green-600">${fmt(item.target)}</div></div>
+                                                                <div className="p-3 bg-gray-100 rounded-lg"><div className="text-gray-500">Volume</div><div className="font-bold">{fmtVol(item.volume)}</div></div>
+                                                            </div>
+                                                        </div>
+                                                    </td></tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ── Biotech Tab ──
+        function BiotechTab() {
+            const [data, setData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [cacheAge, setCacheAge] = useState(null);
+
+            const loadResults = useCallback(async () => {
+                const res = await apiFetch('/api/biotech-results');
+                if (res && res.data) { setData(res.data); setCacheAge(res.cache_age_seconds); }
+            }, []);
+
+            useEffect(() => { loadResults(); }, [loadResults]);
+
+            const startScan = async () => {
+                setLoading(true);
+                await apiFetch('/api/biotech-scan', { method: 'POST' });
+                setTimeout(async () => { await loadResults(); setLoading(false); }, 20000);
+            };
+
+            const items = data.map((d, i) => ({
+                id: i, ticker: d.ticker || d.symbol || '-', name: d.name || d.company || '-',
+                catalyst: d.catalyst || d.catalyst_type || '-', date: d.date || d.catalyst_date || '-',
+                phase: d.phase || '-', score: d.score || 0, price: d.price || 0,
+                change: d.change_pct || d.change || 0, mcap: d.market_cap || d.mcap || 0,
+            }));
+
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="BIOTECH AKTIEN" value={items.length} sub="Mit Katalysator" subColor="text-purple-600" />
+                        <MetricCard label="FDA EVENTS" value={items.filter(i=>i.catalyst.includes('FDA')||i.catalyst.includes('PDUFA')).length} sub="Anstehend" subColor="text-blue-600" />
+                        <MetricCard label="PHASE 3" value={items.filter(i=>i.phase.includes('3')).length} sub="Kandidaten" />
+                        <MetricCard label="CACHE" value={cacheAge != null ? Math.round(cacheAge/60) + ' Min' : '-'} sub={cacheAge != null ? 'alt' : 'Kein Scan'} />
+                    </div>
+
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-lg font-semibold">Biotech Scanner</h2>
+                        <ScanButton onClick={startScan} loading={loading} label="Biotech Scan" />
+                    </div>
+
+                    {loading ? <Spinner /> : items.length === 0 ?
+                        <EmptyState title="Keine Biotech-Daten" subtitle="Starte einen Biotech-Scan um Katalysatoren zu finden" /> : (
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <TableHead columns={['Ticker','Name','Katalysator','Datum','Phase','Preis','Change %']} />
+                                    <tbody>
+                                        {items.map(item => (
+                                            <tr key={item.id} className="table-row border-b">
+                                                <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
+                                                <td className="px-5 py-4 text-sm">{item.name}</td>
+                                                <td className="px-5 py-4 text-sm font-medium">{item.catalyst}</td>
+                                                <td className="px-5 py-4 text-sm">{item.date}</td>
+                                                <td className="px-5 py-4"><span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs font-medium">{item.phase}</span></td>
+                                                <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(item.change)}`}>{item.change > 0 ? '+' : ''}{fmt(item.change)}%</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ── Short / Bear Scanner Tab ──
+        function ShortScannerTab() {
+            const [data, setData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [view, setView] = useState('etfs');
+            const [cacheAge, setCacheAge] = useState(null);
+
+            const loadResults = useCallback(async () => {
+                const res = await apiFetch('/api/bear-results');
+                if (res && res.data && res.data.length > 0) {
+                    setData(res.data[0] || {});
+                    setCacheAge(res.cache_age_seconds);
+                }
+            }, []);
+
+            useEffect(() => { loadResults(); }, [loadResults]);
+
+            const startScan = async () => {
+                setLoading(true);
+                await apiFetch('/api/bear-scan', { method: 'POST' });
+                setTimeout(async () => { await loadResults(); setLoading(false); }, 20000);
+            };
+
+            const etfs = (data.inverse_etfs || []);
+            const breakdowns = (data.breakdown_stocks || []);
+            const items = view === 'etfs' ? etfs : breakdowns;
+
+            return (
+                <div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <MetricCard label="INVERSE ETFs" value={etfs.length} sub="Aktiv" subColor="text-red-600" />
+                        <MetricCard label="BREAKDOWNS" value={breakdowns.length} sub="Aktien >= -4%" subColor="text-red-600" />
+                        <MetricCard label="STARK SIGNAL" value={etfs.filter(e=>e.signal==='STARK').length} sub="Hohe Bearish-Aktivitaet" />
+                        <MetricCard label="CACHE" value={cacheAge != null ? Math.round(cacheAge/60) + ' Min' : '-'} />
+                    </div>
+
+                    <div className="flex justify-between items-center mb-4">
+                        <div className="flex items-center gap-4">
+                            <h2 className="text-lg font-semibold">Short Scanner</h2>
+                            <div className="flex bg-gray-100 rounded-lg p-1">
+                                <button onClick={() => setView('etfs')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${view==='etfs' ? 'bg-red-600 text-white' : 'text-gray-600'}`}>
+                                    Inverse ETFs</button>
+                                <button onClick={() => setView('breakdowns')}
+                                    className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${view==='breakdowns' ? 'bg-red-600 text-white' : 'text-gray-600'}`}>
+                                    Breakdowns</button>
+                            </div>
+                        </div>
+                        <ScanButton onClick={startScan} loading={loading} label="Bear Scan" />
+                    </div>
+
+                    {loading ? <Spinner /> : items.length === 0 ?
+                        <EmptyState title={view === 'etfs' ? 'Keine ETF-Daten' : 'Keine Breakdown-Daten'} subtitle="Starte einen Bear-Scan" /> :
+                        view === 'etfs' ? (
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <TableHead columns={['Ticker','Name','Underlying','Preis','1D %','5D %','20D %','RVOL','Signal']} />
+                                    <tbody>
+                                        {etfs.map((e, i) => (
+                                            <tr key={i} className="table-row border-b">
+                                                <td className="px-5 py-4 font-semibold text-red-600">{e.ticker}</td>
+                                                <td className="px-5 py-4 text-sm">{e.name}</td>
+                                                <td className="px-5 py-4 text-sm text-gray-500">{e.underlying}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold">${fmt(e.price)}</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(e.change_1d)}`}>{e.change_1d > 0 ? '+' : ''}{fmt(e.change_1d)}%</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(e.change_5d)}`}>{e.change_5d > 0 ? '+' : ''}{fmt(e.change_5d)}%</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(e.change_20d)}`}>{e.change_20d > 0 ? '+' : ''}{fmt(e.change_20d)}%</td>
+                                                <td className="px-5 py-4 text-sm">{fmt(e.rvol)}x</td>
+                                                <td className="px-5 py-4"><span className={`signal-badge ${signalBadgeCls(e.signal)}`}>{e.signal}</span></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <TableHead columns={['Ticker','Preis','Change %','Volume','Dollar Volume']} />
+                                    <tbody>
+                                        {breakdowns.map((b, i) => (
+                                            <tr key={i} className="table-row border-b">
+                                                <td className="px-5 py-4 font-semibold text-red-600">{b.ticker}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold">${fmt(b.price)}</td>
+                                                <td className="px-5 py-4 text-sm font-medium text-red-600">{fmt(b.change_pct)}%</td>
+                                                <td className="px-5 py-4 text-sm">{fmtVol(b.volume)}</td>
+                                                <td className="px-5 py-4 text-sm">${fmtVol(b.dollar_volume)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ── Placeholder Tabs for future features ──
+        function PlaceholderTab({ title, description, icon }) {
+            return (
+                <div className="empty-state" style={{paddingTop: '80px'}}>
+                    <div className="text-4xl mb-4">{icon}</div>
+                    <div className="text-xl font-semibold mb-2">{title}</div>
+                    <div className="text-sm max-w-md mx-auto">{description}</div>
+                </div>
+            );
+        }
+
+        // ── Early Movers Tab ──
+        function EarlyMoversTab() {
+            return <PlaceholderTab title="Early Movers" description="Pre-Market und After-Hours Gewinner/Verlierer. Zeigt die staerksten Beweger vor und nach dem regulaeren Handel." icon="&#9889;" />;
+        }
+
+        // ── BTC Divergenz Tab ──
+        function BTCDivergenzTab() {
+            return <PlaceholderTab title="BTC-Divergenz Scanner" description="Erkennt Divergenzen zwischen Bitcoin und korrelierten Assets. Nutzt Polygon und On-Chain Daten." icon="&#8383;" />;
+        }
+
+        // ── Money Flow Tab ──
+        function MoneyFlowTab() {
+            return <PlaceholderTab title="Money Flow Analyse" description="Sektorrotation, institutionelle Zu- und Abfluesse, Dark Pool Aktivitaet und Smart Money Tracking." icon="&#128176;" />;
+        }
+
+        // ── Kalender Tab ──
+        function KalenderTab() {
+            return <PlaceholderTab title="Wirtschaftskalender" description="Earnings, FOMC, CPI, NFP und andere marktbewegende Events mit Countdown und historischen Reaktionen." icon="&#128197;" />;
+        }
+
+        // ── Crash Monitor Tab ──
+        function CrashMonitorTab() {
+            return <PlaceholderTab title="Crash Monitor" description="VIX Tracking, Put/Call Ratio, Breadth Indicators und Market Stress Index. Fruehwarnsystem fuer starke Korrekturen." icon="&#9888;" />;
+        }
+
+        // ── Main App ──
         function AlphaStation() {
             const [theme, setTheme] = useState('light');
             const [activeTab, setActiveTab] = useState('Scanner');
-            const [selectedRow, setSelectedRow] = useState(null);
-            const [showSettings, setShowSettings] = useState(false);
-            const [candidates, setCandidates] = useState(MOCK_CANDIDATES);
-            const [settings, setSettings] = useState({
-                market: 'USA',
-                strategy: 'Momentum',
-                timeframe: '1H',
-            });
-            const [lastScan, setLastScan] = useState(2);
+            const [apiOk, setApiOk] = useState(false);
+            const [marketSession, setMarketSession] = useState({ session: '-', detail: '' });
+            const [lastCheck, setLastCheck] = useState(null);
 
-            // Auto-increment last scan time
+            // Check API health on mount
             useEffect(() => {
-                const interval = setInterval(() => {
-                    setLastScan(prev => (prev + 1) % 60);
-                }, 60000);
-                return () => clearInterval(interval);
+                const check = async () => {
+                    const res = await apiFetch('/api/health');
+                    setApiOk(!!res && res.status === 'healthy');
+                    setLastCheck(new Date());
+                    const mkt = await apiFetch('/api/market-status');
+                    if (mkt) setMarketSession(mkt);
+                };
+                check();
+                const iv = setInterval(check, 60000);
+                return () => clearInterval(iv);
             }, []);
 
             const toggleTheme = () => {
-                setTheme(t => t === 'light' ? 'dark' : 'light');
-                document.documentElement.setAttribute('data-theme', theme === 'light' ? 'dark' : 'light');
-            };
-
-            const getGradeBorder = (grade) => {
-                const map = { 'S': 'border-left-s', 'A': 'border-left-a', 'B': 'border-left-b', 'C': 'border-left-c' };
-                return map[grade] || '';
-            };
-
-            const getGradeBadge = (grade) => {
-                const map = { 'S': 'grade-s', 'A': 'grade-a', 'B': 'grade-b', 'C': 'grade-c' };
-                return map[grade] || '';
-            };
-
-            const getSignalColor = (signal) => {
-                if (signal === 'BUY') return 'text-green-600';
-                if (signal === 'SELL') return 'text-red-600';
-                return 'text-yellow-600';
+                const next = theme === 'light' ? 'dark' : 'light';
+                setTheme(next);
+                document.documentElement.setAttribute('data-theme', next);
             };
 
             const tabs = ['Scanner', 'BI Scanner', 'Biotech', 'BTC-Divergenz', 'Early Movers', 'Short Scanner', 'Money Flow', 'Kalender', 'Crash Monitor'];
 
-            const gradeCount = {
-                S: candidates.filter(c => c.grade === 'S').length,
-                A: candidates.filter(c => c.grade === 'A').length,
+            const renderTab = () => {
+                switch (activeTab) {
+                    case 'Scanner': return <ScannerTab apiOk={apiOk} />;
+                    case 'BI Scanner': return <BIScannerTab />;
+                    case 'Biotech': return <BiotechTab />;
+                    case 'Short Scanner': return <ShortScannerTab />;
+                    case 'BTC-Divergenz': return <BTCDivergenzTab />;
+                    case 'Early Movers': return <EarlyMoversTab />;
+                    case 'Money Flow': return <MoneyFlowTab />;
+                    case 'Kalender': return <KalenderTab />;
+                    case 'Crash Monitor': return <CrashMonitorTab />;
+                    default: return <ScannerTab apiOk={apiOk} />;
+                }
             };
 
-            const avgScore = Math.round(candidates.reduce((sum, c) => sum + c.score, 0) / candidates.length);
-
             return (
-                <div data-theme={theme} className="min-h-screen bg-gray-50">
+                <div data-theme={theme} className="min-h-screen">
                     {/* Header */}
                     <header className="card border-b border-gray-200 sticky top-0 z-50">
                         <div className="max-w-full px-6 py-4 flex items-center justify-between">
                             <h1 className="text-2xl font-bold">Alpha Station</h1>
                             <div className="flex items-center gap-6">
-                                <div className="text-sm text-gray-600">
-                                    <div className="font-semibold">V70.7 Pro</div>
-                                    <div className="flex items-center gap-2">
-                                        <span className="status-online"></span>
-                                        <span>Server Online</span>
+                                <div className="text-sm text-right" style={{color: 'var(--text-muted)'}}>
+                                    <div className="font-semibold" style={{color: 'var(--text-primary)'}}>V70.7 Pro</div>
+                                    <div className="flex items-center gap-2 justify-end">
+                                        <span className={apiOk ? 'status-online' : 'status-offline'}></span>
+                                        <span>{apiOk ? 'Server Online' : 'Server Offline'}</span>
                                     </div>
-                                    <div>Letzter Scan: vor {lastScan} Min</div>
+                                    <div>{marketSession.session} {marketSession.detail ? `- ${marketSession.detail}` : ''}</div>
                                 </div>
-                                <button
-                                    onClick={toggleTheme}
-                                    className="icon-button p-2"
-                                    title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
-                                >
-                                    {theme === 'light' ? '🌙' : '☀️'}
+                                <button onClick={toggleTheme} className="icon-button p-2" title="Theme wechseln">
+                                    {theme === 'light' ? '\u{1F319}' : '\u{2600}\u{FE0F}'}
                                 </button>
                             </div>
                         </div>
                     </header>
 
                     {/* Tab Navigation */}
-                    <nav className="card border-b border-gray-200 px-6 py-4 sticky top-16 z-40">
-                        <div className="flex gap-8 overflow-x-auto pb-4">
+                    <nav className="card border-b border-gray-200 px-6 py-0 sticky top-16 z-40">
+                        <div className="flex gap-8 overflow-x-auto">
                             {tabs.map(tab => (
-                                <button
-                                    key={tab}
-                                    onClick={() => setActiveTab(tab)}
-                                    className={`tab-inactive font-medium whitespace-nowrap pb-2 ${
-                                        activeTab === tab ? 'tab-active' : ''
-                                    }`}
-                                >
+                                <button key={tab} onClick={() => setActiveTab(tab)}
+                                    className={`py-4 font-medium whitespace-nowrap transition-all ${activeTab === tab ? 'tab-active' : 'tab-inactive'}`}>
                                     {tab}
                                 </button>
                             ))}
@@ -506,176 +717,13 @@
 
                     {/* Main Content */}
                     <main className="max-w-full px-6 py-6">
-                        {/* Metric Cards */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-                            <div className="metric-card">
-                                <div className="text-sm font-medium text-gray-600 mb-2">KANDIDATEN</div>
-                                <div className="text-3xl font-bold mb-1">{candidates.length}</div>
-                                <div className="text-sm text-green-600 font-medium">+3 seit letztem Scan</div>
-                            </div>
-
-                            <div className="metric-card">
-                                <div className="text-sm font-medium text-gray-600 mb-2">GRADE S/A</div>
-                                <div className="text-3xl font-bold mb-1">{gradeCount.S + gradeCount.A}</div>
-                                <div className="text-sm text-gray-600">Top-Setups</div>
-                            </div>
-
-                            <div className="metric-card">
-                                <div className="text-sm font-medium text-gray-600 mb-2">DURCHSCHN. SCORE</div>
-                                <div className="text-3xl font-bold mb-1">{avgScore}</div>
-                                <div className="text-sm text-green-600 font-medium">+5.2 vs gestern</div>
-                            </div>
-
-                            <div className="metric-card">
-                                <div className="text-sm font-medium text-gray-600 mb-2">NÄCHSTER SCAN</div>
-                                <div className="text-3xl font-bold mb-1">18 Min</div>
-                                <div className="text-sm text-gray-600">in ET</div>
-                            </div>
-                        </div>
-
-                        {/* Settings and Table Header */}
-                        <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-lg font-semibold">Trading Candidates</h2>
-                            <button
-                                onClick={() => setShowSettings(!showSettings)}
-                                className="icon-button p-2"
-                                title="Settings"
-                            >
-                                ⚙️
-                            </button>
-                        </div>
-
-                        {/* Settings Panel */}
-                        {showSettings && (
-                            <div className="settings-panel mb-6">
-                                <h3 className="text-lg font-semibold mb-4">Settings</h3>
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                    <div>
-                                        <label className="block text-sm font-medium mb-2">Market</label>
-                                        <select
-                                            value={settings.market}
-                                            onChange={(e) => setSettings({...settings, market: e.target.value})}
-                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                                        >
-                                            <option>USA</option>
-                                            <option>EUR</option>
-                                            <option>ASIA</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-2">Strategy</label>
-                                        <select
-                                            value={settings.strategy}
-                                            onChange={(e) => setSettings({...settings, strategy: e.target.value})}
-                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                                        >
-                                            <option>Momentum</option>
-                                            <option>Trend</option>
-                                            <option>Mean Reversion</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-2">Timeframe</label>
-                                        <select
-                                            value={settings.timeframe}
-                                            onChange={(e) => setSettings({...settings, timeframe: e.target.value})}
-                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                                        >
-                                            <option>5M</option>
-                                            <option>15M</option>
-                                            <option>1H</option>
-                                            <option>4H</option>
-                                            <option>1D</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Table */}
-                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
-                            <div className="overflow-x-auto">
-                                <table className="w-full">
-                                    <thead>
-                                        <tr className="border-b border-gray-200 bg-gray-50">
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Ticker</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Score</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Grade</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Signal</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">R:R</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Entry</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Stop</th>
-                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Target</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {candidates.map(candidate => (
-                                            <React.Fragment key={candidate.id}>
-                                                <tr
-                                                    onClick={() => setSelectedRow(selectedRow?.id === candidate.id ? null : candidate)}
-                                                    className={`table-row border-b cursor-pointer ${getGradeBorder(candidate.grade)}`}
-                                                >
-                                                    <td className="px-6 py-4 font-semibold text-blue-600">{candidate.ticker}</td>
-                                                    <td className="px-6 py-4">
-                                                        <span className="score-badge">{candidate.score}</span>
-                                                    </td>
-                                                    <td className="px-6 py-4">
-                                                        <span className={`grade-badge ${getGradeBadge(candidate.grade)}`}>{candidate.grade}</span>
-                                                    </td>
-                                                    <td className={`px-6 py-4 font-medium ${getSignalColor(candidate.signal)}`}>{candidate.signal}</td>
-                                                    <td className="px-6 py-4 text-sm">{candidate.rr}</td>
-                                                    <td className="px-6 py-4 text-sm font-semibold">${candidate.entry}</td>
-                                                    <td className="px-6 py-4 text-sm font-semibold text-red-600">${candidate.stop}</td>
-                                                    <td className="px-6 py-4 text-sm font-semibold text-green-600">${candidate.target}</td>
-                                                </tr>
-                                                {selectedRow?.id === candidate.id && (
-                                                    <tr className="bg-gray-50">
-                                                        <td colSpan="8" className="px-6 py-4">
-                                                            <div className="detail-panel">
-                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                                    <div>
-                                                                        <h4 className="font-semibold text-lg mb-4">{candidate.ticker} - Detailed Analysis</h4>
-                                                                        <p className="text-gray-600 mb-4">{candidate.description}</p>
-                                                                        <div className="space-y-2 text-sm">
-                                                                            <div><strong>Volume:</strong> {candidate.volume}</div>
-                                                                            <div><strong>MA20:</strong> ${candidate.ma20}</div>
-                                                                            <div><strong>RSI:</strong> {candidate.rsi}</div>
-                                                                            <div><strong>Last Update:</strong> {candidate.lastUpdate}</div>
-                                                                        </div>
-                                                                    </div>
-                                                                    <div>
-                                                                        <h4 className="font-semibold mb-4">Trade Summary</h4>
-                                                                        <div className="space-y-3 text-sm">
-                                                                            <div className="p-3 bg-blue-50 rounded-lg">
-                                                                                <div className="text-gray-600">Entry Price</div>
-                                                                                <div className="text-lg font-bold text-blue-600">${candidate.entry}</div>
-                                                                            </div>
-                                                                            <div className="p-3 bg-red-50 rounded-lg">
-                                                                                <div className="text-gray-600">Stop Loss</div>
-                                                                                <div className="text-lg font-bold text-red-600">${candidate.stop}</div>
-                                                                            </div>
-                                                                            <div className="p-3 bg-green-50 rounded-lg">
-                                                                                <div className="text-gray-600">Target Price</div>
-                                                                                <div className="text-lg font-bold text-green-600">${candidate.target}</div>
-                                                                            </div>
-                                                                            <div className="p-3 bg-gray-100 rounded-lg">
-                                                                                <div className="text-gray-600">Risk/Reward</div>
-                                                                                <div className="text-lg font-bold">{candidate.rr}</div>
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                )}
-                                            </React.Fragment>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
+                        {renderTab()}
                     </main>
+
+                    {/* Footer */}
+                    <footer className="text-center py-4 text-xs" style={{color: 'var(--text-muted)'}}>
+                        Alpha Station V70.7 Pro &middot; {marketSession.session}
+                    </footer>
                 </div>
             );
         }
