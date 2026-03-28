@@ -22,10 +22,12 @@ Endpoints:
 import os
 import json
 import math
+import time
 import threading
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, BackgroundTasks, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -321,11 +323,99 @@ def _bear_scan_wrapper() -> None:
         print(f"Bear scanner error: {e}")
 
 
+# ── Background Scheduler ──
+# Runs all scans automatically at defined intervals (like old Streamlit version)
+_scheduler_running = False
+_scan_status = {
+    "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
+    "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
+    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 20},
+    "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
+    "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
+    "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
+    "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 20},
+}
+
+def _run_scan_safe(name, func):
+    """Run a scan function safely, updating status."""
+    _scan_status[name]["running"] = True
+    try:
+        func()
+        _scan_status[name]["last_run"] = datetime.now().isoformat()
+    except Exception as e:
+        print(f"[Scheduler] {name} error: {e}")
+    finally:
+        _scan_status[name]["running"] = False
+
+def _scheduler_loop():
+    """Background loop that triggers all scans at their defined intervals."""
+    global _scheduler_running
+    print("[Scheduler] Starting automatic background scans...")
+
+    # Initial delay to let server fully start
+    time.sleep(5)
+
+    # Run all scans once immediately on startup
+    scan_tasks = [
+        ("early_movers", _early_movers_wrapper),
+        ("crash_monitor", _crash_monitor_wrapper),
+        ("btc_divergenz", _btc_divergenz_wrapper),
+        ("money_flow", _money_flow_wrapper),
+        ("bi_long", lambda: _bi_background_scan_wrapper("long")),
+        ("bi_short", lambda: _bi_background_scan_wrapper("short")),
+        ("bear", _bear_scan_wrapper),
+        ("biotech", _biotech_scan_wrapper),
+    ]
+
+    # Stagger initial scans to avoid API rate limits
+    for name, func in scan_tasks:
+        if not _scheduler_running:
+            break
+        print(f"[Scheduler] Initial scan: {name}")
+        _run_scan_safe(name, func)
+        time.sleep(10)  # 10s pause between initial scans
+
+    # Then loop with interval checks
+    last_run_times = {name: time.time() for name in _scan_status}
+
+    while _scheduler_running:
+        now = time.time()
+        for name, func in scan_tasks:
+            if not _scheduler_running:
+                break
+            interval_sec = _scan_status[name]["interval_min"] * 60
+            elapsed = now - last_run_times.get(name, 0)
+            if elapsed >= interval_sec and not _scan_status[name]["running"]:
+                print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
+                _run_scan_safe(name, func)
+                last_run_times[name] = time.time()
+                _scan_status[name]["next_run"] = datetime.fromtimestamp(
+                    last_run_times[name] + interval_sec
+                ).isoformat()
+                time.sleep(5)  # Small pause between scans
+        time.sleep(30)  # Check every 30 seconds
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Start background scheduler on startup, stop on shutdown."""
+    global _scheduler_running
+    _scheduler_running = True
+    scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
+    scheduler_thread.start()
+    print("[Scheduler] Background scan scheduler started")
+    yield
+    _scheduler_running = False
+    print("[Scheduler] Background scan scheduler stopped")
+
+
 # ── FastAPI App ──
 app = FastAPI(
     title="TradingBot Scanner API",
     description="REST API for trading scanner modules",
     version=API_VERSION,
+    lifespan=lifespan,
 )
 
 # CORS middleware for React frontend
@@ -364,6 +454,16 @@ def get_market_status():
         detail=detail,
         timestamp=datetime.now().isoformat(),
     )
+
+
+@app.get("/api/scan-status")
+def get_scan_status():
+    """Get status of all background scans (running, last_run, next_run)."""
+    return {
+        "scheduler_running": _scheduler_running,
+        "scans": _scan_status,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @app.get("/api/strategies", response_model=StrategiesResponse)
