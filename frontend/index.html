@@ -101,16 +101,47 @@
             position: fixed;
             right: 0;
             top: 0;
-            width: 420px;
             height: 100vh;
             background-color: var(--bg-secondary);
             border-left: 1px solid var(--border-color);
             overflow-y: auto;
             z-index: 1000;
             box-shadow: -2px 0 8px rgba(0,0,0,0.1);
+            transition: width 0.2s ease;
         }
+        .detail-sidebar.sidebar-normal { width: 480px; }
+        .detail-sidebar.sidebar-wide { width: 720px; }
+        .detail-sidebar.sidebar-full { width: 100vw; }
 
         .detail-sidebar-content { padding: 24px; }
+
+        .sidebar-resize-handle {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 6px;
+            height: 100%;
+            cursor: col-resize;
+            background: transparent;
+            z-index: 1001;
+            transition: background 0.2s;
+        }
+        .sidebar-resize-handle:hover, .sidebar-resize-handle.dragging {
+            background: var(--accent);
+            opacity: 0.5;
+        }
+
+        .sidebar-mode-btn {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-primary);
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+        }
+        .sidebar-mode-btn:hover { background: var(--accent); color: white; }
+        .sidebar-mode-btn.active { background: var(--accent); color: white; }
 
         .signal-factor { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
         .signal-dot { width: 12px; height: 12px; border-radius: 50%; }
@@ -131,10 +162,11 @@
         .signal-bullish { background-color: rgba(16, 185, 129, 0.2); color: var(--success); }
         .signal-bearish { background-color: rgba(220, 38, 38, 0.2); color: var(--danger); }
         .signal-neutral { background-color: rgba(107, 114, 128, 0.2); color: var(--text-muted); }
-        .signal-outperform { background-color: rgba(16, 185, 129, 0.2); color: var(--success); }
-        .signal-underperform { background-color: rgba(220, 38, 38, 0.2); color: var(--danger); }
-        .signal-correlated { background-color: rgba(37, 99, 235, 0.2); color: var(--accent); }
-        .signal-lightdiv { background-color: rgba(217, 119, 6, 0.2); color: var(--warning); }
+        .signal-kaufen { background-color: rgba(16, 185, 129, 0.2); color: var(--success); font-weight: 700; }
+        .signal-meiden { background-color: rgba(220, 38, 38, 0.2); color: var(--danger); font-weight: 700; }
+        .signal-abwarten { background-color: rgba(37, 99, 235, 0.2); color: var(--accent); }
+        .signal-beobachten { background-color: rgba(217, 119, 6, 0.2); color: var(--warning); }
+        .signal-btc { background-color: rgba(107, 114, 128, 0.2); color: var(--text-muted); }
 
         .importance-high { background-color: rgba(220, 38, 38, 0.2); color: var(--danger); }
         .importance-medium { background-color: rgba(217, 119, 6, 0.2); color: var(--warning); }
@@ -312,8 +344,41 @@ function DetailSidebar({ ticker, onClose }) {
     const [aiData, setAiData] = useState(null);
     const [aiLoading, setAiLoading] = useState(false);
     const [loading, setLoading] = useState(true);
+    const [sidebarMode, setSidebarMode] = useState('normal'); // normal, wide, full
+    const [customWidth, setCustomWidth] = useState(null);
     const chartContainer = useRef(null);
     const chart = useRef(null);
+    const sidebarRef = useRef(null);
+    const isDragging = useRef(false);
+
+    // Drag-Resize Handler
+    const startResize = (e) => {
+        e.preventDefault();
+        isDragging.current = true;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        const handleMouseMove = (e) => {
+            if (!isDragging.current) return;
+            const newWidth = window.innerWidth - e.clientX;
+            const clamped = Math.max(380, Math.min(newWidth, window.innerWidth - 40));
+            setCustomWidth(clamped);
+            setSidebarMode('custom');
+        };
+        const handleMouseUp = () => {
+            isDragging.current = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+        };
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+    };
+
+    const cycleMode = () => {
+        setCustomWidth(null);
+        setSidebarMode(prev => prev === 'normal' ? 'wide' : prev === 'wide' ? 'full' : 'normal');
+    };
 
     useEffect(() => {
         const fetchData = async () => {
@@ -347,14 +412,23 @@ function DetailSidebar({ ticker, onClose }) {
         }
     };
 
+    // Resize chart when sidebar width changes
+    const getChartWidth = () => {
+        if (customWidth) return customWidth - 60;
+        if (sidebarMode === 'full') return Math.min(window.innerWidth - 60, 900);
+        if (sidebarMode === 'wide') return 660;
+        return 430;
+    };
+
     useEffect(() => {
         if (!tickerData || !chartContainer.current) return;
         try {
             if (chart.current) chart.current.remove();
             const { createChart } = window.LightweightCharts;
+            const chartWidth = getChartWidth();
             chart.current = createChart(chartContainer.current, {
                 layout: { textColor: '#666', background: { color: '#fafafa' } },
-                width: 400, height: 220,
+                width: chartWidth, height: sidebarMode === 'full' ? 350 : 220,
                 timeScale: { timeVisible: true, secondsVisible: false }
             });
             const series = chart.current.addCandlestickSeries();
@@ -365,11 +439,11 @@ function DetailSidebar({ ticker, onClose }) {
             chart.current.timeScale().fitContent();
         } catch (err) { console.error('Chart error:', err); }
         return () => { if (chart.current) { chart.current.remove(); chart.current = null; } };
-    }, [tickerData]);
+    }, [tickerData, sidebarMode, customWidth]);
 
     if (loading) {
         return (
-            <div className="detail-sidebar">
+            <div className={`detail-sidebar sidebar-${sidebarMode}`} style={customWidth ? {width: customWidth + 'px'} : {}}>
                 <div className="detail-sidebar-content flex items-center justify-center h-full">
                     <div className="loading-spinner"></div>
                 </div>
@@ -382,6 +456,8 @@ function DetailSidebar({ ticker, onClose }) {
     const change = d.change_1d || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
+    const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
+    const modeLabel = sidebarMode === 'normal' ? 'Normal' : sidebarMode === 'wide' ? 'Breit' : 'Vollbild';
 
     // Simple markdown-to-HTML: bold, headers, line breaks
     const renderMarkdown = (text) => {
@@ -392,8 +468,14 @@ function DetailSidebar({ ticker, onClose }) {
             .replace(/\n/g, '<br/>');
     };
 
+    // Use grid layout in wide/full mode
+    const isWide = sidebarMode === 'wide' || sidebarMode === 'full' || (customWidth && customWidth > 600);
+
     return (
-        <div className="detail-sidebar">
+        <div ref={sidebarRef} className={`detail-sidebar sidebar-${sidebarMode}`} style={customWidth ? {width: customWidth + 'px', transition: 'none'} : {}}>
+            {/* Drag Handle */}
+            <div className="sidebar-resize-handle" onMouseDown={startResize}></div>
+
             <div className="detail-sidebar-content" style={{ overflowY: 'auto', maxHeight: '100vh', paddingBottom: '40px' }}>
                 {/* Header */}
                 <div className="flex justify-between items-start mb-4">
@@ -403,7 +485,12 @@ function DetailSidebar({ ticker, onClose }) {
                             ${price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
                     </div>
-                    <button onClick={onClose} className="text-2xl font-bold hover:text-red-500">×</button>
+                    <div className="flex gap-2 items-center">
+                        <button onClick={cycleMode} className="sidebar-mode-btn" title={`Modus: ${modeLabel}`}>
+                            {sidebarMode === 'normal' ? '↔' : sidebarMode === 'wide' ? '⛶' : '▪'}
+                        </button>
+                        <button onClick={onClose} className="text-2xl font-bold hover:text-red-500">×</button>
+                    </div>
                 </div>
 
                 {/* Grade + Confluence */}
@@ -422,6 +509,9 @@ function DetailSidebar({ ticker, onClose }) {
 
                 {/* Chart */}
                 <div ref={chartContainer} className="chart-container mb-4"></div>
+
+                {/* Content Grid - 2 columns when wide */}
+                <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
 
                 {/* Price Action */}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
@@ -525,7 +615,9 @@ function DetailSidebar({ ticker, onClose }) {
                     </div>
                 )}
 
-                {/* AI Analysis Button */}
+                </div>{/* End Content Grid */}
+
+                {/* AI Analysis Button - full width */}
                 <div className="mb-4">
                     {!aiData && (
                         <button onClick={loadAiAnalysis} disabled={aiLoading} className="button" style={{ width: '100%' }}>
@@ -954,10 +1046,11 @@ function BTCDivergenzTab({ onSelectTicker }) {
     }, []);
 
     const getSignalClass = (signal) => {
-        if (signal.includes('OUTPERFORM')) return 'signal-outperform';
-        if (signal.includes('UNDERPERFORM')) return 'signal-underperform';
-        if (signal.includes('KORRELIERT')) return 'signal-correlated';
-        if (signal.includes('DIV')) return 'signal-lightdiv';
+        if (signal.includes('KAUFEN')) return 'signal-kaufen';
+        if (signal.includes('MEIDEN')) return 'signal-meiden';
+        if (signal.includes('ABWARTEN')) return 'signal-abwarten';
+        if (signal.includes('BEOBACHTEN')) return 'signal-beobachten';
+        if (signal.includes('BTC')) return 'signal-btc';
         return 'signal-neutral';
     };
 

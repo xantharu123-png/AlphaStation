@@ -1194,20 +1194,20 @@ def _btc_divergenz_wrapper() -> None:
                 if r["ticker"] != "X:BTCUSD":
                     r["div_1d"] = round(r["change_1d"] - btc_data["change_1d"], 2)
                     r["div_5d"] = round(r["change_5d"] - btc_data["change_5d"], 2)
-                    # Signal
+                    # Signal - actionable Labels
                     div = r["div_5d"]
                     if div > 5:
-                        r["signal"] = "OUTPERFORM"
+                        r["signal"] = "KAUFEN"
                     elif div < -5:
-                        r["signal"] = "UNDERPERFORM"
+                        r["signal"] = "MEIDEN"
                     elif abs(div) < 2:
-                        r["signal"] = "KORRELIERT"
+                        r["signal"] = "ABWARTEN"
                     else:
-                        r["signal"] = "LEICHTE DIV."
+                        r["signal"] = "BEOBACHTEN"
                 else:
                     r["div_1d"] = 0
                     r["div_5d"] = 0
-                    r["signal"] = "REFERENZ"
+                    r["signal"] = "BTC"
 
         save_cache_file(BTC_DIVERGENZ_CACHE, results)
     except Exception as e:
