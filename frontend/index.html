@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alpha Station - Trading Scanner</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React, ReactDOM, Babel -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        * {
+            font-family: 'Inter', sans-serif;
+        }
+
+        :root {
+            --bg-primary: #f8f9fb;
+            --bg-secondary: #ffffff;
+            --border-color: #e5e7eb;
+            --text-primary: #1a1a2e;
+            --text-muted: #6b7280;
+            --accent: #2563eb;
+            --success: #059669;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --grade-s: #7c3aed;
+            --grade-a: #059669;
+            --grade-b: #2563eb;
+            --grade-c: #d97706;
+            --score-start: #f59e0b;
+            --score-end: #f97316;
+        }
+
+        [data-theme="dark"] {
+            --bg-primary: #0f1117;
+            --bg-secondary: #161822;
+            --border-color: #1e2130;
+            --text-primary: #e2e8f0;
+            --text-muted: #8b92a6;
+            --accent: #3b82f6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        .card {
+            background-color: var(--bg-secondary);
+            border-color: var(--border-color);
+            transition: background-color 0.3s, border-color 0.3s;
+        }
+
+        .table-row {
+            border-color: var(--border-color);
+            transition: background-color 0.2s;
+        }
+
+        .table-row:hover {
+            background-color: var(--bg-secondary);
+        }
+
+        [data-theme="dark"] .table-row:hover {
+            background-color: rgba(22, 24, 34, 0.5);
+        }
+
+        .metric-card {
+            background-color: var(--bg-secondary);
+            border-color: var(--border-color);
+            border: 1px solid;
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .score-badge {
+            background: linear-gradient(135deg, var(--score-start) 0%, var(--score-end) 100%);
+            color: white;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .grade-badge {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            color: white;
+        }
+
+        .grade-s { background-color: var(--grade-s); }
+        .grade-a { background-color: var(--grade-a); }
+        .grade-b { background-color: var(--grade-b); }
+        .grade-c { background-color: var(--grade-c); }
+
+        .border-left-s { border-left: 3px solid var(--grade-s); }
+        .border-left-a { border-left: 3px solid var(--grade-a); }
+        .border-left-b { border-left: 3px solid var(--grade-b); }
+        .border-left-c { border-left: 3px solid var(--grade-c); }
+
+        .tab-active {
+            border-bottom: 2px solid var(--accent);
+            color: var(--accent);
+        }
+
+        .tab-inactive {
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab-inactive:hover {
+            color: var(--text-primary);
+        }
+
+        .icon-button {
+            cursor: pointer;
+            transition: transform 0.2s, color 0.2s;
+        }
+
+        .icon-button:hover {
+            transform: scale(1.1);
+            color: var(--accent);
+        }
+
+        .settings-panel {
+            background-color: var(--bg-secondary);
+            border-color: var(--border-color);
+            border: 1px solid;
+            border-radius: 8px;
+            padding: 20px;
+            animation: slideInRight 0.3s ease-out;
+        }
+
+        @keyframes slideInRight {
+            from {
+                opacity: 0;
+                transform: translateX(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .detail-panel {
+            background-color: var(--bg-secondary);
+            border-color: var(--border-color);
+            border: 1px solid;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 16px;
+            animation: slideDown 0.3s ease-out;
+        }
+
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--border-color);
+            transition: 0.3s;
+            border-radius: 24px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: var(--accent);
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(20px);
+        }
+
+        .status-online {
+            background-color: var(--success);
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // Mock Data
+        const MOCK_CANDIDATES = [
+            {
+                id: 1,
+                ticker: 'NVDA',
+                score: 92,
+                grade: 'S',
+                signal: 'BUY',
+                rr: '1:3.2',
+                entry: '128.50',
+                stop: '125.20',
+                target: '141.80',
+                lastUpdate: 'vor 2 Min',
+                volume: '45.2M',
+                ma20: '127.80',
+                rsi: 68,
+                description: 'NVIDIA showing strong bullish momentum with golden cross pattern confirmed.',
+            },
+            {
+                id: 2,
+                ticker: 'TSLA',
+                score: 87,
+                grade: 'A',
+                signal: 'BUY',
+                rr: '1:2.8',
+                entry: '245.30',
+                stop: '242.10',
+                target: '313.40',
+                lastUpdate: 'vor 5 Min',
+                volume: '52.1M',
+                ma20: '244.50',
+                rsi: 65,
+                description: 'Tesla breaking through resistance with increasing volume. Good setup.',
+            },
+            {
+                id: 3,
+                ticker: 'AAPL',
+                score: 76,
+                grade: 'A',
+                signal: 'BUY',
+                rr: '1:2.5',
+                entry: '182.40',
+                stop: '180.20',
+                target: '213.80',
+                lastUpdate: 'vor 1 Min',
+                volume: '38.5M',
+                ma20: '181.90',
+                rsi: 62,
+                description: 'Apple consolidating near MA20 with positive divergence.',
+            },
+            {
+                id: 4,
+                ticker: 'MSFT',
+                score: 69,
+                grade: 'B',
+                signal: 'WATCH',
+                rr: '1:2.1',
+                entry: '415.20',
+                stop: '411.80',
+                target: '480.30',
+                lastUpdate: 'vor 8 Min',
+                volume: '28.3M',
+                ma20: '416.50',
+                rsi: 58,
+                description: 'Microsoft approaching key support level. Watch for bounce.',
+            },
+            {
+                id: 5,
+                ticker: 'AMZN',
+                score: 82,
+                grade: 'A',
+                signal: 'BUY',
+                rr: '1:3.0',
+                entry: '198.75',
+                stop: '195.40',
+                target: '244.30',
+                lastUpdate: 'vor 3 Min',
+                volume: '41.7M',
+                ma20: '198.20',
+                rsi: 66,
+                description: 'Amazon breaking previous resistance with strong buying pressure.',
+            },
+            {
+                id: 6,
+                ticker: 'GOOGL',
+                score: 58,
+                grade: 'B',
+                signal: 'WATCH',
+                rr: '1:1.8',
+                entry: '165.30',
+                stop: '162.90',
+                target: '183.40',
+                lastUpdate: 'vor 12 Min',
+                volume: '22.1M',
+                ma20: '164.80',
+                rsi: 51,
+                description: 'Alphabet consolidating with neutral momentum.',
+            },
+            {
+                id: 7,
+                ticker: 'META',
+                score: 79,
+                grade: 'A',
+                signal: 'BUY',
+                rr: '1:2.9',
+                entry: '528.40',
+                stop: '524.10',
+                target: '605.30',
+                lastUpdate: 'vor 4 Min',
+                volume: '35.4M',
+                ma20: '527.60',
+                rsi: 64,
+                description: 'Meta showing strong recovery with institutional buying.',
+            },
+            {
+                id: 8,
+                ticker: 'CRM',
+                score: 71,
+                grade: 'B',
+                signal: 'BUY',
+                rr: '1:2.3',
+                entry: '312.80',
+                stop: '309.50',
+                target: '385.20',
+                lastUpdate: 'vor 6 Min',
+                volume: '18.9M',
+                ma20: '311.40',
+                rsi: 59,
+                description: 'Salesforce breaking out from consolidation zone.',
+            },
+            {
+                id: 9,
+                ticker: 'NFLX',
+                score: 65,
+                grade: 'B',
+                signal: 'WATCH',
+                rr: '1:2.0',
+                entry: '289.50',
+                stop: '286.20',
+                target: '338.20',
+                lastUpdate: 'vor 9 Min',
+                volume: '24.6M',
+                ma20: '288.90',
+                rsi: 55,
+                description: 'Netflix near support with watching for reversal signals.',
+            },
+            {
+                id: 10,
+                ticker: 'UBER',
+                score: 85,
+                grade: 'A',
+                signal: 'BUY',
+                rr: '1:2.7',
+                entry: '92.30',
+                stop: '89.80',
+                target: '117.20',
+                lastUpdate: 'vor 2 Min',
+                volume: '31.2M',
+                ma20: '91.50',
+                rsi: 63,
+                description: 'Uber showing strong uptrend with support holding well.',
+            },
+        ];
+
+        function AlphaStation() {
+            const [theme, setTheme] = useState('light');
+            const [activeTab, setActiveTab] = useState('Scanner');
+            const [selectedRow, setSelectedRow] = useState(null);
+            const [showSettings, setShowSettings] = useState(false);
+            const [candidates, setCandidates] = useState(MOCK_CANDIDATES);
+            const [settings, setSettings] = useState({
+                market: 'USA',
+                strategy: 'Momentum',
+                timeframe: '1H',
+            });
+            const [lastScan, setLastScan] = useState(2);
+
+            // Auto-increment last scan time
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    setLastScan(prev => (prev + 1) % 60);
+                }, 60000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const toggleTheme = () => {
+                setTheme(t => t === 'light' ? 'dark' : 'light');
+                document.documentElement.setAttribute('data-theme', theme === 'light' ? 'dark' : 'light');
+            };
+
+            const getGradeBorder = (grade) => {
+                const map = { 'S': 'border-left-s', 'A': 'border-left-a', 'B': 'border-left-b', 'C': 'border-left-c' };
+                return map[grade] || '';
+            };
+
+            const getGradeBadge = (grade) => {
+                const map = { 'S': 'grade-s', 'A': 'grade-a', 'B': 'grade-b', 'C': 'grade-c' };
+                return map[grade] || '';
+            };
+
+            const getSignalColor = (signal) => {
+                if (signal === 'BUY') return 'text-green-600';
+                if (signal === 'SELL') return 'text-red-600';
+                return 'text-yellow-600';
+            };
+
+            const tabs = ['Scanner', 'BI Scanner', 'Biotech', 'BTC-Divergenz', 'Early Movers', 'Short Scanner', 'Money Flow', 'Kalender', 'Crash Monitor'];
+
+            const gradeCount = {
+                S: candidates.filter(c => c.grade === 'S').length,
+                A: candidates.filter(c => c.grade === 'A').length,
+            };
+
+            const avgScore = Math.round(candidates.reduce((sum, c) => sum + c.score, 0) / candidates.length);
+
+            return (
+                <div data-theme={theme} className="min-h-screen bg-gray-50">
+                    {/* Header */}
+                    <header className="card border-b border-gray-200 sticky top-0 z-50">
+                        <div className="max-w-full px-6 py-4 flex items-center justify-between">
+                            <h1 className="text-2xl font-bold">Alpha Station</h1>
+                            <div className="flex items-center gap-6">
+                                <div className="text-sm text-gray-600">
+                                    <div className="font-semibold">V70.7 Pro</div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="status-online"></span>
+                                        <span>Server Online</span>
+                                    </div>
+                                    <div>Letzter Scan: vor {lastScan} Min</div>
+                                </div>
+                                <button
+                                    onClick={toggleTheme}
+                                    className="icon-button p-2"
+                                    title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+                                >
+                                    {theme === 'light' ? '🌙' : '☀️'}
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Tab Navigation */}
+                    <nav className="card border-b border-gray-200 px-6 py-4 sticky top-16 z-40">
+                        <div className="flex gap-8 overflow-x-auto pb-4">
+                            {tabs.map(tab => (
+                                <button
+                                    key={tab}
+                                    onClick={() => setActiveTab(tab)}
+                                    className={`tab-inactive font-medium whitespace-nowrap pb-2 ${
+                                        activeTab === tab ? 'tab-active' : ''
+                                    }`}
+                                >
+                                    {tab}
+                                </button>
+                            ))}
+                        </div>
+                    </nav>
+
+                    {/* Main Content */}
+                    <main className="max-w-full px-6 py-6">
+                        {/* Metric Cards */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                            <div className="metric-card">
+                                <div className="text-sm font-medium text-gray-600 mb-2">KANDIDATEN</div>
+                                <div className="text-3xl font-bold mb-1">{candidates.length}</div>
+                                <div className="text-sm text-green-600 font-medium">+3 seit letztem Scan</div>
+                            </div>
+
+                            <div className="metric-card">
+                                <div className="text-sm font-medium text-gray-600 mb-2">GRADE S/A</div>
+                                <div className="text-3xl font-bold mb-1">{gradeCount.S + gradeCount.A}</div>
+                                <div className="text-sm text-gray-600">Top-Setups</div>
+                            </div>
+
+                            <div className="metric-card">
+                                <div className="text-sm font-medium text-gray-600 mb-2">DURCHSCHN. SCORE</div>
+                                <div className="text-3xl font-bold mb-1">{avgScore}</div>
+                                <div className="text-sm text-green-600 font-medium">+5.2 vs gestern</div>
+                            </div>
+
+                            <div className="metric-card">
+                                <div className="text-sm font-medium text-gray-600 mb-2">NÄCHSTER SCAN</div>
+                                <div className="text-3xl font-bold mb-1">18 Min</div>
+                                <div className="text-sm text-gray-600">in ET</div>
+                            </div>
+                        </div>
+
+                        {/* Settings and Table Header */}
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-lg font-semibold">Trading Candidates</h2>
+                            <button
+                                onClick={() => setShowSettings(!showSettings)}
+                                className="icon-button p-2"
+                                title="Settings"
+                            >
+                                ⚙️
+                            </button>
+                        </div>
+
+                        {/* Settings Panel */}
+                        {showSettings && (
+                            <div className="settings-panel mb-6">
+                                <h3 className="text-lg font-semibold mb-4">Settings</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                    <div>
+                                        <label className="block text-sm font-medium mb-2">Market</label>
+                                        <select
+                                            value={settings.market}
+                                            onChange={(e) => setSettings({...settings, market: e.target.value})}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                        >
+                                            <option>USA</option>
+                                            <option>EUR</option>
+                                            <option>ASIA</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-2">Strategy</label>
+                                        <select
+                                            value={settings.strategy}
+                                            onChange={(e) => setSettings({...settings, strategy: e.target.value})}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                        >
+                                            <option>Momentum</option>
+                                            <option>Trend</option>
+                                            <option>Mean Reversion</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-2">Timeframe</label>
+                                        <select
+                                            value={settings.timeframe}
+                                            onChange={(e) => setSettings({...settings, timeframe: e.target.value})}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                                        >
+                                            <option>5M</option>
+                                            <option>15M</option>
+                                            <option>1H</option>
+                                            <option>4H</option>
+                                            <option>1D</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Table */}
+                        <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead>
+                                        <tr className="border-b border-gray-200 bg-gray-50">
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Ticker</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Score</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Grade</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Signal</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">R:R</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Entry</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Stop</th>
+                                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Target</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {candidates.map(candidate => (
+                                            <React.Fragment key={candidate.id}>
+                                                <tr
+                                                    onClick={() => setSelectedRow(selectedRow?.id === candidate.id ? null : candidate)}
+                                                    className={`table-row border-b cursor-pointer ${getGradeBorder(candidate.grade)}`}
+                                                >
+                                                    <td className="px-6 py-4 font-semibold text-blue-600">{candidate.ticker}</td>
+                                                    <td className="px-6 py-4">
+                                                        <span className="score-badge">{candidate.score}</span>
+                                                    </td>
+                                                    <td className="px-6 py-4">
+                                                        <span className={`grade-badge ${getGradeBadge(candidate.grade)}`}>{candidate.grade}</span>
+                                                    </td>
+                                                    <td className={`px-6 py-4 font-medium ${getSignalColor(candidate.signal)}`}>{candidate.signal}</td>
+                                                    <td className="px-6 py-4 text-sm">{candidate.rr}</td>
+                                                    <td className="px-6 py-4 text-sm font-semibold">${candidate.entry}</td>
+                                                    <td className="px-6 py-4 text-sm font-semibold text-red-600">${candidate.stop}</td>
+                                                    <td className="px-6 py-4 text-sm font-semibold text-green-600">${candidate.target}</td>
+                                                </tr>
+                                                {selectedRow?.id === candidate.id && (
+                                                    <tr className="bg-gray-50">
+                                                        <td colSpan="8" className="px-6 py-4">
+                                                            <div className="detail-panel">
+                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                                    <div>
+                                                                        <h4 className="font-semibold text-lg mb-4">{candidate.ticker} - Detailed Analysis</h4>
+                                                                        <p className="text-gray-600 mb-4">{candidate.description}</p>
+                                                                        <div className="space-y-2 text-sm">
+                                                                            <div><strong>Volume:</strong> {candidate.volume}</div>
+                                                                            <div><strong>MA20:</strong> ${candidate.ma20}</div>
+                                                                            <div><strong>RSI:</strong> {candidate.rsi}</div>
+                                                                            <div><strong>Last Update:</strong> {candidate.lastUpdate}</div>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <h4 className="font-semibold mb-4">Trade Summary</h4>
+                                                                        <div className="space-y-3 text-sm">
+                                                                            <div className="p-3 bg-blue-50 rounded-lg">
+                                                                                <div className="text-gray-600">Entry Price</div>
+                                                                                <div className="text-lg font-bold text-blue-600">${candidate.entry}</div>
+                                                                            </div>
+                                                                            <div className="p-3 bg-red-50 rounded-lg">
+                                                                                <div className="text-gray-600">Stop Loss</div>
+                                                                                <div className="text-lg font-bold text-red-600">${candidate.stop}</div>
+                                                                            </div>
+                                                                            <div className="p-3 bg-green-50 rounded-lg">
+                                                                                <div className="text-gray-600">Target Price</div>
+                                                                                <div className="text-lg font-bold text-green-600">${candidate.target}</div>
+                                                                            </div>
+                                                                            <div className="p-3 bg-gray-100 rounded-lg">
+                                                                                <div className="text-gray-600">Risk/Reward</div>
+                                                                                <div className="text-lg font-bold">{candidate.rr}</div>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </main>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<AlphaStation />);
+    </script>
+</body>
+</html>
