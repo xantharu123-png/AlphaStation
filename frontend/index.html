@@ -316,6 +316,66 @@ function useSortable(data, defaultKey = null) {
     return { sorted, toggleSort, sortKey, sortDesc };
 }
 
+// SchedulerStatus Component
+function SchedulerStatus({ status }) {
+    const [showDetails, setShowDetails] = useState(false);
+
+    if (!status) return null;
+
+    const getRelativeTime = (timestamp) => {
+        if (!timestamp) return 'nie';
+        const date = new Date(timestamp);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+
+        if (diffMins < 1) return 'gerade eben';
+        if (diffMins < 60) return `vor ${diffMins} min`;
+        if (diffHours < 24) return `vor ${diffHours}h`;
+        return date.toLocaleDateString('de-DE');
+    };
+
+    // API returns scans as object {bi_long: {running, last_run, next_run, interval_min}, ...}
+    const scanEntries = status.scans ? Object.entries(status.scans) : [];
+    const activeCount = scanEntries.length;
+    const runningCount = scanEntries.filter(([_, s]) => s.running).length;
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Movers', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'New Listing', volume_spikes: 'Volume Spikes' };
+
+    return (
+        <div className="flex items-center gap-2">
+            <div className="relative">
+                <button
+                    onClick={() => setShowDetails(!showDetails)}
+                    className="flex items-center gap-2 text-sm px-3 py-1 rounded bg-blue-100 text-blue-700 hover:bg-blue-200"
+                >
+                    <span>{runningCount > 0 ? '⏳' : '🔄'}</span>
+                    <span>Auto-Scans: {activeCount}{runningCount > 0 ? ` (${runningCount} aktiv)` : ''}</span>
+                </button>
+
+                {showDetails && (
+                    <div className="absolute top-full right-0 mt-2 bg-white border border-gray-200 rounded shadow-lg z-50 p-4" style={{minWidth: '320px'}}>
+                        <div className="text-sm font-semibold mb-3">
+                            Scan-Scheduler {status.scheduler_running ? '(läuft)' : '(gestoppt)'}
+                        </div>
+                        {scanEntries.map(([key, scan]) => (
+                            <div key={key} className="text-xs border-b border-gray-100 pb-2 mb-2 last:border-0 last:mb-0">
+                                <div className="flex justify-between">
+                                    <span className="font-medium">{scanNames[key] || key}</span>
+                                    <span className={scan.running ? 'text-orange-500 font-semibold' : 'text-green-600'}>
+                                        {scan.running ? '⏳ läuft' : `alle ${scan.interval_min} min`}
+                                    </span>
+                                </div>
+                                <div className="text-gray-500 mt-1">Letzter: {getRelativeTime(scan.last_run)} | Nächster: {getRelativeTime(scan.next_run)}</div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 // ScanControl Component
 function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null }) {
     return (
@@ -643,6 +703,8 @@ function App() {
     const [selectedTicker, setSelectedTicker] = useState(null);
     const [serverStatus, setServerStatus] = useState(true);
     const [activeScans, setActiveScans] = useState(0);
+    const [scanCache, setScanCache] = useState({});
+    const [schedulerStatus, setSchedulerStatus] = useState(null);
 
     // Check server status
     useEffect(() => {
@@ -658,6 +720,27 @@ function App() {
         const interval = setInterval(checkServer, 30000);
         return () => clearInterval(interval);
     }, []);
+
+    // Fetch scheduler status
+    useEffect(() => {
+        const fetchSchedulerStatus = async () => {
+            try {
+                const response = await fetch(`${API}/api/scan-status`);
+                if (response.ok) {
+                    setSchedulerStatus(await response.json());
+                }
+            } catch (err) {
+                console.error('Error fetching scheduler status:', err);
+            }
+        };
+        fetchSchedulerStatus();
+        const interval = setInterval(fetchSchedulerStatus, 30000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const updateScanCache = (key, data) => {
+        setScanCache(prev => ({...prev, [key]: data}));
+    };
 
     // Apply dark mode
     useEffect(() => {
@@ -693,6 +776,7 @@ function App() {
                     <div className="flex justify-between items-center mb-4">
                         <h1 className="text-2xl font-bold">Alpha Station</h1>
                         <div className="flex items-center gap-4">
+                            <SchedulerStatus status={schedulerStatus} />
                             <div className="flex items-center gap-2">
                                 <span className={`status-dot ${serverStatus ? 'status-online' : 'status-offline'}`}></span>
                                 <span className="text-sm">{serverStatus ? 'Server Online' : 'Server Offline'}</span>
@@ -727,20 +811,20 @@ function App() {
 
             {/* Main Content */}
             <div className="max-w-full px-6 py-6">
-                {activeTab === 'scanner' && <ScannerTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'biotech' && <BiotechTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={setSelectedTicker} />}
+                {activeTab === 'scanner' && <ScannerTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'biotech' && <BiotechTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'kalender' && <KalenderTab />}
-                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={setSelectedTicker} />}
+                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'backtest' && <BacktestTab />}
                 {activeTab === 'strategie-guide' && <StrategieGuideTab />}
-                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={setSelectedTicker} />}
-                {activeTab === 'suche' && <SucheTab onSelectTicker={setSelectedTicker} />}
+                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'suche' && <SucheTab onSelectTicker={setSelectedTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
             </div>
 
             {/* Detail Sidebar */}
@@ -755,30 +839,35 @@ function App() {
 }
 
 // Scanner Tab
-function ScannerTab({ onSelectTicker }) {
+function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [strategy, setStrategy] = useState('');
     const [marketType, setMarketType] = useState('stocks');
     const [isScanning, setIsScanning] = useState(false);
-    const [results, setResults] = useState([]);
+    const [results, setResults] = useState(scanCache.scanner_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
 
     // Load cached results on mount
     useEffect(() => {
-        const loadCached = async () => {
-            try {
-                const response = await fetch(`${API}/api/scan-results?direction=long`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setResults(data.data || []);
-                }
-            } catch (err) { console.error('Error:', err); }
-        };
-        loadCached();
-    }, []);
+        if (scanCache.scanner_results && scanCache.scanner_results.length > 0) {
+            setResults(scanCache.scanner_results);
+        } else {
+            const loadCached = async () => {
+                try {
+                    const response = await fetch(`${API}/api/scan-results?direction=long`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                    }
+                } catch (err) { console.error('Error:', err); }
+            };
+            loadCached();
+        }
+    }, [scanCache.scanner_results]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('scanner_scanning', true);
         try {
             const response = await fetch(`${API}/api/scan`, { method: 'POST', body: JSON.stringify({ strategy, market_type: marketType }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
@@ -791,15 +880,18 @@ function ScannerTab({ onSelectTicker }) {
                         if (res.ok) {
                             const data = await res.json();
                             setResults(data.data || []);
+                            updateScanCache('scanner_results', data.data || []);
                             if (window.addToast) window.addToast('Scan abgeschlossen', 'success');
                         }
                     } catch (e) { console.error(e); }
                     setIsScanning(false);
+                    updateScanCache('scanner_scanning', false);
                 }, 15000);
-            } else { setIsScanning(false); }
+            } else { setIsScanning(false); updateScanCache('scanner_scanning', false); }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
             setIsScanning(false);
+            updateScanCache('scanner_scanning', false);
         }
     };
 
@@ -863,41 +955,49 @@ function ScannerTab({ onSelectTicker }) {
 }
 
 // BI Scanner Tab
-function BIScannerTab({ onSelectTicker }) {
+function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [direction, setDirection] = useState('long');
     const [isScanning, setIsScanning] = useState(false);
-    const [results, setResults] = useState([]);
+    const [results, setResults] = useState(scanCache.bi_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('bi_scanning', true);
         try {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
                 const data = await response.json();
                 setResults(data.data || []);
+                updateScanCache('bi_results', data.data || []);
             }
         } catch (err) {
             console.error('Error:', err);
         } finally {
             setIsScanning(false);
+            updateScanCache('bi_scanning', false);
         }
     };
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setResults(data.data || []);
+        if (scanCache.bi_results && scanCache.bi_results.length > 0) {
+            setResults(scanCache.bi_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('bi_results', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, [direction]);
+            };
+            fetchResults();
+        }
+    }, [direction, scanCache.bi_results]);
 
     return (
         <div className="space-y-6">
@@ -942,40 +1042,48 @@ function BIScannerTab({ onSelectTicker }) {
 }
 
 // Biotech Tab
-function BiotechTab({ onSelectTicker }) {
+function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [isScanning, setIsScanning] = useState(false);
-    const [results, setResults] = useState([]);
+    const [results, setResults] = useState(scanCache.biotech_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('biotech_scanning', true);
         try {
             const response = await fetch(`${API}/api/biotech-scan`, { method: 'POST' });
             if (response.ok) {
                 const data = await response.json();
                 setResults(data.data || []);
+                updateScanCache('biotech_results', data.data || []);
             }
         } catch (err) {
             console.error('Error:', err);
         } finally {
             setIsScanning(false);
+            updateScanCache('biotech_scanning', false);
         }
     };
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/biotech-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setResults(data.data || []);
+        if (scanCache.biotech_results && scanCache.biotech_results.length > 0) {
+            setResults(scanCache.biotech_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/biotech-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('biotech_results', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.biotech_results]);
 
     return (
         <div className="space-y-6">
@@ -1010,40 +1118,48 @@ function BiotechTab({ onSelectTicker }) {
 }
 
 // BTC-Divergenz Tab
-function BTCDivergenzTab({ onSelectTicker }) {
+function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [isScanning, setIsScanning] = useState(false);
-    const [results, setResults] = useState([]);
+    const [results, setResults] = useState(scanCache.btc_divergenz_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('btc_divergenz_scanning', true);
         try {
             const response = await fetch(`${API}/api/btc-divergenz-scan`, { method: 'POST' });
             if (response.ok) {
                 const data = await response.json();
                 setResults(data.data || []);
+                updateScanCache('btc_divergenz_results', data.data || []);
             }
         } catch (err) {
             console.error('Error:', err);
         } finally {
             setIsScanning(false);
+            updateScanCache('btc_divergenz_scanning', false);
         }
     };
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/btc-divergenz-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setResults(data.data || []);
+        if (scanCache.btc_divergenz_results && scanCache.btc_divergenz_results.length > 0) {
+            setResults(scanCache.btc_divergenz_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/btc-divergenz-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('btc_divergenz_results', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.btc_divergenz_results]);
 
     const getSignalClass = (signal) => {
         if (signal.includes('KAUFEN')) return 'signal-kaufen';
@@ -1093,50 +1209,63 @@ function BTCDivergenzTab({ onSelectTicker }) {
 }
 
 // Early Movers Tab
-function EarlyMoversTab({ onSelectTicker }) {
+function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [subTab, setSubTab] = useState('winners');
-    const [winnerResults, setWinnerResults] = useState([]);
-    const [loserResults, setLoserResults] = useState([]);
-    const [spikeResults, setSpikeResults] = useState([]);
+    const [winnerResults, setWinnerResults] = useState(scanCache.em_winners || []);
+    const [loserResults, setLoserResults] = useState(scanCache.em_losers || []);
+    const [spikeResults, setSpikeResults] = useState(scanCache.em_spikes || []);
     const [isScanning, setIsScanning] = useState(false);
     const { sorted: sortedWinners, toggleSort: toggleWinnerSort, sortKey: winnerSortKey } = useSortable(winnerResults, 'change_pct');
     const { sorted: sortedLosers, toggleSort: toggleLoserSort, sortKey: loserSortKey } = useSortable(loserResults, 'change_pct');
     const { sorted: sortedSpikes, toggleSort: toggleSpikeSort, sortKey: spikeSortKey } = useSortable(spikeResults, 'volume');
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/early-movers-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const em = (data.data && data.data[0]) || {};
-                    setWinnerResults(em.gainers || []);
-                    setLoserResults(em.losers || []);
+        if (scanCache.em_winners && scanCache.em_winners.length > 0) {
+            setWinnerResults(scanCache.em_winners);
+            setLoserResults(scanCache.em_losers || []);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/early-movers-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const em = (data.data && data.data[0]) || {};
+                        setWinnerResults(em.gainers || []);
+                        setLoserResults(em.losers || []);
+                        updateScanCache('em_winners', em.gainers || []);
+                        updateScanCache('em_losers', em.losers || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.em_winners]);
 
     useEffect(() => {
-        const fetchSpikes = async () => {
-            try {
-                const response = await fetch(`${API}/api/volume-spikes-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setSpikeResults(data.data || []);
+        if (scanCache.em_spikes && scanCache.em_spikes.length > 0) {
+            setSpikeResults(scanCache.em_spikes);
+        } else {
+            const fetchSpikes = async () => {
+                try {
+                    const response = await fetch(`${API}/api/volume-spikes-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setSpikeResults(data.data || []);
+                        updateScanCache('em_spikes', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchSpikes();
-    }, []);
+            };
+            fetchSpikes();
+        }
+    }, [scanCache.em_spikes]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('em_scanning', true);
         try {
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1147,6 +1276,7 @@ function EarlyMoversTab({ onSelectTicker }) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
         } finally {
             setIsScanning(false);
+            updateScanCache('em_scanning', false);
         }
     };
 
@@ -1235,33 +1365,41 @@ function EarlyMoversTab({ onSelectTicker }) {
 }
 
 // Short Scanner Tab
-function ShortScannerTab({ onSelectTicker }) {
+function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [subTab, setSubTab] = useState('inverse-etfs');
-    const [inverseETFs, setInverseETFs] = useState([]);
-    const [breakdownStocks, setBreakdownStocks] = useState([]);
+    const [inverseETFs, setInverseETFs] = useState(scanCache.short_inverse || []);
+    const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
     const [isScanning, setIsScanning] = useState(false);
     const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'ticker');
     const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'ticker');
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/bear-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const bear = (data.data && data.data[0]) || {};
-                    setInverseETFs(bear.inverse_etfs || []);
-                    setBreakdownStocks(bear.breakdown_stocks || []);
+        if (scanCache.short_inverse && scanCache.short_inverse.length > 0) {
+            setInverseETFs(scanCache.short_inverse);
+            setBreakdownStocks(scanCache.short_breakdown || []);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/bear-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const bear = (data.data && data.data[0]) || {};
+                        setInverseETFs(bear.inverse_etfs || []);
+                        setBreakdownStocks(bear.breakdown_stocks || []);
+                        updateScanCache('short_inverse', bear.inverse_etfs || []);
+                        updateScanCache('short_breakdown', bear.breakdown_stocks || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.short_inverse]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('short_scanning', true);
         try {
             const response = await fetch(`${API}/api/bear-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1271,6 +1409,7 @@ function ShortScannerTab({ onSelectTicker }) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
         } finally {
             setIsScanning(false);
+            updateScanCache('short_scanning', false);
         }
     };
 
@@ -1345,28 +1484,34 @@ function ShortScannerTab({ onSelectTicker }) {
 }
 
 // Money Flow Tab
-function MoneyFlowTab({ onSelectTicker }) {
-    const [results, setResults] = useState([]);
+function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+    const [results, setResults] = useState(scanCache.moneyflow_results || []);
     const [isScanning, setIsScanning] = useState(false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'sector');
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/money-flow-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setResults(data.data || []);
+        if (scanCache.moneyflow_results && scanCache.moneyflow_results.length > 0) {
+            setResults(scanCache.moneyflow_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/money-flow-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('moneyflow_results', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.moneyflow_results]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('moneyflow_scanning', true);
         try {
             const response = await fetch(`${API}/api/money-flow-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1376,6 +1521,7 @@ function MoneyFlowTab({ onSelectTicker }) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
         } finally {
             setIsScanning(false);
+            updateScanCache('moneyflow_scanning', false);
         }
     };
 
@@ -1484,33 +1630,44 @@ function KalenderTab() {
 }
 
 // Crash Monitor Tab
-function CrashMonitorTab({ onSelectTicker }) {
-    const [fearData, setFearData] = useState(null);
-    const [indices, setIndices] = useState([]);
-    const [breadth, setBreadth] = useState(null);
+function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+    const [fearData, setFearData] = useState(scanCache.crash_fear_data || null);
+    const [indices, setIndices] = useState(scanCache.crash_indices || []);
+    const [breadth, setBreadth] = useState(scanCache.crash_breadth || null);
     const [isScanning, setIsScanning] = useState(false);
     const { sorted, toggleSort } = useSortable(indices, 'name');
 
     useEffect(() => {
-        const fetchData = async () => {
-            try {
-                const response = await fetch(`${API}/api/crash-monitor-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const cm = (data.data && data.data[0]) || {};
-                    setFearData({ score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' });
-                    setIndices(cm.indices || []);
-                    setBreadth(cm.breadth || null);
+        if (scanCache.crash_fear_data) {
+            setFearData(scanCache.crash_fear_data);
+            setIndices(scanCache.crash_indices || []);
+            setBreadth(scanCache.crash_breadth || null);
+        } else {
+            const fetchData = async () => {
+                try {
+                    const response = await fetch(`${API}/api/crash-monitor-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const cm = (data.data && data.data[0]) || {};
+                        const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
+                        setFearData(fearData);
+                        setIndices(cm.indices || []);
+                        setBreadth(cm.breadth || null);
+                        updateScanCache('crash_fear_data', fearData);
+                        updateScanCache('crash_indices', cm.indices || []);
+                        updateScanCache('crash_breadth', cm.breadth || null);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchData();
-    }, []);
+            };
+            fetchData();
+        }
+    }, [scanCache.crash_fear_data]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('crash_scanning', true);
         try {
             const response = await fetch(`${API}/api/crash-monitor-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1520,6 +1677,7 @@ function CrashMonitorTab({ onSelectTicker }) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
         } finally {
             setIsScanning(false);
+            updateScanCache('crash_scanning', false);
         }
     };
 
@@ -1620,7 +1778,7 @@ function CrashMonitorTab({ onSelectTicker }) {
 }
 
 // Watchlist Tab
-function WatchlistTab({ onSelectTicker }) {
+function WatchlistTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [watchlist, setWatchlist] = useState([]);
     const [newTicker, setNewTicker] = useState('');
     const [tickerPrices, setTickerPrices] = useState({});
@@ -1965,30 +2123,38 @@ function StrategieGuideTab() {
 }
 
 // New Listing Scanner Tab
-function NewListingTab({ onSelectTicker }) {
-    const [results, setResults] = useState([]);
-    const [stats, setStats] = useState(null);
+function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+    const [results, setResults] = useState(scanCache.newlisting_results || []);
+    const [stats, setStats] = useState(scanCache.newlisting_stats || null);
     const [isScanning, setIsScanning] = useState(false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'pump_pct');
 
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/new-listing-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setResults(data.listings || []);
-                    setStats(data.stats);
+        if (scanCache.newlisting_results && scanCache.newlisting_results.length > 0) {
+            setResults(scanCache.newlisting_results);
+            setStats(scanCache.newlisting_stats || null);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/new-listing-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.listings || []);
+                        setStats(data.stats);
+                        updateScanCache('newlisting_results', data.listings || []);
+                        updateScanCache('newlisting_stats', data.stats);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.newlisting_results]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('newlisting_scanning', true);
         try {
             const response = await fetch(`${API}/api/new-listing-scan`, { method: 'POST' });
             if (response.ok) {
@@ -1998,6 +2164,7 @@ function NewListingTab({ onSelectTicker }) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
         } finally {
             setIsScanning(false);
+            updateScanCache('newlisting_scanning', false);
         }
     };
 
@@ -2061,7 +2228,7 @@ function NewListingTab({ onSelectTicker }) {
 }
 
 // Suche (Search) Tab
-function SucheTab({ onSelectTicker }) {
+function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [searchTicker, setSearchTicker] = useState('');
     const [searchResults, setSearchResults] = useState(null);
     const [loading, setLoading] = useState(false);
