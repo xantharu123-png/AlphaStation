@@ -152,9 +152,16 @@ def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], 
             data = json.load(f)
 
         cached_at = None
-        if isinstance(data, dict) and "cached_at" in data:
+        if isinstance(data, dict):
             cached_at = data.get("cached_at")
-            data = data.get("results", [])
+            if "results" in data:
+                data = data.get("results", [])
+            else:
+                # Wrap single dict in list for compatibility
+                data = [data]
+
+        if not isinstance(data, list):
+            data = [data]
 
         return data, cached_at
     except Exception as e:
