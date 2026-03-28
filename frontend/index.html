@@ -122,6 +122,26 @@
         .signal-fallend { background-color: rgba(5, 150, 105, 0.12); color: #059669; }
 
         .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+
+        /* Detail Sidebar */
+        .detail-sidebar {
+            position: fixed; top: 0; right: 0; width: 420px; height: 100vh;
+            background-color: var(--bg-secondary); border-left: 1px solid var(--border-color);
+            z-index: 100; overflow-y: auto; padding: 0;
+            animation: slideInFromRight 0.3s ease-out;
+            box-shadow: -4px 0 24px rgba(0,0,0,0.08);
+        }
+        @keyframes slideInFromRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        .sidebar-header { position: sticky; top: 0; background-color: var(--bg-secondary); padding: 16px 20px; border-bottom: 1px solid var(--border-color); z-index: 10; }
+        .sidebar-body { padding: 20px; }
+        .sidebar-section { margin-bottom: 20px; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 10px; }
+        .sidebar-metric { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+        .sidebar-metric-label { color: var(--text-muted); }
+        .sidebar-metric-value { font-weight: 600; }
+        .ai-analysis-box { background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(124,58,237,0.05)); border: 1px solid rgba(37,99,235,0.15); border-radius: 8px; padding: 16px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+        .mini-chart { width: 100%; height: 120px; background-color: var(--bg-primary); border-radius: 8px; border: 1px solid var(--border-color); overflow: hidden; }
+        .overlay-bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.2); z-index: 99; }
     </style>
 </head>
 <body>
@@ -158,6 +178,135 @@
         const fmt = (v, d=2) => v != null && !isNaN(v) ? Number(v).toFixed(d) : '-';
         const fmtVol = (v) => { if (!v) return '-'; if (v >= 1e9) return (v/1e9).toFixed(1)+'B'; if (v >= 1e6) return (v/1e6).toFixed(1)+'M'; if (v >= 1e3) return (v/1e3).toFixed(0)+'K'; return String(v); };
         const signalBadgeCls = (s) => ({ STARK: 'signal-stark', Steigend: 'signal-steigend', Leicht: 'signal-leicht', Fallend: 'signal-fallend' }[s] || '');
+
+        // ── Detail Sidebar Component ──
+        function DetailSidebar({ ticker, onClose }) {
+            const [detail, setDetail] = useState(null);
+            const [aiAnalysis, setAiAnalysis] = useState(null);
+            const [aiLoading, setAiLoading] = useState(false);
+            const [detailLoading, setDetailLoading] = useState(true);
+
+            useEffect(() => {
+                if (!ticker) return;
+                setDetailLoading(true);
+                setAiAnalysis(null);
+                apiFetch(`/api/ticker-detail?ticker=${encodeURIComponent(ticker)}`).then(res => {
+                    if (res) setDetail(res);
+                    setDetailLoading(false);
+                });
+            }, [ticker]);
+
+            const runAiAnalysis = async () => {
+                setAiLoading(true);
+                const res = await apiFetch(`/api/ai-analysis?ticker=${encodeURIComponent(ticker)}`);
+                if (res) setAiAnalysis(res.analysis);
+                setAiLoading(false);
+            };
+
+            if (!ticker) return null;
+            const d = detail || {};
+
+            // Mini sparkline chart from candle data
+            const MiniChart = ({ candles }) => {
+                if (!candles || candles.length < 2) return <div className="mini-chart flex items-center justify-center text-gray-400 text-sm">Keine Chartdaten</div>;
+                const prices = candles.map(c => c.c);
+                const minP = Math.min(...prices);
+                const maxP = Math.max(...prices);
+                const range = maxP - minP || 1;
+                const w = 380;
+                const h = 110;
+                const points = prices.map((p, i) => `${(i / (prices.length - 1)) * w},${h - ((p - minP) / range) * (h - 10)}`).join(' ');
+                const isUp = prices[prices.length - 1] >= prices[0];
+                const color = isUp ? '#059669' : '#dc2626';
+                const fillPoints = points + ` ${w},${h} 0,${h}`;
+                return (
+                    <div className="mini-chart" style={{padding: '5px 10px'}}>
+                        <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+                            <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.15"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs>
+                            <polygon points={fillPoints} fill="url(#cg)"/>
+                            <polyline points={points} fill="none" stroke={color} strokeWidth="2"/>
+                        </svg>
+                    </div>
+                );
+            };
+
+            return (
+                <React.Fragment>
+                    <div className="overlay-bg" onClick={onClose}></div>
+                    <div className="detail-sidebar">
+                        <div className="sidebar-header">
+                            <div className="flex justify-between items-center">
+                                <div>
+                                    <div className="text-xl font-bold">{ticker}</div>
+                                    {d.price && <div className="flex items-center gap-3 mt-1">
+                                        <span className="text-2xl font-bold">${fmt(d.price)}</span>
+                                        <span className={`text-sm font-semibold ${changeColor(d.change_1d)}`}>{d.change_1d > 0 ? '+' : ''}{fmt(d.change_1d)}%</span>
+                                    </div>}
+                                </div>
+                                <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1" style={{fontSize:'24px', lineHeight:'1'}}>&times;</button>
+                            </div>
+                        </div>
+
+                        <div className="sidebar-body">
+                            {detailLoading ? <Spinner /> : (
+                                <React.Fragment>
+                                    {/* Chart */}
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">30-Tage Chart</div>
+                                        <MiniChart candles={d.candles} />
+                                    </div>
+
+                                    {/* Key Metrics */}
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">Kennzahlen</div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">Open</span><span className="sidebar-metric-value">${fmt(d.open)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">High</span><span className="sidebar-metric-value">${fmt(d.high)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">Low</span><span className="sidebar-metric-value">${fmt(d.low)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">Volume</span><span className="sidebar-metric-value">{fmtVol(d.volume)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">RVOL</span><span className="sidebar-metric-value">{fmt(d.rvol)}x</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">RSI (14)</span><span className="sidebar-metric-value">{d.rsi || '-'}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">MA20</span><span className="sidebar-metric-value">${fmt(d.ma20)}</span></div>
+                                        {d.ma50 && <div className="sidebar-metric"><span className="sidebar-metric-label">MA50</span><span className="sidebar-metric-value">${fmt(d.ma50)}</span></div>}
+                                    </div>
+
+                                    {/* Performance */}
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">Performance</div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">1 Tag</span><span className={`sidebar-metric-value ${changeColor(d.change_1d)}`}>{d.change_1d > 0 ? '+' : ''}{fmt(d.change_1d)}%</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">5 Tage</span><span className={`sidebar-metric-value ${changeColor(d.change_5d)}`}>{d.change_5d > 0 ? '+' : ''}{fmt(d.change_5d)}%</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">20 Tage</span><span className={`sidebar-metric-value ${changeColor(d.change_20d)}`}>{d.change_20d > 0 ? '+' : ''}{fmt(d.change_20d)}%</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">20D Range Pos.</span><span className="sidebar-metric-value">{fmt(d.range_position, 0)}%</span></div>
+                                    </div>
+
+                                    {/* Levels */}
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">Levels</div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">Widerstand R1</span><span className="sidebar-metric-value text-red-500">${fmt(d.resistance_1)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">Pivot</span><span className="sidebar-metric-value">${fmt(d.pivot)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">Support S1</span><span className="sidebar-metric-value text-green-500">${fmt(d.support_1)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">20D Hoch</span><span className="sidebar-metric-value">${fmt(d.high_20d)}</span></div>
+                                        <div className="sidebar-metric"><span className="sidebar-metric-label">20D Tief</span><span className="sidebar-metric-value">${fmt(d.low_20d)}</span></div>
+                                    </div>
+
+                                    {/* AI Analysis */}
+                                    <div className="sidebar-section">
+                                        <div className="sidebar-section-title">KI Analyse</div>
+                                        {aiAnalysis ? (
+                                            <div className="ai-analysis-box">{aiAnalysis}</div>
+                                        ) : (
+                                            <button onClick={runAiAnalysis} disabled={aiLoading}
+                                                className={`w-full py-3 rounded-lg text-sm font-medium text-white transition ${aiLoading ? 'bg-gray-400' : 'bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700'}`}>
+                                                {aiLoading ? 'Analyse laeuft...' : 'KI Analyse starten'}
+                                            </button>
+                                        )}
+                                    </div>
+                                </React.Fragment>
+                            )}
+                        </div>
+                    </div>
+                </React.Fragment>
+            );
+        }
 
         // ── Auto-Refresh Hook — polls API every N ms, no manual scan needed ──
         function useAutoRefresh(fetchFn, intervalMs = 30000) {
@@ -205,11 +354,18 @@
         }
 
         // ── Scanner Tab ──
-        function ScannerTab({ apiOk }) {
+        function ScannerTab({ apiOk, onSelectTicker }) {
             const [data, setData] = useState([]);
-            const [selected, setSelected] = useState(null);
             const [settings, setSettings] = useState({ market: 'stocks', strategy: 'Volume Surge', timeframe: '1D' });
             const [showSettings, setShowSettings] = useState(false);
+            const [strategies, setStrategies] = useState({});
+
+            // Load available strategies for selected market
+            useEffect(() => {
+                apiFetch(`/api/strategies?market_type=${settings.market}`).then(res => {
+                    if (res && res.strategies) setStrategies(res.strategies);
+                });
+            }, [settings.market]);
 
             const loadResults = useCallback(async () => {
                 const res = await apiFetch('/api/bi-results?direction=long');
@@ -263,7 +419,9 @@
                                     <label className="block text-sm font-medium mb-2">Strategie</label>
                                     <select value={settings.strategy} onChange={e => setSettings({...settings, strategy: e.target.value})}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
-                                        <option>Volume Surge</option><option>Bull Flag</option><option>Bear Flag</option><option>Breakout Long</option><option>Breakdown Short</option>
+                                        {Object.keys(strategies).length > 0
+                                            ? Object.keys(strategies).map(s => <option key={s} value={s}>{s}</option>)
+                                            : <option>Volume Surge</option>}
                                     </select>
                                 </div>
                                 <div>
@@ -285,46 +443,17 @@
                                     <TableHead columns={['Ticker','Score','Grade','Signal','R:R','Entry','Stop','Target']} />
                                     <tbody>
                                         {candidates.map(c => (
-                                            <React.Fragment key={c.id}>
-                                                <tr onClick={() => setSelected(selected?.id === c.id ? null : c)}
-                                                    className={`table-row border-b cursor-pointer ${gradeBorder(c.grade)}`}>
-                                                    <td className="px-5 py-4 font-semibold text-blue-600">{c.ticker}</td>
-                                                    <td className="px-5 py-4"><span className="score-badge">{c.score}</span></td>
-                                                    <td className="px-5 py-4"><span className={`grade-badge ${gradeBadgeCls(c.grade)}`}>{c.grade}</span></td>
-                                                    <td className={`px-5 py-4 font-medium ${signalColor(c.signal)}`}>{c.signal}</td>
-                                                    <td className="px-5 py-4 text-sm">{c.rr}</td>
-                                                    <td className="px-5 py-4 text-sm font-semibold">${fmt(c.entry)}</td>
-                                                    <td className="px-5 py-4 text-sm font-semibold text-red-600">${fmt(c.stop)}</td>
-                                                    <td className="px-5 py-4 text-sm font-semibold text-green-600">${fmt(c.target)}</td>
-                                                </tr>
-                                                {selected?.id === c.id && (
-                                                    <tr><td colSpan="8" className="px-5 py-4">
-                                                        <div className="detail-panel">
-                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                                <div>
-                                                                    <h4 className="font-semibold text-lg mb-3">{c.ticker} - Analyse</h4>
-                                                                    <p className="text-gray-500 mb-4">{c.description || 'Keine Details verfuegbar.'}</p>
-                                                                    <div className="space-y-2 text-sm">
-                                                                        <div><strong>Preis:</strong> ${fmt(c.price)}</div>
-                                                                        <div><strong>Volume:</strong> {fmtVol(c.volume)}</div>
-                                                                        <div><strong>RVOL:</strong> {fmt(c.rvol)}x</div>
-                                                                        <div><strong>RSI:</strong> {c.rsi}</div>
-                                                                    </div>
-                                                                </div>
-                                                                <div>
-                                                                    <h4 className="font-semibold mb-3">Trade Setup</h4>
-                                                                    <div className="space-y-3 text-sm">
-                                                                        <div className="p-3 bg-blue-50 rounded-lg"><div className="text-gray-500">Entry</div><div className="text-lg font-bold text-blue-600">${fmt(c.entry)}</div></div>
-                                                                        <div className="p-3 bg-red-50 rounded-lg"><div className="text-gray-500">Stop Loss</div><div className="text-lg font-bold text-red-600">${fmt(c.stop)}</div></div>
-                                                                        <div className="p-3 bg-green-50 rounded-lg"><div className="text-gray-500">Target</div><div className="text-lg font-bold text-green-600">${fmt(c.target)}</div></div>
-                                                                        <div className="p-3 bg-gray-100 rounded-lg"><div className="text-gray-500">R:R</div><div className="text-lg font-bold">{c.rr}</div></div>
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    </td></tr>
-                                                )}
-                                            </React.Fragment>
+                                            <tr key={c.id} onClick={() => onSelectTicker(c.ticker)}
+                                                className={`table-row border-b cursor-pointer ${gradeBorder(c.grade)}`}>
+                                                <td className="px-5 py-4 font-semibold text-blue-600">{c.ticker}</td>
+                                                <td className="px-5 py-4"><span className="score-badge">{c.score}</span></td>
+                                                <td className="px-5 py-4"><span className={`grade-badge ${gradeBadgeCls(c.grade)}`}>{c.grade}</span></td>
+                                                <td className={`px-5 py-4 font-medium ${signalColor(c.signal)}`}>{c.signal}</td>
+                                                <td className="px-5 py-4 text-sm">{c.rr}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold">${fmt(c.entry)}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold text-red-600">${fmt(c.stop)}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold text-green-600">${fmt(c.target)}</td>
+                                            </tr>
                                         ))}
                                     </tbody>
                                 </table>
@@ -336,10 +465,9 @@
         }
 
         // ── BI Scanner Tab ──
-        function BIScannerTab() {
+        function BIScannerTab({ onSelectTicker }) {
             const [direction, setDirection] = useState('long');
             const [data, setData] = useState([]);
-            const [selected, setSelected] = useState(null);
             const [cacheAge, setCacheAge] = useState(null);
 
             const loadResults = useCallback(async () => {
@@ -394,33 +522,17 @@
                                     <TableHead columns={['Ticker','Score','Grade','Richtung','Preis','Change %','RVOL','Pattern']} />
                                     <tbody>
                                         {items.map(item => (
-                                            <React.Fragment key={item.id}>
-                                                <tr onClick={() => setSelected(selected?.id === item.id ? null : item)}
-                                                    className={`table-row border-b cursor-pointer ${gradeBorder(item.grade)}`}>
-                                                    <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
-                                                    <td className="px-5 py-4"><span className="score-badge">{item.score}</span></td>
-                                                    <td className="px-5 py-4"><span className={`grade-badge ${gradeBadgeCls(item.grade)}`}>{item.grade}</span></td>
-                                                    <td className={`px-5 py-4 font-medium ${item.direction === 'LONG' || item.direction === 'long' ? 'text-green-600' : 'text-red-600'}`}>{item.direction}</td>
-                                                    <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
-                                                    <td className={`px-5 py-4 text-sm font-medium ${changeColor(item.change)}`}>{item.change > 0 ? '+' : ''}{fmt(item.change)}%</td>
-                                                    <td className="px-5 py-4 text-sm">{fmt(item.rvol)}x</td>
-                                                    <td className="px-5 py-4 text-sm">{item.pattern}</td>
-                                                </tr>
-                                                {selected?.id === item.id && (
-                                                    <tr><td colSpan="8" className="px-5 py-4">
-                                                        <div className="detail-panel">
-                                                            <h4 className="font-semibold text-lg mb-3">{item.ticker} - BI Analyse</h4>
-                                                            <p className="text-gray-500 mb-4">{item.reason}</p>
-                                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                                                                <div className="p-3 bg-blue-50 rounded-lg"><div className="text-gray-500">Entry</div><div className="font-bold text-blue-600">${fmt(item.entry)}</div></div>
-                                                                <div className="p-3 bg-red-50 rounded-lg"><div className="text-gray-500">Stop</div><div className="font-bold text-red-600">${fmt(item.stop)}</div></div>
-                                                                <div className="p-3 bg-green-50 rounded-lg"><div className="text-gray-500">Target</div><div className="font-bold text-green-600">${fmt(item.target)}</div></div>
-                                                                <div className="p-3 bg-gray-100 rounded-lg"><div className="text-gray-500">Volume</div><div className="font-bold">{fmtVol(item.volume)}</div></div>
-                                                            </div>
-                                                        </div>
-                                                    </td></tr>
-                                                )}
-                                            </React.Fragment>
+                                            <tr key={item.id} onClick={() => onSelectTicker(item.ticker)}
+                                                className={`table-row border-b cursor-pointer ${gradeBorder(item.grade)}`}>
+                                                <td className="px-5 py-4 font-semibold text-blue-600">{item.ticker}</td>
+                                                <td className="px-5 py-4"><span className="score-badge">{item.score}</span></td>
+                                                <td className="px-5 py-4"><span className={`grade-badge ${gradeBadgeCls(item.grade)}`}>{item.grade}</span></td>
+                                                <td className={`px-5 py-4 font-medium ${item.direction === 'LONG' || item.direction === 'long' ? 'text-green-600' : 'text-red-600'}`}>{item.direction}</td>
+                                                <td className="px-5 py-4 text-sm font-semibold">${fmt(item.price)}</td>
+                                                <td className={`px-5 py-4 text-sm font-medium ${changeColor(item.change)}`}>{item.change > 0 ? '+' : ''}{fmt(item.change)}%</td>
+                                                <td className="px-5 py-4 text-sm">{fmt(item.rvol)}x</td>
+                                                <td className="px-5 py-4 text-sm">{item.pattern}</td>
+                                            </tr>
                                         ))}
                                     </tbody>
                                 </table>
@@ -928,6 +1040,94 @@
             );
         }
 
+        // ── Suche Tab ──
+        function SucheTab({ onSelectTicker }) {
+            const [query, setQuery] = useState('');
+            const [result, setResult] = useState(null);
+            const [loading, setLoading] = useState(false);
+
+            const search = async () => {
+                if (!query.trim()) return;
+                setLoading(true);
+                const ticker = query.trim().toUpperCase();
+                const res = await apiFetch(`/api/ticker-detail?ticker=${encodeURIComponent(ticker)}`);
+                setResult(res);
+                setLoading(false);
+            };
+
+            const handleKeyDown = (e) => { if (e.key === 'Enter') search(); };
+
+            return (
+                <div>
+                    <div className="mb-6">
+                        <h2 className="text-lg font-semibold mb-4">Ticker suchen</h2>
+                        <div className="flex gap-3">
+                            <input type="text" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={handleKeyDown}
+                                placeholder="Ticker eingeben (z.B. NVDA, AAPL, X:BTCUSD)"
+                                className="flex-1 px-4 py-3 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                            <button onClick={search} disabled={loading}
+                                className={`px-6 py-3 rounded-lg text-sm font-medium text-white transition ${loading ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                                {loading ? 'Suche...' : 'Suchen'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {loading ? <Spinner /> : result ? (
+                        <div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                                <MetricCard label={result.ticker} value={'$' + fmt(result.price)} sub={`${result.change_1d > 0 ? '+' : ''}${fmt(result.change_1d)}% heute`} subColor={changeColor(result.change_1d)} />
+                                <MetricCard label="RSI (14)" value={result.rsi || '-'} sub={result.rsi > 70 ? 'Ueberkauft' : result.rsi < 30 ? 'Ueberverkauft' : 'Neutral'} subColor={result.rsi > 70 ? 'text-red-600' : result.rsi < 30 ? 'text-green-600' : ''} />
+                                <MetricCard label="RVOL" value={fmt(result.rvol) + 'x'} sub={result.rvol > 2 ? 'Hohes Volumen' : 'Normal'} subColor={result.rvol > 2 ? 'text-blue-600' : ''} />
+                                <MetricCard label="20D RANGE" value={fmt(result.range_position, 0) + '%'} sub={`$${fmt(result.low_20d)} - $${fmt(result.high_20d)}`} />
+                            </div>
+
+                            <div className="flex gap-3 mb-6">
+                                <button onClick={() => onSelectTicker(result.ticker)}
+                                    className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition">
+                                    Details + KI Analyse
+                                </button>
+                            </div>
+
+                            <div className="card border border-gray-200 rounded-lg overflow-hidden">
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <TableHead columns={['Metrik','Wert']} />
+                                        <tbody>
+                                            {[
+                                                ['Preis', '$' + fmt(result.price)],
+                                                ['Open', '$' + fmt(result.open)],
+                                                ['High', '$' + fmt(result.high)],
+                                                ['Low', '$' + fmt(result.low)],
+                                                ['Volume', fmtVol(result.volume)],
+                                                ['Avg Volume', fmtVol(result.avg_volume)],
+                                                ['RVOL', fmt(result.rvol) + 'x'],
+                                                ['MA20', '$' + fmt(result.ma20)],
+                                                ['MA50', result.ma50 ? '$' + fmt(result.ma50) : '-'],
+                                                ['RSI', result.rsi || '-'],
+                                                ['1D %', (result.change_1d > 0 ? '+' : '') + fmt(result.change_1d) + '%'],
+                                                ['5D %', (result.change_5d > 0 ? '+' : '') + fmt(result.change_5d) + '%'],
+                                                ['20D %', (result.change_20d > 0 ? '+' : '') + fmt(result.change_20d) + '%'],
+                                                ['Pivot', '$' + fmt(result.pivot)],
+                                                ['Support S1', '$' + fmt(result.support_1)],
+                                                ['Widerstand R1', '$' + fmt(result.resistance_1)],
+                                            ].map(([label, val], i) => (
+                                                <tr key={i} className="table-row border-b">
+                                                    <td className="px-5 py-3 text-sm font-medium" style={{color:'var(--text-muted)'}}>{label}</td>
+                                                    <td className="px-5 py-3 text-sm font-semibold">{val}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <EmptyState title="Ticker suchen" subtitle="Gib einen Ticker ein um Marktdaten und KI-Analyse zu erhalten" />
+                    )}
+                </div>
+            );
+        }
+
         // ── Main App ──
         function AlphaStation() {
             const [theme, setTheme] = useState('light');
@@ -935,6 +1135,10 @@
             const [apiOk, setApiOk] = useState(false);
             const [marketSession, setMarketSession] = useState({ session: '-', detail: '' });
             const [scanStatus, setScanStatus] = useState({});
+            const [sidebarTicker, setSidebarTicker] = useState(null);
+
+            const onSelectTicker = (ticker) => setSidebarTicker(ticker);
+            const closeSidebar = () => setSidebarTicker(null);
 
             // Check API health + scan status on mount
             useEffect(() => {
@@ -957,12 +1161,12 @@
                 document.documentElement.setAttribute('data-theme', next);
             };
 
-            const tabs = ['Scanner', 'BI Scanner', 'Biotech', 'BTC-Divergenz', 'Early Movers', 'Short Scanner', 'Money Flow', 'Kalender', 'Crash Monitor'];
+            const tabs = ['Scanner', 'BI Scanner', 'Biotech', 'BTC-Divergenz', 'Early Movers', 'Short Scanner', 'Money Flow', 'Kalender', 'Crash Monitor', 'Suche'];
 
             const renderTab = () => {
                 switch (activeTab) {
-                    case 'Scanner': return <ScannerTab apiOk={apiOk} />;
-                    case 'BI Scanner': return <BIScannerTab />;
+                    case 'Scanner': return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} />;
+                    case 'BI Scanner': return <BIScannerTab onSelectTicker={onSelectTicker} />;
                     case 'Biotech': return <BiotechTab />;
                     case 'Short Scanner': return <ShortScannerTab />;
                     case 'BTC-Divergenz': return <BTCDivergenzTab />;
@@ -970,7 +1174,8 @@
                     case 'Money Flow': return <MoneyFlowTab />;
                     case 'Kalender': return <KalenderTab />;
                     case 'Crash Monitor': return <CrashMonitorTab />;
-                    default: return <ScannerTab apiOk={apiOk} />;
+                    case 'Suche': return <SucheTab onSelectTicker={onSelectTicker} />;
+                    default: return <ScannerTab apiOk={apiOk} onSelectTicker={onSelectTicker} />;
                 }
             };
 
@@ -1015,6 +1220,9 @@
                     <main className="max-w-full px-6 py-6">
                         {renderTab()}
                     </main>
+
+                    {/* Detail Sidebar */}
+                    {sidebarTicker && <DetailSidebar ticker={sidebarTicker} onClose={closeSidebar} />}
 
                     {/* Footer */}
                     <footer className="text-center py-4 text-xs" style={{color: 'var(--text-muted)'}}>

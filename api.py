@@ -43,55 +43,36 @@ from modules.scanners import (
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get
 
-# Strategies are defined inline here to avoid Streamlit import at module level
-# (they are only needed when imported in a Streamlit context)
-STRATEGIES = {
-    "Volume Surge": {
-        "description": "Aktien/Krypto mit überdurchschnittlichem Volumen UND Bewegung",
-        "filters": {"RVOL": (2.0, 50.0), "Change %": (2.0, 100.0)},
-    },
-    "Bull Flag": {
-        "description": "Echte Multi-Day Flag: Fahnenstange (2-7d) + Konsolidierung mit 20 Tageskerzen",
-        "filters": {"Change %": (-5.0, 5.0), "RVOL": (0.05, 3.0)},
-    },
-    "Bear Flag": {
-        "description": "Echte Multi-Day Flag: Fahnenstange (2-7d) + Konsolidierung mit 20 Tageskerzen",
-        "filters": {"Change %": (-5.0, 5.0), "RVOL": (0.05, 3.0)},
-    },
-    "Breakout Long": {
-        "description": "Momentum-Ausbruch mit Volumen-Bestätigung",
-        "filters": {"Change %": (3.0, 50.0), "RVOL": (1.5, 50.0), "Close Position": (0.65, 1.0)},
-    },
-    "Breakdown Short": {
-        "description": "Bearish Momentum-Ausbruch mit Volumen",
-        "filters": {"Change %": (-50.0, -3.0), "RVOL": (1.5, 50.0), "Close Position": (0.0, 0.35)},
-    },
-}
+# ── Load ALL 65+ strategies from modules/strategies.py ──
+# Mock streamlit to avoid ImportError (strategies.py imports streamlit for apply_strategy)
+import importlib.util
+import sys as _sys
 
-CRYPTO_STRATEGIES = {
-    "Momentum": {
-        "description": "Crypto Momentum Plays mit hohem Volumen",
-        "filters": {"RVOL": (3.0, 100.0), "Change %": (5.0, 200.0)},
-    },
-    "Volatility": {
-        "description": "High Volatility Crypto Breakouts",
-        "filters": {"RVOL": (2.0, 50.0)},
-    },
-}
+def _load_strategies():
+    _mock = type(_sys)("streamlit")
+    _mock.session_state = {}
+    _mock.warning = lambda *a, **k: None
+    _real_st = _sys.modules.get("streamlit")
+    _sys.modules["streamlit"] = _mock
+    try:
+        spec = importlib.util.spec_from_file_location("_strategies", "modules/strategies.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return (
+            getattr(mod, "STRATEGIES", {}),
+            getattr(mod, "CRYPTO_STRATEGIES", {}),
+            getattr(mod, "FUTURES_STRATEGIES", {}),
+            getattr(mod, "FOREX_STRATEGIES", {}),
+            getattr(mod, "INTERNATIONAL_STRATEGIES", {}),
+        )
+    finally:
+        if _real_st:
+            _sys.modules["streamlit"] = _real_st
+        else:
+            _sys.modules.pop("streamlit", None)
 
-FUTURES_STRATEGIES = {
-    "Trend Following": {
-        "description": "Follow major futures trends",
-        "filters": {"RVOL": (1.5, 30.0)},
-    },
-}
-
-FOREX_STRATEGIES = {
-    "Pair Momentum": {
-        "description": "FX pair momentum trades",
-        "filters": {"RVOL": (1.0, 20.0)},
-    },
-}
+STRATEGIES, CRYPTO_STRATEGIES, FUTURES_STRATEGIES, FOREX_STRATEGIES, INTERNATIONAL_STRATEGIES = _load_strategies()
+print(f"[Init] Strategies loaded: {len(STRATEGIES)} Stock, {len(CRYPTO_STRATEGIES)} Crypto, {len(FUTURES_STRATEGIES)} Futures, {len(FOREX_STRATEGIES)} Forex, {len(INTERNATIONAL_STRATEGIES)} International")
 
 INVERSE_ETFS = {
     "SQQQ": ("3x Short Nasdaq", "QQQ"), "SPXS": ("3x Short S&P 500", "SPY"),
@@ -210,6 +191,7 @@ def get_strategies_for_market(market_type: str) -> Dict[str, Any]:
         "crypto": CRYPTO_STRATEGIES,
         "futures": FUTURES_STRATEGIES,
         "forex": FOREX_STRATEGIES,
+        "international": INTERNATIONAL_STRATEGIES,
     }
     return strategies_map.get(market_type, STRATEGIES)
 
@@ -464,6 +446,145 @@ def get_scan_status():
         "scans": _scan_status,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.get("/api/ticker-detail")
+def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. NVDA, AAPL, X:BTCUSD)")):
+    """Get detailed price data for a single ticker (30 days, key metrics)."""
+    try:
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc"})
+        if resp.status_code != 200:
+            raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
+        bars = resp.json().get("results", [])
+        if not bars:
+            raise HTTPException(status_code=404, detail=f"No data for '{ticker}'")
+
+        close = bars[0]["c"]
+        high = bars[0]["h"]
+        low = bars[0]["l"]
+        opn = bars[0]["o"]
+        vol = bars[0].get("v", 0)
+        prev_close = bars[1]["c"] if len(bars) > 1 else close
+        chg_1d = round(((close - prev_close) / prev_close) * 100, 2)
+        chg_5d = round(((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100, 2) if len(bars) > 5 else 0
+        chg_20d = round(((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100, 2) if len(bars) > 20 else 0
+
+        # Calculate key indicators
+        closes = [b["c"] for b in bars]
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
+        volumes = [b.get("v", 0) for b in bars]
+
+        ma20 = round(sum(closes[:20]) / min(len(closes), 20), 2)
+        ma50 = round(sum(closes[:50]) / min(len(closes), 50), 2) if len(closes) >= 50 else None
+        avg_vol = sum(volumes[1:21]) / min(len(volumes) - 1, 20) if len(volumes) > 1 else 1
+        rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+
+        # RSI (14-period)
+        rsi = None
+        if len(closes) >= 15:
+            gains, losses = [], []
+            for i in range(14):
+                diff = closes[i] - closes[i+1]  # bars sorted desc
+                if diff > 0:
+                    losses.append(abs(diff))
+                else:
+                    gains.append(abs(diff))
+            avg_gain = sum(gains) / 14 if gains else 0.001
+            avg_loss = sum(losses) / 14 if losses else 0.001
+            rs = avg_gain / avg_loss
+            rsi = round(100 - (100 / (1 + rs)), 1)
+
+        # High/Low 20d
+        high_20d = round(max(highs[:20]), 2) if len(highs) >= 20 else round(max(highs), 2)
+        low_20d = round(min(lows[:20]), 2) if len(lows) >= 20 else round(min(lows), 2)
+        range_pos = round((close - low_20d) / (high_20d - low_20d) * 100, 1) if high_20d != low_20d else 50
+
+        # Support/Resistance (simple pivot)
+        pivot = round((high + low + close) / 3, 2)
+        support_1 = round(2 * pivot - high, 2)
+        resist_1 = round(2 * pivot - low, 2)
+
+        # Candlestick data for chart (last 30 bars, reversed to chronological)
+        candles = [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"], "v": b.get("v", 0)}
+                   for b in reversed(bars[:30])]
+
+        return {
+            "ticker": ticker, "price": round(close, 2), "open": round(opn, 2),
+            "high": round(high, 2), "low": round(low, 2), "volume": vol,
+            "prev_close": round(prev_close, 2),
+            "change_1d": chg_1d, "change_5d": chg_5d, "change_20d": chg_20d,
+            "ma20": ma20, "ma50": ma50, "rvol": rvol, "rsi": rsi,
+            "high_20d": high_20d, "low_20d": low_20d, "range_position": range_pos,
+            "pivot": pivot, "support_1": support_1, "resistance_1": resist_1,
+            "avg_volume": round(avg_vol), "candles": candles,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ai-analysis")
+def get_ai_analysis(ticker: str = Query(..., description="Ticker symbol")):
+    """Generate AI analysis for a ticker using Claude."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY not configured")
+
+    # First get ticker data
+    try:
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+        bars = resp.json().get("results", []) if resp.status_code == 200 else []
+
+        price_info = ""
+        if bars:
+            close = bars[0]["c"]
+            prev = bars[1]["c"] if len(bars) > 1 else close
+            chg = round(((close - prev) / prev) * 100, 2)
+            closes = [b["c"] for b in bars[:20]]
+            ma20 = round(sum(closes) / len(closes), 2)
+            high_20 = round(max(b["h"] for b in bars[:20]), 2)
+            low_20 = round(min(b["l"] for b in bars[:20]), 2)
+            vol = bars[0].get("v", 0)
+            price_info = f"Preis: ${close}, Veraenderung: {chg}%, MA20: ${ma20}, 20d-Hoch: ${high_20}, 20d-Tief: ${low_20}, Vol: {vol}"
+    except:
+        price_info = "Preisdaten nicht verfuegbar"
+
+    # Call Claude API
+    import requests as req
+    try:
+        claude_resp = req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 800,
+                "messages": [{"role": "user", "content": f"""Analysiere {ticker} als Trading-Setup. Aktuelle Daten: {price_info}
+
+Antworte auf Deutsch, strukturiert:
+1. TECHNISCHE EINSCHAETZUNG (2-3 Saetze: Trend, Momentum, Key Levels)
+2. SIGNAL: BUY / SELL / WATCH (ein Wort)
+3. TRADE SETUP: Entry, Stop Loss, Take Profit (konkrete Preise)
+4. RISIKO: Niedrig / Mittel / Hoch
+5. ZUSAMMENFASSUNG (1 Satz)
+
+Kurz und praezise, keine langen Erklaerungen."""}],
+            },
+            timeout=30,
+        )
+        if claude_resp.status_code == 200:
+            content = claude_resp.json().get("content", [{}])[0].get("text", "Analyse nicht verfuegbar")
+            return {"ticker": ticker, "analysis": content, "model": "claude-sonnet-4-20250514", "timestamp": datetime.now().isoformat()}
+        else:
+            return {"ticker": ticker, "analysis": f"API Fehler: {claude_resp.status_code}", "timestamp": datetime.now().isoformat()}
+    except Exception as e:
+        return {"ticker": ticker, "analysis": f"Fehler: {str(e)}", "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/api/strategies", response_model=StrategiesResponse)
