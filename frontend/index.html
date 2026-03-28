@@ -203,19 +203,6 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const API = window.location.protocol + '//' + window.location.hostname + ':8000';
 
-// Toast Notification System
-let toastId = 0;
-const [toasts, setToasts] = useState([]);
-
-function useToast() {
-    const addToast = (message, type = 'info', duration = 3000) => {
-        const id = toastId++;
-        setToasts(prev => [...prev, { id, message, type }]);
-        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
-    };
-    return addToast;
-}
-
 // Toast Component
 function ToastContainer() {
     const [toasts, setToasts] = useState([]);
@@ -323,6 +310,7 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
 function DetailSidebar({ ticker, onClose }) {
     const [tickerData, setTickerData] = useState(null);
     const [aiData, setAiData] = useState(null);
+    const [aiLoading, setAiLoading] = useState(false);
     const [loading, setLoading] = useState(true);
     const chartContainer = useRef(null);
     const chart = useRef(null);
@@ -331,54 +319,52 @@ function DetailSidebar({ ticker, onClose }) {
         const fetchData = async () => {
             try {
                 setLoading(true);
-                const [tickerRes, aiRes] = await Promise.all([
-                    fetch(`${API}/api/ticker-detail?ticker=${ticker}`),
-                    fetch(`${API}/api/ai-analysis?ticker=${ticker}`)
-                ]);
-                if (tickerRes.ok) setTickerData(await tickerRes.json());
-                if (aiRes.ok) setAiData(await aiRes.json());
+                setAiData(null);
+                const res = await fetch(`${API}/api/ticker-detail?ticker=${ticker}`);
+                if (res.ok) setTickerData(await res.json());
             } catch (err) {
                 console.error('Error fetching detail:', err);
             } finally {
                 setLoading(false);
             }
         };
-
         fetchData();
     }, [ticker]);
 
+    const loadAiAnalysis = async () => {
+        setAiLoading(true);
+        try {
+            const res = await fetch(`${API}/api/ai-analysis?ticker=${ticker}`);
+            if (res.ok) {
+                setAiData(await res.json());
+            } else {
+                setAiData({ analysis: 'API Fehler: ' + res.status });
+            }
+        } catch (err) {
+            setAiData({ analysis: 'Verbindungsfehler' });
+        } finally {
+            setAiLoading(false);
+        }
+    };
+
     useEffect(() => {
         if (!tickerData || !chartContainer.current) return;
-
         try {
-            if (chart.current) {
-                chart.current.remove();
-            }
-
+            if (chart.current) chart.current.remove();
             const { createChart } = window.LightweightCharts;
             chart.current = createChart(chartContainer.current, {
                 layout: { textColor: '#666', background: { color: '#fafafa' } },
-                width: 380,
-                height: 250,
+                width: 400, height: 220,
                 timeScale: { timeVisible: true, secondsVisible: false }
             });
-
-            const candlestickSeries = chart.current.addCandlestickSeries();
-            const chartData = tickerData.chart_data || [
-                { time: Date.now() / 1000, open: tickerData.price || 100, high: (tickerData.price || 100) * 1.02, low: (tickerData.price || 100) * 0.98, close: tickerData.price || 100 }
-            ];
-            candlestickSeries.setData(chartData);
+            const series = chart.current.addCandlestickSeries();
+            const candles = (tickerData.candles || []).map(c => ({
+                time: Math.floor(c.t / 1000), open: c.o, high: c.h, low: c.l, close: c.c
+            }));
+            if (candles.length > 0) series.setData(candles);
             chart.current.timeScale().fitContent();
-        } catch (err) {
-            console.error('Chart error:', err);
-        }
-
-        return () => {
-            if (chart.current) {
-                chart.current.remove();
-                chart.current = null;
-            }
-        };
+        } catch (err) { console.error('Chart error:', err); }
+        return () => { if (chart.current) { chart.current.remove(); chart.current = null; } };
     }, [tickerData]);
 
     if (loading) {
@@ -391,65 +377,168 @@ function DetailSidebar({ ticker, onClose }) {
         );
     }
 
-    const price = tickerData?.price || 0;
-    const change = tickerData?.change_pct || 0;
+    const d = tickerData || {};
+    const price = d.price || 0;
+    const change = d.change_1d || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
+    const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
+
+    // Simple markdown-to-HTML: bold, headers, line breaks
+    const renderMarkdown = (text) => {
+        if (!text) return '';
+        return text
+            .replace(/\*\*(\d+)\.\s*(.*?)\*\*/g, '<br/><strong>$1. $2</strong>')
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\n/g, '<br/>');
+    };
 
     return (
         <div className="detail-sidebar">
-            <div className="detail-sidebar-content">
+            <div className="detail-sidebar-content" style={{ overflowY: 'auto', maxHeight: '100vh', paddingBottom: '40px' }}>
                 {/* Header */}
-                <div className="flex justify-between items-start mb-6">
+                <div className="flex justify-between items-start mb-4">
                     <div>
                         <h2 className="text-2xl font-bold">{ticker}</h2>
-                        <p className="text-2xl font-bold mt-2">
-                            €{price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
+                        <p className="text-2xl font-bold mt-1">
+                            ${price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
                     </div>
-                    <button onClick={onClose} className="text-2xl">×</button>
+                    <button onClick={onClose} className="text-2xl font-bold hover:text-red-500">×</button>
+                </div>
+
+                {/* Grade + Confluence */}
+                <div className="flex gap-2 mb-4">
+                    {d.signal_grade && (
+                        <span className={`grade-badge grade-${d.signal_grade.toLowerCase()}`}>
+                            Grade {d.signal_grade} ({d.signal_score || 0}P)
+                        </span>
+                    )}
+                    {d.confluence && (
+                        <span className={`signal-badge signal-${d.confluence.direction === 'LONG' ? 'bullish' : d.confluence.direction === 'SHORT' ? 'bearish' : 'neutral'}`}>
+                            {d.confluence.direction}
+                        </span>
+                    )}
                 </div>
 
                 {/* Chart */}
-                <div ref={chartContainer} className="chart-container"></div>
+                <div ref={chartContainer} className="chart-container mb-4"></div>
 
-                {/* Grade */}
-                {tickerData?.grade && (
-                    <div className="mb-4">
-                        <span className={`grade-badge grade-${tickerData.grade.toLowerCase()}`}>
-                            Grade {tickerData.grade}
-                        </span>
-                    </div>
-                )}
-
-                {/* Key Metrics */}
-                <div className="bg-gray-50 p-4 rounded-lg mb-4 text-sm">
-                    <div className="grid grid-cols-2 gap-4">
-                        <div>
-                            <div className="text-gray-600">RSI</div>
-                            <div className="font-semibold">{(tickerData?.rsi || 0).toFixed(1)}</div>
-                        </div>
-                        <div>
-                            <div className="text-gray-600">RVOL</div>
-                            <div className="font-semibold">{(tickerData?.rvol || 0).toFixed(2)}</div>
-                        </div>
-                        <div>
-                            <div className="text-gray-600">MA20</div>
-                            <div className="font-semibold">€{(tickerData?.ma20 || 0).toFixed(2)}</div>
-                        </div>
-                        <div>
-                            <div className="text-gray-600">MA50</div>
-                            <div className="font-semibold">€{(tickerData?.ma50 || 0).toFixed(2)}</div>
-                        </div>
+                {/* Price Action */}
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Preis</h4>
+                    <div className="grid grid-cols-3 gap-2">
+                        <div><span className="text-gray-500">1D</span> <span className={change >= 0 ? 'color-positive' : 'color-negative'}>{change}%</span></div>
+                        <div><span className="text-gray-500">5D</span> <span className={d.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d}%</span></div>
+                        <div><span className="text-gray-500">20D</span> <span className={d.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d}%</span></div>
+                        <div><span className="text-gray-500">Open</span> ${d.open}</div>
+                        <div><span className="text-gray-500">High</span> ${d.high}</div>
+                        <div><span className="text-gray-500">Low</span> ${d.low}</div>
                     </div>
                 </div>
 
-                {/* AI Analysis */}
-                {aiData && (
-                    <div className="bg-blue-50 p-4 rounded-lg mb-4 text-sm">
-                        <h3 className="font-semibold mb-2">KI Analyse</h3>
-                        <p className="text-gray-700">{aiData.analysis || 'Keine Analyse verfügbar'}</p>
+                {/* Technical Indicators */}
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Technische Indikatoren</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">RSI (14)</span> <span className="font-semibold">{d.rsi?.toFixed(1) || '-'}</span></div>
+                        <div><span className="text-gray-500">RVOL</span> <span className="font-semibold">{d.rvol?.toFixed(2) || '-'}x</span></div>
+                        <div><span className="text-gray-500">ATR</span> <span className="font-semibold">{d.atr?.toFixed(2) || '-'}</span></div>
+                        <div><span className="text-gray-500">VWAP</span> <span className="font-semibold">${d.vwap || '-'}</span></div>
+                        <div><span className="text-gray-500">MACD</span> <span className="font-semibold">{d.macd || '-'}</span></div>
+                        <div><span className="text-gray-500">Signal</span> <span className="font-semibold">{d.macd_signal || '-'}</span></div>
+                        <div><span className="text-gray-500">BB Upper</span> <span className="font-semibold">${d.bb_upper || '-'}</span></div>
+                        <div><span className="text-gray-500">BB Lower</span> <span className="font-semibold">${d.bb_lower || '-'}</span></div>
+                    </div>
+                </div>
+
+                {/* Moving Averages */}
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Moving Averages</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">EMA 9</span> <span className={`font-semibold ${price > (d.ema9||0) ? 'color-positive' : 'color-negative'}`}>${d.ema9 || '-'}</span></div>
+                        <div><span className="text-gray-500">EMA 20</span> <span className={`font-semibold ${price > (d.ema20||0) ? 'color-positive' : 'color-negative'}`}>${d.ema20 || '-'}</span></div>
+                        <div><span className="text-gray-500">MA 20</span> <span className={`font-semibold ${price > (d.ma20||0) ? 'color-positive' : 'color-negative'}`}>${d.ma20 || '-'}</span></div>
+                        <div><span className="text-gray-500">MA 50</span> <span className={`font-semibold ${price > (d.ma50||0) ? 'color-positive' : 'color-negative'}`}>${d.ma50 || '-'}</span></div>
+                        <div><span className="text-gray-500">EMA 100</span> <span className="font-semibold">${d.ema100 || '-'}</span></div>
+                        <div><span className="text-gray-500">EMA 200</span> <span className="font-semibold">${d.ema200 || '-'}</span></div>
+                    </div>
+                </div>
+
+                {/* Support/Resistance + Fibonacci */}
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Support / Resistance</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Support</span> <span className="font-semibold color-positive">${d.support_1}</span></div>
+                        <div><span className="text-gray-500">Resistance</span> <span className="font-semibold color-negative">${d.resistance_1}</span></div>
+                        <div><span className="text-gray-500">Pivot</span> <span className="font-semibold">${d.pivot}</span></div>
+                        <div><span className="text-gray-500">Range Pos</span> <span className="font-semibold">{d.range_position?.toFixed(0)}%</span></div>
+                        <div><span className="text-gray-500">20D High</span> <span className="font-semibold">${d.high_20d}</span></div>
+                        <div><span className="text-gray-500">20D Low</span> <span className="font-semibold">${d.low_20d}</span></div>
+                    </div>
+                    {d.fib_levels && (
+                        <div className="mt-2 pt-2 border-t border-gray-200">
+                            <div className="text-gray-500 mb-1">Fibonacci</div>
+                            <div className="grid grid-cols-4 gap-1">
+                                {Object.entries(d.fib_levels).map(([k, v]) => (
+                                    <div key={k}><span className="text-gray-400">{k}</span> ${v}</div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Volume */}
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Volumen</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Volumen</span> <span className="font-semibold">{(d.volume || 0).toLocaleString()}</span></div>
+                        <div><span className="text-gray-500">Avg Vol</span> <span className="font-semibold">{(d.avg_volume || 0).toLocaleString()}</span></div>
+                    </div>
+                </div>
+
+                {/* Signals */}
+                {d.signals && d.signals.length > 0 && (
+                    <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                        <h4 className="font-semibold text-sm mb-2">Signale ({d.confluence?.bullish || 0} Bull / {d.confluence?.bearish || 0} Bear)</h4>
+                        <div className="space-y-1">
+                            {d.signals.map((s, i) => (
+                                <div key={i} className="flex justify-between items-center">
+                                    <span className="text-gray-600">{s.name}</span>
+                                    <span style={{ color: signalColor(s.status), fontWeight: 600 }}>{s.detail}</span>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 )}
+
+                {/* Trade Setup */}
+                {d.trade_setup && (
+                    <div className="bg-green-50 border border-green-200 p-3 rounded-lg mb-3 text-xs">
+                        <h4 className="font-semibold text-sm mb-2 text-green-800">Trade Setup ({d.trade_setup.direction})</h4>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div><span className="text-gray-500">Entry</span> <span className="font-semibold">${d.trade_setup.entry}</span></div>
+                            <div><span className="text-gray-500">Stop Loss</span> <span className="font-semibold color-negative">${d.trade_setup.stop}</span></div>
+                            <div><span className="text-gray-500">TP1</span> <span className="font-semibold color-positive">${d.trade_setup.tp1}</span></div>
+                            <div><span className="text-gray-500">TP2</span> <span className="font-semibold color-positive">${d.trade_setup.tp2}</span></div>
+                            <div><span className="text-gray-500">R:R</span> <span className="font-semibold">{d.trade_setup.rr}x</span></div>
+                        </div>
+                    </div>
+                )}
+
+                {/* AI Analysis Button */}
+                <div className="mb-4">
+                    {!aiData && (
+                        <button onClick={loadAiAnalysis} disabled={aiLoading} className="button" style={{ width: '100%' }}>
+                            {aiLoading ? 'KI analysiert...' : 'KI Analyse starten'}
+                        </button>
+                    )}
+                    {aiData && (
+                        <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-xs">
+                            <h4 className="font-semibold text-sm mb-2 text-blue-800">KI Analyse</h4>
+                            <div className="text-gray-700 leading-relaxed" dangerouslySetInnerHTML={{ __html: renderMarkdown(aiData.analysis || 'Keine Analyse') }}></div>
+                        </div>
+                    )}
+                </div>
             </div>
         </div>
     );
@@ -582,18 +671,42 @@ function ScannerTab({ onSelectTicker }) {
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
 
+    // Load cached results on mount
+    useEffect(() => {
+        const loadCached = async () => {
+            try {
+                const response = await fetch(`${API}/api/scan-results?direction=long`);
+                if (response.ok) {
+                    const data = await response.json();
+                    setResults(data.data || []);
+                }
+            } catch (err) { console.error('Error:', err); }
+        };
+        loadCached();
+    }, []);
+
     const handleScan = async () => {
         setIsScanning(true);
         try {
             const response = await fetch(`${API}/api/scan`, { method: 'POST', body: JSON.stringify({ strategy, market_type: marketType }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
-                const data = await response.json();
-                setResults(data.results || []);
-                if (window.addToast) window.addToast('Scan abgeschlossen', 'success');
-            }
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results after background scan completes
+                setTimeout(async () => {
+                    try {
+                        const dir = strategy.toLowerCase().includes('short') ? 'short' : 'long';
+                        const res = await fetch(`${API}/api/scan-results?direction=${dir}`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            setResults(data.data || []);
+                            if (window.addToast) window.addToast('Scan abgeschlossen', 'success');
+                        }
+                    } catch (e) { console.error(e); }
+                    setIsScanning(false);
+                }, 15000);
+            } else { setIsScanning(false); }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
-        } finally {
             setIsScanning(false);
         }
     };
@@ -606,7 +719,7 @@ function ScannerTab({ onSelectTicker }) {
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
                         <select value={strategy} onChange={(e) => setStrategy(e.target.value)} className="w-full">
                             <option value="">Wählen Sie eine Strategie...</option>
-                            {strategies?.strategies?.map(s => (
+                            {strategies?.strategies && Object.keys(strategies.strategies).map(s => (
                                 <option key={s} value={s}>{s}</option>
                             ))}
                         </select>
@@ -670,7 +783,7 @@ function BIScannerTab({ onSelectTicker }) {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
                 const data = await response.json();
-                setResults(data.results || []);
+                setResults(data.data || []);
             }
         } catch (err) {
             console.error('Error:', err);
@@ -685,7 +798,7 @@ function BIScannerTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
                 if (response.ok) {
                     const data = await response.json();
-                    setResults(data.results || []);
+                    setResults(data.data || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -748,7 +861,7 @@ function BiotechTab({ onSelectTicker }) {
             const response = await fetch(`${API}/api/biotech-scan`, { method: 'POST' });
             if (response.ok) {
                 const data = await response.json();
-                setResults(data.results || []);
+                setResults(data.data || []);
             }
         } catch (err) {
             console.error('Error:', err);
@@ -763,7 +876,7 @@ function BiotechTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/biotech-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setResults(data.results || []);
+                    setResults(data.data || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -816,7 +929,7 @@ function BTCDivergenzTab({ onSelectTicker }) {
             const response = await fetch(`${API}/api/btc-divergenz-scan`, { method: 'POST' });
             if (response.ok) {
                 const data = await response.json();
-                setResults(data.results || []);
+                setResults(data.data || []);
             }
         } catch (err) {
             console.error('Error:', err);
@@ -831,7 +944,7 @@ function BTCDivergenzTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/btc-divergenz-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setResults(data.results || []);
+                    setResults(data.data || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -903,8 +1016,9 @@ function EarlyMoversTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/early-movers-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setWinnerResults(data.winners || []);
-                    setLoserResults(data.losers || []);
+                    const em = (data.data && data.data[0]) || {};
+                    setWinnerResults(em.gainers || []);
+                    setLoserResults(em.losers || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -919,7 +1033,7 @@ function EarlyMoversTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/volume-spikes-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setSpikeResults(data.results || []);
+                    setSpikeResults(data.data || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -1042,8 +1156,9 @@ function ShortScannerTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/bear-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setInverseETFs(data.inverse_etfs || []);
-                    setBreakdownStocks(data.breakdown_stocks || []);
+                    const bear = (data.data && data.data[0]) || {};
+                    setInverseETFs(bear.inverse_etfs || []);
+                    setBreakdownStocks(bear.breakdown_stocks || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -1148,7 +1263,7 @@ function MoneyFlowTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/money-flow-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setResults(data.results || []);
+                    setResults(data.data || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -1289,9 +1404,10 @@ function CrashMonitorTab({ onSelectTicker }) {
                 const response = await fetch(`${API}/api/crash-monitor-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    setFearData(data.fear_data);
-                    setIndices(data.indices || []);
-                    setBreadth(data.market_breadth);
+                    const cm = (data.data && data.data[0]) || {};
+                    setFearData({ score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' });
+                    setIndices(cm.indices || []);
+                    setBreadth(cm.breadth || null);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -1557,7 +1673,7 @@ function BacktestTab() {
 
             if (response.ok) {
                 const data = await response.json();
-                setResults(data.results);
+                setResults(data.data || {});
                 setTrades(data.trades || []);
                 if (window.addToast) window.addToast('Backtest abgeschlossen', 'success');
             } else {

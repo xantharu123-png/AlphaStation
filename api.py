@@ -919,6 +919,32 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     }
 
 
+@app.get("/api/scan-results", response_model=ScanResultsResponse)
+def get_scan_results(direction: str = Query("long", description="long or short")):
+    """Get cached scan results (delegates to BI cache since main scan uses BI scanner)."""
+    if direction not in ["long", "short"]:
+        raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
+
+    cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
+    results, cached_at = load_cache_file(cache_file)
+
+    cache_age = None
+    if cached_at:
+        try:
+            cached_dt = datetime.fromisoformat(cached_at)
+            cache_age = int((datetime.now() - cached_dt).total_seconds())
+        except Exception:
+            pass
+
+    return ScanResultsResponse(
+        status="success",
+        count=len(results),
+        data=results,
+        cached_at=cached_at,
+        cache_age_seconds=cache_age,
+    )
+
+
 @app.post("/api/bi-scan")
 def trigger_bi_scan(request: BIScanRequest, background_tasks: BackgroundTasks):
     """Trigger BI background scan (long or short direction)."""
