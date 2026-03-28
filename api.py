@@ -516,9 +516,258 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         support_1 = round(2 * pivot - high, 2)
         resist_1 = round(2 * pivot - low, 2)
 
-        # Candlestick data for chart (last 30 bars, reversed to chronological)
-        candles = [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"], "v": b.get("v", 0)}
-                   for b in reversed(bars[:30])]
+        # ========== MASSIVE EXPANSION STARTS HERE ==========
+
+        # 1. ADDITIONAL EMAs (exponential moving averages)
+        def calculate_ema(data, period):
+            """Calculate EMA using formula: EMA = price * k + EMA_prev * (1-k)"""
+            if len(data) < period:
+                return None
+            k = 2 / (period + 1)
+            ema = sum(data[-period:]) / period  # Start with SMA
+            for i in range(len(data) - period - 1, -1, -1):
+                ema = data[i] * k + ema * (1 - k)
+            return round(ema, 2)
+
+        ema9 = calculate_ema(closes, 9)
+        ema20 = calculate_ema(closes, 20)
+        ema50 = calculate_ema(closes, 50)
+        ema100 = calculate_ema(closes, 100)
+        ema200 = calculate_ema(closes, 200)
+
+        # 2. VWAP (from last 20 bars)
+        vwap = None
+        if len(bars) >= 20:
+            vwap_bars = bars[:20]  # Most recent 20
+            cum_tp_vol = sum(((b["h"] + b["l"] + b["c"]) / 3) * b.get("v", 0) for b in vwap_bars)
+            cum_vol = sum(b.get("v", 0) for b in vwap_bars)
+            if cum_vol > 0:
+                vwap = round(cum_tp_vol / cum_vol, 2)
+
+        # 3. MACD
+        ema12 = calculate_ema(closes, 12)
+        ema26 = calculate_ema(closes, 26)
+        macd = None
+        macd_signal = None
+        macd_histogram = None
+        if ema12 is not None and ema26 is not None:
+            macd = round(ema12 - ema26, 2)
+            # Signal line is EMA9 of MACD line - simplified: use approximation
+            if len(closes) >= 34:
+                macd_line_vals = []
+                for i in range(len(closes) - 1, -1, -1):
+                    test_ema12 = calculate_ema(closes[:len(closes)-i], 12) if len(closes) - i >= 12 else None
+                    test_ema26 = calculate_ema(closes[:len(closes)-i], 26) if len(closes) - i >= 26 else None
+                    if test_ema12 and test_ema26:
+                        macd_line_vals.append(test_ema12 - test_ema26)
+                if len(macd_line_vals) >= 9:
+                    macd_signal = calculate_ema(list(reversed(macd_line_vals)), 9)
+            if macd_signal is not None:
+                macd_histogram = round(macd - macd_signal, 2)
+
+        # 4. Bollinger Bands (20-period, 2 std dev)
+        bb_upper = None
+        bb_lower = None
+        if len(closes) >= 20:
+            ma20_bb = sum(closes[:20]) / 20
+            variance = sum((x - ma20_bb) ** 2 for x in closes[:20]) / 20
+            stddev = variance ** 0.5
+            bb_upper = round(ma20 + 2 * stddev, 2)
+            bb_lower = round(ma20 - 2 * stddev, 2)
+
+        # 5. Fibonacci Retracement Levels (from 20d high/low)
+        fib_levels = {}
+        if len(bars) >= 20:
+            high_20 = max(highs[:20])
+            low_20 = min(lows[:20])
+            range_fib = high_20 - low_20
+            fib_ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+            for ratio in fib_ratios:
+                level_price = low_20 + range_fib * ratio
+                fib_levels[f"{int(ratio*100)}%"] = round(level_price, 2)
+
+        # 6. ATR (Average True Range, 14-period)
+        atr = None
+        if len(bars) >= 15:
+            tr_values = []
+            for i in range(14):
+                high_i = highs[i]
+                low_i = lows[i]
+                prev_close_i = closes[i + 1] if i < len(closes) - 1 else closes[i]
+                tr = max(high_i - low_i, abs(high_i - prev_close_i), abs(low_i - prev_close_i))
+                tr_values.append(tr)
+            atr = round(sum(tr_values) / 14, 2)
+
+        # 7. Signal Scoring (10-factor system)
+        signals = []
+        score = 0
+
+        # 1. Trend (price vs MA20/MA50)
+        if close > ma20 and (ma50 is None or close > ma50):
+            signals.append({"name": "Trend", "status": "bullish", "detail": "Price above MA20/MA50", "points": 2})
+            score += 2
+        elif close < ma20:
+            signals.append({"name": "Trend", "status": "bearish", "detail": "Price below MA20", "points": 0})
+        else:
+            signals.append({"name": "Trend", "status": "neutral", "detail": "Price near MA20", "points": 1})
+            score += 1
+
+        # 2. RSI
+        if rsi is not None:
+            if rsi > 70:
+                signals.append({"name": "RSI", "status": "bearish", "detail": f"Overbought (RSI {rsi})", "points": 0})
+            elif rsi < 30:
+                signals.append({"name": "RSI", "status": "bullish", "detail": f"Oversold (RSI {rsi})", "points": 2})
+                score += 2
+            else:
+                signals.append({"name": "RSI", "status": "neutral", "detail": f"Neutral (RSI {rsi})", "points": 1})
+                score += 1
+
+        # 3. Volume (RVOL)
+        if rvol > 1.2:
+            signals.append({"name": "Volume", "status": "bullish", "detail": f"High volume ({rvol}x avg)", "points": 2})
+            score += 2
+        elif rvol < 0.8:
+            signals.append({"name": "Volume", "status": "bearish", "detail": f"Low volume ({rvol}x avg)", "points": 0})
+        else:
+            signals.append({"name": "Volume", "status": "neutral", "detail": f"Normal volume ({rvol}x avg)", "points": 1})
+            score += 1
+
+        # 4. MACD
+        if macd is not None and macd_signal is not None:
+            if macd > macd_signal:
+                signals.append({"name": "MACD", "status": "bullish", "detail": f"MACD above signal", "points": 2})
+                score += 2
+            else:
+                signals.append({"name": "MACD", "status": "bearish", "detail": f"MACD below signal", "points": 0})
+
+        # 5. Bollinger Position
+        if bb_upper is not None and bb_lower is not None:
+            bb_range = bb_upper - bb_lower
+            if bb_range > 0:
+                bb_pos = (close - bb_lower) / bb_range
+                if bb_pos > 0.8:
+                    signals.append({"name": "Bollinger", "status": "bearish", "detail": "Near upper band", "points": 0})
+                elif bb_pos < 0.2:
+                    signals.append({"name": "Bollinger", "status": "bullish", "detail": "Near lower band", "points": 2})
+                    score += 2
+                else:
+                    signals.append({"name": "Bollinger", "status": "neutral", "detail": "Within bands", "points": 1})
+                    score += 1
+
+        # 6. ATR (volatility)
+        if atr is not None:
+            avg_price = (high + low) / 2
+            atr_pct = (atr / avg_price) * 100 if avg_price > 0 else 0
+            if atr_pct < 1:
+                signals.append({"name": "Volatility", "status": "bearish", "detail": f"Low ATR ({atr_pct:.1f}%)", "points": 0})
+            elif atr_pct > 3:
+                signals.append({"name": "Volatility", "status": "bullish", "detail": f"High ATR ({atr_pct:.1f}%)", "points": 2})
+                score += 2
+            else:
+                signals.append({"name": "Volatility", "status": "neutral", "detail": f"Normal ATR ({atr_pct:.1f}%)", "points": 1})
+                score += 1
+
+        # 7. Price vs VWAP
+        if vwap is not None:
+            if close > vwap:
+                signals.append({"name": "VWAP", "status": "bullish", "detail": f"Price above VWAP", "points": 2})
+                score += 2
+            else:
+                signals.append({"name": "VWAP", "status": "bearish", "detail": f"Price below VWAP", "points": 0})
+
+        # 8. Support/Resistance proximity
+        dist_to_support = close - support_1
+        dist_to_resist = resist_1 - close
+        if dist_to_support > 0 and dist_to_support < (high_20d - low_20d) * 0.05:
+            signals.append({"name": "Support", "status": "bullish", "detail": f"Near support ({support_1})", "points": 2})
+            score += 2
+        elif dist_to_resist > 0 and dist_to_resist < (high_20d - low_20d) * 0.05:
+            signals.append({"name": "Resistance", "status": "bearish", "detail": f"Near resistance ({resist_1})", "points": 0})
+        else:
+            signals.append({"name": "S/R", "status": "neutral", "detail": "Away from key levels", "points": 1})
+            score += 1
+
+        # 9. Range position (20D)
+        if range_pos > 70:
+            signals.append({"name": "Range", "status": "bearish", "detail": f"At 20D high ({range_pos:.0f}%)", "points": 0})
+        elif range_pos < 30:
+            signals.append({"name": "Range", "status": "bullish", "detail": f"At 20D low ({range_pos:.0f}%)", "points": 2})
+            score += 2
+        else:
+            signals.append({"name": "Range", "status": "neutral", "detail": f"Mid-range ({range_pos:.0f}%)", "points": 1})
+            score += 1
+
+        # 10. Momentum (5D change)
+        if chg_5d > 2:
+            signals.append({"name": "Momentum", "status": "bullish", "detail": f"Strong up ({chg_5d:.1f}%)", "points": 2})
+            score += 2
+        elif chg_5d < -2:
+            signals.append({"name": "Momentum", "status": "bearish", "detail": f"Strong down ({chg_5d:.1f}%)", "points": 0})
+        else:
+            signals.append({"name": "Momentum", "status": "neutral", "detail": f"Neutral ({chg_5d:.1f}%)", "points": 1})
+            score += 1
+
+        # Signal grading
+        signal_grade = "S" if score >= 18 else "A" if score >= 14 else "B" if score >= 10 else "C" if score >= 6 else "D"
+
+        # 8. Confluence Score
+        bullish_count = sum(1 for s in signals if s["status"] == "bullish")
+        bearish_count = sum(1 for s in signals if s["status"] == "bearish")
+        neutral_count = sum(1 for s in signals if s["status"] == "neutral")
+        confluence_direction = "LONG" if bullish_count > bearish_count else "SHORT" if bearish_count > bullish_count else "NEUTRAL"
+
+        confluence = {
+            "bullish": bullish_count,
+            "bearish": bearish_count,
+            "neutral": neutral_count,
+            "direction": confluence_direction
+        }
+
+        # 9. Trade Setup
+        trade_setup = None
+        if signal_grade in ['S', 'A']:
+            entry = close
+            # Stop = support_1 or low_20d (whichever is closer below)
+            stop = max(support_1, low_20d) if support_1 > low_20d else support_1
+            risk = entry - stop
+            if risk > 0:
+                tp1 = entry + risk
+                tp2 = entry + risk * 1.618
+                rr = (tp1 - entry) / risk if risk > 0 else 0
+                direction = "LONG" if chg_5d > 0 else "SHORT"
+                trade_setup = {
+                    "entry": round(entry, 2),
+                    "stop": round(stop, 2),
+                    "tp1": round(tp1, 2),
+                    "tp2": round(tp2, 2),
+                    "rr": round(rr, 2),
+                    "direction": direction
+                }
+
+        # 10. Candlestick data for chart (last 60 bars, reversed to chronological, with EMA overlays)
+        candles = []
+        bars_for_chart = list(reversed(bars[:60]))
+
+        # Calculate EMA20 and EMA50 for each candle
+        closes_reversed = list(reversed(closes[:60]))
+        ema20_values = []
+        ema50_values = []
+
+        for i in range(len(closes_reversed)):
+            slice_closes = closes_reversed[:i+1]
+            e20 = calculate_ema(slice_closes, min(20, len(slice_closes)))
+            e50 = calculate_ema(slice_closes, min(50, len(slice_closes)))
+            ema20_values.append(e20)
+            ema50_values.append(e50)
+
+        for idx, b in enumerate(bars_for_chart):
+            candle = {
+                "t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"], "v": b.get("v", 0),
+                "ema20": ema20_values[idx],
+                "ema50": ema50_values[idx]
+            }
+            candles.append(candle)
 
         return {
             "ticker": ticker, "price": round(close, 2), "open": round(opn, 2),
@@ -528,7 +777,18 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             "ma20": ma20, "ma50": ma50, "rvol": rvol, "rsi": rsi,
             "high_20d": high_20d, "low_20d": low_20d, "range_position": range_pos,
             "pivot": pivot, "support_1": support_1, "resistance_1": resist_1,
-            "avg_volume": round(avg_vol), "candles": candles,
+            "avg_volume": round(avg_vol),
+            # New fields
+            "ema9": ema9, "ema20": ema20, "ema50": ema50, "ema100": ema100, "ema200": ema200,
+            "vwap": vwap,
+            "macd": macd, "macd_signal": macd_signal, "macd_histogram": macd_histogram,
+            "bb_upper": bb_upper, "bb_lower": bb_lower,
+            "fib_levels": fib_levels,
+            "atr": atr,
+            "signals": signals, "signal_score": score, "signal_grade": signal_grade,
+            "confluence": confluence,
+            "trade_setup": trade_setup,
+            "candles": candles,
         }
     except HTTPException:
         raise

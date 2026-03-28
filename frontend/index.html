@@ -18,6 +18,9 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+    <!-- TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+
     <style>
         * { font-family: 'Inter', sans-serif; }
 
@@ -256,12 +259,115 @@
             );
         }
 
+        // ── TradingView Candlestick Chart Component ──
+        function CandlestickChart({ candles, ema20Values, ema50Values, height = 280 }) {
+            const containerRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!containerRef.current || !candles || candles.length < 2) return;
+
+                containerRef.current.innerHTML = '';
+
+                if (typeof LightweightCharts === 'undefined') {
+                    containerRef.current.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">Chart-Bibliothek wird geladen...</div>';
+                    return;
+                }
+
+                const container = containerRef.current;
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: height,
+                    layout: {
+                        background: { type: 'solid', color: 'transparent' },
+                        textColor: 'var(--text-muted)',
+                    },
+                    grid: {
+                        vertLines: { color: 'rgba(197, 203, 206, 0.1)' },
+                        horzLines: { color: 'rgba(197, 203, 206, 0.1)' },
+                    },
+                    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                    rightPriceScale: { borderColor: 'rgba(197, 203, 206, 0.3)' },
+                    timeScale: { borderColor: 'rgba(197, 203, 206, 0.3)', timeVisible: false },
+                });
+
+                const candleSeries = chart.addCandlestickSeries({
+                    upColor: '#059669',
+                    downColor: '#dc2626',
+                    borderUpColor: '#059669',
+                    borderDownColor: '#dc2626',
+                    wickUpColor: '#059669',
+                    wickDownColor: '#dc2626',
+                });
+
+                const candleData = candles.map(c => ({
+                    time: typeof c.t === 'number' ? Math.floor(c.t / 1000) : c.t,
+                    open: c.o,
+                    high: c.h,
+                    low: c.l,
+                    close: c.c,
+                }));
+                candleSeries.setData(candleData);
+
+                if (ema20Values && ema20Values.length > 0) {
+                    const ema20Series = chart.addLineSeries({
+                        color: '#3b82f6',
+                        lineWidth: 1,
+                        title: 'EMA20',
+                    });
+                    ema20Series.setData(ema20Values);
+                }
+
+                if (ema50Values && ema50Values.length > 0) {
+                    const ema50Series = chart.addLineSeries({
+                        color: '#f59e0b',
+                        lineWidth: 1,
+                        title: 'EMA50',
+                    });
+                    ema50Series.setData(ema50Values);
+                }
+
+                const volSeries = chart.addHistogramSeries({
+                    color: '#94a3b8',
+                    priceFormat: { type: 'volume' },
+                    priceScaleId: 'vol',
+                    scaleMargins: { top: 0.85, bottom: 0 },
+                });
+                volSeries.setData(candles.map(c => ({
+                    time: typeof c.t === 'number' ? Math.floor(c.t / 1000) : c.t,
+                    value: c.v,
+                    color: c.c >= c.o ? 'rgba(5,150,105,0.3)' : 'rgba(220,38,38,0.3)',
+                })));
+
+                chart.timeScale().fitContent();
+                chartRef.current = chart;
+
+                const handleResize = () => {
+                    if (container && chart) {
+                        chart.applyOptions({ width: container.clientWidth });
+                    }
+                };
+                window.addEventListener('resize', handleResize);
+
+                return () => {
+                    window.removeEventListener('resize', handleResize);
+                    if (chartRef.current) {
+                        chartRef.current.remove();
+                        chartRef.current = null;
+                    }
+                };
+            }, [candles, ema20Values, ema50Values, height]);
+
+            return <div ref={containerRef} style={{width: '100%', height: height + 'px', borderRadius: '8px', overflow: 'hidden'}}></div>;
+        }
+
         // ── Detail Sidebar Component ──
         function DetailSidebar({ ticker, onClose }) {
             const [detail, setDetail] = useState(null);
             const [aiAnalysis, setAiAnalysis] = useState(null);
             const [aiLoading, setAiLoading] = useState(false);
             const [detailLoading, setDetailLoading] = useState(true);
+            const [watchlistAdded, setWatchlistAdded] = useState(false);
 
             useEffect(() => {
                 if (!ticker) return;
@@ -280,31 +386,49 @@
                 setAiLoading(false);
             };
 
+            const addToWatchlist = () => {
+                try {
+                    const watchlist = JSON.parse(localStorage.getItem('watchlist') || '[]');
+                    if (!watchlist.includes(ticker)) {
+                        watchlist.push(ticker);
+                        localStorage.setItem('watchlist', JSON.stringify(watchlist));
+                        setWatchlistAdded(true);
+                        showToast(`${ticker} zur Watchlist hinzugefuegt`, 'success');
+                    } else {
+                        showToast(`${ticker} bereits in Watchlist`, 'info');
+                    }
+                } catch (err) {
+                    console.error('Watchlist error:', err);
+                    showToast('Fehler beim Hinzufuegen zur Watchlist', 'error');
+                }
+            };
+
             if (!ticker) return null;
             const d = detail || {};
 
-            const MiniChart = ({ candles }) => {
-                if (!candles || candles.length < 2) return <div className="mini-chart flex items-center justify-center text-gray-400 text-sm">Keine Chartdaten</div>;
-                const prices = candles.map(c => c.c);
-                const minP = Math.min(...prices);
-                const maxP = Math.max(...prices);
-                const range = maxP - minP || 1;
-                const w = 380;
-                const h = 110;
-                const points = prices.map((p, i) => `${(i / (prices.length - 1)) * w},${h - ((p - minP) / range) * (h - 10)}`).join(' ');
-                const isUp = prices[prices.length - 1] >= prices[0];
-                const color = isUp ? '#059669' : '#dc2626';
-                const fillPoints = points + ` ${w},${h} 0,${h}`;
-                return (
-                    <div className="mini-chart" style={{padding: '5px 10px'}}>
-                        <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
-                            <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.15"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs>
-                            <polygon points={fillPoints} fill="url(#cg)"/>
-                            <polyline points={points} fill="none" stroke={color} strokeWidth="2"/>
-                        </svg>
-                    </div>
-                );
+            const getSignalGrade = (signals) => {
+                if (!signals || signals.length === 0) return 'D';
+                const totalPoints = signals.reduce((sum, s) => sum + (s.points || 0), 0);
+                const maxPoints = signals.length * 2;
+                const percentage = (totalPoints / maxPoints) * 100;
+                return gradeFor(percentage);
             };
+
+            const getConfluenceDisplay = (signals) => {
+                if (!signals || signals.length === 0) return { bullish: 0, bearish: 0, neutral: 0 };
+                const counts = { bullish: 0, bearish: 0, neutral: 0 };
+                signals.forEach(s => {
+                    if (s.status === 'bullish') counts.bullish++;
+                    else if (s.status === 'bearish') counts.bearish++;
+                    else counts.neutral++;
+                });
+                return counts;
+            };
+
+            const confluence = getConfluenceDisplay(d.signals);
+            const signalGrade = getSignalGrade(d.signals);
+            const totalSignalPoints = d.signals ? d.signals.reduce((sum, s) => sum + (s.points || 0), 0) : 0;
+            const maxSignalPoints = d.signals ? d.signals.length * 2 : 0;
 
             return (
                 <React.Fragment>
@@ -321,15 +445,103 @@
                                 </div>
                                 <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1" style={{fontSize:'24px', lineHeight:'1'}}>&times;</button>
                             </div>
+                            <button onClick={addToWatchlist}
+                                className={`w-full mt-3 py-2 rounded-lg text-xs font-medium transition ${watchlistAdded ? 'bg-green-100 text-green-700 border border-green-300' : 'bg-gray-100 text-gray-700 border border-gray-300 hover:bg-gray-200'}`}>
+                                {watchlistAdded ? '✓ Zur Watchlist hinzugefuegt' : 'Zur Watchlist hinzufuegen'}
+                            </button>
                         </div>
 
                         <div className="sidebar-body">
                             {detailLoading ? <Spinner /> : (
                                 <React.Fragment>
                                     <div className="sidebar-section">
-                                        <div className="sidebar-section-title">30-Tage Chart</div>
-                                        <MiniChart candles={d.candles} />
+                                        <div className="sidebar-section-title">Candlestick Chart</div>
+                                        <CandlestickChart candles={d.candles} ema20Values={d.ema20_values} ema50Values={d.ema50_values} height={280} />
                                     </div>
+
+                                    {d.signals && d.signals.length > 0 && (
+                                        <div className="sidebar-section">
+                                            <div className="sidebar-section-title flex justify-between items-center">
+                                                <span>Signal Bewertung</span>
+                                                <span className={`grade-badge grade-${signalGrade.toLowerCase()}`}>{signalGrade}</span>
+                                            </div>
+                                            <div style={{fontSize: '12px', marginBottom: '12px', color: 'var(--text-muted)'}}>
+                                                {totalSignalPoints}/{maxSignalPoints} Punkte
+                                            </div>
+                                            {d.signals.map((sig, idx) => (
+                                                <div key={idx} className="flex items-center justify-between py-1.5" style={{borderBottom: '1px solid var(--border-color)'}}>
+                                                    <div className="flex items-center gap-2">
+                                                        <span>{sig.status === 'bullish' ? '🟢' : sig.status === 'bearish' ? '🔴' : '⚪'}</span>
+                                                        <span className="text-sm">{sig.name}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-xs" style={{color:'var(--text-muted)'}}>{sig.detail || ''}</span>
+                                                        <span className="text-xs font-bold">{sig.points || 0}/2</span>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {d.trade_setup && (
+                                        <div className="sidebar-section">
+                                            <div className="sidebar-section-title">Trade Setup</div>
+                                            <div style={{marginBottom: '12px'}}>
+                                                <span className={`grade-badge ${d.trade_setup.direction === 'LONG' ? 'grade-a' : 'grade-c'}`}>
+                                                    {d.trade_setup.direction}
+                                                </span>
+                                            </div>
+                                            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '12px'}}>
+                                                <div style={{padding: '8px', backgroundColor: 'var(--bg-primary)', borderRadius: '4px'}}>
+                                                    <div style={{color: 'var(--text-muted)', marginBottom: '4px'}}>Entry</div>
+                                                    <div style={{fontWeight: 'bold'}}>${fmt(d.trade_setup.entry)}</div>
+                                                </div>
+                                                <div style={{padding: '8px', backgroundColor: 'var(--bg-primary)', borderRadius: '4px'}}>
+                                                    <div style={{color: 'var(--text-muted)', marginBottom: '4px'}}>Stop Loss</div>
+                                                    <div style={{fontWeight: 'bold', color: 'var(--danger)'}}>${fmt(d.trade_setup.stop_loss)}</div>
+                                                </div>
+                                                <div style={{padding: '8px', backgroundColor: 'var(--bg-primary)', borderRadius: '4px'}}>
+                                                    <div style={{color: 'var(--text-muted)', marginBottom: '4px'}}>TP 1</div>
+                                                    <div style={{fontWeight: 'bold', color: 'var(--success)'}}>${fmt(d.trade_setup.tp1)}</div>
+                                                </div>
+                                                <div style={{padding: '8px', backgroundColor: 'var(--bg-primary)', borderRadius: '4px'}}>
+                                                    <div style={{color: 'var(--text-muted)', marginBottom: '4px'}}>TP 2</div>
+                                                    <div style={{fontWeight: 'bold', color: 'var(--success)'}}>${fmt(d.trade_setup.tp2)}</div>
+                                                </div>
+                                            </div>
+                                            {d.trade_setup.rr_ratio && (
+                                                <div style={{marginTop: '12px', padding: '8px', backgroundColor: 'rgba(37, 99, 235, 0.1)', borderRadius: '4px', textAlign: 'center'}}>
+                                                    <div style={{color: 'var(--text-muted)', fontSize: '12px', marginBottom: '4px'}}>R:R Ratio</div>
+                                                    <div style={{fontWeight: 'bold', color: 'var(--accent)', fontSize: '14px'}}>1:{d.trade_setup.rr_ratio}</div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {(confluence.bullish > 0 || confluence.bearish > 0) && (
+                                        <div className="sidebar-section">
+                                            <div className="sidebar-section-title">Confluence</div>
+                                            <div style={{display: 'flex', gap: '8px', marginBottom: '8px'}}>
+                                                <div style={{flex: confluence.bullish, height: '12px', backgroundColor: '#059669', borderRadius: '2px', opacity: confluence.bullish > 0 ? 1 : 0.3}}></div>
+                                                <div style={{flex: confluence.neutral, height: '12px', backgroundColor: '#9ca3af', borderRadius: '2px', opacity: confluence.neutral > 0 ? 1 : 0.3}}></div>
+                                                <div style={{flex: confluence.bearish, height: '12px', backgroundColor: '#dc2626', borderRadius: '2px', opacity: confluence.bearish > 0 ? 1 : 0.3}}></div>
+                                            </div>
+                                            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', fontSize: '12px'}}>
+                                                <div style={{textAlign: 'center'}}>
+                                                    <div style={{fontWeight: 'bold', color: '#059669'}}>{confluence.bullish}</div>
+                                                    <div style={{color: 'var(--text-muted)'}}>Bullish</div>
+                                                </div>
+                                                <div style={{textAlign: 'center'}}>
+                                                    <div style={{fontWeight: 'bold', color: '#9ca3af'}}>{confluence.neutral}</div>
+                                                    <div style={{color: 'var(--text-muted)'}}>Neutral</div>
+                                                </div>
+                                                <div style={{textAlign: 'center'}}>
+                                                    <div style={{fontWeight: 'bold', color: '#dc2626'}}>{confluence.bearish}</div>
+                                                    <div style={{color: 'var(--text-muted)'}}>Bearish</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
 
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">Kennzahlen</div>
@@ -343,6 +555,26 @@
                                         {d.ma50 && <div className="sidebar-metric"><span className="sidebar-metric-label">MA50</span><span className="sidebar-metric-value">${fmt(d.ma50)}</span></div>}
                                     </div>
 
+                                    {(d.macd || d.bollinger_bands || d.atr || d.vwap) && (
+                                        <div className="sidebar-section">
+                                            <div className="sidebar-section-title">Technische Indikatoren</div>
+                                            {d.macd && (
+                                                <div className="sidebar-metric">
+                                                    <span className="sidebar-metric-label">MACD</span>
+                                                    <span className="sidebar-metric-value">{typeof d.macd === 'object' ? `${fmt(d.macd.value)} (${d.macd.signal > 0 ? '+' : ''}${fmt(d.macd.signal)})` : fmt(d.macd)}</span>
+                                                </div>
+                                            )}
+                                            {d.bollinger_bands && (
+                                                <div className="sidebar-metric">
+                                                    <span className="sidebar-metric-label">BB</span>
+                                                    <span className="sidebar-metric-value">${fmt(d.bollinger_bands.middle || d.bollinger_bands)}</span>
+                                                </div>
+                                            )}
+                                            {d.atr && <div className="sidebar-metric"><span className="sidebar-metric-label">ATR</span><span className="sidebar-metric-value">{fmt(d.atr)}</span></div>}
+                                            {d.vwap && <div className="sidebar-metric"><span className="sidebar-metric-label">VWAP</span><span className="sidebar-metric-value">${fmt(d.vwap)}</span></div>}
+                                        </div>
+                                    )}
+
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">Performance</div>
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">1 Tag</span><span className={`sidebar-metric-value ${changeColor(d.change_1d)}`}>{d.change_1d > 0 ? '+' : ''}{fmt(d.change_1d)}%</span></div>
@@ -350,6 +582,18 @@
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">20 Tage</span><span className={`sidebar-metric-value ${changeColor(d.change_20d)}`}>{d.change_20d > 0 ? '+' : ''}{fmt(d.change_20d)}%</span></div>
                                         <div className="sidebar-metric"><span className="sidebar-metric-label">20D Range Pos.</span><span className="sidebar-metric-value">{fmt(d.range_position, 0)}%</span></div>
                                     </div>
+
+                                    {d.fib_levels && d.fib_levels.length > 0 && (
+                                        <div className="sidebar-section">
+                                            <div className="sidebar-section-title">Fibonacci Levels</div>
+                                            {d.fib_levels.map((fib, idx) => (
+                                                <div key={idx} className="sidebar-metric">
+                                                    <span className="sidebar-metric-label">{fib.level}</span>
+                                                    <span className="sidebar-metric-value">${fmt(fib.value)}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
 
                                     <div className="sidebar-section">
                                         <div className="sidebar-section-title">Levels</div>
