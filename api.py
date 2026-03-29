@@ -2689,19 +2689,23 @@ def _new_listing_wrapper() -> None:
                 if not symbol:
                     continue
 
-                # Clean symbol: remove _USDT, USDT suffix for ticker lookup
-                clean_symbol = symbol.replace("_USDT", "").replace("USDT", "").replace("_PERP", "")
+                # Display symbol: clean for UI (remove exchange suffixes)
+                display_symbol = symbol.replace("_USDT", "").replace("USDT", "").replace("_PERP", "").replace("-PERP", "").rstrip("USD")
+                if not display_symbol:
+                    display_symbol = symbol
 
-                # Fetch ticker data
-                ticker_data = fetch_ticker_for(clean_symbol, exchange)
+                # Use ORIGINAL symbol for API calls — each exchange needs its own format!
+                # MEXC: AAVE_USDT, Bitget: AAVEUSDT, Crypto.com: AAVEUSD-PERP
+                ticker_data = fetch_ticker_for(symbol, exchange)
                 if not ticker_data:
+                    print(f"[New Listing] No ticker for {symbol} ({exchange}), skipping")
                     continue
 
-                # Fetch candles
-                candles = fetch_candles_for(clean_symbol, exchange)
+                # Fetch candles with original symbol
+                candles = fetch_candles_for(symbol, exchange)
 
-                # Fetch orderbook
-                orderbook = fetch_cryptocom_orderbook(f"{clean_symbol}_PERP") if "crypto" in exchange else None
+                # Fetch orderbook (only crypto.com, use original symbol)
+                orderbook = fetch_cryptocom_orderbook(symbol) if exchange == "crypto.com" else None
 
                 # Calculate exhaustion
                 exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
@@ -2709,7 +2713,7 @@ def _new_listing_wrapper() -> None:
                 )
 
                 results.append({
-                    "symbol": clean_symbol,
+                    "symbol": display_symbol,
                     "exchange": exchange,
                     "contract": symbol,
                     "price": ticker_data.get("price", 0),
@@ -3257,13 +3261,23 @@ def _crash_monitor_wrapper() -> None:
 
             total = up + down + unchanged
             ratio = round(up / down, 2) if down > 0 else 0
+            # No data = market closed (weekend/holiday), don't falsely report bearish
+            if total == 0:
+                breadth_signal = "MARKT GESCHLOSSEN"
+            elif ratio > 1.5:
+                breadth_signal = "BULLISH"
+            elif ratio < 0.7:
+                breadth_signal = "BEARISH"
+            else:
+                breadth_signal = "NEUTRAL"
             result["breadth"] = {
                 "advancing": up, "declining": down, "unchanged": unchanged,
                 "total": total, "ad_ratio": ratio,
-                "advancing_pct": round(up / total * 100, 1) if total > 0 else 50,
-                "declining_pct": round(down / total * 100, 1) if total > 0 else 50,
+                "advancing_pct": round(up / total * 100, 1) if total > 0 else 0,
+                "declining_pct": round(down / total * 100, 1) if total > 0 else 0,
                 "unchanged_pct": round(unchanged / total * 100, 1) if total > 0 else 0,
-                "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
+                "breadth_signal": breadth_signal,
+                "market_open": total > 0,
             }
         except Exception as e:
             print(f"[Warning] Market breadth error: {e}")

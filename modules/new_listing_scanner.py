@@ -231,7 +231,7 @@ def fetch_mexc_ticker(symbol):
     if not data or not data.get("success"):
         return None
     t = data.get("data", {})
-    if not t:
+    if not t or not isinstance(t, dict):
         return None
     return {
         "price": float(t.get("lastPrice", 0)),
@@ -329,6 +329,8 @@ def fetch_bitget_ticker(symbol):
     if not tickers:
         return None
     t = tickers[0] if isinstance(tickers, list) else tickers
+    if not isinstance(t, dict):
+        return None
     return {
         "price": float(t.get("lastPr", 0)),
         "bid": float(t.get("bidPr", 0)),
