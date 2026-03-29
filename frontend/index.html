@@ -2852,7 +2852,9 @@ function StrategieGuideTab() {
                 const response = await fetch(`${API}/api/strategies?market_type=${activeMarket}`);
                 if (response.ok) {
                     const data = await response.json();
-                    setStrategies(data.strategies || []);
+                    // API returns strategies as {name: config} dict — extract keys as array
+                    const strats = data.strategies || {};
+                    setStrategies(typeof strats === 'object' && !Array.isArray(strats) ? Object.keys(strats) : (Array.isArray(strats) ? strats : []));
                 }
             } catch (err) {
                 console.error('Error:', err);

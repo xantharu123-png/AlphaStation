@@ -1073,205 +1073,205 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 continue
 
             try:
-              # Analyse
-              result = analyze_breakout_imminent(bars, direction=direction)
-            if len(result) == 8:
-                is_valid, bi_score, max_score, details, confidence, grade, sm_fires, sm_hits = result
-            else:
-                is_valid, bi_score, max_score, details, confidence, grade = result
-                sm_fires, sm_hits = 0, 0
+                # Analyse
+                result = analyze_breakout_imminent(bars, direction=direction)
+                if len(result) == 8:
+                    is_valid, bi_score, max_score, details, confidence, grade, sm_fires, sm_hits = result
+                else:
+                    is_valid, bi_score, max_score, details, confidence, grade = result
+                    sm_fires, sm_hits = 0, 0
 
-            score_sum += bi_score
-            score_count += 1
-            if bi_score > top_score:
-                top_score = bi_score
+                score_sum += bi_score
+                score_count += 1
+                if bi_score > top_score:
+                    top_score = bi_score
 
-            if not is_valid:
-                low_score_count += 1
-                continue
-
-            # FIX 4: Short Trend-Validierung — nur klare Uptrends filtern
-            # Gelockert: Preis muss DEUTLICH über SMA20 sein UND SMA10 > SMA20
-            # Vorher: jeder Preis über SMA20 wurde gefiltert (zu strikt für Intraday/Gap Downs)
-            if direction == "short" and len(all_bars) >= 20:
-                _closes = [b["close"] for b in all_bars]
-                _sma20 = sum(_closes[-20:]) / 20
-                _sma10 = sum(_closes[-10:]) / 10
-                _cur = _closes[-1]
-                _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
-                # Nur filtern wenn Preis >3% über SMA20 UND SMA10 steigend = klarer Uptrend
-                if _above_sma20_pct > 3.0 and _sma10 > _sma20:
+                if not is_valid:
+                    low_score_count += 1
                     continue
 
-            # Range berechnen
-            range_high = max(b["high"] for b in bars[-15:])
-            range_low = min(b["low"] for b in bars[-15:])
-            range_size = range_high - range_low
-            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
+                # FIX 4: Short Trend-Validierung — nur klare Uptrends filtern
+                # Gelockert: Preis muss DEUTLICH über SMA20 sein UND SMA10 > SMA20
+                # Vorher: jeder Preis über SMA20 wurde gefiltert (zu strikt für Intraday/Gap Downs)
+                if direction == "short" and len(all_bars) >= 20:
+                    _closes = [b["close"] for b in all_bars]
+                    _sma20 = sum(_closes[-20:]) / 20
+                    _sma10 = sum(_closes[-10:]) / 10
+                    _cur = _closes[-1]
+                    _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
+                    # Nur filtern wenn Preis >3% über SMA20 UND SMA10 steigend = klarer Uptrend
+                    if _above_sma20_pct > 3.0 and _sma10 > _sma20:
+                        continue
 
-            if range_pct < 2.0:
-                range_fail += 1
-                continue
+                # Range berechnen
+                range_high = max(b["high"] for b in bars[-15:])
+                range_low = min(b["low"] for b in bars[-15:])
+                range_size = range_high - range_low
+                range_pct = (range_size / range_low * 100) if range_low > 0 else 0
 
-            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
-            if avg_daily_range < 0.3:
-                atr_fail += 1
-                continue
+                if range_pct < 2.0:
+                    range_fail += 1
+                    continue
 
-            grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — WATCH", "D": "D — SCHWACH"}
-            grade_label = grade_map.get(grade, grade)
+                avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
+                if avg_daily_range < 0.3:
+                    atr_fail += 1
+                    continue
 
-            # Convert string candidate to dict for storing results
-            if isinstance(candidate, str):
-                candidate = {"Ticker": candidate, "ticker": candidate}
-            candidate["Alpha"] = bi_score
-            candidate["BI_Score"] = bi_score
-            candidate["BI_MaxScore"] = max_score
-            candidate["BI_Details"] = details
-            candidate["BI_Confidence"] = confidence
-            candidate["BI_Direction"] = direction.upper()
-            candidate["BI_Grade"] = grade
-            candidate["BI_GradeLabel"] = grade_label
+                grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — WATCH", "D": "D — SCHWACH"}
+                grade_label = grade_map.get(grade, grade)
 
-            atr_bars = bars[-6:]  # Need 6 bars for 5 True Range values
-            true_ranges = []
-            for i in range(1, len(atr_bars)):
-                h = atr_bars[i]["high"]
-                l = atr_bars[i]["low"]
-                pc = atr_bars[i-1]["close"]
-                tr = max(h - l, abs(h - pc), abs(l - pc))
-                true_ranges.append(tr)
-            atr_5 = sum(true_ranges) / len(true_ranges) if true_ranges else (bars[-1]["high"] - bars[-1]["low"])
+                # Convert string candidate to dict for storing results
+                if isinstance(candidate, str):
+                    candidate = {"Ticker": candidate, "ticker": candidate}
+                candidate["Alpha"] = bi_score
+                candidate["BI_Score"] = bi_score
+                candidate["BI_MaxScore"] = max_score
+                candidate["BI_Details"] = details
+                candidate["BI_Confidence"] = confidence
+                candidate["BI_Direction"] = direction.upper()
+                candidate["BI_Grade"] = grade
+                candidate["BI_GradeLabel"] = grade_label
 
-            if direction == "long":
-                candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)
-                candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)
-                candidate["TP1"] = round(range_high + range_size * 0.75, 2)
-                candidate["TP2"] = round(range_high + range_size * 1.618, 2)
-            else:
-                # FIX 2: SHORT Entry — Breakdown vs Pullback je nach Preislage
-                _current = bars[-1]["close"]
-                _range_mid = (range_high + range_low) / 2
-                _near_low = _current < _range_mid  # Preis in unterer Hälfte = Breakdown
-                if _near_low:
-                    # BREAKDOWN-SHORT: Preis nahe/unter Range-Low → Entry bei aktuellem Preis
-                    candidate["Entry"] = round(_current, 2)
-                    candidate["StopLoss"] = round(_current + atr_5 * 1.2, 2)  # Stop = 1.2× ATR über Entry
+                atr_bars = bars[-6:]  # Need 6 bars for 5 True Range values
+                true_ranges = []
+                for i in range(1, len(atr_bars)):
+                    h = atr_bars[i]["high"]
+                    l = atr_bars[i]["low"]
+                    pc = atr_bars[i-1]["close"]
+                    tr = max(h - l, abs(h - pc), abs(l - pc))
+                    true_ranges.append(tr)
+                atr_5 = sum(true_ranges) / len(true_ranges) if true_ranges else (bars[-1]["high"] - bars[-1]["low"])
+
+                if direction == "long":
+                    candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)
+                    candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)
+                    candidate["TP1"] = round(range_high + range_size * 0.75, 2)
+                    candidate["TP2"] = round(range_high + range_size * 1.618, 2)
                 else:
-                    # PULLBACK-SHORT: Preis nahe Range-High → Entry bei Resistance
-                    candidate["Entry"] = round(range_high * 0.995, 2)
-                    candidate["StopLoss"] = round(range_high * 1.015, 2)
-                risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])  # FIX 7: Division Guard
-                candidate["TP1"] = round(candidate["Entry"] - risk_short * 2.0, 2)
-                candidate["TP2"] = round(candidate["Entry"] - risk_short * 3.5, 2)
+                    # FIX 2: SHORT Entry — Breakdown vs Pullback je nach Preislage
+                    _current = bars[-1]["close"]
+                    _range_mid = (range_high + range_low) / 2
+                    _near_low = _current < _range_mid  # Preis in unterer Hälfte = Breakdown
+                    if _near_low:
+                        # BREAKDOWN-SHORT: Preis nahe/unter Range-Low → Entry bei aktuellem Preis
+                        candidate["Entry"] = round(_current, 2)
+                        candidate["StopLoss"] = round(_current + atr_5 * 1.2, 2)  # Stop = 1.2× ATR über Entry
+                    else:
+                        # PULLBACK-SHORT: Preis nahe Range-High → Entry bei Resistance
+                        candidate["Entry"] = round(range_high * 0.995, 2)
+                        candidate["StopLoss"] = round(range_high * 1.015, 2)
+                    risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])  # FIX 7: Division Guard
+                    candidate["TP1"] = round(candidate["Entry"] - risk_short * 2.0, 2)
+                    candidate["TP2"] = round(candidate["Entry"] - risk_short * 3.5, 2)
 
-            risk = abs(candidate["Entry"] - candidate["StopLoss"])
-            reward = abs(candidate["TP1"] - candidate["Entry"])
-            candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
-            candidate["RangeHigh"] = round(range_high, 2)
-            candidate["RangeLow"] = round(range_low, 2)
+                risk = abs(candidate["Entry"] - candidate["StopLoss"])
+                reward = abs(candidate["TP1"] - candidate["Entry"])
+                candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
+                candidate["RangeHigh"] = round(range_high, 2)
+                candidate["RangeLow"] = round(range_low, 2)
 
-            if candidate["RiskReward"] < 1.5:
-                rr_fail += 1
-                continue
+                if candidate["RiskReward"] < 1.5:
+                    rr_fail += 1
+                    continue
 
-            # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
-            # FIX 1+6+8+9: Proportionale Penalties, Grade-Cap, bessere Labels, Confluence-Fallback
-            pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
-            _has_conflicting_pattern = False  # FIX 1: Track ob bullish Pattern bei Short (oder umgekehrt)
-            if pattern_warnings:
-                high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
-                medium_warnings = [w for w in pattern_warnings if w["severity"] == "medium"]
-                danger_warnings = high_warnings + medium_warnings
-                candidate["PatternWarnings"] = pattern_warnings
-                candidate["PatternCount"] = len(danger_warnings)
-                candidate["PatternHighCount"] = len(high_warnings)
-                if danger_warnings:
-                    warn_texts = [f"!! {w['pattern']}" if w["severity"] == "high" else f"! {w['pattern']}" for w in danger_warnings]
-                    candidate["PatternLabel"] = " | ".join(warn_texts)
-                    _has_conflicting_pattern = len(high_warnings) > 0  # FIX 1
+                # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
+                # FIX 1+6+8+9: Proportionale Penalties, Grade-Cap, bessere Labels, Confluence-Fallback
+                pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
+                _has_conflicting_pattern = False  # FIX 1: Track ob bullish Pattern bei Short (oder umgekehrt)
+                if pattern_warnings:
+                    high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
+                    medium_warnings = [w for w in pattern_warnings if w["severity"] == "medium"]
+                    danger_warnings = high_warnings + medium_warnings
+                    candidate["PatternWarnings"] = pattern_warnings
+                    candidate["PatternCount"] = len(danger_warnings)
+                    candidate["PatternHighCount"] = len(high_warnings)
+                    if danger_warnings:
+                        warn_texts = [f"!! {w['pattern']}" if w["severity"] == "high" else f"! {w['pattern']}" for w in danger_warnings]
+                        candidate["PatternLabel"] = " | ".join(warn_texts)
+                        _has_conflicting_pattern = len(high_warnings) > 0  # FIX 1
+                    else:
+                        candidate["PatternLabel"] = "Keine Umkehr-Patterns"  # FIX 8: war "Clean"
+
+                    # FIX 6: Proportionale Score-Penalties statt fixer Werte
+                    # high = 20-30% des aktuellen Scores, medium = 10-15%
+                    for pw in pattern_warnings:
+                        if pw["severity"] == "high":
+                            prox = pw.get("proximity_pct", 5.0)
+                            # Proportional: 20-30% des Scores je nach Proximity
+                            pct_penalty = 0.20 + 0.10 * (1.0 - min(prox, 10.0) / 10.0)  # 20-30%
+                            penalty = max(15, int(bi_score * pct_penalty))
+                            bi_score -= penalty
+                        elif pw["severity"] == "medium":
+                            penalty = max(10, int(bi_score * 0.12))  # 12% des Scores
+                            bi_score -= penalty
+
+                    # FIX 9: Confluence-Veto — Fallback wenn Confluence leer ist
+                    # Berechne einfachen Trend-Check als Ersatz
+                    _conf_data = candidate.get("Confluence", {})
+                    if isinstance(_conf_data, dict) and _conf_data.get("categories"):
+                        _conf_cats = _conf_data["categories"]
+                        _trend_against = not _conf_cats.get("trend", {}).get("pass", True)
+                        _mtf_against = not _conf_cats.get("multi_tf", {}).get("pass", True)
+                        if _trend_against and _mtf_against and high_warnings:
+                            bi_score -= 20
+                    elif high_warnings and len(all_bars) >= 20:
+                        # Fallback: Einfacher SMA-Trend-Check wenn Confluence fehlt
+                        _fb_closes = [b["close"] for b in all_bars]
+                        _fb_sma20 = sum(_fb_closes[-20:]) / 20
+                        _fb_cur = _fb_closes[-1]
+                        _trend_bullish = _fb_cur > _fb_sma20
+                        _trend_bearish = _fb_cur < _fb_sma20
+                        if direction == "short" and _trend_bullish:
+                            bi_score -= 15  # Short gegen Uptrend + bullish Pattern
+                        elif direction == "long" and _trend_bearish:
+                            bi_score -= 15  # Long gegen Downtrend + bearish Pattern
+
+                    # Short Bonus Signals
+                    if direction == "short":
+                        try:
+                            bonus_result = calculate_short_bonus_signals(
+                                ticker, all_bars, poly_key=poly_key, mode="swing"
+                            )
+                            short_bonus = bonus_result.get("bonus_score", 0)
+                            bi_score += short_bonus
+                            candidate["ShortBonusScore"] = short_bonus
+                            candidate["ShortBonusDetails"] = bonus_result.get("details", [])
+                        except Exception:
+                            candidate["ShortBonusScore"] = 0
+                            candidate["ShortBonusDetails"] = []
+
+                    candidate["BI_Score"] = max(0, bi_score)
+
+                    # Grading — mit FIX 1: Grade-Cap bei conflicting high-severity Patterns
+                    # Wenn ein bullishes Umkehr-Pattern (Double Bottom, Inv H&S) bei Short erkannt wird
+                    # (oder bearishes bei Long), dann max Grade B — egal wie hoch der Score ist.
+                    _max_grade = "S"  # Default: kein Cap
+                    if _has_conflicting_pattern:
+                        _max_grade = "B"  # FIX 1: Hard-Cap bei Pattern-Konflikt
+
+                    if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
+                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
+                    elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
+                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
+                    elif bi_score >= 90:
+                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
+                    elif bi_score >= 75:
+                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
+                    else:
+                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
+
+                    # FIX 1: Append Pattern-Warnung zum GradeLabel wenn Konflikt
+                    if _has_conflicting_pattern:
+                        _conflict_names = [w["pattern"] for w in high_warnings]
+                        candidate["BI_GradeLabel"] += f" [!{', '.join(_conflict_names)}]"
                 else:
-                    candidate["PatternLabel"] = "Keine Umkehr-Patterns"  # FIX 8: war "Clean"
+                    candidate["PatternWarnings"] = []
+                    candidate["PatternCount"] = 0
+                    candidate["PatternHighCount"] = 0
+                    candidate["PatternLabel"] = "Keine Umkehr-Patterns"
 
-                # FIX 6: Proportionale Score-Penalties statt fixer Werte
-                # high = 20-30% des aktuellen Scores, medium = 10-15%
-                for pw in pattern_warnings:
-                    if pw["severity"] == "high":
-                        prox = pw.get("proximity_pct", 5.0)
-                        # Proportional: 20-30% des Scores je nach Proximity
-                        pct_penalty = 0.20 + 0.10 * (1.0 - min(prox, 10.0) / 10.0)  # 20-30%
-                        penalty = max(15, int(bi_score * pct_penalty))
-                        bi_score -= penalty
-                    elif pw["severity"] == "medium":
-                        penalty = max(10, int(bi_score * 0.12))  # 12% des Scores
-                        bi_score -= penalty
-
-                # FIX 9: Confluence-Veto — Fallback wenn Confluence leer ist
-                # Berechne einfachen Trend-Check als Ersatz
-                _conf_data = candidate.get("Confluence", {})
-                if isinstance(_conf_data, dict) and _conf_data.get("categories"):
-                    _conf_cats = _conf_data["categories"]
-                    _trend_against = not _conf_cats.get("trend", {}).get("pass", True)
-                    _mtf_against = not _conf_cats.get("multi_tf", {}).get("pass", True)
-                    if _trend_against and _mtf_against and high_warnings:
-                        bi_score -= 20
-                elif high_warnings and len(all_bars) >= 20:
-                    # Fallback: Einfacher SMA-Trend-Check wenn Confluence fehlt
-                    _fb_closes = [b["close"] for b in all_bars]
-                    _fb_sma20 = sum(_fb_closes[-20:]) / 20
-                    _fb_cur = _fb_closes[-1]
-                    _trend_bullish = _fb_cur > _fb_sma20
-                    _trend_bearish = _fb_cur < _fb_sma20
-                    if direction == "short" and _trend_bullish:
-                        bi_score -= 15  # Short gegen Uptrend + bullish Pattern
-                    elif direction == "long" and _trend_bearish:
-                        bi_score -= 15  # Long gegen Downtrend + bearish Pattern
-
-                # Short Bonus Signals
-                if direction == "short":
-                    try:
-                        bonus_result = calculate_short_bonus_signals(
-                            ticker, all_bars, poly_key=poly_key, mode="swing"
-                        )
-                        short_bonus = bonus_result.get("bonus_score", 0)
-                        bi_score += short_bonus
-                        candidate["ShortBonusScore"] = short_bonus
-                        candidate["ShortBonusDetails"] = bonus_result.get("details", [])
-                    except Exception:
-                        candidate["ShortBonusScore"] = 0
-                        candidate["ShortBonusDetails"] = []
-
-                candidate["BI_Score"] = max(0, bi_score)
-
-                # Grading — mit FIX 1: Grade-Cap bei conflicting high-severity Patterns
-                # Wenn ein bullishes Umkehr-Pattern (Double Bottom, Inv H&S) bei Short erkannt wird
-                # (oder bearishes bei Long), dann max Grade B — egal wie hoch der Score ist.
-                _max_grade = "S"  # Default: kein Cap
-                if _has_conflicting_pattern:
-                    _max_grade = "B"  # FIX 1: Hard-Cap bei Pattern-Konflikt
-
-                if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                elif bi_score >= 90:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
-                elif bi_score >= 75:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
-                else:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
-
-                # FIX 1: Append Pattern-Warnung zum GradeLabel wenn Konflikt
-                if _has_conflicting_pattern:
-                    _conflict_names = [w["pattern"] for w in high_warnings]
-                    candidate["BI_GradeLabel"] += f" [!{', '.join(_conflict_names)}]"
-            else:
-                candidate["PatternWarnings"] = []
-                candidate["PatternCount"] = 0
-                candidate["PatternHighCount"] = 0
-                candidate["PatternLabel"] = "Keine Umkehr-Patterns"
-
-            results.append(candidate)
+                results.append(candidate)
             except Exception as e:
                 print(f"[BI {direction}] Error analyzing {ticker}: {e}")
                 continue

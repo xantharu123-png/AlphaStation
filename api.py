@@ -1726,55 +1726,604 @@ def get_biotech_results():
     )
 
 
-# ── Early Movers ──
+# ── Early Movers (Crypto Scanner) ──
 EARLY_MOVERS_CACHE = "/tmp/early_movers_cache.json"
 
-def _early_movers_wrapper() -> None:
-    """Fetch pre/post market movers via Polygon snapshot."""
+CRYPTO_NARRATIVES = {
+    # AI / ML
+    "fetch-ai": "AI", "singularitynet": "AI", "ocean-protocol": "AI",
+    "render-token": "AI", "akash-network": "AI", "bittensor": "AI",
+    "artificial-superintelligence-alliance": "AI", "near": "AI",
+    "worldcoin-wld": "AI", "arkham": "AI", "numeraire": "AI",
+    "phala-network": "AI", "nosana": "AI", "virtuals-protocol": "AI",
+    "ai16z": "AI", "griffain": "AI", "goatseus-maximus": "AI",
+    "io-net": "AI", "grass": "AI",
+    # Meme
+    "dogecoin": "Meme", "shiba-inu": "Meme", "pepe": "Meme",
+    "dogwifcoin": "Meme", "bonk": "Meme", "floki": "Meme",
+    "brett-based": "Meme", "mog-coin": "Meme", "popcat": "Meme",
+    "cat-in-a-dogs-world": "Meme", "neiro-on-eth": "Meme",
+    "fartcoin": "Meme", "trump": "Meme", "melania-meme": "Meme",
+    "peanut-the-squirrel": "Meme", "act-i-the-ai-prophecy": "Meme",
+    # RWA (Real World Assets)
+    "ondo-finance": "RWA", "mantra": "RWA", "polymesh": "RWA",
+    "centrifuge": "RWA", "goldfinch": "RWA", "maple": "RWA",
+    "clearpool": "RWA", "pendle": "RWA",
+    # DePIN
+    "helium": "DePIN", "theta-token": "DePIN", "filecoin": "DePIN",
+    "arweave": "DePIN", "hivemapper": "DePIN",
+    "iotex": "DePIN", "dimo-network": "DePIN",
+    # L1 / L2
+    "solana": "L1", "avalanche-2": "L1", "sui": "L1",
+    "aptos": "L1", "sei-network": "L1", "injective-protocol": "L1",
+    "celestia": "L1", "monad": "L1", "berachain": "L1",
+    "arbitrum": "L2", "optimism": "L2", "polygon-ecosystem-token": "L2",
+    "starknet": "L2", "zksync": "L2", "base-protocol": "L2",
+    # DeFi
+    "uniswap": "DeFi", "aave": "DeFi", "lido-dao": "DeFi",
+    "maker": "DeFi", "curve-dao-token": "DeFi", "compound-governance-token": "DeFi",
+    "jupiter-exchange-solana": "DeFi", "raydium": "DeFi",
+    "hyperliquid": "DeFi", "ethena": "DeFi",
+    # Gaming
+    "immutable-x": "Gaming", "the-sandbox": "Gaming", "axie-infinity": "Gaming",
+    "gala": "Gaming", "illuvium": "Gaming", "beam-2": "Gaming",
+    "ronin": "Gaming", "pixels": "Gaming",
+}
+
+
+def _fetch_coingecko_markets(pages=4):
+    """Fetch CoinGecko markets API with 2 min file cache to reduce rate limiting."""
+    _CG_CACHE = "/tmp/coingecko_markets_cache.json"
     try:
-        print(f"[Early Movers] Starting scan... POLYGON_KEY={'set' if POLYGON_KEY else 'MISSING'}")
-        url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/gainers"
-        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY})
-        print(f"[Early Movers] Gainers API response: {resp.status_code}")
-        gainers = []
-        if resp.status_code == 200:
-            for t in resp.json().get("tickers", [])[:20]:
-                day = t.get("day", {})
-                prev = t.get("prevDay", {})
-                price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                prev_c = prev.get("c", 0)
-                chg = ((price - prev_c) / prev_c * 100) if prev_c else 0
-                vol = day.get("v", 0)
-                gainers.append({"ticker": t.get("ticker",""), "price": round(price,2), "change_pct": round(chg,2), "volume": vol})
+        if os.path.exists(_CG_CACHE):
+            _cg_age = time.time() - os.path.getmtime(_CG_CACHE)
+            if _cg_age < 120:  # < 2 min old
+                with open(_CG_CACHE, "r") as _f:
+                    _cached = json.load(_f)
+                    _coins = _cached.get("coins", [])
+                    if _coins:
+                        return _coins
+    except Exception:
+        pass
 
-        url2 = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
-        resp2 = rate_limited_get(url2, params={"apiKey": POLYGON_KEY})
-        print(f"[Early Movers] Losers API response: {resp2.status_code}")
-        losers = []
-        if resp2.status_code == 200:
-            for t in resp2.json().get("tickers", [])[:20]:
-                day = t.get("day", {})
-                prev = t.get("prevDay", {})
-                price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                prev_c = prev.get("c", 0)
-                chg = ((price - prev_c) / prev_c * 100) if prev_c else 0
-                vol = day.get("v", 0)
-                losers.append({"ticker": t.get("ticker",""), "price": round(price,2), "change_pct": round(chg,2), "volume": vol})
+    all_coins = []
+    for page_num in range(1, pages + 1):
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 250,
+            "page": page_num,
+            "sparkline": False,
+            "price_change_percentage": "1h,24h,7d,14d,30d"
+        }
+        resp = None
+        for _retry in range(4):
+            try:
+                resp = req.get(url, params=params, timeout=30)
+                if resp.status_code == 429:
+                    if _retry < 3:
+                        time.sleep(15 * (_retry + 1))
+                        continue
+                    break
+                elif resp.status_code == 200:
+                    break
+                else:
+                    if _retry < 3:
+                        time.sleep(5)
+                        continue
+                    break
+            except Exception:
+                if _retry < 3:
+                    time.sleep(5)
+                    continue
+                break
+        if resp and resp.status_code == 429:
+            break
+        try:
+            page_coins = resp.json() if resp and resp.status_code == 200 else []
+        except Exception:
+            page_coins = []
+        if not isinstance(page_coins, list) or not page_coins:
+            break
+        all_coins.extend(page_coins)
+        if page_num < pages:
+            time.sleep(3.0)
 
-        # Only save if we got actual data — don't overwrite Friday's results on weekends
-        if gainers or losers:
-            save_cache_file(EARLY_MOVERS_CACHE, [{"gainers": gainers, "losers": losers}])
-            print(f"[Early Movers] Saved {len(gainers)} gainers, {len(losers)} losers")
+    # Save to cache
+    try:
+        with open(_CG_CACHE, "w") as _f:
+            json.dump({"coins": all_coins}, _f)
+    except Exception:
+        pass
+
+    return all_coins
+
+
+def fetch_mexc_funding_oi():
+    """MEXC Perpetual Futures: Funding Rate + Open Interest for all contracts."""
+    try:
+        time.sleep(0.1)
+        resp = req.get("https://contract.mexc.com/api/v1/contract/ticker", timeout=15)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        if not data.get("success") or not data.get("data"):
+            return {}
+
+        result = {}
+        for t in data.get("data", []):
+            symbol = t.get("symbol", "")
+            if not symbol.endswith("_USDT"):
+                continue
+            base = symbol.replace("_USDT", "")
+            hold_vol = float(t.get("holdVol") or 0)
+            volume24 = float(t.get("volume24") or 0)
+            fr = float(t.get("fundingRate") or 0)
+            last_price = float(t.get("lastPrice") or t.get("last") or 0)
+            oi_usdt = hold_vol * last_price if last_price > 0 else hold_vol
+            vol_usdt = volume24 * last_price if last_price > 0 else volume24
+            oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
+            result[base] = {
+                "funding_rate": fr,
+                "hold_vol": hold_vol,
+                "volume24": vol_usdt,
+                "oi_usdt": oi_usdt,
+                "oi_ratio": round(oi_ratio, 2),
+            }
+        return result
+    except Exception:
+        return {}
+
+
+def fetch_bitget_funding_oi():
+    """Bitget Perpetual Futures: Funding Rate + Open Interest for all USDT contracts."""
+    try:
+        time.sleep(0.1)
+        resp = req.get("https://api.bitget.com/api/v2/mix/market/tickers",
+                          params={"productType": "USDT-FUTURES"}, timeout=15)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        if data.get("code") != "00000" or not data.get("data"):
+            return {}
+
+        result = {}
+        for t in data.get("data", []):
+            symbol = t.get("symbol", "")
+            if not symbol.endswith("USDT"):
+                continue
+            base = symbol.replace("USDT", "")
+            fr = float(t.get("fundingRate") or 0)
+            hold_amount = float(t.get("holdingAmount") or 0)
+            vol_usdt = float(t.get("usdtVolume") or 0)
+            last_price = float(t.get("lastPr") or 0)
+            change_24h = float(t.get("change24h") or 0)
+
+            oi_usdt = hold_amount * last_price if last_price > 0 else 0
+            oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
+
+            result[base] = {
+                "funding_rate": fr,
+                "hold_amount": hold_amount,
+                "oi_usdt": oi_usdt,
+                "volume24_usdt": vol_usdt,
+                "oi_ratio": round(oi_ratio, 2),
+                "change24h": change_24h,
+                "last_price": last_price,
+            }
+        return result
+    except Exception:
+        return {}
+
+
+def fetch_multi_exchange_perps():
+    """Multi-Exchange Perpetual Data: MEXC + Bitget combined."""
+    mexc = fetch_mexc_funding_oi()
+    bitget = fetch_bitget_funding_oi()
+
+    all_symbols = set(mexc.keys()) | set(bitget.keys())
+    result = {}
+
+    for sym in all_symbols:
+        m = mexc.get(sym, {})
+        b = bitget.get(sym, {})
+
+        exchanges = []
+        if m:
+            exchanges.append("MEXC")
+        if b:
+            exchanges.append("Bitget")
+
+        mexc_vol = m.get("volume24", 0) if m else 0
+        bitget_vol = b.get("volume24_usdt", 0) if b else 0
+
+        if bitget_vol >= mexc_vol and b:
+            best = "Bitget"
+            best_fr = b.get("funding_rate", 0)
+            best_oi_ratio = b.get("oi_ratio", 0)
+            best_oi_usdt = b.get("oi_usdt", 0)
+            best_vol = bitget_vol
+        elif m:
+            best = "MEXC"
+            best_fr = m.get("funding_rate", 0)
+            best_oi_ratio = m.get("oi_ratio", 0)
+            best_oi_usdt = m.get("hold_vol", 0)
+            best_vol = mexc_vol
         else:
-            print(f"[Early Movers] No data (market closed/weekend?) — keeping previous cache")
+            continue
+
+        result[sym] = {
+            "exchanges": exchanges,
+            "best_exchange": best,
+            "funding_rate": best_fr,
+            "oi_ratio": best_oi_ratio,
+            "oi_usdt": best_oi_usdt,
+            "volume24_usdt": max(mexc_vol, bitget_vol),
+            "mexc": m,
+            "bitget": b,
+        }
+
+    return result
+
+
+def fetch_early_movers(_prefetched_perps=None):
+    """Early Movers Scanner V2.0 — Multi-Exchange (Bitget + MEXC)
+
+    5 strategies to find next 10x coins early:
+    1. Volume Spike Detector: Vol/MCap anomalously high, price not yet exploded
+    2. Micro-Cap Momentum: $1M-$50M MCap, early movement
+    3. Whale Accumulation: OI rising strongly but price still stable
+    4. Funding Rate Flip: FR negative → positive = squeeze coming
+    5. Narrative Tracker: Sector performance & laggards
+
+    Returns: dict with lists for each category
+    """
+    all_coins = _fetch_coingecko_markets(pages=4)
+    if not all_coins:
+        return {"volume_spikes": [], "micro_caps": [], "whale_acc": [], "narratives": {}, "recently_listed": [], "stats": {"error": "No data"}}
+
+    perp_data = _prefetched_perps if _prefetched_perps is not None else fetch_multi_exchange_perps()
+
+    btc_7d = 0
+    for c in all_coins:
+        if c.get("id") == "bitcoin":
+            btc_7d = c.get("price_change_percentage_7d_in_currency") or c.get("price_change_percentage_7d") or 0
+            break
+
+    # Fetch trending coins
+    trending_ids = set()
+    try:
+        _tr_resp = req.get("https://api.coingecko.com/api/v3/search/trending", timeout=15)
+        if _tr_resp.status_code == 200:
+            _tr_coins = _tr_resp.json().get("coins", [])
+            for _tc in _tr_coins:
+                _item = _tc.get("item", {})
+                _tid = _item.get("id", "")
+                if _tid:
+                    trending_ids.add(_tid)
+    except Exception:
+        pass
+
+    newly_listed_coins = []
+    volume_spikes = []
+    micro_caps = []
+    whale_accumulations = []
+    narrative_coins = {}
+
+    for coin in all_coins:
+        try:
+            price = coin.get("current_price") or 0
+            if price <= 0:
+                continue
+
+            cid = coin.get("id", "")
+            symbol = coin.get("symbol", "").upper()
+            name = coin.get("name", "")
+            mcap = coin.get("market_cap") or 0
+            vol_24h = coin.get("total_volume") or 0
+            change_1h = coin.get("price_change_percentage_1h_in_currency") or 0
+            change_24h = coin.get("price_change_percentage_24h") or 0
+            change_7d = coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0
+            change_14d = coin.get("price_change_percentage_14d_in_currency") or 0
+            change_30d = coin.get("price_change_percentage_30d_in_currency") or 0
+            high_24h = coin.get("high_24h") or price
+            low_24h = coin.get("low_24h") or price
+
+            perp_info = perp_data.get(symbol, {})
+            has_perp = bool(perp_info)
+            funding_rate = perp_info.get("funding_rate", 0)
+            oi_ratio = perp_info.get("oi_ratio", 0)
+            best_exchange = perp_info.get("best_exchange", "")
+            exchanges = perp_info.get("exchanges", [])
+
+            # Skip stablecoins + wrapped
+            if symbol in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "WBTC", "WETH", "STETH", "RETH"):
+                continue
+
+            vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0
+            narrative = CRYPTO_NARRATIVES.get(cid, "")
+            is_trending = cid in trending_ids
+            is_newly_listed = (mcap > 0 and vol_24h > 100_000
+                               and (change_14d == 0 or change_14d is None) and (change_30d == 0 or change_30d is None)
+                               and change_7d != 0)
+
+            base_entry = {
+                "Symbol": symbol, "Name": name, "ID": cid,
+                "Price": price, "MCap": mcap, "Vol24h": vol_24h,
+                "Change1h": round(change_1h, 2), "Change24h": round(change_24h, 2),
+                "Change7d": round(change_7d, 2), "Change14d": round(change_14d, 2),
+                "Change30d": round(change_30d, 2),
+                "VolMCapRatio": round(vol_mcap_ratio, 2),
+                "HasPerp": has_perp, "FundingRate": funding_rate,
+                "OI_Ratio": oi_ratio,
+                "BestExchange": best_exchange,
+                "Exchanges": exchanges,
+                "Narrative": narrative,
+                "High24h": high_24h, "Low24h": low_24h,
+                "IsTrending": is_trending,
+                "IsNewlyListed": is_newly_listed,
+            }
+
+            # Newly listed coins
+            if is_newly_listed and change_7d > 0:
+                nl_entry = dict(base_entry)
+                nl_entry["Signal"] = "Newly listed"
+                nl_entry["NewScore"] = min(100, int(change_7d * 2 + vol_mcap_ratio))
+                newly_listed_coins.append(nl_entry)
+
+            # 1. VOLUME SPIKE DETECTOR
+            if mcap > 5_000_000 and vol_24h > 200_000:
+                if vol_mcap_ratio > 30 and change_7d < 100:
+                    if change_24h < -8:
+                        pass
+                    else:
+                        range_24h = high_24h - low_24h
+                        if range_24h > 0:
+                            price_position = (price - low_24h) / range_24h
+                        else:
+                            price_position = 0.5
+
+                        vol_score = min(35, vol_mcap_ratio / 2)
+
+                        momentum_score = 0
+                        if 10 < change_7d < 50:
+                            momentum_score = 20
+                        elif change_7d > 50:
+                            momentum_score = 10
+                        elif 0 < change_7d <= 10:
+                            momentum_score = 15
+                        elif change_7d <= 0:
+                            if change_24h > 5 and change_1h > 1:
+                                momentum_score = 18
+                            elif change_24h > 3:
+                                momentum_score = 10
+                            else:
+                                momentum_score = 0
+
+                        freshness_score = 0
+                        if change_24h > 0 and change_1h > 0:
+                            freshness_score = 15
+                        elif change_24h > 0:
+                            freshness_score = 10
+
+                        position_score = 0
+                        if price_position >= 0.7:
+                            position_score = 10
+                        elif price_position >= 0.5:
+                            position_score = 5
+
+                        perp_score = 10 if has_perp else 0
+                        if len(exchanges) >= 2:
+                            perp_score += 5
+
+                        recency_score = 0
+                        if change_1h > 5 and vol_mcap_ratio > 40:
+                            recency_score = 15
+                        elif change_1h > 2 and vol_mcap_ratio > 30:
+                            recency_score = 10
+                        elif change_1h > 0 and change_24h > 3:
+                            recency_score = 5
+
+                        trending_score = 10 if is_trending else 0
+                        total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score)
+
+                        if total_score >= 30:
+                            entry = dict(base_entry)
+                            entry["EarlyScore"] = total_score
+                            entry["PricePosition"] = round(price_position, 2)
+                            entry["RecencyScore"] = recency_score
+                            entry["TrendingBonus"] = trending_score
+                            if price_position >= 0.7 and change_1h > 3:
+                                entry["Signal"] = "Strong buy pressure + live pump!"
+                            elif price_position >= 0.7:
+                                entry["Signal"] = "Accumulation (price near high)"
+                            elif change_24h > 5:
+                                entry["Signal"] = "Volume + positive 24h"
+                            else:
+                                entry["Signal"] = "Volume spike (watch)"
+                            volume_spikes.append(entry)
+
+            # 2. MICRO-CAP MOMENTUM
+            _micro_vol_min = 750_000 if change_7d >= 20 else 500_000
+            if 1_000_000 <= mcap <= 50_000_000 and vol_24h > _micro_vol_min:
+                if change_7d > 5 and change_24h > -10:
+                    degen_score = 0
+                    if change_7d >= 100:
+                        degen_score += 30
+                    elif change_7d >= 50:
+                        degen_score += 25
+                    else:
+                        degen_score += 15
+
+                    if vol_mcap_ratio > 50:
+                        degen_score += 25
+                    elif vol_mcap_ratio > 20:
+                        degen_score += 15
+                    else:
+                        degen_score += 5
+
+                    if mcap < 5_000_000:
+                        degen_score += 25
+                    elif mcap < 15_000_000:
+                        degen_score += 20
+                    else:
+                        degen_score += 10
+
+                    if has_perp:
+                        degen_score += 10
+                    if len(exchanges) >= 2:
+                        degen_score += 5
+
+                    if change_1h > 2:
+                        degen_score += 5
+
+                    if is_trending:
+                        degen_score += 15
+
+                    if is_newly_listed:
+                        degen_score += 10
+
+                    entry = dict(base_entry)
+                    entry["DegenScore"] = min(100, degen_score)
+                    entry["Signal"] = f"MicroCap +{change_7d:.0f}% 7d"
+                    if is_trending:
+                        entry["Signal"] += " TRENDING"
+                    if is_newly_listed:
+                        entry["Signal"] += " NEW"
+                    micro_caps.append(entry)
+
+            # 3. WHALE ACCUMULATION
+            if has_perp and mcap > 10_000_000:
+                whale_score = 0
+                signals = []
+
+                if oi_ratio >= 3.0:
+                    whale_score += 30
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (highly leveraged)")
+                elif oi_ratio >= 1.5:
+                    whale_score += 20
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (positions building)")
+                elif oi_ratio >= 0.8:
+                    whale_score += 10
+
+                fr_pct = funding_rate * 100
+                if fr_pct >= 0.05:
+                    whale_score += 20
+                    signals.append(f"FR +{fr_pct:.3f}% (longs dominant)")
+                elif fr_pct >= 0.01:
+                    whale_score += 10
+                elif fr_pct <= -0.03:
+                    if change_24h > 3:
+                        whale_score += 20
+                        signals.append(f"FR negative {fr_pct:.3f}% but +{change_24h:.1f}% → squeeze potential")
+                    elif change_1h > 1:
+                        whale_score += 12
+                        signals.append(f"FR negative {fr_pct:.3f}% + 1h pump → watch")
+
+                if 5 < change_7d < 40:
+                    whale_score += 15
+                elif change_7d <= 5:
+                    whale_score += 20
+
+                if len(exchanges) >= 2:
+                    whale_score += 10
+                    signals.append(f"On {' + '.join(exchanges)}")
+
+                if whale_score >= 35:
+                    entry = dict(base_entry)
+                    entry["WhaleScore"] = min(100, whale_score)
+                    entry["Signals"] = signals
+                    whale_accumulations.append(entry)
+
+            # 4. NARRATIVE TRACKER
+            if narrative and mcap > 10_000_000:
+                if narrative not in narrative_coins:
+                    narrative_coins[narrative] = []
+                narrative_coins[narrative].append(base_entry)
+
+        except Exception:
+            continue
+
+    # Sort
+    newly_listed_coins.sort(key=lambda x: x.get("NewScore", 0), reverse=True)
+    volume_spikes.sort(key=lambda x: x.get("EarlyScore", 0), reverse=True)
+    micro_caps.sort(key=lambda x: x.get("DegenScore", 0), reverse=True)
+    whale_accumulations.sort(key=lambda x: x.get("WhaleScore", 0), reverse=True)
+
+    # Narrative aggregation
+    narrative_summary = {}
+    for narr, coins_list in narrative_coins.items():
+        if len(coins_list) < 2:
+            continue
+        avg_7d = sum(c.get("Change7d", 0) for c in coins_list) / len(coins_list)
+        avg_24h = sum(c.get("Change24h", 0) for c in coins_list) / len(coins_list)
+        total_vol = sum(c["Vol24h"] for c in coins_list)
+        total_mcap = sum(c.get("MCap", 0) for c in coins_list)
+
+        if avg_7d > 2:
+            laggards = [c for c in coins_list if c.get("Change7d", 0) < avg_7d * 0.5 and c.get("Change7d", 0) > -10]
+        else:
+            laggards = []
+        leaders = sorted(coins_list, key=lambda x: x["Change7d"], reverse=True)[:3]
+
+        narrative_summary[narr] = {
+            "avg_7d": round(avg_7d, 2),
+            "avg_24h": round(avg_24h, 2),
+            "total_vol": total_vol,
+            "total_mcap": total_mcap,
+            "count": len(coins_list),
+            "leaders": leaders,
+            "laggards": laggards[:5],
+            "coins": coins_list,
+        }
+
+    narrative_summary = dict(sorted(narrative_summary.items(), key=lambda x: x[1]["avg_7d"], reverse=True))
+
+    stats = {
+        "total_coins": len(all_coins),
+        "volume_spikes": len(volume_spikes),
+        "micro_caps": len(micro_caps),
+        "whale_acc": len(whale_accumulations),
+        "narratives": len(narrative_summary),
+        "recently_listed": len(newly_listed_coins),
+        "trending_coins": len(trending_ids),
+        "btc_7d": btc_7d,
+        "perps_mexc": len(fetch_mexc_funding_oi()),
+        "perps_bitget": len(fetch_bitget_funding_oi()),
+    }
+
+    return {
+        "volume_spikes": volume_spikes[:30],
+        "micro_caps": micro_caps[:30],
+        "whale_acc": whale_accumulations[:25],
+        "recently_listed": newly_listed_coins[:20],
+        "narratives": narrative_summary,
+        "stats": stats,
+    }
+
+
+def _early_movers_wrapper() -> None:
+    """Run Early Movers crypto scanner and save results."""
+    try:
+        print("[Early Movers] Starting crypto scanner...")
+
+        # Fetch multi-exchange perp data once
+        perp_data = fetch_multi_exchange_perps()
+
+        # Run full analysis
+        result = fetch_early_movers(_prefetched_perps=perp_data)
+
+        # Save results
+        save_cache_file(EARLY_MOVERS_CACHE, [result])
+        print(f"[Early Movers] Scan complete. Found {result['stats']['volume_spikes']} volume spikes, "
+              f"{result['stats']['micro_caps']} micro caps, {result['stats']['whale_acc']} whale positions")
     except Exception as e:
-        print(f"Early movers error: {e}")
+        print(f"[Early Movers] Error: {e}")
 
 
 @app.post("/api/early-movers-scan")
 def trigger_early_movers(background_tasks: BackgroundTasks):
-    if not POLYGON_KEY:
-        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
     background_tasks.add_task(_early_movers_wrapper)
     return {"status": "started", "message": "Early Movers scan started"}
 
