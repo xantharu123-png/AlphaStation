@@ -532,13 +532,26 @@ def autotrader_scan_once(poly_key, config=None):
             if range_pct < 2.0:
                 continue
 
+            # Fix 1a: Gap/ATR Ratio - frühe Gapbewegungen filtern
+            prev_close = window[-2]["close"] if len(window) >= 2 else window[-1]["close"]
+            gap_pct = ((window[-1]["open"] - prev_close) / prev_close * 100) if prev_close > 0 else 0
+            atr_pct = (atr_5 / prev_close * 100) if prev_close > 0 else 3.0
+            gap_to_atr = abs(gap_pct) / (atr_pct if atr_pct > 0 else 3.0)
+
+            if gap_to_atr > 2.5:
+                # Gap zu explosiv = wahrscheinlich Fade
+                score_pct *= 0.5  # Reduziere Score
+                details.append(f"Gap/ATR={gap_to_atr:.1f} — Fade-Risiko")
+            elif gap_to_atr < 0.3:
+                score_pct *= 0.7  # Gap zu klein = schwaches Signal
+
             # Entry/Stop/TP Berechnung
             breakout_level = range_high
             stop_atr_mult = 1.2
             tp1_mult = 0.7 if grade == "C" else 1.0
             tp2_mult = 1.4 if grade == "C" else 2.0
 
-            entry_price = round(range_high + atr_5 * 0.05, 2)  # Knapp über Range-High
+            entry_price = round(range_high + atr_5 * 0.15, 2)  # Erhöht von 0.05 auf 0.15 für bessere Filtration
             stop_price = round(range_high - atr_5 * stop_atr_mult, 2)
             tp1_price = round(range_high + range_size * tp1_mult, 2)
             tp2_price = round(range_high + range_size * tp2_mult, 2)
@@ -1548,7 +1561,7 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
             if len(catalysts) > 1:
                 catalyst_score += int(catalysts[1]["score"] * 0.5)  # 50% Bonus für 2. Catalyst
 
-        # Negative Flags abziehen (mit Time-Decay)
+        # Negative Flags abziehen (mit Time-Decay) — FIX 1: Weniger aggressive Decay
         from datetime import datetime as _nf_dt_cls
         _nf_today = _nf_dt_cls.utcnow().date()
         for nf in negative_flags:
@@ -1563,16 +1576,17 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
 
             decay = 1.0
             if nf_age_days > 365:
-                decay = 0.0
+                decay = 0.05  # FIX 1: Changed from 0.0 to 0.05
             elif nf_age_days > 180:
-                decay = 0.10
+                decay = 0.25  # FIX 1: Changed from 0.10 to 0.25
             elif nf_age_days > 90:
-                decay = 0.40
+                decay = 0.55  # FIX 1: Changed from 0.40 to 0.55
             elif nf_age_days > 30:
-                decay = 0.75
+                decay = 0.85  # FIX 1: Changed from 0.75 to 0.85
             catalyst_score += int(nf["penalty"] * decay)
 
-        catalyst_score = max(0, min(30, catalyst_score))
+        # FIX 3: Catalyst Cap Increase from 30 to 45
+        catalyst_score = max(0, min(45, catalyst_score))
 
         return {
             "catalyst_score": catalyst_score,
@@ -1807,18 +1821,20 @@ def _biotech_technical_score(poly_key, ticker):
         avg_vol_50 = sum(volumes[-min(50, len(volumes)):]) / min(50, len(volumes))
         last_vol = volumes[-1]
 
-        # 1. Unusual Volume (max 6 pts)
+        # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
         rvol = last_vol / max(1, avg_vol_20)
         details["RVOL"] = round(rvol, 2)
         if rvol >= 3.0:
-            tech_score += 6
-            details["vol_signal"] = " Extrem hohes Volumen"
-        elif rvol >= 2.0:
-            tech_score += 4
-            details["vol_signal"] = " Hohes Volumen"
+            # FIX 2: Check direction — high volume on UP day = accumulation, DOWN day = distribution
+            if closes[-1] > closes[-2]:  # High volume on UP day = accumulation
+                tech_score += 6
+                details["vol_signal"] = " Extrem hohes Volumen (Accumulation)"
+            else:  # High volume on DOWN day = distribution
+                tech_score += 1  # Minimal score, not a buy signal
+                details["vol_signal"] = " Extrem hohes Volumen (Distribution) — Vorsicht!"
         elif rvol >= 1.5:
-            tech_score += 2
-            details["vol_signal"] = " Leicht erhöht"
+            tech_score += 3  # FIX 2: Moderate volume (was 2 for 1.5-2.0, now unified)
+            details["vol_signal"] = " Erhöhtes Volumen"
         else:
             details["vol_signal"] = " Normal"
 
@@ -1966,7 +1982,7 @@ def _biotech_technical_score(poly_key, ticker):
         return {"technical_score": 0, "details": {}}
 
 
-def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
+def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price, catalyst_score=0):
     """
     Opportunity & Risk Score für Biotech (max 15 pts).
 
@@ -1974,6 +1990,8 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
     Ein FDA Approval bewegt ABBV ($400B) vielleicht 2%, aber BCRX ($2B) um 30%+.
     Der Score belohnt den Sweet Spot: groß genug zum sicher Traden,
     klein genug für großes Catalyst-Upside.
+
+    FIX 4: Added catalyst_score parameter for binary event risk assessment.
     """
     risk_score = 0
     risk_details = []
@@ -2036,6 +2054,13 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price):
         penalty = min(4, (len(negative_flags) - 1) * 2)
         risk_score = max(0, risk_score - penalty)
         risk_details.append(f" {len(negative_flags)} negative Signale (−{penalty} Pts)")
+
+    # FIX 4: Binary Event Risk — if catalyst is borderline but fundamentals weak
+    # Catalyst pending (>0) but borderline (<15) + weak fundamentals = higher risk
+    if catalyst_score > 0 and catalyst_score < 15:
+        # Weak catalyst = higher risk of negative outcome
+        risk_score = max(0, risk_score - 3)
+        risk_details.append(" [!] Borderline Catalyst + Weak Fundamentals = Risiko")
 
     return {"risk_score": min(15, risk_score), "risk_details": risk_details}
 
@@ -2205,7 +2230,8 @@ def _biotech_background_scan(poly_key):
                     market_cap_m=details.get("market_cap_millions", 0),
                     shares_m=details.get("shares_millions", 0),
                     negative_flags=news_data.get("negative_flags", []),
-                    price=tech_data.get("details", {}).get("price", 0)
+                    price=tech_data.get("details", {}).get("price", 0),
+                    catalyst_score=catalyst_score  # FIX 4: Pass catalyst for binary event risk
                 )
 
                 # G) Final Score (mit RVOL für Catalyst-Volume Confirmation)

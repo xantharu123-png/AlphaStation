@@ -826,9 +826,10 @@ def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_
     ist das Signal deutlich stärker (Smart Money bestätigt die News).
     """
     # Weighted: Catalyst is primary driver (2x weight)
+    # FIX 3: Updated for new catalyst cap of 45
     total = (catalyst_score * 2) + pipeline_score + technical_score + risk_score + news_momentum_score
-    # Normalize to 0-100 scale (max: 60 + 0 + 20 + 15 + 15 = 110)
-    total = min(100, int(total * 100 / 110))
+    # Normalize to 0-100 scale (max: 45*2 + 20 + 20 + 15 + 15 = 160)
+    total = min(100, int(total * 100 / 160))
 
     # Catalyst-Volume Confirmation Bonus (max 10 Extra-Punkte)
     if catalyst_score > 0 and rvol >= 1.5:

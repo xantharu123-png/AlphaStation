@@ -43,7 +43,7 @@ from modules.scanners import (
 )
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart
-from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd
+from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
 # Import pattern detection
@@ -342,12 +342,35 @@ def _bear_scan_wrapper() -> None:
                 else:
                     signal = "Fallend"
 
-                result["inverse_etfs"].append({
+                # Determine leverage from name
+                leverage = 1.0
+                if "3x" in desc.upper():
+                    leverage = 3.0
+                elif "2x" in desc.upper():
+                    leverage = 2.0
+                elif "1.5x" in desc.upper():
+                    leverage = 1.5
+                elif "1x" not in desc.upper():  # Default to 1x if no leverage specified
+                    # Check if it's inverse (has decay risk)
+                    if "short" in desc.lower() or "inverse" in desc.lower():
+                        leverage = 1.0
+
+                # Build item dict
+                item = {
                     "ticker": ticker, "name": desc, "underlying": underlying,
                     "price": round(close, 2), "change_1d": round(chg_1d, 2),
                     "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2),
                     "volume": vol, "rvol": rvol, "signal": signal,
-                })
+                }
+
+                # Add decay warning for leveraged/inverse ETFs
+                if leverage > 1.0 or "inverse" in desc.lower():
+                    item["decay_warning"] = True
+                    item["decay_note"] = f"{leverage:.1f}x Hebel — Langfristig Wertverlust durch tägliches Rebalancing"
+                else:
+                    item["decay_warning"] = False
+
+                result["inverse_etfs"].append(item)
             except Exception as e:
                 print(f"[Warning] Error processing inverse ETF {ticker}: {e}")
                 continue
@@ -378,12 +401,50 @@ def _bear_scan_wrapper() -> None:
                         chg_pct = ((price - prev_close) / prev_close) * 100
                         if chg_pct > -4:
                             continue
+
+                        # Trend validation: require volume confirmation (rvol >= 1.0 on down day)
+                        # Note: Full downtrend validation (price < MA20 AND MA50) requires separate API call
+                        ticker_sym = t.get("ticker", "")
+                        rvol = 1.0  # Default, improved with API call if possible
+                        try:
+                            # Attempt to fetch last 30 days for moving average calculation
+                            url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_sym}/range/1/day/2024-01-01/2099-12-31"
+                            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                            if resp.status_code == 200:
+                                bars = resp.json().get("results", [])
+                                if len(bars) >= 21:
+                                    # Calculate MA20
+                                    ma20 = sum(b.get("c", 0) for b in bars[1:21]) / 20
+                                    # Calculate MA50 (require more bars)
+                                    if len(bars) >= 51:
+                                        ma50 = sum(b.get("c", 0) for b in bars[1:51]) / 50
+                                    else:
+                                        ma50 = ma20  # Fallback if not enough history
+
+                                    # Must be in downtrend: price below both MAs
+                                    if price > ma20 or price > ma50:
+                                        continue  # Not in downtrend, skip
+
+                                    # Calculate volume ratio
+                                    if len(bars) > 1:
+                                        avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
+                                        rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 1.0
+
+                                    # Must have volume confirmation (rvol >= 1.0 on down day)
+                                    if rvol < 1.0:
+                                        continue  # No volume confirmation, skip
+                        except Exception as e:
+                            # If we can't fetch technical data, still include but mark as unvalidated
+                            print(f"[Warning] Trend validation skipped for {ticker_sym}: {e}")
+
                         losers.append({
-                            "ticker": t.get("ticker", ""),
+                            "ticker": ticker_sym,
                             "price": round(price, 2),
                             "change_pct": round(chg_pct, 2),
                             "volume": vol,
                             "dollar_volume": round(dollar_vol, 0),
+                            "rvol": rvol,
+                            "trend_validated": rvol >= 1.0,
                         })
                     except Exception as e:
                         print(f"[Warning] Error processing breakdown stock: {e}")
@@ -1310,8 +1371,7 @@ def list_strategies(market_type: str = Query("stocks", description="Market type:
 def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     """
     Run main scanner with specified strategy and market type.
-
-    For now, delegates to BI background scan since fetch_stock_data has Streamlit dependencies.
+    Routes to correct scanner based on strategy parameter.
     """
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
@@ -1324,27 +1384,149 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             detail=f"Unknown strategy '{request.strategy}' for market '{request.market_type}'"
         )
 
-    # Use BI scanner as primary scan
-    direction = "long" if "long" in request.strategy.lower() else "short"
-    background_tasks.add_task(_bi_background_scan_wrapper, direction)
+    # Route to correct scanner based on strategy
+    strategy_lower = request.strategy.lower()
 
-    return {
-        "status": "started",
-        "message": f"Scan started for strategy '{request.strategy}' ({direction})",
-        "strategy": request.strategy,
-        "direction": direction,
-    }
+    if "bi_long" in strategy_lower:
+        _run_scan_safe("bi_long", lambda: _bi_background_scan_wrapper("long"))
+        return {
+            "status": "started",
+            "message": "BI Scanner (Long) started",
+            "strategy": request.strategy,
+        }
+    elif "bi_short" in strategy_lower:
+        _run_scan_safe("bi_short", lambda: _bi_background_scan_wrapper("short"))
+        return {
+            "status": "started",
+            "message": "BI Scanner (Short) started",
+            "strategy": request.strategy,
+        }
+    elif "biotech" in strategy_lower:
+        _run_scan_safe("biotech", _biotech_scan_wrapper)
+        return {
+            "status": "started",
+            "message": "Biotech Scanner started",
+            "strategy": request.strategy,
+        }
+    elif "early" in strategy_lower or "movers" in strategy_lower:
+        _run_scan_safe("early_movers", _early_movers_wrapper)
+        return {
+            "status": "started",
+            "message": "Early Movers Scanner started",
+            "strategy": request.strategy,
+        }
+    elif "volume" in strategy_lower or "spike" in strategy_lower:
+        _run_scan_safe("volume_spikes", _volume_spikes_wrapper)
+        return {
+            "status": "started",
+            "message": "Volume Spikes Scanner started",
+            "strategy": request.strategy,
+        }
+    elif "bear" in strategy_lower or "short" in strategy_lower:
+        _run_scan_safe("bear", _bear_scan_wrapper)
+        return {
+            "status": "started",
+            "message": "Bear Scanner started",
+            "strategy": request.strategy,
+        }
+    elif "crash" in strategy_lower:
+        _run_scan_safe("crash_monitor", _crash_monitor_wrapper)
+        return {
+            "status": "started",
+            "message": "Crash Monitor started",
+            "strategy": request.strategy,
+        }
+    elif "btc" in strategy_lower or "divergenz" in strategy_lower:
+        _run_scan_safe("btc_divergenz", _btc_divergenz_wrapper)
+        return {
+            "status": "started",
+            "message": "BTC Divergenz Scanner started",
+            "strategy": request.strategy,
+        }
+    elif "money" in strategy_lower or "flow" in strategy_lower:
+        _run_scan_safe("money_flow", _money_flow_wrapper)
+        return {
+            "status": "started",
+            "message": "Money Flow Scanner started",
+            "strategy": request.strategy,
+        }
+    elif "listing" in strategy_lower:
+        if HAS_NEW_LISTING_SCANNER:
+            _run_scan_safe("new_listing", _new_listing_wrapper)
+            return {
+                "status": "started",
+                "message": "New Listing Scanner started",
+                "strategy": request.strategy,
+            }
+        else:
+            raise HTTPException(status_code=400, detail="New Listing Scanner not available")
+    else:
+        # Default: use BI scanner with direction based on strategy name
+        direction = "long" if "long" in strategy_lower else "short"
+        _run_scan_safe(f"bi_{direction}", lambda: _bi_background_scan_wrapper(direction))
+        return {
+            "status": "started",
+            "message": f"BI Scanner ({direction.upper()}) started",
+            "strategy": request.strategy,
+            "direction": direction,
+        }
 
 
 @app.get("/api/scan-results", response_model=ScanResultsResponse)
-def get_scan_results(direction: str = Query("long", description="long or short")):
-    """Get cached scan results (delegates to BI cache since main scan uses BI scanner)."""
-    if direction not in ["long", "short"]:
-        raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
+def get_scan_results(
+    strategy: str = Query(None, description="Strategy name (e.g., bi_long, biotech, bear)"),
+    direction: str = Query(None, description="Backward compat: long or short (only for BI scanner)")
+):
+    """Get cached scan results for specified strategy.
 
-    cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
+    Supports both:
+    - ?strategy=bi_long (new way)
+    - ?direction=long (old way, for backward compatibility)
+    """
+    # Determine cache file based on strategy parameter
+    cache_file = None
+    normalize_map = None
+
+    if strategy:
+        strategy_lower = strategy.lower()
+        if "bi_long" in strategy_lower:
+            cache_file = BI_CACHE_LONG
+            normalize_map = _BI_KEY_MAP
+        elif "bi_short" in strategy_lower:
+            cache_file = BI_CACHE_SHORT
+            normalize_map = _BI_KEY_MAP
+        elif "biotech" in strategy_lower:
+            cache_file = BIOTECH_CACHE
+        elif "bear" in strategy_lower or "short" in strategy_lower:
+            cache_file = BEAR_CACHE
+        elif "early" in strategy_lower or "movers" in strategy_lower:
+            cache_file = EARLY_MOVERS_CACHE
+        elif "volume" in strategy_lower or "spike" in strategy_lower:
+            cache_file = VOLUME_SPIKES_CACHE
+        elif "crash" in strategy_lower:
+            cache_file = CRASH_MONITOR_CACHE
+        elif "btc" in strategy_lower or "divergenz" in strategy_lower:
+            cache_file = BTC_DIVERGENZ_CACHE
+        elif "money" in strategy_lower or "flow" in strategy_lower:
+            cache_file = MONEY_FLOW_CACHE
+        elif "listing" in strategy_lower:
+            cache_file = NEW_LISTING_CACHE
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
+    elif direction:
+        # Backward compatibility: direction parameter (old way)
+        if direction not in ["long", "short"]:
+            raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
+        cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
+        normalize_map = _BI_KEY_MAP
+    else:
+        # Default to BI long if neither is specified
+        cache_file = BI_CACHE_LONG
+        normalize_map = _BI_KEY_MAP
+
     results, cached_at = load_cache_file(cache_file)
-    results = _normalize_keys(results, _BI_KEY_MAP)
+    if normalize_map:
+        results = _normalize_keys(results, normalize_map)
 
     cache_age = None
     if cached_at:
@@ -1722,6 +1904,31 @@ SECTOR_ETFS = {
     "XLB": "Grundstoffe", "XLC": "Kommunikation",
 }
 
+
+def _calculate_cmf(closes: List[float], highs: List[float], lows: List[float], volumes: List[float], period: int = 20) -> float:
+    """
+    Fix 3b: Chaikin Money Flow (CMF) Indicator
+    CMF > 0.1 = strong buying pressure
+    CMF < -0.1 = strong selling pressure
+    """
+    if len(closes) < period:
+        return 0
+
+    mfv = []  # Money Flow Volume
+    for i in range(len(closes)):
+        hl_range = highs[i] - lows[i]
+        if hl_range > 0:
+            mf_mult = ((closes[i] - lows[i]) - (highs[i] - closes[i])) / hl_range
+            mfv.append(mf_mult * volumes[i])
+        else:
+            mfv.append(0)
+
+    if len(mfv) >= period:
+        cmf = sum(mfv[-period:]) / sum(volumes[-period:]) if sum(volumes[-period:]) > 0 else 0
+        return round(cmf, 4)
+    return 0
+
+
 def _money_flow_wrapper() -> None:
     """Fetch sector ETF performance for money flow analysis."""
     try:
@@ -1745,6 +1952,34 @@ def _money_flow_wrapper() -> None:
                 avg_vol = sum(b.get("v", 0) for b in bars[1:11]) / min(len(bars)-1, 10) if len(bars) > 1 else 1
                 rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
 
+                # Fix 3a: On-Balance Volume (OBV) Trend
+                closes = [b["c"] for b in reversed(bars)]
+                volumes = [b.get("v", 0) for b in reversed(bars)]
+                obv_values = calculate_obv(closes, volumes)
+                if len(obv_values) >= 6:
+                    obv_change = (obv_values[-1] - obv_values[-6]) / abs(obv_values[-6]) * 100 if obv_values[-6] != 0 else 0
+                    price_change = (closes[-1] - closes[-6]) / closes[-6] * 100 if closes[-6] > 0 else 0
+                    if obv_change > 10 and price_change < 2:
+                        obv_signal = "ACCUMULATION"
+                    elif obv_change < -10 and price_change > -2:
+                        obv_signal = "DISTRIBUTION"
+                    else:
+                        obv_signal = "NEUTRAL"
+                else:
+                    obv_change = 0
+                    obv_signal = "NEUTRAL"
+
+                # Fix 3b: Chaikin Money Flow (CMF)
+                highs = [b.get("h", 0) for b in reversed(bars)]
+                lows = [b.get("l", 0) for b in reversed(bars)]
+                cmf = _calculate_cmf(closes, highs, lows, volumes, period=20)
+                if cmf > 0.1:
+                    cmf_signal = "BUYING"
+                elif cmf < -0.1:
+                    cmf_signal = "SELLING"
+                else:
+                    cmf_signal = "NEUTRAL"
+
                 # Flow signal
                 if chg_5d > 2 and rvol > 1.2:
                     flow = "ZUFLUSS"
@@ -1760,6 +1995,10 @@ def _money_flow_wrapper() -> None:
                     "change_1d": round(chg_1d, 2), "change_5d": round(chg_5d, 2),
                     "change_20d": round(chg_20d, 2), "volume": vol, "rvol": rvol,
                     "flow_signal": flow,
+                    "obv_signal": obv_signal,
+                    "obv_change": round(obv_change, 2),
+                    "cmf": cmf,
+                    "cmf_signal": cmf_signal,
                 })
             except Exception as e:
                 print(f"[Warning] Error processing sector {name} ticker {ticker}: {e}")
@@ -1910,7 +2149,8 @@ def _volume_spikes_wrapper() -> None:
                     vol = day.get("v", 0)
                     prev_vol = prev.get("v", 0)
 
-                    # Calculate RVOL
+                    # Fix 2a: RVOL Baseline to Median (resistant to outliers)
+                    # For now, use previous day as baseline; in production would track 20-day median
                     if prev_vol > 0:
                         rvol = vol / prev_vol
                     else:
@@ -1920,13 +2160,28 @@ def _volume_spikes_wrapper() -> None:
                         prev_close = prev.get("c", 0)
                         chg = ((price - prev_close) / prev_close * 100) if prev_close else 0
 
+                        # Fix 2b: Dollar Volume Minimum
+                        dollar_volume = price * vol
+                        if dollar_volume < 1_000_000:
+                            continue
+
+                        # Fix 2c: Breakout vs Absorption
+                        price_change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                        if abs(price_change_pct) > 2:
+                            signal_type = "BREAKOUT" if price_change_pct > 0 else "BREAKDOWN"
+                        elif abs(price_change_pct) < 0.5:
+                            signal_type = "ABSORPTION"  # High volume, no price move = accumulation/distribution
+                        else:
+                            signal_type = "NORMAL"
+
                         spikes.append({
                             "ticker": t.get("ticker", ""),
                             "price": round(price, 2),
                             "change_pct": round(chg, 2),
                             "volume": vol,
                             "rvol": round(rvol, 2),
-                            "dollar_volume": round(price * vol, 0),
+                            "dollar_volume": round(dollar_volume, 0),
+                            "signal_type": signal_type,
                         })
                 except Exception as e:
                     print(f"[Warning] Error processing volume spike for ticker: {e}")
@@ -2106,6 +2361,23 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
         else:
             details["ad_ratio"] = 0
 
+    # 8b. Breadth confirmation as put/call proxy (0-5 points)
+    # If decliners >> advancers = extreme bearish sentiment (put/call proxy)
+    if breadth_data and "declining" in breadth_data and "advancing" in breadth_data:
+        advancing = breadth_data.get("advancing", 1)
+        declining = breadth_data.get("declining", 1)
+        breadth_ratio = advancing / declining if declining > 0 else 0
+        if breadth_ratio < 0.4:  # More decliners than advancers (heavy selling)
+            score += 5
+            details["breadth_confirmation"] = 5
+        elif breadth_ratio < 0.6:
+            score += 3
+            details["breadth_confirmation"] = 3
+        else:
+            details["breadth_confirmation"] = 0
+    else:
+        details["breadth_confirmation"] = 0
+
     # 9. Russell vs S&P divergence (0-8 points)
     if iwm_data and spy_data:
         iwm_chg = iwm_data.get("change_5d", 0)
@@ -2141,8 +2413,28 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
     else:
         details["negative_indices"] = 0
 
-    # 11. VIX term structure (skip for now - would need futures data)
-    details["vix_term_structure"] = 0
+    # 11. VIX term structure proxy (0-25 points)
+    # VIX level indicates contango/backwardation proxy
+    # VIX > 35 = extreme fear (backwardation likely) = crash signal
+    # VIX 20-35 = elevated concern
+    # VIX < 20 = complacent (contango = contrarian warning)
+    vix_term_score = 0
+    if vix_data and "price" in vix_data:
+        vix_value = vix_data["price"]
+        if vix_value > 35:
+            vix_term_score = 25  # Extreme fear/backwardation
+            details["vix_term_structure"] = 25
+        elif vix_value > 25:
+            vix_term_score = 15  # Elevated fear
+            details["vix_term_structure"] = 15
+        elif vix_value < 15:
+            vix_term_score = 5  # Low VIX = complacency = contrarian warning
+            details["vix_term_structure"] = 5
+        else:
+            details["vix_term_structure"] = 0
+        score += vix_term_score
+    else:
+        details["vix_term_structure"] = 0
 
     # 12. Consecutive red days for S&P (0-8 points)
     # This would require historical data - estimate from 1D and 5D

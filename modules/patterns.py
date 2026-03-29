@@ -814,13 +814,18 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # SIGNAL 1: VOLATILITAETS-KONTRAKTION (ATR Squeeze) — max 6 Punkte [CUT]
     # ATR schrumpft = Energie baut sich auf, ABER auch bei toten Aktien!
+    # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
     daily_ranges = []
     for b in bars:
         if b["close"] > 0:
             daily_ranges.append((b["high"] - b["low"]) / b["close"] * 100)
 
-    if len(daily_ranges) >= 15:
+    avg_volume = sum(volumes) / len(volumes) if volumes else 0
+    close = closes[-1] if closes else 0
+    is_penny_illiquid = (avg_volume < 500000 and close < 5)
+
+    if len(daily_ranges) >= 15 and not is_penny_illiquid:
         # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage (sensitiver als Halbierung)
         recent_atr = sum(daily_ranges[-5:]) / 5
         prior_atr = sum(daily_ranges[-20:-5]) / max(1, len(daily_ranges[-20:-5]))
@@ -849,8 +854,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # V69.1 FIX: Signal 1 (ATR Squeeze) misst bereits daily_ranges — hier
     # messen wir stattdessen ob die BODIES kleiner werden (Doji-artig),
     # was Unentschlossenheit = Energie-Aufbau signalisiert.
+    # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
-    if crypto_mode:
+    if not is_penny_illiquid and crypto_mode:
         # Body-Ratio: |close-open| / (high-low) pro Bar — 0=Doji, 1=Marubozu
         body_ratios = []
         for b in bars:
@@ -877,7 +883,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 details.append(" Body-Kompression: Keine Prior-Daten")
         else:
             details.append(" Body-Kompression: Nicht genug Daten")
-    else:
+    elif not is_penny_illiquid:
         if len(volumes) >= 15:
             recent_vol = sum(volumes[-5:]) / 5
             prior_vol = sum(volumes[-20:-5]) / max(1, len(volumes[-20:-5]))
@@ -899,6 +905,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 details.append(" Vol Dry-Up: Kein Prior-Volumen")
         else:
             details.append(" Vol Dry-Up: Nicht genug Daten (min 15 Tage)")
+    else:
+        details.append(" Vol Dry-Up: Penny/Illiquid Stock ignoriert")
 
     # ===================================================================
     # SIGNAL 3: OBV-DIVERGENZ / CLOSE-MOMENTUM DIVERGENZ — max 13 Punkte [BOOSTED]
@@ -1033,6 +1041,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # SIGNAL 5: RANGE DURATION — max 5 Punkte [CUT]
     # Laengere Konsolidierung, ABER zu lang = tote Aktie!
+    # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
     # Zaehle aufeinanderfolgende Tage in enger Range (vom Ende rueckwaerts)
     range_days = 0
@@ -1049,21 +1058,25 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             break
 
-    if range_days >= 15:
-        score += 5
-        details.append(f" Lange Konsolidierung: {range_days} Tage")
-    elif range_days >= 10:
-        score += 3
-        details.append(f" Solide Konsolidierung: {range_days} Tage")
-    elif range_days >= 6:
-        score += 2
-        details.append(f" Kurze Konsolidierung: {range_days} Tage")
+    if not is_penny_illiquid:
+        if range_days >= 15:
+            score += 5
+            details.append(f" Lange Konsolidierung: {range_days} Tage")
+        elif range_days >= 10:
+            score += 3
+            details.append(f" Solide Konsolidierung: {range_days} Tage")
+        elif range_days >= 6:
+            score += 2
+            details.append(f" Kurze Konsolidierung: {range_days} Tage")
+        else:
+            details.append(f" Keine Konsolidierung: {range_days} Tage")
     else:
-        details.append(f" Keine Konsolidierung: {range_days} Tage")
+        details.append(f" Range Duration: Penny/Illiquid Stock ignoriert ({range_days} Tage)")
 
     # ===================================================================
     # SIGNAL 6: RANGE BOUNDARY TESTS — max 10 Punkte
     # Mehrfache Tests der Grenze = Widerstand wird schwaecher
+    # FIX 3: Add volume confirmation for breakout attempts
     # ===================================================================
     if range_days >= 5:
         range_high = max(highs[-range_days:])
@@ -1077,18 +1090,40 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             upper_tests = sum(1 for h in highs[-range_days:] if h >= threshold_upper)
             lower_tests = sum(1 for l in lows[-range_days:] if l <= threshold_lower)
 
+            # FIX 3: Calculate relative volume (RVOL) on latest bar for breakout confirmation
+            avg_vol = sum(volumes[-range_days:]) / range_days if volumes[-range_days:] else 1
+            latest_vol = volumes[-1] if volumes else 0
+            rvol_latest = latest_vol / avg_vol if avg_vol > 0 else 0
+
             if direction == "long" and upper_tests >= 4:
-                score += 10
-                details.append(f" {upper_tests}x Resistance getestet → wird schwaecher")
+                # Only score breakout if volume confirms (rvol >= 1.5)
+                if rvol_latest >= 1.5:
+                    score += 10
+                    details.append(f" {upper_tests}x Resistance getestet + Volume Confirmation (RVOL {rvol_latest:.2f}x)")
+                else:
+                    score += 3  # Weak breakout without volume
+                    details.append(f" {upper_tests}x Resistance getestet aber schwaches Volume (RVOL {rvol_latest:.2f}x)")
             elif direction == "long" and upper_tests >= 3:
-                score += 5
-                details.append(f" {upper_tests}x Resistance getestet")
+                if rvol_latest >= 1.5:
+                    score += 5
+                    details.append(f" {upper_tests}x Resistance getestet + Volume (RVOL {rvol_latest:.2f}x)")
+                else:
+                    score += 2
+                    details.append(f" {upper_tests}x Resistance getestet ohne Volume (RVOL {rvol_latest:.2f}x)")
             elif direction == "short" and lower_tests >= 4:
-                score += 10
-                details.append(f" {lower_tests}x Support getestet → wird schwaecher")
+                if rvol_latest >= 1.5:
+                    score += 10
+                    details.append(f" {lower_tests}x Support getestet + Volume Confirmation (RVOL {rvol_latest:.2f}x)")
+                else:
+                    score += 3
+                    details.append(f" {lower_tests}x Support getestet aber schwaches Volume (RVOL {rvol_latest:.2f}x)")
             elif direction == "short" and lower_tests >= 3:
-                score += 5
-                details.append(f" {lower_tests}x Support getestet")
+                if rvol_latest >= 1.5:
+                    score += 5
+                    details.append(f" {lower_tests}x Support getestet + Volume (RVOL {rvol_latest:.2f}x)")
+                else:
+                    score += 2
+                    details.append(f" {lower_tests}x Support getestet ohne Volume (RVOL {rvol_latest:.2f}x)")
             else:
                 details.append(f" Wenig Boundary-Tests (Upper: {upper_tests}, Lower: {lower_tests})")
         else:
@@ -1116,8 +1151,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             details.append(f" ADX bereits hoch: {adx:.0f} (Trend laeuft schon)")
 
     # ===================================================================
-    # SIGNAL 8: INSTITUTIONAL ACCUMULATION / SPREAD-EXPANSION DAYS — max 14 Punkte [BOOSTED]
+    # SIGNAL 8: INSTITUTIONAL ACCUMULATION / SPREAD-EXPANSION DAYS — max 7 Punkte [FIX 1: Reduced from 14 to 7]
     # Crypto: Spread-Expansion + Close Direction als Volume-Proxy
+    # AUDIT: OBV Divergence (Signal 3) + RSI Drift (Signal 9) bereits messen Buying Pressure
+    # Reduced to avoid triple-counting "buying pressure despite flat price"
     # ===================================================================
     if n >= 10:
         if crypto_mode:
@@ -1144,59 +1181,63 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
-            score += 14; sm_fires += 1; sm_hits += 1
+            score += 7; sm_hits += 1
             details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
-            score += 9; sm_hits += 1
+            score += 4; sm_hits += 1
             details.append(f" Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
-            score += 14; sm_fires += 1; sm_hits += 1
+            score += 7; sm_hits += 1
             details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
-            score += 9; sm_hits += 1
+            score += 4; sm_hits += 1
             details.append(f" Distribution: {distri_days} vs {accum_days} Tage")
         else:
             details.append(f" Gemischte Aktivitaet: {accum_days} Akku / {distri_days} Distri")
 
     # ===================================================================
-    # SIGNAL 9: RSI DRIFT — max 10 Punkte
+    # SIGNAL 9: RSI DRIFT — max 5 Punkte [FIX 1: Reduced from 10 to 5]
     # RSI driftet ueber 55 (bullisch) oder unter 45 (baerisch) waehrend
     # Preis noch flat ist = Momentum baut sich unsichtbar auf
+    # AUDIT: Overlaps with Stochastic (Signal 14) — avoid double-counting momentum
+    # FIX 4: Score RSI but will take max(rsi_points, stoch_points) to avoid dedup
     # ===================================================================
     rsi = calculate_rsi_from_bars(bars)
+    rsi_points = 0  # Will be used in FIX 4 dedup logic
+    rsi_detail = ""
 
     if rsi is not None:
         if price_flat:
             # Preis flat + RSI driftet = unsichtbares Momentum (starkes Signal)
             if direction == "long" and 55 <= rsi <= 65:
-                score += 10
-                details.append(f" RSI-Drift bullisch: {rsi:.0f} (Preis flat, Momentum baut auf)")
+                rsi_points = 5
+                rsi_detail = f" RSI-Drift bullisch: {rsi:.0f} (Preis flat, Momentum baut auf)"
             elif direction == "long" and 50 <= rsi < 55:
-                score += 5
-                details.append(f" RSI leicht bullisch: {rsi:.0f}")
+                rsi_points = 2
+                rsi_detail = f" RSI leicht bullisch: {rsi:.0f}"
             elif direction == "short" and 35 <= rsi <= 45:
-                score += 10
-                details.append(f" RSI-Drift baerisch: {rsi:.0f} (Preis flat, Schwaeche baut auf)")
+                rsi_points = 5
+                rsi_detail = f" RSI-Drift baerisch: {rsi:.0f} (Preis flat, Schwaeche baut auf)"
             elif direction == "short" and 45 < rsi <= 50:
-                score += 5
-                details.append(f" RSI leicht baerisch: {rsi:.0f}")
+                rsi_points = 2
+                rsi_detail = f" RSI leicht baerisch: {rsi:.0f}"
             elif 40 <= rsi <= 60:
-                score += 2
-                details.append(f" RSI neutral: {rsi:.0f}")
+                rsi_points = 2
+                rsi_detail = f" RSI neutral: {rsi:.0f}"
             else:
-                details.append(f" RSI extrem: {rsi:.0f}")
+                rsi_detail = f" RSI extrem: {rsi:.0f}"
         else:
             # Preis nicht flat — RSI trotzdem bewerten aber weniger Punkte
             if direction == "long" and 50 <= rsi <= 65:
-                score += 4
-                details.append(f" RSI bullisch: {rsi:.0f} (Preis bewegt: {price_change_pct:+.1f}%)")
+                rsi_points = 4
+                rsi_detail = f" RSI bullisch: {rsi:.0f} (Preis bewegt: {price_change_pct:+.1f}%)"
             elif direction == "short" and 35 <= rsi <= 50:
-                score += 4
-                details.append(f" RSI baerisch: {rsi:.0f} (Preis bewegt: {price_change_pct:+.1f}%)")
+                rsi_points = 4
+                rsi_detail = f" RSI baerisch: {rsi:.0f} (Preis bewegt: {price_change_pct:+.1f}%)"
             else:
-                details.append(f" RSI: {rsi:.0f} (Preis nicht flat: {price_change_pct:+.1f}%)")
+                rsi_detail = f" RSI: {rsi:.0f} (Preis nicht flat: {price_change_pct:+.1f}%)"
     else:
-        details.append(" RSI: Nicht genug Daten")
+        rsi_detail = " RSI: Nicht genug Daten"
 
     # ===================================================================
     # SIGNAL 10: HIGHER LOWS / LOWER HIGHS IN RANGE — max 10 Punkte
@@ -1270,8 +1311,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # SIGNAL 12: TIGHT RANGE COMPRESSION (Bollinger-Squeeze Proxy) — max 6 Punkte [CUT]
     # StdDev schrumpft, ABER extreme Kompression = oft tote Aktie!
+    # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
-    if n >= 10:
+    if n >= 10 and not is_penny_illiquid:
         recent_closes = closes[-10:]
         mean_price = sum(recent_closes) / len(recent_closes)
         variance = sum((c - mean_price) ** 2 for c in recent_closes) / len(recent_closes)
@@ -1319,40 +1361,44 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # SIGNAL 14: STOCHASTIC MOMENTUM — max 10 Punkte
     # %K/%D Kreuzung in Extremzonen = starkes Timing-Signal
+    # FIX 4: Score Stochastic but will take max(rsi_points, stoch_points) to avoid dedup
     # ===================================================================
     stoch_k, stoch_d = calculate_stochastic(bars)
+    stoch_points = 0  # Will be used in FIX 4 dedup logic
+    stoch_detail = ""
+
     if stoch_k is not None and stoch_d is not None:
         if direction == "long":
             # Breakout-Kontext: %K rising + crossover ist wichtiger als Extremzone
             if stoch_k < 30 and stoch_k > stoch_d:
-                score += 10
-                details.append(f" Stochastic bullisch: %K={stoch_k:.0f} kreuzt %D={stoch_d:.0f} in Oversold")
+                stoch_points = 10
+                stoch_detail = f" Stochastic bullisch: %K={stoch_k:.0f} kreuzt %D={stoch_d:.0f} in Oversold"
             elif stoch_k < 50 and stoch_k > stoch_d:
-                score += 7
-                details.append(f" Stochastic steigend aus Mitte: %K={stoch_k:.0f} > %D={stoch_d:.0f}")
+                stoch_points = 7
+                stoch_detail = f" Stochastic steigend aus Mitte: %K={stoch_k:.0f} > %D={stoch_d:.0f}"
             elif stoch_k > stoch_d:
-                score += 3
-                details.append(f" Stochastic steigend: %K={stoch_k:.0f} (aber schon hoch)")
+                stoch_points = 3
+                stoch_detail = f" Stochastic steigend: %K={stoch_k:.0f} (aber schon hoch)"
             elif stoch_k > 80:
-                details.append(f" Stochastic ueberkauft: {stoch_k:.0f}")
+                stoch_detail = f" Stochastic ueberkauft: {stoch_k:.0f}"
             else:
-                details.append(f" Stochastic neutral: %K={stoch_k:.0f}")
+                stoch_detail = f" Stochastic neutral: %K={stoch_k:.0f}"
         else:  # short
             if stoch_k > 70 and stoch_k < stoch_d:
-                score += 10
-                details.append(f" Stochastic baerisch: %K={stoch_k:.0f} kreuzt %D={stoch_d:.0f} in Overbought")
+                stoch_points = 10
+                stoch_detail = f" Stochastic baerisch: %K={stoch_k:.0f} kreuzt %D={stoch_d:.0f} in Overbought"
             elif stoch_k > 50 and stoch_k < stoch_d:
-                score += 7
-                details.append(f" Stochastic fallend aus Mitte: %K={stoch_k:.0f} < %D={stoch_d:.0f}")
+                stoch_points = 7
+                stoch_detail = f" Stochastic fallend aus Mitte: %K={stoch_k:.0f} < %D={stoch_d:.0f}"
             elif stoch_k < stoch_d:
-                score += 3
-                details.append(f" Stochastic fallend: %K={stoch_k:.0f} (aber schon niedrig)")
+                stoch_points = 3
+                stoch_detail = f" Stochastic fallend: %K={stoch_k:.0f} (aber schon niedrig)"
             elif stoch_k < 20:
-                details.append(f" Stochastic ueberverkauft: {stoch_k:.0f}")
+                stoch_detail = f" Stochastic ueberverkauft: {stoch_k:.0f}"
             else:
-                details.append(f" Stochastic neutral: %K={stoch_k:.0f}")
+                stoch_detail = f" Stochastic neutral: %K={stoch_k:.0f}"
     else:
-        details.append(" Stochastic: Nicht genug Daten")
+        stoch_detail = " Stochastic: Nicht genug Daten"
 
     # ===================================================================
     # SIGNAL 15: ORDER BLOCK CONFLUENCE — max 14 Punkte [BOOSTED]
@@ -1652,12 +1698,29 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 details.append(f" Keine Body-Kompression: {body_compression:.2f}x")
 
     # ===================================================================
+    # FIX 4: RSI + STOCHASTIC DEDUP — Take max() of both momentum signals
+    # Don't double-count momentum if both RSI and Stochastic signal the same condition
+    # ===================================================================
+    momentum_points = max(rsi_points, stoch_points)
+    score += momentum_points
+    # Add whichever detail is applicable (prefer higher-scoring one)
+    if stoch_points > rsi_points and stoch_detail:
+        details.append(stoch_detail)
+    elif rsi_detail:
+        details.append(rsi_detail)
+    if stoch_detail and rsi_detail and rsi_points > 0 and stoch_points > 0:
+        # If both have points, add a note that we took the max
+        details.append(f"  [Dedup: max({rsi_points}, {stoch_points}) = {momentum_points} to avoid double-counting momentum]")
+
+    # ===================================================================
     # FINAL SCORE + RICHTUNGS-KONFIDENZ + GRADE + SMART MONEY SUB-SCORE
     # ===================================================================
-    # Tatsächliche Summe der Signal-Maxima:
-    # 6+5+13+10+5+10+14+14+10+10+14+6+10+10+14+10+14+10+10+5 = 200
+    # Tatsächliche Summe der Signal-Maxima (nach FIX 1 + FIX 4):
+    # 6+5+13+10+5+10+14+7+5+10+14+6+10+max(5,10)+14+10+14+10+10+5 = 188
+    # FIX 1: Signal 8 (14→7) + Signal 9 (10→5) = -12 pts from OG 200
+    # FIX 4: RSI+Stoch take max() instead of sum → often saves ~5 pts on average
     # (BOOSTED-Signale: 14 Punkte max, CUT-Signale: 5-6 Punkte max)
-    max_score = 200
+    max_score = 188
 
     # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
     # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation
