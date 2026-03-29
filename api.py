@@ -495,12 +495,18 @@ def _run_scan_safe(name, func, timeout_min=10):
         _scan_status[name]["_started_at"] = time.time()
 
     def _worker():
+        start_t = time.time()
         try:
             func()
+            elapsed = round(time.time() - start_t, 1)
+            print(f"[Scheduler] {name} DONE in {elapsed}s")
             with _scan_lock:
                 _scan_status[name]["last_run"] = datetime.now().isoformat()
         except Exception as e:
-            print(f"[Scheduler] {name} error: {e}")
+            elapsed = round(time.time() - start_t, 1)
+            print(f"[Scheduler] {name} ERROR after {elapsed}s: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             with _scan_lock:
                 _scan_status[name]["running"] = False
@@ -1688,8 +1694,10 @@ EARLY_MOVERS_CACHE = "/tmp/early_movers_cache.json"
 def _early_movers_wrapper() -> None:
     """Fetch pre/post market movers via Polygon snapshot."""
     try:
+        print(f"[Early Movers] Starting scan... POLYGON_KEY={'set' if POLYGON_KEY else 'MISSING'}")
         url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/gainers"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY})
+        print(f"[Early Movers] Gainers API response: {resp.status_code}")
         gainers = []
         if resp.status_code == 200:
             for t in resp.json().get("tickers", [])[:20]:
@@ -1703,6 +1711,7 @@ def _early_movers_wrapper() -> None:
 
         url2 = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
         resp2 = rate_limited_get(url2, params={"apiKey": POLYGON_KEY})
+        print(f"[Early Movers] Losers API response: {resp2.status_code}")
         losers = []
         if resp2.status_code == 200:
             for t in resp2.json().get("tickers", [])[:20]:
@@ -2496,6 +2505,7 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 def _crash_monitor_wrapper() -> None:
     """Fetch VIX, major indices, and market breadth data with fear score."""
     try:
+        print("[Crash Monitor] Starting scan...")
         result = {"vix": {}, "indices": [], "breadth": {}, "fear_score": 0, "fear_level": ""}
 
         # VIX via Polygon
@@ -2604,8 +2614,11 @@ def _crash_monitor_wrapper() -> None:
         result["fear_details"] = fear_details
 
         save_cache_file(CRASH_MONITOR_CACHE, [result])
+        print(f"[Crash Monitor] Done — fear_score={fear_score}, indices={len(result.get('indices',[]))}, vix={result.get('vix',{}).get('price','?')}")
     except Exception as e:
         print(f"Crash monitor error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ── Kalender (Economic Calendar) ──
