@@ -992,7 +992,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _bi_clear_stop(direction)
                 return
 
-            ticker = candidate["Ticker"]
+            # candidate can be a string (ticker name) or dict with "Ticker" key
+            ticker = candidate if isinstance(candidate, str) else candidate.get("Ticker", candidate.get("ticker", ""))
 
             # OHLCV laden — Short braucht 300 Tage für SMA200 Bonus-Signale
             try:

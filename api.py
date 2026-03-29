@@ -288,17 +288,25 @@ def get_strategies_for_market(market_type: str) -> Dict[str, Any]:
 def _bi_background_scan_wrapper(direction: str) -> None:
     """Wrapper to run _bi_background_scan in background without candidates pre-load."""
     try:
+        print(f"[BI {direction}] Starting scan...")
         _bi_background_scan(POLYGON_KEY, direction=direction, candidates=None)
+        print(f"[BI {direction}] Scan completed")
     except Exception as e:
         print(f"BI background scan error ({direction}): {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def _biotech_scan_wrapper() -> None:
     """Wrapper to run biotech background scan in background."""
     try:
+        print("[Biotech] Starting scan... (this takes 5-15 minutes)")
         _biotech_background_scan(POLYGON_KEY)
+        print("[Biotech] Scan completed")
     except Exception as e:
         print(f"Biotech background scan error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def _bear_scan_wrapper() -> None:
@@ -2508,23 +2516,60 @@ def _crash_monitor_wrapper() -> None:
         print("[Crash Monitor] Starting scan...")
         result = {"vix": {}, "indices": [], "breadth": {}, "fear_score": 0, "fear_level": ""}
 
-        # VIX via Polygon
+        # Try VIX index first, fallback to UVXY ETF proxy
         vix_tickers = [
-            ("I:VIX", "VIX", "Volatility Index"),
             ("SPY", "S&P 500", "S&P 500 ETF"),
             ("QQQ", "Nasdaq", "Nasdaq 100 ETF"),
             ("DIA", "Dow Jones", "Dow Jones ETF"),
             ("IWM", "Russell 2000", "Russell 2000 ETF"),
         ]
 
+        # VIX via Polygon snapshot (works on some plans)
+        try:
+            vix_url = "https://api.polygon.io/v3/snapshot?ticker.any_of=I:VIX&apiKey=" + POLYGON_KEY
+            vix_resp = rate_limited_get(vix_url, params={})
+            if vix_resp.status_code == 200:
+                vix_results = vix_resp.json().get("results", [])
+                if vix_results:
+                    vix_session = vix_results[0].get("session", {})
+                    vix_price = vix_session.get("close", 0) or vix_session.get("previous_close", 0)
+                    vix_prev = vix_session.get("previous_close", vix_price)
+                    if vix_price > 0:
+                        chg = ((vix_price - vix_prev) / vix_prev * 100) if vix_prev else 0
+                        result["vix"] = {"ticker": "I:VIX", "name": "VIX", "price": round(vix_price, 2),
+                                         "change_1d": round(chg, 2), "change_5d": 0, "change_20d": 0}
+                        if vix_price >= 30: result["vix"]["level"] = "EXTREME"
+                        elif vix_price >= 25: result["vix"]["level"] = "HIGH"
+                        elif vix_price >= 20: result["vix"]["level"] = "ELEVATED"
+                        else: result["vix"]["level"] = "LOW"
+                        print(f"[Crash Monitor] VIX from snapshot: {vix_price}")
+            if not result.get("vix", {}).get("price"):
+                # Fallback: UVXY as VIX proxy
+                uvxy_url = f"https://api.polygon.io/v2/aggs/ticker/UVXY/range/1/day/2024-01-01/2099-12-31"
+                uvxy_resp = rate_limited_get(uvxy_url, params={"apiKey": POLYGON_KEY, "limit": 5, "sort": "desc"})
+                if uvxy_resp.status_code == 200:
+                    bars = uvxy_resp.json().get("results", [])
+                    if bars:
+                        # UVXY roughly tracks 1.5x VIX futures; estimate VIX from UVXY price range
+                        uvxy_price = bars[0]["c"]
+                        # UVXY ~$30 when VIX ~20, ~$50 when VIX ~30 (very rough estimate)
+                        est_vix = max(10, min(80, uvxy_price * 0.6 + 5))
+                        result["vix"] = {"ticker": "UVXY", "name": "VIX (est.)", "price": round(est_vix, 1),
+                                         "change_1d": 0, "change_5d": 0, "change_20d": 0}
+                        if est_vix >= 30: result["vix"]["level"] = "EXTREME"
+                        elif est_vix >= 25: result["vix"]["level"] = "HIGH"
+                        elif est_vix >= 20: result["vix"]["level"] = "ELEVATED"
+                        else: result["vix"]["level"] = "LOW"
+                        print(f"[Crash Monitor] VIX estimated from UVXY: {est_vix}")
+        except Exception as e:
+            print(f"[Crash Monitor] VIX fetch error: {e}")
+
         for sym, name, desc in vix_tickers:
             try:
-                if sym.startswith("I:"):
-                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
-                else:
-                    url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
+                url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
                 resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
                 if resp.status_code != 200:
+                    print(f"[Crash Monitor] {sym} API response: {resp.status_code}")
                     continue
                 bars = resp.json().get("results", [])
                 if len(bars) < 2:
@@ -2539,8 +2584,8 @@ def _crash_monitor_wrapper() -> None:
                          "price": round(close, 2), "change_1d": round(chg_1d, 2),
                          "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
 
-                if sym == "I:VIX":
-                    result["vix"] = entry
+                if False:  # VIX now handled separately above
+                    pass
                     # Stress level
                     if close >= 30:
                         entry["level"] = "EXTREME"
