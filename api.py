@@ -2071,8 +2071,16 @@ def _new_listing_wrapper() -> None:
         results = []
         for listing in new_listings[:20]:  # Limit to 20
             try:
-                symbol = listing.get("symbol", "")
-                exchange = listing.get("exchange", "crypto_com")
+                # listing can be a dict or string — normalize
+                if isinstance(listing, str):
+                    symbol = listing
+                    exchange = "crypto.com"
+                else:
+                    symbol = listing.get("symbol", "")
+                    exchange = listing.get("exchange", "crypto.com")
+
+                if not symbol:
+                    continue
 
                 # Fetch ticker data
                 ticker_data = fetch_ticker_for(symbol, exchange)
@@ -2083,7 +2091,7 @@ def _new_listing_wrapper() -> None:
                 candles = fetch_candles_for(symbol, exchange)
 
                 # Fetch orderbook
-                orderbook = fetch_cryptocom_orderbook(f"{symbol}_PERP") if exchange == "crypto_com" else None
+                orderbook = fetch_cryptocom_orderbook(f"{symbol}_PERP") if "crypto" in exchange else None
 
                 # Calculate exhaustion
                 exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
@@ -2100,11 +2108,11 @@ def _new_listing_wrapper() -> None:
                     "exhaustion_score": exhaustion_score,
                     "exhaustion_details": exhaustion_details,
                     "pump_data": pump_data,
-                    "listing_date": listing.get("listing_date"),
-                    "time_since_listing_hours": listing.get("time_since_listing_hours"),
+                    "listing_date": listing.get("listing_date") if isinstance(listing, dict) else None,
+                    "time_since_listing_hours": listing.get("time_since_listing_hours") if isinstance(listing, dict) else None,
                 })
             except Exception as e:
-                print(f"[New Listing] Error processing {listing.get('symbol', 'unknown')}: {e}")
+                print(f"[New Listing] Error processing {listing if isinstance(listing, str) else listing.get('symbol', 'unknown')}: {e}")
                 continue
 
         save_cache_file(NEW_LISTING_CACHE, results)
