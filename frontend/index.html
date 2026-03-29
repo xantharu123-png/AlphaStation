@@ -493,8 +493,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         setSidebarMode(prev => prev === 'normal' ? 'wide' : prev === 'wide' ? 'full' : 'normal');
     };
 
-    // Fetch ticker detail data (metrics)
+    const isCrypto = scannerData?.isCrypto || false;
+
+    // Fetch ticker detail data (metrics) — skip for crypto
     useEffect(() => {
+        if (isCrypto) { setLoading(false); return; }
         const fetchData = async () => {
             try {
                 setLoading(true);
@@ -508,10 +511,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             }
         };
         fetchData();
-    }, [ticker]);
+    }, [ticker, isCrypto]);
 
-    // Fetch chart data — always request ALL overlays so toggles work instantly
+    // Fetch chart data — skip for crypto
     useEffect(() => {
+        if (isCrypto) {
+            setChartData({ ticker, timeframe, candles: [], error: 'Crypto — kein Polygon-Chart verfügbar' });
+            return;
+        }
         const fetchChart = async () => {
             try {
                 const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
@@ -519,7 +526,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (res.ok) {
                     setChartData(await res.json());
                 } else {
-                    // Set empty chart data so sidebar doesn't stay in loading state
                     setChartData({ ticker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
                 }
             } catch (err) {
@@ -528,7 +534,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             }
         };
         fetchChart();
-    }, [ticker, timeframe]);
+    }, [ticker, timeframe, isCrypto]);
 
     const loadAiAnalysis = async () => {
         setAiLoading(true);
@@ -846,8 +852,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     }
 
     const d = tickerData || {};
-    const price = d.price || 0;
-    const change = d.change_1d || 0;
+    const cd = scannerData || {};  // crypto data from Early Movers
+    const price = isCrypto ? (cd.Price || 0) : (d.price || 0);
+    const change = isCrypto ? (cd.Change24h || 0) : (d.change_1d || 0);
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
@@ -883,7 +890,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     <div>
                         <h2 className="text-2xl font-bold">{ticker}</h2>
                         <p className="text-2xl font-bold mt-1">
-                            ${price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
+                            ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
                     </div>
                     <div className="flex gap-2 items-center">
@@ -985,7 +992,47 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Content Grid - 2 columns when wide */}
                 <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
 
-                {/* Price Action */}
+                {/* Crypto Detail Panel */}
+                {isCrypto && cd && (
+                <>
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Crypto Info</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Name</span> <span className="font-semibold">{cd.Name || '–'}</span></div>
+                        <div><span className="text-gray-500">Narrative</span> <span className="font-semibold">{cd.Narrative || '–'}</span></div>
+                        <div><span className="text-gray-500">MCap</span> <span className="font-semibold">{cd.MCap ? (cd.MCap > 1e9 ? (cd.MCap/1e9).toFixed(1)+'B' : cd.MCap > 1e6 ? (cd.MCap/1e6).toFixed(0)+'M' : (cd.MCap/1e3).toFixed(0)+'K') : '–'}</span></div>
+                        <div><span className="text-gray-500">Rank</span> <span className="font-semibold">#{cd.Rank || '–'}</span></div>
+                    </div>
+                </div>
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Performance</h4>
+                    <div className="grid grid-cols-3 gap-2">
+                        <div><span className="text-gray-500">1h</span> <span className={`font-semibold ${(cd.Change1h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{cd.Change1h?.toFixed(1) || '–'}%</span></div>
+                        <div><span className="text-gray-500">24h</span> <span className={`font-semibold ${(cd.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{cd.Change24h?.toFixed(1) || '–'}%</span></div>
+                        <div><span className="text-gray-500">7d</span> <span className={`font-semibold ${(cd.Change7d||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{cd.Change7d?.toFixed(1) || '–'}%</span></div>
+                        <div><span className="text-gray-500">Vol/MCap</span> <span className="font-semibold">{cd.VolMCapRatio?.toFixed(1) || '–'}%</span></div>
+                        <div><span className="text-gray-500">Vol 24h</span> <span className="font-semibold">{cd.Vol24h ? (cd.Vol24h > 1e9 ? (cd.Vol24h/1e9).toFixed(1)+'B' : cd.Vol24h > 1e6 ? (cd.Vol24h/1e6).toFixed(0)+'M' : (cd.Vol24h/1e3).toFixed(0)+'K') : '–'}</span></div>
+                        {cd.IsTrending && <div><span className="text-xs px-2 py-1 rounded bg-purple-100 text-purple-800 font-semibold">TRENDING</span></div>}
+                    </div>
+                </div>
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Scanner Daten</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        {cd.EarlyScore && <div><span className="text-gray-500">Score</span> <span className={`font-semibold px-2 py-0.5 rounded ${cd.EarlyScore >= 70 ? 'bg-green-100 text-green-800' : cd.EarlyScore >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{cd.EarlyScore}</span></div>}
+                        {cd.DegenScore && <div><span className="text-gray-500">DegenScore</span> <span className="font-semibold">{cd.DegenScore}</span></div>}
+                        {cd.WhaleScore && <div><span className="text-gray-500">WhaleScore</span> <span className="font-semibold">{cd.WhaleScore}</span></div>}
+                        {cd.Signal && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className="font-semibold">{cd.Signal}</span></div>}
+                        {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'}</span></div>}
+                        {cd.FundingRate != null && <div><span className="text-gray-500">Funding</span> <span className="font-semibold">{(cd.FundingRate * 100).toFixed(3)}%</span></div>}
+                        {cd.OI_Ratio && <div><span className="text-gray-500">OI Ratio</span> <span className="font-semibold">{cd.OI_Ratio.toFixed(2)}x</span></div>}
+                        {cd.Signals && <div className="col-span-2"><span className="text-gray-500">Signale</span> <span className="font-semibold text-xs">{Array.isArray(cd.Signals) ? cd.Signals.join(', ') : cd.Signals}</span></div>}
+                    </div>
+                </div>
+                </>
+                )}
+
+                {/* Price Action — Stock only */}
+                {!isCrypto && (
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Preis</h4>
                     <div className="grid grid-cols-3 gap-2">
@@ -997,7 +1044,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div><span className="text-gray-500">Low</span> ${d.low}</div>
                     </div>
                 </div>
+                )}
 
+                {/* Stock-only sections */}
+                {!isCrypto && (<>
                 {/* Technical Indicators */}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Technische Indikatoren</h4>
@@ -1057,6 +1107,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div><span className="text-gray-500">Avg Vol</span> <span className="font-semibold">{(d.avg_volume || 0).toLocaleString()}</span></div>
                     </div>
                 </div>
+                </>)}
 
                 {/* Signals */}
                 {d.signals && d.signals.length > 0 && (
@@ -1952,7 +2003,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             </thead>
                             <tbody>
                                 {sortedSpikes.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                         <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
                                         <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
                                         <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
@@ -1993,7 +2044,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             </thead>
                             <tbody>
                                 {sortedMicro.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                         <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
                                         <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
                                         <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
@@ -2032,7 +2083,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             </thead>
                             <tbody>
                                 {sortedWhale.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                         <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
                                         <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
                                         <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
@@ -2070,7 +2121,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             </thead>
                             <tbody>
                                 {sortedRecent.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                         <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
                                         <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
                                         <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
