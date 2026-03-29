@@ -1072,8 +1072,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 no_data_count += 1
                 continue
 
-            # Analyse
-            result = analyze_breakout_imminent(bars, direction=direction)
+            try:
+              # Analyse
+              result = analyze_breakout_imminent(bars, direction=direction)
             if len(result) == 8:
                 is_valid, bi_score, max_score, details, confidence, grade, sm_fires, sm_hits = result
             else:
@@ -1120,6 +1121,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — WATCH", "D": "D — SCHWACH"}
             grade_label = grade_map.get(grade, grade)
 
+            # Convert string candidate to dict for storing results
+            if isinstance(candidate, str):
+                candidate = {"Ticker": candidate, "ticker": candidate}
             candidate["Alpha"] = bi_score
             candidate["BI_Score"] = bi_score
             candidate["BI_MaxScore"] = max_score
@@ -1268,6 +1272,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["PatternLabel"] = "Keine Umkehr-Patterns"
 
             results.append(candidate)
+            except Exception as e:
+                print(f"[BI {direction}] Error analyzing {ticker}: {e}")
+                continue
 
         # Sortiere nach Score
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]

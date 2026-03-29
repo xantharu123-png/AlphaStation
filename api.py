@@ -1761,7 +1761,12 @@ def _early_movers_wrapper() -> None:
                 vol = day.get("v", 0)
                 losers.append({"ticker": t.get("ticker",""), "price": round(price,2), "change_pct": round(chg,2), "volume": vol})
 
-        save_cache_file(EARLY_MOVERS_CACHE, [{"gainers": gainers, "losers": losers}])
+        # Only save if we got actual data — don't overwrite Friday's results on weekends
+        if gainers or losers:
+            save_cache_file(EARLY_MOVERS_CACHE, [{"gainers": gainers, "losers": losers}])
+            print(f"[Early Movers] Saved {len(gainers)} gainers, {len(losers)} losers")
+        else:
+            print(f"[Early Movers] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
         print(f"Early movers error: {e}")
 
