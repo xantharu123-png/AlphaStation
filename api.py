@@ -2149,8 +2149,9 @@ def _volume_spikes_wrapper() -> None:
                     vol = day.get("v", 0)
                     prev_vol = prev.get("v", 0)
 
-                    # Fix 2a: RVOL Baseline to Median (resistant to outliers)
-                    # For now, use previous day as baseline; in production would track 20-day median
+                    # Fix 2a: RVOL Baseline — use prevDay volume as quick baseline
+                    # Snapshot only has day + prevDay; 20-day median would need extra API call per ticker
+                    # For gainers/losers bulk scan, prevDay is acceptable (close enough to median for high-vol stocks)
                     if prev_vol > 0:
                         rvol = vol / prev_vol
                     else:

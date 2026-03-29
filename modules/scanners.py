@@ -1529,13 +1529,13 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                     _cat_date = _dt_cls.strptime(_cat_date_str[:10], "%Y-%m-%d").date()
                     _days_old = (_today - _cat_date).days
                     if _days_old > 365:
-                        cat["score"] = 0          # > 1 Jahr: komplett ignorieren
+                        cat["score"] = int(cat["score"] * 0.05)  # > 1 Jahr: 5% (nicht komplett 0)
                     elif _days_old > 180:
-                        cat["score"] = int(cat["score"] * 0.10)  # > 6 Monate: 10%
+                        cat["score"] = int(cat["score"] * 0.25)  # > 6 Monate: 25%
                     elif _days_old > 90:
-                        cat["score"] = int(cat["score"] * 0.40)  # > 3 Monate: 40%
+                        cat["score"] = int(cat["score"] * 0.55)  # > 3 Monate: 55%
                     elif _days_old > 30:
-                        cat["score"] = int(cat["score"] * 0.75)  # > 1 Monat: 75%
+                        cat["score"] = int(cat["score"] * 0.85)  # > 1 Monat: 85%
                     # <= 30 Tage: voller Score (100%)
                     cat["days_old"] = _days_old
                 except (ValueError, TypeError):
