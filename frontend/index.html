@@ -404,15 +404,20 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     const displayLast = timing.lastScan || lastScan;
     const displayNext = timing.nextScan || nextScan;
 
+    // Check if scheduler is currently running this scan in the background
+    const schedulerRunning = scanKey && schedulerStatus?.scans?.[scanKey]?.running;
+    const runningSinceSec = schedulerRunning ? (schedulerStatus.scans[scanKey].running_since_sec || 0) : 0;
+    const anyScanning = isScanning || schedulerRunning;
+
     return (
         <div className="card border border-gray-200 p-4 rounded-lg">
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                    <button onClick={onScan} disabled={isScanning} className="button" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                        {isScanning ? (
+                    <button onClick={onScan} disabled={anyScanning} className="button" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                        {anyScanning ? (
                             <>
                                 <span className="loading-spinner"></span>
-                                Scannt...
+                                {schedulerRunning && !isScanning ? 'Auto-Scan läuft...' : 'Scannt...'}
                             </>
                         ) : (
                             'Scan starten'
@@ -422,12 +427,16 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                     {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
                 </div>
             </div>
-            {isScanning && (
+            {anyScanning && (
                 <div className="mt-3">
                     <div style={{ width: '100%', height: '4px', backgroundColor: '#e5e7eb', borderRadius: '2px', overflow: 'hidden' }}>
                         <div style={{ width: '100%', height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s infinite', borderRadius: '2px' }}></div>
                     </div>
-                    <div className="text-xs text-blue-600 mt-1 font-semibold">Scanner läuft — Bitte warten...</div>
+                    <div className="text-xs text-blue-600 mt-1 font-semibold">
+                        {schedulerRunning && !isScanning
+                            ? `Auto-Scan läuft seit ${runningSinceSec > 60 ? Math.floor(runningSinceSec / 60) + ' min' : runningSinceSec + 's'}...`
+                            : 'Scanner läuft — Bitte warten...'}
+                    </div>
                 </div>
             )}
         </div>
