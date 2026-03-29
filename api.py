@@ -396,28 +396,37 @@ def _bear_scan_wrapper() -> None:
 # Runs all scans automatically at defined intervals (like old Streamlit version)
 _scheduler_running = False
 _scan_status = {
-    "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
-    "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
-    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 20},
-    "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
-    "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
-    "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
-    "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
-    "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 20},
-    "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
-    "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 10},
+    "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
+    "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
+    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
+    "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
+    "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
+    "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
+    "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
 }
 
-def _run_scan_safe(name, func):
-    """Run a scan function safely, updating status."""
+def _run_scan_safe(name, func, timeout_min=10):
+    """Run a scan function safely in a thread with timeout, updating status."""
     _scan_status[name]["running"] = True
-    try:
-        func()
-        _scan_status[name]["last_run"] = datetime.now().isoformat()
-    except Exception as e:
-        print(f"[Scheduler] {name} error: {e}")
-    finally:
-        _scan_status[name]["running"] = False
+
+    def _worker():
+        try:
+            func()
+            _scan_status[name]["last_run"] = datetime.now().isoformat()
+        except Exception as e:
+            print(f"[Scheduler] {name} error: {e}")
+        finally:
+            _scan_status[name]["running"] = False
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout_min * 60)  # Wait max timeout_min minutes
+    if t.is_alive():
+        print(f"[Scheduler] {name} TIMEOUT after {timeout_min}min — skipping")
+        _scan_status[name]["running"] = False  # Force reset so scheduler isn't blocked
 
 def _scheduler_loop():
     """Background loop that triggers all scans at their defined intervals."""
@@ -889,6 +898,52 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             }
             candles.append(candle)
 
+        # ── BI Scanner Cache Lookup: übernimm Grade/Score/Direction wenn vorhanden ──
+        bi_scanner = None
+        for cache_path, bi_dir in [(BI_CACHE_LONG, "LONG"), (BI_CACHE_SHORT, "SHORT")]:
+            try:
+                cached_results, _ = load_cache_file(cache_path)
+                if cached_results:
+                    normed = _normalize_keys(cached_results, _BI_KEY_MAP)
+                    for item in normed:
+                        if isinstance(item, dict) and item.get("ticker", "").upper() == ticker.upper():
+                            bi_scanner = {
+                                "grade": item.get("grade"),
+                                "score": item.get("score"),
+                                "max_score": item.get("max_score"),
+                                "grade_label": item.get("grade_label"),
+                                "confidence": item.get("confidence"),
+                                "direction": bi_dir,
+                                "source": "BI Scanner",
+                                "entry": item.get("entry"),
+                                "stop_loss": item.get("stop_loss"),
+                                "tp1": item.get("tp1"),
+                                "tp2": item.get("tp2"),
+                                "risk_reward": item.get("risk_reward"),
+                            }
+                            break
+                if bi_scanner:
+                    break
+            except Exception:
+                pass
+
+        # Wenn BI Scanner Daten vorhanden → überschreibe signal_grade/score/confluence
+        if bi_scanner:
+            signal_grade = bi_scanner["grade"] or signal_grade
+            score = bi_scanner["score"] if bi_scanner["score"] is not None else score
+            confluence_direction = bi_scanner["direction"]
+            confluence = {**confluence, "direction": confluence_direction}
+            # Trade Setup vom BI Scanner übernehmen wenn vorhanden
+            if bi_scanner.get("entry") and bi_scanner.get("stop_loss"):
+                trade_setup = {
+                    "entry": bi_scanner["entry"],
+                    "stop": bi_scanner["stop_loss"],
+                    "tp1": bi_scanner.get("tp1"),
+                    "tp2": bi_scanner.get("tp2"),
+                    "rr": bi_scanner.get("risk_reward"),
+                    "direction": bi_scanner["direction"],
+                }
+
         return {
             "ticker": ticker, "price": round(close, 2), "open": round(opn, 2),
             "high": round(high, 2), "low": round(low, 2), "volume": vol,
@@ -909,6 +964,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             "confluence": confluence,
             "trade_setup": trade_setup,
             "candles": candles,
+            "bi_scanner": bi_scanner,  # None wenn nicht im Cache
         }
     except HTTPException:
         raise
