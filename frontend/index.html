@@ -1824,25 +1824,23 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         fetchResults();
     }, []);
 
+    // Load volume spikes for Early Movers on mount
     useEffect(() => {
-        if (scanCache.em_spikes && scanCache.em_spikes.length > 0) {
-            setSpikeResults(scanCache.em_spikes);
-        } else {
-            const fetchSpikes = async () => {
-                try {
-                    const response = await fetch(`${API}/api/volume-spikes-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setSpikeResults(data.data || []);
-                        updateScanCache('em_spikes', data.data || []);
-                    }
-                } catch (err) {
-                    console.error('Error:', err);
+        const fetchSpikes = async () => {
+            try {
+                const response = await fetch(`${API}/api/volume-spikes-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    setSpikeResults(items);
+                    updateScanCache('em_spikes', items);
                 }
-            };
-            fetchSpikes();
-        }
-    }, [scanCache.em_spikes]);
+            } catch (err) {
+                console.error('Error:', err);
+            }
+        };
+        fetchSpikes();
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);

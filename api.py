@@ -485,6 +485,36 @@ _scan_status = {
 _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
 
+# Initialize last_run from cache files on startup (survives restarts)
+def _init_scan_status_from_cache():
+    """Read cache file timestamps to populate last_run on startup."""
+    import os
+    _cache_map = {
+        "bi_long": "/tmp/bi_cache_long.json",
+        "bi_short": "/tmp/bi_cache_short.json",
+        "bear": "/tmp/bear_scanner_cache.json",
+        "biotech": "/tmp/alpha_biotech_cache.json",
+        "early_movers": "/tmp/early_movers_cache.json",
+        "crash_monitor": "/tmp/crash_monitor_cache.json",
+        "btc_divergenz": "/tmp/btc_divergenz_cache.json",
+        "money_flow": "/tmp/money_flow_cache.json",
+        "new_listing": "/tmp/new_listing_scanner.json",
+        "volume_spikes": "/tmp/volume_spikes_cache.json",
+    }
+    for scan_name, cache_path in _cache_map.items():
+        if scan_name in _scan_status and os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r") as f:
+                    cache_data = json.load(f)
+                cached_at = cache_data.get("cached_at")
+                if cached_at:
+                    _scan_status[scan_name]["last_run"] = cached_at
+                    print(f"[Init] {scan_name} last_run restored from cache: {cached_at}")
+            except Exception as e:
+                print(f"[Init] Could not read cache for {scan_name}: {e}")
+
+_init_scan_status_from_cache()
+
 def _run_scan_safe(name, func, timeout_min=10):
     """Run a scan function safely in a background thread (non-blocking).
     Uses a watchdog pattern: if a scan is still 'running' after timeout_min,
@@ -2544,23 +2574,49 @@ def _crash_monitor_wrapper() -> None:
                         else: result["vix"]["level"] = "LOW"
                         print(f"[Crash Monitor] VIX from snapshot: {vix_price}")
             if not result.get("vix", {}).get("price"):
-                # Fallback: UVXY as VIX proxy
+                # Fallback: Use UVXY daily change to estimate VIX level
+                # UVXY is 1.5x leveraged VIX futures - absolute price is useless due to decay
+                # Instead, use daily % change to estimate current VIX regime
                 uvxy_url = f"https://api.polygon.io/v2/aggs/ticker/UVXY/range/1/day/2024-01-01/2099-12-31"
-                uvxy_resp = rate_limited_get(uvxy_url, params={"apiKey": POLYGON_KEY, "limit": 5, "sort": "desc"})
+                uvxy_resp = rate_limited_get(uvxy_url, params={"apiKey": POLYGON_KEY, "limit": 10, "sort": "desc"})
                 if uvxy_resp.status_code == 200:
                     bars = uvxy_resp.json().get("results", [])
-                    if bars:
-                        # UVXY roughly tracks 1.5x VIX futures; estimate VIX from UVXY price range
-                        uvxy_price = bars[0]["c"]
-                        # UVXY ~$30 when VIX ~20, ~$50 when VIX ~30 (very rough estimate)
-                        est_vix = max(10, min(80, uvxy_price * 0.6 + 5))
-                        result["vix"] = {"ticker": "UVXY", "name": "VIX (est.)", "price": round(est_vix, 1),
-                                         "change_1d": 0, "change_5d": 0, "change_20d": 0}
+                    if bars and len(bars) >= 2:
+                        uvxy_today = bars[0]["c"]
+                        uvxy_prev = bars[1]["c"]
+                        uvxy_chg_pct = ((uvxy_today - uvxy_prev) / uvxy_prev * 100) if uvxy_prev else 0
+                        # Calculate avg 5-day volatility from UVXY as VIX proxy
+                        # Normal VIX ~15-18, elevated ~20-25, high ~25-30, extreme >30
+                        # Estimate from UVXY behavior:
+                        # - UVXY 5d avg abs change <3% → VIX ~14-16 (calm)
+                        # - UVXY 5d avg abs change 3-8% → VIX ~17-22 (normal)
+                        # - UVXY 5d avg abs change 8-15% → VIX ~22-28 (elevated)
+                        # - UVXY 5d avg abs change >15% → VIX ~28+ (fear)
+                        recent_changes = []
+                        for i in range(min(5, len(bars) - 1)):
+                            c1 = bars[i]["c"]
+                            c2 = bars[i + 1]["c"]
+                            if c2 > 0:
+                                recent_changes.append(abs((c1 - c2) / c2 * 100))
+                        avg_abs_change = sum(recent_changes) / len(recent_changes) if recent_changes else 0
+                        # Map avg absolute change to estimated VIX
+                        if avg_abs_change > 15:
+                            est_vix = min(45, 28 + (avg_abs_change - 15) * 0.5)
+                        elif avg_abs_change > 8:
+                            est_vix = 22 + (avg_abs_change - 8) * 0.86
+                        elif avg_abs_change > 3:
+                            est_vix = 17 + (avg_abs_change - 3) * 1.0
+                        else:
+                            est_vix = 13 + avg_abs_change * 1.3
+                        est_vix = round(max(12, min(50, est_vix)), 1)
+                        result["vix"] = {"ticker": "UVXY", "name": "VIX (est.)", "price": est_vix,
+                                         "change_1d": round(uvxy_chg_pct / 1.5, 2),  # Rough: divide UVXY change by leverage
+                                         "change_5d": 0, "change_20d": 0}
                         if est_vix >= 30: result["vix"]["level"] = "EXTREME"
                         elif est_vix >= 25: result["vix"]["level"] = "HIGH"
                         elif est_vix >= 20: result["vix"]["level"] = "ELEVATED"
                         else: result["vix"]["level"] = "LOW"
-                        print(f"[Crash Monitor] VIX estimated from UVXY: {est_vix}")
+                        print(f"[Crash Monitor] VIX estimated from UVXY volatility: {est_vix} (avg_abs_chg={avg_abs_change:.1f}%)")
         except Exception as e:
             print(f"[Crash Monitor] VIX fetch error: {e}")
 
