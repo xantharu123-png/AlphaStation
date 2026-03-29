@@ -636,7 +636,17 @@ def get_market_status():
 def get_scan_status():
     """Get status of all background scans (running, last_run, next_run)."""
     with _scan_lock:
-        scans_copy = dict(_scan_status)
+        scans_copy = {}
+        for name, status in _scan_status.items():
+            scans_copy[name] = {
+                "running": status["running"],
+                "last_run": status["last_run"],
+                "next_run": status["next_run"],
+                "interval_min": status["interval_min"],
+            }
+            # Add runtime info for running scans
+            if status["running"] and status.get("_started_at"):
+                scans_copy[name]["running_since_sec"] = int(time.time() - status["_started_at"])
     return {
         "scheduler_running": _scheduler_running,
         "scans": scans_copy,

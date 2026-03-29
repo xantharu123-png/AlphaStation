@@ -1271,23 +1271,23 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
-    // Load cached results on mount
+    // Always load latest results from server on mount
     useEffect(() => {
-        if (scanCache.scanner_results && scanCache.scanner_results.length > 0) {
-            setResults(scanCache.scanner_results);
-        } else {
-            const loadCached = async () => {
-                try {
-                    const response = await fetch(`${API}/api/scan-results?direction=long`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.data || []);
+        const loadCached = async () => {
+            try {
+                const response = await fetch(`${API}/api/scan-results?direction=long`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('scanner_results', items);
                     }
-                } catch (err) { console.error('Error:', err); }
-            };
-            loadCached();
-        }
-    }, [scanCache.scanner_results]);
+                }
+            } catch (err) { console.error('Error:', err); }
+        };
+        loadCached();
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -1471,25 +1471,23 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
         }
     };
 
+    // Always load latest results from server on mount / direction change
     useEffect(() => {
-        if (scanCache.bi_results && scanCache.bi_results.length > 0) {
-            setResults(scanCache.bi_results);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.data || []);
-                        updateScanCache('bi_results', data.data || []);
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('bi_results', items);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [direction, scanCache.bi_results]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, [direction]);
 
     return (
         <div className="space-y-6">
@@ -1599,25 +1597,23 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         }
     };
 
+    // Always load latest results from server on mount
     useEffect(() => {
-        if (scanCache.biotech_results && scanCache.biotech_results.length > 0) {
-            setResults(scanCache.biotech_results);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/biotech-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.data || []);
-                        updateScanCache('biotech_results', data.data || []);
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/biotech-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('biotech_results', items);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [scanCache.biotech_results]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     return (
         <div className="space-y-6">
@@ -1719,23 +1715,24 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
     useEffect(() => {
         if (scanCache.btc_divergenz_results && scanCache.btc_divergenz_results.length > 0) {
+            // fallback from cache
             setResults(scanCache.btc_divergenz_results);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/btc-divergenz-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.data || []);
-                        updateScanCache('btc_divergenz_results', data.data || []);
-                    }
-                } catch (err) {
-                    console.error('Error:', err);
-                }
-            };
-            fetchResults();
         }
-    }, [scanCache.btc_divergenz_results]);
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/btc-divergenz-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('btc_divergenz_results', items);
+                    }
+                }
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     const getSignalClass = (signal) => {
         if (signal.includes('KAUFEN')) return 'signal-kaufen';
@@ -1807,29 +1804,25 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
+    // Always load latest from server on mount
     useEffect(() => {
-        if (scanCache.em_winners && scanCache.em_winners.length > 0) {
-            setWinnerResults(scanCache.em_winners);
-            setLoserResults(scanCache.em_losers || []);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/early-movers-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        const em = (data.data && data.data[0]) || {};
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/early-movers-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const em = (data.data && data.data[0]) || {};
+                    if ((em.gainers || []).length > 0 || (em.losers || []).length > 0) {
                         setWinnerResults(em.gainers || []);
                         setLoserResults(em.losers || []);
                         updateScanCache('em_winners', em.gainers || []);
                         updateScanCache('em_losers', em.losers || []);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [scanCache.em_winners]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     useEffect(() => {
         if (scanCache.em_spikes && scanCache.em_spikes.length > 0) {
@@ -2008,29 +2001,25 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
+    // Always load latest from server on mount
     useEffect(() => {
-        if (scanCache.short_inverse && scanCache.short_inverse.length > 0) {
-            setInverseETFs(scanCache.short_inverse);
-            setBreakdownStocks(scanCache.short_breakdown || []);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/bear-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        const bear = (data.data && data.data[0]) || {};
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/bear-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const bear = (data.data && data.data[0]) || {};
+                    if ((bear.inverse_etfs || []).length > 0 || (bear.breakdown_stocks || []).length > 0) {
                         setInverseETFs(bear.inverse_etfs || []);
                         setBreakdownStocks(bear.breakdown_stocks || []);
                         updateScanCache('short_inverse', bear.inverse_etfs || []);
                         updateScanCache('short_breakdown', bear.breakdown_stocks || []);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [scanCache.short_inverse]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2173,24 +2162,22 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     }, []);
 
     useEffect(() => {
-        if (scanCache.moneyflow_results && scanCache.moneyflow_results.length > 0) {
-            setResults(scanCache.moneyflow_results);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/money-flow-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.data || []);
-                        updateScanCache('moneyflow_results', data.data || []);
+        // Always load latest from server
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/money-flow-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('moneyflow_results', items);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [scanCache.moneyflow_results]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2381,33 +2368,28 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
+    // Always load latest from server on mount
     useEffect(() => {
-        if (scanCache.crash_fear_data) {
-            setFearData(scanCache.crash_fear_data);
-            setIndices(scanCache.crash_indices || []);
-            setBreadth(scanCache.crash_breadth || null);
-        } else {
-            const fetchData = async () => {
-                try {
-                    const response = await fetch(`${API}/api/crash-monitor-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        const cm = (data.data && data.data[0]) || {};
-                        const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
-                        setFearData(fearData);
+        const fetchData = async () => {
+            try {
+                const response = await fetch(`${API}/api/crash-monitor-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const cm = (data.data && data.data[0]) || {};
+                    if (cm.fear_score !== undefined) {
+                        const fd = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
+                        setFearData(fd);
                         setIndices(cm.indices || []);
                         setBreadth(cm.breadth || null);
-                        updateScanCache('crash_fear_data', fearData);
+                        updateScanCache('crash_fear_data', fd);
                         updateScanCache('crash_indices', cm.indices || []);
                         updateScanCache('crash_breadth', cm.breadth || null);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchData();
-        }
-    }, [scanCache.crash_fear_data]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchData();
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2944,28 +2926,25 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
+    // Always load latest from server on mount
     useEffect(() => {
-        if (scanCache.newlisting_results && scanCache.newlisting_results.length > 0) {
-            setResults(scanCache.newlisting_results);
-            setStats(scanCache.newlisting_stats || null);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/new-listing-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.listings || []);
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/new-listing-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.listings || [];
+                    if (items.length > 0) {
+                        setResults(items);
                         setStats(data.stats);
-                        updateScanCache('newlisting_results', data.listings || []);
+                        updateScanCache('newlisting_results', items);
                         updateScanCache('newlisting_stats', data.stats);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [scanCache.newlisting_results]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -3148,25 +3127,23 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         }
     };
 
+    // Always load latest from server on mount
     useEffect(() => {
-        if (scanCache.vs_results && scanCache.vs_results.length > 0) {
-            setResults(scanCache.vs_results);
-        } else {
-            const fetchResults = async () => {
-                try {
-                    const response = await fetch(`${API}/api/volume-spikes-results`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        setResults(data.data || []);
-                        updateScanCache('vs_results', data.data || []);
+        const fetchResults = async () => {
+            try {
+                const response = await fetch(`${API}/api/volume-spikes-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('vs_results', items);
                     }
-                } catch (err) {
-                    console.error('Error:', err);
                 }
-            };
-            fetchResults();
-        }
-    }, [scanCache.vs_results]);
+            } catch (err) { console.error('Error:', err); }
+        };
+        fetchResults();
+    }, []);
 
     return (
         <div className="space-y-6">
