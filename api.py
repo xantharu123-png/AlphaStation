@@ -23,11 +23,15 @@ import os
 import json
 import math
 import time
+import re
+import smtplib
 import threading
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from fastapi import FastAPI, BackgroundTasks, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -131,6 +135,131 @@ BI_CACHE_LONG = "/tmp/bi_cache_long.json"
 BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
+
+
+# ── Email Alert System ──
+def _load_secrets():
+    """Liest .streamlit/secrets.toml"""
+    secrets = {}
+    paths = [
+        Path(__file__).parent / ".streamlit" / "secrets.toml",
+        Path.home() / ".streamlit" / "secrets.toml",
+    ]
+    for sp in paths:
+        if sp.exists():
+            with open(sp, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        key, val = line.split("=", 1)
+                        secrets[key.strip()] = val.strip().strip('"')
+            if secrets:
+                break
+    return secrets
+
+_SECRETS = _load_secrets()
+_EMAIL_COOLDOWN = {}
+_EMAIL_COOLDOWN_SEC = 3600 * 4  # 4h pro Ticker
+
+print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (secrets.toml fehlt)'}")
+
+
+def _send_email_alert(subject, body_html):
+    """Sendet E-Mail Alert via Gmail SMTP."""
+    gmail_user = _SECRETS.get("GMAIL_USER", "")
+    gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
+    alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
+    if not gmail_user or not gmail_pass:
+        return False
+    for attempt in range(3):
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["From"] = f"TradingBot Alert <{gmail_user}>"
+            msg["To"] = alert_to
+            msg["Subject"] = subject
+            plain = re.sub(r"<[^>]+>", "", body_html.replace("<br>", "\n").replace("</tr>", "\n"))
+            msg.attach(MIMEText(plain, "plain", "utf-8"))
+            msg.attach(MIMEText(body_html, "html", "utf-8"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+                server.login(gmail_user, gmail_pass)
+                server.sendmail(gmail_user, alert_to.split(","), msg.as_string())
+            print(f"[Alert] Email gesendet: {subject}")
+            return True
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"[Alert] Email FEHLER nach 3 Versuchen: {e}")
+                return False
+
+
+def _check_and_alert(scanner_name, cache_file):
+    """Prüft Scan-Ergebnisse auf Grade S/A und sendet Alert."""
+    now = time.time()
+    try:
+        if not os.path.exists(cache_file):
+            return
+        with open(cache_file, "r") as f:
+            data = json.load(f)
+        results = data if isinstance(data, list) else data.get("results", data.get("data", []))
+        if isinstance(results, list) and len(results) > 0 and isinstance(results[0], dict) and "data" in results[0]:
+            results = results[0].get("data", results)
+        if not isinstance(results, list):
+            return
+        alerts = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            ticker = r.get("ticker", r.get("Ticker", r.get("symbol", "")))
+            grade = r.get("BI_Grade", r.get("Grade", r.get("grade", r.get("rating", ""))))
+            score = r.get("BI_Score", r.get("Score", r.get("score", r.get("Alpha", 0)))
+            )
+            if grade not in ("S", "A", "A+"):
+                continue
+            ck = f"{scanner_name}_{ticker}"
+            if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
+                continue
+            _EMAIL_COOLDOWN[ck] = now
+            alerts.append({"ticker": ticker, "grade": grade, "score": score,
+                           "price": r.get("Preis", r.get("price", r.get("current", 0))),
+                           "direction": r.get("direction", ""),
+                           "rvol": r.get("RVOL", r.get("rvol", 0))})
+        if not alerts:
+            return
+        labels = {"bi_long": "BI Scanner LONG", "bi_short": "BI Scanner SHORT",
+                  "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
+        label = labels.get(scanner_name, scanner_name)
+        n = len(alerts)
+        subject = f"🚨 {n} Top-Setup{'s' if n > 1 else ''} — {label}"
+        rows = ""
+        for a in alerts:
+            emoji = "🏆" if a["grade"] == "S" else "🔥"
+            rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a["grade"]}</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${a["price"]}</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]}x</td></tr>'
+        body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+        <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
+        <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {n} starke Setups</p>
+        <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
+        <th style="padding:8px;text-align:left">Grade</th><th style="padding:8px;text-align:left">Score</th>
+        <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">RVOL</th></tr>
+        {rows}</table>
+        <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — Grade S = ELITE | Grade A = STARK</p>
+        </body></html>'''
+        _send_email_alert(subject, body)
+    except Exception as e:
+        print(f"[Alert] Check-Fehler {scanner_name}: {e}")
+
+
+# Cleanup cooldown (alle 4h wird automatisch bereinigt)
+def _cleanup_email_cooldown():
+    now = time.time()
+    expired = [k for k, ts in _EMAIL_COOLDOWN.items() if now - ts > _EMAIL_COOLDOWN_SEC]
+    for k in expired:
+        del _EMAIL_COOLDOWN[k]
 
 
 # ── Pydantic Models ──
@@ -291,6 +420,9 @@ def _bi_background_scan_wrapper(direction: str) -> None:
         print(f"[BI {direction}] Starting scan...")
         _bi_background_scan(POLYGON_KEY, direction=direction, candidates=None)
         print(f"[BI {direction}] Scan completed")
+        # Email Alert bei Grade S/A
+        cache = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
+        _check_and_alert(f"bi_{direction}", cache)
     except Exception as e:
         print(f"BI background scan error ({direction}): {e}")
         import traceback
@@ -303,6 +435,8 @@ def _biotech_scan_wrapper() -> None:
         print("[Biotech] Starting scan... (this takes 5-15 minutes)")
         _biotech_background_scan(POLYGON_KEY)
         print("[Biotech] Scan completed")
+        # Email Alert bei Grade S/A
+        _check_and_alert("biotech", BIOTECH_CACHE)
     except Exception as e:
         print(f"Biotech background scan error: {e}")
         import traceback
@@ -669,6 +803,25 @@ def get_health():
             "ANTHROPIC_API_KEY": bool(ANTHROPIC_API_KEY),
         },
     )
+
+
+@app.post("/api/test-email")
+def test_email_alert():
+    """Test-Endpoint: Sendet eine Test-Mail um Email-Alerts zu verifizieren."""
+    if not _SECRETS.get("GMAIL_USER"):
+        raise HTTPException(status_code=500, detail="secrets.toml nicht gefunden oder GMAIL_USER fehlt")
+    success = _send_email_alert(
+        "✅ TradingBot Test — Email Alerts funktionieren!",
+        f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+        <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
+        <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
+        <p>Du wirst ab jetzt automatisch benachrichtigt wenn ein Scanner <b>Grade S</b> oder <b>Grade A</b> Setups findet.</p>
+        <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
+        </body></html>'''
+    )
+    if success:
+        return {"status": "ok", "message": "Test-Email gesendet!"}
+    raise HTTPException(status_code=500, detail="Email konnte nicht gesendet werden — prüfe GMAIL_APP_PASSWORD")
 
 
 @app.get("/api/market-status", response_model=MarketStatusResponse)
