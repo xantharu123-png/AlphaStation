@@ -462,7 +462,13 @@ def _bear_scan_wrapper() -> None:
         except Exception as e:
             print(f"Breakdown stocks error: {e}")
 
-        save_cache_file(BEAR_CACHE, [result])
+        # Only save if we got actual stock data — don't overwrite Friday's results on weekends
+        has_stock_data = len(result.get("breakdown_stocks", [])) > 0 or len(result.get("inverse_etfs", [])) > 0
+        if has_stock_data:
+            save_cache_file(BEAR_CACHE, [result])
+            print(f"[Bear] Saved {len(result.get('inverse_etfs',[]))} ETFs, {len(result.get('breakdown_stocks',[]))} breakdowns")
+        else:
+            print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
         print(f"Bear scanner error: {e}")
 

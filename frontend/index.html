@@ -2146,12 +2146,10 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 if (response.ok) {
                     const data = await response.json();
                     const bear = (data.data && data.data[0]) || {};
-                    if ((bear.inverse_etfs || []).length > 0 || (bear.breakdown_stocks || []).length > 0) {
-                        setInverseETFs(bear.inverse_etfs || []);
-                        setBreakdownStocks(bear.breakdown_stocks || []);
-                        updateScanCache('short_inverse', bear.inverse_etfs || []);
-                        updateScanCache('short_breakdown', bear.breakdown_stocks || []);
-                    }
+                    setInverseETFs(bear.inverse_etfs || []);
+                    setBreakdownStocks(bear.breakdown_stocks || []);
+                    updateScanCache('short_inverse', bear.inverse_etfs || []);
+                    updateScanCache('short_breakdown', bear.breakdown_stocks || []);
                 }
             } catch (err) { console.error('Error:', err); }
         };
