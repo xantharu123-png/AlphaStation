@@ -2567,6 +2567,9 @@ def _crash_monitor_wrapper() -> None:
             result["breadth"] = {
                 "advancing": up, "declining": down, "unchanged": unchanged,
                 "total": total, "ad_ratio": ratio,
+                "advancing_pct": round(up / total * 100, 1) if total > 0 else 50,
+                "declining_pct": round(down / total * 100, 1) if total > 0 else 50,
+                "unchanged_pct": round(unchanged / total * 100, 1) if total > 0 else 0,
                 "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
             }
         except Exception as e:
@@ -2606,12 +2609,14 @@ def get_economic_calendar():
     For production use, integrate with a real economic calendar API (e.g., investing.com, tradingeconomics.com).
     """
     try:
+        from datetime import date, timedelta
         events = []
 
         # Major recurring events (simplified - hardcoded with dynamic dates)
         # In production, would fetch from economic calendar API
 
         fomc_day = 14  # Approximate
+        fomc_months = [1, 3, 5, 6, 7, 9, 11, 12]  # 8 FOMC meetings per year
         for month in fomc_months:
             try:
                 next_date = _calculate_next_occurrence(month, fomc_day)
@@ -2625,31 +2630,33 @@ def get_economic_calendar():
             except Exception as e:
                 print(f"[Warning] {e}")
 
-        # CPI (1st week of each month, reported ~12 days after month end)
-        try:
-            next_cpi = _calculate_next_occurrence(4, 10)  # Approximate next
-            events.append({
-                "date": next_cpi,
-                "event": "CPI (Verbraucherpreisindex)",
-                "importance": "high",
-                "description": "US Consumer Price Index YoY",
-                "impact": "Sehr Hoch"
-            })
-        except Exception as e:
-            print(f"[Warning] {e}")
+        # CPI (released ~12th of each month)
+        for month in range(1, 13):
+            try:
+                next_cpi = _calculate_next_occurrence(month, 12)
+                events.append({
+                    "date": next_cpi,
+                    "event": "CPI (Verbraucherpreisindex)",
+                    "importance": "high",
+                    "description": "US Consumer Price Index YoY",
+                    "impact": "Sehr Hoch"
+                })
+            except Exception as e:
+                print(f"[Warning] {e}")
 
-        # NFP (1st Friday of each month)
-        try:
-            next_nfp = _calculate_next_occurrence(4, 3)  # Approximate
-            events.append({
-                "date": next_nfp,
-                "event": "NFP (Non-Farm Payroll)",
-                "importance": "high",
-                "description": "US Employment Report",
-                "impact": "Sehr Hoch"
-            })
-        except Exception as e:
-            print(f"[Warning] {e}")
+        # NFP (1st Friday of each month, approx. 3rd-7th)
+        for month in range(1, 13):
+            try:
+                next_nfp = _calculate_next_occurrence(month, 5)
+                events.append({
+                    "date": next_nfp,
+                    "event": "NFP (Non-Farm Payroll)",
+                    "importance": "high",
+                    "description": "US Employment Report",
+                    "impact": "Sehr Hoch"
+                })
+            except Exception as e:
+                print(f"[Warning] {e}")
 
         # GDP (end of each quarter)
         for month in [3, 6, 9, 12]:
@@ -2679,18 +2686,71 @@ def get_economic_calendar():
             except Exception as e:
                 print(f"[Warning] {e}")
 
-        # Fed Fund Rate Decision (typically day 14)
+        # PPI (Producer Price Index - ~15th of each month)
+        for month in range(1, 13):
+            try:
+                next_ppi = _calculate_next_occurrence(month, 15)
+                events.append({
+                    "date": next_ppi,
+                    "event": "PPI (Erzeugerpreisindex)",
+                    "importance": "medium",
+                    "description": "US Producer Price Index MoM",
+                    "impact": "Hoch"
+                })
+            except Exception as e:
+                print(f"[Warning] {e}")
+
+        # Retail Sales (~15th of each month)
+        for month in range(1, 13):
+            try:
+                next_retail = _calculate_next_occurrence(month, 16)
+                events.append({
+                    "date": next_retail,
+                    "event": "Retail Sales (Einzelhandelsumsätze)",
+                    "importance": "medium",
+                    "description": "US Monthly Retail Sales Report",
+                    "impact": "Hoch"
+                })
+            except Exception as e:
+                print(f"[Warning] {e}")
+
+        # ISM Manufacturing PMI (1st business day of each month)
+        for month in range(1, 13):
+            try:
+                next_ism = _calculate_next_occurrence(month, 1)
+                events.append({
+                    "date": next_ism,
+                    "event": "ISM Manufacturing PMI",
+                    "importance": "medium",
+                    "description": "Institute for Supply Management Manufacturing Index",
+                    "impact": "Hoch"
+                })
+            except Exception as e:
+                print(f"[Warning] {e}")
+
+        # Jobless Claims (weekly, every Thursday)
         try:
-            next_rate = _calculate_next_occurrence(3, 18)
-            events.append({
-                "date": next_rate,
-                "event": "Fed Funds Rate Decision",
-                "importance": "high",
-                "description": "Federal Reserve Interest Rate Announcement",
-                "impact": "Sehr Hoch"
-            })
+            from datetime import timedelta
+            today_dt = date.today()
+            days_until_thursday = (3 - today_dt.weekday()) % 7
+            if days_until_thursday == 0:
+                days_until_thursday = 7
+            for i in range(4):  # Next 4 Thursdays
+                next_thursday = today_dt + timedelta(days=days_until_thursday + i * 7)
+                events.append({
+                    "date": next_thursday.isoformat(),
+                    "event": "Erstanträge Arbeitslosenhilfe",
+                    "importance": "medium",
+                    "description": "Initial Jobless Claims (wöchentlich)",
+                    "impact": "Mittel"
+                })
         except Exception as e:
             print(f"[Warning] {e}")
+
+        # Filter: only future events within 90 days
+        today_str = date.today().isoformat()
+        max_date = (date.today() + timedelta(days=90)).isoformat()
+        events = [e for e in events if today_str <= e["date"] <= max_date]
 
         # Sort by date
         events.sort(key=lambda x: x["date"])

@@ -317,13 +317,8 @@ function useSortable(data, defaultKey = null) {
     return { sorted, toggleSort, sortKey, sortDesc };
 }
 
-// SchedulerStatus Component
-function SchedulerStatus({ status }) {
-    const [showDetails, setShowDetails] = useState(false);
-
-    if (!status) return null;
-
-    const getRelativeTime = (timestamp, isFuture = false) => {
+// Global helper: relative time display (German)
+function getRelativeTime(timestamp, isFuture = false) {
         if (!timestamp) return 'nie';
         const date = new Date(timestamp);
         const now = new Date();
@@ -342,7 +337,23 @@ function SchedulerStatus({ status }) {
         if (diffMins < 60) return `vor ${diffMins} min`;
         if (diffHours < 24) return `vor ${diffHours}h`;
         return date.toLocaleDateString('de-DE');
+}
+
+// Helper: extract scan timing info for ScanControl from schedulerStatus
+function getScanTiming(schedulerStatus, scanKey) {
+    if (!schedulerStatus?.scans?.[scanKey]) return { lastScan: null, nextScan: null };
+    const scan = schedulerStatus.scans[scanKey];
+    return {
+        lastScan: scan.last_run ? getRelativeTime(scan.last_run) : null,
+        nextScan: scan.next_run ? getRelativeTime(scan.next_run, true) : null,
     };
+}
+
+// SchedulerStatus Component
+function SchedulerStatus({ status }) {
+    const [showDetails, setShowDetails] = useState(false);
+
+    if (!status) return null;
 
     // API returns scans as object {bi_long: {running, last_run, next_run, interval_min}, ...}
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
@@ -385,7 +396,12 @@ function SchedulerStatus({ status }) {
 }
 
 // ScanControl Component
-function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null }) {
+function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null }) {
+    // Auto-derive lastScan/nextScan from schedulerStatus if scanKey provided
+    const timing = scanKey ? getScanTiming(schedulerStatus, scanKey) : { lastScan, nextScan };
+    const displayLast = timing.lastScan || lastScan;
+    const displayNext = timing.nextScan || nextScan;
+
     return (
         <div className="card border border-gray-200 p-4 rounded-lg">
             <div className="flex items-center justify-between">
@@ -400,8 +416,8 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                             'Scan starten'
                         )}
                     </button>
-                    {lastScan && <div className="text-sm text-gray-600">Letzter Scan: {lastScan}</div>}
-                    {nextScan && <div className="text-sm text-gray-600">Nächster Scan: {nextScan}</div>}
+                    {displayLast && <div className="text-sm text-gray-500">Letzter: {displayLast}</div>}
+                    {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
                 </div>
             </div>
             {isScanning && (
@@ -1212,20 +1228,20 @@ function App() {
 
             {/* Main Content */}
             <div className="max-w-full px-6 py-6">
-                {activeTab === 'scanner' && <ScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'biotech' && <BiotechTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'scanner' && <ScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'biotech' && <BiotechTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                 {activeTab === 'kalender' && <KalenderTab />}
-                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                 {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'backtest' && <BacktestTab />}
                 {activeTab === 'strategie-guide' && <StrategieGuideTab />}
-                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                 {activeTab === 'suche' && <SucheTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
             </div>
 
@@ -1241,7 +1257,7 @@ function App() {
 }
 
 // Scanner Tab
-function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [strategy, setStrategy] = useState('');
     const [marketType, setMarketType] = useState('stocks');
     const [isScanning, setIsScanning] = useState(scanCache.scanner_scanning || false);
@@ -1354,7 +1370,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1389,7 +1405,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 }
 
 // BI Scanner Tab
-function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [direction, setDirection] = useState('long');
     const [isScanning, setIsScanning] = useState(scanCache.bi_scanning || false);
     const [results, setResults] = useState(scanCache.bi_results || []);
@@ -1485,7 +1501,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1518,7 +1534,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 }
 
 // Biotech Tab
-function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
@@ -1605,7 +1621,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="biotech" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1636,7 +1652,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 }
 
 // BTC-Divergenz Tab
-function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.btc_divergenz_scanning || false);
     const [results, setResults] = useState(scanCache.btc_divergenz_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
@@ -1732,7 +1748,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="btc_divergenz" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1775,7 +1791,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 }
 
 // Early Movers Tab
-function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [subTab, setSubTab] = useState('winners');
     const [winnerResults, setWinnerResults] = useState(scanCache.em_winners || []);
     const [loserResults, setLoserResults] = useState(scanCache.em_losers || []);
@@ -1901,7 +1917,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 <button onClick={() => setSubTab('spikes')} className={`secondary-tab ${subTab === 'spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="early_movers" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 {subTab === 'winners' && (
@@ -1978,8 +1994,8 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 }
 
 // Short Scanner Tab
-function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
-    const [subTab, setSubTab] = useState('inverse-etfs');
+function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+    const [subTab, setSubTab] = useState('breakdown');
     const [inverseETFs, setInverseETFs] = useState(scanCache.short_inverse || []);
     const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
     const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
@@ -2077,11 +2093,11 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     return (
         <div className="space-y-6">
             <div className="flex gap-2 border-b border-gray-200">
-                <button onClick={() => setSubTab('inverse-etfs')} className={`secondary-tab ${subTab === 'inverse-etfs' ? 'active' : 'inactive'}`}>Inverse ETFs</button>
-                <button onClick={() => setSubTab('breakdown')} className={`secondary-tab ${subTab === 'breakdown' ? 'active' : 'inactive'}`}>Breakdown Aktien</button>
+                <button onClick={() => setSubTab('breakdown')} className={`secondary-tab ${subTab === 'breakdown' ? 'active' : 'inactive'}`}>Short-Kandidaten</button>
+                <button onClick={() => setSubTab('inverse-etfs')} className={`secondary-tab ${subTab === 'inverse-etfs' ? 'active' : 'inactive'}`}>Hedging-ETFs</button>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="bear" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 {subTab === 'inverse-etfs' && (
@@ -2145,7 +2161,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 }
 
 // Money Flow Tab
-function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [results, setResults] = useState(scanCache.moneyflow_results || []);
     const [isScanning, setIsScanning] = useState(scanCache.mf_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'sector');
@@ -2238,7 +2254,7 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="money_flow" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -2251,6 +2267,8 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             <th className="text-right py-2 px-2">5D%</th>
                             <th className="text-right py-2 px-2">20D%</th>
                             <th className="text-right py-2 px-2">RVOL</th>
+                            <th className="text-right py-2 px-2">CMF</th>
+                            <th className="text-left py-2 px-2">OBV</th>
                             <th className="text-left py-2 px-2">Flow Signal</th>
                         </tr>
                     </thead>
@@ -2264,7 +2282,9 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal)}`}>{item.flow_signal}</span></td>
+                                <td className={`py-3 px-2 text-right ${(item.cmf ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.cmf != null ? item.cmf.toFixed(3) : '–'}</td>
+                                <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : 'Neutral'}</span></td>
+                                <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal || '')}`}>{item.flow_signal || '–'}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -2296,10 +2316,18 @@ function KalenderTab() {
         fetchCalendar();
     }, []);
 
-    const getImportanceClass = (importance) => {
-        if (importance.includes('HOCH')) return 'importance-high';
-        if (importance.includes('MITTEL')) return 'importance-medium';
+    const getImportanceClass = (imp) => {
+        const i = (imp || '').toLowerCase();
+        if (i === 'high' || i.includes('hoch')) return 'importance-high';
+        if (i === 'medium' || i.includes('mittel')) return 'importance-medium';
         return 'importance-low';
+    };
+    const getImportanceLabel = (imp) => {
+        const i = (imp || '').toLowerCase();
+        if (i === 'high') return 'Hoch';
+        if (i === 'medium') return 'Mittel';
+        if (i === 'low') return 'Niedrig';
+        return imp || '–';
     };
 
     return (
@@ -2314,16 +2342,21 @@ function KalenderTab() {
                                 <th className="text-left py-2 px-2">Datum</th>
                                 <th className="text-left py-2 px-2">Event</th>
                                 <th className="text-center py-2 px-2">Wichtigkeit</th>
+                                <th className="text-center py-2 px-2">Impact</th>
                                 <th className="text-left py-2 px-2">Beschreibung</th>
                             </tr>
                         </thead>
                         <tbody>
+                            {events.length === 0 && (
+                                <tr><td colSpan="5" className="py-6 text-center text-gray-400">Keine Events gefunden</td></tr>
+                            )}
                             {events.map((event, idx) => (
                                 <tr key={idx} className="table-row border-b border-gray-200">
-                                    <td className="py-3 px-2 font-semibold">{event.date}</td>
-                                    <td className="py-3 px-2">{event.event}</td>
-                                    <td className="py-3 px-2 text-center"><span className={`signal-badge ${getImportanceClass(event.importance)}`}>{event.importance}</span></td>
-                                    <td className="py-3 px-2">{event.description}</td>
+                                    <td className="py-3 px-2 font-semibold whitespace-nowrap">{new Date(event.date).toLocaleDateString('de-DE', {weekday:'short', day:'2-digit', month:'short', year:'numeric'})}</td>
+                                    <td className="py-3 px-2 font-medium">{event.event}</td>
+                                    <td className="py-3 px-2 text-center"><span className={`signal-badge ${getImportanceClass(event.importance)}`}>{getImportanceLabel(event.importance)}</span></td>
+                                    <td className="py-3 px-2 text-center text-xs">{event.impact || '–'}</td>
+                                    <td className="py-3 px-2 text-gray-600">{event.description}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -2335,7 +2368,7 @@ function KalenderTab() {
 }
 
 // Crash Monitor Tab
-function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [fearData, setFearData] = useState(scanCache.crash_fear_data || null);
     const [indices, setIndices] = useState(scanCache.crash_indices || []);
     const [breadth, setBreadth] = useState(scanCache.crash_breadth || null);
@@ -2469,7 +2502,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 </div>
             )}
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="crash_monitor" />
 
             {/* Indices */}
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -2521,9 +2554,31 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <div className="momentum-bar-fill" style={{ width: `${breadth.declining_pct || 50}%`, backgroundColor: '#dc2626' }}></div>
                             </div>
                         </div>
-                        <div className="text-center text-sm text-gray-600 mt-4">
-                            A/D Ratio: {breadth.ad_ratio?.toFixed(2)}
+                        <div className="flex justify-between items-center mt-4 pt-3 border-t border-gray-100">
+                            <div className="text-sm text-gray-600">
+                                A/D Ratio: <span className="font-semibold">{breadth.ad_ratio?.toFixed(2)}</span>
+                            </div>
+                            <span className={`signal-badge ${breadth.breadth_signal === 'BULLISH' ? 'signal-bullish' : breadth.breadth_signal === 'BEARISH' ? 'signal-bearish' : 'signal-neutral'}`}>
+                                {breadth.breadth_signal === 'BULLISH' ? 'Bullisch' : breadth.breadth_signal === 'BEARISH' ? 'Bärisch' : 'Neutral'}
+                            </span>
                         </div>
+                        {breadth.unchanged > 0 && (
+                            <div className="text-xs text-gray-400 mt-2">Unverändert: {breadth.unchanged} ({breadth.unchanged_pct?.toFixed(1)}%)</div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Fear Score Details */}
+            {fearData && fearData.score > 0 && (
+                <div className="card border border-gray-200 p-6 rounded-lg">
+                    <h3 className="font-semibold mb-4">Fear-Score Komponenten</h3>
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="flex justify-between"><span className="text-gray-600">VIX Level</span><span className="font-semibold">{fearData.vix?.toFixed(1)}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-600">Fear Score</span><span className="font-bold" style={{color: fearColor}}>{fearLevel}/100</span></div>
+                    </div>
+                    <div className="mt-3 text-xs text-gray-500">
+                        Score basiert auf: VIX Level & Trend, S&P/Nasdaq Tagesänderungen, A/D Ratio, Marktbreite, Sektor-Divergenzen, VIX Termstruktur
                     </div>
                 </div>
             )}
@@ -2877,7 +2932,7 @@ function StrategieGuideTab() {
 }
 
 // New Listing Scanner Tab
-function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [results, setResults] = useState(scanCache.newlisting_results || []);
     const [stats, setStats] = useState(scanCache.newlisting_stats || null);
     const [isScanning, setIsScanning] = useState(scanCache.nl_scanning || false);
@@ -2993,7 +3048,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 </div>
             )}
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -3028,7 +3083,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 }
 
 // Volume Spikes Tab
-function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.vs_scanning || false);
     const [results, setResults] = useState(scanCache.vs_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
@@ -3115,7 +3170,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="volume_spikes" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
