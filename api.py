@@ -478,9 +478,21 @@ _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
 
 def _run_scan_safe(name, func, timeout_min=10):
-    """Run a scan function safely in a thread with timeout, updating status."""
+    """Run a scan function safely in a background thread (non-blocking).
+    Uses a watchdog pattern: if a scan is still 'running' after timeout_min,
+    the next check will force-reset it so the scheduler isn't stuck."""
     with _scan_lock:
+        # Watchdog: if already marked running but started too long ago, force-reset
+        if _scan_status[name]["running"]:
+            started = _scan_status[name].get("_started_at")
+            if started and (time.time() - started) > timeout_min * 60:
+                print(f"[Scheduler] {name} WATCHDOG: still running after {timeout_min}min — force-resetting")
+                _scan_status[name]["running"] = False
+            else:
+                print(f"[Scheduler] {name} already running — skipping")
+                return
         _scan_status[name]["running"] = True
+        _scan_status[name]["_started_at"] = time.time()
 
     def _worker():
         try:
@@ -492,14 +504,11 @@ def _run_scan_safe(name, func, timeout_min=10):
         finally:
             with _scan_lock:
                 _scan_status[name]["running"] = False
+                _scan_status[name]["_started_at"] = None
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
-    t.join(timeout=timeout_min * 60)  # Wait max timeout_min minutes
-    if t.is_alive():
-        print(f"[Scheduler] {name} TIMEOUT after {timeout_min}min — skipping")
-        with _scan_lock:
-            _scan_status[name]["running"] = False  # Force reset so scheduler isn't blocked
+    # NON-BLOCKING: thread runs in background, watchdog handles timeouts
 
 def _scheduler_loop():
     """Background loop that triggers all scans at their defined intervals."""
@@ -526,19 +535,19 @@ def _scheduler_loop():
     if HAS_NEW_LISTING_SCANNER:
         scan_tasks.append(("new_listing", _new_listing_wrapper))
 
-    # Stagger initial scans to avoid API rate limits
+    # Fire all initial scans quickly (non-blocking now)
     for name, func in scan_tasks:
         if not _scheduler_running:
             break
         print(f"[Scheduler] Initial scan: {name}")
         _run_scan_safe(name, func)
-        # Set next_run after initial scan
+        # Set next_run immediately
         with _scan_lock:
             interval_sec = _scan_status[name]["interval_min"] * 60
             _scan_status[name]["next_run"] = datetime.fromtimestamp(
                 time.time() + interval_sec
             ).isoformat()
-        time.sleep(10)  # 10s pause between initial scans
+        time.sleep(3)  # 3s stagger to avoid API rate limits
 
     # Then loop with interval checks
     last_run_times = {name: time.time() for name in _scan_status}
@@ -554,13 +563,13 @@ def _scheduler_loop():
                 is_running = _scan_status[name]["running"]
             if elapsed >= interval_sec and not is_running:
                 print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
-                _run_scan_safe(name, func)
+                _run_scan_safe(name, func)  # Non-blocking
                 last_run_times[name] = time.time()
                 with _scan_lock:
                     _scan_status[name]["next_run"] = datetime.fromtimestamp(
                         last_run_times[name] + interval_sec
                     ).isoformat()
-                time.sleep(5)  # Small pause between scans
+                time.sleep(2)  # Small stagger between scan launches
         time.sleep(30)  # Check every 30 seconds
 
 
