@@ -180,9 +180,19 @@ def _send_email_alert(subject, body_html):
             plain = re.sub(r"<[^>]+>", "", body_html.replace("<br>", "\n").replace("</tr>", "\n"))
             msg.attach(MIMEText(plain, "plain", "utf-8"))
             msg.attach(MIMEText(body_html, "html", "utf-8"))
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            # Try port 587 (STARTTLS) first, fallback to 465 (SSL)
+            try:
+                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
                 server.login(gmail_user, gmail_pass)
                 server.sendmail(gmail_user, alert_to.split(","), msg.as_string())
+                server.quit()
+            except Exception:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+                    server.login(gmail_user, gmail_pass)
+                    server.sendmail(gmail_user, alert_to.split(","), msg.as_string())
             print(f"[Alert] Email gesendet: {subject}")
             return True
         except Exception as e:
