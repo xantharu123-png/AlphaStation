@@ -320,7 +320,9 @@ function useSortable(data, defaultKey = null) {
 // Global helper: relative time display (German)
 function getRelativeTime(timestamp, isFuture = false) {
         if (!timestamp) return 'nie';
-        const date = new Date(timestamp);
+        // Server sends UTC timestamps without 'Z' suffix — force UTC interpretation
+        const raw = String(timestamp);
+        const date = new Date(raw.endsWith('Z') ? raw : raw + 'Z');
         const now = new Date();
         const diffMs = isFuture ? (date - now) : (now - date);
         const diffMins = Math.floor(diffMs / 60000);
