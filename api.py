@@ -208,57 +208,59 @@ def _normalize_keys(results: list, key_map: dict) -> list:
 
 
 def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
-    """Load cache file and return (data, cached_at_timestamp).
+    """Load cache file and return (data, cached_at_timestamp) (thread-safe).
 
     Supports two cache formats:
     - New format: {"cached_at": "ISO-string", "results": [...]}
     - Scanner format: {"timestamp": unix_epoch_float, "results": [...]}
     """
-    if not Path(filepath).exists():
-        return [], None
+    with _cache_lock:
+        if not Path(filepath).exists():
+            return [], None
 
-    try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
+        try:
+            with open(filepath, "r") as f:
+                data = json.load(f)
 
-        cached_at = None
-        if isinstance(data, dict):
-            # Try new format first (ISO string)
-            cached_at = data.get("cached_at")
-            # Fall back to scanner format (Unix epoch float)
-            if not cached_at and "timestamp" in data:
-                try:
-                    ts = data["timestamp"]
-                    if isinstance(ts, (int, float)) and ts > 1000000000:
-                        cached_at = datetime.fromtimestamp(ts).isoformat()
-                except Exception:
-                    pass
-            if "results" in data:
-                data = data.get("results", [])
-            else:
-                # Wrap single dict in list for compatibility
+            cached_at = None
+            if isinstance(data, dict):
+                # Try new format first (ISO string)
+                cached_at = data.get("cached_at")
+                # Fall back to scanner format (Unix epoch float)
+                if not cached_at and "timestamp" in data:
+                    try:
+                        ts = data["timestamp"]
+                        if isinstance(ts, (int, float)) and ts > 1000000000:
+                            cached_at = datetime.fromtimestamp(ts).isoformat()
+                    except Exception as e:
+                        print(f"Error parsing cache timestamp from {filepath}: {e}")
+                if "results" in data:
+                    data = data.get("results", [])
+                else:
+                    # Wrap single dict in list for compatibility
+                    data = [data]
+
+            if not isinstance(data, list):
                 data = [data]
 
-        if not isinstance(data, list):
-            data = [data]
-
-        return data, cached_at
-    except Exception as e:
-        print(f"Error loading cache {filepath}: {e}")
-        return [], None
+            return data, cached_at
+        except Exception as e:
+            print(f"Error loading cache {filepath}: {e}")
+            return [], None
 
 
 def save_cache_file(filepath: str, data: List[Dict]) -> None:
-    """Save cache file with timestamp."""
-    try:
-        cache_data = {
-            "cached_at": datetime.now().isoformat(),
-            "results": data,
-        }
-        with open(filepath, "w") as f:
-            json.dump(cache_data, f, indent=2, default=_serialize_json)
-    except Exception as e:
-        print(f"Error saving cache {filepath}: {e}")
+    """Save cache file with timestamp (thread-safe)."""
+    with _cache_lock:
+        try:
+            cache_data = {
+                "cached_at": datetime.now().isoformat(),
+                "results": data,
+            }
+            with open(filepath, "w") as f:
+                json.dump(cache_data, f, indent=2, default=_serialize_json)
+        except Exception as e:
+            print(f"Error saving cache {filepath}: {e}")
 
 
 def _serialize_json(obj):
@@ -346,18 +348,21 @@ def _bear_scan_wrapper() -> None:
                     "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2),
                     "volume": vol, "rvol": rvol, "signal": signal,
                 })
-            except Exception:
+            except Exception as e:
+                print(f"[Warning] Error processing inverse ETF {ticker}: {e}")
                 continue
 
         result["inverse_etfs"].sort(key=lambda x: x.get("change_5d", 0), reverse=True)
 
         # --- Section 2: Breakdown stocks (big single-day losers) ---
         try:
-            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
+            # Use /losers endpoint (Starter plan compatible) instead of bulk /tickers endpoint (Enterprise only)
+            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
+            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+
+            losers = []
             if snap_resp.status_code == 200:
                 tickers = snap_resp.json().get("tickers", [])
-                losers = []
                 for t in tickers:
                     try:
                         day = t.get("day", {})
@@ -380,7 +385,8 @@ def _bear_scan_wrapper() -> None:
                             "volume": vol,
                             "dollar_volume": round(dollar_vol, 0),
                         })
-                    except Exception:
+                    except Exception as e:
+                        print(f"[Warning] Error processing breakdown stock: {e}")
                         continue
                 losers.sort(key=lambda x: x.get("change_pct", 0))
                 result["breakdown_stocks"] = losers[:30]
@@ -407,26 +413,32 @@ _scan_status = {
     "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
 }
+_scan_lock = threading.Lock()
+_cache_lock = threading.Lock()
 
 def _run_scan_safe(name, func, timeout_min=10):
     """Run a scan function safely in a thread with timeout, updating status."""
-    _scan_status[name]["running"] = True
+    with _scan_lock:
+        _scan_status[name]["running"] = True
 
     def _worker():
         try:
             func()
-            _scan_status[name]["last_run"] = datetime.now().isoformat()
+            with _scan_lock:
+                _scan_status[name]["last_run"] = datetime.now().isoformat()
         except Exception as e:
             print(f"[Scheduler] {name} error: {e}")
         finally:
-            _scan_status[name]["running"] = False
+            with _scan_lock:
+                _scan_status[name]["running"] = False
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     t.join(timeout=timeout_min * 60)  # Wait max timeout_min minutes
     if t.is_alive():
         print(f"[Scheduler] {name} TIMEOUT after {timeout_min}min — skipping")
-        _scan_status[name]["running"] = False  # Force reset so scheduler isn't blocked
+        with _scan_lock:
+            _scan_status[name]["running"] = False  # Force reset so scheduler isn't blocked
 
 def _scheduler_loop():
     """Background loop that triggers all scans at their defined intervals."""
@@ -460,10 +472,11 @@ def _scheduler_loop():
         print(f"[Scheduler] Initial scan: {name}")
         _run_scan_safe(name, func)
         # Set next_run after initial scan
-        interval_sec = _scan_status[name]["interval_min"] * 60
-        _scan_status[name]["next_run"] = datetime.fromtimestamp(
-            time.time() + interval_sec
-        ).isoformat()
+        with _scan_lock:
+            interval_sec = _scan_status[name]["interval_min"] * 60
+            _scan_status[name]["next_run"] = datetime.fromtimestamp(
+                time.time() + interval_sec
+            ).isoformat()
         time.sleep(10)  # 10s pause between initial scans
 
     # Then loop with interval checks
@@ -474,15 +487,18 @@ def _scheduler_loop():
         for name, func in scan_tasks:
             if not _scheduler_running:
                 break
-            interval_sec = _scan_status[name]["interval_min"] * 60
-            elapsed = now - last_run_times.get(name, 0)
-            if elapsed >= interval_sec and not _scan_status[name]["running"]:
+            with _scan_lock:
+                interval_sec = _scan_status[name]["interval_min"] * 60
+                elapsed = now - last_run_times.get(name, 0)
+                is_running = _scan_status[name]["running"]
+            if elapsed >= interval_sec and not is_running:
                 print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
                 _run_scan_safe(name, func)
                 last_run_times[name] = time.time()
-                _scan_status[name]["next_run"] = datetime.fromtimestamp(
-                    last_run_times[name] + interval_sec
-                ).isoformat()
+                with _scan_lock:
+                    _scan_status[name]["next_run"] = datetime.fromtimestamp(
+                        last_run_times[name] + interval_sec
+                    ).isoformat()
                 time.sleep(5)  # Small pause between scans
         time.sleep(30)  # Check every 30 seconds
 
@@ -549,9 +565,11 @@ def get_market_status():
 @app.get("/api/scan-status")
 def get_scan_status():
     """Get status of all background scans (running, last_run, next_run)."""
+    with _scan_lock:
+        scans_copy = dict(_scan_status)
     return {
         "scheduler_running": _scheduler_running,
-        "scans": _scan_status,
+        "scans": scans_copy,
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -654,7 +672,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             if cum_vol > 0:
                 vwap = round(cum_tp_vol / cum_vol, 2)
 
-        # 3. MACD
+        # 3. MACD (optimized: calculate EMA series once, then derive MACD line)
         ema12 = calculate_ema(closes, 12)
         ema26 = calculate_ema(closes, 26)
         macd = None
@@ -662,15 +680,19 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         macd_histogram = None
         if ema12 is not None and ema26 is not None:
             macd = round(ema12 - ema26, 2)
-            # Signal line is EMA9 of MACD line - simplified: use approximation
+            # Signal line is EMA9 of MACD line
             if len(closes) >= 34:
+                # Calculate EMA12 and EMA26 series for all bars (single pass each)
+                ema12_series = calculate_ema_series(closes, 12)
+                ema26_series = calculate_ema_series(closes, 26)
+                # Derive MACD line from the series (only where both values exist)
                 macd_line_vals = []
-                for i in range(len(closes) - 1, -1, -1):
-                    test_ema12 = calculate_ema(closes[:len(closes)-i], 12) if len(closes) - i >= 12 else None
-                    test_ema26 = calculate_ema(closes[:len(closes)-i], 26) if len(closes) - i >= 26 else None
-                    if test_ema12 and test_ema26:
-                        macd_line_vals.append(test_ema12 - test_ema26)
+                min_len = min(len(ema12_series), len(ema26_series))
+                for i in range(min_len):
+                    if ema12_series[i] is not None and ema26_series[i] is not None:
+                        macd_line_vals.append(ema12_series[i] - ema26_series[i])
                 if len(macd_line_vals) >= 9:
+                    # Reverse to chronological for EMA calculation of signal line
                     macd_signal = calculate_ema(list(reversed(macd_line_vals)), 9)
             if macd_signal is not None:
                 macd_histogram = round(macd - macd_signal, 2)
@@ -879,22 +901,30 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         bars_for_chart = list(reversed(bars[:60]))
 
         # Calculate EMA20 and EMA50 for each candle
-        closes_reversed = list(reversed(closes[:60]))
-        ema20_values = []
-        ema50_values = []
+        # Use full lookback (all available data) for proper EMA calculation
+        ema20_series = calculate_ema_series(closes, 20) if len(closes) >= 20 else []
+        ema50_series = calculate_ema_series(closes, 50) if len(closes) >= 50 else []
 
-        for i in range(len(closes_reversed)):
-            slice_closes = closes_reversed[:i+1]
-            e20 = calculate_ema(slice_closes, min(20, len(slice_closes)))
-            e50 = calculate_ema(slice_closes, min(50, len(slice_closes)))
-            ema20_values.append(e20)
-            ema50_values.append(e50)
+        # Align with chart bars (last 60 bars in chronological order)
+        ema20_for_chart = []
+        ema50_for_chart = []
+        start_idx = len(closes) - 60
+        for i, ema_val in enumerate(ema20_series):
+            if start_idx + i >= 0:
+                ema20_for_chart.append(ema_val)
+        for i, ema_val in enumerate(ema50_series):
+            if start_idx + i >= 0:
+                ema50_for_chart.append(ema_val)
+
+        # Reverse to match bars_for_chart order (chronological)
+        ema20_for_chart = list(reversed(ema20_for_chart[-60:]))
+        ema50_for_chart = list(reversed(ema50_for_chart[-60:]))
 
         for idx, b in enumerate(bars_for_chart):
             candle = {
                 "t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"], "v": b.get("v", 0),
-                "ema20": ema20_values[idx],
-                "ema50": ema50_values[idx]
+                "ema20": ema20_for_chart[idx] if idx < len(ema20_for_chart) else None,
+                "ema50": ema50_for_chart[idx] if idx < len(ema50_for_chart) else None
             }
             candles.append(candle)
 
@@ -924,8 +954,8 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                             break
                 if bi_scanner:
                     break
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] Error loading BI Scanner cache for {ticker}: {e}")
 
         # Wenn BI Scanner Daten vorhanden → überschreibe signal_grade/score/confluence
         if bi_scanner:
@@ -1012,8 +1042,8 @@ def get_chart_data(
                                 ema_data.append({"time": times[start + i], "value": round(val, 2)})
                         if ema_data:
                             ema_overlays[f"ema{period}"] = ema_data
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[Warning] Error calculating EMA{period}: {e}")
             result["ema"] = ema_overlays
 
         # VWAP (cumulative per-bar)
@@ -1030,8 +1060,8 @@ def get_chart_data(
                     if cum_vol > 0:
                         vwap_data.append({"time": bar["time"], "value": round(cum_tp_vol / cum_vol, 2)})
                 result["vwap"] = vwap_data
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] Error calculating VWAP: {e}")
 
         # Support/Resistance levels — REAL calculation from swing points + volume clusters
         if "sr" in overlay_list:
@@ -1114,8 +1144,8 @@ def get_chart_data(
                 for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
                     fib[f"{int(ratio*100)}%"] = round(l20 + rng * ratio, 2)
                 result["fib"] = fib
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] Error calculating Fibonacci levels: {e}")
 
         # Pattern detection (Harmonic, Chart Patterns, Order Blocks, Liquidity)
         if "patterns" in overlay_list and HAS_PATTERNS:
@@ -1189,8 +1219,8 @@ def get_chart_data(
                         "lower": round(ma - 2 * std, 2)
                     })
                 result["bollinger"] = bb_data
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] Error calculating Bollinger Bands: {e}")
 
         # Volume data
         vol_data = [{"time": bar["time"], "value": bar.get("volume", 0), "color": "rgba(16,185,129,0.3)" if bar["close"] >= bar["open"] else "rgba(220,38,38,0.3)"} for bar in ohlcv]
@@ -1321,8 +1351,8 @@ def get_scan_results(direction: str = Query("long", description="long or short")
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
     return ScanResultsResponse(
         status="success",
@@ -1366,8 +1396,8 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
     return ScanResultsResponse(
         status="success",
@@ -1402,8 +1432,8 @@ def get_bear_results():
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
     return ScanResultsResponse(
         status="success",
@@ -1439,8 +1469,8 @@ def get_biotech_results():
         try:
             cached_dt = datetime.fromisoformat(cached_at)
             cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
     return ScanResultsResponse(
         status="success",
@@ -1503,8 +1533,8 @@ def get_early_movers():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
@@ -1528,8 +1558,8 @@ def get_crash_monitor():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
@@ -1579,7 +1609,8 @@ def _btc_divergenz_wrapper() -> None:
                     btc_data = entry
                     btc_bars_raw = bars
                 results.append(entry)
-            except Exception:
+            except Exception as e:
+                print(f"[Warning] {e}")
                 continue
 
         # Calculate divergence vs BTC — PROFESSIONAL: Beta-adjusted Z-Score
@@ -1676,8 +1707,8 @@ def get_btc_divergenz():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
@@ -1730,7 +1761,8 @@ def _money_flow_wrapper() -> None:
                     "change_20d": round(chg_20d, 2), "volume": vol, "rvol": rvol,
                     "flow_signal": flow,
                 })
-            except Exception:
+            except Exception as e:
+                print(f"[Warning] Error processing sector {name} ticker {ticker}: {e}")
                 continue
 
         sectors.sort(key=lambda x: x.get("change_5d", 0), reverse=True)
@@ -1754,8 +1786,8 @@ def get_money_flow():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] Error calculating cache age: {e}")
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
@@ -1841,8 +1873,8 @@ def get_new_listing_results():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
@@ -1852,12 +1884,19 @@ VOLUME_SPIKES_CACHE = "/tmp/volume_spikes_cache.json"
 def _volume_spikes_wrapper() -> None:
     """Find stocks with unusual volume (RVOL > 3.0, price > $2)."""
     try:
-        # Fetch market snapshot
-        snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-        snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
-
+        # Fetch market snapshot using /gainers endpoint (Starter plan compatible) for higher volume stocks
+        # Combine with /losers endpoint to get comprehensive coverage
         spikes = []
-        if snap_resp.status_code == 200:
+
+        for endpoint in ["gainers", "losers"]:
+            snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+
+            if snap_resp.status_code != 200:
+                if snap_resp.status_code == 403:
+                    print(f"[Warning] 403 Forbidden on {endpoint} endpoint - check API plan")
+                continue
+
             tickers = snap_resp.json().get("tickers", [])
             for t in tickers:
                 try:
@@ -1889,7 +1928,8 @@ def _volume_spikes_wrapper() -> None:
                             "rvol": round(rvol, 2),
                             "dollar_volume": round(price * vol, 0),
                         })
-                except Exception:
+                except Exception as e:
+                    print(f"[Warning] Error processing volume spike for ticker: {e}")
                     continue
 
         # Sort by RVOL descending
@@ -1917,8 +1957,8 @@ def get_volume_spikes():
     if cached_at:
         try:
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
@@ -2182,39 +2222,53 @@ def _crash_monitor_wrapper() -> None:
                         entry["level"] = "LOW"
                 else:
                     result["indices"].append(entry)
-            except Exception:
+            except Exception as e:
+                print(f"[Warning] Error processing market index: {e}")
                 continue
 
         # Market breadth - count gainers vs losers via snapshot
         try:
-            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY})
-            if snap_resp.status_code == 200:
+            # Use /gainers and /losers endpoints (Starter plan compatible) instead of bulk /tickers endpoint (Enterprise only)
+            up = 0
+            down = 0
+            unchanged = 0
+
+            for endpoint in ["gainers", "losers"]:
+                snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+
+                if snap_resp.status_code != 200:
+                    if snap_resp.status_code == 403:
+                        print(f"[Warning] 403 Forbidden on {endpoint} endpoint - check API plan")
+                    continue
+
                 tickers = snap_resp.json().get("tickers", [])
-                up = 0
-                down = 0
-                unchanged = 0
                 for t in tickers:
-                    day = t.get("day", {})
-                    prev = t.get("prevDay", {})
-                    pc = day.get("c", 0)
-                    pp = prev.get("c", 0)
-                    if pc and pp:
-                        if pc > pp:
-                            up += 1
-                        elif pc < pp:
-                            down += 1
-                        else:
-                            unchanged += 1
-                total = up + down + unchanged
-                ratio = round(up / down, 2) if down > 0 else 0
-                result["breadth"] = {
-                    "advancing": up, "declining": down, "unchanged": unchanged,
-                    "total": total, "ad_ratio": ratio,
-                    "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
-                }
-        except Exception:
-            pass
+                    try:
+                        day = t.get("day", {})
+                        prev = t.get("prevDay", {})
+                        pc = day.get("c", 0)
+                        pp = prev.get("c", 0)
+                        if pc and pp:
+                            if pc > pp:
+                                up += 1
+                            elif pc < pp:
+                                down += 1
+                            else:
+                                unchanged += 1
+                    except Exception as e:
+                        print(f"[Warning] Error processing breadth ticker: {e}")
+                        continue
+
+            total = up + down + unchanged
+            ratio = round(up / down, 2) if down > 0 else 0
+            result["breadth"] = {
+                "advancing": up, "declining": down, "unchanged": unchanged,
+                "total": total, "ad_ratio": ratio,
+                "breadth_signal": "BULLISH" if ratio > 1.5 else "BEARISH" if ratio < 0.7 else "NEUTRAL"
+            }
+        except Exception as e:
+            print(f"[Warning] Market breadth error: {e}")
 
         # Calculate fear score
         fear_score, fear_level, fear_details = _calculate_fear_score(
@@ -2244,15 +2298,17 @@ def _calculate_next_occurrence(month: int, day: int) -> str:
 
 @app.get("/api/kalender")
 def get_economic_calendar():
-    """Get upcoming economic events and important dates."""
+    """Get upcoming economic events and important dates.
+
+    NOTE: This is a placeholder implementation with hardcoded events and estimated dates.
+    For production use, integrate with a real economic calendar API (e.g., investing.com, tradingeconomics.com).
+    """
     try:
         events = []
 
         # Major recurring events (simplified - hardcoded with dynamic dates)
         # In production, would fetch from economic calendar API
 
-        # FOMC meetings (typically 8 per year, Jan/Mar/May/Jun/Jul/Sep/Nov/Dec)
-        fomc_months = [1, 3, 5, 6, 7, 9, 11, 12]
         fomc_day = 14  # Approximate
         for month in fomc_months:
             try:
@@ -2264,8 +2320,8 @@ def get_economic_calendar():
                     "description": "Federal Reserve Interest Rate Decision",
                     "impact": "Sehr Hoch"
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] {e}")
 
         # CPI (1st week of each month, reported ~12 days after month end)
         try:
@@ -2277,8 +2333,8 @@ def get_economic_calendar():
                 "description": "US Consumer Price Index YoY",
                 "impact": "Sehr Hoch"
             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
         # NFP (1st Friday of each month)
         try:
@@ -2290,8 +2346,8 @@ def get_economic_calendar():
                 "description": "US Employment Report",
                 "impact": "Sehr Hoch"
             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
         # GDP (end of each quarter)
         for month in [3, 6, 9, 12]:
@@ -2304,10 +2360,9 @@ def get_economic_calendar():
                     "description": "Gross Domestic Product Report",
                     "impact": "Sehr Hoch"
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] {e}")
 
-        # Earnings seasons (approximate)
         earnings_months = [4, 7, 10, 1]  # Q1, Q2, Q3, Q4
         for month in earnings_months:
             try:
@@ -2319,8 +2374,8 @@ def get_economic_calendar():
                     "description": "Corporate Earnings Reports",
                     "impact": "Hoch"
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] {e}")
 
         # Fed Fund Rate Decision (typically day 14)
         try:
@@ -2332,14 +2387,15 @@ def get_economic_calendar():
                 "description": "Federal Reserve Interest Rate Announcement",
                 "impact": "Sehr Hoch"
             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
 
         # Sort by date
         events.sort(key=lambda x: x["date"])
 
         return {
             "status": "success",
+            "source": "estimated",
             "events": events,
             "timestamp": datetime.now().isoformat(),
             "note": "Simplified calendar - dates are approximate for recurring events"
@@ -2529,8 +2585,8 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         return {"error": str(e), "ticker": ticker, "strategy": strategy}
 
 
-@app.post("/api/backtest")
-def run_backtest(request: BacktestRequest, background_tasks: BackgroundTasks):
+@app.post("/api/run-backtest")
+def run_backtest(request: BacktestRequest):
     """Run a backtest for a ticker with given strategy."""
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
@@ -2542,10 +2598,8 @@ def run_backtest(request: BacktestRequest, background_tasks: BackgroundTasks):
         cache_key = f"/tmp/backtest_{request.ticker}_{request.strategy}.json"
         with open(cache_key, "w") as f:
             json.dump({"cached_at": datetime.now().isoformat(), "results": result}, f, default=_serialize_json)
-    except Exception:
-        pass
-
-    return {"status": "success", "data": result}
+    except Exception as e:
+        print(f"[Warning] {e}")
 
 
 @app.get("/api/backtest-results")
@@ -2557,8 +2611,8 @@ def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma
             with open(cache_key, "r") as f:
                 data = json.load(f)
             return {"status": "success", "data": data.get("results", {}), "cached_at": data.get("cached_at")}
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Warning] {e}")
     return {"status": "success", "data": {}, "cached_at": None}
 
 

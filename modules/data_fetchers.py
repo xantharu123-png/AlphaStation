@@ -24,13 +24,60 @@ _api_call_window_start = 0
 _CANDLE_ANALYSIS_CACHE = {}
 _CANDLE_CACHE_TTL = 300  # 5 Minuten
 
-# BPIQ catalyst cache — real loader is in scanner.py (needs st.secrets)
-# This stub returns empty dict when called standalone
+# BPIQ catalyst cache — fetches from BPIQ API if key is available
+import os as _os
 _BPIQ_CATALYST_CACHE = {}
 _BPIQ_CACHE_TIMESTAMP = 0
+_BPIQ_CACHE_TTL = 3600  # 1 hour
 
 def _load_bpiq_catalyst_cache():
-    """Stub — real implementation in scanner.py (needs Streamlit secrets)."""
+    """Load BPIQ catalyst cache from API if key is available, otherwise return empty dict.
+
+    Returns:
+        dict: Cached BPIQ data keyed by ticker (e.g., {"AMGN": [{drug data}], ...})
+    """
+    global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP
+
+    # Try to get BPIQ API key from environment
+    bpiq_key = _os.getenv("BPIQ_API_KEY", "")
+    if not bpiq_key:
+        # No API key available, return empty cache
+        return {}
+
+    # Check if cache is still fresh (within 1 hour)
+    now = time.time()
+    if _BPIQ_CATALYST_CACHE and (now - _BPIQ_CACHE_TIMESTAMP) < _BPIQ_CACHE_TTL:
+        return _BPIQ_CATALYST_CACHE
+
+    # Cache expired or empty, try to fetch from BPIQ API
+    try:
+        # Attempt to fetch BPIQ data
+        # Expected endpoint format: https://api.bpiq.com/v1/catalysts?apikey=...
+        url = "https://api.bpiq.com/v1/catalysts"
+        params = {"apikey": bpiq_key}
+
+        resp = rate_limited_get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+
+            # Parse response and index by ticker
+            # Expected format: {"data": {ticker: [drug objects]}}
+            if isinstance(data, dict):
+                if "data" in data:
+                    _BPIQ_CATALYST_CACHE = data.get("data", {})
+                elif "catalysts" in data:
+                    _BPIQ_CATALYST_CACHE = data.get("catalysts", {})
+                else:
+                    # Try to use the whole response as ticker mapping
+                    _BPIQ_CATALYST_CACHE = data
+            else:
+                _BPIQ_CATALYST_CACHE = {}
+
+            _BPIQ_CACHE_TIMESTAMP = now
+    except Exception as e:
+        # API error, keep existing cache or return empty
+        pass
+
     return _BPIQ_CATALYST_CACHE
 
 # Catalyst detection keywords (used by _detect_catalyst)

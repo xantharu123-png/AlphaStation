@@ -793,7 +793,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
             chart.current.timeScale().fitContent();
         } catch (err) { console.error('Chart error:', err); }
-        return () => { if (chart.current) { chart.current.remove(); chart.current = null; } };
+        return () => {
+            if (chart.current) {
+                chart.current.remove();
+                chart.current = null;
+            }
+        };
     }, [chartData, sidebarMode, customWidth, overlays]);
 
     if (loading && !tickerData) {
@@ -824,7 +829,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     // Simple markdown-to-HTML: bold, headers, line breaks
     const renderMarkdown = (text) => {
         if (!text) return '';
-        return text
+        // Escape HTML first to prevent XSS
+        let safe = text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+        // Then apply markdown formatting
+        return safe
             .replace(/\*\*(\d+)\.\s*(.*?)\*\*/g, '<br/><strong>$1. $2</strong>')
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
             .replace(/\n/g, '<br/>');
@@ -951,8 +963,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     <h4 className="font-semibold text-sm mb-2">Preis</h4>
                     <div className="grid grid-cols-3 gap-2">
                         <div><span className="text-gray-500">1D</span> <span className={change >= 0 ? 'color-positive' : 'color-negative'}>{change}%</span></div>
-                        <div><span className="text-gray-500">5D</span> <span className={d.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d}%</span></div>
-                        <div><span className="text-gray-500">20D</span> <span className={d.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d}%</span></div>
+                        <div><span className="text-gray-500">5D</span> <span className={(d.change_5d ?? 0) >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d}%</span></div>
+                        <div><span className="text-gray-500">20D</span> <span className={(d.change_20d ?? 0) >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d}%</span></div>
                         <div><span className="text-gray-500">Open</span> ${d.open}</div>
                         <div><span className="text-gray-500">High</span> ${d.high}</div>
                         <div><span className="text-gray-500">Low</span> ${d.low}</div>
@@ -1236,6 +1248,12 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     const [results, setResults] = useState(scanCache.scanner_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     // Load cached results on mount
     useEffect(() => {
@@ -1297,9 +1315,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('scanner_scanning', false);
@@ -1355,12 +1373,12 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rsi?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${item.grade?.toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -1376,6 +1394,12 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const [isScanning, setIsScanning] = useState(scanCache.bi_scanning || false);
     const [results, setResults] = useState(scanCache.bi_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -1417,9 +1441,9 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('bi_scanning', false);
@@ -1479,9 +1503,9 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${item.grade?.toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
                                 <td className="py-3 px-2"><span className="signal-badge signal-bullish">{item.signal}</span></td>
                                 <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                             </tr>
@@ -1498,6 +1522,12 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -1539,9 +1569,9 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('biotech_scanning', false);
@@ -1592,7 +1622,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 <td className="py-3 px-2">{item.catalyst}</td>
@@ -1610,6 +1640,12 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [isScanning, setIsScanning] = useState(scanCache.btc_divergenz_scanning || false);
     const [results, setResults] = useState(scanCache.btc_divergenz_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -1651,9 +1687,9 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('btc_divergenz_scanning', false);
@@ -1720,7 +1756,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.name}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.div_1d?.toFixed(2)}</td>
@@ -1748,6 +1784,12 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const { sorted: sortedWinners, toggleSort: toggleWinnerSort, sortKey: winnerSortKey } = useSortable(winnerResults, 'change_pct');
     const { sorted: sortedLosers, toggleSort: toggleLoserSort, sortKey: loserSortKey } = useSortable(loserResults, 'change_pct');
     const { sorted: sortedSpikes, toggleSort: toggleSpikeSort, sortKey: spikeSortKey } = useSortable(spikeResults, 'volume');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     useEffect(() => {
         if (scanCache.em_winners && scanCache.em_winners.length > 0) {
@@ -1837,9 +1879,9 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('em_scanning', false);
@@ -1876,7 +1918,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             {sortedWinners.map((item, idx) => (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className="py-3 px-2 text-right color-positive font-semibold">{item.change_pct?.toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 </tr>
@@ -1899,7 +1941,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             {sortedLosers.map((item, idx) => (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className="py-3 px-2 text-right color-negative font-semibold">{item.change_pct?.toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 </tr>
@@ -1922,7 +1964,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             {sortedSpikes.map((item, idx) => (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right font-semibold">{(item.volume / 1000000).toFixed(2)}M</td>
                                 </tr>
@@ -1943,6 +1985,12 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
     const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'ticker');
     const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'ticker');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     useEffect(() => {
         if (scanCache.short_inverse && scanCache.short_inverse.length > 0) {
@@ -2012,9 +2060,9 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('short_scanning', false);
@@ -2057,7 +2105,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                     <td className="py-3 px-2">{item.name}</td>
                                     <td className="py-3 px-2">{item.underlying}</td>
-                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                     <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                     <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
@@ -2083,7 +2131,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             {sortedBreakdown.map((item, idx) => (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 </tr>
@@ -2101,6 +2149,12 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const [results, setResults] = useState(scanCache.moneyflow_results || []);
     const [isScanning, setIsScanning] = useState(scanCache.mf_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'sector');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     useEffect(() => {
         if (scanCache.moneyflow_results && scanCache.moneyflow_results.length > 0) {
@@ -2162,9 +2216,9 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('moneyflow_scanning', false);
@@ -2205,7 +2259,7 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.etf)}>
                                 <td className="py-3 px-2 font-semibold">{item.sector}</td>
                                 <td className="py-3 px-2">{item.etf}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
@@ -2287,6 +2341,12 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [breadth, setBreadth] = useState(scanCache.crash_breadth || null);
     const [isScanning, setIsScanning] = useState(scanCache.crash_scanning || false);
     const { sorted, toggleSort } = useSortable(indices, 'name');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     useEffect(() => {
         if (scanCache.crash_fear_data) {
@@ -2361,9 +2421,9 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('crash_scanning', false);
@@ -2428,7 +2488,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.name}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
@@ -2576,7 +2636,7 @@ function WatchlistTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(ticker)}>
                                     <td className="py-3 px-2 font-semibold">{ticker}</td>
-                                    <td className="py-3 px-2 text-right">€{price?.price?.toFixed(2) || '-'}</td>
+                                    <td className="py-3 px-2 text-right">${price?.price?.toFixed(2) || '-'}</td>
                                     <td className={`py-3 px-2 text-right ${(price?.change_pct || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{price?.change_pct?.toFixed(2) || '-'}%</td>
                                     <td className={`py-3 px-2 text-right ${(price?.change_5d || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{price?.change_5d?.toFixed(2) || '-'}%</td>
                                     <td className="py-3 px-2 text-right">{price?.rsi?.toFixed(1) || '-'}</td>
@@ -2682,7 +2742,7 @@ function BacktestTab() {
                         <div className="metric-card orange">
                             <div className="text-sm font-semibold text-gray-600">Ø PnL</div>
                             <div className={`text-2xl font-bold mt-2 ${results.avg_pnl >= 0 ? 'color-positive' : 'color-negative'}`}>
-                                €{results.avg_pnl?.toFixed(2)}
+                                ${results.avg_pnl?.toFixed(2)}
                             </div>
                         </div>
                         <div className="metric-card purple">
@@ -2715,9 +2775,9 @@ function BacktestTab() {
                                     {trades.map((trade, idx) => (
                                         <tr key={idx} className="table-row border-b border-gray-200">
                                             <td className="py-3 px-2">{trade.entry_date}</td>
-                                            <td className="py-3 px-2 text-right">€{trade.entry_price?.toFixed(2)}</td>
+                                            <td className="py-3 px-2 text-right">${trade.entry_price?.toFixed(2)}</td>
                                             <td className="py-3 px-2">{trade.exit_date}</td>
-                                            <td className="py-3 px-2 text-right">€{trade.exit_price?.toFixed(2)}</td>
+                                            <td className="py-3 px-2 text-right">${trade.exit_price?.toFixed(2)}</td>
                                             <td className={`py-3 px-2 text-right ${trade.pnl_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{trade.pnl_pct?.toFixed(2)}%</td>
                                         </tr>
                                     ))}
@@ -2822,6 +2882,12 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     const [stats, setStats] = useState(scanCache.newlisting_stats || null);
     const [isScanning, setIsScanning] = useState(scanCache.nl_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'pump_pct');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     useEffect(() => {
         if (scanCache.newlisting_results && scanCache.newlisting_results.length > 0) {
@@ -2888,9 +2954,9 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('newlisting_scanning', false);
@@ -2947,7 +3013,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.exchange}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.pump_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
                                 <td className="py-3 px-2 text-center"><span className="signal-badge signal-bullish">{item.signal}</span></td>
@@ -2966,6 +3032,12 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [isScanning, setIsScanning] = useState(scanCache.vs_scanning || false);
     const [results, setResults] = useState(scanCache.vs_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -3007,9 +3079,9 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('vs_scanning', false);
@@ -3061,11 +3133,11 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-right">€{(item.dollar_volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2 text-right">${(item.dollar_volume / 1000000).toFixed(2)}M</td>
                             </tr>
                         ))}
                     </tbody>
@@ -3080,6 +3152,12 @@ function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }
     const [searchTicker, setSearchTicker] = useState('');
     const [searchResults, setSearchResults] = useState(null);
     const [loading, setLoading] = useState(false);
+    const pollTimeoutRef = useRef(null);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
 
     const performSearch = async () => {
         if (!searchTicker.trim()) return;
@@ -3127,7 +3205,7 @@ function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }
                         <div className="flex justify-between items-start mb-4">
                             <div>
                                 <h2 className="text-2xl font-bold">{searchResults.ticker}</h2>
-                                <p className="text-2xl font-bold mt-2">€{searchResults.price?.toFixed(2)}</p>
+                                <p className="text-2xl font-bold mt-2">${searchResults.price?.toFixed(2)}</p>
                                 <p className={`text-lg font-semibold mt-1 ${searchResults.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>
                                     ({searchResults.change_pct?.toFixed(2)}%)
                                 </p>
@@ -3149,11 +3227,11 @@ function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }
                         </div>
                         <div className="card border border-gray-200 p-4 rounded-lg">
                             <div className="text-sm font-semibold text-gray-600">MA20</div>
-                            <div className="text-2xl font-bold mt-2">€{searchResults.ma20?.toFixed(2)}</div>
+                            <div className="text-2xl font-bold mt-2">${searchResults.ma20?.toFixed(2)}</div>
                         </div>
                         <div className="card border border-gray-200 p-4 rounded-lg">
                             <div className="text-sm font-semibold text-gray-600">MA50</div>
-                            <div className="text-2xl font-bold mt-2">€{searchResults.ma50?.toFixed(2)}</div>
+                            <div className="text-2xl font-bold mt-2">${searchResults.ma50?.toFixed(2)}</div>
                         </div>
                     </div>
 

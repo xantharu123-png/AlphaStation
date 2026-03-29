@@ -2194,6 +2194,8 @@ def _biotech_background_scan(poly_key):
                         trial_data["readout_score"] = bpiq_data["readout_score"]
                         trial_data["readout_label"] = bpiq_data["readout_label"]
                         trial_data["catalyst_readouts"] = bpiq_data["catalyst_readouts"]
+                        # Use BPIQ readout as pipeline proxy (0-15 from BPIQ, scale to 0-20)
+                        trial_data["pipeline_score"] = min(20, int(bpiq_data["readout_score"] * 20 / 15))
 
                 # E) Technical Score
                 tech_data = _biotech_technical_score(poly_key, ticker)
