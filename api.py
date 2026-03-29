@@ -2689,16 +2689,19 @@ def _new_listing_wrapper() -> None:
                 if not symbol:
                     continue
 
+                # Clean symbol: remove _USDT, USDT suffix for ticker lookup
+                clean_symbol = symbol.replace("_USDT", "").replace("USDT", "").replace("_PERP", "")
+
                 # Fetch ticker data
-                ticker_data = fetch_ticker_for(symbol, exchange)
+                ticker_data = fetch_ticker_for(clean_symbol, exchange)
                 if not ticker_data:
                     continue
 
                 # Fetch candles
-                candles = fetch_candles_for(symbol, exchange)
+                candles = fetch_candles_for(clean_symbol, exchange)
 
                 # Fetch orderbook
-                orderbook = fetch_cryptocom_orderbook(f"{symbol}_PERP") if "crypto" in exchange else None
+                orderbook = fetch_cryptocom_orderbook(f"{clean_symbol}_PERP") if "crypto" in exchange else None
 
                 # Calculate exhaustion
                 exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
@@ -2706,8 +2709,9 @@ def _new_listing_wrapper() -> None:
                 )
 
                 results.append({
-                    "symbol": symbol,
+                    "symbol": clean_symbol,
                     "exchange": exchange,
+                    "contract": symbol,
                     "price": ticker_data.get("price", 0),
                     "change_24h": ticker_data.get("change_24h", 0),
                     "volume_24h": ticker_data.get("volume_24h", 0),
