@@ -1506,8 +1506,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
-                                <td className="py-3 px-2"><span className="signal-badge signal-bullish">{item.signal}</span></td>
-                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2"><span className={`signal-badge signal-${direction === 'long' ? 'bullish' : 'bearish'}`}>{item.grade_label || direction.toUpperCase()}</span></td>
+                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                             </tr>
                         ))}
                     </tbody>
@@ -1624,7 +1624,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 <td className="py-3 px-2">{item.catalyst}</td>
                             </tr>
                         ))}
@@ -1764,7 +1764,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <td className="py-3 px-2 text-right">{item.beta?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right">{item.correlation?.toFixed(3)}</td>
                                 <td className="py-3 px-2 text-right">{item.z_score?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${getSignalClass(item.signal)}`}>{item.signal}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${getSignalClass(item.signal || '')}`}>{item.signal || '–'}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -1920,7 +1920,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                     <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className="py-3 px-2 text-right color-positive font-semibold">{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                    <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -1943,7 +1943,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                     <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className="py-3 px-2 text-right color-negative font-semibold">{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                    <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -1966,7 +1966,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                     <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right font-semibold">{(item.volume / 1000000).toFixed(2)}M</td>
+                                    <td className="py-3 px-2 text-right font-semibold">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -2110,7 +2110,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                     <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                     <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                    <td className="py-3 px-2"><span className="signal-badge signal-bearish">{item.signal}</span></td>
+                                    <td className="py-3 px-2"><span className="signal-badge signal-bearish">{item.signal || 'SHORT'}</span></td>
                                 </tr>
                             ))}
                         </tbody>
@@ -2133,7 +2133,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                     <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                     <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                    <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -3016,7 +3016,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.pump_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
-                                <td className="py-3 px-2 text-center"><span className="signal-badge signal-bullish">{item.signal}</span></td>
+                                <td className="py-3 px-2 text-center"><span className="signal-badge signal-bullish">{item.signal || 'BUY'}</span></td>
                                 <td className={`py-3 px-2 text-right ${item.funding_rate >= 0 ? 'color-positive' : 'color-negative'}`}>{item.funding_rate?.toFixed(3)}%</td>
                             </tr>
                         ))}
@@ -3135,7 +3135,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right">${(item.dollar_volume / 1000000).toFixed(2)}M</td>
                             </tr>
