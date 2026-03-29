@@ -1800,22 +1800,52 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
 // Early Movers Tab
 function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [subTab, setSubTab] = useState('winners');
-    const [winnerResults, setWinnerResults] = useState(scanCache.em_winners || []);
-    const [loserResults, setLoserResults] = useState(scanCache.em_losers || []);
-    const [spikeResults, setSpikeResults] = useState(scanCache.em_spikes || []);
-    const [isScanning, setIsScanning] = useState(scanCache.em_scanning || false);
-    const { sorted: sortedWinners, toggleSort: toggleWinnerSort, sortKey: winnerSortKey } = useSortable(winnerResults, 'change_pct');
-    const { sorted: sortedLosers, toggleSort: toggleLoserSort, sortKey: loserSortKey } = useSortable(loserResults, 'change_pct');
-    const { sorted: sortedSpikes, toggleSort: toggleSpikeSort, sortKey: spikeSortKey } = useSortable(spikeResults, 'volume');
+    const [subTab, setSubTab] = useState('volume-spikes');
+    const [volumeSpikes, setVolumeSpikes] = useState([]);
+    const [microCaps, setMicroCaps] = useState([]);
+    const [whaleAcc, setWhaleAcc] = useState([]);
+    const [recentlyListed, setRecentlyListed] = useState([]);
+    const [narratives, setNarratives] = useState({});
+    const [stats, setStats] = useState({});
+    const [isScanning, setIsScanning] = useState(false);
     const pollTimeoutRef = useRef(null);
+
+    const { sorted: sortedSpikes, toggleSort: toggleSpikeSort } = useSortable(volumeSpikes, 'EarlyScore');
+    const { sorted: sortedMicro, toggleSort: toggleMicroSort } = useSortable(microCaps, 'DegenScore');
+    const { sorted: sortedWhale, toggleSort: toggleWhaleSort } = useSortable(whaleAcc, 'WhaleScore');
+    const { sorted: sortedRecent, toggleSort: toggleRecentSort } = useSortable(recentlyListed, 'NewScore');
+
+    // Utility functions for formatting
+    const formatPrice = (price) => {
+        if (price === null || price === undefined) return '–';
+        return price >= 1 ? `$${price.toFixed(2)}` : `$${price.toFixed(4)}`;
+    };
+
+    const formatMCap = (mcap) => {
+        if (mcap === null || mcap === undefined) return '–';
+        if (mcap >= 1000000000) return `$${(mcap / 1000000000).toFixed(1)}B`;
+        if (mcap >= 1000000) return `$${(mcap / 1000000).toFixed(1)}M`;
+        return `$${mcap.toFixed(0)}`;
+    };
+
+    const getScoreClass = (score) => {
+        if (!score) return '';
+        if (score >= 70) return 'bg-green-600 text-white';
+        if (score >= 40) return 'bg-yellow-600 text-white';
+        return 'bg-red-600 text-white';
+    };
+
+    const getPercentClass = (value) => {
+        if (!value) return '';
+        return value >= 0 ? 'color-positive' : 'color-negative';
+    };
 
     // Cleanup polling on unmount
     useEffect(() => {
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
-    // Always load latest from server on mount
+    // Load latest data on mount
     useEffect(() => {
         const fetchResults = async () => {
             try {
@@ -1823,40 +1853,20 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 if (response.ok) {
                     const data = await response.json();
                     const em = (data.data && data.data[0]) || {};
-                    if ((em.gainers || []).length > 0 || (em.losers || []).length > 0) {
-                        setWinnerResults(em.gainers || []);
-                        setLoserResults(em.losers || []);
-                        updateScanCache('em_winners', em.gainers || []);
-                        updateScanCache('em_losers', em.losers || []);
-                    }
+                    setVolumeSpikes(em.volume_spikes || []);
+                    setMicroCaps(em.micro_caps || []);
+                    setWhaleAcc(em.whale_acc || []);
+                    setRecentlyListed(em.recently_listed || []);
+                    setNarratives(em.narratives || {});
+                    setStats(em.stats || {});
                 }
-            } catch (err) { console.error('Error:', err); }
+            } catch (err) { console.error('Error fetching early movers:', err); }
         };
         fetchResults();
     }, []);
 
-    // Load volume spikes for Early Movers on mount
-    useEffect(() => {
-        const fetchSpikes = async () => {
-            try {
-                const response = await fetch(`${API}/api/volume-spikes-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    setSpikeResults(items);
-                    updateScanCache('em_spikes', items);
-                }
-            } catch (err) {
-                console.error('Error:', err);
-            }
-        };
-        fetchSpikes();
-    }, []);
-
     const handleScan = async () => {
         setIsScanning(true);
-        updateScanCache('em_scanning', true);
-        // Save current cached_at BEFORE scan starts
         let prevCachedAt = null;
         try {
             const preCheck = await fetch(`${API}/api/early-movers-results`);
@@ -1869,11 +1879,9 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
             if (response.ok) {
                 if (window.addToast) window.addToast('Scan gestartet...', 'info');
-                // Poll for results with increasing intervals
                 const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                    if (attempts > 12) {
                         setIsScanning(false);
-                        updateScanCache('em_scanning', false);
                         if (window.addToast) window.addToast('Scan dauert länger...', 'info');
                         return;
                     }
@@ -1882,115 +1890,235 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         if (res.ok) {
                             const data = await res.json();
                             const em = (data.data && data.data[0]) || {};
-                            const winners = em.gainers || [];
-                            const losers = em.losers || [];
                             const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
                             if (isNewData) {
-                                setWinnerResults(winners);
-                                setLoserResults(losers);
-                                updateScanCache('em_winners', winners);
-                                updateScanCache('em_losers', losers);
+                                setVolumeSpikes(em.volume_spikes || []);
+                                setMicroCaps(em.micro_caps || []);
+                                setWhaleAcc(em.whale_acc || []);
+                                setRecentlyListed(em.recently_listed || []);
+                                setNarratives(em.narratives || {});
+                                setStats(em.stats || {});
                                 setIsScanning(false);
-                                updateScanCache('em_scanning', false);
-                                if (window.addToast) window.addToast(`Scan fertig: ${winners.length + losers.length} Ergebnisse`, 'success');
+                                if (window.addToast) window.addToast('Scan fertig!', 'success');
                                 return;
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000);
             } else {
                 setIsScanning(false);
-                updateScanCache('em_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
             setIsScanning(false);
-            updateScanCache('em_scanning', false);
         }
     };
 
     return (
         <div className="space-y-6">
-            <div className="flex gap-2 border-b border-gray-200">
-                <button onClick={() => setSubTab('winners')} className={`secondary-tab ${subTab === 'winners' ? 'active' : 'inactive'}`}>Gewinner</button>
-                <button onClick={() => setSubTab('losers')} className={`secondary-tab ${subTab === 'losers' ? 'active' : 'inactive'}`}>Verlierer</button>
-                <button onClick={() => setSubTab('spikes')} className={`secondary-tab ${subTab === 'spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
+            <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
+                <button onClick={() => setSubTab('volume-spikes')} className={`secondary-tab ${subTab === 'volume-spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
+                <button onClick={() => setSubTab('micro-caps')} className={`secondary-tab ${subTab === 'micro-caps' ? 'active' : 'inactive'}`}>Micro-Caps</button>
+                <button onClick={() => setSubTab('whale-acc')} className={`secondary-tab ${subTab === 'whale-acc' ? 'active' : 'inactive'}`}>Whale Accumulation</button>
+                <button onClick={() => setSubTab('recently-listed')} className={`secondary-tab ${subTab === 'recently-listed' ? 'active' : 'inactive'}`}>Neu Gelistet</button>
+                <button onClick={() => setSubTab('narratives')} className={`secondary-tab ${subTab === 'narratives' ? 'active' : 'inactive'}`}>Narratives</button>
             </div>
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="early_movers" />
 
-            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                {subTab === 'winners' && (
-                    <table className="w-full text-sm">
-                        <thead className="border-b border-gray-200">
-                            <tr>
-                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleWinnerSort('ticker')}>Ticker</th>
-                                <th className="text-right py-2 px-2">Preis</th>
-                                <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleWinnerSort('change_pct')}>Änderung%</th>
-                                <th className="text-right py-2 px-2">Volumen</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {sortedWinners.map((item, idx) => (
-                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                    <td className="py-3 px-2 text-right color-positive font-semibold">{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
+            {/* Volume Spikes Tab */}
+            {subTab === 'volume-spikes' && (
+                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                    {sortedSpikes.length === 0 ? (
+                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
+                    ) : (
+                        <table className="w-full text-sm">
+                            <thead className="border-b border-gray-200">
+                                <tr>
+                                    <th className="text-left py-2 px-2">Symbol</th>
+                                    <th className="text-left py-2 px-2">Name</th>
+                                    <th className="text-right py-2 px-2">Preis</th>
+                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSpikeSort('Change1h')}>1h%</th>
+                                    <th className="text-right py-2 px-2">24h%</th>
+                                    <th className="text-right py-2 px-2">7d%</th>
+                                    <th className="text-right py-2 px-2">Vol/MCap%</th>
+                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSpikeSort('EarlyScore')}>Score</th>
+                                    <th className="text-left py-2 px-2">Signal</th>
+                                    <th className="text-left py-2 px-2">Perp</th>
+                                    <th className="text-left py-2 px-2">Narrative</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
+                            </thead>
+                            <tbody>
+                                {sortedSpikes.map((item, idx) => (
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
+                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
+                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
+                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change1h)}`}>{item.Change1h?.toFixed(1) || '–'}%</td>
+                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change24h)}`}>{item.Change24h?.toFixed(1) || '–'}%</td>
+                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
+                                        <td className="py-3 px-2 text-right">{item.VolMCapRatio?.toFixed(1) || '–'}%</td>
+                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.EarlyScore)}`}>{item.EarlyScore || '–'}</span></td>
+                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
+                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
+                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.IsTrending ? 'bg-purple-100 text-purple-800 font-semibold' : 'text-gray-500'}`}>{item.IsTrending ? 'TRENDING' : item.Narrative || '–'}</span></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            )}
 
-                {subTab === 'losers' && (
-                    <table className="w-full text-sm">
-                        <thead className="border-b border-gray-200">
-                            <tr>
-                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleLoserSort('ticker')}>Ticker</th>
-                                <th className="text-right py-2 px-2">Preis</th>
-                                <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleLoserSort('change_pct')}>Änderung%</th>
-                                <th className="text-right py-2 px-2">Volumen</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {sortedLosers.map((item, idx) => (
-                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                    <td className="py-3 px-2 text-right color-negative font-semibold">{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
+            {/* Micro-Caps Tab */}
+            {subTab === 'micro-caps' && (
+                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                    {sortedMicro.length === 0 ? (
+                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
+                    ) : (
+                        <table className="w-full text-sm">
+                            <thead className="border-b border-gray-200">
+                                <tr>
+                                    <th className="text-left py-2 px-2">Symbol</th>
+                                    <th className="text-left py-2 px-2">Name</th>
+                                    <th className="text-right py-2 px-2">Preis</th>
+                                    <th className="text-right py-2 px-2">MCap</th>
+                                    <th className="text-right py-2 px-2">7d%</th>
+                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleMicroSort('DegenScore')}>DegenScore</th>
+                                    <th className="text-left py-2 px-2">Signal</th>
+                                    <th className="text-left py-2 px-2">Perp</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
+                            </thead>
+                            <tbody>
+                                {sortedMicro.map((item, idx) => (
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
+                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
+                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
+                                        <td className="py-3 px-2 text-right">{formatMCap(item.MCap)}</td>
+                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
+                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.DegenScore)}`}>{item.DegenScore || '–'}</span></td>
+                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
+                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            )}
 
-                {subTab === 'spikes' && (
-                    <table className="w-full text-sm">
-                        <thead className="border-b border-gray-200">
-                            <tr>
-                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSpikeSort('ticker')}>Ticker</th>
-                                <th className="text-right py-2 px-2">Preis</th>
-                                <th className="text-right py-2 px-2">Änderung%</th>
-                                <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSpikeSort('volume')}>Volumen</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {sortedSpikes.map((item, idx) => (
-                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right font-semibold">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
+            {/* Whale Accumulation Tab */}
+            {subTab === 'whale-acc' && (
+                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                    {sortedWhale.length === 0 ? (
+                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
+                    ) : (
+                        <table className="w-full text-sm">
+                            <thead className="border-b border-gray-200">
+                                <tr>
+                                    <th className="text-left py-2 px-2">Symbol</th>
+                                    <th className="text-left py-2 px-2">Name</th>
+                                    <th className="text-right py-2 px-2">Preis</th>
+                                    <th className="text-right py-2 px-2">MCap</th>
+                                    <th className="text-right py-2 px-2">OI Ratio</th>
+                                    <th className="text-right py-2 px-2">Funding Rate</th>
+                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleWhaleSort('WhaleScore')}>WhaleScore</th>
+                                    <th className="text-left py-2 px-2">Signals</th>
+                                    <th className="text-left py-2 px-2">Perp</th>
                                 </tr>
+                            </thead>
+                            <tbody>
+                                {sortedWhale.map((item, idx) => (
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
+                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
+                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
+                                        <td className="py-3 px-2 text-right">{formatMCap(item.MCap)}</td>
+                                        <td className="py-3 px-2 text-right">{item.OI_Ratio?.toFixed(2) || '–'}x</td>
+                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.FundingRate * 100)}`}>{item.FundingRate ? (item.FundingRate * 100).toFixed(3) : '–'}%</td>
+                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.WhaleScore)}`}>{item.WhaleScore || '–'}</span></td>
+                                        <td className="py-3 px-2 text-sm">{Array.isArray(item.Signals) ? item.Signals.join(', ') : item.Signals || '–'}</td>
+                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            )}
+
+            {/* Recently Listed Tab */}
+            {subTab === 'recently-listed' && (
+                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                    {sortedRecent.length === 0 ? (
+                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
+                    ) : (
+                        <table className="w-full text-sm">
+                            <thead className="border-b border-gray-200">
+                                <tr>
+                                    <th className="text-left py-2 px-2">Symbol</th>
+                                    <th className="text-left py-2 px-2">Name</th>
+                                    <th className="text-right py-2 px-2">Preis</th>
+                                    <th className="text-right py-2 px-2">7d%</th>
+                                    <th className="text-right py-2 px-2">Vol 24h</th>
+                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleRecentSort('NewScore')}>NewScore</th>
+                                    <th className="text-left py-2 px-2">Signal</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedRecent.map((item, idx) => (
+                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker(item.Symbol)}>
+                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
+                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
+                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
+                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
+                                        <td className="py-3 px-2 text-right">{formatMCap(item.Vol24h)}</td>
+                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.NewScore)}`}>{item.NewScore || '–'}</span></td>
+                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            )}
+
+            {/* Narratives Tab */}
+            {subTab === 'narratives' && (
+                <div className="card border border-gray-200 p-6 rounded-lg">
+                    {Object.keys(narratives).length === 0 ? (
+                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {Object.entries(narratives).map(([name, data]) => (
+                                <div key={name} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                                    <h3 className="font-semibold text-lg mb-3">{name}</h3>
+                                    <div className="space-y-2 text-sm">
+                                        <div><span className="text-gray-600">7d Avg:</span> <span className={getPercentClass(data.avg_7d)}>{data.avg_7d?.toFixed(1) || '–'}%</span></div>
+                                        <div><span className="text-gray-600">24h Avg:</span> <span className={getPercentClass(data.avg_24h)}>{data.avg_24h?.toFixed(1) || '–'}%</span></div>
+                                        <div><span className="text-gray-600">Count:</span> <span className="font-semibold">{data.count || 0}</span></div>
+                                        {data.leaders && data.leaders.length > 0 && (
+                                            <div className="mt-3 pt-3 border-t border-gray-300">
+                                                <p className="text-gray-600 font-semibold mb-1">Leaders:</p>
+                                                <div className="space-y-1">
+                                                    {data.leaders.slice(0, 3).map((leader, idx) => (
+                                                        <div key={idx} className="text-xs text-gray-700">
+                                                            {typeof leader === 'string' ? leader : leader.Symbol || '–'}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
                             ))}
-                        </tbody>
-                    </table>
-                )}
-            </div>
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 }
@@ -2944,7 +3072,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 const response = await fetch(`${API}/api/new-listing-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    const items = data.listings || [];
+                    const items = data.data || [];
                     if (items.length > 0) {
                         setResults(items);
                         setStats(data.stats);
@@ -2985,7 +3113,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         const res = await fetch(`${API}/api/new-listing-results`);
                         if (res.ok) {
                             const data = await res.json();
-                            const items = data.listings || [];
+                            const items = data.data || [];
                             const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
                             if (isNewData) {
                                 setResults(items);
