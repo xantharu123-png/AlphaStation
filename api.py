@@ -1007,7 +1007,7 @@ def test_email_alert():
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
         <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
         <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
-        <p>Du wirst ab jetzt automatisch benachrichtigt wenn ein Scanner <b>Grade S</b> oder <b>Grade A</b> Setups findet.</p>
+        <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A/B</b> (BI + Biotech), <b>Bear-Signale</b>, <b>ORB Breakouts</b> (Grade S/A).</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>'''
     )
