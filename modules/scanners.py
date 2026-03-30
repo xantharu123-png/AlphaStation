@@ -2514,6 +2514,52 @@ def _biotech_background_scan(poly_key):
                 else:
                     _event_result = "—"
 
+                # ── V2.6: BPIQ-Daten für Catalyst_Date + Event_Result nutzen ──
+                # Wenn BPIQ echte FDA-Dates hat, IMMER diese bevorzugen (statt News-Datum)
+                _bpiq_catalyst_date = ""
+                _bpiq_event_label = ""
+                if bpiq_data.get("bpiq_available") and bpiq_data.get("catalyst_readouts"):
+                    _top_bpiq = bpiq_data["catalyst_readouts"][0]
+                    _bpiq_cat_date = _top_bpiq.get("catalyst_date_text", "")
+                    _bpiq_days = _top_bpiq.get("days_until")
+                    _bpiq_category = _top_bpiq.get("category", "")
+                    _bpiq_stage = _top_bpiq.get("full_label", "")
+                    _bpiq_drug = _top_bpiq.get("drug_name", "")[:25]
+
+                    # Echtes FDA-Datum von BPIQ verwenden
+                    if _bpiq_cat_date and _bpiq_cat_date != "TBA":
+                        _bpiq_catalyst_date = _bpiq_cat_date
+                        # Auch catalyst_date überschreiben (News-Datum ersetzen)
+                        catalyst_date = _bpiq_cat_date
+
+                    # Event-Label zusammenbauen
+                    if _bpiq_stage:
+                        _bpiq_event_label = f"{_bpiq_stage}"
+                        if _bpiq_drug:
+                            _bpiq_event_label += f" — {_bpiq_drug}"
+
+                    # Event_Result aus BPIQ-Kategorie ableiten (wenn News kein Result hatte)
+                    if _event_result in ("—", " Catalyst", ""):
+                        if _bpiq_category == "OVERDUE":
+                            _event_result = "⏰ Überfällig"
+                        elif _bpiq_category == "IMMINENT":
+                            _event_result = "⏳ Ausstehend"
+                        elif _bpiq_category == "UPCOMING":
+                            _event_result = "📅 Geplant"
+                        elif _bpiq_category == "LATER":
+                            _event_result = "📋 Später"
+
+                    # Catalyst-Label mit BPIQ anreichern wenn besser
+                    if _bpiq_event_label and (not catalyst_label or catalyst_label == " Pipeline"):
+                        catalyst_label = _bpiq_event_label
+
+                # Datum-Validierung: Ungültige Daten abfangen
+                if catalyst_date:
+                    try:
+                        datetime.strptime(catalyst_date[:10], "%Y-%m-%d")
+                    except (ValueError, TypeError):
+                        catalyst_date = ""  # Ungültiges Datum entfernen
+
                 result = {
                     "Ticker": ticker,
                     "Name": (details.get("name", "") or stock.get("name", ""))[:30],

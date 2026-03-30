@@ -167,7 +167,7 @@ def _load_secrets():
 
 _SECRETS = _load_secrets()
 _EMAIL_COOLDOWN = {}
-_EMAIL_COOLDOWN_SEC = 3600 * 4  # 4h pro Ticker
+_EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker (war 4h)
 
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (secrets.toml fehlt)'}")
 
@@ -227,8 +227,9 @@ def _check_and_alert(scanner_name, cache_file):
             print(f"[Alert] {scanner_name}: Cache hat kein gültiges results-Array")
             return
         print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
-        # Grade-Schwellen pro Scanner — BI: S/A/B, Biotech: A/B (hat kein S)
-        _alert_grades = {"S", "A", "A+", "B"}
+        # V2.6: Grade-Schwellen VERSCHÄRFT — nur noch hochkarätige Setups
+        # BI: S/A (kein B mehr!), Biotech: A (hat kein S)
+        _alert_grades = {"S", "A", "A+"}
         alerts = []
         for r in results:
             if not isinstance(r, dict):
@@ -347,8 +348,17 @@ _BIOTECH_KEY_MAP = {
     "Risk_Flag": "risk_flag", "Catalyst": "catalyst", "Catalyst_Score": "catalyst_score",
     "Pipeline_Score": "pipeline_score", "Readout_Score": "readout_score",
     "Technical_Score": "technical_score", "Risk_Score": "risk_score",
-    "News_Momentum": "news_momentum", "RVOL": "rvol", "Price": "price",
-    "Market_Cap": "market_cap", "Chart_Health": "chart_health",
+    "Momentum_Score": "momentum_score", "News_Momentum": "news_momentum",
+    "RVOL": "rvol", "Preis": "price", "Price": "price",
+    "MCap_M": "mcap_m", "Market_Cap": "market_cap", "Shares_M": "shares_m",
+    "Chart_Health": "chart_health", "Chart": "chart", "Drawdown": "drawdown",
+    "Float_Cat": "float_cat", "Headline": "headline",
+    "Catalyst_Date": "catalyst_date", "Catalyst_Keyword": "catalyst_keyword",
+    "Readout_Label": "readout_label", "Event_Result": "event_result",
+    "BPIQ_Available": "bpiq_available", "BPIQ_Catalysts": "bpiq_catalysts",
+    "Selloff_Reason": "selloff_reason", "Negative_Flags": "negative_flags",
+    "Phase3": "phase3", "Phase2": "phase2", "Phase1": "phase1",
+    "Active_Trials": "active_trials",
 }
 
 def _normalize_keys(results: list, key_map: dict) -> list:
@@ -907,11 +917,14 @@ def _bear_scan_wrapper() -> None:
                         f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
                         f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                     )
-            # V2.5: Crash-Flash-Alerts — sofortige Email bei extremen Drops (> -10%)
+            # V2.6: Crash-Flash-Alerts — VERSCHÄRFT: nur bei extremen Drops (> -15%) ODER (> -10% UND Score >= 75)
             _crash_stocks = [bd for bd in result.get("breakdown_stocks", [])
-                             if isinstance(bd, dict) and bd.get("change_pct", 0) <= -10 and bd.get("score", 0) >= 50]
+                             if isinstance(bd, dict) and (
+                                 (bd.get("change_pct", 0) <= -15 and bd.get("score", 0) >= 50) or
+                                 (bd.get("change_pct", 0) <= -10 and bd.get("score", 0) >= 75)
+                             )]
             for _cs in _crash_stocks:
-                _cs_ck = f"crash_flash_{_cs.get('ticker','?')}_{datetime.now().strftime('%Y%m%d_%H')}"
+                _cs_ck = f"crash_flash_{_cs.get('ticker','?')}_{datetime.now().strftime('%Y%m%d')}"  # V2.6: 1x pro TAG (war pro Stunde)
                 if _cs_ck not in _EMAIL_COOLDOWN:
                     _EMAIL_COOLDOWN[_cs_ck] = time.time()
                     _cs_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
@@ -930,10 +943,12 @@ def _bear_scan_wrapper() -> None:
                     _send_email_alert(f"CRASH: {_cs.get('ticker','?')} {_cs.get('change_pct',0):.1f}%", _cs_body)
                     print(f"[Bear] CRASH FLASH sent for {_cs.get('ticker','?')} ({_cs.get('change_pct',0):.1f}%)")
 
-            # V2.5: Bear Summary Email — Cooldown pro Stunde statt pro Tag
+            # V2.6: Bear Summary Email — nur 2x pro Tag (alle 12h) UND nur wenn starke Signale
             _total_signals = len(_etf_rows) + len(_bd_rows)
-            if _total_signals > 0:
-                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d_%H')}"
+            # Nur senden wenn mindestens 3 Signale ODER ein ETF-Signal dabei ist
+            _has_strong_signal = len(_etf_rows) > 0 or _total_signals >= 3
+            if _total_signals > 0 and _has_strong_signal:
+                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}_{('AM' if datetime.now().hour < 12 else 'PM')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
                     _EMAIL_COOLDOWN[_bear_ck] = time.time()
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Signale</p>"
@@ -1280,7 +1295,7 @@ def test_email_alert():
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
         <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
         <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
-        <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A/B</b> (BI + Biotech), <b>Bear-Signale</b>, <b>ORB Breakouts</b> (Grade S/A).</p>
+        <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A</b> (BI + Biotech), <b>Bear (2x/Tag bei starken Signalen)</b>, <b>Crash Flash (≥-15%)</b>, <b>ORB Breakouts</b> (Grade S/A).</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>'''
     )

@@ -31,54 +31,129 @@ _BPIQ_CACHE_TIMESTAMP = 0
 _BPIQ_CACHE_TTL = 3600  # 1 hour
 
 def _load_bpiq_catalyst_cache():
-    """Load BPIQ catalyst cache from API if key is available, otherwise return empty dict.
+    """
+    Lädt ALLE Drugs mit Catalyst-Dates von BPIQ in einen In-Memory-Cache.
+    Korrekte Implementation: Pagination, Drug-Parsing, Category-Berechnung.
+    Cache-TTL: 4 Stunden (BPIQ Daten werden täglich aktualisiert).
 
     Returns:
-        dict: Cached BPIQ data keyed by ticker (e.g., {"AMGN": [{drug data}], ...})
+        dict: {TICKER: [{drug_name, stage_label, catalyst_date, catalyst_date_text,
+                         days_until, category, phase_mult, ...}], ...}
     """
     global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP
 
-    # Try to get BPIQ API key from environment
     bpiq_key = _os.getenv("BPIQ_API_KEY", "")
     if not bpiq_key:
-        # No API key available, return empty cache
         return {}
 
-    # Check if cache is still fresh (within 1 hour)
+    # Cache noch gültig? (4h = 14400s)
     now = time.time()
-    if _BPIQ_CATALYST_CACHE and (now - _BPIQ_CACHE_TIMESTAMP) < _BPIQ_CACHE_TTL:
+    if _BPIQ_CATALYST_CACHE and (now - _BPIQ_CACHE_TIMESTAMP) < 14400:
         return _BPIQ_CATALYST_CACHE
 
-    # Cache expired or empty, try to fetch from BPIQ API
     try:
-        # Attempt to fetch BPIQ data
-        # Expected endpoint format: https://api.bpiq.com/v1/catalysts?apikey=...
-        url = "https://api.bpiq.com/v1/catalysts"
-        params = {"apikey": bpiq_key}
-
-        resp = rate_limited_get(url, params=params, timeout=15)
-        if resp.status_code == 200:
+        all_drugs = []
+        for offset in range(0, 800, 200):
+            resp = rate_limited_get(
+                f"https://api.bpiq.com/api/v1/drugs/?has_catalyst=true&limit=200&offset={offset}",
+                headers={"Authorization": f"Token {bpiq_key}"},
+                timeout=15
+            )
+            if resp.status_code != 200:
+                break
             data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                break
+            all_drugs.extend(results)
 
-            # Parse response and index by ticker
-            # Expected format: {"data": {ticker: [drug objects]}}
-            if isinstance(data, dict):
-                if "data" in data:
-                    _BPIQ_CATALYST_CACHE = data.get("data", {})
-                elif "catalysts" in data:
-                    _BPIQ_CATALYST_CACHE = data.get("catalysts", {})
-                else:
-                    # Try to use the whole response as ticker mapping
-                    _BPIQ_CATALYST_CACHE = data
+        # Gruppiere nach Ticker mit vollständiger Daten-Aufbereitung
+        cache = {}
+        _now = datetime.now()
+        for drug in all_drugs:
+            ticker = drug.get("ticker", "").upper()
+            if not ticker:
+                continue
+
+            cat_date = drug.get("catalyst_date")
+            cat_text = drug.get("catalyst_date_text", "TBA")
+            stage = drug.get("stage_event", {})
+            stage_label = stage.get("stage_label", "")
+            event_label = stage.get("event_label", "")
+            full_label = stage.get("label", "")
+            bpiq_score = stage.get("score", 0)
+
+            # Tage bis Catalyst berechnen + Datum validieren
+            days_until = None
+            if cat_date:
+                try:
+                    _cd = datetime.strptime(cat_date[:10], "%Y-%m-%d")
+                    days_until = (_cd - _now).days
+                except (ValueError, TypeError):
+                    # Ungültiges Datum (z.B. "2026-03-35") → ignorieren
+                    cat_date = None
+                    cat_text = "TBA"
+
+            # Kategorie bestimmen
+            category = ""
+            if days_until is not None:
+                if days_until < 0:
+                    if abs(days_until) <= 90:
+                        category = "OVERDUE"
+                elif days_until <= 30:
+                    category = "IMMINENT"
+                elif days_until <= 90:
+                    category = "UPCOMING"
+                elif days_until <= 365:
+                    category = "LATER"
+
+            # Phase-Multiplikator
+            phase_mult = 1.0
+            if "Phase 3" in stage_label or "PDUFA" in stage_label:
+                phase_mult = 3.0
+            elif "Phase 2" in stage_label:
+                phase_mult = 2.0
+            elif "Phase 1" in stage_label:
+                phase_mult = 1.0
             else:
-                _BPIQ_CATALYST_CACHE = {}
+                phase_mult = 0.5
 
-            _BPIQ_CACHE_TIMESTAMP = now
+            entry = {
+                "drug_name": drug.get("drug_name", "")[:60],
+                "stage_label": stage_label,
+                "event_label": event_label,
+                "full_label": full_label,
+                "catalyst_date": cat_date,
+                "catalyst_date_text": cat_text,
+                "days_until": days_until,
+                "category": category,
+                "phase_mult": phase_mult,
+                "bpiq_score": bpiq_score,
+                "indications": drug.get("indications_text", ""),
+                "note": (drug.get("note", "") or "")[:200],
+                "source": drug.get("catalyst_source", ""),
+            }
+
+            if ticker not in cache:
+                cache[ticker] = []
+            cache[ticker].append(entry)
+
+        # Sortiere pro Ticker: OVERDUE/IMMINENT zuerst, dann nach Datum
+        cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2, "LATER": 3, "": 9}
+        for ticker in cache:
+            cache[ticker].sort(key=lambda x: (
+                cat_order.get(x["category"], 9),
+                x["days_until"] if x["days_until"] is not None else 9999
+            ))
+
+        _BPIQ_CATALYST_CACHE = cache
+        _BPIQ_CACHE_TIMESTAMP = now
+        print(f"[BPIQ] Cache geladen: {len(all_drugs)} Drugs, {len(cache)} Tickers")
+        return cache
+
     except Exception as e:
-        # API error, keep existing cache or return empty
-        pass
-
-    return _BPIQ_CATALYST_CACHE
+        print(f"[BPIQ] FEHLER beim Laden: {e}")
+        return _BPIQ_CATALYST_CACHE or {}
 
 # Catalyst detection keywords (used by _detect_catalyst)
 CATALYST_KEYWORDS = {
