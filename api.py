@@ -906,9 +906,10 @@ def _scheduler_loop():
 
         if cache_age is not None and cache_age < interval_sec:
             # Cache ist frisch genug → NICHT neu scannen
-            last_run_times[name] = time.time() - cache_age  # So als ob er vor cache_age Sekunden lief
+            last_run_times[name] = time.time() - cache_age
             next_run = time.time() + (interval_sec - cache_age)
             with _scan_lock:
+                _scan_status[name]["last_run"] = datetime.fromtimestamp(time.time() - cache_age).isoformat()
                 _scan_status[name]["next_run"] = datetime.fromtimestamp(next_run).isoformat()
             print(f"[Scheduler] {name}: Cache frisch ({int(cache_age)}s alt, Intervall {interval_sec}s) — übersprungen, nächster in {int(interval_sec - cache_age)}s")
         else:
