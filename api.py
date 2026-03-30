@@ -48,7 +48,7 @@ from modules.scanners import (
     _biotech_progress_read,
 )
 from modules.helpers import get_current_trading_session
-from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily
+from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily, fetch_daily_candles_crypto
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
@@ -1730,6 +1730,67 @@ def get_chart_data(
 
         return result
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/crypto-chart")
+def get_crypto_chart(
+    coin_id: str = Query(..., description="CoinGecko coin ID (e.g. bitcoin, based-one)"),
+    days: int = Query(30, description="Number of days")
+):
+    """Get OHLCV chart data for crypto coins via CoinGecko."""
+    try:
+        bars = fetch_daily_candles_crypto(coin_id, days=min(days, 90))
+        if not bars or len(bars) < 2:
+            raise HTTPException(status_code=404, detail=f"No chart data for '{coin_id}'")
+
+        # Convert to TradingView Lightweight Charts format
+        candles = []
+        vol_data = []
+        for bar in bars:
+            ts = int(bar.get("t", 0) / 1000) if bar.get("t", 0) > 1e10 else int(bar.get("t", 0))
+            candle = {
+                "time": ts,
+                "open": round(bar["o"], 6),
+                "high": round(bar["h"], 6),
+                "low": round(bar["l"], 6),
+                "close": round(bar["c"], 6),
+            }
+            candles.append(candle)
+            vol_data.append({
+                "time": ts,
+                "value": int(bar.get("v", 0)),
+                "color": "rgba(16,185,129,0.3)" if bar["c"] >= bar["o"] else "rgba(220,38,38,0.3)"
+            })
+
+        # Simple EMA overlays
+        closes = [c["close"] for c in candles]
+        times = [c["time"] for c in candles]
+        ema_overlays = {}
+        for period in [9, 20, 50]:
+            if len(closes) >= period:
+                try:
+                    ema_vals = calculate_ema_series(closes, period)
+                    ema_data = []
+                    start = len(times) - len(ema_vals)
+                    for i, val in enumerate(ema_vals):
+                        if val is not None:
+                            ema_data.append({"time": times[start + i], "value": round(val, 6)})
+                    if ema_data:
+                        ema_overlays[f"ema{period}"] = ema_data
+                except Exception:
+                    pass
+
+        return {
+            "ticker": coin_id,
+            "timeframe": "1D",
+            "candles": candles,
+            "volume": vol_data,
+            "ema": ema_overlays,
+        }
     except HTTPException:
         raise
     except Exception as e:

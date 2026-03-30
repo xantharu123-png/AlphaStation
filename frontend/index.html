@@ -527,20 +527,27 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         fetchData();
     }, [ticker, isCrypto]);
 
-    // Fetch chart data — skip for crypto
+    // Fetch chart data — crypto uses CoinGecko, stocks use Polygon
     useEffect(() => {
-        if (isCrypto) {
-            setChartData({ ticker, timeframe, candles: [], error: 'Crypto — kein Polygon-Chart verfügbar' });
-            return;
-        }
         const fetchChart = async () => {
             try {
-                const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
-                const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`);
-                if (res.ok) {
-                    setChartData(await res.json());
+                if (isCrypto) {
+                    // Crypto: use CoinGecko chart via coin ID
+                    const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
+                    const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`);
+                    if (res.ok) {
+                        setChartData(await res.json());
+                    } else {
+                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart nicht verfügbar' });
+                    }
                 } else {
-                    setChartData({ ticker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
+                    const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
+                    const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`);
+                    if (res.ok) {
+                        setChartData(await res.json());
+                    } else {
+                        setChartData({ ticker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
+                    }
                 }
             } catch (err) {
                 console.error('Chart data error:', err);
