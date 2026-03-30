@@ -44,6 +44,8 @@ from modules.scanners import (
     _biotech_background_scan,
     _bi_cache_load,
     _biotech_cache_load,
+    _bi_progress_read,
+    _biotech_progress_read,
 )
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily
@@ -829,8 +831,6 @@ def _run_scan_safe(name, func, timeout_min=None):
             func()
             elapsed = round(time.time() - start_t, 1)
             print(f"[Scheduler] {name} DONE in {elapsed}s")
-            with _scan_lock:
-                _scan_status[name]["last_run"] = datetime.now().isoformat()
         except Exception as e:
             elapsed = round(time.time() - start_t, 1)
             print(f"[Scheduler] {name} ERROR after {elapsed}s: {e}")
@@ -840,6 +840,8 @@ def _run_scan_safe(name, func, timeout_min=None):
             with _scan_lock:
                 _scan_status[name]["running"] = False
                 _scan_status[name]["_started_at"] = None
+                # last_run IMMER aktualisieren (auch bei Fehler) — sonst zeigt UI ewig alten Wert
+                _scan_status[name]["last_run"] = datetime.now().isoformat()
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
@@ -1036,7 +1038,7 @@ def get_market_status():
 
 @app.get("/api/scan-status")
 def get_scan_status():
-    """Get status of all background scans (running, last_run, next_run)."""
+    """Get status of all background scans (running, last_run, next_run) + progress."""
     with _scan_lock:
         scans_copy = {}
         for name, status in _scan_status.items():
@@ -1049,6 +1051,24 @@ def get_scan_status():
             # Add runtime info for running scans
             if status["running"] and status.get("_started_at"):
                 scans_copy[name]["running_since_sec"] = int(time.time() - status["_started_at"])
+
+    # Progress-Daten aus /tmp/ Files anhängen (BI + Biotech)
+    for scan_key, reader in [("bi_long", lambda: _bi_progress_read("long")),
+                              ("bi_short", lambda: _bi_progress_read("short")),
+                              ("biotech", _biotech_progress_read)]:
+        try:
+            prog = reader()
+            if prog and isinstance(prog, dict):
+                scans_copy[scan_key]["progress"] = {
+                    "checked": prog.get("checked", 0),
+                    "total": prog.get("total", 0),
+                    "hits": prog.get("hits", 0),
+                    "detail": prog.get("detail", ""),
+                    "status": prog.get("status", ""),
+                }
+        except Exception:
+            pass
+
     return {
         "scheduler_running": _scheduler_running,
         "scans": scans_copy,
@@ -2732,15 +2752,34 @@ def _btc_divergenz_wrapper() -> None:
     """Compare BTC vs correlated assets for divergence signals."""
     try:
         assets = [
+            # Crypto
             ("X:BTCUSD", "BTC", "Bitcoin"),
             ("X:ETHUSD", "ETH", "Ethereum"),
+            ("X:SOLUSD", "SOL", "Solana"),
+            ("X:XRPUSD", "XRP", "Ripple"),
+            ("X:DOGEUSD", "DOGE", "Dogecoin"),
+            ("X:AVAXUSD", "AVAX", "Avalanche"),
+            ("X:LINKUSD", "LINK", "Chainlink"),
+            ("X:ADAUSD", "ADA", "Cardano"),
+            ("X:DOTUSD", "DOT", "Polkadot"),
+            ("X:MATICUSD", "MATIC", "Polygon"),
+            ("X:AAVEUSD", "AAVE", "Aave"),
+            ("X:UNIUSD", "UNI", "Uniswap"),
+            # BTC-korrelierte Aktien
             ("MSTR", "MSTR", "MicroStrategy"),
             ("COIN", "COIN", "Coinbase"),
             ("MARA", "MARA", "Marathon Digital"),
             ("RIOT", "RIOT", "Riot Platforms"),
             ("CLSK", "CLSK", "CleanSpark"),
             ("BITF", "BITF", "Bitfarms"),
+            ("HUT", "HUT", "Hut 8 Mining"),
+            ("CIFR", "CIFR", "Cipher Mining"),
+            ("IREN", "IREN", "Iris Energy"),
+            ("BTDR", "BTDR", "Bitdeer Technologies"),
             ("GBTC", "GBTC", "Grayscale BTC Trust"),
+            ("IBIT", "IBIT", "iShares Bitcoin Trust"),
+            ("ETHE", "ETHE", "Grayscale ETH Trust"),
+            ("BITO", "BITO", "ProShares BTC Strategy"),
         ]
         results = []
         btc_data = None
