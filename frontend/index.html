@@ -1719,23 +1719,50 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung%</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('preis')}>Preis</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('mcap_m')}>MCap</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL</th>
                             <th className="text-left py-2 px-2">Catalyst</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('event_result')}>Ergebnis</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('chart_health')}>Chart</th>
+                            <th className="text-left py-2 px-2">Sentiment</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {sorted.map((item, idx) => (
+                        {sorted.map((item, idx) => {
+                            const gradeColor = item.grade === 'S' ? '#7c3aed' : item.grade === 'A' ? '#059669' : item.grade === 'B' ? '#2563eb' : '#6b7280';
+                            const resultColor = (item.event_result || '').includes('Positiv') ? '#059669' : (item.event_result || '').includes('Negativ') ? '#dc2626' : '#9ca3af';
+                            return (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
-                                <td className="py-3 px-2">{item.catalyst}</td>
+                                <td className="py-3 px-2">
+                                    <span style={{ color: gradeColor, fontWeight: 700 }}>{item.grade}</span>
+                                    <span className="text-gray-400 text-xs ml-1">{item.score}</span>
+                                </td>
+                                <td className="py-3 px-2">
+                                    <div className="font-semibold">{item.ticker}</div>
+                                    <div className="text-xs text-gray-400 truncate" style={{maxWidth:'120px'}}>{item.name}</div>
+                                </td>
+                                <td className="py-3 px-2 text-right font-mono">${item.preis?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right text-xs">{item.mcap_m ? (item.mcap_m >= 1000 ? (item.mcap_m/1000).toFixed(1)+'B' : item.mcap_m.toFixed(0)+'M') : '–'}</td>
+                                <td className={`py-3 px-2 text-right ${item.rvol >= 2 ? 'color-positive font-semibold' : item.rvol >= 1.3 ? 'color-positive' : ''}`}>{item.rvol?.toFixed(1)}x</td>
+                                <td className="py-3 px-2 text-xs" style={{maxWidth:'180px'}}>
+                                    <div>{item.catalyst}</div>
+                                    {item.catalyst_date && <div className="text-gray-400">{item.catalyst_date}</div>}
+                                </td>
+                                <td className="py-3 px-2" style={{ color: resultColor, fontWeight: 600 }}>
+                                    {(item.event_result || '').includes('Positiv') ? '✅ Positiv' : (item.event_result || '').includes('Negativ') ? '❌ Negativ' : (item.event_result || '').includes('Ausstehend') ? '⏳ Ausstehend' : '–'}
+                                </td>
+                                <td className="py-3 px-2">
+                                    <span className={`text-xs px-2 py-0.5 rounded ${item.chart_health >= 7 ? 'bg-green-100 text-green-700' : item.chart_health >= 4 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                                        {item.chart || '–'}
+                                    </span>
+                                </td>
+                                <td className="py-3 px-2 text-xs">{item.sentiment || '–'}</td>
                             </tr>
-                        ))}
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>
