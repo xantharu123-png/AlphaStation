@@ -827,15 +827,18 @@ def _bi_cache_save(results, direction="long"):
     """Speichert BI-Ergebnisse im Cache."""
     try:
         cache = {
+            "cached_at": datetime.now().isoformat(),
             "timestamp": time.time(),
             "direction": direction,
             "count": len(results),
             "results": results
         }
-        with open(_bi_cache_path(direction), "w") as f:
+        path = _bi_cache_path(direction)
+        with open(path, "w") as f:
             json.dump(cache, f, default=str)
-    except Exception:
-        pass
+        print(f"[BI {direction}] Cache gespeichert: {len(results)} Ergebnisse → {path}")
+    except Exception as e:
+        print(f"[BI {direction}] FEHLER beim Cache-Speichern: {e}")
 
 
 def _bi_progress_read(direction="long"):
@@ -1356,10 +1359,12 @@ def _biotech_progress_read():
 
 def _biotech_cache_save(results):
     try:
-        with open(_biotech_cache_file(), "w") as f:
-            json.dump({"results": results, "timestamp": time.time()}, f, default=str)
-    except Exception:
-        pass
+        path = _biotech_cache_file()
+        with open(path, "w") as f:
+            json.dump({"cached_at": datetime.now().isoformat(), "results": results, "timestamp": time.time()}, f, default=str)
+        print(f"[Biotech] Cache gespeichert: {len(results)} Ergebnisse → {path}")
+    except Exception as e:
+        print(f"[Biotech] FEHLER beim Cache-Speichern: {e}")
 
 
 def _biotech_cache_load(max_age_hours=2):

@@ -689,10 +689,20 @@ def _init_scan_status_from_cache():
             try:
                 with open(cache_path, "r") as f:
                     cache_data = json.load(f)
-                cached_at = cache_data.get("cached_at")
-                if cached_at:
-                    _scan_status[scan_name]["last_run"] = cached_at
-                    print(f"[Init] {scan_name} last_run restored from cache: {cached_at}")
+                cached_at = None
+                # Neues Format: ISO string
+                if isinstance(cache_data, dict) and cache_data.get("cached_at"):
+                    cached_at = cache_data["cached_at"]
+                # Altes Scanner-Format: Unix timestamp
+                elif isinstance(cache_data, dict) and "timestamp" in cache_data:
+                    ts = cache_data["timestamp"]
+                    if isinstance(ts, (int, float)) and ts > 1000000000:
+                        cached_at = datetime.fromtimestamp(ts).isoformat()
+                # Fallback: File modification time
+                if not cached_at:
+                    cached_at = datetime.fromtimestamp(os.path.getmtime(cache_path)).isoformat()
+                _scan_status[scan_name]["last_run"] = cached_at
+                print(f"[Init] {scan_name} last_run restored: {cached_at}")
             except Exception as e:
                 print(f"[Init] Could not read cache for {scan_name}: {e}")
 
@@ -1849,7 +1859,7 @@ def get_scan_results(
 
 
 @app.post("/api/bi-scan")
-def trigger_bi_scan(request: BIScanRequest, background_tasks: BackgroundTasks):
+def trigger_bi_scan(request: BIScanRequest):
     """Trigger BI background scan (long or short direction)."""
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
@@ -1857,7 +1867,8 @@ def trigger_bi_scan(request: BIScanRequest, background_tasks: BackgroundTasks):
     if request.direction not in ["long", "short"]:
         raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
 
-    background_tasks.add_task(_bi_background_scan_wrapper, request.direction)
+    # Thread statt BackgroundTasks — überlebt Browser-Reload
+    _run_scan_safe(f"bi_{request.direction}", lambda: _bi_background_scan_wrapper(request.direction))
 
     return {
         "status": "started",
@@ -1894,12 +1905,12 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
 
 
 @app.post("/api/bear-scan")
-def trigger_bear_scan(background_tasks: BackgroundTasks):
+def trigger_bear_scan():
     """Trigger bear scanner (short opportunities)."""
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
 
-    background_tasks.add_task(_bear_scan_wrapper)
+    _run_scan_safe("bear", _bear_scan_wrapper)
 
     return {
         "status": "started",
@@ -1930,12 +1941,12 @@ def get_bear_results():
 
 
 @app.post("/api/biotech-scan")
-def trigger_biotech_scan(background_tasks: BackgroundTasks):
+def trigger_biotech_scan():
     """Trigger biotech background scan (FDA catalysts, clinical trials)."""
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
 
-    background_tasks.add_task(_biotech_scan_wrapper)
+    _run_scan_safe("biotech", _biotech_scan_wrapper)
 
     return {
         "status": "started",
@@ -2563,8 +2574,8 @@ def _early_movers_wrapper() -> None:
 
 
 @app.post("/api/early-movers-scan")
-def trigger_early_movers(background_tasks: BackgroundTasks):
-    background_tasks.add_task(_early_movers_wrapper)
+def trigger_early_movers():
+    _run_scan_safe("early_movers", _early_movers_wrapper)
     return {"status": "started", "message": "Early Movers scan started"}
 
 
@@ -2586,10 +2597,10 @@ CRASH_MONITOR_CACHE = "/tmp/crash_monitor_cache.json"
 
 
 @app.post("/api/crash-monitor-scan")
-def trigger_crash_monitor(background_tasks: BackgroundTasks):
+def trigger_crash_monitor():
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
-    background_tasks.add_task(_crash_monitor_wrapper)
+    _run_scan_safe("crash_monitor", _crash_monitor_wrapper)
     return {"status": "started", "message": "Crash monitor scan started"}
 
 
@@ -2735,10 +2746,10 @@ def _btc_divergenz_wrapper() -> None:
 
 
 @app.post("/api/btc-divergenz-scan")
-def trigger_btc_divergenz(background_tasks: BackgroundTasks):
+def trigger_btc_divergenz():
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
-    background_tasks.add_task(_btc_divergenz_wrapper)
+    _run_scan_safe("btc_divergenz", _btc_divergenz_wrapper)
     return {"status": "started", "message": "BTC Divergenz scan started"}
 
 
@@ -2871,10 +2882,10 @@ def _money_flow_wrapper() -> None:
 
 
 @app.post("/api/money-flow-scan")
-def trigger_money_flow(background_tasks: BackgroundTasks):
+def trigger_money_flow():
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
-    background_tasks.add_task(_money_flow_wrapper)
+    _run_scan_safe("money_flow", _money_flow_wrapper)
     return {"status": "started", "message": "Money Flow scan started"}
 
 
@@ -2971,12 +2982,12 @@ def _new_listing_wrapper() -> None:
 
 
 @app.post("/api/new-listing-scan")
-def trigger_new_listing_scan(background_tasks: BackgroundTasks):
+def trigger_new_listing_scan():
     """Trigger new listing scanner (Crypto.com and other exchanges)."""
     if not HAS_NEW_LISTING_SCANNER:
         raise HTTPException(status_code=400, detail="New listing scanner module not available")
 
-    background_tasks.add_task(_new_listing_wrapper)
+    _run_scan_safe("new_listing", _new_listing_wrapper)
     return {"status": "started", "message": "New Listing scan started"}
 
 
@@ -3072,12 +3083,12 @@ def _volume_spikes_wrapper() -> None:
 
 
 @app.post("/api/volume-spikes-scan")
-def trigger_volume_spikes(background_tasks: BackgroundTasks):
+def trigger_volume_spikes():
     """Trigger volume spikes scanner."""
     if not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
 
-    background_tasks.add_task(_volume_spikes_wrapper)
+    _run_scan_safe("volume_spikes", _volume_spikes_wrapper)
     return {"status": "started", "message": "Volume Spikes scan started"}
 
 
@@ -3525,7 +3536,7 @@ def _orb_scanner_wrapper() -> None:
 
 
 @app.post("/api/orb-scan")
-def trigger_orb_scan(background_tasks: BackgroundTasks):
+def trigger_orb_scan():
     """Trigger ORB Scanner (Opening Range Breakout) — nur aktiv 9:45-11:00 ET Mo-Fr."""
     _run_scan_safe("orb", _orb_scanner_wrapper)
     return {"status": "started", "message": "ORB scan triggered"}
