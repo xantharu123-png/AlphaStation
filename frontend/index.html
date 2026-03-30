@@ -468,7 +468,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [customWidth, setCustomWidth] = useState(null);
     const [customHeight, setCustomHeight] = useState(null);
     const [timeframe, setTimeframe] = useState('1D');
-    const [overlays, setOverlays] = useState({ ema: true, vwap: true, sr: true, fib: false, patterns: true, bb: false, vrvp: false, vol: true });
+    const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
     const chartContainer = useRef(null);
     const chart = useRef(null);
     const candleSeries = useRef(null);
@@ -1099,7 +1099,26 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 ) : !chartData ? (
                     <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>
                 ) : null}
-                <div ref={chartContainer} className="chart-container" style={{ borderRadius: '8px 8px 0 0', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
+                <div style={{ position: 'relative' }}>
+                    {/* V2.5: Expand-Button oben links im Chart */}
+                    {chartData && chartData.candles && chartData.candles.length > 0 && (
+                        <button onClick={() => {
+                            const halfScreen = Math.round(window.innerWidth * 0.5);
+                            if (customWidth && customWidth >= halfScreen - 50) {
+                                setCustomWidth(null); setSidebarMode('normal');
+                            } else {
+                                setCustomWidth(halfScreen); setSidebarMode('custom');
+                            }
+                        }}
+                        style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 10, background: 'rgba(30,30,50,0.8)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '6px', padding: '4px 8px', cursor: 'pointer', color: '#ccc', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '4px', backdropFilter: 'blur(4px)' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(59,130,246,0.6)'; e.currentTarget.style.color = '#fff'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(30,30,50,0.8)'; e.currentTarget.style.color = '#ccc'; }}
+                        title={customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? 'Sidebar verkleinern' : 'Sidebar auf 50% erweitern'}>
+                            <span style={{ fontSize: '16px' }}>{customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? '⊟' : '⊞'}</span>
+                        </button>
+                    )}
+                    <div ref={chartContainer} className="chart-container" style={{ borderRadius: '8px 8px 0 0', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
+                </div>
                 {/* V2.4: Chart-Höhe Drag-Handle */}
                 {chartData && chartData.candles && chartData.candles.length > 0 && (
                     <div onMouseDown={startHeightResize}
