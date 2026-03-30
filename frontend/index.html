@@ -971,7 +971,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 chart.current = null;
             }
         };
-    }, [chartData, sidebarMode, customWidth, customHeight, overlays]);
+    }, [chartData, sidebarMode, customWidth, customHeight, overlays, tickerData]);
 
     if (loading && !tickerData) {
         return (

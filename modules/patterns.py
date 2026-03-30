@@ -1724,8 +1724,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
     # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
     # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation
-    directional_signals = sum(1 for d in details if "" in d or "" in d)
-    direction_confidence = round((directional_signals / 20) * 100)
+    # V2.7: Fix — "" in d war immer True (Emojis verloren beim Refactoring)
+    # Statt Emoji-Suche: Score-basierte Konfidenz (akkurater als String-Matching)
+    direction_confidence = round((score / max_score) * 100) if max_score > 0 else 0
 
     # Smart Money Sub-Score: Inline-Counter sm_fires/sm_hits werden direkt
     # bei jedem BOOSTED-Signal inkrementiert (Signale 3,7,8,11,15,17)

@@ -2010,8 +2010,8 @@ def _biotech_technical_score(poly_key, ticker):
             else:
                 details["drawdown"] = " Normaler Pullback (−{:.0f}%)".format(drawdown_pct)
 
-        # B) Trend
-        if details.get("trend", "").startswith(""):
+        # B) Trend — V2.7: Fix startswith("") war immer True (Emoji verloren)
+        if "Abwärtstrend" in details.get("trend", ""):
             chart_health -= 2
 
         # C) Bearish Price Action letzte 5 Tage
@@ -2350,9 +2350,13 @@ def _biotech_background_scan(poly_key):
                 )
 
                 # H) Readout-Bonus: Überfällige/nahende Trial-Readouts boosten den Score
-                # V68: Cap bei 100 NACH Readout-Addition (vorher konnte Score > 100 werden)
+                # V2.7: FIX — readout_score war DOPPELT gezählt (einmal in pipeline_score, einmal hier)
+                # Nur noch als Bonus wenn KEIN pipeline_score aus BPIQ vorhanden
                 _readout_bonus = trial_data.get("readout_score", 0)
-                total_score = min(100, total_score + _readout_bonus)
+                if trial_data.get("pipeline_score", 0) == 0 and _readout_bonus > 0:
+                    total_score = min(100, total_score + _readout_bonus)
+                else:
+                    total_score = min(100, total_score)
 
                 # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
                 # READOUT-OVERRIDE: Wenn ein Readout überfällig/imminent ist, senke den Threshold
@@ -2413,7 +2417,8 @@ def _biotech_background_scan(poly_key):
 
                 # Readout-Label: Wenn vorhanden, ergänze Catalyst-Label
                 _readout_lbl = trial_data.get("readout_label", "")
-                if _readout_lbl and not catalyst_label.startswith("") and not catalyst_label.startswith(""):
+                if _readout_lbl and ("Pipeline" in catalyst_label or not catalyst_label):
+                    # V2.7: Fix — startswith("") war immer True → Block war Dead Code
                     # Readout ist das primäre Signal wenn kein stärkerer Catalyst da ist
                     if trial_data.get("readout_score", 0) >= 5:
                         catalyst_label = _readout_lbl
@@ -2638,7 +2643,7 @@ def _biotech_background_scan(poly_key):
                     "Risk_Details": risk_data.get("risk_details", []),
                     "Tech_Details": _tech_details,
                     "Sentiment": momentum_data.get("sentiment_summary", ""),
-                    "Catalysts_All": news_data.get("catalysts", []),
+                    # V2.7: Duplicate "Catalysts_All" entfernt (limitiert auf [:5] in Zeile oben)
                 }
                 results.append(result)
 

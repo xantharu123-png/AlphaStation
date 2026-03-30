@@ -1424,8 +1424,9 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         lows = [b["l"] for b in bars]
         volumes = [b.get("v", 0) for b in bars]
 
-        ma20 = round(sum(closes[:20]) / min(len(closes), 20), 2)
-        ma50 = round(sum(closes[:50]) / min(len(closes), 50), 2) if len(closes) >= 50 else None
+        # V2.7: FIX — MA nur berechnen wenn genug Bars vorhanden (sonst None statt falscher Wert)
+        ma20 = round(sum(closes[:20]) / 20, 2) if len(closes) >= 20 else None
+        ma50 = round(sum(closes[:50]) / 50, 2) if len(closes) >= 50 else None
         avg_vol = sum(volumes[1:21]) / min(len(volumes) - 1, 20) if len(volumes) > 1 else 1
         rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
 
