@@ -1513,56 +1513,57 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const [isScanning, setIsScanning] = useState(scanCache.bi_scanning || false);
     const [results, setResults] = useState(scanCache.bi_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
-    const pollTimeoutRef = useRef(null);
+    const pollRef = useRef(null);
 
     // Cleanup polling on unmount
     useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+        return () => { if (pollRef.current) clearInterval(pollRef.current); };
     }, []);
+
+    // V2.2: Live-Polling — lädt Zwischenergebnisse während Scan läuft
+    const startLivePolling = () => {
+        if (pollRef.current) clearInterval(pollRef.current);
+        pollRef.current = setInterval(async () => {
+            try {
+                // Prüfe ob Scan noch läuft
+                const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
+                const statusRes = await fetch(`${API}/api/scan-status`);
+                let scanRunning = true;
+                if (statusRes.ok) {
+                    const status = await statusRes.json();
+                    const s = status.scans?.[scanKey];
+                    scanRunning = s?.running || false;
+                }
+                // Lade aktuelle Ergebnisse (inkl. Zwischenergebnisse)
+                const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    const items = data.data || [];
+                    if (items.length > 0) {
+                        setResults(items);
+                        updateScanCache('bi_results', items);
+                    }
+                }
+                // Scan fertig → Polling stoppen
+                if (!scanRunning) {
+                    clearInterval(pollRef.current);
+                    pollRef.current = null;
+                    setIsScanning(false);
+                    updateScanCache('bi_scanning', false);
+                    if (window.addToast) window.addToast('Scan fertig', 'success');
+                }
+            } catch (e) { console.error(e); }
+        }, 8000); // Alle 8 Sekunden
+    };
 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('bi_scanning', true);
-        // Save current cached_at BEFORE scan starts
-        let prevCachedAt = null;
-        try {
-            const preCheck = await fetch(`${API}/api/bi-results?direction=${direction}`);
-            if (preCheck.ok) {
-                const preData = await preCheck.json();
-                prevCachedAt = preData.cached_at || null;
-            }
-        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
-                if (window.addToast) window.addToast('Scan gestartet...', 'info');
-                // Poll for results with increasing intervals
-                const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
-                        setIsScanning(false);
-                        updateScanCache('bi_scanning', false);
-                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
-                        return;
-                    }
-                    try {
-                        const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
-                        if (res.ok) {
-                            const data = await res.json();
-                            const items = data.data || [];
-                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
-                            if (isNewData) {
-                                setResults(items);
-                                updateScanCache('bi_results', items);
-                                setIsScanning(false);
-                                updateScanCache('bi_scanning', false);
-                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
-                                return;
-                            }
-                        }
-                    } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
-                };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                if (window.addToast) window.addToast('Scan gestartet — Ergebnisse erscheinen live...', 'info');
+                startLivePolling();
             } else {
                 setIsScanning(false);
                 updateScanCache('bi_scanning', false);
@@ -1574,7 +1575,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
         }
     };
 
-    // Always load latest results from server on mount / direction change
+    // Load results on mount / direction change + auto-detect running scan
     useEffect(() => {
         const fetchResults = async () => {
             try {
@@ -1587,9 +1588,20 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         updateScanCache('bi_results', items);
                     }
                 }
+                // Auto-detect: Läuft gerade ein Scan? Dann Live-Polling starten
+                const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
+                const statusRes = await fetch(`${API}/api/scan-status`);
+                if (statusRes.ok) {
+                    const status = await statusRes.json();
+                    if (status.scans?.[scanKey]?.running) {
+                        setIsScanning(true);
+                        startLivePolling();
+                    }
+                }
             } catch (err) { console.error('Error:', err); }
         };
         fetchResults();
+        return () => { if (pollRef.current) clearInterval(pollRef.current); };
     }, [direction]);
 
     return (

@@ -1309,14 +1309,18 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["PatternLabel"] = "Keine Umkehr-Patterns"
 
                 results.append(candidate)
+
+                # V2.2: Live-Zwischenergebnisse speichern — alle 5 neuen Treffer
+                if len(results) % 5 == 0 or len(results) == 1:
+                    _live = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+                    _bi_cache_save(_live, direction=direction)
+                    print(f"[BI {direction}] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
             except Exception as e:
                 print(f"[BI {direction}] Error analyzing {ticker}: {e}")
                 continue
 
-        # Sortiere nach Score
+        # Finale Sortierung + Speichern
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
-
-        # Cache + Progress speichern
         _bi_cache_save(results, direction=direction)
 
         avg_sc = round(score_sum / max(1, score_count))
@@ -2554,15 +2558,19 @@ def _biotech_background_scan(poly_key):
                 }
                 results.append(result)
 
+                # V2.2: Live-Zwischenergebnisse
+                if len(results) % 3 == 0 or len(results) == 1:
+                    _live = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+                    _biotech_cache_save(_live)
+                    print(f"[BIOTECH] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
+
             except Exception as _bio_err:
                 import traceback
                 print(f"[BIOTECH] Fehler bei {ticker}: {_bio_err}\n{traceback.format_exc()}")
                 continue
 
-        # Sortiere nach Score
+        # Finale Sortierung + Speichern
         results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
-
-        # Cache speichern
         _biotech_cache_save(results)
 
         top_score = results[0]["Score"] if results else 0
