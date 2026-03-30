@@ -135,6 +135,7 @@ BI_CACHE_LONG = "/tmp/bi_cache_long.json"
 BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
+STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"
 
 
 # ── Email Alert System ──
@@ -464,6 +465,98 @@ def _biotech_scan_wrapper() -> None:
         traceback.print_exc()
 
 
+def _strategy_scan_wrapper(strategy_name: str) -> None:
+    """Generischer Snapshot-basierter Scanner für PM/AH/Standard-Strategien.
+    Nutzt Polygon Gainers/Losers Snapshot und filtert nach Strategy-Kriterien."""
+    try:
+        all_strategies = {**STRATEGIES, **CRYPTO_STRATEGIES}
+        strat = all_strategies.get(strategy_name)
+        if not strat:
+            print(f"[Strategy Scan] Strategie '{strategy_name}' nicht gefunden")
+            return
+
+        filters = strat.get("filters", {})
+        change_min, change_max = filters.get("Change %", (-999, 999))
+        price_min, price_max = filters.get("Preis", (0, 999999))
+        rvol_min, rvol_max = filters.get("RVOL", (0, 999))
+        close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
+
+        print(f"[Strategy Scan] {strategy_name}: Change {change_min}..{change_max}%, Preis ${price_min}..${price_max}")
+
+        # Polygon Snapshot: Gainers + Losers
+        results = []
+        for endpoint in ["gainers", "losers"]:
+            try:
+                url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250}, timeout=15)
+                if resp.status_code != 200:
+                    print(f"[Strategy Scan] {endpoint} API error: {resp.status_code}")
+                    continue
+                tickers = resp.json().get("tickers", [])
+                for t in tickers:
+                    try:
+                        ticker = t.get("ticker", "")
+                        day = t.get("day", {})
+                        prev = t.get("prevDay", {})
+                        if not ticker or not prev.get("c"):
+                            continue
+
+                        price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                        prev_close = prev.get("c", 0)
+                        if not price or not prev_close:
+                            continue
+
+                        change_pct = ((price - prev_close) / prev_close * 100)
+                        volume = day.get("v", 0)
+                        prev_vol = prev.get("v", 1)
+                        rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
+
+                        # Close Position (wo im Tagesrange: 0=Low, 1=High)
+                        day_high = day.get("h", price)
+                        day_low = day.get("l", price)
+                        day_range = day_high - day_low
+                        close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
+
+                        # Filter anwenden
+                        if not (change_min <= change_pct <= change_max):
+                            continue
+                        if not (price_min <= price <= price_max):
+                            continue
+                        if "RVOL" in filters and not (rvol_min <= rvol <= rvol_max):
+                            continue
+                        if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                            continue
+
+                        results.append({
+                            "Ticker": ticker,
+                            "ticker": ticker,
+                            "Preis": round(price, 2),
+                            "Change_Pct": round(change_pct, 2),
+                            "Volume": volume,
+                            "RVOL": rvol,
+                            "Prev_Close": round(prev_close, 2),
+                            "Day_High": round(day_high, 2),
+                            "Day_Low": round(day_low, 2),
+                            "Close_Position": round(close_pos, 2),
+                        })
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"[Strategy Scan] {endpoint} error: {e}")
+
+        # Sortieren nach |Change%| absteigend
+        results.sort(key=lambda x: abs(x.get("Change_Pct", 0)), reverse=True)
+        results = results[:50]
+
+        save_cache_file(STRATEGY_SCAN_CACHE, results)
+        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer")
+
+    except Exception as e:
+        print(f"[Strategy Scan] Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def _bear_scan_wrapper() -> None:
     """Run bear scanner in background — finds inverse ETF opportunities and breakdown stocks."""
     try:
@@ -663,6 +756,7 @@ _scan_status = {
     "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
+    "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
 }
 _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
@@ -1774,14 +1868,14 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         else:
             raise HTTPException(status_code=400, detail="New Listing Scanner not available")
     else:
-        # Default: use BI scanner with direction based on strategy name
-        direction = "long" if "long" in strategy_lower else "short"
-        _run_scan_safe(f"bi_{direction}", lambda: _bi_background_scan_wrapper(direction))
+        # Generische Strategie (PM Losers, PM Gainers, AH, Whale Watch, etc.)
+        # Nutzt Polygon Snapshot + Filter aus strategies.py
+        _strat_name = request.strategy
+        _run_scan_safe("strategy_scan", lambda: _strategy_scan_wrapper(_strat_name))
         return {
             "status": "started",
-            "message": f"BI Scanner ({direction.upper()}) started",
+            "message": f"Strategie-Scan gestartet: {request.strategy}",
             "strategy": request.strategy,
-            "direction": direction,
         }
 
 
@@ -1825,7 +1919,8 @@ def get_scan_results(
         elif "listing" in strategy_lower:
             cache_file = NEW_LISTING_CACHE
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
+            # Generische Strategie (PM Losers, PM Gainers, AH, Whale Watch, etc.)
+            cache_file = STRATEGY_SCAN_CACHE
     elif direction:
         # Backward compatibility: direction parameter (old way)
         if direction not in ["long", "short"]:
