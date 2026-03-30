@@ -667,7 +667,7 @@ def _bear_scan_wrapper() -> None:
 
         result["inverse_etfs"].sort(key=lambda x: x.get("change_5d", 0), reverse=True)
 
-        # --- Section 2: Breakdown stocks (big single-day losers) ---
+        # --- Section 2: Breakdown stocks V2.2 — mit Score/Grade System ---
         try:
             snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
             snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
@@ -682,42 +682,128 @@ def _bear_scan_wrapper() -> None:
                         prev = t.get("prevDay", {})
                         price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
                         prev_close = prev.get("c", 0)
-                        if not price or not prev_close or price < 5:
+                        if not price or not prev_close or price < 3:
                             continue
                         vol = day.get("v", 0)
                         dollar_vol = price * vol
-                        if dollar_vol < 500000:
+                        if dollar_vol < 300_000:
                             continue
                         chg_pct = ((price - prev_close) / prev_close) * 100
-                        if chg_pct > -4:
+                        if chg_pct > -3:
                             continue
 
                         ticker_sym = t.get("ticker", "")
-                        rvol = 1.0
+                        rvol = 0
+                        ma20 = 0
+                        ma50 = 0
+                        ma20_dist = 0
+                        ma50_dist = 0
+                        has_history = False
 
                         try:
                             url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_sym}/range/1/day/2024-01-01/2099-12-31"
-                            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc"})
                             if resp.status_code == 200:
                                 bars = resp.json().get("results", [])
                                 if len(bars) >= 21:
+                                    has_history = True
                                     ma20 = sum(b.get("c", 0) for b in bars[1:21]) / 20
+                                    ma20_dist = round((price - ma20) / ma20 * 100, 2) if ma20 > 0 else 0
                                     if len(bars) >= 51:
                                         ma50 = sum(b.get("c", 0) for b in bars[1:51]) / 50
+                                        ma50_dist = round((price - ma50) / ma50 * 100, 2) if ma50 > 0 else 0
                                     else:
                                         ma50 = ma20
+                                        ma50_dist = ma20_dist
 
-                                    if price > ma20 or price > ma50:
-                                        continue
-
-                                    if len(bars) > 1:
-                                        avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
-                                        rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 1.0
-
-                                    if rvol < 1.0:
-                                        continue
+                                    avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
+                                    rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
                         except Exception as e:
-                            print(f"[Warning] Trend validation skipped for {ticker_sym}: {e}")
+                            print(f"[Bear] History failed for {ticker_sym}: {e}")
+
+                        # V2.2: Ohne History-Daten → überspringen (kein Blindflug)
+                        if not has_history:
+                            continue
+
+                        # ── Scoring System (0-100) ──
+                        score = 0
+                        score_details = []
+
+                        # 1. Change Magnitude (0-25): Je stärker der Drop, desto besser
+                        abs_chg = abs(chg_pct)
+                        if abs_chg >= 15:
+                            score += 25; score_details.append(f"Drop {chg_pct:.1f}% (extrem)")
+                        elif abs_chg >= 10:
+                            score += 20; score_details.append(f"Drop {chg_pct:.1f}% (stark)")
+                        elif abs_chg >= 6:
+                            score += 15; score_details.append(f"Drop {chg_pct:.1f}%")
+                        elif abs_chg >= 4:
+                            score += 10; score_details.append(f"Drop {chg_pct:.1f}% (moderat)")
+                        else:
+                            score += 5
+
+                        # 2. RVOL (0-20): Hohes Vol bestätigt den Move
+                        if rvol >= 3.0:
+                            score += 20; score_details.append(f"RVOL {rvol:.1f}x (extrem)")
+                        elif rvol >= 2.0:
+                            score += 15; score_details.append(f"RVOL {rvol:.1f}x (stark)")
+                        elif rvol >= 1.5:
+                            score += 10; score_details.append(f"RVOL {rvol:.1f}x")
+                        elif rvol >= 1.0:
+                            score += 5; score_details.append(f"RVOL {rvol:.1f}x (normal)")
+                        else:
+                            score_details.append(f"RVOL {rvol:.1f}x (schwach)")
+
+                        # 3. MA20 Trend (0-20): Unter MA20 = bestätigter Downtrend
+                        if ma20_dist < -10:
+                            score += 20; score_details.append(f"MA20 {ma20_dist:.1f}% (weit darunter)")
+                        elif ma20_dist < -5:
+                            score += 15; score_details.append(f"MA20 {ma20_dist:.1f}%")
+                        elif ma20_dist < -2:
+                            score += 10; score_details.append(f"MA20 {ma20_dist:.1f}%")
+                        elif ma20_dist < 0:
+                            score += 5
+                        # Über MA20 = gegen den Trend → Abzug
+                        else:
+                            score -= 5; score_details.append(f"Über MA20 ({ma20_dist:+.1f}%)")
+
+                        # 4. MA50 Trend (0-15)
+                        if ma50_dist < -10:
+                            score += 15
+                        elif ma50_dist < -5:
+                            score += 10
+                        elif ma50_dist < 0:
+                            score += 5
+
+                        # 5. Dollar Volume Quality (0-10)
+                        if dollar_vol >= 10_000_000:
+                            score += 10; score_details.append("$Vol >10M")
+                        elif dollar_vol >= 5_000_000:
+                            score += 7
+                        elif dollar_vol >= 1_000_000:
+                            score += 4
+                        else:
+                            score += 1
+
+                        # 6. Price Quality (0-10): $10-$200 = ideal für Shorts
+                        if 10 <= price <= 200:
+                            score += 10
+                        elif 5 <= price < 10:
+                            score += 5
+                        elif price > 200:
+                            score += 7  # Teuer aber shortbar
+
+                        # ── Grade ──
+                        if score >= 80:
+                            grade = "S"
+                        elif score >= 65:
+                            grade = "A"
+                        elif score >= 50:
+                            grade = "B"
+                        elif score >= 35:
+                            grade = "C"
+                        else:
+                            grade = "D"
 
                         losers.append({
                             "ticker": ticker_sym,
@@ -726,12 +812,16 @@ def _bear_scan_wrapper() -> None:
                             "volume": vol,
                             "dollar_volume": round(dollar_vol, 0),
                             "rvol": rvol,
-                            "trend_validated": rvol >= 1.0,
+                            "ma20_dist": ma20_dist,
+                            "ma50_dist": ma50_dist,
+                            "score": score,
+                            "grade": grade,
+                            "score_details": " | ".join(score_details),
                         })
                     except Exception as e:
                         print(f"[Warning] Error processing breakdown stock: {e}")
                         continue
-                losers.sort(key=lambda x: x.get("change_pct", 0))
+                losers.sort(key=lambda x: x.get("score", 0), reverse=True)
                 result["breakdown_stocks"] = losers[:30]
                 print(f"[Bear] Final breakdown_stocks: {len(losers[:30])}")
         except Exception as e:
@@ -3587,11 +3677,13 @@ def _orb_scanner_wrapper() -> None:
                     continue
 
                 # ── Holding Check: Preis muss AKTUELL noch auf Breakout-Seite sein ──
+                # V2.2: Dynamischer Holding-Check — früh im Fenster (9:45-9:55) reicht 1 Bar
                 bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
                 bars_below = sum(1 for b in post_or if b.get("c", 0) < or_low)
-                if breakout_dir == "LONG" and (current_price <= or_high or bars_above < 2):
+                _min_hold_bars = 1 if len(post_or) <= 2 else 2  # Früh im Fenster: 1 Bar reicht
+                if breakout_dir == "LONG" and (current_price <= or_high or bars_above < _min_hold_bars):
                     continue
-                if breakout_dir == "SHORT" and (current_price >= or_low or bars_below < 2):
+                if breakout_dir == "SHORT" and (current_price >= or_low or bars_below < _min_hold_bars):
                     continue
 
                 # ── Entry / Stop / Target Levels ──
