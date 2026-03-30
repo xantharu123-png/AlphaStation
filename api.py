@@ -715,22 +715,29 @@ def _bear_scan_wrapper() -> None:
         if has_stock_data:
             save_cache_file(BEAR_CACHE, [result])
             print(f"[Bear] Saved {len(result.get('inverse_etfs',[]))} ETFs, {len(result.get('breakdown_stocks',[]))} breakdowns")
-            # Bear Alert: starke Inverse ETFs + Breakdowns
+            # Bear Alert: nur bei starken Inverse-ETF-Signalen oder Breakdowns
             _bear_alert_items = []
             for etf in result.get("inverse_etfs", []):
                 if isinstance(etf, dict) and etf.get("signal") == "STARK":
-                    _bear_alert_items.append(f"📉 {etf.get('ticker','?')} ({etf.get('description','')[:30]}) — {etf.get('chg_5d',0):+.1f}% (5T)")
+                    _name = etf.get("name", etf.get("underlying", ""))[:30]
+                    _chg5 = etf.get("change_5d", 0)
+                    _chg1 = etf.get("change_1d", 0)
+                    _bear_alert_items.append(f"📉 {etf.get('ticker','?')} ({_name}) — 1T: {_chg1:+.1f}%, 5T: {_chg5:+.1f}%")
             for bd in result.get("breakdown_stocks", []):
                 if isinstance(bd, dict) and bd.get("score", 0) >= 70:
-                    _bear_alert_items.append(f"🔻 {bd.get('ticker','?')} — Score {bd.get('score',0)}, {bd.get('signal','')}")
+                    _bear_alert_items.append(f"🔻 {bd.get('ticker','?')} — Score {bd.get('score',0)}, ${bd.get('price',0)}, {bd.get('signal','')}")
             if _bear_alert_items:
                 _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
                     _EMAIL_COOLDOWN[_bear_ck] = time.time()
+                    _rows = ""
+                    for item in _bear_alert_items:
+                        _rows += f"<li style='padding:4px 0'>{item}</li>"
                     _bear_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
                     <h2 style="color:#dc2626">📉 Bear Scanner Alert</h2>
-                    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</p>
-                    <ul>{"".join(f"<li>{item}</li>" for item in _bear_alert_items)}</ul>
+                    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(_bear_alert_items)} Signale</p>
+                    <ul style="list-style:none;padding:0">{_rows}</ul>
+                    <p style="color:#999;font-size:11px">Signal STARK = Inverse ETF steigt >5% in 5 Tagen (Markt fällt)</p>
                     </body></html>'''
                     _send_email_alert(f"📉 {len(_bear_alert_items)} Bear-Signale erkannt", _bear_body)
         else:
