@@ -472,6 +472,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const chart = useRef(null);
     const candleSeries = useRef(null);
     const overlaySeriesRef = useRef([]);
+    const savedVisibleRange = useRef(null);
+    const prevOverlaysRef = useRef(null);
     const sidebarRef = useRef(null);
     const isDragging = useRef(false);
 
@@ -587,8 +589,13 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         if (!chartData || !chartContainer.current) return;
         if (!chartData.candles || chartData.candles.length === 0) return; // No data to render
         try {
-            // Cleanup
-            if (chart.current) chart.current.remove();
+            // V2.3: Zoom-State speichern vor Rebuild (nur bei Overlay-Toggle, nicht bei neuem chartData)
+            const isOverlayChange = prevOverlaysRef.current && prevOverlaysRef.current !== overlays && chartData === prevOverlaysRef.current._chartData;
+            if (chart.current) {
+                try { savedVisibleRange.current = chart.current.timeScale().getVisibleRange(); } catch(e) {}
+                chart.current.remove();
+            }
+            prevOverlaysRef.current = { ...overlays, _chartData: chartData };
             overlaySeriesRef.current = [];
 
             const { createChart, LineStyle, CrosshairMode } = window.LightweightCharts;
@@ -708,9 +715,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (sr.period_low) addPriceLine(sr.period_low, 'Period Low', '#64748b', LineStyle.Dotted, 1);
             }
 
-            // VRVP — Volume Profile as horizontal price lines
+            // VRVP — V2.3: Volume Profile als Balken (horizontales Histogramm)
             if (overlays.vrvp && chartData.vrvp) {
                 const vp = chartData.vrvp;
+                // POC, VAH, VAL als Preis-Linien beibehalten
                 const addVPLine = (price, title, color, style, width) => {
                     if (price && price > 0) {
                         candleSeries.current.createPriceLine({
@@ -723,27 +731,79 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 addVPLine(vp.poc, 'POC', '#06b6d4', LineStyle.Solid, 2);
                 addVPLine(vp.vah, 'VAH', '#0891b2', LineStyle.Dashed, 1);
                 addVPLine(vp.val, 'VAL', '#0891b2', LineStyle.Dashed, 1);
-                // HVNs (High Volume Nodes)
-                if (vp.hvns) {
-                    vp.hvns.slice(0, 3).forEach((h, i) => {
-                        addVPLine(h.mid, `HVN${i+1}`, '#22d3ee', LineStyle.Dotted, 1);
-                    });
-                }
-                // LVNs (Low Volume Nodes / Volume Voids)
-                if (vp.lvns) {
-                    vp.lvns.slice(0, 3).forEach((l, i) => {
-                        addVPLine(l.mid, `LVN${i+1}`, '#f59e0b', LineStyle.Dotted, 1);
-                    });
+
+                // Balken als Canvas-Overlay zeichnen
+                if (vp.bins && vp.bins.length > 0 && chart.current) {
+                    const maxVol = Math.max(...vp.bins.map(b => b.volume));
+                    const maxBarWidth = chartContainer.current ? chartContainer.current.clientWidth * 0.15 : 80;
+                    const priceScale = chart.current.priceScale('right');
+
+                    // Canvas-Overlay erstellen
+                    const existingCanvas = chartContainer.current.querySelector('.vrvp-canvas');
+                    if (existingCanvas) existingCanvas.remove();
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'vrvp-canvas';
+                    canvas.style.position = 'absolute';
+                    canvas.style.top = '0';
+                    canvas.style.right = '48px';
+                    canvas.style.pointerEvents = 'none';
+                    canvas.style.zIndex = '5';
+                    canvas.width = Math.ceil(maxBarWidth + 10);
+                    canvas.height = chartContainer.current.clientHeight;
+                    chartContainer.current.style.position = 'relative';
+                    chartContainer.current.appendChild(canvas);
+
+                    const drawVRVP = () => {
+                        const ctx = canvas.getContext('2d');
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        const series = candleSeries.current;
+                        if (!series) return;
+
+                        vp.bins.forEach(bin => {
+                            const yMid = series.priceToCoordinate(bin.mid);
+                            const yHigh = series.priceToCoordinate(bin.high);
+                            const yLow = series.priceToCoordinate(bin.low);
+                            if (yMid === null || yHigh === null || yLow === null) return;
+
+                            const barH = Math.max(2, Math.abs(yLow - yHigh));
+                            const barW = Math.max(2, (bin.volume / maxVol) * maxBarWidth);
+                            const y = Math.min(yHigh, yLow);
+                            const isPOC = Math.abs(bin.mid - vp.poc) < (bin.high - bin.low);
+                            const isVA = bin.mid >= vp.val && bin.mid <= vp.vah;
+
+                            ctx.fillStyle = isPOC ? 'rgba(6, 182, 212, 0.45)' : isVA ? 'rgba(34, 211, 238, 0.25)' : 'rgba(100, 116, 139, 0.18)';
+                            ctx.fillRect(canvas.width - barW, y, barW, barH);
+                            // Rand
+                            ctx.strokeStyle = isPOC ? 'rgba(6, 182, 212, 0.7)' : isVA ? 'rgba(34, 211, 238, 0.4)' : 'rgba(100, 116, 139, 0.3)';
+                            ctx.lineWidth = 0.5;
+                            ctx.strokeRect(canvas.width - barW, y, barW, barH);
+                        });
+                    };
+
+                    drawVRVP();
+                    // Redraw on scroll/zoom
+                    chart.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
+                    chart.current.subscribeCrosshairMove(drawVRVP);
                 }
             }
 
-            // Fibonacci levels
+            // Fibonacci levels — V2.3: Extended Levels mit eigenen Farben
             if (overlays.fib && chartData.fib) {
-                const fibColors = { '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e', '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7' };
+                const fibColors = {
+                    '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
+                    '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
+                    // Extended Long (nach oben)
+                    '127%': '#06b6d4', '161%': '#14b8a6', '200%': '#10b981', '261%': '#059669',
+                    // Extended Short (nach unten)
+                    '-27%': '#f43f5e', '-61%': '#e11d48', '-100%': '#be123c', '-161%': '#9f1239',
+                };
+                const extendedKeys = ['127%', '161%', '200%', '261%', '-27%', '-61%', '-100%', '-161%'];
                 Object.entries(chartData.fib).forEach(([level, price]) => {
+                    const isExtended = extendedKeys.includes(level);
                     candleSeries.current.createPriceLine({
-                        price, color: fibColors[level] || '#6b7280', lineWidth: 1,
-                        lineStyle: LineStyle.Dotted,
+                        price, color: fibColors[level] || '#6b7280',
+                        lineWidth: isExtended ? 1 : 1,
+                        lineStyle: isExtended ? LineStyle.Dashed : LineStyle.Dotted,
                         axisLabelVisible: true, title: `Fib ${level}`,
                     });
                 });
@@ -845,10 +905,22 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 }
             }
 
-            chart.current.timeScale().fitContent();
+            // V2.3: Zoom wiederherstellen statt fitContent wenn nur Overlay getoggelt wurde
+            if (savedVisibleRange.current) {
+                try {
+                    chart.current.timeScale().setVisibleRange(savedVisibleRange.current);
+                } catch(e) {
+                    chart.current.timeScale().fitContent();
+                }
+            } else {
+                chart.current.timeScale().fitContent();
+            }
+            // Range nur bei echtem Data-Wechsel zurücksetzen
+            if (!isOverlayChange) savedVisibleRange.current = null;
         } catch (err) { console.error('Chart error:', err); }
         return () => {
             if (chart.current) {
+                try { savedVisibleRange.current = chart.current.timeScale().getVisibleRange(); } catch(e) {}
                 chart.current.remove();
                 chart.current = null;
             }
@@ -1620,23 +1692,27 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score</th>
-                            <th className="text-center py-2 px-2">Grade</th>
-                            <th className="text-left py-2 px-2">Signal</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen</th>
+                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('grade')}>Grade {sortKey === 'grade' && '↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker {sortKey === 'ticker' && '↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis {sortKey === 'price' && '↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Chg% {sortKey === 'change_pct' && '↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen {sortKey === 'volume' && '↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score {sortKey === 'score' && '↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('grade_label')}>Signal {sortKey === 'grade_label' && '↓'}</th>
                         </tr>
                     </thead>
                     <tbody>
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-right" style={{color: (item.change_pct || 0) >= 0 ? '#10b981' : '#ef4444'}}>{(item.change_pct || 0) >= 0 ? '+' : ''}{(item.change_pct || 0).toFixed(2)}%</td>
+                                <td className="py-3 px-2 text-right" style={{color: (item.rvol || 0) >= 2 ? '#f59e0b' : '#9ca3af'}}>{(item.rvol || 0).toFixed(1)}x</td>
+                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume >= 1000000 ? (item.volume / 1000000).toFixed(1) + 'M' : (item.volume / 1000).toFixed(0) + 'K') : '–'}</td>
+                                <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(0)}</td>
                                 <td className="py-3 px-2"><span className={`signal-badge signal-${direction === 'long' ? 'bullish' : 'bearish'}`}>{item.grade_label || direction.toUpperCase()}</span></td>
-                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                             </tr>
                         ))}
                     </tbody>

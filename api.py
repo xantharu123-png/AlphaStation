@@ -340,6 +340,7 @@ _BI_KEY_MAP = {
     "BI_GradeLabel": "grade_label", "BI_Confidence": "confidence", "BI_Details": "details",
     "Entry": "entry", "StopLoss": "stop_loss", "TP1": "tp1", "TP2": "tp2",
     "RiskReward": "risk_reward", "RVOL": "rvol", "SmartMoney": "smart_money",
+    "Volumen": "volume", "AvgVolumen": "avg_volume",
 }
 _BIOTECH_KEY_MAP = {
     "Ticker": "ticker", "Name": "name", "Score": "score", "Grade": "grade",
@@ -1875,15 +1876,33 @@ def get_chart_data(
             except Exception as e:
                 print(f"VRVP error: {e}")
 
-        # Fibonacci levels
+        # Fibonacci levels — V2.3: Extended Levels für Long/Short
         if "fib" in overlay_list and len(ohlcv) >= 20:
             try:
                 h20 = max(highs[-20:])
                 l20 = min(lows[-20:])
                 rng = h20 - l20
+                cur_price = closes[-1]
                 fib = {}
+                # Standard Retracement Levels (immer)
                 for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
                     fib[f"{int(ratio*100)}%"] = round(l20 + rng * ratio, 2)
+                # Extended Levels: Abhängig von Preislage
+                # Long (Preis in oberer Hälfte / über Range) → Extended nach oben
+                # Short (Preis in unterer Hälfte / unter Range) → Extended nach unten
+                _mid = (h20 + l20) / 2
+                if cur_price >= _mid:
+                    # Long-Extended: über 100% hinaus (nach oben)
+                    fib["127%"] = round(l20 + rng * 1.272, 2)
+                    fib["161%"] = round(l20 + rng * 1.618, 2)
+                    fib["200%"] = round(l20 + rng * 2.0, 2)
+                    fib["261%"] = round(l20 + rng * 2.618, 2)
+                else:
+                    # Short-Extended: unter 0% hinaus (nach unten)
+                    fib["-27%"] = round(l20 - rng * 0.272, 2)
+                    fib["-61%"] = round(l20 - rng * 0.618, 2)
+                    fib["-100%"] = round(l20 - rng * 1.0, 2)
+                    fib["-161%"] = round(l20 - rng * 1.618, 2)
                 result["fib"] = fib
             except Exception as e:
                 print(f"[Warning] Error calculating Fibonacci levels: {e}")

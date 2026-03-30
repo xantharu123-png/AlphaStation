@@ -1203,6 +1203,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["RangeHigh"] = round(range_high, 2)
                 candidate["RangeLow"] = round(range_low, 2)
 
+                # V2.3: Volumen-Daten für Frontend
+                _last_vol = all_bars[-1]["volume"] if all_bars else 0
+                _avg_vol_20 = sum(b["volume"] for b in all_bars[-20:]) / min(20, len(all_bars)) if all_bars else 0
+                candidate["Volumen"] = int(_last_vol)
+                candidate["AvgVolumen"] = int(_avg_vol_20)
+                candidate["RVOL"] = round(_last_vol / _avg_vol_20, 2) if _avg_vol_20 > 0 else 0
+                candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
+                candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0
+
                 if candidate["RiskReward"] < 1.5:
                     rr_fail += 1
                     continue
