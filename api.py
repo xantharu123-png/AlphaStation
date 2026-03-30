@@ -1984,6 +1984,40 @@ def get_chart_data(
                 except Exception as e:
                     print(f"Liquidity error: {e}")
 
+                # V2.5: Kohärenz-Filter — widersprüchliche bullish+bearish Patterns bereinigen
+                # Bestimme dominante Richtung aus Preis-Trend
+                try:
+                    _cp = closes[-1]
+                    _sma20 = sum(closes[-20:]) / min(20, len(closes)) if len(closes) >= 5 else _cp
+                    _sma50 = sum(closes[-50:]) / min(50, len(closes)) if len(closes) >= 10 else _sma20
+                    _trend_bullish = _cp > _sma20 and _sma20 > _sma50
+                    _trend_bearish = _cp < _sma20 and _sma20 < _sma50
+                    # Trend neutral wenn weder klar bullish noch bearish
+
+                    if _trend_bullish or _trend_bearish:
+                        _dominant = "bullish" if _trend_bullish else "bearish"
+                        _opposing = "bearish" if _trend_bullish else "bullish"
+
+                        # Chart Patterns: Gegensätzliche entfernen (außer "High" Confidence)
+                        if "chart_patterns" in patterns_result:
+                            patterns_result["chart_patterns"] = [
+                                p for p in patterns_result["chart_patterns"]
+                                if p.get("type") != _opposing or p.get("confidence") == "High"
+                            ]
+
+                        # Order Blocks: Nur die zur Trend-Richtung passenden behalten
+                        if "order_blocks" in patterns_result:
+                            obs = patterns_result["order_blocks"]
+                            if _dominant == "bullish":
+                                # Bei Uptrend: Bearish OBs entfernen wenn Bullish OB vorhanden
+                                if obs.get("nearest_bull_ob") and obs.get("nearest_bear_ob"):
+                                    obs.pop("nearest_bear_ob", None)
+                            else:
+                                if obs.get("nearest_bear_ob") and obs.get("nearest_bull_ob"):
+                                    obs.pop("nearest_bull_ob", None)
+                except Exception as _coh_err:
+                    print(f"[Warning] Coherence filter error: {_coh_err}")
+
                 result["patterns"] = patterns_result
             except Exception as e:
                 print(f"Pattern detection error: {e}")
