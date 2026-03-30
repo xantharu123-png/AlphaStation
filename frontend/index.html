@@ -861,9 +861,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     });
                 }
 
-                // Chart pattern markers
+                // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
+                const _viewDir = (d.confluence?.direction || '').toUpperCase();
+
+                // Chart pattern markers (gefiltert nach Richtung)
                 if (chartData.patterns.chart_patterns) {
-                    chartData.patterns.chart_patterns.forEach(p => {
+                    chartData.patterns.chart_patterns
+                        .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
+                        .forEach(p => {
                         const lastCandle = candles[candles.length - 1];
                         if (lastCandle) {
                             markers.push({
@@ -877,9 +882,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     });
                 }
 
-                // Harmonic pattern lines
+                // Harmonic pattern lines (gefiltert nach Richtung)
                 if (chartData.patterns.harmonic) {
-                    chartData.patterns.harmonic.forEach(h => {
+                    chartData.patterns.harmonic
+                        .filter(h => !_viewDir || _viewDir === 'NEUTRAL' || h.direction === _viewDir)
+                        .forEach(h => {
                         if (h.points && h.points.length >= 5) {
                             const hLine = chart.current.addLineSeries({
                                 color: h.direction === 'LONG' ? '#10b981' : '#ef4444',
@@ -1130,24 +1137,33 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 )}
 
                 {/* Pattern Info */}
-                {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (
+                {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
+                {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
+                    const _vd = (d.confluence?.direction || '').toUpperCase();
+                    const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
+                    return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
-                        {chartData.patterns.chart_patterns.map((p, i) => (
+                        {filtered.map((p, i) => (
                             <span key={i} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
                                 {p.pattern} ({p.confidence || ''})
                             </span>
                         ))}
                     </div>
-                )}
-                {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (
+                    ) : null;
+                })()}
+                {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
+                    const _vd = (d.confluence?.direction || '').toUpperCase();
+                    const filtered = chartData.patterns.harmonic.filter(h => !_vd || _vd === 'NEUTRAL' || h.direction === _vd);
+                    return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
-                        {chartData.patterns.harmonic.map((h, i) => (
+                        {filtered.map((h, i) => (
                             <span key={i} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${h.direction === 'LONG' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
                                 {h.pattern} {h.direction} (Score: {h.score || ''})
                             </span>
                         ))}
                     </div>
-                )}
+                    ) : null;
+                })()}
 
                 {/* Content Grid - 2 columns when wide */}
                 <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
