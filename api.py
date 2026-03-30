@@ -167,13 +167,19 @@ def _load_secrets():
 
 _SECRETS = _load_secrets()
 _EMAIL_COOLDOWN = {}
-_EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker (war 4h)
+_EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
+_EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach Restart
+_EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (secrets.toml fehlt)'}")
 
 
 def _send_email_alert(subject, body_html):
     """Sendet E-Mail Alert via Gmail SMTP."""
+    # V2.6b: Nach Restart 5 Min warten (alte Cache-Daten erzeugen Phantom-Alerts)
+    if time.time() - _EMAIL_STARTUP_TIME < _EMAIL_STARTUP_DELAY:
+        print(f"[Alert] SKIP (Startup-Cooldown): {subject}")
+        return False
     gmail_user = _SECRETS.get("GMAIL_USER", "")
     gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
     alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
@@ -749,6 +755,18 @@ def _bear_scan_wrapper() -> None:
                             continue
 
                         ticker_sym = t.get("ticker", "")
+                        # V2.6b: ETF/ETP/Leveraged Filter — keine ETFs in Breakdown-Stocks
+                        _tk_up = ticker_sym.upper()
+                        # Bekannte ETF-Suffixe und Muster filtern
+                        _etf_tickers = {"SOXS","SQQQ","SPXU","SPXS","UVXY","VIXY","QID","SRTY","TZA","SDOW","LABD",
+                                       "SDS","SH","PSQ","DOG","RWM","SOXL","TQQQ","UPRO","SPXL","UDOW","FNGU",
+                                       "AMPL","KOLD","BOIL","DRIP","GUSH","JDST","JNUG","NUGT","DUST","YANG","YINN",
+                                       "SVXY","VXX","TVIX","BITI","BITO"}
+                        if _tk_up in _etf_tickers:
+                            continue
+                        # Heuristik: 4+ Zeichen, endet auf X/Q/S doppelt = wahrscheinlich ETF
+                        if len(_tk_up) >= 4 and _tk_up[-1] in ("X","Q") and _tk_up[-2] in ("X","Q","S"):
+                            continue
                         rvol = 0
                         ma20 = 0
                         ma50 = 0
@@ -917,38 +935,61 @@ def _bear_scan_wrapper() -> None:
                         f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
                         f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                     )
-            # V2.6: Crash-Flash-Alerts — VERSCHÄRFT: nur bei extremen Drops (> -15%) ODER (> -10% UND Score >= 75)
-            _crash_stocks = [bd for bd in result.get("breakdown_stocks", [])
-                             if isinstance(bd, dict) and (
-                                 (bd.get("change_pct", 0) <= -15 and bd.get("score", 0) >= 50) or
-                                 (bd.get("change_pct", 0) <= -10 and bd.get("score", 0) >= 75)
-                             )]
-            for _cs in _crash_stocks:
-                _cs_ck = f"crash_flash_{_cs.get('ticker','?')}_{datetime.now().strftime('%Y%m%d')}"  # V2.6: 1x pro TAG (war pro Stunde)
-                if _cs_ck not in _EMAIL_COOLDOWN:
-                    _EMAIL_COOLDOWN[_cs_ck] = time.time()
-                    _cs_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-                    <h2 style="color:#dc2626;margin:0">⚠️ CRASH ALERT: {_cs.get('ticker','?')} {_cs.get('change_pct',0):.1f}%</h2>
-                    <p style="color:#666;font-size:13px;margin:4px 0">{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC</p>
-                    <table style="border-collapse:collapse;font-size:14px;margin-top:12px">
-                    <tr><td style="padding:4px 12px;color:#666">Ticker</td><td style="padding:4px 12px;font-weight:bold;font-size:18px">{_cs.get('ticker','?')}</td></tr>
-                    <tr><td style="padding:4px 12px;color:#666">Preis</td><td style="padding:4px 12px;font-weight:bold">${_cs.get('price',0):.2f}</td></tr>
-                    <tr><td style="padding:4px 12px;color:#666">Drop</td><td style="padding:4px 12px;font-weight:bold;color:#dc2626;font-size:16px">{_cs.get('change_pct',0):.1f}%</td></tr>
-                    <tr><td style="padding:4px 12px;color:#666">RVOL</td><td style="padding:4px 12px;font-weight:bold">{_cs.get('rvol',0):.1f}x</td></tr>
-                    <tr><td style="padding:4px 12px;color:#666">MA20</td><td style="padding:4px 12px">{_cs.get('ma20_dist',0):.1f}%</td></tr>
-                    <tr><td style="padding:4px 12px;color:#666">Grade</td><td style="padding:4px 12px;font-weight:bold">{_cs.get('grade','?')}</td></tr>
-                    <tr><td style="padding:4px 12px;color:#666">Score</td><td style="padding:4px 12px;font-weight:bold">{_cs.get('score',0)}</td></tr>
-                    </table>
-                    </body></html>'''
-                    _send_email_alert(f"CRASH: {_cs.get('ticker','?')} {_cs.get('change_pct',0):.1f}%", _cs_body)
-                    print(f"[Bear] CRASH FLASH sent for {_cs.get('ticker','?')} ({_cs.get('change_pct',0):.1f}%)")
+            # V2.6b: Crash-Flash — EINE Sammel-Mail pro Tag, nur Grade S/A, keine ETFs/ETPs
+            _ETF_KEYWORDS = {"etf", "etp", "leveraged", "inverse", "ultra", "proshares", "direxion", "amplify", "graniteshares"}
+            _crash_stocks = []
+            for bd in result.get("breakdown_stocks", []):
+                if not isinstance(bd, dict):
+                    continue
+                _cs_ticker = bd.get("ticker", "")
+                _cs_grade = bd.get("grade", "")
+                _cs_chg = bd.get("change_pct", 0)
+                _cs_score = bd.get("score", 0)
+                # Nur Grade S/A + Drop >= -15% + Score >= 60
+                if _cs_grade not in ("S", "A") or _cs_chg > -15 or _cs_score < 60:
+                    continue
+                # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
+                _cs_tk_up = _cs_ticker.upper()
+                if len(_cs_tk_up) >= 4 and _cs_tk_up[-1] in ("X", "Q", "S") and _cs_tk_up[-2] in ("X", "Q", "S"):
+                    continue  # SOXS, SQQQ, SPXS, UVXY etc.
+                _crash_stocks.append(bd)
 
-            # V2.6: Bear Summary Email — nur 2x pro Tag (alle 12h) UND nur wenn starke Signale
+            if _crash_stocks:
+                _crash_ck = f"crash_summary_{datetime.now().strftime('%Y%m%d')}"
+                if _crash_ck not in _EMAIL_COOLDOWN:
+                    _EMAIL_COOLDOWN[_crash_ck] = time.time()
+                    _crash_rows = ""
+                    for _cs in _crash_stocks[:5]:  # Max 5 in einer Mail
+                        _gc = {"S": "#7c3aed", "A": "#16a34a"}.get(_cs.get("grade", ""), "#666")
+                        _crash_rows += (
+                            f"<tr><td style='padding:6px 8px;font-weight:bold;color:{_gc}'>{_cs.get('grade','?')}</td>"
+                            f"<td style='padding:6px 8px;font-weight:bold'>{_cs.get('ticker','?')}</td>"
+                            f"<td style='padding:6px 8px;text-align:right'>${_cs.get('price',0):.2f}</td>"
+                            f"<td style='padding:6px 8px;text-align:right;color:#dc2626;font-weight:bold'>{_cs.get('change_pct',0):.1f}%</td>"
+                            f"<td style='padding:6px 8px;text-align:right'>{_cs.get('rvol',0):.1f}x</td>"
+                            f"<td style='padding:6px 8px;text-align:right;font-weight:bold'>{_cs.get('score',0)}</td></tr>"
+                        )
+                    _crash_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+                    <h2 style="color:#dc2626">⚠️ Crash Alert — {len(_crash_stocks)} Aktien</h2>
+                    <p style="color:#666;font-size:13px">{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC</p>
+                    <table style="border-collapse:collapse;width:100%;font-size:13px">
+                    <tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left">Grd</th>
+                    <th style="padding:6px 8px;text-align:left">Ticker</th>
+                    <th style="padding:6px 8px;text-align:right">Preis</th>
+                    <th style="padding:6px 8px;text-align:right">Drop</th>
+                    <th style="padding:6px 8px;text-align:right">RVOL</th>
+                    <th style="padding:6px 8px;text-align:right">Score</th></tr>
+                    {_crash_rows}</table>
+                    </body></html>'''
+                    _send_email_alert(f"⚠️ CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)", _crash_body)
+                    print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
+
+            # V2.6b: Bear Summary Email — 1x pro Tag, nur wenn Grade S/A Signale dabei
+            _bd_strong = [r for r in _bd_rows if True]  # already filtered above
             _total_signals = len(_etf_rows) + len(_bd_rows)
-            # Nur senden wenn mindestens 3 Signale ODER ein ETF-Signal dabei ist
             _has_strong_signal = len(_etf_rows) > 0 or _total_signals >= 3
             if _total_signals > 0 and _has_strong_signal:
-                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}_{('AM' if datetime.now().hour < 12 else 'PM')}"
+                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
                     _EMAIL_COOLDOWN[_bear_ck] = time.time()
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Signale</p>"
