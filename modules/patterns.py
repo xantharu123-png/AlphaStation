@@ -1771,7 +1771,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     if crypto_mode:
         threshold = 45 if direction == "long" else 40
     else:
-        threshold = 60 if direction == "long" else 55
+        threshold = 60 if direction == "long" else 65  # V2.6b: Short braucht MEHR Score (war 55)
     is_valid = score >= threshold
 
     # Cap score at max_score to prevent overflow

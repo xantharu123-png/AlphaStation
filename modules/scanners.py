@@ -1122,17 +1122,25 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     low_score_count += 1
                     continue
 
-                # FIX 4: Short Trend-Validierung — nur klare Uptrends filtern
-                # Gelockert: Preis muss DEUTLICH über SMA20 sein UND SMA10 > SMA20
-                # Vorher: jeder Preis über SMA20 wurde gefiltert (zu strikt für Intraday/Gap Downs)
+                # V2.6b AUDIT: Short Trend-Validierung — VERSCHÄRFT
+                # Short-Kandidaten MÜSSEN in einem Abwärtstrend oder zumindest schwach sein
                 if direction == "short" and len(all_bars) >= 20:
                     _closes = [b["close"] for b in all_bars]
                     _sma20 = sum(_closes[-20:]) / 20
                     _sma10 = sum(_closes[-10:]) / 10
+                    _sma50 = sum(_closes[-50:]) / 50 if len(_closes) >= 50 else _sma20
                     _cur = _closes[-1]
                     _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
-                    # Nur filtern wenn Preis >3% über SMA20 UND SMA10 steigend = klarer Uptrend
-                    if _above_sma20_pct > 3.0 and _sma10 > _sma20:
+
+                    # HARD REJECT: Preis über SMA20 UND SMA10 > SMA20 = Uptrend
+                    if _above_sma20_pct > 1.5 and _sma10 > _sma20:
+                        continue
+                    # HARD REJECT: Preis über SMA50 UND SMA20 > SMA50 = langfristiger Uptrend
+                    if _cur > _sma50 and _sma20 > _sma50 and _above_sma20_pct > 0:
+                        continue
+                    # HARD REJECT: Heute positiv UND über SMA20 = keine Schwäche
+                    _today_chg = (_cur - _closes[-2]) / _closes[-2] * 100 if len(_closes) >= 2 and _closes[-2] > 0 else 0
+                    if _today_chg > 1.5 and _cur > _sma20:
                         continue
 
                 # Range berechnen
@@ -1181,21 +1189,23 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["TP1"] = round(range_high + range_size * 0.75, 2)
                     candidate["TP2"] = round(range_high + range_size * 1.618, 2)
                 else:
-                    # FIX 2: SHORT Entry — Breakdown vs Pullback je nach Preislage
+                    # V2.6b AUDIT: SHORT Entry — verbesserte Berechnung
                     _current = bars[-1]["close"]
                     _range_mid = (range_high + range_low) / 2
                     _near_low = _current < _range_mid  # Preis in unterer Hälfte = Breakdown
                     if _near_low:
                         # BREAKDOWN-SHORT: Preis nahe/unter Range-Low → Entry bei aktuellem Preis
                         candidate["Entry"] = round(_current, 2)
-                        candidate["StopLoss"] = round(_current + atr_5 * 1.2, 2)  # Stop = 1.2× ATR über Entry
+                        candidate["StopLoss"] = round(min(range_high, _current + atr_5 * 1.5), 2)
                     else:
                         # PULLBACK-SHORT: Preis nahe Range-High → Entry bei Resistance
                         candidate["Entry"] = round(range_high * 0.995, 2)
-                        candidate["StopLoss"] = round(range_high * 1.015, 2)
-                    risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])  # FIX 7: Division Guard
-                    candidate["TP1"] = round(candidate["Entry"] - risk_short * 2.0, 2)
-                    candidate["TP2"] = round(candidate["Entry"] - risk_short * 3.5, 2)
+                        candidate["StopLoss"] = round(range_high + atr_5 * 0.5, 2)
+                    risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])
+                    # TP basiert auf nächstem Support (Range-Low) statt fixem Multiplikator
+                    _dist_to_range_low = max(0.01, candidate["Entry"] - range_low)
+                    candidate["TP1"] = round(range_low, 2)  # TP1 = Range-Low (logisches Ziel)
+                    candidate["TP2"] = round(range_low - range_size * 0.618, 2)  # TP2 = unter Range
 
                 risk = abs(candidate["Entry"] - candidate["StopLoss"])
                 reward = abs(candidate["TP1"] - candidate["Entry"])
@@ -1282,23 +1292,50 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                             candidate["ShortBonusScore"] = 0
                             candidate["ShortBonusDetails"] = []
 
+                        # V2.6b AUDIT: Short-Qualitätsfilter
+                        # 1) Short Bonus muss positiv sein (Stage 4, Death Cross, neg. News, etc.)
+                        _short_bonus_val = candidate.get("ShortBonusScore", 0)
+                        if _short_bonus_val <= 0:
+                            # Kein einziges Short-spezifisches Signal → kein Short-Setup
+                            continue
+
+                        # 2) RVOL-Check: Bei Short brauchen wir Verkaufsdruck
+                        _short_rvol = candidate.get("RVOL", 0)
+                        # Erlaube niedrigeres RVOL wenn Stage 4 Breakdown vorhanden
+                        _has_stage4 = any("Stage 4" in str(d) for d in candidate.get("ShortBonusDetails", []))
+                        if not _has_stage4 and _short_rvol < 0.3:
+                            continue  # Zu wenig Volume und kein Breakdown
+
                     candidate["BI_Score"] = max(0, bi_score)
 
-                    # Grading
+                    # V2.6b AUDIT: Grading — HÖHERE Schwellen für Short
                     _max_grade = "S"
                     if _has_conflicting_pattern:
-                        _max_grade = "B"  # Hard-Cap bei Pattern-Konflikt (nur wenn Score >= 100)
+                        _max_grade = "B"
 
-                    if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
-                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                    elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
-                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                    elif bi_score >= 90:
-                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
-                    elif bi_score >= 75:
-                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
+                    if direction == "short":
+                        # Short braucht mehr Überzeugung (Short ist riskanter als Long)
+                        if bi_score >= 130 and sm_fires >= 3 and _max_grade == "S":
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
+                        elif bi_score >= 115 and sm_fires >= 2 and _max_grade in ("S", "A"):
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
+                        elif bi_score >= 95:
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
+                        elif bi_score >= 80:
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
+                        else:
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
                     else:
-                        candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
+                        if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
+                        elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
+                        elif bi_score >= 90:
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
+                        elif bi_score >= 75:
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
+                        else:
+                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
 
                     if _has_conflicting_pattern:
                         _conflict_names = [w["pattern"] for w in high_warnings]
