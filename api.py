@@ -4017,10 +4017,12 @@ def _crash_monitor_wrapper() -> None:
 
         # Market breadth - count gainers vs losers via snapshot
         try:
-            # Use /gainers and /losers endpoints (Starter plan compatible) instead of bulk /tickers endpoint (Enterprise only)
+            # Marktbreite: Gainers vs Losers Count + durchschnittliche Veränderung
             up = 0
             down = 0
             unchanged = 0
+            gainers_avg_chg = 0
+            losers_avg_chg = 0
 
             for endpoint in ["gainers", "losers"]:
                 snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
@@ -4032,26 +4034,28 @@ def _crash_monitor_wrapper() -> None:
                     continue
 
                 tickers = snap_resp.json().get("tickers", [])
+                changes = []
                 for t in tickers:
                     try:
-                        day = t.get("day", {})
-                        prev = t.get("prevDay", {})
-                        pc = day.get("c", 0)
-                        pp = prev.get("c", 0)
-                        if pc and pp:
-                            if pc > pp:
+                        tod = t.get("todaysChangePerc", 0)
+                        if tod and isinstance(tod, (int, float)):
+                            changes.append(tod)
+                            if tod > 0.1:
                                 up += 1
-                            elif pc < pp:
+                            elif tod < -0.1:
                                 down += 1
                             else:
                                 unchanged += 1
-                    except Exception as e:
-                        print(f"[Warning] Error processing breadth ticker: {e}")
+                    except Exception:
                         continue
+
+                if endpoint == "gainers" and changes:
+                    gainers_avg_chg = round(sum(changes) / len(changes), 2)
+                elif endpoint == "losers" and changes:
+                    losers_avg_chg = round(sum(changes) / len(changes), 2)
 
             total = up + down + unchanged
             ratio = round(up / down, 2) if down > 0 else 0
-            # No data = market closed (weekend/holiday), don't falsely report bearish
             if total == 0:
                 breadth_signal = "MARKT GESCHLOSSEN"
             elif ratio > 1.5:
@@ -4068,7 +4072,10 @@ def _crash_monitor_wrapper() -> None:
                 "unchanged_pct": round(unchanged / total * 100, 1) if total > 0 else 0,
                 "breadth_signal": breadth_signal,
                 "market_open": total > 0,
+                "gainers_avg_chg": gainers_avg_chg,
+                "losers_avg_chg": losers_avg_chg,
             }
+            print(f"[Crash Monitor] Breadth: {up} up, {down} down, ratio={ratio}, signal={breadth_signal}")
         except Exception as e:
             print(f"[Warning] Market breadth error: {e}")
 
