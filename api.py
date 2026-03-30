@@ -738,22 +738,53 @@ def _scheduler_loop():
     if HAS_NEW_LISTING_SCANNER:
         scan_tasks.append(("new_listing", _new_listing_wrapper))
 
-    # Fire all initial scans quickly (non-blocking now)
+    # ── Smart Startup: Nur Scans starten die keinen frischen Cache haben ──
+    _cache_map = {
+        "bi_long": "/tmp/bi_cache_long.json",
+        "bi_short": "/tmp/bi_cache_short.json",
+        "bear": "/tmp/bear_scanner_cache.json",
+        "biotech": "/tmp/alpha_biotech_cache.json",
+        "early_movers": "/tmp/early_movers_cache.json",
+        "crash_monitor": "/tmp/crash_monitor_cache.json",
+        "btc_divergenz": "/tmp/btc_divergenz_cache.json",
+        "money_flow": "/tmp/money_flow_cache.json",
+        "new_listing": "/tmp/new_listing_scanner.json",
+        "volume_spikes": "/tmp/volume_spikes_cache.json",
+        "orb": "/tmp/orb_scan_results.json",
+    }
+    last_run_times = {}
     for name, func in scan_tasks:
         if not _scheduler_running:
             break
-        print(f"[Scheduler] Initial scan: {name}")
-        _run_scan_safe(name, func)
-        # Set next_run immediately
-        with _scan_lock:
-            interval_sec = _scan_status[name]["interval_min"] * 60
-            _scan_status[name]["next_run"] = datetime.fromtimestamp(
-                time.time() + interval_sec
-            ).isoformat()
-        time.sleep(3)  # 3s stagger to avoid API rate limits
+        interval_sec = _scan_status[name]["interval_min"] * 60
+        cache_file = _cache_map.get(name)
+        cache_age = None
+        if cache_file and os.path.exists(cache_file):
+            cache_age = time.time() - os.path.getmtime(cache_file)
 
-    # Then loop with interval checks
-    last_run_times = {name: time.time() for name in _scan_status}
+        if cache_age is not None and cache_age < interval_sec:
+            # Cache ist frisch genug → NICHT neu scannen
+            last_run_times[name] = time.time() - cache_age  # So als ob er vor cache_age Sekunden lief
+            next_run = time.time() + (interval_sec - cache_age)
+            with _scan_lock:
+                _scan_status[name]["next_run"] = datetime.fromtimestamp(next_run).isoformat()
+            print(f"[Scheduler] {name}: Cache frisch ({int(cache_age)}s alt, Intervall {interval_sec}s) — übersprungen, nächster in {int(interval_sec - cache_age)}s")
+        else:
+            # Kein Cache oder zu alt → scannen
+            age_str = f"{int(cache_age)}s alt" if cache_age else "kein Cache"
+            print(f"[Scheduler] Initial scan: {name} ({age_str})")
+            _run_scan_safe(name, func)
+            last_run_times[name] = time.time()
+            with _scan_lock:
+                _scan_status[name]["next_run"] = datetime.fromtimestamp(
+                    time.time() + interval_sec
+                ).isoformat()
+            time.sleep(3)  # Stagger
+
+    # Fill any missing last_run_times
+    for name in _scan_status:
+        if name not in last_run_times:
+            last_run_times[name] = 0  # Will run on next check
 
     while _scheduler_running:
         now = time.time()
