@@ -466,6 +466,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [loading, setLoading] = useState(true);
     const [sidebarMode, setSidebarMode] = useState('normal');
     const [customWidth, setCustomWidth] = useState(null);
+    const [customHeight, setCustomHeight] = useState(null);
     const [timeframe, setTimeframe] = useState('1D');
     const [overlays, setOverlays] = useState({ ema: true, vwap: true, sr: true, fib: false, patterns: true, bb: false, vrvp: false, vol: true });
     const chartContainer = useRef(null);
@@ -495,6 +496,29 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         };
         const handleMouseUp = () => {
             isDragging.current = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+        };
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+    };
+
+    // V2.4: Vertikaler Drag-Resize für Chart-Höhe
+    const startHeightResize = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const startY = e.clientY;
+        const startHeight = getChartHeight();
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+        const handleMouseMove = (e) => {
+            const delta = e.clientY - startY;
+            const newHeight = Math.max(180, Math.min(startHeight + delta, window.innerHeight - 100));
+            setCustomHeight(newHeight);
+        };
+        const handleMouseUp = () => {
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
             document.removeEventListener('mousemove', handleMouseMove);
@@ -582,17 +606,26 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return 480 - 60;
     };
 
-    const getChartHeight = () => sidebarMode === 'full' ? Math.max(500, window.innerHeight * 0.55) : sidebarMode === 'wide' ? 380 : 250;
+    const getChartHeight = () => {
+        if (customHeight) return customHeight;
+        return sidebarMode === 'full' ? Math.max(500, window.innerHeight * 0.55) : sidebarMode === 'wide' ? 380 : 250;
+    };
 
     // Render chart with all overlays
     useEffect(() => {
         if (!chartData || !chartContainer.current) return;
         if (!chartData.candles || chartData.candles.length === 0) return; // No data to render
         try {
-            // V2.3: Zoom-State speichern vor Rebuild (nur bei Overlay-Toggle, nicht bei neuem chartData)
-            const isOverlayChange = prevOverlaysRef.current && prevOverlaysRef.current !== overlays && chartData === prevOverlaysRef.current._chartData;
+            // V2.4: Zoom+Scroll exakt speichern vor Rebuild
+            // Erkennung: ist es nur ein Overlay/Resize-Wechsel (gleiche Daten)?
+            const isOverlayChange = prevOverlaysRef.current && chartData === prevOverlaysRef.current._chartData;
             if (chart.current) {
-                try { savedVisibleRange.current = chart.current.timeScale().getVisibleRange(); } catch(e) {}
+                try {
+                    savedVisibleRange.current = {
+                        logical: chart.current.timeScale().getVisibleLogicalRange(),
+                        scrollPos: chart.current.timeScale().scrollPosition(),
+                    };
+                } catch(e) {}
                 chart.current.remove();
             }
             prevOverlaysRef.current = { ...overlays, _chartData: chartData };
@@ -905,27 +938,33 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 }
             }
 
-            // V2.3: Zoom wiederherstellen statt fitContent wenn nur Overlay getoggelt wurde
-            if (savedVisibleRange.current) {
+            // V2.4: Zoom+Scroll exakt wiederherstellen bei Overlay-Toggle
+            if (isOverlayChange && savedVisibleRange.current) {
                 try {
-                    chart.current.timeScale().setVisibleRange(savedVisibleRange.current);
+                    if (savedVisibleRange.current.logical) {
+                        chart.current.timeScale().setVisibleLogicalRange(savedVisibleRange.current.logical);
+                    }
                 } catch(e) {
                     chart.current.timeScale().fitContent();
                 }
             } else {
                 chart.current.timeScale().fitContent();
+                savedVisibleRange.current = null;
             }
-            // Range nur bei echtem Data-Wechsel zurücksetzen
-            if (!isOverlayChange) savedVisibleRange.current = null;
         } catch (err) { console.error('Chart error:', err); }
         return () => {
             if (chart.current) {
-                try { savedVisibleRange.current = chart.current.timeScale().getVisibleRange(); } catch(e) {}
+                try {
+                    savedVisibleRange.current = {
+                        logical: chart.current.timeScale().getVisibleLogicalRange(),
+                        scrollPos: chart.current.timeScale().scrollPosition(),
+                    };
+                } catch(e) {}
                 chart.current.remove();
                 chart.current = null;
             }
         };
-    }, [chartData, sidebarMode, customWidth, overlays]);
+    }, [chartData, sidebarMode, customWidth, customHeight, overlays]);
 
     if (loading && !tickerData) {
         return (
@@ -1060,7 +1099,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 ) : !chartData ? (
                     <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>
                 ) : null}
-                <div ref={chartContainer} className="chart-container mb-4" style={{ borderRadius: '8px', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
+                <div ref={chartContainer} className="chart-container" style={{ borderRadius: '8px 8px 0 0', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
+                {/* V2.4: Chart-Höhe Drag-Handle */}
+                {chartData && chartData.candles && chartData.candles.length > 0 && (
+                    <div onMouseDown={startHeightResize}
+                        style={{ height: '6px', cursor: 'row-resize', background: 'transparent', borderRadius: '0 0 8px 8px', marginBottom: '16px', transition: 'background 0.2s' }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(59,130,246,0.5)'}
+                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                        title="Chart-Höhe ziehen"
+                    ></div>
+                )}
 
                 {/* Pattern Info */}
                 {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (
