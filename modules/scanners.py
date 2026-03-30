@@ -1217,61 +1217,56 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     continue
 
                 # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
-                # FIX 1+6+8+9: Proportionale Penalties, Grade-Cap, bessere Labels, Confluence-Fallback
+                # V2.5: Conflicting Patterns = HARD REJECT
+                # Double Top/H&S bei Long = raus, Double Bottom/Inv H&S bei Short = raus
                 pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
-                _has_conflicting_pattern = False  # FIX 1: Track ob bullish Pattern bei Short (oder umgekehrt)
+                _has_conflicting_pattern = False
                 if pattern_warnings:
                     high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
                     medium_warnings = [w for w in pattern_warnings if w["severity"] == "medium"]
                     danger_warnings = high_warnings + medium_warnings
+
+                    # V2.5: HARD REJECT — Conflicting high-severity Patterns komplett rausfiltern
+                    # Long + Double Top/H&S = Widerspruch → skip
+                    # Short + Double Bottom/Inv H&S = Widerspruch → skip
+                    if high_warnings:
+                        _conflict_names = [w["pattern"] for w in high_warnings]
+                        _is_bearish_conflict = any(p in ("Double Top", "Head & Shoulders") for p in _conflict_names)
+                        _is_bullish_conflict = any(p in ("Double Bottom", "Inv. Head & Shoulders") for p in _conflict_names)
+
+                        if (direction == "long" and _is_bearish_conflict) or (direction == "short" and _is_bullish_conflict):
+                            # Nur durchlassen wenn Score extrem hoch (>= 100) UND SmartMoney stark (>= 2)
+                            # = Signal so stark dass es das Pattern überstimmt
+                            if bi_score < 100 or sm_fires < 2:
+                                continue  # HARD REJECT
+                            else:
+                                _has_conflicting_pattern = True  # Warnung beibehalten aber durchlassen
+
                     candidate["PatternWarnings"] = pattern_warnings
                     candidate["PatternCount"] = len(danger_warnings)
                     candidate["PatternHighCount"] = len(high_warnings)
                     if danger_warnings:
                         warn_texts = [f"!! {w['pattern']}" if w["severity"] == "high" else f"! {w['pattern']}" for w in danger_warnings]
                         candidate["PatternLabel"] = " | ".join(warn_texts)
-                        _has_conflicting_pattern = len(high_warnings) > 0  # FIX 1
                     else:
-                        candidate["PatternLabel"] = "Keine Umkehr-Patterns"  # FIX 8: war "Clean"
+                        candidate["PatternLabel"] = "Clean"
 
-                    # FIX 6+V2.2: Proportionale Score-Penalties mit Floor
-                    # high = 15-20% des aktuellen Scores, medium = 8-10%
-                    # V2.2: Penalties gedeckelt — max 30% Gesamt-Abzug, min Score = 20
+                    # Score-Penalties für medium warnings (high conflicts already filtered above)
                     _total_penalty = 0
-                    _max_penalty = int(bi_score * 0.30)  # Max 30% Abzug
+                    _max_penalty = int(bi_score * 0.25)
                     for pw in pattern_warnings:
                         if _total_penalty >= _max_penalty:
-                            break  # Penalty-Cap erreicht
-                        if pw["severity"] == "high":
-                            prox = pw.get("proximity_pct", 5.0)
-                            pct_penalty = 0.15 + 0.05 * (1.0 - min(prox, 10.0) / 10.0)  # 15-20%
-                            penalty = min(max(10, int(bi_score * pct_penalty)), _max_penalty - _total_penalty)
+                            break
+                        if pw["severity"] == "medium":
+                            penalty = min(max(5, int(bi_score * 0.08)), _max_penalty - _total_penalty)
                             bi_score -= penalty
                             _total_penalty += penalty
-                        elif pw["severity"] == "medium":
-                            penalty = min(max(5, int(bi_score * 0.08)), _max_penalty - _total_penalty)  # 8%
+                        elif pw["severity"] == "high" and _has_conflicting_pattern:
+                            # Nur für die seltenen Fälle wo Score >= 100 + SmartMoney
+                            penalty = min(max(15, int(bi_score * 0.20)), _max_penalty - _total_penalty)
                             bi_score -= penalty
                             _total_penalty += penalty
-                    bi_score = max(20, bi_score)  # Floor: nie unter 20
-
-                    # FIX 9+V2.2: Confluence-Veto — milder, mit Floor
-                    _conf_data = candidate.get("Confluence", {})
-                    if isinstance(_conf_data, dict) and _conf_data.get("categories"):
-                        _conf_cats = _conf_data["categories"]
-                        _trend_against = not _conf_cats.get("trend", {}).get("pass", True)
-                        _mtf_against = not _conf_cats.get("multi_tf", {}).get("pass", True)
-                        if _trend_against and _mtf_against and high_warnings:
-                            bi_score = max(20, bi_score - 10)
-                    elif high_warnings and len(all_bars) >= 20:
-                        _fb_closes = [b["close"] for b in all_bars]
-                        _fb_sma20 = sum(_fb_closes[-20:]) / 20
-                        _fb_cur = _fb_closes[-1]
-                        _trend_bullish = _fb_cur > _fb_sma20
-                        _trend_bearish = _fb_cur < _fb_sma20
-                        if direction == "short" and _trend_bullish:
-                            bi_score = max(20, bi_score - 8)
-                        elif direction == "long" and _trend_bearish:
-                            bi_score = max(20, bi_score - 8)
+                    bi_score = max(20, bi_score)
 
                     # Short Bonus Signals
                     if direction == "short":
@@ -1289,12 +1284,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                     candidate["BI_Score"] = max(0, bi_score)
 
-                    # Grading — mit FIX 1: Grade-Cap bei conflicting high-severity Patterns
-                    # Wenn ein bullishes Umkehr-Pattern (Double Bottom, Inv H&S) bei Short erkannt wird
-                    # (oder bearishes bei Long), dann max Grade B — egal wie hoch der Score ist.
-                    _max_grade = "S"  # Default: kein Cap
+                    # Grading
+                    _max_grade = "S"
                     if _has_conflicting_pattern:
-                        _max_grade = "B"  # FIX 1: Hard-Cap bei Pattern-Konflikt
+                        _max_grade = "B"  # Hard-Cap bei Pattern-Konflikt (nur wenn Score >= 100)
 
                     if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
                         candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
@@ -1307,7 +1300,6 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     else:
                         candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
 
-                    # FIX 1: Append Pattern-Warnung zum GradeLabel wenn Konflikt
                     if _has_conflicting_pattern:
                         _conflict_names = [w["pattern"] for w in high_warnings]
                         candidate["BI_GradeLabel"] += f" [!{', '.join(_conflict_names)}]"
@@ -1315,7 +1307,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["PatternWarnings"] = []
                     candidate["PatternCount"] = 0
                     candidate["PatternHighCount"] = 0
-                    candidate["PatternLabel"] = "Keine Umkehr-Patterns"
+                    candidate["PatternLabel"] = "Clean"
 
                 results.append(candidate)
 

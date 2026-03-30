@@ -907,9 +907,33 @@ def _bear_scan_wrapper() -> None:
                         f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
                         f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                     )
+            # V2.5: Crash-Flash-Alerts — sofortige Email bei extremen Drops (> -10%)
+            _crash_stocks = [bd for bd in result.get("breakdown_stocks", [])
+                             if isinstance(bd, dict) and bd.get("change_pct", 0) <= -10 and bd.get("score", 0) >= 50]
+            for _cs in _crash_stocks:
+                _cs_ck = f"crash_flash_{_cs.get('ticker','?')}_{datetime.now().strftime('%Y%m%d_%H')}"
+                if _cs_ck not in _EMAIL_COOLDOWN:
+                    _EMAIL_COOLDOWN[_cs_ck] = time.time()
+                    _cs_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+                    <h2 style="color:#dc2626;margin:0">⚠️ CRASH ALERT: {_cs.get('ticker','?')} {_cs.get('change_pct',0):.1f}%</h2>
+                    <p style="color:#666;font-size:13px;margin:4px 0">{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC</p>
+                    <table style="border-collapse:collapse;font-size:14px;margin-top:12px">
+                    <tr><td style="padding:4px 12px;color:#666">Ticker</td><td style="padding:4px 12px;font-weight:bold;font-size:18px">{_cs.get('ticker','?')}</td></tr>
+                    <tr><td style="padding:4px 12px;color:#666">Preis</td><td style="padding:4px 12px;font-weight:bold">${_cs.get('price',0):.2f}</td></tr>
+                    <tr><td style="padding:4px 12px;color:#666">Drop</td><td style="padding:4px 12px;font-weight:bold;color:#dc2626;font-size:16px">{_cs.get('change_pct',0):.1f}%</td></tr>
+                    <tr><td style="padding:4px 12px;color:#666">RVOL</td><td style="padding:4px 12px;font-weight:bold">{_cs.get('rvol',0):.1f}x</td></tr>
+                    <tr><td style="padding:4px 12px;color:#666">MA20</td><td style="padding:4px 12px">{_cs.get('ma20_dist',0):.1f}%</td></tr>
+                    <tr><td style="padding:4px 12px;color:#666">Grade</td><td style="padding:4px 12px;font-weight:bold">{_cs.get('grade','?')}</td></tr>
+                    <tr><td style="padding:4px 12px;color:#666">Score</td><td style="padding:4px 12px;font-weight:bold">{_cs.get('score',0)}</td></tr>
+                    </table>
+                    </body></html>'''
+                    _send_email_alert(f"CRASH: {_cs.get('ticker','?')} {_cs.get('change_pct',0):.1f}%", _cs_body)
+                    print(f"[Bear] CRASH FLASH sent for {_cs.get('ticker','?')} ({_cs.get('change_pct',0):.1f}%)")
+
+            # V2.5: Bear Summary Email — Cooldown pro Stunde statt pro Tag
             _total_signals = len(_etf_rows) + len(_bd_rows)
             if _total_signals > 0:
-                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
+                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d_%H')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
                     _EMAIL_COOLDOWN[_bear_ck] = time.time()
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Signale</p>"
@@ -960,7 +984,7 @@ _scheduler_running = False
 _scan_status = {
     "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
     "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
-    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
+    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 240},
     "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
@@ -1078,10 +1102,10 @@ def _scheduler_loop():
         ("volume_spikes", _volume_spikes_wrapper),
         ("money_flow", _money_flow_wrapper),
         ("orb", _orb_scanner_wrapper),
+        ("bear", _bear_scan_wrapper),  # V2.5: Bear ist light (~30 API-Calls), nicht heavy
     ]
     heavy_scans = [
         ("bi_long", lambda: _bi_background_scan_wrapper("long")),
-        ("bear", _bear_scan_wrapper),
         ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("biotech", _biotech_scan_wrapper),
     ]
