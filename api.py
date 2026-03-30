@@ -137,7 +137,12 @@ BI_CACHE_LONG = "/tmp/bi_cache_long.json"
 BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
-STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"
+STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
+
+def _strategy_cache_path(strategy_name: str) -> str:
+    """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
+    safe_name = strategy_name.lower().replace(" ", "_").replace("/", "_")
+    return f"/tmp/strategy_{safe_name}_cache.json"
 
 
 # ── Email Alert System ──
@@ -468,8 +473,8 @@ def _biotech_scan_wrapper() -> None:
 
 
 def _strategy_scan_wrapper(strategy_name: str) -> None:
-    """Generischer Snapshot-basierter Scanner für PM/AH/Standard-Strategien.
-    Nutzt Polygon Gainers/Losers Snapshot und filtert nach Strategy-Kriterien."""
+    """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
+    Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
     try:
         all_strategies = {**STRATEGIES, **CRYPTO_STRATEGIES}
         strat = all_strategies.get(strategy_name)
@@ -482,6 +487,11 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         price_min, price_max = filters.get("Preis", (0, 999999))
         rvol_min, rvol_max = filters.get("RVOL", (0, 999))
         close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
+        gap_min, gap_max = filters.get("Gap %", (-999, 999))
+        vortag_min, vortag_max = filters.get("Vortag %", (-999, 999))
+        min_dollar_vol = strat.get("min_dollar_volume", 0)
+        _has_gap_filter = "Gap %" in filters
+        _has_vortag_filter = "Vortag %" in filters
 
         print(f"[Strategy Scan] {strategy_name}: Change {change_min}..{change_max}%, Preis ${price_min}..${price_max}")
 
@@ -512,12 +522,21 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         volume = day.get("v", 0)
                         prev_vol = prev.get("v", 1)
                         rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
+                        dollar_vol = volume * price
 
                         # Close Position (wo im Tagesrange: 0=Low, 1=High)
                         day_high = day.get("h", price)
                         day_low = day.get("l", price)
+                        day_open = day.get("o", prev_close)
                         day_range = day_high - day_low
                         close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
+
+                        # V2.2: Gap % = Open vs Previous Close
+                        gap_pct = ((day_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
+
+                        # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
+                        prev_open = prev.get("o", prev_close)
+                        vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
 
                         # Filter anwenden
                         if not (change_min <= change_pct <= change_max):
@@ -528,6 +547,12 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             continue
                         if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
                             continue
+                        if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
+                            continue
+                        if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
+                            continue
+                        if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
+                            continue
 
                         results.append({
                             "Ticker": ticker,
@@ -536,10 +561,14 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             "Change_Pct": round(change_pct, 2),
                             "Volume": volume,
                             "RVOL": rvol,
+                            "Dollar_Volume": round(dollar_vol),
                             "Prev_Close": round(prev_close, 2),
+                            "Day_Open": round(day_open, 2),
                             "Day_High": round(day_high, 2),
                             "Day_Low": round(day_low, 2),
                             "Close_Position": round(close_pos, 2),
+                            "Gap_Pct": round(gap_pct, 2),
+                            "Vortag_Pct": round(vortag_pct, 2),
                         })
                     except Exception:
                         continue
@@ -550,8 +579,11 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         results.sort(key=lambda x: abs(x.get("Change_Pct", 0)), reverse=True)
         results = results[:50]
 
-        save_cache_file(STRATEGY_SCAN_CACHE, results)
-        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer")
+        # V2.2: Separate Cache-Datei pro Strategie + Fallback auf generischen Cache
+        _strat_cache = _strategy_cache_path(strategy_name)
+        save_cache_file(_strat_cache, results)
+        save_cache_file(STRATEGY_SCAN_CACHE, results)  # Fallback für alte Clients
+        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer → {_strat_cache}")
 
     except Exception as e:
         print(f"[Strategy Scan] Fehler: {e}")
@@ -1966,7 +1998,12 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         # Generische Strategie (PM Losers, PM Gainers, AH, Whale Watch, etc.)
         # Nutzt Polygon Snapshot + Filter aus strategies.py
         _strat_name = request.strategy
-        _run_scan_safe("strategy_scan", lambda: _strategy_scan_wrapper(_strat_name))
+        # V2.2: Separate scan-locks pro Strategie statt ein einziger "strategy_scan"
+        _safe_key = f"strat_{_strat_name.lower().replace(' ', '_')}"
+        if _safe_key not in _scan_status:
+            with _scan_lock:
+                _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
+        _run_scan_safe(_safe_key, lambda: _strategy_scan_wrapper(_strat_name))
         return {
             "status": "started",
             "message": f"Strategie-Scan gestartet: {request.strategy}",
@@ -2014,8 +2051,12 @@ def get_scan_results(
         elif "listing" in strategy_lower:
             cache_file = NEW_LISTING_CACHE
         else:
-            # Generische Strategie (PM Losers, PM Gainers, AH, Whale Watch, etc.)
-            cache_file = STRATEGY_SCAN_CACHE
+            # V2.2: Generische Strategie — versuche zuerst strategie-spezifischen Cache
+            _strat_cache = _strategy_cache_path(strategy)
+            if os.path.exists(_strat_cache):
+                cache_file = _strat_cache
+            else:
+                cache_file = STRATEGY_SCAN_CACHE  # Fallback
     elif direction:
         # Backward compatibility: direction parameter (old way)
         if direction not in ["long", "short"]:

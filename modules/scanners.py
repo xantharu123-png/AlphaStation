@@ -997,6 +997,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         score_sum = 0
         score_count = 0
         top_score = 0
+        # V2.2: Score-Verteilungs-Buckets für Debugging
+        _score_buckets = {"0-19": 0, "20-39": 0, "40-59": 0, "60-79": 0, "80-99": 0, "100+": 0}
+        _short_trend_fail = 0
+        _pattern_killed = 0
 
         for candidate in candidates:
             # ── Stop-Signal prüfen ──
@@ -1106,6 +1110,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if bi_score > top_score:
                     top_score = bi_score
 
+                # V2.2: Score-Bucket tracking
+                if bi_score >= 100: _score_buckets["100+"] += 1
+                elif bi_score >= 80: _score_buckets["80-99"] += 1
+                elif bi_score >= 60: _score_buckets["60-79"] += 1
+                elif bi_score >= 40: _score_buckets["40-59"] += 1
+                elif bi_score >= 20: _score_buckets["20-39"] += 1
+                else: _score_buckets["0-19"] += 1
+
                 if not is_valid:
                     low_score_count += 1
                     continue
@@ -1129,7 +1141,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 range_size = range_high - range_low
                 range_pct = (range_size / range_low * 100) if range_low > 0 else 0
 
-                if range_pct < 2.0:
+                if range_pct < 1.0:
                     range_fail += 1
                     continue
 
@@ -1213,39 +1225,44 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     else:
                         candidate["PatternLabel"] = "Keine Umkehr-Patterns"  # FIX 8: war "Clean"
 
-                    # FIX 6: Proportionale Score-Penalties statt fixer Werte
-                    # high = 20-30% des aktuellen Scores, medium = 10-15%
+                    # FIX 6+V2.2: Proportionale Score-Penalties mit Floor
+                    # high = 15-20% des aktuellen Scores, medium = 8-10%
+                    # V2.2: Penalties gedeckelt — max 30% Gesamt-Abzug, min Score = 20
+                    _total_penalty = 0
+                    _max_penalty = int(bi_score * 0.30)  # Max 30% Abzug
                     for pw in pattern_warnings:
+                        if _total_penalty >= _max_penalty:
+                            break  # Penalty-Cap erreicht
                         if pw["severity"] == "high":
                             prox = pw.get("proximity_pct", 5.0)
-                            # Proportional: 20-30% des Scores je nach Proximity
-                            pct_penalty = 0.20 + 0.10 * (1.0 - min(prox, 10.0) / 10.0)  # 20-30%
-                            penalty = max(15, int(bi_score * pct_penalty))
+                            pct_penalty = 0.15 + 0.05 * (1.0 - min(prox, 10.0) / 10.0)  # 15-20%
+                            penalty = min(max(10, int(bi_score * pct_penalty)), _max_penalty - _total_penalty)
                             bi_score -= penalty
+                            _total_penalty += penalty
                         elif pw["severity"] == "medium":
-                            penalty = max(10, int(bi_score * 0.12))  # 12% des Scores
+                            penalty = min(max(5, int(bi_score * 0.08)), _max_penalty - _total_penalty)  # 8%
                             bi_score -= penalty
+                            _total_penalty += penalty
+                    bi_score = max(20, bi_score)  # Floor: nie unter 20
 
-                    # FIX 9: Confluence-Veto — Fallback wenn Confluence leer ist
-                    # Berechne einfachen Trend-Check als Ersatz
+                    # FIX 9+V2.2: Confluence-Veto — milder, mit Floor
                     _conf_data = candidate.get("Confluence", {})
                     if isinstance(_conf_data, dict) and _conf_data.get("categories"):
                         _conf_cats = _conf_data["categories"]
                         _trend_against = not _conf_cats.get("trend", {}).get("pass", True)
                         _mtf_against = not _conf_cats.get("multi_tf", {}).get("pass", True)
                         if _trend_against and _mtf_against and high_warnings:
-                            bi_score -= 20
+                            bi_score = max(20, bi_score - 10)
                     elif high_warnings and len(all_bars) >= 20:
-                        # Fallback: Einfacher SMA-Trend-Check wenn Confluence fehlt
                         _fb_closes = [b["close"] for b in all_bars]
                         _fb_sma20 = sum(_fb_closes[-20:]) / 20
                         _fb_cur = _fb_closes[-1]
                         _trend_bullish = _fb_cur > _fb_sma20
                         _trend_bearish = _fb_cur < _fb_sma20
                         if direction == "short" and _trend_bullish:
-                            bi_score -= 15  # Short gegen Uptrend + bullish Pattern
+                            bi_score = max(20, bi_score - 8)
                         elif direction == "long" and _trend_bearish:
-                            bi_score -= 15  # Long gegen Downtrend + bearish Pattern
+                            bi_score = max(20, bi_score - 8)
 
                     # Short Bonus Signals
                     if direction == "short":
@@ -1303,10 +1320,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _bi_cache_save(results, direction=direction)
 
         avg_sc = round(score_sum / max(1, score_count))
+        _thr = 60 if direction == "long" else 55
+        _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
         pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
-                    f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold 85) → "
+                    f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold {_thr}) → "
                     f"{low_score_count} unter Threshold → {range_fail} Range → "
-                    f"{atr_fail} ATR → {rr_fail} R:R → {len(results)} Treffer")
+                    f"{atr_fail} ATR → {rr_fail} R:R → {len(results)} Treffer"
+                    f" [Scores: {_buckets_str}]")
+        print(f"[BI {direction}] Pipeline: {pipeline}")
 
         _bi_progress_write(direction, "done", checked=checked, total=total,
                            hits=len(results), no_data=no_data_count,
@@ -2231,6 +2252,17 @@ def _biotech_background_scan(poly_key):
 
                 # C) Ticker Details (MCap, Shares)
                 details = get_ticker_details(poly_key, ticker)
+
+                # C.1) SIC-Code Validierung: Nicht-Biotech rausfiltern
+                _detail_sic = str(details.get("sic_code", "") or "")
+                if _detail_sic and _detail_sic in SPAC_SIC_CODES:
+                    continue  # SPAC/Blank Check — kein Biotech
+                if _detail_sic and _detail_sic not in BIOTECH_SIC_CODES and _detail_sic[:2] not in ("28", "38", "87", "80"):
+                    # SIC bekannt aber nicht Pharma/Biotech/Medical/R&D — raus
+                    # 28xx=Chemicals/Pharma, 38xx=Instruments, 87xx=R&D, 80xx=Health Services
+                    _name_lower = (_stock_name or "").lower()
+                    if not any(kw in _name_lower for kw in ["pharma", "therapeutics", "bio", "medical", "oncol", "genom"]):
+                        continue
 
                 # D) BPIQ Catalyst-Daten (kuratiert, PDUFA-Dates, täglich aktualisiert)
                 # ClinicalTrials.gov entfernt — Datenqualität zu schlecht (veraltete Readout-Dates)

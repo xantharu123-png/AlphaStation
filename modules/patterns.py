@@ -1762,12 +1762,16 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             grade = "D" # SCHWACH
 
-    # Threshold: Long 85, Short 80 (42.5%/40% von 200)
-    # V69.1: Crypto-Schwellen angepasst an neue Grading-Schwellen
+    # Threshold: Long 60, Short 55 (~32%/29% von 188)
+    # V2.2 FIX: Alte Schwellen (85/80) waren für 200-Punkte-System kalibriert.
+    # Nach Pro-Reweighting (CUT-Signale gesenkt, max_score=188) und AUDIT-Fixes
+    # (FIX 1: Inst.Accumulation 14→7, FIX 4: RSI+Stoch dedup) ist die
+    # erreichbare Punktzahl ~20-30% niedriger als vorher.
+    # Neue Schwellen: 60/55 = realistischer für den aktuellen Scoring-Mix.
     if crypto_mode:
-        threshold = 55 if direction == "long" else 50
+        threshold = 45 if direction == "long" else 40
     else:
-        threshold = 85 if direction == "long" else 80
+        threshold = 60 if direction == "long" else 55
     is_valid = score >= threshold
 
     # Cap score at max_score to prevent overflow
