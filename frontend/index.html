@@ -2807,8 +2807,11 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     };
 
     const fearLevel = fearData?.score || 0;
-    const fearText = fearLevel < 25 ? 'GIER' : fearLevel < 45 ? 'OPTIMISMUS' : fearLevel < 55 ? 'NEUTRAL' : fearLevel < 75 ? 'ANGST' : 'PANIK';
-    const fearColor = fearLevel < 25 ? '#059669' : fearLevel < 45 ? '#2563eb' : fearLevel < 55 ? '#6b7280' : fearLevel < 75 ? '#d97706' : '#dc2626';
+    // V2.3: Labels korrekt — hoher Score = viel Angst, niedriger = Gier
+    const _fearTextMap = (s) => s >= 80 ? 'EXTREME ANGST' : s >= 60 ? 'ANGST' : s >= 40 ? 'NEUTRAL' : s >= 20 ? 'OPTIMISMUS' : 'GIER';
+    const fearText = fearData?.level || _fearTextMap(fearLevel);
+    const _fearColorMap = (s) => s >= 80 ? '#dc2626' : s >= 60 ? '#d97706' : s >= 40 ? '#6b7280' : s >= 20 ? '#2563eb' : '#059669';
+    const fearColor = _fearColorMap(fearLevel);
 
     return (
         <div className="space-y-6">
