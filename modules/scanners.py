@@ -914,46 +914,63 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         candidates: Vorgeladene Kandidaten-Liste (aus fetch_stock_data im Hauptthread)
     """
     try:
-        # ── Fallback: Generate candidates from Polygon gainers/losers + curated list ──
+        # ── Fallback: Full stock universe from Polygon ──
         if not candidates:
-            _bi_progress_write(direction, "scanning", detail="Lade Aktien-Universe...")
+            _bi_progress_write(direction, "scanning", detail="Lade volles Aktien-Universe...")
             try:
                 candidates = []
-                # 1. Polygon gainers/losers (Starter Plan compatible)
+                seen = set()
+
+                # 1. Full Universe: /v3/reference/tickers mit Pagination (8000+ Aktien)
+                url = "https://api.polygon.io/v3/reference/tickers"
+                params = {
+                    "type": "CS",
+                    "market": "stocks",
+                    "active": "true",
+                    "limit": 1000,
+                    "apiKey": poly_key,
+                }
+                next_url = None
+                for _page in range(12):  # Max 12 Seiten = 12000 Aktien
+                    if next_url:
+                        resp = rate_limited_get(next_url, timeout=15)
+                    else:
+                        resp = rate_limited_get(url, params=params, timeout=15)
+                    if resp.status_code != 200:
+                        print(f"[BI {direction}] Universe page {_page} failed: {resp.status_code}")
+                        break
+                    data = resp.json()
+                    results = data.get("results", [])
+                    for r in results:
+                        t = r.get("ticker", "")
+                        if t and t not in seen:
+                            seen.add(t)
+                            candidates.append(t)
+                    next_url = data.get("next_url")
+                    if next_url:
+                        next_url = f"{next_url}&apiKey={poly_key}"
+                    else:
+                        break
+                    _bi_progress_write(direction, "scanning",
+                                       detail=f"Universe: {len(candidates)} Aktien geladen (Seite {_page+1})...")
+
+                # 2. Gainers/Losers als Bonus (aktuelle Mover)
                 for endpoint in ["gainers", "losers"]:
-                    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                    resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=15)
-                    if resp.status_code == 200:
-                        for t in resp.json().get("tickers", []):
-                            ticker = t.get("ticker", "")
-                            day = t.get("day", {})
-                            price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                            if price > 2 and ticker and ticker not in candidates:
-                                candidates.append(ticker)
+                    try:
+                        gurl = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                        resp = rate_limited_get(gurl, params={"apiKey": poly_key}, timeout=15)
+                        if resp.status_code == 200:
+                            for t in resp.json().get("tickers", []):
+                                ticker = t.get("ticker", "")
+                                if ticker and ticker not in seen:
+                                    seen.add(ticker)
+                                    candidates.append(ticker)
+                    except Exception:
+                        pass
 
-                # 2. Curated universe of liquid, popular stocks
-                _curated = [
-                    "AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","AMD","AVGO","CRM",
-                    "NFLX","ADBE","INTC","QCOM","MU","AMAT","LRCX","KLAC","MRVL","ON",
-                    "COIN","MARA","RIOT","SQ","PYPL","SHOP","SNOW","PLTR","DDOG","NET",
-                    "JPM","GS","MS","BAC","WFC","C","V","MA","AXP","SCHW",
-                    "XOM","CVX","COP","SLB","HAL","OXY","DVN","MPC","VLO","PXD",
-                    "UNH","JNJ","PFE","ABBV","MRK","LLY","BMY","GILD","AMGN","BIIB",
-                    "LMT","RTX","GD","NOC","BA","CAT","DE","HON","GE","MMM",
-                    "DIS","CMCSA","T","VZ","TMUS","CHTR","NFLX","ROKU","PARA","WBD",
-                    "HD","LOW","TGT","WMT","COST","TJX","ROST","DG","DLTR","BBY",
-                    "NKE","SBUX","MCD","YUM","CMG","DASH","ABNB","BKNG","MAR","HLT",
-                    "F","GM","RIVN","LCID","NIO","LI","XPEV","TSLA","TM","HMC",
-                    "SOFI","HOOD","UPST","AFRM","NU","LC","ALLY","SYF","DFS","COF",
-                    "CRWD","ZS","PANW","FTNT","S","OKTA","CYBR","MNDY","QLYS","TENB",
-                    "SPY","QQQ","IWM","DIA","XLF","XLE","XLK","XLV","XLI","XLP",
-                    "SMCI","ARM","CRDO","VRT","DELL","HPE","PSTG","NTAP","ZM","TEAM",
-                ]
-                for t in _curated:
-                    if t not in candidates:
-                        candidates.append(t)
-
-                _bi_progress_write(direction, "scanning", detail=f"{len(candidates)} Kandidaten gefunden")
+                _bi_progress_write(direction, "scanning",
+                                   detail=f"{len(candidates)} Kandidaten — starte Analyse")
+                print(f"[BI {direction}] Universe loaded: {len(candidates)} stocks")
             except Exception as e:
                 _bi_progress_write(direction, "error", detail=f"Universe-Fehler: {str(e)[:50]}")
                 return
