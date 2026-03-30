@@ -2873,12 +2873,10 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         }
     };
 
-    const fearLevel = fearData?.score || 0;
-    // V2.3: Labels korrekt — hoher Score = viel Angst, niedriger = Gier
-    const _fearTextMap = (s) => s >= 80 ? 'EXTREME ANGST' : s >= 60 ? 'ANGST' : s >= 40 ? 'NEUTRAL' : s >= 20 ? 'OPTIMISMUS' : 'GIER';
-    const fearText = fearData?.level || _fearTextMap(fearLevel);
-    const _fearColorMap = (s) => s >= 80 ? '#dc2626' : s >= 60 ? '#d97706' : s >= 40 ? '#6b7280' : s >= 20 ? '#2563eb' : '#059669';
-    const fearColor = _fearColorMap(fearLevel);
+    const fearLevel = fearData?.score ?? 50;
+    // V2.5: CNN-kompatible Skala — 0 = Extreme Fear, 100 = Extreme Greed
+    const fearText = fearData?.level || (fearLevel <= 20 ? 'EXTREME ANGST' : fearLevel <= 40 ? 'ANGST' : fearLevel <= 60 ? 'NEUTRAL' : fearLevel <= 80 ? 'GIER' : 'EXTREME GIER');
+    const fearColor = fearLevel <= 20 ? '#dc2626' : fearLevel <= 40 ? '#d97706' : fearLevel <= 60 ? '#6b7280' : fearLevel <= 80 ? '#2563eb' : '#059669';
 
     return (
         <div className="space-y-6">
@@ -2983,7 +2981,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     <h3 className="font-semibold mb-4">Fear-Score Komponenten</h3>
                     <div className="grid grid-cols-2 gap-3 text-sm">
                         <div className="flex justify-between"><span className="text-gray-600">VIX Level</span><span className="font-semibold">{fearData.vix?.toFixed(1)}</span></div>
-                        <div className="flex justify-between"><span className="text-gray-600">Fear Score</span><span className="font-bold" style={{color: fearColor}}>{fearLevel}/100</span></div>
+                        <div className="flex justify-between"><span className="text-gray-600">Fear & Greed</span><span className="font-bold" style={{color: fearColor}}>{fearLevel}/100</span></div>
                     </div>
                     <div className="mt-3 text-xs text-gray-500">
                         Score basiert auf: VIX Level & Trend, S&P/Nasdaq Tagesänderungen, A/D Ratio, Marktbreite, Sektor-Divergenzen, VIX Termstruktur

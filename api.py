@@ -4091,64 +4091,18 @@ def get_orb_results():
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
-# ── Fear Score (12-factor) ──
+# ── Fear & Greed Score (CNN-kompatibel, 0-100) ──
+# V2.5: Komplett neu — Skala wie CNN: 0 = Extreme Fear, 100 = Extreme Greed
+# Verwendet 7 Faktoren analog zu CNN, basierend auf verfügbaren Daten
 def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List[Dict]) -> tuple[int, str, Dict]:
     """
-    Calculate comprehensive fear/panic score (0-100).
-    Returns (score, fear_level_string, details_dict)
+    Calculate Fear & Greed score compatible with CNN scale.
+    0 = Extreme Fear, 25 = Fear, 50 = Neutral, 75 = Greed, 100 = Extreme Greed
+    Each factor produces a sub-score 0-100, final score is weighted average.
     """
-    score = 0
-    details = {}
+    factors = {}
+    weights = {}
 
-    # 1. VIX Level (0-8 points)
-    if vix_data and "price" in vix_data:
-        vix = vix_data["price"]
-        if vix >= 30:
-            score += 8
-            details["vix_level"] = 8
-        elif vix >= 25:
-            score += 6
-            details["vix_level"] = 6
-        elif vix >= 20:
-            score += 4
-            details["vix_level"] = 4
-        elif vix >= 15:
-            score += 2
-            details["vix_level"] = 2
-        else:
-            details["vix_level"] = 0
-
-    # 2. VIX Change 1D (0-8 points)
-    if vix_data and "change_1d" in vix_data:
-        vix_chg_1d = abs(vix_data["change_1d"])
-        if vix_chg_1d > 10:
-            score += 8
-            details["vix_change_1d"] = 8
-        elif vix_chg_1d > 5:
-            score += 6
-            details["vix_change_1d"] = 6
-        elif vix_chg_1d > 2:
-            score += 4
-            details["vix_change_1d"] = 4
-        else:
-            details["vix_change_1d"] = 0
-
-    # 3. VIX Change 5D (0-8 points)
-    if vix_data and "change_5d" in vix_data:
-        vix_chg_5d = abs(vix_data["change_5d"])
-        if vix_chg_5d > 20:
-            score += 8
-            details["vix_change_5d"] = 8
-        elif vix_chg_5d > 10:
-            score += 6
-            details["vix_change_5d"] = 6
-        elif vix_chg_5d > 5:
-            score += 4
-            details["vix_change_5d"] = 4
-        else:
-            details["vix_change_5d"] = 0
-
-    # Helper to find index by ticker
     def get_index_data(ticker):
         for idx in indices_data:
             if idx.get("ticker") == ticker:
@@ -4157,183 +4111,143 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 
     spy_data = get_index_data("SPY")
     qqq_data = get_index_data("QQQ")
-    dia_data = get_index_data("DIA")
     iwm_data = get_index_data("IWM")
 
-    # 4. S&P 500 Change 1D (0-8 points)
-    if spy_data and "change_1d" in spy_data:
-        spy_chg_1d = spy_data["change_1d"]
-        if spy_chg_1d < -2:
-            score += 8
-            details["spy_change_1d"] = 8
-        elif spy_chg_1d < -1:
-            score += 6
-            details["spy_change_1d"] = 6
-        elif spy_chg_1d < -0.5:
-            score += 4
-            details["spy_change_1d"] = 4
-        else:
-            details["spy_change_1d"] = 0
-
-    # 5. S&P 500 Change 5D (0-8 points)
-    if spy_data and "change_5d" in spy_data:
-        spy_chg_5d = spy_data["change_5d"]
-        if spy_chg_5d < -5:
-            score += 8
-            details["spy_change_5d"] = 8
-        elif spy_chg_5d < -3:
-            score += 6
-            details["spy_change_5d"] = 6
-        elif spy_chg_5d < -1:
-            score += 4
-            details["spy_change_5d"] = 4
-        else:
-            details["spy_change_5d"] = 0
-
-    # 6. Nasdaq Change 1D (0-8 points)
-    if qqq_data and "change_1d" in qqq_data:
-        qqq_chg_1d = qqq_data["change_1d"]
-        if qqq_chg_1d < -2:
-            score += 8
-            details["qqq_change_1d"] = 8
-        elif qqq_chg_1d < -1:
-            score += 6
-            details["qqq_change_1d"] = 6
-        elif qqq_chg_1d < -0.5:
-            score += 4
-            details["qqq_change_1d"] = 4
-        else:
-            details["qqq_change_1d"] = 0
-
-    # 7. Nasdaq Change 5D (0-8 points)
-    if qqq_data and "change_5d" in qqq_data:
-        qqq_chg_5d = qqq_data["change_5d"]
-        if qqq_chg_5d < -5:
-            score += 8
-            details["qqq_change_5d"] = 8
-        elif qqq_chg_5d < -3:
-            score += 6
-            details["qqq_change_5d"] = 6
-        elif qqq_chg_5d < -1:
-            score += 4
-            details["qqq_change_5d"] = 4
-        else:
-            details["qqq_change_5d"] = 0
-
-    # 8. A/D Ratio (0-8 points)
-    if breadth_data and "ad_ratio" in breadth_data:
-        ad_ratio = breadth_data["ad_ratio"]
-        if ad_ratio < 0.5:
-            score += 8
-            details["ad_ratio"] = 8
-        elif ad_ratio < 0.7:
-            score += 6
-            details["ad_ratio"] = 6
-        elif ad_ratio < 1.0:
-            score += 4
-            details["ad_ratio"] = 4
-        else:
-            details["ad_ratio"] = 0
-
-    # 8b. Breadth confirmation as put/call proxy (0-5 points)
-    # If decliners >> advancers = extreme bearish sentiment (put/call proxy)
-    if breadth_data and "declining" in breadth_data and "advancing" in breadth_data:
-        advancing = breadth_data.get("advancing", 1)
-        declining = breadth_data.get("declining", 1)
-        breadth_ratio = advancing / declining if declining > 0 else 0
-        if breadth_ratio < 0.4:  # More decliners than advancers (heavy selling)
-            score += 5
-            details["breadth_confirmation"] = 5
-        elif breadth_ratio < 0.6:
-            score += 3
-            details["breadth_confirmation"] = 3
-        else:
-            details["breadth_confirmation"] = 0
-    else:
-        details["breadth_confirmation"] = 0
-
-    # 9. Russell vs S&P divergence (0-8 points)
-    if iwm_data and spy_data:
-        iwm_chg = iwm_data.get("change_5d", 0)
-        spy_chg = spy_data.get("change_5d", 0)
-        divergence = spy_chg - iwm_chg  # If SPY up and IWM down = positive divergence
-        if divergence > 5:  # IWM significantly underperforming
-            score += 8
-            details["russell_spy_div"] = 8
-        elif divergence > 3:
-            score += 6
-            details["russell_spy_div"] = 6
-        elif divergence > 1:
-            score += 4
-            details["russell_spy_div"] = 4
-        else:
-            details["russell_spy_div"] = 0
-
-    # 10. Count indices with negative 5D change (0-8 points)
-    negative_count = 0
-    for idx in indices_data:
-        if idx.get("change_5d", 0) < 0:
-            negative_count += 1
-
-    if negative_count == 4:
-        score += 8
-        details["negative_indices"] = 8
-    elif negative_count == 3:
-        score += 6
-        details["negative_indices"] = 6
-    elif negative_count == 2:
-        score += 4
-        details["negative_indices"] = 4
-    else:
-        details["negative_indices"] = 0
-
-    # 11. VIX term structure proxy (0-25 points)
-    # VIX level indicates contango/backwardation proxy
-    # VIX > 35 = extreme fear (backwardation likely) = crash signal
-    # VIX 20-35 = elevated concern
-    # VIX < 20 = complacent (contango = contrarian warning)
-    vix_term_score = 0
+    # ── Factor 1: VIX Level (Market Volatility) — Weight 20 ──
+    # VIX < 12 = 100 (Extreme Greed), 12-15 = 75, 15-20 = 50, 20-25 = 25, 25-30 = 10, >30 = 0
     if vix_data and "price" in vix_data:
-        vix_value = vix_data["price"]
-        if vix_value > 35:
-            vix_term_score = 25  # Extreme fear/backwardation
-            details["vix_term_structure"] = 25
-        elif vix_value > 25:
-            vix_term_score = 15  # Elevated fear
-            details["vix_term_structure"] = 15
-        elif vix_value < 15:
-            vix_term_score = 5  # Low VIX = complacency = contrarian warning
-            details["vix_term_structure"] = 5
+        vix = vix_data["price"]
+        if vix <= 12:
+            factors["VIX Level"] = 100
+        elif vix <= 15:
+            factors["VIX Level"] = 75 - (vix - 12) / 3 * 25  # 75→50
+        elif vix <= 20:
+            factors["VIX Level"] = 50 - (vix - 15) / 5 * 25  # 50→25
+        elif vix <= 25:
+            factors["VIX Level"] = 25 - (vix - 20) / 5 * 15  # 25→10
+        elif vix <= 35:
+            factors["VIX Level"] = 10 - (vix - 25) / 10 * 10  # 10→0
         else:
-            details["vix_term_structure"] = 0
-        score += vix_term_score
+            factors["VIX Level"] = 0
+        weights["VIX Level"] = 20
+
+    # ── Factor 2: Market Momentum (S&P 500 vs 20D) — Weight 20 ──
+    # SPY 20D change: > +5% = 100, +2-5% = 75, 0-2% = 55, -2-0% = 40, -5 to -2% = 20, < -5% = 0
+    if spy_data and "change_20d" in spy_data:
+        chg20 = spy_data["change_20d"]
+        if chg20 >= 5:
+            factors["Momentum"] = 100
+        elif chg20 >= 2:
+            factors["Momentum"] = 75 + (chg20 - 2) / 3 * 25
+        elif chg20 >= 0:
+            factors["Momentum"] = 50 + chg20 / 2 * 25
+        elif chg20 >= -2:
+            factors["Momentum"] = 30 + (chg20 + 2) / 2 * 20
+        elif chg20 >= -5:
+            factors["Momentum"] = 10 + (chg20 + 5) / 3 * 20
+        elif chg20 >= -10:
+            factors["Momentum"] = (chg20 + 10) / 5 * 10
+        else:
+            factors["Momentum"] = 0
+        weights["Momentum"] = 20
+
+    # ── Factor 3: Market Breadth (A/D Ratio) — Weight 15 ──
+    # A/D > 2.0 = 100, 1.5 = 80, 1.0 = 50, 0.7 = 30, 0.5 = 15, < 0.3 = 0
+    if breadth_data and "ad_ratio" in breadth_data:
+        ad = breadth_data["ad_ratio"]
+        if ad >= 2.0:
+            factors["Breadth"] = 100
+        elif ad >= 1.5:
+            factors["Breadth"] = 80 + (ad - 1.5) / 0.5 * 20
+        elif ad >= 1.0:
+            factors["Breadth"] = 50 + (ad - 1.0) / 0.5 * 30
+        elif ad >= 0.7:
+            factors["Breadth"] = 30 + (ad - 0.7) / 0.3 * 20
+        elif ad >= 0.3:
+            factors["Breadth"] = (ad - 0.3) / 0.4 * 30
+        else:
+            factors["Breadth"] = 0
+        weights["Breadth"] = 15
+
+    # ── Factor 4: Index 5D Performance (Proxy für Strength) — Weight 15 ──
+    # Durchschnitt der 5D-Changes aller Indizes
+    chg5_list = [idx.get("change_5d", 0) for idx in indices_data if "change_5d" in idx]
+    if chg5_list:
+        avg_5d = sum(chg5_list) / len(chg5_list)
+        if avg_5d >= 3:
+            factors["5D Strength"] = 100
+        elif avg_5d >= 1:
+            factors["5D Strength"] = 70 + avg_5d / 3 * 30
+        elif avg_5d >= 0:
+            factors["5D Strength"] = 50 + avg_5d * 20
+        elif avg_5d >= -2:
+            factors["5D Strength"] = 25 + (avg_5d + 2) / 2 * 25
+        elif avg_5d >= -5:
+            factors["5D Strength"] = 5 + (avg_5d + 5) / 3 * 20
+        else:
+            factors["5D Strength"] = max(0, 5 + avg_5d + 5)
+        weights["5D Strength"] = 15
+
+    # ── Factor 5: Nasdaq vs S&P Divergenz (Risk Appetite Proxy) — Weight 10 ──
+    # Wenn Nasdaq besser als S&P = Risk On, umgekehrt = Risk Off
+    if qqq_data and spy_data:
+        qqq_5d = qqq_data.get("change_5d", 0)
+        spy_5d = spy_data.get("change_5d", 0)
+        diff = qqq_5d - spy_5d  # Positiv = Tech outperforms = Risk On
+        factors["Risk Appetite"] = max(0, min(100, 50 + diff * 10))
+        weights["Risk Appetite"] = 10
+
+    # ── Factor 6: Small Cap Strength (Russell vs S&P) — Weight 10 ──
+    if iwm_data and spy_data:
+        iwm_5d = iwm_data.get("change_5d", 0)
+        spy_5d = spy_data.get("change_5d", 0)
+        diff = iwm_5d - spy_5d  # Positiv = Small Caps outperform = bullish breadth
+        factors["Small Cap"] = max(0, min(100, 50 + diff * 12))
+        weights["Small Cap"] = 10
+
+    # ── Factor 7: VIX Trend (5D Change) — Weight 10 ──
+    # VIX sinkend = Greed, VIX steigend = Fear
+    if vix_data and "change_5d" in vix_data:
+        vix_chg = vix_data["change_5d"]  # Positiv = VIX gestiegen = mehr Fear
+        if vix_chg <= -15:
+            factors["VIX Trend"] = 100
+        elif vix_chg <= -5:
+            factors["VIX Trend"] = 75 + (-5 - vix_chg) / 10 * 25
+        elif vix_chg <= 0:
+            factors["VIX Trend"] = 50 + (-vix_chg) / 5 * 25
+        elif vix_chg <= 10:
+            factors["VIX Trend"] = 50 - vix_chg / 10 * 35
+        elif vix_chg <= 25:
+            factors["VIX Trend"] = 15 - (vix_chg - 10) / 15 * 15
+        else:
+            factors["VIX Trend"] = 0
+        weights["VIX Trend"] = 10
+
+    # ── Gewichteter Durchschnitt ──
+    total_weight = sum(weights.values())
+    if total_weight > 0:
+        score = sum(factors.get(k, 50) * weights[k] for k in weights) / total_weight
     else:
-        details["vix_term_structure"] = 0
+        score = 50  # Neutral wenn keine Daten
 
-    # 12. Consecutive red days for S&P (0-8 points)
-    # This would require historical data - estimate from 1D and 5D
-    if spy_data:
-        spy_1d = spy_data.get("change_1d", 0)
-        if spy_1d < 0:  # Red today
-            score += 4  # Assume multiple red days if in downtrend
-            details["consecutive_red_days"] = 4
-        else:
-            details["consecutive_red_days"] = 0
+    score = max(0, min(100, round(score)))
 
-    # Cap at 100
-    score = min(score, 100)
+    # Details für Frontend
+    details = {}
+    for k, v in factors.items():
+        details[k.lower().replace(" ", "_")] = round(v, 1)
 
-    # Determine fear level
-    if score >= 80:
-        fear_level = "PANIK"
-    elif score >= 60:
+    # Fear Level — CNN-kompatibel
+    if score <= 20:
+        fear_level = "EXTREME ANGST"
+    elif score <= 40:
         fear_level = "ANGST"
-    elif score >= 40:
+    elif score <= 60:
         fear_level = "NEUTRAL"
-    elif score >= 20:
-        fear_level = "OPTIMISMUS"
-    else:
+    elif score <= 80:
         fear_level = "GIER"
+    else:
+        fear_level = "EXTREME GIER"
 
     return score, fear_level, details
 
