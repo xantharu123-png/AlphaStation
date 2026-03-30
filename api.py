@@ -931,6 +931,19 @@ def _scheduler_loop():
                 interval_sec = _scan_status[name]["interval_min"] * 60
                 elapsed = now - last_run_times.get(name, 0)
                 is_running = _scan_status[name]["running"]
+                started_at = _scan_status[name].get("_started_at")
+
+            # Watchdog: Force-Reset wenn Scan zu lange hängt
+            if is_running and started_at:
+                timeout_min = _SCAN_TIMEOUTS.get(name, 10)
+                stuck_sec = now - started_at
+                if stuck_sec > timeout_min * 60:
+                    print(f"[Scheduler] WATCHDOG: {name} hängt seit {int(stuck_sec)}s (timeout={timeout_min}min) — Force-Reset!")
+                    with _scan_lock:
+                        _scan_status[name]["running"] = False
+                        _scan_status[name]["_started_at"] = None
+                    is_running = False  # Erlaubt sofortigen Neustart
+
             if elapsed >= interval_sec and not is_running:
                 print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
                 _run_scan_safe(name, func)  # Non-blocking
