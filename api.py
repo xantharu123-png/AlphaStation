@@ -554,13 +554,55 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
                             continue
 
+                        # V2.2: Scoring für Strategie-Ergebnisse
+                        _strat_score = 0
+                        # Change-Stärke (0-30)
+                        _ac = abs(change_pct)
+                        if _ac >= 10: _strat_score += 30
+                        elif _ac >= 5: _strat_score += 20
+                        elif _ac >= 3: _strat_score += 12
+                        else: _strat_score += 5
+                        # RVOL (0-25)
+                        if rvol >= 3.0: _strat_score += 25
+                        elif rvol >= 2.0: _strat_score += 18
+                        elif rvol >= 1.5: _strat_score += 12
+                        elif rvol >= 1.0: _strat_score += 6
+                        # Close Position (0-15)
+                        if "Change %" in filters:
+                            _cm, _ = filters["Change %"]
+                            if _cm >= 0:  # Bullish: Close near High = gut
+                                if close_pos >= 0.8: _strat_score += 15
+                                elif close_pos >= 0.6: _strat_score += 10
+                            else:  # Bearish: Close near Low = gut
+                                if close_pos <= 0.2: _strat_score += 15
+                                elif close_pos <= 0.4: _strat_score += 10
+                        # Dollar Volume (0-15)
+                        if dollar_vol >= 10_000_000: _strat_score += 15
+                        elif dollar_vol >= 5_000_000: _strat_score += 10
+                        elif dollar_vol >= 1_000_000: _strat_score += 6
+                        # Gap-Qualität (0-15)
+                        _ag = abs(gap_pct)
+                        if _ag >= 5: _strat_score += 12
+                        elif _ag >= 2: _strat_score += 15  # Sweet spot
+                        elif _ag >= 1: _strat_score += 8
+                        # Grade
+                        if _strat_score >= 75: _strat_grade = "S"
+                        elif _strat_score >= 60: _strat_grade = "A"
+                        elif _strat_score >= 45: _strat_grade = "B"
+                        elif _strat_score >= 30: _strat_grade = "C"
+                        else: _strat_grade = "D"
+
                         results.append({
                             "Ticker": ticker,
                             "ticker": ticker,
                             "Preis": round(price, 2),
+                            "price": round(price, 2),
                             "Change_Pct": round(change_pct, 2),
+                            "change_pct": round(change_pct, 2),
                             "Volume": volume,
+                            "volume": volume,
                             "RVOL": rvol,
+                            "rvol": rvol,
                             "Dollar_Volume": round(dollar_vol),
                             "Prev_Close": round(prev_close, 2),
                             "Day_Open": round(day_open, 2),
@@ -568,7 +610,10 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             "Day_Low": round(day_low, 2),
                             "Close_Position": round(close_pos, 2),
                             "Gap_Pct": round(gap_pct, 2),
+                            "gap_pct": round(gap_pct, 2),
                             "Vortag_Pct": round(vortag_pct, 2),
+                            "score": _strat_score,
+                            "grade": _strat_grade,
                         })
                     except Exception:
                         continue
