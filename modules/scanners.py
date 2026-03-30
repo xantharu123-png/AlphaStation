@@ -1030,8 +1030,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 resp = rate_limited_get(url, params=params, timeout=15)
                 checked += 1
 
-                if checked % 25 == 0:
-                    # Nicht "running" schreiben wenn Stop angefordert wurde
+                if checked % 10 == 0:
+                    # V2.2: Alle 10 statt 25 Stocks updaten für Live-Fortschritt
                     if not _bi_should_stop(direction):
                         avg_sc = round(score_sum / max(1, score_count))
                         _bi_progress_write(direction, "running", checked=checked, total=total,

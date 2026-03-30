@@ -1068,22 +1068,28 @@ def _scheduler_loop():
     # Run all scans once immediately on startup
     # Reihenfolge: Schnelle Crypto-Scans zuerst, dann Stock-Scans gestaffelt
     # BI Long + BI Short NICHT gleichzeitig (beide nutzen Polygon heavy)
-    scan_tasks = [
+    # V2.2: Scans in LEICHT (Snapshot, 1-2 API Calls) und SCHWER (tausende Calls) aufteilen
+    # Leichte Scans starten parallel, schwere NACHEINANDER (teilen sich 200 calls/min)
+    light_scans = [
         ("early_movers", _early_movers_wrapper),
         ("crash_monitor", _crash_monitor_wrapper),
         ("btc_divergenz", _btc_divergenz_wrapper),
         ("volume_spikes", _volume_spikes_wrapper),
         ("money_flow", _money_flow_wrapper),
+        ("orb", _orb_scanner_wrapper),
+    ]
+    heavy_scans = [
         ("bi_long", lambda: _bi_background_scan_wrapper("long")),
         ("bear", _bear_scan_wrapper),
         ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("biotech", _biotech_scan_wrapper),
-        ("orb", _orb_scanner_wrapper),
     ]
+    scan_tasks = light_scans + heavy_scans
 
     # Only add new_listing scan if module is available
     if HAS_NEW_LISTING_SCANNER:
         scan_tasks.append(("new_listing", _new_listing_wrapper))
+    _heavy_names = {name for name, _ in heavy_scans}
 
     # ── Smart Startup: Nur Scans starten die keinen frischen Cache haben ──
     _cache_map = {
@@ -1127,7 +1133,20 @@ def _scheduler_loop():
                 _scan_status[name]["next_run"] = datetime.fromtimestamp(
                     time.time() + interval_sec
                 ).isoformat()
-            time.sleep(3)  # Stagger
+            # V2.2: Schwere Scans (bi_long, bi_short, biotech) WARTEN bis fertig
+            # bevor der nächste startet — sonst teilen sich alle 200 calls/min
+            if name in _heavy_names:
+                print(f"[Scheduler] Warte auf {name} (schwerer Scan)...")
+                _wait_start = time.time()
+                while _scan_status[name]["running"] and _scheduler_running:
+                    time.sleep(10)
+                    _wait_sec = int(time.time() - _wait_start)
+                    if _wait_sec > 3600:  # Max 1h warten
+                        print(f"[Scheduler] {name} Timeout nach 1h — weiter")
+                        break
+                print(f"[Scheduler] {name} fertig nach {int(time.time() - _wait_start)}s — nächster Scan")
+            else:
+                time.sleep(3)  # Leichte Scans: nur kurzer Stagger
 
     # Fill any missing last_run_times
     for name in _scan_status:
@@ -1157,6 +1176,16 @@ def _scheduler_loop():
                     is_running = False  # Erlaubt sofortigen Neustart
 
             if elapsed >= interval_sec and not is_running:
+                # V2.2: Schwere Scans nicht starten wenn ein anderer schwerer läuft
+                if name in _heavy_names:
+                    _other_heavy_running = False
+                    with _scan_lock:
+                        for _hn in _heavy_names:
+                            if _hn != name and _scan_status.get(_hn, {}).get("running", False):
+                                _other_heavy_running = True
+                                break
+                    if _other_heavy_running:
+                        continue  # Nächstes Mal probieren
                 print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
                 _run_scan_safe(name, func)  # Non-blocking
                 last_run_times[name] = time.time()
