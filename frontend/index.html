@@ -2746,7 +2746,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 A/D Ratio: <span className="font-semibold">{breadth.ad_ratio?.toFixed(2)}</span>
                             </div>
                             <span className={`signal-badge ${breadth.breadth_signal === 'BULLISH' ? 'signal-bullish' : breadth.breadth_signal === 'BEARISH' ? 'signal-bearish' : 'signal-neutral'}`}>
-                                {breadth.breadth_signal === 'BULLISH' ? 'Bullisch' : breadth.breadth_signal === 'BEARISH' ? 'Bärisch' : 'Neutral'}
+                                {breadth.breadth_signal === 'BULLISH' ? 'Bullisch' : breadth.breadth_signal === 'BEARISH' ? 'Bärisch' : breadth.breadth_signal === 'MARKT GESCHLOSSEN' ? 'Markt geschlossen' : 'Neutral'}
                             </span>
                         </div>
                         {breadth.unchanged > 0 && (

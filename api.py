@@ -635,13 +635,13 @@ def _bear_scan_wrapper() -> None:
 
         # --- Section 2: Breakdown stocks (big single-day losers) ---
         try:
-            # Use /losers endpoint (Starter plan compatible) instead of bulk /tickers endpoint (Enterprise only)
             snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
             snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
 
             losers = []
             if snap_resp.status_code == 200:
                 tickers = snap_resp.json().get("tickers", [])
+                print(f"[Bear] Losers endpoint returned {len(tickers)} tickers")
                 for t in tickers:
                     try:
                         day = t.get("day", {})
@@ -658,39 +658,31 @@ def _bear_scan_wrapper() -> None:
                         if chg_pct > -4:
                             continue
 
-                        # Trend validation: require volume confirmation (rvol >= 1.0 on down day)
-                        # Note: Full downtrend validation (price < MA20 AND MA50) requires separate API call
                         ticker_sym = t.get("ticker", "")
-                        rvol = 1.0  # Default, improved with API call if possible
+                        rvol = 1.0
+
                         try:
-                            # Attempt to fetch last 30 days for moving average calculation
                             url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_sym}/range/1/day/2024-01-01/2099-12-31"
                             resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
                             if resp.status_code == 200:
                                 bars = resp.json().get("results", [])
                                 if len(bars) >= 21:
-                                    # Calculate MA20
                                     ma20 = sum(b.get("c", 0) for b in bars[1:21]) / 20
-                                    # Calculate MA50 (require more bars)
                                     if len(bars) >= 51:
                                         ma50 = sum(b.get("c", 0) for b in bars[1:51]) / 50
                                     else:
-                                        ma50 = ma20  # Fallback if not enough history
+                                        ma50 = ma20
 
-                                    # Must be in downtrend: price below both MAs
                                     if price > ma20 or price > ma50:
-                                        continue  # Not in downtrend, skip
+                                        continue
 
-                                    # Calculate volume ratio
                                     if len(bars) > 1:
                                         avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
                                         rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 1.0
 
-                                    # Must have volume confirmation (rvol >= 1.0 on down day)
                                     if rvol < 1.0:
-                                        continue  # No volume confirmation, skip
+                                        continue
                         except Exception as e:
-                            # If we can't fetch technical data, still include but mark as unvalidated
                             print(f"[Warning] Trend validation skipped for {ticker_sym}: {e}")
 
                         losers.append({
@@ -707,6 +699,7 @@ def _bear_scan_wrapper() -> None:
                         continue
                 losers.sort(key=lambda x: x.get("change_pct", 0))
                 result["breakdown_stocks"] = losers[:30]
+                print(f"[Bear] Final breakdown_stocks: {len(losers[:30])}")
         except Exception as e:
             print(f"Breakdown stocks error: {e}")
 
@@ -4034,33 +4027,41 @@ def _crash_monitor_wrapper() -> None:
 
             for endpoint in ["gainers", "losers"]:
                 snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+                try:
+                    snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+                    print(f"[Crash Monitor] {endpoint} endpoint: status={snap_resp.status_code}")
+                except Exception as req_err:
+                    print(f"[Crash Monitor] {endpoint} request FAILED: {req_err}")
+                    continue
 
                 if snap_resp.status_code != 200:
-                    if snap_resp.status_code == 403:
-                        print(f"[Warning] 403 Forbidden on {endpoint} endpoint - check API plan")
+                    print(f"[Warning] {endpoint} returned {snap_resp.status_code}: {snap_resp.text[:200]}")
                     continue
 
                 tickers = snap_resp.json().get("tickers", [])
+                print(f"[Crash Monitor] {endpoint}: {len(tickers)} tickers received")
+
+                # Gainers endpoint = alle steigenden, Losers endpoint = alle fallenden
+                # Count direkt aus der Anzahl der Tickers (robust, kein todaysChangePerc nötig)
                 changes = []
                 for t in tickers:
                     try:
                         tod = t.get("todaysChangePerc", 0)
-                        if tod and isinstance(tod, (int, float)):
+                        if isinstance(tod, (int, float)) and tod != 0:
                             changes.append(tod)
-                            if tod > 0.1:
-                                up += 1
-                            elif tod < -0.1:
-                                down += 1
-                            else:
-                                unchanged += 1
                     except Exception:
                         continue
 
-                if endpoint == "gainers" and changes:
-                    gainers_avg_chg = round(sum(changes) / len(changes), 2)
-                elif endpoint == "losers" and changes:
-                    losers_avg_chg = round(sum(changes) / len(changes), 2)
+                if endpoint == "gainers":
+                    up = len(tickers)  # Alle Tickers im Gainers-Endpoint sind Gewinner
+                    if changes:
+                        gainers_avg_chg = round(sum(changes) / len(changes), 2)
+                elif endpoint == "losers":
+                    down = len(tickers)  # Alle Tickers im Losers-Endpoint sind Verlierer
+                    if changes:
+                        losers_avg_chg = round(sum(changes) / len(changes), 2)
+
+                print(f"[Crash Monitor] {endpoint}: count={len(tickers)}, avg_chg={changes and round(sum(changes)/len(changes),2) or 0}")
 
             total = up + down + unchanged
             ratio = round(up / down, 2) if down > 0 else 0
