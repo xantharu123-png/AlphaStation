@@ -1883,7 +1883,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         <tr>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('preis')}>Preis</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('mcap_m')}>MCap</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL</th>
                             <th className="text-left py-2 px-2">Catalyst</th>
@@ -1906,7 +1906,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     <div className="font-semibold">{item.ticker}</div>
                                     <div className="text-xs text-gray-400 truncate" style={{maxWidth:'120px'}}>{item.name}</div>
                                 </td>
-                                <td className="py-3 px-2 text-right font-mono">${item.preis?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right font-mono">${(item.price || item.preis)?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right text-xs">{item.mcap_m ? (item.mcap_m >= 1000 ? (item.mcap_m/1000).toFixed(1)+'B' : item.mcap_m.toFixed(0)+'M') : '–'}</td>
                                 <td className={`py-3 px-2 text-right ${item.rvol >= 2 ? 'color-positive font-semibold' : item.rvol >= 1.3 ? 'color-positive' : ''}`}>{item.rvol?.toFixed(1)}x</td>
                                 <td className="py-3 px-2 text-xs" style={{maxWidth:'180px'}}>

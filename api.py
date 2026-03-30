@@ -2291,7 +2291,9 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             "message": "Volume Spikes Scanner started",
             "strategy": request.strategy,
         }
-    elif "bear" in strategy_lower or "short" in strategy_lower:
+    elif strategy_lower in ("bear", "bear scanner", "bear scan"):
+        # V2.6b: Nur explizit "bear" — nicht mehr jedes "short" abfangen
+        # "Breakout Short", "Breakdown Short" etc. sind generische Strategien
         _run_scan_safe("bear", _bear_scan_wrapper)
         return {
             "status": "started",
