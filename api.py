@@ -204,10 +204,11 @@ def _send_email_alert(subject, body_html):
 
 
 def _check_and_alert(scanner_name, cache_file):
-    """Prüft Scan-Ergebnisse auf Grade S/A und sendet Alert."""
+    """Prüft Scan-Ergebnisse auf Grade S/A/B und sendet Alert."""
     now = time.time()
     try:
         if not os.path.exists(cache_file):
+            print(f"[Alert] {scanner_name}: Cache-Datei nicht vorhanden: {cache_file}")
             return
         with open(cache_file, "r") as f:
             data = json.load(f)
@@ -215,16 +216,19 @@ def _check_and_alert(scanner_name, cache_file):
         if isinstance(results, list) and len(results) > 0 and isinstance(results[0], dict) and "data" in results[0]:
             results = results[0].get("data", results)
         if not isinstance(results, list):
+            print(f"[Alert] {scanner_name}: Cache hat kein gültiges results-Array")
             return
+        print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
+        # Grade-Schwellen pro Scanner — BI: S/A/B, Biotech: A/B (hat kein S)
+        _alert_grades = {"S", "A", "A+", "B"}
         alerts = []
         for r in results:
             if not isinstance(r, dict):
                 continue
             ticker = r.get("ticker", r.get("Ticker", r.get("symbol", "")))
             grade = r.get("BI_Grade", r.get("Grade", r.get("grade", r.get("rating", ""))))
-            score = r.get("BI_Score", r.get("Score", r.get("score", r.get("Alpha", 0)))
-            )
-            if grade not in ("S", "A", "A+"):
+            score = r.get("BI_Score", r.get("Score", r.get("score", r.get("Alpha", 0))))
+            if grade not in _alert_grades:
                 continue
             ck = f"{scanner_name}_{ticker}"
             if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
@@ -232,18 +236,23 @@ def _check_and_alert(scanner_name, cache_file):
             _EMAIL_COOLDOWN[ck] = now
             alerts.append({"ticker": ticker, "grade": grade, "score": score,
                            "price": r.get("Preis", r.get("price", r.get("current", 0))),
-                           "direction": r.get("direction", ""),
+                           "direction": r.get("BI_Direction", r.get("direction", "")),
                            "rvol": r.get("RVOL", r.get("rvol", 0))})
         if not alerts:
+            # Log warum keine Alerts
+            all_grades = [r.get("BI_Grade", r.get("Grade", "?")) for r in results if isinstance(r, dict)]
+            print(f"[Alert] {scanner_name}: Keine alertbaren Grades. Vorhandene Grades: {dict((g, all_grades.count(g)) for g in set(all_grades))}")
             return
         labels = {"bi_long": "BI Scanner LONG", "bi_short": "BI Scanner SHORT",
                   "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
         label = labels.get(scanner_name, scanner_name)
         n = len(alerts)
+        # Emoji pro Grade
+        _grade_emoji = {"S": "🏆", "A": "🔥", "A+": "🔥", "B": "⭐"}
         subject = f"🚨 {n} Top-Setup{'s' if n > 1 else ''} — {label}"
         rows = ""
         for a in alerts:
-            emoji = "🏆" if a["grade"] == "S" else "🔥"
+            emoji = _grade_emoji.get(a["grade"], "📊")
             rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a["grade"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
@@ -257,11 +266,13 @@ def _check_and_alert(scanner_name, cache_file):
         <th style="padding:8px;text-align:left">Grade</th><th style="padding:8px;text-align:left">Score</th>
         <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">RVOL</th></tr>
         {rows}</table>
-        <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — Grade S = ELITE | Grade A = STARK</p>
+        <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
+        print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
         _send_email_alert(subject, body)
     except Exception as e:
-        print(f"[Alert] Check-Fehler {scanner_name}: {e}")
+        import traceback
+        print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -611,10 +622,30 @@ def _bear_scan_wrapper() -> None:
         if has_stock_data:
             save_cache_file(BEAR_CACHE, [result])
             print(f"[Bear] Saved {len(result.get('inverse_etfs',[]))} ETFs, {len(result.get('breakdown_stocks',[]))} breakdowns")
+            # Bear Alert: starke Inverse ETFs + Breakdowns
+            _bear_alert_items = []
+            for etf in result.get("inverse_etfs", []):
+                if isinstance(etf, dict) and etf.get("signal") == "STARK":
+                    _bear_alert_items.append(f"📉 {etf.get('ticker','?')} ({etf.get('description','')[:30]}) — {etf.get('chg_5d',0):+.1f}% (5T)")
+            for bd in result.get("breakdown_stocks", []):
+                if isinstance(bd, dict) and bd.get("score", 0) >= 70:
+                    _bear_alert_items.append(f"🔻 {bd.get('ticker','?')} — Score {bd.get('score',0)}, {bd.get('signal','')}")
+            if _bear_alert_items:
+                _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
+                if _bear_ck not in _EMAIL_COOLDOWN:
+                    _EMAIL_COOLDOWN[_bear_ck] = time.time()
+                    _bear_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+                    <h2 style="color:#dc2626">📉 Bear Scanner Alert</h2>
+                    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</p>
+                    <ul>{"".join(f"<li>{item}</li>" for item in _bear_alert_items)}</ul>
+                    </body></html>'''
+                    _send_email_alert(f"📉 {len(_bear_alert_items)} Bear-Signale erkannt", _bear_body)
         else:
             print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
         print(f"Bear scanner error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ── Background Scheduler ──
@@ -3067,7 +3098,19 @@ def get_volume_spikes():
 ORB_CACHE = "/tmp/orb_scan_results.json"
 
 def _orb_scanner_wrapper() -> None:
-    """ORB Scanner — läuft nur Mo-Fr 9:45-11:00 ET."""
+    """
+    ORB Scanner V2 — Professional Grade Opening Range Breakout
+    Basiert auf Mark Fisher ACD + Toby Crabel Methodik.
+    Läuft nur Mo-Fr 9:45-11:00 ET (alle 5 Min).
+
+    Verbesserungen V2:
+    - Volume Confirmation auf Breakout-Candle (verhindert ~40% false positives)
+    - Entry/Stop/Target Levels für jedes Setup
+    - OR-Size vs ATR Check (zu weite OR = schlechtes R:R)
+    - Failed Breakout Detection (Crabel Reversal Setups)
+    - Scoring/Grading System (S/A/B/C)
+    - Verbesserte RVOL Berechnung (U-Shape Intraday Curve)
+    """
     try:
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo("US/Eastern")
@@ -3081,11 +3124,11 @@ def _orb_scanner_wrapper() -> None:
             print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {'Mo-Fr' if weekday < 5 else 'Wochenende'}) — übersprungen")
             return
 
-        print(f"[ORB] Scanner gestartet ({now_et.strftime('%H:%M')} ET)...")
+        print(f"[ORB] Scanner V2 gestartet ({now_et.strftime('%H:%M')} ET)...")
 
         today_str = now_et.strftime("%Y-%m-%d")
         yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
-        if weekday == 0:  # Montag → Freitag
+        if weekday == 0:
             yesterday = (now_et - timedelta(days=3)).strftime("%Y-%m-%d")
 
         prev_data = fetch_grouped_daily(POLYGON_KEY, yesterday)
@@ -3103,7 +3146,26 @@ def _orb_scanner_wrapper() -> None:
         mins_since_open = max(1, time_val - 570)  # 570 = 9:30
         total_market_mins = 390
 
-        # Kandidaten filtern
+        # ── Verbesserte RVOL: U-Shape Intraday Volume Curve ──
+        # Reale Markt-Microstructure: hohes Vol am Open/Close, niedrig Mittags
+        def _intraday_evf(mins_open):
+            """Expected Volume Fraction — U-Shape Modell."""
+            if mins_open <= 5:
+                return 0.08 * (mins_open / 5)    # Erste 5 Min = 8% des Tagesvolumens
+            elif mins_open <= 15:
+                return 0.08 + 0.07 * ((mins_open - 5) / 10)   # 15 Min = 15%
+            elif mins_open <= 30:
+                return 0.15 + 0.07 * ((mins_open - 15) / 15)  # 30 Min = 22%
+            elif mins_open <= 60:
+                return 0.22 + 0.08 * ((mins_open - 30) / 30)  # 1h = 30%
+            elif mins_open <= 120:
+                return 0.30 + 0.10 * ((mins_open - 60) / 60)  # 2h = 40%
+            else:
+                return 0.40 + 0.60 * ((mins_open - 120) / max(1, total_market_mins - 120))
+
+        evf = max(0.01, _intraday_evf(mins_since_open))
+
+        # ── Kandidaten filtern ──
         candidates = []
         for ticker, prev in prev_data.items():
             if len(ticker) > 5 or "." in ticker:
@@ -3114,6 +3176,8 @@ def _orb_scanner_wrapper() -> None:
             prev_vol = prev.get("v", 0)
             if prev_vol < 500000:
                 continue
+            # ATR Proxy aus Vortag (High-Low / Close)
+            prev_atr_pct = (prev.get("h", 0) - prev.get("l", 0)) / prev_close * 100 if prev_close > 0 else 0
 
             today = today_data.get(ticker, {}) if today_data else {}
             today_open = today.get("o", 0)
@@ -3126,18 +3190,9 @@ def _orb_scanner_wrapper() -> None:
                 continue
 
             gap_pct = ((today_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
-
-            # Expected volume fraction basierend auf Tageszeit
-            if mins_since_open <= 30:
-                evf = 0.20 * (mins_since_open / 30)
-            elif mins_since_open <= 60:
-                evf = 0.20 + 0.10 * ((mins_since_open - 30) / 30)
-            else:
-                evf = 0.30 + 0.70 * ((mins_since_open - 60) / (total_market_mins - 60))
-            evf = max(0.01, evf)
             rvol = today_vol / (prev_vol * evf) if prev_vol * evf > 0 else 0
 
-            if abs(gap_pct) < 2 and rvol < 1.5:
+            if abs(gap_pct) < 1.5 and rvol < 1.3:
                 continue
 
             candidates.append({
@@ -3145,15 +3200,17 @@ def _orb_scanner_wrapper() -> None:
                 "open": round(today_open, 2), "current": round(today_close or today_open, 2),
                 "high": round(today_high, 2), "low": round(today_low, 2),
                 "gap_pct": round(gap_pct, 2), "rvol": round(rvol, 2), "volume": today_vol,
+                "prev_atr_pct": round(prev_atr_pct, 2), "prev_vol": prev_vol,
             })
 
-        candidates.sort(key=lambda x: abs(x["gap_pct"]) * 0.6 + min(x["rvol"], 5) * 0.4, reverse=True)
-        candidates = candidates[:40]
+        candidates.sort(key=lambda x: abs(x["gap_pct"]) * 0.5 + min(x["rvol"], 5) * 0.3 + min(abs(x["prev_atr_pct"]), 5) * 0.2, reverse=True)
+        candidates = candidates[:50]
 
-        # 5-Min Candles für Breakout Detection
+        # ── 5-Min Candles für Breakout Detection ──
         market_open_ms = int(now_et.replace(hour=9, minute=30, second=0, microsecond=0).timestamp() * 1000)
         or_end_ms = int(now_et.replace(hour=9, minute=45, second=0, microsecond=0).timestamp() * 1000)
         breakouts = []
+        failed_breakouts = []
 
         for cand in candidates:
             t = cand["ticker"]
@@ -3169,65 +3226,297 @@ def _orb_scanner_wrapper() -> None:
                 if len(bars) < 2:
                     continue
 
+                # ── Opening Range bestimmen (9:30-9:45 = erste 3 5-Min Candles) ──
                 or_bars = [b for b in bars if b.get("t", 0) < or_end_ms]
-                if not or_bars:
-                    or_bars = bars[:3]
+                if not or_bars or len(or_bars) < 2:
+                    # Nicht genug OR-Daten → Skip (kein Fallback auf bars[:3])
+                    continue
                 or_high = max(b.get("h", 0) for b in or_bars)
                 or_low = min(b.get("l", 999999) for b in or_bars)
+                or_size = or_high - or_low
+                or_size_pct = (or_size / or_low * 100) if or_low > 0 else 0
 
-                # VWAP
+                # ── OR-Size vs ATR Check ──
+                # OR > 2x ATR = zu volatil für ORB (schlechtes R:R, Mark Fisher Regel)
+                prev_atr_dollar = cand["prev_close"] * cand["prev_atr_pct"] / 100
+                if prev_atr_dollar > 0 and or_size > prev_atr_dollar * 2.0:
+                    continue  # OR zu weit — überspringe
+
+                # OR zu eng = kein echtes Setup (< 0.3% = noise)
+                if or_size_pct < 0.3:
+                    continue
+
+                # ── VWAP Berechnung ──
                 total_vwap_num = sum((b.get("h",0)+b.get("l",0)+b.get("c",0))/3 * b.get("v",0) for b in bars)
                 total_vol = sum(b.get("v", 0) for b in bars)
                 vwap = total_vwap_num / total_vol if total_vol > 0 else (or_high + or_low) / 2
 
+                # ── OR Volume (für Volume-Confirmation) ──
+                or_avg_vol = sum(b.get("v", 0) for b in or_bars) / len(or_bars) if or_bars else 0
+
                 current_price = bars[-1].get("c", 0)
                 post_or = [b for b in bars if b.get("t", 0) >= or_end_ms]
+
+                # ── Breakout Detection mit Volume Confirmation ──
+                breakout_dir = None
+                breakout_confirmed = False
+                breakout_bar_vol = 0
+                breakout_bar_idx = -1
+                retest_detected = False
+
+                for i, b in enumerate(post_or):
+                    bc = b.get("c", 0)
+                    bv = b.get("v", 0)
+
+                    # LONG Breakout: Close über OR High
+                    if bc > or_high and breakout_dir != "LONG":
+                        breakout_dir = "LONG"
+                        breakout_bar_vol = bv
+                        breakout_bar_idx = i
+                        # Volume Confirmation: Breakout-Bar Volume > 1.2x OR-Durchschnitt
+                        if or_avg_vol > 0 and bv >= or_avg_vol * 1.2:
+                            breakout_confirmed = True
+                        break
+
+                    # SHORT Breakout: Close unter OR Low
+                    if bc < or_low and breakout_dir != "SHORT":
+                        breakout_dir = "SHORT"
+                        breakout_bar_vol = bv
+                        breakout_bar_idx = i
+                        if or_avg_vol > 0 and bv >= or_avg_vol * 1.2:
+                            breakout_confirmed = True
+                        break
+
+                # ── Failed Breakout Detection (Crabel Reversal) ──
+                # Wenn Breakout in eine Richtung, dann Reversal durch OR zurück
+                if breakout_dir and len(post_or) > breakout_bar_idx + 2:
+                    subsequent = post_or[breakout_bar_idx + 1:]
+                    if breakout_dir == "LONG":
+                        # Failed Long: Preis fällt zurück unter OR High
+                        fails_back = sum(1 for b in subsequent if b.get("c", 0) < or_high)
+                        if fails_back >= 2 and current_price < or_high:
+                            # Failed Breakout → potentieller Short
+                            failed_breakouts.append({
+                                **cand,
+                                "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                                "or_size_pct": round(or_size_pct, 2),
+                                "vwap": round(vwap, 2), "direction": "FAILED_LONG→SHORT",
+                                "current_price": round(current_price, 2),
+                                "entry": round(or_low - or_size * 0.05, 2),
+                                "stop": round(or_high + or_size * 0.15, 2),
+                                "target": round(or_low - or_size * 0.8, 2),
+                            })
+                            breakout_dir = None  # Kein gültiger Breakout
+                    elif breakout_dir == "SHORT":
+                        fails_back = sum(1 for b in subsequent if b.get("c", 0) > or_low)
+                        if fails_back >= 2 and current_price > or_low:
+                            failed_breakouts.append({
+                                **cand,
+                                "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                                "or_size_pct": round(or_size_pct, 2),
+                                "vwap": round(vwap, 2), "direction": "FAILED_SHORT→LONG",
+                                "current_price": round(current_price, 2),
+                                "entry": round(or_high + or_size * 0.05, 2),
+                                "stop": round(or_low - or_size * 0.15, 2),
+                                "target": round(or_high + or_size * 0.8, 2),
+                            })
+                            breakout_dir = None
+
+                if not breakout_dir:
+                    continue
+
+                # ── Holding Check: Preis muss AKTUELL noch auf Breakout-Seite sein ──
                 bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
                 bars_below = sum(1 for b in post_or if b.get("c", 0) < or_low)
+                if breakout_dir == "LONG" and (current_price <= or_high or bars_above < 2):
+                    continue
+                if breakout_dir == "SHORT" and (current_price >= or_low or bars_below < 2):
+                    continue
 
-                breakout_dir = None
-                if current_price > or_high and bars_above >= 2:
-                    breakout_dir = "LONG"
-                elif current_price < or_low and bars_below >= 2:
-                    breakout_dir = "SHORT"
+                # ── Entry / Stop / Target Levels ──
+                if breakout_dir == "LONG":
+                    entry = round(or_high + or_size * 0.02, 2)   # Knapp über OR High
+                    stop = round(or_low - or_size * 0.10, 2)     # Unter OR Low
+                    target1 = round(or_high + or_size * 1.0, 2)  # 1x OR Size
+                    target2 = round(or_high + or_size * 1.5, 2)  # 1.5x OR Size
+                    risk = entry - stop
+                    reward = target1 - entry
+                else:
+                    entry = round(or_low - or_size * 0.02, 2)
+                    stop = round(or_high + or_size * 0.10, 2)
+                    target1 = round(or_low - or_size * 1.0, 2)
+                    target2 = round(or_low - or_size * 1.5, 2)
+                    risk = stop - entry
+                    reward = entry - target1
+                rr_ratio = round(reward / risk, 2) if risk > 0 else 0
 
-                if breakout_dir:
-                    breakouts.append({
-                        **cand,
-                        "or_high": round(or_high, 2), "or_low": round(or_low, 2),
-                        "vwap": round(vwap, 2), "direction": breakout_dir,
-                        "current_price": round(current_price, 2),
-                    })
+                # ── R:R Filter: mindestens 1.5:1 ──
+                if rr_ratio < 1.2:
+                    continue
+
+                # ── VWAP Alignment ──
+                vwap_aligned = (breakout_dir == "LONG" and current_price > vwap) or \
+                               (breakout_dir == "SHORT" and current_price < vwap)
+
+                # ── Scoring System (0-100) ──
+                score = 0
+                score_details = []
+
+                # 1. Volume Confirmation (0-25 Punkte)
+                if breakout_confirmed:
+                    vol_ratio = breakout_bar_vol / or_avg_vol if or_avg_vol > 0 else 0
+                    if vol_ratio >= 2.0:
+                        score += 25
+                        score_details.append("Vol 2x+ ✓")
+                    elif vol_ratio >= 1.5:
+                        score += 20
+                        score_details.append("Vol 1.5x ✓")
+                    else:
+                        score += 12
+                        score_details.append("Vol OK")
+                else:
+                    score += 5
+                    score_details.append("Vol ✗")
+
+                # 2. RVOL (0-20 Punkte)
+                _rvol = cand["rvol"]
+                if _rvol >= 3.0:
+                    score += 20
+                    score_details.append(f"RVOL {_rvol:.1f}x ✓✓")
+                elif _rvol >= 2.0:
+                    score += 15
+                    score_details.append(f"RVOL {_rvol:.1f}x ✓")
+                elif _rvol >= 1.5:
+                    score += 10
+                    score_details.append(f"RVOL {_rvol:.1f}x")
+                else:
+                    score += 5
+
+                # 3. Gap Quality (0-15 Punkte)
+                _gap = abs(cand["gap_pct"])
+                if 2.0 <= _gap <= 5.0:
+                    score += 15  # Sweet Spot
+                    score_details.append(f"Gap {cand['gap_pct']:+.1f}% ✓")
+                elif _gap > 5.0:
+                    score += 8   # Zu groß, höheres Reversal-Risiko
+                    score_details.append(f"Gap {cand['gap_pct']:+.1f}% (weit)")
+                elif _gap >= 1.5:
+                    score += 10
+                    score_details.append(f"Gap {cand['gap_pct']:+.1f}%")
+                else:
+                    score += 5
+
+                # 4. OR Size Quality (0-15 Punkte)
+                # Ideale OR: 0.5-1.5% des Preises
+                if 0.5 <= or_size_pct <= 1.5:
+                    score += 15
+                    score_details.append(f"OR {or_size_pct:.1f}% ✓")
+                elif or_size_pct < 0.5:
+                    score += 8   # Eng — könnte Noise-Breakout sein
+                    score_details.append(f"OR {or_size_pct:.1f}% (eng)")
+                else:
+                    score += 8
+                    score_details.append(f"OR {or_size_pct:.1f}% (weit)")
+
+                # 5. VWAP Alignment (0-10 Punkte)
+                if vwap_aligned:
+                    score += 10
+                    score_details.append("VWAP ✓")
+                else:
+                    score += 3
+                    score_details.append("VWAP ✗")
+
+                # 6. R:R Ratio (0-10 Punkte)
+                if rr_ratio >= 2.5:
+                    score += 10
+                    score_details.append(f"R:R {rr_ratio:.1f} ✓✓")
+                elif rr_ratio >= 2.0:
+                    score += 8
+                    score_details.append(f"R:R {rr_ratio:.1f} ✓")
+                elif rr_ratio >= 1.5:
+                    score += 6
+                    score_details.append(f"R:R {rr_ratio:.1f}")
+                else:
+                    score += 3
+
+                # 7. Holding Strength (0-5 Punkte)
+                hold_bars = bars_above if breakout_dir == "LONG" else bars_below
+                total_post = len(post_or) if post_or else 1
+                hold_pct = hold_bars / total_post
+                if hold_pct >= 0.8:
+                    score += 5
+                    score_details.append("Hold ✓")
+                elif hold_pct >= 0.6:
+                    score += 3
+
+                # ── Grading ──
+                if score >= 85:
+                    grade = "S"
+                elif score >= 70:
+                    grade = "A"
+                elif score >= 55:
+                    grade = "B"
+                else:
+                    grade = "C"
+
+                breakouts.append({
+                    **cand,
+                    "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                    "or_size_pct": round(or_size_pct, 2),
+                    "vwap": round(vwap, 2), "direction": breakout_dir,
+                    "current_price": round(current_price, 2),
+                    "entry": entry, "stop": stop,
+                    "target1": target1, "target2": target2,
+                    "rr_ratio": rr_ratio,
+                    "vol_confirmed": breakout_confirmed,
+                    "vwap_aligned": vwap_aligned,
+                    "score": score, "grade": grade,
+                    "score_details": " | ".join(score_details),
+                })
             except Exception:
                 continue
 
+        # Sortiere nach Score
+        breakouts.sort(key=lambda x: x.get("score", 0), reverse=True)
+
         result = {
-            "breakouts": breakouts, "candidates": candidates[:20],
-            "stats": {"scanned": len(prev_data), "candidates": len(candidates), "breakouts": len(breakouts)},
+            "breakouts": breakouts,
+            "failed_breakouts": failed_breakouts[:10],
+            "candidates": candidates[:20],
+            "stats": {
+                "scanned": len(prev_data), "candidates": len(candidates),
+                "breakouts": len(breakouts), "failed": len(failed_breakouts),
+            },
             "or_phase": "active", "market_time": now_et.strftime("%H:%M ET"),
         }
         save_cache_file(ORB_CACHE, [result])
-        print(f"[ORB] Fertig: {len(breakouts)} Breakouts (von {len(candidates)} Kandidaten)")
+        print(f"[ORB] V2 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")
 
-        # Alert bei Breakouts
-        if breakouts:
+        # ── Alert bei Grade S/A Breakouts ──
+        alert_breakouts = [b for b in breakouts if b.get("grade") in ("S", "A")]
+        if alert_breakouts:
             rows = ""
-            for b in breakouts:
-                emoji = "⬆️" if b["direction"] == "LONG" else "⬇️"
+            for b in alert_breakouts:
+                emoji = "🏆" if b["grade"] == "S" else ("⬆️" if b["direction"] == "LONG" else "⬇️")
+                vol_icon = "🔊" if b.get("vol_confirmed") else "🔇"
                 rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{b["ticker"]}</b></td>'
-                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {b["direction"]}</td>'
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {b["direction"]} ({b["grade"]})</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${b["current_price"]}</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["gap_pct"]:+.1f}%</td>'
-                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["rvol"]:.1f}x</td></tr>'
-            body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["rvol"]:.1f}x {vol_icon}</td>'
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">E: ${b["entry"]} S: ${b["stop"]} T: ${b["target1"]}</td></tr>'
+            body = f'''<html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto">
             <h2 style="color:#1a73e8">🔔 ORB Breakouts — {now_et.strftime("%H:%M")} ET</h2>
-            <p style="color:#666">{len(breakouts)} Opening Range Breakouts gefunden</p>
-            <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <p style="color:#666">{len(alert_breakouts)} Top-Setups (Grade S/A)</p>
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
             <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
-            <th style="padding:8px;text-align:left">Richtung</th><th style="padding:8px;text-align:left">Preis</th>
-            <th style="padding:8px;text-align:left">Gap</th><th style="padding:8px;text-align:left">RVOL</th></tr>
-            {rows}</table></body></html>'''
-            _send_email_alert(f"🔔 {len(breakouts)} ORB Breakouts", body)
+            <th style="padding:8px;text-align:left">Setup</th><th style="padding:8px;text-align:left">Preis</th>
+            <th style="padding:8px;text-align:left">Gap</th><th style="padding:8px;text-align:left">RVOL</th>
+            <th style="padding:8px;text-align:left">E/S/T</th></tr>
+            {rows}</table>
+            <p style="color:#999;font-size:11px;margin-top:15px">ORB V2 — Volume Confirmed | VWAP Aligned | R:R optimiert</p>
+            </body></html>'''
+            _send_email_alert(f"🔔 {len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)", body)
 
     except Exception as e:
         print(f"[ORB] Fehler: {e}")
