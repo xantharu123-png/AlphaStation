@@ -621,10 +621,10 @@ def _bear_scan_wrapper() -> None:
 # Runs all scans automatically at defined intervals (like old Streamlit version)
 _scheduler_running = False
 _scan_status = {
-    "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
-    "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
-    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
-    "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
+    "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
+    "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
+    "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
+    "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 240},
     "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
@@ -665,10 +665,14 @@ def _init_scan_status_from_cache():
 
 _init_scan_status_from_cache()
 
-def _run_scan_safe(name, func, timeout_min=10):
+_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20}
+
+def _run_scan_safe(name, func, timeout_min=None):
     """Run a scan function safely in a background thread (non-blocking).
     Uses a watchdog pattern: if a scan is still 'running' after timeout_min,
     the next check will force-reset it so the scheduler isn't stuck."""
+    if timeout_min is None:
+        timeout_min = _SCAN_TIMEOUTS.get(name, 10)
     with _scan_lock:
         # Watchdog: if already marked running but started too long ago, force-reset
         if _scan_status[name]["running"]:
@@ -713,16 +717,18 @@ def _scheduler_loop():
     time.sleep(5)
 
     # Run all scans once immediately on startup
+    # Reihenfolge: Schnelle Crypto-Scans zuerst, dann Stock-Scans gestaffelt
+    # BI Long + BI Short NICHT gleichzeitig (beide nutzen Polygon heavy)
     scan_tasks = [
         ("early_movers", _early_movers_wrapper),
         ("crash_monitor", _crash_monitor_wrapper),
         ("btc_divergenz", _btc_divergenz_wrapper),
+        ("volume_spikes", _volume_spikes_wrapper),
         ("money_flow", _money_flow_wrapper),
         ("bi_long", lambda: _bi_background_scan_wrapper("long")),
-        ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("bear", _bear_scan_wrapper),
+        ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("biotech", _biotech_scan_wrapper),
-        ("volume_spikes", _volume_spikes_wrapper),
     ]
 
     # Only add new_listing scan if module is available
