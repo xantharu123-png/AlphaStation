@@ -27,7 +27,7 @@ import re
 import smtplib
 import threading
 from typing import Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
@@ -46,7 +46,7 @@ from modules.scanners import (
     _biotech_cache_load,
 )
 from modules.helpers import get_current_trading_session
-from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart
+from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
@@ -631,6 +631,7 @@ _scan_status = {
     "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
     "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
 }
 _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
@@ -650,6 +651,7 @@ def _init_scan_status_from_cache():
         "money_flow": "/tmp/money_flow_cache.json",
         "new_listing": "/tmp/new_listing_scanner.json",
         "volume_spikes": "/tmp/volume_spikes_cache.json",
+        "orb": "/tmp/orb_scan_results.json",
     }
     for scan_name, cache_path in _cache_map.items():
         if scan_name in _scan_status and os.path.exists(cache_path):
@@ -729,6 +731,7 @@ def _scheduler_loop():
         ("bear", _bear_scan_wrapper),
         ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("biotech", _biotech_scan_wrapper),
+        ("orb", _orb_scanner_wrapper),
     ]
 
     # Only add new_listing scan if module is available
@@ -3026,6 +3029,198 @@ def get_volume_spikes():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+
+
+# ── ORB Scanner (Opening Range Breakout) ──
+ORB_CACHE = "/tmp/orb_scan_results.json"
+
+def _orb_scanner_wrapper() -> None:
+    """ORB Scanner — läuft nur Mo-Fr 9:45-11:00 ET."""
+    try:
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo("US/Eastern")
+        now_et = datetime.now(et_tz)
+        hour, minute = now_et.hour, now_et.minute
+        time_val = hour * 60 + minute
+        weekday = now_et.weekday()
+
+        # Nur während ORB-Fenster: 9:45-11:00 ET, Mo-Fr
+        if weekday >= 5 or time_val < 585 or time_val >= 660:
+            print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {'Mo-Fr' if weekday < 5 else 'Wochenende'}) — übersprungen")
+            return
+
+        print(f"[ORB] Scanner gestartet ({now_et.strftime('%H:%M')} ET)...")
+
+        today_str = now_et.strftime("%Y-%m-%d")
+        yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+        if weekday == 0:  # Montag → Freitag
+            yesterday = (now_et - timedelta(days=3)).strftime("%Y-%m-%d")
+
+        prev_data = fetch_grouped_daily(POLYGON_KEY, yesterday)
+        if not prev_data:
+            day_before = (now_et - timedelta(days=2)).strftime("%Y-%m-%d")
+            if weekday == 0:
+                day_before = (now_et - timedelta(days=4)).strftime("%Y-%m-%d")
+            prev_data = fetch_grouped_daily(POLYGON_KEY, day_before)
+        if not prev_data:
+            print("[ORB] Keine Vortages-Daten")
+            return
+
+        today_data = fetch_grouped_daily(POLYGON_KEY, today_str)
+
+        mins_since_open = max(1, time_val - 570)  # 570 = 9:30
+        total_market_mins = 390
+
+        # Kandidaten filtern
+        candidates = []
+        for ticker, prev in prev_data.items():
+            if len(ticker) > 5 or "." in ticker:
+                continue
+            prev_close = prev.get("c", 0)
+            if prev_close < 5 or prev_close > 2000:
+                continue
+            prev_vol = prev.get("v", 0)
+            if prev_vol < 500000:
+                continue
+
+            today = today_data.get(ticker, {}) if today_data else {}
+            today_open = today.get("o", 0)
+            today_vol = today.get("v", 0)
+            today_high = today.get("h", 0)
+            today_low = today.get("l", 0)
+            today_close = today.get("c", 0)
+
+            if today_open <= 0:
+                continue
+
+            gap_pct = ((today_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
+
+            # Expected volume fraction basierend auf Tageszeit
+            if mins_since_open <= 30:
+                evf = 0.20 * (mins_since_open / 30)
+            elif mins_since_open <= 60:
+                evf = 0.20 + 0.10 * ((mins_since_open - 30) / 30)
+            else:
+                evf = 0.30 + 0.70 * ((mins_since_open - 60) / (total_market_mins - 60))
+            evf = max(0.01, evf)
+            rvol = today_vol / (prev_vol * evf) if prev_vol * evf > 0 else 0
+
+            if abs(gap_pct) < 2 and rvol < 1.5:
+                continue
+
+            candidates.append({
+                "ticker": ticker, "prev_close": round(prev_close, 2),
+                "open": round(today_open, 2), "current": round(today_close or today_open, 2),
+                "high": round(today_high, 2), "low": round(today_low, 2),
+                "gap_pct": round(gap_pct, 2), "rvol": round(rvol, 2), "volume": today_vol,
+            })
+
+        candidates.sort(key=lambda x: abs(x["gap_pct"]) * 0.6 + min(x["rvol"], 5) * 0.4, reverse=True)
+        candidates = candidates[:40]
+
+        # 5-Min Candles für Breakout Detection
+        market_open_ms = int(now_et.replace(hour=9, minute=30, second=0, microsecond=0).timestamp() * 1000)
+        or_end_ms = int(now_et.replace(hour=9, minute=45, second=0, microsecond=0).timestamp() * 1000)
+        breakouts = []
+
+        for cand in candidates:
+            t = cand["ticker"]
+            try:
+                url = f"https://api.polygon.io/v2/aggs/ticker/{t}/range/5/minute/{today_str}/{today_str}"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "asc", "limit": 50000}, timeout=10)
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if not bars or len(bars) < 2:
+                    continue
+                bars = [b for b in bars if b.get("t", 0) >= market_open_ms]
+                if len(bars) < 2:
+                    continue
+
+                or_bars = [b for b in bars if b.get("t", 0) < or_end_ms]
+                if not or_bars:
+                    or_bars = bars[:3]
+                or_high = max(b.get("h", 0) for b in or_bars)
+                or_low = min(b.get("l", 999999) for b in or_bars)
+
+                # VWAP
+                total_vwap_num = sum((b.get("h",0)+b.get("l",0)+b.get("c",0))/3 * b.get("v",0) for b in bars)
+                total_vol = sum(b.get("v", 0) for b in bars)
+                vwap = total_vwap_num / total_vol if total_vol > 0 else (or_high + or_low) / 2
+
+                current_price = bars[-1].get("c", 0)
+                post_or = [b for b in bars if b.get("t", 0) >= or_end_ms]
+                bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
+                bars_below = sum(1 for b in post_or if b.get("c", 0) < or_low)
+
+                breakout_dir = None
+                if current_price > or_high and bars_above >= 2:
+                    breakout_dir = "LONG"
+                elif current_price < or_low and bars_below >= 2:
+                    breakout_dir = "SHORT"
+
+                if breakout_dir:
+                    breakouts.append({
+                        **cand,
+                        "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                        "vwap": round(vwap, 2), "direction": breakout_dir,
+                        "current_price": round(current_price, 2),
+                    })
+            except Exception:
+                continue
+
+        result = {
+            "breakouts": breakouts, "candidates": candidates[:20],
+            "stats": {"scanned": len(prev_data), "candidates": len(candidates), "breakouts": len(breakouts)},
+            "or_phase": "active", "market_time": now_et.strftime("%H:%M ET"),
+        }
+        save_cache_file(ORB_CACHE, [result])
+        print(f"[ORB] Fertig: {len(breakouts)} Breakouts (von {len(candidates)} Kandidaten)")
+
+        # Alert bei Breakouts
+        if breakouts:
+            rows = ""
+            for b in breakouts:
+                emoji = "⬆️" if b["direction"] == "LONG" else "⬇️"
+                rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{b["ticker"]}</b></td>'
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {b["direction"]}</td>'
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${b["current_price"]}</td>'
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["gap_pct"]:+.1f}%</td>'
+                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["rvol"]:.1f}x</td></tr>'
+            body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+            <h2 style="color:#1a73e8">🔔 ORB Breakouts — {now_et.strftime("%H:%M")} ET</h2>
+            <p style="color:#666">{len(breakouts)} Opening Range Breakouts gefunden</p>
+            <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
+            <th style="padding:8px;text-align:left">Richtung</th><th style="padding:8px;text-align:left">Preis</th>
+            <th style="padding:8px;text-align:left">Gap</th><th style="padding:8px;text-align:left">RVOL</th></tr>
+            {rows}</table></body></html>'''
+            _send_email_alert(f"🔔 {len(breakouts)} ORB Breakouts", body)
+
+    except Exception as e:
+        print(f"[ORB] Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@app.post("/api/orb-scan")
+def trigger_orb_scan(background_tasks: BackgroundTasks):
+    """Trigger ORB Scanner (Opening Range Breakout) — nur aktiv 9:45-11:00 ET Mo-Fr."""
+    _run_scan_safe("orb", _orb_scanner_wrapper)
+    return {"status": "started", "message": "ORB scan triggered"}
+
+
+@app.get("/api/orb-results")
+def get_orb_results():
+    """Get cached ORB scan results."""
+    results, cached_at = load_cache_file(ORB_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except Exception:
+            pass
     return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
 
 
