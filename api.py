@@ -945,8 +945,8 @@ def _bear_scan_wrapper() -> None:
                 _cs_grade = bd.get("grade", "")
                 _cs_chg = bd.get("change_pct", 0)
                 _cs_score = bd.get("score", 0)
-                # Nur Grade S/A + Drop >= -15% + Score >= 60
-                if _cs_grade not in ("S", "A") or _cs_chg > -15 or _cs_score < 60:
+                # V2.8: Nur Grade S/A + Drop >= -10% + Score >= 60 (vereinheitlicht mit bg_service)
+                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < 60:
                     continue
                 # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
                 _cs_tk_up = _cs_ticker.upper()
