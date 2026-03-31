@@ -469,7 +469,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [sidebarMode, setSidebarMode] = useState('normal');
     const [customWidth, setCustomWidth] = useState(null);
     const [customHeight, setCustomHeight] = useState(null);
-    const [timeframe, setTimeframe] = useState('1D');
+    const [timeframe, setTimeframe] = useState('4H');
     const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
     const chartContainer = useRef(null);
     const chart = useRef(null);
@@ -556,13 +556,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     }, [ticker, isCrypto]);
 
     // Fetch chart data — crypto uses CoinGecko, stocks use Polygon
+    // V2.8: AbortController verhindert Race Conditions bei schnellem Timeframe-Wechsel
     useEffect(() => {
+        const controller = new AbortController();
+        const signal = controller.signal;
         const fetchChart = async () => {
             try {
                 if (isCrypto) {
-                    // Crypto: use CoinGecko chart via coin ID
                     const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
-                    const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`);
+                    const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`, { signal });
+                    if (signal.aborted) return;
                     if (res.ok) {
                         setChartData(await res.json());
                     } else {
@@ -570,7 +573,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     }
                 } else {
                     const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
-                    const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`);
+                    const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`, { signal });
+                    if (signal.aborted) return;
                     if (res.ok) {
                         setChartData(await res.json());
                     } else {
@@ -578,11 +582,13 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     }
                 }
             } catch (err) {
+                if (err.name === 'AbortError') return;  // Abgebrochen — ignorieren
                 console.error('Chart data error:', err);
                 setChartData({ ticker, timeframe, candles: [], error: 'Chart-Daten konnten nicht geladen werden' });
             }
         };
         fetchChart();
+        return () => controller.abort();  // Vorherigen Request abbrechen
     }, [ticker, timeframe, isCrypto]);
 
     const loadAiAnalysis = async () => {
