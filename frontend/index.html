@@ -289,9 +289,9 @@ function useAutoRefresh(url, interval = 30000, dependency = []) {
     return { data, loading, error };
 }
 
-function useSortable(data, defaultKey = null) {
+function useSortable(data, defaultKey = null, defaultDesc = true) {
     const [sortKey, setSortKey] = useState(defaultKey);
-    const [sortDesc, setSortDesc] = useState(false);
+    const [sortDesc, setSortDesc] = useState(defaultDesc);  // V2.7: Default absteigend (beste zuerst)
 
     const sorted = useMemo(() => {
         if (!data || !sortKey) return data;
@@ -1809,7 +1809,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
-    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollTimeoutRef = useRef(null);
 
     // Cleanup polling on unmount
@@ -1952,7 +1952,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.btc_divergenz_scanning || false);
     const [results, setResults] = useState(scanCache.btc_divergenz_results || []);
-    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollTimeoutRef = useRef(null);
 
     // Cleanup polling on unmount
@@ -2419,8 +2419,8 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [inverseETFs, setInverseETFs] = useState(scanCache.short_inverse || []);
     const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
     const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
-    const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'ticker');
-    const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'ticker');
+    const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'change_pct');
+    const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'change_pct');
     const pollTimeoutRef = useRef(null);
 
     // Cleanup polling on unmount
@@ -3507,7 +3507,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.vs_scanning || false);
     const [results, setResults] = useState(scanCache.vs_results || []);
-    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollTimeoutRef = useRef(null);
 
     // Cleanup polling on unmount

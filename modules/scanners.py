@@ -1122,26 +1122,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     low_score_count += 1
                     continue
 
-                # V2.6b AUDIT: Short Trend-Validierung — VERSCHÄRFT
-                # Short-Kandidaten MÜSSEN in einem Abwärtstrend oder zumindest schwach sein
+                # V2.7: Short Trend-Info (nur informativ, kein Hard-Reject mehr)
+                # V2.6b Hard-Rejects waren zu aggressiv → haben 80%+ der Kandidaten eliminiert
                 if direction == "short" and len(all_bars) >= 20:
                     _closes = [b["close"] for b in all_bars]
                     _sma20 = sum(_closes[-20:]) / 20
-                    _sma10 = sum(_closes[-10:]) / 10
-                    _sma50 = sum(_closes[-50:]) / 50 if len(_closes) >= 50 else _sma20
                     _cur = _closes[-1]
                     _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
-
-                    # HARD REJECT: Preis über SMA20 UND SMA10 > SMA20 = Uptrend
-                    if _above_sma20_pct > 1.5 and _sma10 > _sma20:
-                        continue
-                    # HARD REJECT: Preis über SMA50 UND SMA20 > SMA50 = langfristiger Uptrend
-                    if _cur > _sma50 and _sma20 > _sma50 and _above_sma20_pct > 0:
-                        continue
-                    # HARD REJECT: Heute positiv UND über SMA20 = keine Schwäche
-                    _today_chg = (_cur - _closes[-2]) / _closes[-2] * 100 if len(_closes) >= 2 and _closes[-2] > 0 else 0
-                    if _today_chg > 1.5 and _cur > _sma20:
-                        continue
+                    candidate["above_sma20_pct"] = round(_above_sma20_pct, 1)
 
                 # Range berechnen
                 range_high = max(b["high"] for b in bars[-15:])
@@ -1292,19 +1280,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                             candidate["ShortBonusScore"] = 0
                             candidate["ShortBonusDetails"] = []
 
-                        # V2.6b AUDIT: Short-Qualitätsfilter
-                        # 1) Short Bonus muss positiv sein (Stage 4, Death Cross, neg. News, etc.)
+                        # V2.7: Short-Qualitätsfilter (entschärft, V2.6b war zu strikt)
                         _short_bonus_val = candidate.get("ShortBonusScore", 0)
-                        if _short_bonus_val <= 0:
-                            # Kein einziges Short-spezifisches Signal → kein Short-Setup
+                        if False:  # V2.7: Deaktiviert — Short Bonus ist informativ, kein Hard-Gate
                             continue
 
-                        # 2) RVOL-Check: Bei Short brauchen wir Verkaufsdruck
+                        # 2) RVOL-Info (nur informativ, kein Hard-Reject)
                         _short_rvol = candidate.get("RVOL", 0)
-                        # Erlaube niedrigeres RVOL wenn Stage 4 Breakdown vorhanden
                         _has_stage4 = any("Stage 4" in str(d) for d in candidate.get("ShortBonusDetails", []))
-                        if not _has_stage4 and _short_rvol < 0.3:
-                            continue  # Zu wenig Volume und kein Breakdown
+                        candidate["has_stage4"] = _has_stage4
 
                     candidate["BI_Score"] = max(0, bi_score)
 
@@ -1314,14 +1298,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         _max_grade = "B"
 
                     if direction == "short":
-                        # Short braucht mehr Überzeugung (Short ist riskanter als Long)
-                        if bi_score >= 130 and sm_fires >= 3 and _max_grade == "S":
+                        # V2.7: Gleiche Schwellen wie Long (V2.6b war zu aggressiv)
+                        if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
                             candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                        elif bi_score >= 115 and sm_fires >= 2 and _max_grade in ("S", "A"):
+                        elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
                             candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                        elif bi_score >= 95:
+                        elif bi_score >= 90:
                             candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
-                        elif bi_score >= 80:
+                        elif bi_score >= 75:
                             candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
                         else:
                             candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
