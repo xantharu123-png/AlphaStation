@@ -1251,12 +1251,13 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 candidate["BI_Score"] = max(0, bi_score)
 
-                # ── Grading — IMMER ausführen (war vorher im pattern_warnings Block eingesperrt!) ──
-                if bi_score >= 120 and sm_fires >= 3:
+                # ── Grading — IMMER ausführen, mit SM-Bestätigung (Original-Logik) ──
+                # Proportional skaliert für max_score 188 (statt Original 200)
+                if bi_score >= 113 and sm_fires >= 4:
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                elif bi_score >= 105 and sm_fires >= 2:
+                elif bi_score >= 99 and sm_fires >= 3:
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                elif bi_score >= 90:
+                elif bi_score >= 85 and sm_hits >= 2:
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
                 elif bi_score >= 75:
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
@@ -1279,7 +1280,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _bi_cache_save(results, direction=direction)
 
         avg_sc = round(score_sum / max(1, score_count))
-        _thr = 60 if direction == "long" else 55
+        _thr = 80 if direction == "long" else 75
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
         pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
                     f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold {_thr}) → "

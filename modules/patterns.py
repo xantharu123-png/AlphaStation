@@ -1751,28 +1751,33 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             grade = "D"
     else:
-        # V68: Grading geglättet — SM-Fires senkt max 1 Grade (kein Cliff-Effekt)
-        if score >= 120 and smart_money_fires >= 3:
-            grade = "S" # ELITE — Score 120+ UND 3+ Boosted fires
-        elif score >= 105 and smart_money_fires >= 2:
-            grade = "A" # STARK — Score 105+ UND 2+ Boosted fires
-        elif score >= 90:
-            grade = "B" # SOLIDE — Score 90+
+        # V2.8: Grading — Original-Logik mit SM-Bestätigung für jedes Grade
+        # Professionelles Trading: Score allein reicht nicht, Smart Money muss bestätigen
+        # sm_fires = Boosted Signals auf Maximum (stärkste Bestätigung)
+        # sm_hits = Boosted Signals aktiv (moderate Bestätigung)
+        #
+        # Original hatte: S>=120+4fires, A>=105+3fires, B>=90+2hits, C>=80
+        # Proportional skaliert für max_score 188 (statt 200):
+        # 120/200 = 60% → 113/188, 105/200 = 52.5% → 99/188, 90/200 = 45% → 85/188
+        # SM-Anforderungen: Original-Werte beibehalten (diese sind score-unabhängig)
+        if score >= 113 and smart_money_fires >= 4:
+            grade = "S"  # ELITE — Top 60% Score + 4 Boosted fires
+        elif score >= 99 and smart_money_fires >= 3:
+            grade = "A"  # STARK — Top 52.5% Score + 3 Boosted fires
+        elif score >= 85 and smart_money_hits >= 2:
+            grade = "B"  # SOLIDE — Top 45% Score + 2 SM hits (Original!)
         elif score >= 75:
-            grade = "C" # WATCHLIST — Score 75+
+            grade = "C"  # WATCHLIST — Score 75+
         else:
-            grade = "D" # SCHWACH
+            grade = "D"  # SCHWACH
 
-    # Threshold: Long 60, Short 55 (~32%/29% von 188)
-    # V2.2 FIX: Alte Schwellen (85/80) waren für 200-Punkte-System kalibriert.
-    # Nach Pro-Reweighting (CUT-Signale gesenkt, max_score=188) und AUDIT-Fixes
-    # (FIX 1: Inst.Accumulation 14→7, FIX 4: RSI+Stoch dedup) ist die
-    # erreichbare Punktzahl ~20-30% niedriger als vorher.
-    # Neue Schwellen: 60/55 = realistischer für den aktuellen Scoring-Mix.
+    # Threshold: Proportional skaliert für max_score 188
+    # Original: 85/200 = 42.5% → 80/188 für Long
+    # Original: 80/200 = 40.0% → 75/188 für Short
     if crypto_mode:
         threshold = 45 if direction == "long" else 40
     else:
-        threshold = 60 if direction == "long" else 55  # V2.7: Zurück auf Original (65 war zu strikt)
+        threshold = 80 if direction == "long" else 75
     is_valid = score >= threshold
 
     # Cap score at max_score to prevent overflow
