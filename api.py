@@ -3740,7 +3740,39 @@ def _orb_scanner_wrapper() -> None:
             print("[ORB] Keine Vortages-Daten")
             return
 
-        today_data = fetch_grouped_daily(POLYGON_KEY, today_str)
+        # V2.8: Snapshot API statt fetch_grouped_daily für heutige Daten
+        # fetch_grouped_daily liefert während Handelszeit KEINE Daten (nur nach Börsenschluss)
+        # Snapshot API liefert Live-Intraday-Daten
+        today_data = {}
+        try:
+            snap_resp = rate_limited_get(
+                "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
+                params={"apiKey": POLYGON_KEY}, timeout=30
+            )
+            if snap_resp.status_code == 200:
+                for t in snap_resp.json().get("tickers", []):
+                    sym = t.get("ticker", "")
+                    day = t.get("day", {}) or {}
+                    lt = t.get("lastTrade", {}) or {}
+                    if day.get("o"):
+                        today_data[sym] = {
+                            "o": day.get("o", 0),
+                            "h": day.get("h", 0),
+                            "l": day.get("l", 0),
+                            "c": day.get("c", 0) or lt.get("p", 0),
+                            "v": day.get("v", 0),
+                        }
+                print(f"[ORB] Snapshot: {len(today_data)} Ticker mit Intraday-Daten")
+            else:
+                print(f"[ORB] Snapshot HTTP {snap_resp.status_code} — Fallback auf grouped daily")
+                today_data_raw = fetch_grouped_daily(POLYGON_KEY, today_str)
+                if today_data_raw:
+                    today_data = today_data_raw
+        except Exception as e:
+            print(f"[ORB] Snapshot Fehler: {e} — Fallback auf grouped daily")
+            today_data_raw = fetch_grouped_daily(POLYGON_KEY, today_str)
+            if today_data_raw:
+                today_data = today_data_raw
 
         mins_since_open = max(1, time_val - 570)  # 570 = 9:30
         total_market_mins = 390
