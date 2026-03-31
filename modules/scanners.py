@@ -1070,7 +1070,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     continue
 
                 # ── Avg-Volume-Check: min $500K Ø Daily Dollar-Volume ──
-                avg_vol_10d = sum(b["volume"] for b in all_bars[-10:]) / min(10, len(all_bars))
+                # V2.8: Heutigen partiellen Bar ausschließen für Volume-Berechnung
+                _today_check = datetime.now().strftime("%Y-%m-%d")
+                _complete_bars = [b for b in all_bars if b.get("date", "") != _today_check]
+                if not _complete_bars:
+                    _complete_bars = all_bars  # Fallback
+                avg_vol_10d = sum(b["volume"] for b in _complete_bars[-10:]) / min(10, len(_complete_bars))
                 avg_dollar_vol = avg_vol_10d * all_bars[-1]["close"] if all_bars[-1]["close"] > 0 else 0
                 if avg_dollar_vol < 500_000:
                     no_data_count += 1
@@ -1078,8 +1083,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # ── RVOL Anomalie-Filter: >50x = IPO-Tag oder Pump-Scheme ──
                 # Normales RVOL: 0.5-5.0, Breakout: 5-15, >50 = Spam
-                _prev_vol = sum(b["volume"] for b in all_bars[-20:-5]) / max(1, min(15, len(all_bars) - 5)) if len(all_bars) > 5 else 0
-                _recent_vol = sum(b["volume"] for b in all_bars[-5:]) / min(5, len(all_bars))
+                _prev_vol = sum(b["volume"] for b in _complete_bars[-20:-5]) / max(1, min(15, len(_complete_bars) - 5)) if len(_complete_bars) > 5 else 0
+                _recent_vol = sum(b["volume"] for b in _complete_bars[-5:]) / min(5, len(_complete_bars))
                 _scan_rvol = _recent_vol / max(1, _prev_vol) if _prev_vol > 0 else 0
                 if _scan_rvol > 50:
                     no_data_count += 1
@@ -1201,9 +1206,22 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["RangeHigh"] = round(range_high, 2)
                 candidate["RangeLow"] = round(range_low, 2)
 
-                # V2.3: Volumen-Daten für Frontend
-                _last_vol = all_bars[-1]["volume"] if all_bars else 0
-                _avg_vol_20 = sum(b["volume"] for b in all_bars[-20:]) / min(20, len(all_bars)) if all_bars else 0
+                # V2.8: Volumen-Daten — letzten KOMPLETTEN Handelstag verwenden
+                # all_bars[-1] kann heutiger partieller Bar sein (z.B. 1K um 10 Uhr)
+                # Fix: Prüfe ob letzter Bar heute ist → dann all_bars[-2] für Volume/RVOL
+                _today_str = datetime.now().strftime("%Y-%m-%d")
+                _last_bar_is_today = len(all_bars) >= 2 and all_bars[-1].get("date", "") == _today_str
+                _vol_bar_idx = -2 if _last_bar_is_today else -1  # Letzter kompletter Tag
+
+                if len(all_bars) >= abs(_vol_bar_idx):
+                    _last_vol = all_bars[_vol_bar_idx]["volume"]
+                else:
+                    _last_vol = all_bars[-1]["volume"] if all_bars else 0
+
+                # Avg Vol: Immer auf abgeschlossene Tage basieren (heute raus)
+                _vol_bars = all_bars[:-1] if _last_bar_is_today else all_bars
+                _avg_vol_20 = sum(b["volume"] for b in _vol_bars[-20:]) / min(20, len(_vol_bars)) if _vol_bars else 0
+
                 candidate["Volumen"] = int(_last_vol)
                 candidate["AvgVolumen"] = int(_avg_vol_20)
                 candidate["RVOL"] = round(_last_vol / _avg_vol_20, 2) if _avg_vol_20 > 0 else 0

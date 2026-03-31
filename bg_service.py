@@ -692,24 +692,16 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
 
             rr = round(abs(entry - tp1) / max(0.01, abs(entry - stop)), 1) if abs(entry - stop) > 0 else 0
 
-            # Pattern Warnings
+            # V2.8: Pattern Warnings — nur informativ, KEINE Score-Penalties
+            # (konsistent mit modules/scanners.py)
             pattern_warnings = _detect_chart_patterns(bars, direction=direction)
-            pattern_label = "✅ Clean"
+            pattern_label = "Clean"
             if pattern_warnings:
                 high_w = [w for w in pattern_warnings if w.get("severity") == "high"]
-                med_w = [w for w in pattern_warnings if w.get("severity") == "medium"]
                 if high_w:
-                    pattern_label = " | ".join(f"🚨 {w.get('pattern', '?')}" for w in high_w)
-                    # Skaliert: proximity_pct nahe 0 = Pattern nah am Preis = volle Strafe
-                    for w in high_w:
-                        prox = w.get("proximity_pct", 5.0)  # Default 5% wenn nicht gesetzt
-                        penalty = max(10, int(25 * (1.0 - min(prox, 10.0) / 10.0)))
-                        bi_score -= penalty
-                    bi_score = max(0, bi_score)
-                elif med_w:
-                    pattern_label = " | ".join(f"⚠️ {w.get('pattern', '?')}" for w in med_w)
-                    bi_score -= 10 * len(med_w)
-                    bi_score = max(0, bi_score)
+                    pattern_label = " | ".join(w.get("pattern", "?") for w in high_w)
+                else:
+                    pattern_label = " | ".join(w.get("pattern", "?") for w in pattern_warnings)
 
             # 🐻 Short Bonus Signals (nur für Bear Scanner)
             short_bonus_score = 0
@@ -726,12 +718,18 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
                 except Exception as e:
                     log.warning(f"  Short Bonus Fehler {ticker}: {e}")
 
-            # Grade (nach allen Bonus/Penalties)
-            if bi_score >= 120 and sm_fires >= 3: grade_label = "🏆 S — ELITE"
-            elif bi_score >= 105 and sm_fires >= 2: grade_label = "🔥 A — STARK"
-            elif bi_score >= 90: grade_label = "✅ B — SOLIDE"
-            elif bi_score >= 75: grade_label = "⚠️ C — WATCH"
-            else: grade_label = "❌ D — SCHWACH"
+            # V2.8: Grade — proportional skaliert (max_score 188), mit SM-Bestätigung
+            # Konsistent mit patterns.py + modules/scanners.py
+            if bi_score >= 113 and sm_fires >= 4:
+                grade = "S"; grade_label = "S — ELITE"
+            elif bi_score >= 99 and sm_fires >= 3:
+                grade = "A"; grade_label = "A — STARK"
+            elif bi_score >= 85 and sm_hits >= 2:
+                grade = "B"; grade_label = "B — SOLIDE"
+            elif bi_score >= 75:
+                grade = "C"; grade_label = "C — WATCH"
+            else:
+                grade = "D"; grade_label = "D — SCHWACH"
 
             results.append({
                 "Ticker": ticker, "Name": cand["Name"],
