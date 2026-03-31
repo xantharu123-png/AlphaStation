@@ -310,7 +310,9 @@ function useSortable(data, defaultKey = null, defaultDesc = true) {
             setSortDesc(!sortDesc);
         } else {
             setSortKey(key);
-            setSortDesc(false);
+            // V2.7: Numerische Spalten starten absteigend (beste zuerst), Text aufsteigend
+            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','EarlyScore','DegenScore','WhaleScore','NewScore'];
+            setSortDesc(numericKeys.includes(key));
         }
     };
 
