@@ -1210,125 +1210,58 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
                 candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0
 
-                if candidate["RiskReward"] < 1.5:
+                if candidate["RiskReward"] < 1.0:
                     rr_fail += 1
                     continue
 
                 # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
-                # V2.5: Conflicting Patterns = HARD REJECT
-                # Double Top/H&S bei Long = raus, Double Bottom/Inv H&S bei Short = raus
+                # V2.8: Zurück auf Original — nur informativ, KEINE Score-Penalties, KEIN Hard-Reject
+                # (V2.5 Hard-Rejects + Score-Penalties haben B/A Grades zerstört)
                 pattern_warnings = _detect_chart_patterns(all_bars, direction=direction)
-                _has_conflicting_pattern = False
                 if pattern_warnings:
                     high_warnings = [w for w in pattern_warnings if w["severity"] == "high"]
-                    medium_warnings = [w for w in pattern_warnings if w["severity"] == "medium"]
-                    danger_warnings = high_warnings + medium_warnings
-
-                    # V2.5: HARD REJECT — Conflicting high-severity Patterns komplett rausfiltern
-                    # Long + Double Top/H&S = Widerspruch → skip
-                    # Short + Double Bottom/Inv H&S = Widerspruch → skip
-                    if high_warnings:
-                        _conflict_names = [w["pattern"] for w in high_warnings]
-                        _is_bearish_conflict = any(p in ("Double Top", "Head & Shoulders") for p in _conflict_names)
-                        _is_bullish_conflict = any(p in ("Double Bottom", "Inv. Head & Shoulders") for p in _conflict_names)
-
-                        if (direction == "long" and _is_bearish_conflict) or (direction == "short" and _is_bullish_conflict):
-                            # Nur durchlassen wenn Score extrem hoch (>= 100) UND SmartMoney stark (>= 2)
-                            # = Signal so stark dass es das Pattern überstimmt
-                            if bi_score < 100 or sm_fires < 2:
-                                continue  # HARD REJECT
-                            else:
-                                _has_conflicting_pattern = True  # Warnung beibehalten aber durchlassen
-
                     candidate["PatternWarnings"] = pattern_warnings
-                    candidate["PatternCount"] = len(danger_warnings)
+                    candidate["PatternCount"] = len(pattern_warnings)
                     candidate["PatternHighCount"] = len(high_warnings)
-                    if danger_warnings:
-                        warn_texts = [f"!! {w['pattern']}" if w["severity"] == "high" else f"! {w['pattern']}" for w in danger_warnings]
-                        candidate["PatternLabel"] = " | ".join(warn_texts)
-                    else:
-                        candidate["PatternLabel"] = "Clean"
-
-                    # Score-Penalties für medium warnings (high conflicts already filtered above)
-                    _total_penalty = 0
-                    _max_penalty = int(bi_score * 0.25)
-                    for pw in pattern_warnings:
-                        if _total_penalty >= _max_penalty:
-                            break
-                        if pw["severity"] == "medium":
-                            penalty = min(max(5, int(bi_score * 0.08)), _max_penalty - _total_penalty)
-                            bi_score -= penalty
-                            _total_penalty += penalty
-                        elif pw["severity"] == "high" and _has_conflicting_pattern:
-                            # Nur für die seltenen Fälle wo Score >= 100 + SmartMoney
-                            penalty = min(max(15, int(bi_score * 0.20)), _max_penalty - _total_penalty)
-                            bi_score -= penalty
-                            _total_penalty += penalty
-                    bi_score = max(20, bi_score)
-
-                    # Short Bonus Signals
-                    if direction == "short":
-                        try:
-                            bonus_result = calculate_short_bonus_signals(
-                                ticker, all_bars, poly_key=poly_key, mode="swing"
-                            )
-                            short_bonus = bonus_result.get("bonus_score", 0)
-                            bi_score += short_bonus
-                            candidate["ShortBonusScore"] = short_bonus
-                            candidate["ShortBonusDetails"] = bonus_result.get("details", [])
-                        except Exception:
-                            candidate["ShortBonusScore"] = 0
-                            candidate["ShortBonusDetails"] = []
-
-                        # V2.7: Short-Qualitätsfilter (entschärft, V2.6b war zu strikt)
-                        _short_bonus_val = candidate.get("ShortBonusScore", 0)
-                        if False:  # V2.7: Deaktiviert — Short Bonus ist informativ, kein Hard-Gate
-                            continue
-
-                        # 2) RVOL-Info (nur informativ, kein Hard-Reject)
-                        _short_rvol = candidate.get("RVOL", 0)
-                        _has_stage4 = any("Stage 4" in str(d) for d in candidate.get("ShortBonusDetails", []))
-                        candidate["has_stage4"] = _has_stage4
-
-                    candidate["BI_Score"] = max(0, bi_score)
-
-                    # V2.6b AUDIT: Grading — HÖHERE Schwellen für Short
-                    _max_grade = "S"
-                    if _has_conflicting_pattern:
-                        _max_grade = "B"
-
-                    if direction == "short":
-                        # V2.7: Gleiche Schwellen wie Long (V2.6b war zu aggressiv)
-                        if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                        elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                        elif bi_score >= 90:
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
-                        elif bi_score >= 75:
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
-                        else:
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
-                    else:
-                        if bi_score >= 120 and sm_fires >= 3 and _max_grade == "S":
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                        elif bi_score >= 105 and sm_fires >= 2 and _max_grade in ("S", "A"):
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                        elif bi_score >= 90:
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
-                        elif bi_score >= 75:
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
-                        else:
-                            candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
-
-                    if _has_conflicting_pattern:
-                        _conflict_names = [w["pattern"] for w in high_warnings]
-                        candidate["BI_GradeLabel"] += f" [!{', '.join(_conflict_names)}]"
+                    warn_texts = [w["pattern"] for w in pattern_warnings]
+                    candidate["PatternLabel"] = " | ".join(warn_texts)
                 else:
                     candidate["PatternWarnings"] = []
                     candidate["PatternCount"] = 0
                     candidate["PatternHighCount"] = 0
                     candidate["PatternLabel"] = "Clean"
+
+                # ── Short Bonus Signals (IMMER berechnen, nicht nur bei Pattern-Warnings) ──
+                if direction == "short":
+                    try:
+                        bonus_result = calculate_short_bonus_signals(
+                            ticker, all_bars, poly_key=poly_key, mode="swing"
+                        )
+                        short_bonus = bonus_result.get("bonus_score", 0)
+                        bi_score += short_bonus
+                        candidate["ShortBonusScore"] = short_bonus
+                        candidate["ShortBonusDetails"] = bonus_result.get("details", [])
+                    except Exception:
+                        candidate["ShortBonusScore"] = 0
+                        candidate["ShortBonusDetails"] = []
+
+                    _short_rvol = candidate.get("RVOL", 0)
+                    _has_stage4 = any("Stage 4" in str(d) for d in candidate.get("ShortBonusDetails", []))
+                    candidate["has_stage4"] = _has_stage4
+
+                candidate["BI_Score"] = max(0, bi_score)
+
+                # ── Grading — IMMER ausführen (war vorher im pattern_warnings Block eingesperrt!) ──
+                if bi_score >= 120 and sm_fires >= 3:
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
+                elif bi_score >= 105 and sm_fires >= 2:
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
+                elif bi_score >= 90:
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
+                elif bi_score >= 75:
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
+                else:
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
 
                 results.append(candidate)
 
