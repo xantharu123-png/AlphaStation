@@ -650,7 +650,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 width: chartWidth, height: chartHeight,
                 crosshair: { mode: CrosshairMode.Normal },
                 rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
-                timeScale: { timeVisible: timeframe.includes('m') || timeframe.includes('H'), secondsVisible: false, borderColor: 'rgba(255,255,255,0.1)' },
+                timeScale: { timeVisible: timeframe.includes('m') || timeframe.includes('H'), secondsVisible: false, borderColor: 'rgba(255,255,255,0.1)', rightOffset: 5, barSpacing: 6 },
             });
 
             // Candlestick series
@@ -964,7 +964,18 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     chart.current.timeScale().fitContent();
                 }
             } else {
-                chart.current.timeScale().fitContent();
+                // V3.0: Zeige die letzten ~80 Kerzen statt alle reinzuquetschen
+                // So sind die aktuellen Kerzen gut sichtbar + etwas Platz rechts
+                const totalBars = candles.length;
+                if (totalBars > 80) {
+                    chart.current.timeScale().setVisibleLogicalRange({
+                        from: totalBars - 80,
+                        to: totalBars + 5,  // 5 Bars Platz rechts für bessere Sicht
+                    });
+                } else {
+                    chart.current.timeScale().fitContent();
+                }
+                chart.current.timeScale().scrollToRealTime();
                 savedVisibleRange.current = null;
             }
         } catch (err) { console.error('Chart error:', err); }
