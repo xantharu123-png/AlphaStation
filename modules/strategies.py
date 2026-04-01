@@ -81,66 +81,19 @@ STRATEGIES = {
         "logic": "RVOL > 3.0 + Change < -2% + Close nahe Low = echtes Whale Selling"
     },
     # =========================================================================
-    # PRE-MARKET STRATEGIEN - Optimiert für 4:00-9:30 AM ET (KEIN RVOL!)
+    # EARNINGS / NEWS MOVER - Ersetzt alle PM/AH Strategien
     # =========================================================================
-    "PM Gainers ": {
-        "description": " PRE-MARKET: Aktien mit starkem Anstieg vor Börsenöffnung",
-        "filters": {"Change %": (5.0, 100.0), "Preis": (1.0, 10000.0)},
-        "logic": "Change > 5% vs. Previous Close = starkes Pre-Market Momentum",
-        "stocks_only": True,
-        "session_hint": "Pre-Market"
+    "Earnings Mover Long": {
+        "description": "Starker Gap-Up nach Earnings/News — funktioniert PM, AH und Regular",
+        "filters": {"Gap %": (5.0, 100.0), "Change %": (3.0, 200.0), "RVOL": (2.0, 100.0), "Preis": (5.0, 100000.0), "Close Position": (0.50, 1.0)},
+        "logic": "Gap >5% + RVOL >2 + Close hält über Gap = Earnings Beat / Catalyst. Preis >$5 filtert Penny-Noise",
+        "stocks_only": True
     },
-    "PM Losers ": {
-        "description": " PRE-MARKET: Aktien mit starkem Abverkauf vor Börsenöffnung",
-        "filters": {"Change %": (-100.0, -5.0), "Preis": (1.0, 10000.0)},
-        "logic": "Change < -5% vs. Previous Close = Gap-Down Kandidat",
-        "stocks_only": True,
-        "session_hint": "Pre-Market"
-    },
-    "PM Gap & Go ": {
-        "description": " PRE-MARKET: Quality Gaps mit Momentum-Potenzial",
-        "filters": {"Change %": (3.0, 50.0), "Preis": (5.0, 500.0)},
-        "logic": "Solide Aktien (>$5) mit 3%+ Gap = Momentum-Trade bei Open",
-        "stocks_only": True,
-        "session_hint": "Pre-Market"
-    },
-    "PM Penny Movers ": {
-        "description": " PRE-MARKET: Günstige Aktien mit explosiver Bewegung",
-        "filters": {"Change %": (10.0, 500.0), "Preis": (0.10, 5.0)},
-        "logic": "Lowcaps unter $5 mit >10% Move = High Risk/Reward",
-        "stocks_only": True,
-        "session_hint": "Pre-Market"
-    },
-    # =========================================================================
-    # AFTER-HOURS STRATEGIEN - Optimiert für 16:00-20:00 ET (KEIN RVOL!)
-    # =========================================================================
-    "AH Gainers ": {
-        "description": " AFTER-HOURS: Aktien steigen nach Börsenschluss",
-        "filters": {"Change %": (3.0, 100.0), "Preis": (1.0, 10000.0)},
-        "logic": "Change > 3% vs. Regular Close = positive News/Earnings",
-        "stocks_only": True,
-        "session_hint": "After-Hours"
-    },
-    "AH Losers ": {
-        "description": " AFTER-HOURS: Aktien fallen nach Börsenschluss",
-        "filters": {"Change %": (-100.0, -3.0), "Preis": (1.0, 10000.0)},
-        "logic": "Change < -3% vs. Regular Close = negative News/Earnings",
-        "stocks_only": True,
-        "session_hint": "After-Hours"
-    },
-    "AH Earnings Gainers ": {
-        "description": " AFTER-HOURS: Starker ANSTIEG nach Earnings",
-        "filters": {"Change %": (8.0, 200.0), "Preis": (10.0, 1000.0)},
-        "logic": ">8% Anstieg nach Close = positive Earnings Überraschung",
-        "stocks_only": True,
-        "session_hint": "After-Hours"
-    },
-    "AH Earnings Losers ": {
-        "description": " AFTER-HOURS: Starker ABVERKAUF nach Earnings",
-        "filters": {"Change %": (-200.0, -8.0), "Preis": (10.0, 1000.0)},
-        "logic": ">8% Fall nach Close = negative Earnings Überraschung oder Guidance",
-        "stocks_only": True,
-        "session_hint": "After-Hours"
+    "Earnings Mover Short": {
+        "description": "Starker Gap-Down nach Earnings/News — Fade oder Continuation Short",
+        "filters": {"Gap %": (-100.0, -5.0), "Change %": (-200.0, -3.0), "RVOL": (2.0, 100.0), "Preis": (5.0, 100000.0), "Close Position": (0.0, 0.45)},
+        "logic": "Gap <-5% + RVOL >2 + Close nahe Low = Earnings Miss / Bad News. Kein Bounce = Continuation Short",
+        "stocks_only": True
     },
     # =========================================================================
     # GAP STRATEGIEN - NUR AKTIEN! (Mit Liquiditäts-Filter!)
