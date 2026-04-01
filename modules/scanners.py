@@ -1069,7 +1069,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     no_data_count += 1
                     continue
 
-                # ── Avg-Volume-Check: min $500K Ø Daily Dollar-Volume ──
+                # ── Avg-Volume-Check: min $200K Ø Daily Dollar-Volume ──
                 # V2.8: Heutigen partiellen Bar ausschließen für Volume-Berechnung
                 _today_check = datetime.now().strftime("%Y-%m-%d")
                 _complete_bars = [b for b in all_bars if b.get("date", "") != _today_check]

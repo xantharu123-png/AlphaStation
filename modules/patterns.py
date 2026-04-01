@@ -110,7 +110,8 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
 
         if flagpole <= 0 and prev_close > 0 and vortag_chg > 0:
             # Fallback: Berechne aus vortag_chg wenn prev_high/Low fehlen
-            price_before_move = prev_close / (1 + vortag_chg/100)
+            _denom = 1 + vortag_chg / 100
+            price_before_move = prev_close / _denom if abs(_denom) > 0.001 else prev_close
             flagpole = abs(prev_close - price_before_move)
         
         if flagpole > 0 and prev_high > 0:
@@ -193,7 +194,8 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             flagpole = prev_high - prev_low
 
         if flagpole <= 0 and prev_close > 0 and vortag_chg < 0:
-            price_before_move = prev_close / (1 + vortag_chg/100)
+            _denom = 1 + vortag_chg / 100
+            price_before_move = prev_close / _denom if abs(_denom) > 0.001 else prev_close
             flagpole = abs(price_before_move - prev_close)
         
         if flagpole > 0 and prev_low > 0:
@@ -283,10 +285,10 @@ def analyze_candles(candles):
 
     if hh_count >= lookback * 0.6 and hl_count >= lookback * 0.6:
         trend = "up"
-        trend_strength = min(100, int((hh_count + hl_count) / (lookback * 2) * 100))
+        trend_strength = min(100, int((hh_count + hl_count) / max(1, lookback * 2) * 100))
     elif lh_count >= lookback * 0.6 and ll_count >= lookback * 0.6:
         trend = "down"
-        trend_strength = min(100, int((lh_count + ll_count) / (lookback * 2) * 100))
+        trend_strength = min(100, int((lh_count + ll_count) / max(1, lookback * 2) * 100))
     else:
         trend = "sideways"
         trend_strength = 30
@@ -767,7 +769,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
      BREAKOUT IMMINENT V2.1 — 20-Signal Composite Prediction (Pro-Reweighted)
 
     Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
-    Maximum: 200 Punkte — aber GEWICHTET nach Trader-Wisdom:
+    Maximum: 188 Punkte — GEWICHTET nach Trader-Wisdom:
 
     crypto_mode=True: Volume-Signale (2,3,8,16,19) werden durch Spread-basierte
     Preis-Proxies ersetzt, da CoinGecko kein historisches Volume liefert.
@@ -796,7 +798,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         (is_valid, score, max_score, details, direction_confidence, grade)
     """
     if not bars or len(bars) < 10:
-        return False, 0, 120, ["Nicht genug Daten (min 10 Tage)"], 0, "D", 0, 0
+        return False, 0, 188, ["Nicht genug Daten (min 10 Tage)"], 0, "D", 0, 0
 
     score = 0
     sm_fires = 0  # Smart Money Fires (Boosted-Signale auf Maximum)

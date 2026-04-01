@@ -3983,9 +3983,7 @@ def _orb_scanner_wrapper() -> None:
                     reward = entry - target1
                 rr_ratio = round(reward / risk, 2) if risk > 0 else 0
 
-                # ── R:R Filter: mindestens 1.5:1 ──
-                if rr_ratio < 1.2:
-                    continue
+                # V2.8: R:R nur Info-Spalte, kein Hard-Filter mehr
 
                 # ── VWAP Alignment ──
                 vwap_aligned = (breakout_dir == "LONG" and current_price > vwap) or \

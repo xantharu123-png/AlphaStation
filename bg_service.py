@@ -274,7 +274,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         </table>
         <p style="color:#999;font-size:12px;margin-top:20px">
             Automatischer Alert vom TradingBot Background Service.<br>
-            Grade S = ELITE (Score ≥120 + 3 Smart Money) | Grade A = STARK (Score ≥105 + 2 SM)
+            Grade S = ELITE (Score ≥113 + 4 Smart Money) | Grade A = STARK (Score ≥99 + 3 SM)
         </p>
         </body></html>"""
 
@@ -749,8 +749,9 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
             })
 
         except Exception as e:
-            if bi_score and bi_score >= threshold:
-                log.warning(f"  ⚠️ {ticker} Score {bi_score} aber Exception: {e}")
+            _exc_score = locals().get("bi_score", 0) or 0
+            if _exc_score >= threshold:
+                log.warning(f"  ⚠️ {ticker} Score {_exc_score} aber Exception: {e}")
             continue
 
     # Sortiere + Speichere
@@ -2282,9 +2283,38 @@ def run_once():
 
     print("\n📡 BI Scanner Long...")
     _run_bi_scanner(poly_key, "long")
+    _check_and_alert_scan_results("bi_long", secrets)
 
     print("\n📡 Bear Scanner Short...")
-    _run_bi_scanner(poly_key, "short")
+    _run_bear_scanner(poly_key, secrets)
+    _check_and_alert_scan_results("bi_short", secrets)
+
+    print("\n📡 Biotech Scanner...")
+    try:
+        _run_biotech_scanner(poly_key)
+        _check_and_alert_scan_results("biotech", secrets)
+    except Exception as e:
+        print(f"   ❌ Biotech: {e}")
+
+    print("\n📡 Strategien Scanner...")
+    try:
+        _run_strategy_scanner(poly_key, secrets)
+    except Exception as e:
+        print(f"   ❌ Strategien: {e}")
+
+    print("\n📡 ORB Scanner...")
+    try:
+        _run_orb_scanner(poly_key)
+        _check_and_alert_scan_results("orb", secrets)
+    except Exception as e:
+        print(f"   ❌ ORB: {e}")
+
+    print("\n📡 New Listing Scanner...")
+    try:
+        _nls_r = _run_new_listing_scanner()
+        _alert_nls_signals(_nls_r, secrets)
+    except Exception as e:
+        print(f"   ❌ NLS: {e}")
 
     print("\n✅ Fertig!")
 
