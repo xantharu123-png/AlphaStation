@@ -1077,7 +1077,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _complete_bars = all_bars  # Fallback
                 avg_vol_10d = sum(b["volume"] for b in _complete_bars[-10:]) / min(10, len(_complete_bars))
                 avg_dollar_vol = avg_vol_10d * all_bars[-1]["close"] if all_bars[-1]["close"] > 0 else 0
-                if avg_dollar_vol < 500_000:
+                if avg_dollar_vol < 200_000:
                     no_data_count += 1
                     continue
 
@@ -1228,9 +1228,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
                 candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0
 
-                if candidate["RiskReward"] < 1.0:
-                    rr_fail += 1
-                    continue
+                # V2.8: R:R bleibt als Info-Spalte, kein Filter mehr
+                # (War vorher Hard-Filter >= 1.0, hat zu viele Short-Setups eliminiert)
 
                 # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
                 # V2.8: Zurück auf Original — nur informativ, KEINE Score-Penalties, KEIN Hard-Reject
