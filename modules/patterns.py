@@ -110,7 +110,8 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
 
         if flagpole <= 0 and prev_close > 0 and vortag_chg > 0:
             # Fallback: Berechne aus vortag_chg wenn prev_high/Low fehlen
-            price_before_move = prev_close / (1 + vortag_chg/100)
+            _denom = 1 + vortag_chg / 100
+            price_before_move = prev_close / _denom if abs(_denom) > 0.001 else prev_close
             flagpole = abs(prev_close - price_before_move)
         
         if flagpole > 0 and prev_high > 0:
@@ -193,7 +194,8 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             flagpole = prev_high - prev_low
 
         if flagpole <= 0 and prev_close > 0 and vortag_chg < 0:
-            price_before_move = prev_close / (1 + vortag_chg/100)
+            _denom = 1 + vortag_chg / 100
+            price_before_move = prev_close / _denom if abs(_denom) > 0.001 else prev_close
             flagpole = abs(price_before_move - prev_close)
         
         if flagpole > 0 and prev_low > 0:
@@ -283,10 +285,10 @@ def analyze_candles(candles):
 
     if hh_count >= lookback * 0.6 and hl_count >= lookback * 0.6:
         trend = "up"
-        trend_strength = min(100, int((hh_count + hl_count) / (lookback * 2) * 100))
+        trend_strength = min(100, int((hh_count + hl_count) / max(1, lookback * 2) * 100))
     elif lh_count >= lookback * 0.6 and ll_count >= lookback * 0.6:
         trend = "down"
-        trend_strength = min(100, int((lh_count + ll_count) / (lookback * 2) * 100))
+        trend_strength = min(100, int((lh_count + ll_count) / max(1, lookback * 2) * 100))
     else:
         trend = "sideways"
         trend_strength = 30

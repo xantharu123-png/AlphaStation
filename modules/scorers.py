@@ -662,7 +662,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     trend_detail = "Keine History"
 
     if ohlcv_data and len(ohlcv_data) >= 50:
-        closes = [d["close"] for d in ohlcv_data]
+        closes = [d.get("close", d.get("c", 0)) for d in ohlcv_data]
         # Verwende letzten OHLCV-Close für EMA-Vergleich (konsistent!)
         # Der extern übergebene `price` kann ein Snapshot sein der abweicht
         current_price = closes[-1]
@@ -902,7 +902,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     mtf_detail = "Keine History"
 
     if ohlcv_data and len(ohlcv_data) >= 20:
-        closes = [d["close"] for d in ohlcv_data]
+        closes = [d.get("close", d.get("c", 0)) for d in ohlcv_data]
 
         # Weekly Trend: Letzte 5 Bars (= ca 1 Woche) vs. vorherige 5
         if len(closes) >= 10:
