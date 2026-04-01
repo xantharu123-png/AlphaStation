@@ -1,0 +1,25 @@
+[Unit]
+Description=TradingBot Streamlit App
+After=network.target
+Wants=tradingbot-bg.service
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/home/tradingbot/app
+Environment="PATH=/home/tradingbot/app/venv/bin:/usr/bin"
+ExecStart=/home/tradingbot/app/venv/bin/streamlit run scanner.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradingbot
+
+# Limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

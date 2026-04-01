@@ -234,8 +234,7 @@
 
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
-const API_PORT = new URLSearchParams(window.location.search).get('api_port') || '8000';
-const API = window.location.protocol + '//' + window.location.hostname + ':' + API_PORT;
+const API = window.location.protocol + '//' + window.location.hostname + ':8000';
 
 // Toast Component
 function ToastContainer() {
@@ -290,9 +289,9 @@ function useAutoRefresh(url, interval = 30000, dependency = []) {
     return { data, loading, error };
 }
 
-function useSortable(data, defaultKey = null, defaultDesc = true) {
+function useSortable(data, defaultKey = null) {
     const [sortKey, setSortKey] = useState(defaultKey);
-    const [sortDesc, setSortDesc] = useState(defaultDesc);  // V2.7: Default absteigend (beste zuerst)
+    const [sortDesc, setSortDesc] = useState(false);
 
     const sorted = useMemo(() => {
         if (!data || !sortKey) return data;
@@ -311,21 +310,22 @@ function useSortable(data, defaultKey = null, defaultDesc = true) {
             setSortDesc(!sortDesc);
         } else {
             setSortKey(key);
-            // V2.7: Numerische Spalten starten absteigend (beste zuerst), Text aufsteigend
-            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','EarlyScore','DegenScore','WhaleScore','NewScore'];
-            setSortDesc(numericKeys.includes(key));
+            setSortDesc(false);
         }
     };
 
     return { sorted, toggleSort, sortKey, sortDesc };
 }
 
-// Global helper: relative time display (German)
-function getRelativeTime(timestamp, isFuture = false) {
+// SchedulerStatus Component
+function SchedulerStatus({ status }) {
+    const [showDetails, setShowDetails] = useState(false);
+
+    if (!status) return null;
+
+    const getRelativeTime = (timestamp, isFuture = false) => {
         if (!timestamp) return 'nie';
-        // Server sends UTC timestamps without 'Z' suffix — force UTC interpretation
-        const raw = String(timestamp);
-        const date = new Date(raw.endsWith('Z') ? raw : raw + 'Z');
+        const date = new Date(timestamp);
         const now = new Date();
         const diffMs = isFuture ? (date - now) : (now - date);
         const diffMins = Math.floor(diffMs / 60000);
@@ -342,23 +342,7 @@ function getRelativeTime(timestamp, isFuture = false) {
         if (diffMins < 60) return `vor ${diffMins} min`;
         if (diffHours < 24) return `vor ${diffHours}h`;
         return date.toLocaleDateString('de-DE');
-}
-
-// Helper: extract scan timing info for ScanControl from schedulerStatus
-function getScanTiming(schedulerStatus, scanKey) {
-    if (!schedulerStatus?.scans?.[scanKey]) return { lastScan: null, nextScan: null };
-    const scan = schedulerStatus.scans[scanKey];
-    return {
-        lastScan: scan.last_run ? getRelativeTime(scan.last_run) : null,
-        nextScan: scan.next_run ? getRelativeTime(scan.next_run, true) : null,
     };
-}
-
-// SchedulerStatus Component
-function SchedulerStatus({ status }) {
-    const [showDetails, setShowDetails] = useState(false);
-
-    if (!status) return null;
 
     // API returns scans as object {bi_long: {running, last_run, next_run, interval_min}, ...}
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
@@ -401,61 +385,33 @@ function SchedulerStatus({ status }) {
 }
 
 // ScanControl Component
-function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null }) {
-    // Auto-derive lastScan/nextScan from schedulerStatus if scanKey provided
-    const timing = scanKey ? getScanTiming(schedulerStatus, scanKey) : { lastScan, nextScan };
-    const displayLast = timing.lastScan || lastScan;
-    const displayNext = timing.nextScan || nextScan;
-
-    // Check if scheduler is currently running this scan in the background
-    const schedulerRunning = scanKey && schedulerStatus?.scans?.[scanKey]?.running;
-    const runningSinceSec = schedulerRunning ? (schedulerStatus.scans[scanKey].running_since_sec || 0) : 0;
-    const anyScanning = isScanning || schedulerRunning;
-
+function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null }) {
     return (
         <div className="card border border-gray-200 p-4 rounded-lg">
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                    <button onClick={onScan} disabled={anyScanning} className="button" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                        {anyScanning ? (
+                    <button onClick={onScan} disabled={isScanning} className="button" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                        {isScanning ? (
                             <>
                                 <span className="loading-spinner"></span>
-                                {schedulerRunning && !isScanning ? 'Auto-Scan läuft...' : 'Scannt...'}
+                                Scannt...
                             </>
                         ) : (
                             'Scan starten'
                         )}
                     </button>
-                    {displayLast && <div className="text-sm text-gray-500">Letzter: {displayLast}</div>}
-                    {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
+                    {lastScan && <div className="text-sm text-gray-600">Letzter Scan: {lastScan}</div>}
+                    {nextScan && <div className="text-sm text-gray-600">Nächster Scan: {nextScan}</div>}
                 </div>
             </div>
-            {anyScanning && (() => {
-                const prog = scanKey && schedulerStatus?.scans?.[scanKey]?.progress;
-                const hasProgress = prog && prog.total > 0;
-                const pct = hasProgress ? Math.round((prog.checked / prog.total) * 100) : 0;
-                return (
+            {isScanning && (
                 <div className="mt-3">
-                    <div style={{ width: '100%', height: hasProgress ? '6px' : '4px', backgroundColor: '#e5e7eb', borderRadius: '3px', overflow: 'hidden' }}>
-                        {hasProgress ? (
-                            <div style={{ width: `${pct}%`, height: '100%', backgroundColor: '#3b82f6', borderRadius: '3px', transition: 'width 0.5s ease' }}></div>
-                        ) : (
-                            <div style={{ width: '100%', height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s infinite', borderRadius: '2px' }}></div>
-                        )}
+                    <div style={{ width: '100%', height: '4px', backgroundColor: '#e5e7eb', borderRadius: '2px', overflow: 'hidden' }}>
+                        <div style={{ width: '100%', height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s infinite', borderRadius: '2px' }}></div>
                     </div>
-                    <div className="text-xs text-blue-600 mt-1 font-semibold">
-                        {hasProgress
-                            ? `${prog.checked} / ${prog.total} analysiert — ${prog.hits} Treffer (${pct}%)`
-                            : schedulerRunning && !isScanning
-                                ? `Auto-Scan läuft seit ${runningSinceSec > 60 ? Math.floor(runningSinceSec / 60) + ' min' : runningSinceSec + 's'}...`
-                                : 'Scanner läuft — Bitte warten...'}
-                    </div>
-                    {hasProgress && prog.detail && (
-                        <div className="text-xs text-gray-400 mt-0.5">{prog.detail}</div>
-                    )}
+                    <div className="text-xs text-blue-600 mt-1 font-semibold">Scanner läuft — Bitte warten...</div>
                 </div>
-                );
-            })()}
+            )}
         </div>
     );
 }
@@ -469,15 +425,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [loading, setLoading] = useState(true);
     const [sidebarMode, setSidebarMode] = useState('normal');
     const [customWidth, setCustomWidth] = useState(null);
-    const [customHeight, setCustomHeight] = useState(null);
-    const [timeframe, setTimeframe] = useState('4H');
-    const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
+    const [timeframe, setTimeframe] = useState('1D');
+    const [overlays, setOverlays] = useState({ ema: true, vwap: true, sr: true, fib: false, patterns: true, bb: false, vrvp: false, vol: true });
     const chartContainer = useRef(null);
     const chart = useRef(null);
     const candleSeries = useRef(null);
     const overlaySeriesRef = useRef([]);
-    const savedVisibleRange = useRef(null);
-    const prevOverlaysRef = useRef(null);
     const sidebarRef = useRef(null);
     const isDragging = useRef(false);
 
@@ -508,39 +461,13 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         document.addEventListener('mouseup', handleMouseUp);
     };
 
-    // V2.4: Vertikaler Drag-Resize für Chart-Höhe
-    const startHeightResize = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const startY = e.clientY;
-        const startHeight = getChartHeight();
-        document.body.style.cursor = 'row-resize';
-        document.body.style.userSelect = 'none';
-        const handleMouseMove = (e) => {
-            const delta = e.clientY - startY;
-            const newHeight = Math.max(180, Math.min(startHeight + delta, window.innerHeight - 100));
-            setCustomHeight(newHeight);
-        };
-        const handleMouseUp = () => {
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
-            document.removeEventListener('mousemove', handleMouseMove);
-            document.removeEventListener('mouseup', handleMouseUp);
-        };
-        document.addEventListener('mousemove', handleMouseMove);
-        document.addEventListener('mouseup', handleMouseUp);
-    };
-
     const cycleMode = () => {
         setCustomWidth(null);
         setSidebarMode(prev => prev === 'normal' ? 'wide' : prev === 'wide' ? 'full' : 'normal');
     };
 
-    const isCrypto = scannerData?.isCrypto || false;
-
-    // Fetch ticker detail data (metrics) — skip for crypto
+    // Fetch ticker detail data (metrics)
     useEffect(() => {
-        if (isCrypto) { setLoading(false); return; }
         const fetchData = async () => {
             try {
                 setLoading(true);
@@ -554,43 +481,27 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             }
         };
         fetchData();
-    }, [ticker, isCrypto]);
+    }, [ticker]);
 
-    // Fetch chart data — crypto uses CoinGecko, stocks use Polygon
-    // V2.8: AbortController verhindert Race Conditions bei schnellem Timeframe-Wechsel
+    // Fetch chart data — always request ALL overlays so toggles work instantly
     useEffect(() => {
-        const controller = new AbortController();
-        const signal = controller.signal;
         const fetchChart = async () => {
             try {
-                if (isCrypto) {
-                    const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
-                    const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`, { signal });
-                    if (signal.aborted) return;
-                    if (res.ok) {
-                        setChartData(await res.json());
-                    } else {
-                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart nicht verfügbar' });
-                    }
+                const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
+                const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`);
+                if (res.ok) {
+                    setChartData(await res.json());
                 } else {
-                    const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
-                    const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`, { signal });
-                    if (signal.aborted) return;
-                    if (res.ok) {
-                        setChartData(await res.json());
-                    } else {
-                        setChartData({ ticker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
-                    }
+                    // Set empty chart data so sidebar doesn't stay in loading state
+                    setChartData({ ticker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
                 }
             } catch (err) {
-                if (err.name === 'AbortError') return;  // Abgebrochen — ignorieren
                 console.error('Chart data error:', err);
                 setChartData({ ticker, timeframe, candles: [], error: 'Chart-Daten konnten nicht geladen werden' });
             }
         };
         fetchChart();
-        return () => controller.abort();  // Vorherigen Request abbrechen
-    }, [ticker, timeframe, isCrypto]);
+    }, [ticker, timeframe]);
 
     const loadAiAnalysis = async () => {
         setAiLoading(true);
@@ -615,29 +526,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return 480 - 60;
     };
 
-    const getChartHeight = () => {
-        if (customHeight) return customHeight;
-        return sidebarMode === 'full' ? Math.max(500, window.innerHeight * 0.55) : sidebarMode === 'wide' ? 380 : 250;
-    };
+    const getChartHeight = () => sidebarMode === 'full' ? Math.max(500, window.innerHeight * 0.55) : sidebarMode === 'wide' ? 380 : 250;
 
     // Render chart with all overlays
     useEffect(() => {
         if (!chartData || !chartContainer.current) return;
         if (!chartData.candles || chartData.candles.length === 0) return; // No data to render
         try {
-            // V2.4: Zoom+Scroll exakt speichern vor Rebuild
-            // Erkennung: ist es nur ein Overlay/Resize-Wechsel (gleiche Daten)?
-            const isOverlayChange = prevOverlaysRef.current && chartData === prevOverlaysRef.current._chartData;
-            if (chart.current) {
-                try {
-                    savedVisibleRange.current = {
-                        logical: chart.current.timeScale().getVisibleLogicalRange(),
-                        scrollPos: chart.current.timeScale().scrollPosition(),
-                    };
-                } catch(e) {}
-                chart.current.remove();
-            }
-            prevOverlaysRef.current = { ...overlays, _chartData: chartData };
+            // Cleanup
+            if (chart.current) chart.current.remove();
             overlaySeriesRef.current = [];
 
             const { createChart, LineStyle, CrosshairMode } = window.LightweightCharts;
@@ -757,10 +654,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (sr.period_low) addPriceLine(sr.period_low, 'Period Low', '#64748b', LineStyle.Dotted, 1);
             }
 
-            // VRVP — V2.3: Volume Profile als Balken (horizontales Histogramm)
+            // VRVP — Volume Profile as horizontal price lines
             if (overlays.vrvp && chartData.vrvp) {
                 const vp = chartData.vrvp;
-                // POC, VAH, VAL als Preis-Linien beibehalten
                 const addVPLine = (price, title, color, style, width) => {
                     if (price && price > 0) {
                         candleSeries.current.createPriceLine({
@@ -773,79 +669,27 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 addVPLine(vp.poc, 'POC', '#06b6d4', LineStyle.Solid, 2);
                 addVPLine(vp.vah, 'VAH', '#0891b2', LineStyle.Dashed, 1);
                 addVPLine(vp.val, 'VAL', '#0891b2', LineStyle.Dashed, 1);
-
-                // Balken als Canvas-Overlay zeichnen
-                if (vp.bins && vp.bins.length > 0 && chart.current) {
-                    const maxVol = Math.max(...vp.bins.map(b => b.volume));
-                    const maxBarWidth = chartContainer.current ? chartContainer.current.clientWidth * 0.15 : 80;
-                    const priceScale = chart.current.priceScale('right');
-
-                    // Canvas-Overlay erstellen
-                    const existingCanvas = chartContainer.current.querySelector('.vrvp-canvas');
-                    if (existingCanvas) existingCanvas.remove();
-                    const canvas = document.createElement('canvas');
-                    canvas.className = 'vrvp-canvas';
-                    canvas.style.position = 'absolute';
-                    canvas.style.top = '0';
-                    canvas.style.right = '48px';
-                    canvas.style.pointerEvents = 'none';
-                    canvas.style.zIndex = '5';
-                    canvas.width = Math.ceil(maxBarWidth + 10);
-                    canvas.height = chartContainer.current.clientHeight;
-                    chartContainer.current.style.position = 'relative';
-                    chartContainer.current.appendChild(canvas);
-
-                    const drawVRVP = () => {
-                        const ctx = canvas.getContext('2d');
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        const series = candleSeries.current;
-                        if (!series) return;
-
-                        vp.bins.forEach(bin => {
-                            const yMid = series.priceToCoordinate(bin.mid);
-                            const yHigh = series.priceToCoordinate(bin.high);
-                            const yLow = series.priceToCoordinate(bin.low);
-                            if (yMid === null || yHigh === null || yLow === null) return;
-
-                            const barH = Math.max(2, Math.abs(yLow - yHigh));
-                            const barW = Math.max(2, (bin.volume / maxVol) * maxBarWidth);
-                            const y = Math.min(yHigh, yLow);
-                            const isPOC = Math.abs(bin.mid - vp.poc) < (bin.high - bin.low);
-                            const isVA = bin.mid >= vp.val && bin.mid <= vp.vah;
-
-                            ctx.fillStyle = isPOC ? 'rgba(6, 182, 212, 0.45)' : isVA ? 'rgba(34, 211, 238, 0.25)' : 'rgba(100, 116, 139, 0.18)';
-                            ctx.fillRect(canvas.width - barW, y, barW, barH);
-                            // Rand
-                            ctx.strokeStyle = isPOC ? 'rgba(6, 182, 212, 0.7)' : isVA ? 'rgba(34, 211, 238, 0.4)' : 'rgba(100, 116, 139, 0.3)';
-                            ctx.lineWidth = 0.5;
-                            ctx.strokeRect(canvas.width - barW, y, barW, barH);
-                        });
-                    };
-
-                    drawVRVP();
-                    // Redraw on scroll/zoom
-                    chart.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
-                    chart.current.subscribeCrosshairMove(drawVRVP);
+                // HVNs (High Volume Nodes)
+                if (vp.hvns) {
+                    vp.hvns.slice(0, 3).forEach((h, i) => {
+                        addVPLine(h.mid, `HVN${i+1}`, '#22d3ee', LineStyle.Dotted, 1);
+                    });
+                }
+                // LVNs (Low Volume Nodes / Volume Voids)
+                if (vp.lvns) {
+                    vp.lvns.slice(0, 3).forEach((l, i) => {
+                        addVPLine(l.mid, `LVN${i+1}`, '#f59e0b', LineStyle.Dotted, 1);
+                    });
                 }
             }
 
-            // Fibonacci levels — V2.3: Extended Levels mit eigenen Farben
+            // Fibonacci levels
             if (overlays.fib && chartData.fib) {
-                const fibColors = {
-                    '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
-                    '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
-                    // Extended Long (nach oben)
-                    '127%': '#06b6d4', '161%': '#14b8a6', '200%': '#10b981', '261%': '#059669',
-                    // Extended Short (nach unten)
-                    '-27%': '#f43f5e', '-61%': '#e11d48', '-100%': '#be123c', '-161%': '#9f1239',
-                };
-                const extendedKeys = ['127%', '161%', '200%', '261%', '-27%', '-61%', '-100%', '-161%'];
+                const fibColors = { '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e', '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7' };
                 Object.entries(chartData.fib).forEach(([level, price]) => {
-                    const isExtended = extendedKeys.includes(level);
                     candleSeries.current.createPriceLine({
-                        price, color: fibColors[level] || '#6b7280',
-                        lineWidth: isExtended ? 1 : 1,
-                        lineStyle: isExtended ? LineStyle.Dashed : LineStyle.Dotted,
+                        price, color: fibColors[level] || '#6b7280', lineWidth: 1,
+                        lineStyle: LineStyle.Dotted,
                         axisLabelVisible: true, title: `Fib ${level}`,
                     });
                 });
@@ -870,14 +714,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     });
                 }
 
-                // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
-                const _viewDir = (d.confluence?.direction || '').toUpperCase();
-
-                // Chart pattern markers (gefiltert nach Richtung)
+                // Chart pattern markers
                 if (chartData.patterns.chart_patterns) {
-                    chartData.patterns.chart_patterns
-                        .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
-                        .forEach(p => {
+                    chartData.patterns.chart_patterns.forEach(p => {
                         const lastCandle = candles[candles.length - 1];
                         if (lastCandle) {
                             markers.push({
@@ -891,11 +730,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     });
                 }
 
-                // Harmonic pattern lines (gefiltert nach Richtung)
+                // Harmonic pattern lines
                 if (chartData.patterns.harmonic) {
-                    chartData.patterns.harmonic
-                        .filter(h => !_viewDir || _viewDir === 'NEUTRAL' || h.direction === _viewDir)
-                        .forEach(h => {
+                    chartData.patterns.harmonic.forEach(h => {
                         if (h.points && h.points.length >= 5) {
                             const hLine = chart.current.addLineSeries({
                                 color: h.direction === 'LONG' ? '#10b981' : '#ef4444',
@@ -954,33 +791,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 }
             }
 
-            // V2.4: Zoom+Scroll exakt wiederherstellen bei Overlay-Toggle
-            if (isOverlayChange && savedVisibleRange.current) {
-                try {
-                    if (savedVisibleRange.current.logical) {
-                        chart.current.timeScale().setVisibleLogicalRange(savedVisibleRange.current.logical);
-                    }
-                } catch(e) {
-                    chart.current.timeScale().fitContent();
-                }
-            } else {
-                chart.current.timeScale().fitContent();
-                savedVisibleRange.current = null;
-            }
+            chart.current.timeScale().fitContent();
         } catch (err) { console.error('Chart error:', err); }
-        return () => {
-            if (chart.current) {
-                try {
-                    savedVisibleRange.current = {
-                        logical: chart.current.timeScale().getVisibleLogicalRange(),
-                        scrollPos: chart.current.timeScale().scrollPosition(),
-                    };
-                } catch(e) {}
-                chart.current.remove();
-                chart.current = null;
-            }
-        };
-    }, [chartData, sidebarMode, customWidth, customHeight, overlays, tickerData]);
+        return () => { if (chart.current) { chart.current.remove(); chart.current = null; } };
+    }, [chartData, sidebarMode, customWidth, overlays]);
 
     if (loading && !tickerData) {
         return (
@@ -1000,9 +814,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     }
 
     const d = tickerData || {};
-    const cd = scannerData || {};  // crypto data from Early Movers
-    const price = isCrypto ? (cd.Price || 0) : (d.price || 0);
-    const change = isCrypto ? (cd.Change24h || 0) : (d.change_1d || 0);
+    const price = d.price || 0;
+    const change = d.change_1d || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
@@ -1011,14 +824,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     // Simple markdown-to-HTML: bold, headers, line breaks
     const renderMarkdown = (text) => {
         if (!text) return '';
-        // Escape HTML first to prevent XSS
-        let safe = text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-        // Then apply markdown formatting
-        return safe
+        return text
             .replace(/\*\*(\d+)\.\s*(.*?)\*\*/g, '<br/><strong>$1. $2</strong>')
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
             .replace(/\n/g, '<br/>');
@@ -1038,7 +844,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     <div>
                         <h2 className="text-2xl font-bold">{ticker}</h2>
                         <p className="text-2xl font-bold mt-1">
-                            ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
+                            ${price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
                     </div>
                     <div className="flex gap-2 items-center">
@@ -1115,124 +921,44 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 ) : !chartData ? (
                     <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>
                 ) : null}
-                <div style={{ position: 'relative' }}>
-                    {/* V2.5: Expand-Button oben links im Chart */}
-                    {chartData && chartData.candles && chartData.candles.length > 0 && (
-                        <button onClick={() => {
-                            const halfScreen = Math.round(window.innerWidth * 0.5);
-                            if (customWidth && customWidth >= halfScreen - 50) {
-                                setCustomWidth(null); setSidebarMode('normal');
-                            } else {
-                                setCustomWidth(halfScreen); setSidebarMode('custom');
-                            }
-                        }}
-                        style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 10, background: 'rgba(30,30,50,0.8)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '6px', padding: '4px 8px', cursor: 'pointer', color: '#ccc', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '4px', backdropFilter: 'blur(4px)' }}
-                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(59,130,246,0.6)'; e.currentTarget.style.color = '#fff'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(30,30,50,0.8)'; e.currentTarget.style.color = '#ccc'; }}
-                        title={customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? 'Sidebar verkleinern' : 'Sidebar auf 50% erweitern'}>
-                            <span style={{ fontSize: '16px' }}>{customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? '⊟' : '⊞'}</span>
-                        </button>
-                    )}
-                    <div ref={chartContainer} className="chart-container" style={{ borderRadius: '8px 8px 0 0', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
-                </div>
-                {/* V2.4: Chart-Höhe Drag-Handle */}
-                {chartData && chartData.candles && chartData.candles.length > 0 && (
-                    <div onMouseDown={startHeightResize}
-                        style={{ height: '6px', cursor: 'row-resize', background: 'transparent', borderRadius: '0 0 8px 8px', marginBottom: '16px', transition: 'background 0.2s' }}
-                        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(59,130,246,0.5)'}
-                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                        title="Chart-Höhe ziehen"
-                    ></div>
-                )}
+                <div ref={chartContainer} className="chart-container mb-4" style={{ borderRadius: '8px', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
 
                 {/* Pattern Info */}
-                {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
-                {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
-                    const _vd = (d.confluence?.direction || '').toUpperCase();
-                    const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
-                    return filtered.length > 0 ? (
+                {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (
                     <div className="mb-3 text-xs">
-                        {filtered.map((p, i) => (
+                        {chartData.patterns.chart_patterns.map((p, i) => (
                             <span key={i} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
                                 {p.pattern} ({p.confidence || ''})
                             </span>
                         ))}
                     </div>
-                    ) : null;
-                })()}
-                {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
-                    const _vd = (d.confluence?.direction || '').toUpperCase();
-                    const filtered = chartData.patterns.harmonic.filter(h => !_vd || _vd === 'NEUTRAL' || h.direction === _vd);
-                    return filtered.length > 0 ? (
+                )}
+                {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (
                     <div className="mb-3 text-xs">
-                        {filtered.map((h, i) => (
+                        {chartData.patterns.harmonic.map((h, i) => (
                             <span key={i} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${h.direction === 'LONG' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
                                 {h.pattern} {h.direction} (Score: {h.score || ''})
                             </span>
                         ))}
                     </div>
-                    ) : null;
-                })()}
+                )}
 
                 {/* Content Grid - 2 columns when wide */}
                 <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
 
-                {/* Crypto Detail Panel */}
-                {isCrypto && cd && (
-                <>
-                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Crypto Info</h4>
-                    <div className="grid grid-cols-2 gap-2">
-                        <div><span className="text-gray-500">Name</span> <span className="font-semibold">{cd.Name || '–'}</span></div>
-                        <div><span className="text-gray-500">Narrative</span> <span className="font-semibold">{cd.Narrative || '–'}</span></div>
-                        <div><span className="text-gray-500">MCap</span> <span className="font-semibold">{cd.MCap ? (cd.MCap > 1e9 ? (cd.MCap/1e9).toFixed(1)+'B' : cd.MCap > 1e6 ? (cd.MCap/1e6).toFixed(0)+'M' : (cd.MCap/1e3).toFixed(0)+'K') : '–'}</span></div>
-                        <div><span className="text-gray-500">Rank</span> <span className="font-semibold">#{cd.Rank || '–'}</span></div>
-                    </div>
-                </div>
-                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Performance</h4>
-                    <div className="grid grid-cols-3 gap-2">
-                        <div><span className="text-gray-500">1h</span> <span className={`font-semibold ${(cd.Change1h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{cd.Change1h?.toFixed(1) || '–'}%</span></div>
-                        <div><span className="text-gray-500">24h</span> <span className={`font-semibold ${(cd.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{cd.Change24h?.toFixed(1) || '–'}%</span></div>
-                        <div><span className="text-gray-500">7d</span> <span className={`font-semibold ${(cd.Change7d||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{cd.Change7d?.toFixed(1) || '–'}%</span></div>
-                        <div><span className="text-gray-500">Vol/MCap</span> <span className="font-semibold">{cd.VolMCapRatio?.toFixed(1) || '–'}%</span></div>
-                        <div><span className="text-gray-500">Vol 24h</span> <span className="font-semibold">{cd.Vol24h ? (cd.Vol24h > 1e9 ? (cd.Vol24h/1e9).toFixed(1)+'B' : cd.Vol24h > 1e6 ? (cd.Vol24h/1e6).toFixed(0)+'M' : (cd.Vol24h/1e3).toFixed(0)+'K') : '–'}</span></div>
-                        {cd.IsTrending && <div><span className="text-xs px-2 py-1 rounded bg-purple-100 text-purple-800 font-semibold">TRENDING</span></div>}
-                    </div>
-                </div>
-                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Scanner Daten</h4>
-                    <div className="grid grid-cols-2 gap-2">
-                        {cd.EarlyScore && <div><span className="text-gray-500">Score</span> <span className={`font-semibold px-2 py-0.5 rounded ${cd.EarlyScore >= 70 ? 'bg-green-100 text-green-800' : cd.EarlyScore >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{cd.EarlyScore}</span></div>}
-                        {cd.DegenScore && <div><span className="text-gray-500">DegenScore</span> <span className="font-semibold">{cd.DegenScore}</span></div>}
-                        {cd.WhaleScore && <div><span className="text-gray-500">WhaleScore</span> <span className="font-semibold">{cd.WhaleScore}</span></div>}
-                        {cd.Signal && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className="font-semibold">{cd.Signal}</span></div>}
-                        {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'}</span></div>}
-                        {cd.FundingRate != null && <div><span className="text-gray-500">Funding</span> <span className="font-semibold">{(cd.FundingRate * 100).toFixed(3)}%</span></div>}
-                        {cd.OI_Ratio && <div><span className="text-gray-500">OI Ratio</span> <span className="font-semibold">{cd.OI_Ratio.toFixed(2)}x</span></div>}
-                        {cd.Signals && <div className="col-span-2"><span className="text-gray-500">Signale</span> <span className="font-semibold text-xs">{Array.isArray(cd.Signals) ? cd.Signals.join(', ') : cd.Signals}</span></div>}
-                    </div>
-                </div>
-                </>
-                )}
-
-                {/* Price Action — Stock only */}
-                {!isCrypto && (
+                {/* Price Action */}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Preis</h4>
                     <div className="grid grid-cols-3 gap-2">
                         <div><span className="text-gray-500">1D</span> <span className={change >= 0 ? 'color-positive' : 'color-negative'}>{change}%</span></div>
-                        <div><span className="text-gray-500">5D</span> <span className={(d.change_5d ?? 0) >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d}%</span></div>
-                        <div><span className="text-gray-500">20D</span> <span className={(d.change_20d ?? 0) >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d}%</span></div>
+                        <div><span className="text-gray-500">5D</span> <span className={d.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d}%</span></div>
+                        <div><span className="text-gray-500">20D</span> <span className={d.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d}%</span></div>
                         <div><span className="text-gray-500">Open</span> ${d.open}</div>
                         <div><span className="text-gray-500">High</span> ${d.high}</div>
                         <div><span className="text-gray-500">Low</span> ${d.low}</div>
                     </div>
                 </div>
-                )}
 
-                {/* Stock-only sections */}
-                {!isCrypto && (<>
                 {/* Technical Indicators */}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Technische Indikatoren</h4>
@@ -1292,7 +1018,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div><span className="text-gray-500">Avg Vol</span> <span className="font-semibold">{(d.avg_volume || 0).toLocaleString()}</span></div>
                     </div>
                 </div>
-                </>)}
 
                 {/* Signals */}
                 {d.signals && d.signals.length > 0 && (
@@ -1397,8 +1122,7 @@ function App() {
             }
         };
         fetchSchedulerStatus();
-        // Schnelleres Polling (5s) wenn Scans laufen, sonst 30s
-        const interval = setInterval(fetchSchedulerStatus, 5000);
+        const interval = setInterval(fetchSchedulerStatus, 30000);
         return () => clearInterval(interval);
     }, []);
 
@@ -1430,7 +1154,6 @@ function App() {
         { id: 'strategie-guide', label: 'Strategie Guide' },
         { id: 'new-listing', label: 'New Listing' },
         { id: 'volume-spikes', label: 'Volume Spikes' },
-        { id: 'orb', label: 'ORB Scanner' },
         { id: 'suche', label: 'Suche' }
     ];
 
@@ -1477,21 +1200,20 @@ function App() {
 
             {/* Main Content */}
             <div className="max-w-full px-6 py-6">
-                {activeTab === 'scanner' && <ScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'biotech' && <BiotechTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'scanner' && <ScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'biotech' && <BiotechTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'kalender' && <KalenderTab />}
-                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'backtest' && <BacktestTab />}
                 {activeTab === 'strategie-guide' && <StrategieGuideTab />}
-                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'orb' && <ORBScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 {activeTab === 'suche' && <SucheTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
             </div>
 
@@ -1507,37 +1229,31 @@ function App() {
 }
 
 // Scanner Tab
-function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [strategy, setStrategy] = useState('');
     const [marketType, setMarketType] = useState('stocks');
     const [isScanning, setIsScanning] = useState(scanCache.scanner_scanning || false);
     const [results, setResults] = useState(scanCache.scanner_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
-    const pollTimeoutRef = useRef(null);
 
-    // Cleanup polling on unmount
+    // Load cached results on mount
     useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
-
-    // Always load latest results from server on mount
-    useEffect(() => {
-        const loadCached = async () => {
-            try {
-                const response = await fetch(`${API}/api/scan-results?direction=long`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('scanner_results', items);
+        if (scanCache.scanner_results && scanCache.scanner_results.length > 0) {
+            setResults(scanCache.scanner_results);
+        } else {
+            const loadCached = async () => {
+                try {
+                    const response = await fetch(`${API}/api/scan-results?direction=long`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
                     }
-                }
-            } catch (err) { console.error('Error:', err); }
-        };
-        loadCached();
-    }, []);
+                } catch (err) { console.error('Error:', err); }
+            };
+            loadCached();
+        }
+    }, [scanCache.scanner_results]);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -1545,16 +1261,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         // Save current cached_at BEFORE scan starts
         let prevCachedAt = null;
         try {
-            const stratLower = strategy.toLowerCase();
-            const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
-            let preUrl;
-            if (isBI) {
-                const dir = stratLower.includes('short') ? 'short' : 'long';
-                preUrl = `${API}/api/scan-results?direction=${dir}`;
-            } else {
-                preUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}`;
-            }
-            const preCheck = await fetch(preUrl);
+            const dir = strategy.toLowerCase().includes('short') ? 'short' : 'long';
+            const preCheck = await fetch(`${API}/api/scan-results?direction=${dir}`);
             if (preCheck.ok) {
                 const preData = await preCheck.json();
                 prevCachedAt = preData.cached_at || null;
@@ -1566,24 +1274,15 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 if (window.addToast) window.addToast('Scan gestartet...', 'info');
                 // Poll for results with increasing intervals
                 const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
                         setIsScanning(false);
                         updateScanCache('scanner_scanning', false);
                         if (window.addToast) window.addToast('Scan dauert länger...', 'info');
                         return;
                     }
                     try {
-                        // Strategie-Name mitsenden für korrekte Cache-Zuordnung
-                        const stratLower = strategy.toLowerCase();
-                        const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
-                        let pollUrl;
-                        if (isBI) {
-                            const dir = stratLower.includes('short') ? 'short' : 'long';
-                            pollUrl = `${API}/api/scan-results?direction=${dir}`;
-                        } else {
-                            pollUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}`;
-                        }
-                        const res = await fetch(pollUrl);
+                        const dir = strategy.toLowerCase().includes('short') ? 'short' : 'long';
+                        const res = await fetch(`${API}/api/scan-results?direction=${dir}`);
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
@@ -1598,9 +1297,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 3000); // Strategie-Scans sind schnell
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('scanner_scanning', false);
@@ -1637,7 +1336,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1656,12 +1355,12 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rsi?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${item.grade?.toLowerCase()}`}>{item.grade}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -1672,62 +1371,55 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 }
 
 // BI Scanner Tab
-function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [direction, setDirection] = useState('long');
     const [isScanning, setIsScanning] = useState(scanCache.bi_scanning || false);
     const [results, setResults] = useState(scanCache.bi_results || []);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
-    const pollRef = useRef(null);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, []);
-
-    // V2.2: Live-Polling — lädt Zwischenergebnisse während Scan läuft
-    const startLivePolling = () => {
-        if (pollRef.current) clearInterval(pollRef.current);
-        pollRef.current = setInterval(async () => {
-            try {
-                // Prüfe ob Scan noch läuft
-                const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
-                const statusRes = await fetch(`${API}/api/scan-status`);
-                let scanRunning = true;
-                if (statusRes.ok) {
-                    const status = await statusRes.json();
-                    const s = status.scans?.[scanKey];
-                    scanRunning = s?.running || false;
-                }
-                // Lade aktuelle Ergebnisse (inkl. Zwischenergebnisse)
-                const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
-                if (res.ok) {
-                    const data = await res.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('bi_results', items);
-                    }
-                }
-                // Scan fertig → Polling stoppen
-                if (!scanRunning) {
-                    clearInterval(pollRef.current);
-                    pollRef.current = null;
-                    setIsScanning(false);
-                    updateScanCache('bi_scanning', false);
-                    if (window.addToast) window.addToast('Scan fertig', 'success');
-                }
-            } catch (e) { console.error(e); }
-        }, 8000); // Alle 8 Sekunden
-    };
 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('bi_scanning', true);
+        // Save current cached_at BEFORE scan starts
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/bi-results?direction=${direction}`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
         try {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
-                if (window.addToast) window.addToast('Scan gestartet — Ergebnisse erscheinen live...', 'info');
-                startLivePolling();
+                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
+                        setIsScanning(false);
+                        updateScanCache('bi_scanning', false);
+                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
+                                setResults(items);
+                                updateScanCache('bi_results', items);
+                                setIsScanning(false);
+                                updateScanCache('bi_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                };
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('bi_scanning', false);
@@ -1739,34 +1431,25 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
         }
     };
 
-    // Load results on mount / direction change + auto-detect running scan
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('bi_results', items);
+        if (scanCache.bi_results && scanCache.bi_results.length > 0) {
+            setResults(scanCache.bi_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('bi_results', data.data || []);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-                // Auto-detect: Läuft gerade ein Scan? Dann Live-Polling starten
-                const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
-                const statusRes = await fetch(`${API}/api/scan-status`);
-                if (statusRes.ok) {
-                    const status = await statusRes.json();
-                    if (status.scans?.[scanKey]?.running) {
-                        setIsScanning(true);
-                        startLivePolling();
-                    }
-                }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-        return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [direction]);
+            };
+            fetchResults();
+        }
+    }, [direction, scanCache.bi_results]);
 
     return (
         <div className="space-y-6">
@@ -1778,33 +1461,29 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('grade')}>Grade {sortKey === 'grade' && '↓'}</th>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker {sortKey === 'ticker' && '↓'}</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis {sortKey === 'price' && '↓'}</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Chg% {sortKey === 'change_pct' && '↓'}</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen {sortKey === 'volume' && '↓'}</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score {sortKey === 'score' && '↓'}</th>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('grade_label')}>Signal {sortKey === 'grade_label' && '↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score</th>
+                            <th className="text-center py-2 px-2">Grade</th>
+                            <th className="text-left py-2 px-2">Signal</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen</th>
                         </tr>
                     </thead>
                     <tbody>
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-right" style={{color: (item.change_pct || 0) >= 0 ? '#10b981' : '#ef4444'}}>{(item.change_pct || 0) >= 0 ? '+' : ''}{(item.change_pct || 0).toFixed(2)}%</td>
-                                <td className="py-3 px-2 text-right" style={{color: (item.rvol || 0) >= 2 ? '#f59e0b' : '#9ca3af'}}>{(item.rvol || 0).toFixed(1)}x</td>
-                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume >= 1000000 ? (item.volume / 1000000).toFixed(1) + 'M' : (item.volume / 1000).toFixed(0) + 'K') : '–'}</td>
-                                <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(0)}</td>
-                                <td className="py-3 px-2"><span className={`signal-badge signal-${direction === 'long' ? 'bullish' : 'bearish'}`}>{item.grade_label || direction.toUpperCase()}</span></td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${item.grade?.toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2"><span className="signal-badge signal-bullish">{item.signal}</span></td>
+                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                             </tr>
                         ))}
                     </tbody>
@@ -1815,16 +1494,10 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 }
 
 // Biotech Tab
-function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
-    const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
-    const pollTimeoutRef = useRef(null);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -1866,9 +1539,9 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('biotech_scanning', false);
@@ -1880,76 +1553,51 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         }
     };
 
-    // Always load latest results from server on mount
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/biotech-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('biotech_results', items);
+        if (scanCache.biotech_results && scanCache.biotech_results.length > 0) {
+            setResults(scanCache.biotech_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/biotech-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('biotech_results', data.data || []);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.biotech_results]);
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="biotech" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('mcap_m')}>MCap</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung%</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen</th>
                             <th className="text-left py-2 px-2">Catalyst</th>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('event_result')}>Ergebnis</th>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('chart_health')}>Chart</th>
-                            <th className="text-left py-2 px-2">Sentiment</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {sorted.map((item, idx) => {
-                            const gradeColor = item.grade === 'S' ? '#7c3aed' : item.grade === 'A' ? '#059669' : item.grade === 'B' ? '#2563eb' : '#6b7280';
-                            const resultColor = (item.event_result || '').includes('Positiv') ? '#059669' : (item.event_result || '').includes('Negativ') ? '#dc2626' : '#9ca3af';
-                            return (
+                        {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                <td className="py-3 px-2">
-                                    <span style={{ color: gradeColor, fontWeight: 700 }}>{item.grade}</span>
-                                    <span className="text-gray-400 text-xs ml-1">{item.score}</span>
-                                </td>
-                                <td className="py-3 px-2">
-                                    <div className="font-semibold">{item.ticker}</div>
-                                    <div className="text-xs text-gray-400 truncate" style={{maxWidth:'120px'}}>{item.name}</div>
-                                </td>
-                                <td className="py-3 px-2 text-right font-mono">${(item.price || item.preis)?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-right text-xs">{item.mcap_m ? (item.mcap_m >= 1000 ? (item.mcap_m/1000).toFixed(1)+'B' : item.mcap_m.toFixed(0)+'M') : '–'}</td>
-                                <td className={`py-3 px-2 text-right ${item.rvol >= 2 ? 'color-positive font-semibold' : item.rvol >= 1.3 ? 'color-positive' : ''}`}>{item.rvol?.toFixed(1)}x</td>
-                                <td className="py-3 px-2 text-xs" style={{maxWidth:'180px'}}>
-                                    <div>{item.catalyst}</div>
-                                    {item.catalyst_date && <div className="text-gray-400">{item.catalyst_date}</div>}
-                                </td>
-                                <td className="py-3 px-2" style={{ color: resultColor, fontWeight: 600 }}>
-                                    {(item.event_result || '').includes('Positiv') ? '✅ Positiv' : (item.event_result || '').includes('Negativ') ? '❌ Negativ' : (item.event_result || '').includes('Ausstehend') ? '⏳ Ausstehend' : '–'}
-                                </td>
-                                <td className="py-3 px-2">
-                                    <span className={`text-xs px-2 py-0.5 rounded ${item.chart_health >= 7 ? 'bg-green-100 text-green-700' : item.chart_health >= 4 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
-                                        {item.chart || '–'}
-                                    </span>
-                                </td>
-                                <td className="py-3 px-2 text-xs">{item.sentiment || '–'}</td>
+                                <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
+                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2">{item.catalyst}</td>
                             </tr>
-                            );
-                        })}
+                        ))}
                     </tbody>
                 </table>
             </div>
@@ -1958,16 +1606,10 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 }
 
 // BTC-Divergenz Tab
-function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [isScanning, setIsScanning] = useState(scanCache.btc_divergenz_scanning || false);
     const [results, setResults] = useState(scanCache.btc_divergenz_results || []);
-    const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
-    const pollTimeoutRef = useRef(null);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2009,9 +1651,9 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('btc_divergenz_scanning', false);
@@ -2025,24 +1667,23 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
     useEffect(() => {
         if (scanCache.btc_divergenz_results && scanCache.btc_divergenz_results.length > 0) {
-            // fallback from cache
             setResults(scanCache.btc_divergenz_results);
-        }
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/btc-divergenz-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('btc_divergenz_results', items);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/btc-divergenz-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('btc_divergenz_results', data.data || []);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.btc_divergenz_results]);
 
     const getSignalClass = (signal) => {
         if (signal.includes('KAUFEN')) return 'signal-kaufen';
@@ -2055,7 +1696,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="btc_divergenz" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -2079,7 +1720,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.name}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.div_1d?.toFixed(2)}</td>
@@ -2087,7 +1728,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <td className="py-3 px-2 text-right">{item.beta?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right">{item.correlation?.toFixed(3)}</td>
                                 <td className="py-3 px-2 text-right">{item.z_score?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${getSignalClass(item.signal || '')}`}>{item.signal || '–'}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${getSignalClass(item.signal)}`}>{item.signal}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -2098,74 +1739,64 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 }
 
 // Early Movers Tab
-function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [subTab, setSubTab] = useState('volume-spikes');
-    const [volumeSpikes, setVolumeSpikes] = useState([]);
-    const [microCaps, setMicroCaps] = useState([]);
-    const [whaleAcc, setWhaleAcc] = useState([]);
-    const [recentlyListed, setRecentlyListed] = useState([]);
-    const [narratives, setNarratives] = useState({});
-    const [stats, setStats] = useState({});
-    const [isScanning, setIsScanning] = useState(false);
-    const pollTimeoutRef = useRef(null);
+function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+    const [subTab, setSubTab] = useState('winners');
+    const [winnerResults, setWinnerResults] = useState(scanCache.em_winners || []);
+    const [loserResults, setLoserResults] = useState(scanCache.em_losers || []);
+    const [spikeResults, setSpikeResults] = useState(scanCache.em_spikes || []);
+    const [isScanning, setIsScanning] = useState(scanCache.em_scanning || false);
+    const { sorted: sortedWinners, toggleSort: toggleWinnerSort, sortKey: winnerSortKey } = useSortable(winnerResults, 'change_pct');
+    const { sorted: sortedLosers, toggleSort: toggleLoserSort, sortKey: loserSortKey } = useSortable(loserResults, 'change_pct');
+    const { sorted: sortedSpikes, toggleSort: toggleSpikeSort, sortKey: spikeSortKey } = useSortable(spikeResults, 'volume');
 
-    const { sorted: sortedSpikes, toggleSort: toggleSpikeSort } = useSortable(volumeSpikes, 'EarlyScore');
-    const { sorted: sortedMicro, toggleSort: toggleMicroSort } = useSortable(microCaps, 'DegenScore');
-    const { sorted: sortedWhale, toggleSort: toggleWhaleSort } = useSortable(whaleAcc, 'WhaleScore');
-    const { sorted: sortedRecent, toggleSort: toggleRecentSort } = useSortable(recentlyListed, 'NewScore');
-
-    // Utility functions for formatting
-    const formatPrice = (price) => {
-        if (price === null || price === undefined) return '–';
-        return price >= 1 ? `$${price.toFixed(2)}` : `$${price.toFixed(4)}`;
-    };
-
-    const formatMCap = (mcap) => {
-        if (mcap === null || mcap === undefined) return '–';
-        if (mcap >= 1000000000) return `$${(mcap / 1000000000).toFixed(1)}B`;
-        if (mcap >= 1000000) return `$${(mcap / 1000000).toFixed(1)}M`;
-        return `$${mcap.toFixed(0)}`;
-    };
-
-    const getScoreClass = (score) => {
-        if (!score) return '';
-        if (score >= 70) return 'bg-green-600 text-white';
-        if (score >= 40) return 'bg-yellow-600 text-white';
-        return 'bg-red-600 text-white';
-    };
-
-    const getPercentClass = (value) => {
-        if (!value) return '';
-        return value >= 0 ? 'color-positive' : 'color-negative';
-    };
-
-    // Cleanup polling on unmount
     useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
-
-    // Load latest data on mount
-    useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/early-movers-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const em = (data.data && data.data[0]) || {};
-                    setVolumeSpikes(em.volume_spikes || []);
-                    setMicroCaps(em.micro_caps || []);
-                    setWhaleAcc(em.whale_acc || []);
-                    setRecentlyListed(em.recently_listed || []);
-                    setNarratives(em.narratives || {});
-                    setStats(em.stats || {});
+        if (scanCache.em_winners && scanCache.em_winners.length > 0) {
+            setWinnerResults(scanCache.em_winners);
+            setLoserResults(scanCache.em_losers || []);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/early-movers-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const em = (data.data && data.data[0]) || {};
+                        setWinnerResults(em.gainers || []);
+                        setLoserResults(em.losers || []);
+                        updateScanCache('em_winners', em.gainers || []);
+                        updateScanCache('em_losers', em.losers || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error fetching early movers:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.em_winners]);
+
+    useEffect(() => {
+        if (scanCache.em_spikes && scanCache.em_spikes.length > 0) {
+            setSpikeResults(scanCache.em_spikes);
+        } else {
+            const fetchSpikes = async () => {
+                try {
+                    const response = await fetch(`${API}/api/volume-spikes-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setSpikeResults(data.data || []);
+                        updateScanCache('em_spikes', data.data || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
+                }
+            };
+            fetchSpikes();
+        }
+    }, [scanCache.em_spikes]);
 
     const handleScan = async () => {
         setIsScanning(true);
+        updateScanCache('em_scanning', true);
+        // Save current cached_at BEFORE scan starts
         let prevCachedAt = null;
         try {
             const preCheck = await fetch(`${API}/api/early-movers-results`);
@@ -2178,9 +1809,11 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
             if (response.ok) {
                 if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                // Poll for results with increasing intervals
                 const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) {
+                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
                         setIsScanning(false);
+                        updateScanCache('em_scanning', false);
                         if (window.addToast) window.addToast('Scan dauert länger...', 'info');
                         return;
                     }
@@ -2189,271 +1822,151 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         if (res.ok) {
                             const data = await res.json();
                             const em = (data.data && data.data[0]) || {};
+                            const winners = em.gainers || [];
+                            const losers = em.losers || [];
                             const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
                             if (isNewData) {
-                                setVolumeSpikes(em.volume_spikes || []);
-                                setMicroCaps(em.micro_caps || []);
-                                setWhaleAcc(em.whale_acc || []);
-                                setRecentlyListed(em.recently_listed || []);
-                                setNarratives(em.narratives || {});
-                                setStats(em.stats || {});
+                                setWinnerResults(winners);
+                                setLoserResults(losers);
+                                updateScanCache('em_winners', winners);
+                                updateScanCache('em_losers', losers);
                                 setIsScanning(false);
-                                if (window.addToast) window.addToast('Scan fertig!', 'success');
+                                updateScanCache('em_scanning', false);
+                                if (window.addToast) window.addToast(`Scan fertig: ${winners.length + losers.length} Ergebnisse`, 'success');
                                 return;
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000);
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
+                updateScanCache('em_scanning', false);
             }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
             setIsScanning(false);
+            updateScanCache('em_scanning', false);
         }
     };
 
     return (
         <div className="space-y-6">
-            <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
-                <button onClick={() => setSubTab('volume-spikes')} className={`secondary-tab ${subTab === 'volume-spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
-                <button onClick={() => setSubTab('micro-caps')} className={`secondary-tab ${subTab === 'micro-caps' ? 'active' : 'inactive'}`}>Micro-Caps</button>
-                <button onClick={() => setSubTab('whale-acc')} className={`secondary-tab ${subTab === 'whale-acc' ? 'active' : 'inactive'}`}>Whale Accumulation</button>
-                <button onClick={() => setSubTab('recently-listed')} className={`secondary-tab ${subTab === 'recently-listed' ? 'active' : 'inactive'}`}>Neu Gelistet</button>
-                <button onClick={() => setSubTab('narratives')} className={`secondary-tab ${subTab === 'narratives' ? 'active' : 'inactive'}`}>Narratives</button>
+            <div className="flex gap-2 border-b border-gray-200">
+                <button onClick={() => setSubTab('winners')} className={`secondary-tab ${subTab === 'winners' ? 'active' : 'inactive'}`}>Gewinner</button>
+                <button onClick={() => setSubTab('losers')} className={`secondary-tab ${subTab === 'losers' ? 'active' : 'inactive'}`}>Verlierer</button>
+                <button onClick={() => setSubTab('spikes')} className={`secondary-tab ${subTab === 'spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="early_movers" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
-            {/* Volume Spikes Tab */}
-            {subTab === 'volume-spikes' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedSpikes.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSpikeSort('Change1h')}>1h%</th>
-                                    <th className="text-right py-2 px-2">24h%</th>
-                                    <th className="text-right py-2 px-2">7d%</th>
-                                    <th className="text-right py-2 px-2">Vol/MCap%</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSpikeSort('EarlyScore')}>Score</th>
-                                    <th className="text-left py-2 px-2">Signal</th>
-                                    <th className="text-left py-2 px-2">Perp</th>
-                                    <th className="text-left py-2 px-2">Narrative</th>
+            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                {subTab === 'winners' && (
+                    <table className="w-full text-sm">
+                        <thead className="border-b border-gray-200">
+                            <tr>
+                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleWinnerSort('ticker')}>Ticker</th>
+                                <th className="text-right py-2 px-2">Preis</th>
+                                <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleWinnerSort('change_pct')}>Änderung%</th>
+                                <th className="text-right py-2 px-2">Volumen</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedWinners.map((item, idx) => (
+                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right color-positive font-semibold">{item.change_pct?.toFixed(2)}%</td>
+                                    <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 </tr>
-                            </thead>
-                            <tbody>
-                                {sortedSpikes.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change1h)}`}>{item.Change1h?.toFixed(1) || '–'}%</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change24h)}`}>{item.Change24h?.toFixed(1) || '–'}%</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right">{item.VolMCapRatio?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.EarlyScore)}`}>{item.EarlyScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.IsTrending ? 'bg-purple-100 text-purple-800 font-semibold' : 'text-gray-500'}`}>{item.IsTrending ? 'TRENDING' : item.Narrative || '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
-
-            {/* Micro-Caps Tab */}
-            {subTab === 'micro-caps' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedMicro.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2">MCap</th>
-                                    <th className="text-right py-2 px-2">7d%</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleMicroSort('DegenScore')}>DegenScore</th>
-                                    <th className="text-left py-2 px-2">Signal</th>
-                                    <th className="text-left py-2 px-2">Perp</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedMicro.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className="py-3 px-2 text-right">{formatMCap(item.MCap)}</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.DegenScore)}`}>{item.DegenScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
-
-            {/* Whale Accumulation Tab */}
-            {subTab === 'whale-acc' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedWhale.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2">MCap</th>
-                                    <th className="text-right py-2 px-2">OI Ratio</th>
-                                    <th className="text-right py-2 px-2">Funding Rate</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleWhaleSort('WhaleScore')}>WhaleScore</th>
-                                    <th className="text-left py-2 px-2">Signals</th>
-                                    <th className="text-left py-2 px-2">Perp</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedWhale.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className="py-3 px-2 text-right">{formatMCap(item.MCap)}</td>
-                                        <td className="py-3 px-2 text-right">{item.OI_Ratio?.toFixed(2) || '–'}x</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.FundingRate * 100)}`}>{item.FundingRate ? (item.FundingRate * 100).toFixed(3) : '–'}%</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.WhaleScore)}`}>{item.WhaleScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{Array.isArray(item.Signals) ? item.Signals.join(', ') : item.Signals || '–'}</td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
-
-            {/* Recently Listed Tab */}
-            {subTab === 'recently-listed' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedRecent.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2">7d%</th>
-                                    <th className="text-right py-2 px-2">Vol 24h</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleRecentSort('NewScore')}>NewScore</th>
-                                    <th className="text-left py-2 px-2">Signal</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedRecent.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right">{formatMCap(item.Vol24h)}</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.NewScore)}`}>{item.NewScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
-
-            {/* Narratives Tab */}
-            {subTab === 'narratives' && (
-                <div className="card border border-gray-200 p-6 rounded-lg">
-                    {Object.keys(narratives).length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {Object.entries(narratives).map(([name, data]) => (
-                                <div key={name} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                                    <h3 className="font-semibold text-lg mb-3">{name}</h3>
-                                    <div className="space-y-2 text-sm">
-                                        <div><span className="text-gray-600">7d Avg:</span> <span className={getPercentClass(data.avg_7d)}>{data.avg_7d?.toFixed(1) || '–'}%</span></div>
-                                        <div><span className="text-gray-600">24h Avg:</span> <span className={getPercentClass(data.avg_24h)}>{data.avg_24h?.toFixed(1) || '–'}%</span></div>
-                                        <div><span className="text-gray-600">Count:</span> <span className="font-semibold">{data.count || 0}</span></div>
-                                        {data.leaders && data.leaders.length > 0 && (
-                                            <div className="mt-3 pt-3 border-t border-gray-300">
-                                                <p className="text-gray-600 font-semibold mb-1">Leaders:</p>
-                                                <div className="space-y-1">
-                                                    {data.leaders.slice(0, 3).map((leader, idx) => (
-                                                        <div key={idx} className="text-xs text-gray-700">
-                                                            {typeof leader === 'string' ? leader : leader.Symbol || '–'}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
                             ))}
-                        </div>
-                    )}
-                </div>
-            )}
+                        </tbody>
+                    </table>
+                )}
+
+                {subTab === 'losers' && (
+                    <table className="w-full text-sm">
+                        <thead className="border-b border-gray-200">
+                            <tr>
+                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleLoserSort('ticker')}>Ticker</th>
+                                <th className="text-right py-2 px-2">Preis</th>
+                                <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleLoserSort('change_pct')}>Änderung%</th>
+                                <th className="text-right py-2 px-2">Volumen</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedLosers.map((item, idx) => (
+                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right color-negative font-semibold">{item.change_pct?.toFixed(2)}%</td>
+                                    <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+
+                {subTab === 'spikes' && (
+                    <table className="w-full text-sm">
+                        <thead className="border-b border-gray-200">
+                            <tr>
+                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSpikeSort('ticker')}>Ticker</th>
+                                <th className="text-right py-2 px-2">Preis</th>
+                                <th className="text-right py-2 px-2">Änderung%</th>
+                                <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSpikeSort('volume')}>Volumen</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedSpikes.map((item, idx) => (
+                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
+                                    <td className="py-3 px-2 text-right font-semibold">{(item.volume / 1000000).toFixed(2)}M</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </div>
         </div>
     );
 }
 
 // Short Scanner Tab
-function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [subTab, setSubTab] = useState('breakdown');
+function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+    const [subTab, setSubTab] = useState('inverse-etfs');
     const [inverseETFs, setInverseETFs] = useState(scanCache.short_inverse || []);
     const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
     const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
-    const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'change_pct');
-    const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'change_pct');
-    const pollTimeoutRef = useRef(null);
+    const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'ticker');
+    const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'ticker');
 
-    // Cleanup polling on unmount
     useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
-
-    // Always load latest from server on mount
-    useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/bear-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const bear = (data.data && data.data[0]) || {};
-                    setInverseETFs(bear.inverse_etfs || []);
-                    setBreakdownStocks(bear.breakdown_stocks || []);
-                    updateScanCache('short_inverse', bear.inverse_etfs || []);
-                    updateScanCache('short_breakdown', bear.breakdown_stocks || []);
+        if (scanCache.short_inverse && scanCache.short_inverse.length > 0) {
+            setInverseETFs(scanCache.short_inverse);
+            setBreakdownStocks(scanCache.short_breakdown || []);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/bear-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const bear = (data.data && data.data[0]) || {};
+                        setInverseETFs(bear.inverse_etfs || []);
+                        setBreakdownStocks(bear.breakdown_stocks || []);
+                        updateScanCache('short_inverse', bear.inverse_etfs || []);
+                        updateScanCache('short_breakdown', bear.breakdown_stocks || []);
+                    }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.short_inverse]);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2499,9 +2012,9 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('short_scanning', false);
@@ -2516,11 +2029,11 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     return (
         <div className="space-y-6">
             <div className="flex gap-2 border-b border-gray-200">
-                <button onClick={() => setSubTab('breakdown')} className={`secondary-tab ${subTab === 'breakdown' ? 'active' : 'inactive'}`}>Short-Kandidaten</button>
-                <button onClick={() => setSubTab('inverse-etfs')} className={`secondary-tab ${subTab === 'inverse-etfs' ? 'active' : 'inactive'}`}>Hedging-ETFs</button>
+                <button onClick={() => setSubTab('inverse-etfs')} className={`secondary-tab ${subTab === 'inverse-etfs' ? 'active' : 'inactive'}`}>Inverse ETFs</button>
+                <button onClick={() => setSubTab('breakdown')} className={`secondary-tab ${subTab === 'breakdown' ? 'active' : 'inactive'}`}>Breakdown Aktien</button>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="bear" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 {subTab === 'inverse-etfs' && (
@@ -2544,12 +2057,12 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                     <td className="py-3 px-2 font-semibold">{item.ticker}</td>
                                     <td className="py-3 px-2">{item.name}</td>
                                     <td className="py-3 px-2">{item.underlying}</td>
-                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                     <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                     <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                     <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                    <td className="py-3 px-2"><span className="signal-badge signal-bearish">{item.signal || 'SHORT'}</span></td>
+                                    <td className="py-3 px-2"><span className="signal-badge signal-bearish">{item.signal}</span></td>
                                 </tr>
                             ))}
                         </tbody>
@@ -2560,35 +2073,21 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     <table className="w-full text-sm">
                         <thead className="border-b border-gray-200">
                             <tr>
-                                <th className="text-left py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('grade')}>Grade</th>
-                                <th className="text-left py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('ticker')}>Ticker</th>
-                                <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('price')}>Preis</th>
-                                <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('change_pct')}>Chg%</th>
-                                <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('rvol')}>RVOL</th>
-                                <th className="text-right py-2 px-1">$Vol</th>
-                                <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('ma20_dist')}>MA20</th>
-                                <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('score')}>Score</th>
+                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleBreakdownSort('ticker')}>Ticker</th>
+                                <th className="text-right py-2 px-2">Preis</th>
+                                <th className="text-right py-2 px-2">Änderung%</th>
+                                <th className="text-right py-2 px-2">Volumen</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {sortedBreakdown.map((item, idx) => {
-                                const gradeColors = { S: 'bg-purple-100 text-purple-800', A: 'bg-green-100 text-green-800', B: 'bg-blue-100 text-blue-800', C: 'bg-yellow-100 text-yellow-800', D: 'bg-gray-100 text-gray-500' };
-                                const gc = gradeColors[item.grade] || gradeColors.D;
-                                const dv = item.dollar_volume || (item.volume * item.price);
-                                const dvStr = dv >= 1e6 ? (dv / 1e6).toFixed(1) + 'M' : dv >= 1e3 ? (dv / 1e3).toFixed(0) + 'K' : dv?.toFixed(0);
-                                return (
-                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)} title={item.score_details || ''}>
-                                    <td className="py-3 px-1"><span className={`px-2 py-0.5 rounded text-xs font-bold ${gc}`}>{item.grade || '–'}</span></td>
-                                    <td className="py-3 px-1 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-1 text-right">${item.price?.toFixed(2)}</td>
-                                    <td className="py-3 px-1 text-right color-negative font-medium">{item.change_pct?.toFixed(1)}%</td>
-                                    <td className={`py-3 px-1 text-right ${item.rvol >= 2.0 ? 'font-bold color-positive' : ''}`}>{item.rvol?.toFixed(1)}x</td>
-                                    <td className="py-3 px-1 text-right text-gray-600">{dvStr}</td>
-                                    <td className="py-3 px-1 text-right color-negative">{item.ma20_dist?.toFixed(1)}%</td>
-                                    <td className="py-3 px-1 text-right font-medium">{item.score || 0}</td>
+                            {sortedBreakdown.map((item, idx) => (
+                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                    <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
+                                    <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 </tr>
-                                );
-                            })}
+                            ))}
                         </tbody>
                     </table>
                 )}
@@ -2598,34 +2097,30 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 }
 
 // Money Flow Tab
-function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [results, setResults] = useState(scanCache.moneyflow_results || []);
     const [isScanning, setIsScanning] = useState(scanCache.mf_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'sector');
-    const pollTimeoutRef = useRef(null);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
 
     useEffect(() => {
-        // Always load latest from server
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/money-flow-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('moneyflow_results', items);
+        if (scanCache.moneyflow_results && scanCache.moneyflow_results.length > 0) {
+            setResults(scanCache.moneyflow_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/money-flow-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('moneyflow_results', data.data || []);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.moneyflow_results]);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2667,9 +2162,9 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('moneyflow_scanning', false);
@@ -2689,7 +2184,7 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="money_flow" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -2702,8 +2197,6 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             <th className="text-right py-2 px-2">5D%</th>
                             <th className="text-right py-2 px-2">20D%</th>
                             <th className="text-right py-2 px-2">RVOL</th>
-                            <th className="text-right py-2 px-2">CMF</th>
-                            <th className="text-left py-2 px-2">OBV</th>
                             <th className="text-left py-2 px-2">Flow Signal</th>
                         </tr>
                     </thead>
@@ -2712,14 +2205,12 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.etf)}>
                                 <td className="py-3 px-2 font-semibold">{item.sector}</td>
                                 <td className="py-3 px-2">{item.etf}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                <td className={`py-3 px-2 text-right ${(item.cmf ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.cmf != null ? item.cmf.toFixed(3) : '–'}</td>
-                                <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : 'Neutral'}</span></td>
-                                <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal || '')}`}>{item.flow_signal || '–'}</span></td>
+                                <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal)}`}>{item.flow_signal}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -2751,18 +2242,10 @@ function KalenderTab() {
         fetchCalendar();
     }, []);
 
-    const getImportanceClass = (imp) => {
-        const i = (imp || '').toLowerCase();
-        if (i === 'high' || i.includes('hoch')) return 'importance-high';
-        if (i === 'medium' || i.includes('mittel')) return 'importance-medium';
+    const getImportanceClass = (importance) => {
+        if (importance.includes('HOCH')) return 'importance-high';
+        if (importance.includes('MITTEL')) return 'importance-medium';
         return 'importance-low';
-    };
-    const getImportanceLabel = (imp) => {
-        const i = (imp || '').toLowerCase();
-        if (i === 'high') return 'Hoch';
-        if (i === 'medium') return 'Mittel';
-        if (i === 'low') return 'Niedrig';
-        return imp || '–';
     };
 
     return (
@@ -2777,21 +2260,16 @@ function KalenderTab() {
                                 <th className="text-left py-2 px-2">Datum</th>
                                 <th className="text-left py-2 px-2">Event</th>
                                 <th className="text-center py-2 px-2">Wichtigkeit</th>
-                                <th className="text-center py-2 px-2">Impact</th>
                                 <th className="text-left py-2 px-2">Beschreibung</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {events.length === 0 && (
-                                <tr><td colSpan="5" className="py-6 text-center text-gray-400">Keine Events gefunden</td></tr>
-                            )}
                             {events.map((event, idx) => (
                                 <tr key={idx} className="table-row border-b border-gray-200">
-                                    <td className="py-3 px-2 font-semibold whitespace-nowrap">{new Date(event.date).toLocaleDateString('de-DE', {weekday:'short', day:'2-digit', month:'short', year:'numeric'})}</td>
-                                    <td className="py-3 px-2 font-medium">{event.event}</td>
-                                    <td className="py-3 px-2 text-center"><span className={`signal-badge ${getImportanceClass(event.importance)}`}>{getImportanceLabel(event.importance)}</span></td>
-                                    <td className="py-3 px-2 text-center text-xs">{event.impact || '–'}</td>
-                                    <td className="py-3 px-2 text-gray-600">{event.description}</td>
+                                    <td className="py-3 px-2 font-semibold">{event.date}</td>
+                                    <td className="py-3 px-2">{event.event}</td>
+                                    <td className="py-3 px-2 text-center"><span className={`signal-badge ${getImportanceClass(event.importance)}`}>{event.importance}</span></td>
+                                    <td className="py-3 px-2">{event.description}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -2803,41 +2281,40 @@ function KalenderTab() {
 }
 
 // Crash Monitor Tab
-function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [fearData, setFearData] = useState(scanCache.crash_fear_data || null);
     const [indices, setIndices] = useState(scanCache.crash_indices || []);
     const [breadth, setBreadth] = useState(scanCache.crash_breadth || null);
     const [isScanning, setIsScanning] = useState(scanCache.crash_scanning || false);
     const { sorted, toggleSort } = useSortable(indices, 'name');
-    const pollTimeoutRef = useRef(null);
 
-    // Cleanup polling on unmount
     useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
-
-    // Always load latest from server on mount
-    useEffect(() => {
-        const fetchData = async () => {
-            try {
-                const response = await fetch(`${API}/api/crash-monitor-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const cm = (data.data && data.data[0]) || {};
-                    if (cm.fear_score !== undefined) {
-                        const fd = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
-                        setFearData(fd);
+        if (scanCache.crash_fear_data) {
+            setFearData(scanCache.crash_fear_data);
+            setIndices(scanCache.crash_indices || []);
+            setBreadth(scanCache.crash_breadth || null);
+        } else {
+            const fetchData = async () => {
+                try {
+                    const response = await fetch(`${API}/api/crash-monitor-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const cm = (data.data && data.data[0]) || {};
+                        const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
+                        setFearData(fearData);
                         setIndices(cm.indices || []);
                         setBreadth(cm.breadth || null);
-                        updateScanCache('crash_fear_data', fd);
+                        updateScanCache('crash_fear_data', fearData);
                         updateScanCache('crash_indices', cm.indices || []);
                         updateScanCache('crash_breadth', cm.breadth || null);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchData();
-    }, []);
+            };
+            fetchData();
+        }
+    }, [scanCache.crash_fear_data]);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -2884,9 +2361,9 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('crash_scanning', false);
@@ -2898,10 +2375,9 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         }
     };
 
-    const fearLevel = fearData?.score ?? 50;
-    // V2.5: CNN-kompatible Skala — 0 = Extreme Fear, 100 = Extreme Greed
-    const fearText = fearData?.level || (fearLevel <= 20 ? 'EXTREME ANGST' : fearLevel <= 40 ? 'ANGST' : fearLevel <= 60 ? 'NEUTRAL' : fearLevel <= 80 ? 'GIER' : 'EXTREME GIER');
-    const fearColor = fearLevel <= 20 ? '#dc2626' : fearLevel <= 40 ? '#d97706' : fearLevel <= 60 ? '#6b7280' : fearLevel <= 80 ? '#2563eb' : '#059669';
+    const fearLevel = fearData?.score || 0;
+    const fearText = fearLevel < 25 ? 'GIER' : fearLevel < 45 ? 'OPTIMISMUS' : fearLevel < 55 ? 'NEUTRAL' : fearLevel < 75 ? 'ANGST' : 'PANIK';
+    const fearColor = fearLevel < 25 ? '#059669' : fearLevel < 45 ? '#2563eb' : fearLevel < 55 ? '#6b7280' : fearLevel < 75 ? '#d97706' : '#dc2626';
 
     return (
         <div className="space-y-6">
@@ -2933,7 +2409,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 </div>
             )}
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="crash_monitor" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             {/* Indices */}
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -2952,7 +2428,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.name}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
@@ -2985,31 +2461,9 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <div className="momentum-bar-fill" style={{ width: `${breadth.declining_pct || 50}%`, backgroundColor: '#dc2626' }}></div>
                             </div>
                         </div>
-                        <div className="flex justify-between items-center mt-4 pt-3 border-t border-gray-100">
-                            <div className="text-sm text-gray-600">
-                                A/D Ratio: <span className="font-semibold">{breadth.ad_ratio?.toFixed(2)}</span>
-                            </div>
-                            <span className={`signal-badge ${breadth.breadth_signal === 'BULLISH' ? 'signal-bullish' : breadth.breadth_signal === 'BEARISH' ? 'signal-bearish' : 'signal-neutral'}`}>
-                                {breadth.breadth_signal === 'BULLISH' ? 'Bullisch' : breadth.breadth_signal === 'BEARISH' ? 'Bärisch' : breadth.breadth_signal === 'MARKT GESCHLOSSEN' ? 'Markt geschlossen' : 'Neutral'}
-                            </span>
+                        <div className="text-center text-sm text-gray-600 mt-4">
+                            A/D Ratio: {breadth.ad_ratio?.toFixed(2)}
                         </div>
-                        {breadth.unchanged > 0 && (
-                            <div className="text-xs text-gray-400 mt-2">Unverändert: {breadth.unchanged} ({breadth.unchanged_pct?.toFixed(1)}%)</div>
-                        )}
-                    </div>
-                </div>
-            )}
-
-            {/* Fear Score Details */}
-            {fearData && fearData.score > 0 && (
-                <div className="card border border-gray-200 p-6 rounded-lg">
-                    <h3 className="font-semibold mb-4">Fear-Score Komponenten</h3>
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                        <div className="flex justify-between"><span className="text-gray-600">VIX Level</span><span className="font-semibold">{fearData.vix?.toFixed(1)}</span></div>
-                        <div className="flex justify-between"><span className="text-gray-600">Fear & Greed</span><span className="font-bold" style={{color: fearColor}}>{fearLevel}/100</span></div>
-                    </div>
-                    <div className="mt-3 text-xs text-gray-500">
-                        Score basiert auf: VIX Level & Trend, S&P/Nasdaq Tagesänderungen, A/D Ratio, Marktbreite, Sektor-Divergenzen, VIX Termstruktur
                     </div>
                 </div>
             )}
@@ -3122,7 +2576,7 @@ function WatchlistTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(ticker)}>
                                     <td className="py-3 px-2 font-semibold">{ticker}</td>
-                                    <td className="py-3 px-2 text-right">${price?.price?.toFixed(2) || '-'}</td>
+                                    <td className="py-3 px-2 text-right">€{price?.price?.toFixed(2) || '-'}</td>
                                     <td className={`py-3 px-2 text-right ${(price?.change_pct || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{price?.change_pct?.toFixed(2) || '-'}%</td>
                                     <td className={`py-3 px-2 text-right ${(price?.change_5d || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{price?.change_5d?.toFixed(2) || '-'}%</td>
                                     <td className="py-3 px-2 text-right">{price?.rsi?.toFixed(1) || '-'}</td>
@@ -3228,7 +2682,7 @@ function BacktestTab() {
                         <div className="metric-card orange">
                             <div className="text-sm font-semibold text-gray-600">Ø PnL</div>
                             <div className={`text-2xl font-bold mt-2 ${results.avg_pnl >= 0 ? 'color-positive' : 'color-negative'}`}>
-                                ${results.avg_pnl?.toFixed(2)}
+                                €{results.avg_pnl?.toFixed(2)}
                             </div>
                         </div>
                         <div className="metric-card purple">
@@ -3261,9 +2715,9 @@ function BacktestTab() {
                                     {trades.map((trade, idx) => (
                                         <tr key={idx} className="table-row border-b border-gray-200">
                                             <td className="py-3 px-2">{trade.entry_date}</td>
-                                            <td className="py-3 px-2 text-right">${trade.entry_price?.toFixed(2)}</td>
+                                            <td className="py-3 px-2 text-right">€{trade.entry_price?.toFixed(2)}</td>
                                             <td className="py-3 px-2">{trade.exit_date}</td>
-                                            <td className="py-3 px-2 text-right">${trade.exit_price?.toFixed(2)}</td>
+                                            <td className="py-3 px-2 text-right">€{trade.exit_price?.toFixed(2)}</td>
                                             <td className={`py-3 px-2 text-right ${trade.pnl_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{trade.pnl_pct?.toFixed(2)}%</td>
                                         </tr>
                                     ))}
@@ -3292,9 +2746,7 @@ function StrategieGuideTab() {
                 const response = await fetch(`${API}/api/strategies?market_type=${activeMarket}`);
                 if (response.ok) {
                     const data = await response.json();
-                    // API returns strategies as {name: config} dict — extract keys as array
-                    const strats = data.strategies || {};
-                    setStrategies(typeof strats === 'object' && !Array.isArray(strats) ? Object.keys(strats) : (Array.isArray(strats) ? strats : []));
+                    setStrategies(data.strategies || []);
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -3365,37 +2817,34 @@ function StrategieGuideTab() {
 }
 
 // New Listing Scanner Tab
-function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [results, setResults] = useState(scanCache.newlisting_results || []);
     const [stats, setStats] = useState(scanCache.newlisting_stats || null);
     const [isScanning, setIsScanning] = useState(scanCache.nl_scanning || false);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'pump_pct');
-    const pollTimeoutRef = useRef(null);
 
-    // Cleanup polling on unmount
     useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
-
-    // Always load latest from server on mount
-    useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/new-listing-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
+        if (scanCache.newlisting_results && scanCache.newlisting_results.length > 0) {
+            setResults(scanCache.newlisting_results);
+            setStats(scanCache.newlisting_stats || null);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/new-listing-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.listings || []);
                         setStats(data.stats);
-                        updateScanCache('newlisting_results', items);
+                        updateScanCache('newlisting_results', data.listings || []);
                         updateScanCache('newlisting_stats', data.stats);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.newlisting_results]);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -3425,7 +2874,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         const res = await fetch(`${API}/api/new-listing-results`);
                         if (res.ok) {
                             const data = await res.json();
-                            const items = data.data || [];
+                            const items = data.listings || [];
                             const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
                             if (isNewData) {
                                 setResults(items);
@@ -3439,9 +2888,9 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('newlisting_scanning', false);
@@ -3478,7 +2927,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 </div>
             )}
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -3498,10 +2947,10 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.exchange}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.pump_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
-                                <td className="py-3 px-2 text-center"><span className="signal-badge signal-bullish">{item.signal || 'BUY'}</span></td>
+                                <td className="py-3 px-2 text-center"><span className="signal-badge signal-bullish">{item.signal}</span></td>
                                 <td className={`py-3 px-2 text-right ${item.funding_rate >= 0 ? 'color-positive' : 'color-negative'}`}>{item.funding_rate?.toFixed(3)}%</td>
                             </tr>
                         ))}
@@ -3513,16 +2962,10 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 }
 
 // Volume Spikes Tab
-function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [isScanning, setIsScanning] = useState(scanCache.vs_scanning || false);
     const [results, setResults] = useState(scanCache.vs_results || []);
-    const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
-    const pollTimeoutRef = useRef(null);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
+    const { sorted, toggleSort, sortKey } = useSortable(results, 'ticker');
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -3564,9 +3007,9 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
+                    setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
+                setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
                 setIsScanning(false);
                 updateScanCache('vs_scanning', false);
@@ -3578,27 +3021,29 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         }
     };
 
-    // Always load latest from server on mount
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/volume-spikes-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('vs_results', items);
+        if (scanCache.vs_results && scanCache.vs_results.length > 0) {
+            setResults(scanCache.vs_results);
+        } else {
+            const fetchResults = async () => {
+                try {
+                    const response = await fetch(`${API}/api/volume-spikes-results`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        setResults(data.data || []);
+                        updateScanCache('vs_results', data.data || []);
                     }
+                } catch (err) {
+                    console.error('Error:', err);
                 }
-            } catch (err) { console.error('Error:', err); }
-        };
-        fetchResults();
-    }, []);
+            };
+            fetchResults();
+        }
+    }, [scanCache.vs_results]);
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="volume_spikes" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -3616,11 +3061,11 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">€{item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
-                                <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
+                                <td className="py-3 px-2 text-right">{(item.volume / 1000000).toFixed(2)}M</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-right">${(item.dollar_volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2 text-right">€{(item.dollar_volume / 1000000).toFixed(2)}M</td>
                             </tr>
                         ))}
                     </tbody>
@@ -3630,179 +3075,11 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     );
 }
 
-// ORB Scanner Tab (Opening Range Breakout)
-function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [results, setResults] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [cacheAge, setCacheAge] = useState(null);
-    const [subView, setSubView] = useState('breakouts');
-
-    const loadResults = async () => {
-        try {
-            const resp = await fetch(`${API}/api/orb-results`);
-            const data = await resp.json();
-            if (data.data && data.data.length > 0) {
-                setResults(data.data[0]);
-                setCacheAge(data.cache_age_seconds);
-            }
-        } catch (e) { console.error('ORB load error:', e); }
-    };
-
-    useEffect(() => { loadResults(); const iv = setInterval(loadResults, 30000); return () => clearInterval(iv); }, []);
-
-    const triggerScan = async () => {
-        setLoading(true);
-        try {
-            await fetch(`${API}/api/orb-scan`, { method: 'POST' });
-            setTimeout(loadResults, 5000);
-        } catch (e) { console.error(e); }
-        setLoading(false);
-    };
-
-    const gradeColor = (g) => ({ S: 'text-yellow-500 font-bold', A: 'text-green-500 font-bold', B: 'text-blue-500', C: 'text-gray-500' }[g] || 'text-gray-400');
-    const dirEmoji = (d) => d === 'LONG' ? '⬆️' : d === 'SHORT' ? '⬇️' : '🔄';
-    const formatAge = (s) => s == null ? '—' : s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}min` : `${Math.floor(s/3600)}h`;
-
-    const breakouts = results?.breakouts || [];
-    const failedBOs = results?.failed_breakouts || [];
-    const candidates = results?.candidates || [];
-    const stats = results?.stats || {};
-
-    return (
-        <div className="space-y-4">
-            <div className="card p-4">
-                <div className="flex justify-between items-center mb-3">
-                    <div>
-                        <h2 className="text-lg font-bold">ORB Scanner V2</h2>
-                        <p className="text-xs text-gray-500">Opening Range Breakout — Mo-Fr 9:45-11:00 ET | Mark Fisher ACD + Crabel</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <span className="text-xs text-gray-400">Cache: {formatAge(cacheAge)}</span>
-                        <button onClick={triggerScan} disabled={loading} className="btn-primary text-sm px-3 py-1">
-                            {loading ? '⏳ Scanning...' : '🔍 Scan'}
-                        </button>
-                    </div>
-                </div>
-                {stats.scanned > 0 && (
-                    <div className="flex gap-4 text-xs text-gray-500">
-                        <span>Gescannt: {stats.scanned}</span>
-                        <span>Kandidaten: {stats.candidates}</span>
-                        <span className="text-green-600 font-medium">Breakouts: {stats.breakouts}</span>
-                        <span className="text-red-500">Failed: {stats.failed || 0}</span>
-                        <span className="text-gray-400">{results?.market_time || ''}</span>
-                    </div>
-                )}
-            </div>
-
-            <div className="flex gap-2 mb-2">
-                <button onClick={() => setSubView('breakouts')} className={`text-xs px-3 py-1 rounded ${subView === 'breakouts' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600'}`}>
-                    Breakouts ({breakouts.length})
-                </button>
-                <button onClick={() => setSubView('failed')} className={`text-xs px-3 py-1 rounded ${subView === 'failed' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-600'}`}>
-                    Failed BOs ({failedBOs.length})
-                </button>
-                <button onClick={() => setSubView('candidates')} className={`text-xs px-3 py-1 rounded ${subView === 'candidates' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600'}`}>
-                    Kandidaten ({candidates.length})
-                </button>
-            </div>
-
-            {subView === 'breakouts' && breakouts.length > 0 && (
-                <div className="space-y-2">
-                    {breakouts.map((b, i) => (
-                        <div key={i} className="card p-3 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <span className="font-bold text-base">{b.ticker}</span>
-                                    <span className={`ml-2 ${gradeColor(b.grade)}`}>{b.grade}</span>
-                                    <span className="ml-2 text-sm">{dirEmoji(b.direction)} {b.direction}</span>
-                                    {b.vol_confirmed && <span className="ml-1 text-xs text-green-600">🔊 Vol✓</span>}
-                                    {b.vwap_aligned && <span className="ml-1 text-xs text-blue-500">VWAP✓</span>}
-                                </div>
-                                <div className="text-right">
-                                    <div className="font-bold">${b.current_price}</div>
-                                    <div className="text-xs text-gray-500">Score: {b.score}/100</div>
-                                </div>
-                            </div>
-                            <div className="mt-2 grid grid-cols-4 gap-2 text-xs text-gray-600">
-                                <div>Gap: <span className={b.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{b.gap_pct > 0 ? '+' : ''}{b.gap_pct}%</span></div>
-                                <div>RVOL: <span className={b.rvol >= 2 ? 'text-green-600 font-medium' : ''}>{b.rvol}x</span></div>
-                                <div>OR: {b.or_size_pct}%</div>
-                                <div>R:R: <span className={b.rr_ratio >= 2 ? 'text-green-600 font-medium' : ''}>{b.rr_ratio}</span></div>
-                            </div>
-                            <div className="mt-1 flex gap-3 text-xs">
-                                <span className="text-green-700">Entry: ${b.entry}</span>
-                                <span className="text-red-500">Stop: ${b.stop}</span>
-                                <span className="text-blue-600">T1: ${b.target1}</span>
-                                <span className="text-blue-400">T2: ${b.target2}</span>
-                            </div>
-                            <div className="mt-1 text-xs text-gray-400">{b.score_details}</div>
-                        </div>
-                    ))}
-                </div>
-            )}
-            {subView === 'breakouts' && breakouts.length === 0 && (
-                <div className="card p-6 text-center text-gray-400">
-                    <p className="text-lg mb-1">Keine Breakouts</p>
-                    <p className="text-xs">ORB Scanner läuft nur Mo-Fr 9:45-11:00 ET</p>
-                </div>
-            )}
-
-            {subView === 'failed' && failedBOs.length > 0 && (
-                <div className="space-y-2">
-                    <p className="text-xs text-gray-500 mb-1">Failed Breakouts = Crabel Reversal Setups (Gegenrichtung handeln)</p>
-                    {failedBOs.map((b, i) => (
-                        <div key={i} className="card p-3 border-l-4 border-red-400 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
-                            <div className="flex justify-between">
-                                <div>
-                                    <span className="font-bold">{b.ticker}</span>
-                                    <span className="ml-2 text-sm text-red-500">🔄 {b.direction}</span>
-                                </div>
-                                <span className="font-bold">${b.current_price}</span>
-                            </div>
-                            <div className="mt-1 flex gap-3 text-xs">
-                                <span>Gap: {b.gap_pct}%</span>
-                                <span>RVOL: {b.rvol}x</span>
-                                <span className="text-green-700">Entry: ${b.entry}</span>
-                                <span className="text-red-500">Stop: ${b.stop}</span>
-                                <span className="text-blue-600">Target: ${b.target}</span>
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            )}
-            {subView === 'failed' && failedBOs.length === 0 && (
-                <div className="card p-4 text-center text-gray-400 text-sm">Keine Failed Breakouts erkannt</div>
-            )}
-
-            {subView === 'candidates' && candidates.length > 0 && (
-                <div className="space-y-1">
-                    <p className="text-xs text-gray-500 mb-1">Pre-ORB Kandidaten (Gap + RVOL Filter, warten auf Breakout)</p>
-                    {candidates.map((c, i) => (
-                        <div key={i} className="card p-2 flex justify-between items-center cursor-pointer hover:bg-gray-50 text-sm" onClick={() => onSelectTicker({ticker: c.ticker, ...c})}>
-                            <span className="font-medium w-16">{c.ticker}</span>
-                            <span className={c.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{c.gap_pct > 0 ? '+' : ''}{c.gap_pct}%</span>
-                            <span className={c.rvol >= 2 ? 'text-green-600 font-medium' : 'text-gray-500'}>{c.rvol}x</span>
-                            <span className="text-gray-500">${c.current}</span>
-                            <span className="text-gray-400 text-xs">{(c.volume/1000000).toFixed(1)}M</span>
-                        </div>
-                    ))}
-                </div>
-            )}
-        </div>
-    );
-}
-
 // Suche (Search) Tab
 function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [searchTicker, setSearchTicker] = useState('');
     const [searchResults, setSearchResults] = useState(null);
     const [loading, setLoading] = useState(false);
-    const pollTimeoutRef = useRef(null);
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
 
     const performSearch = async () => {
         if (!searchTicker.trim()) return;
@@ -3850,7 +3127,7 @@ function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }
                         <div className="flex justify-between items-start mb-4">
                             <div>
                                 <h2 className="text-2xl font-bold">{searchResults.ticker}</h2>
-                                <p className="text-2xl font-bold mt-2">${searchResults.price?.toFixed(2)}</p>
+                                <p className="text-2xl font-bold mt-2">€{searchResults.price?.toFixed(2)}</p>
                                 <p className={`text-lg font-semibold mt-1 ${searchResults.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>
                                     ({searchResults.change_pct?.toFixed(2)}%)
                                 </p>
@@ -3872,11 +3149,11 @@ function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }
                         </div>
                         <div className="card border border-gray-200 p-4 rounded-lg">
                             <div className="text-sm font-semibold text-gray-600">MA20</div>
-                            <div className="text-2xl font-bold mt-2">${searchResults.ma20?.toFixed(2)}</div>
+                            <div className="text-2xl font-bold mt-2">€{searchResults.ma20?.toFixed(2)}</div>
                         </div>
                         <div className="card border border-gray-200 p-4 rounded-lg">
                             <div className="text-sm font-semibold text-gray-600">MA50</div>
-                            <div className="text-2xl font-bold mt-2">${searchResults.ma50?.toFixed(2)}</div>
+                            <div className="text-2xl font-bold mt-2">€{searchResults.ma50?.toFixed(2)}</div>
                         </div>
                     </div>
 

@@ -877,7 +877,7 @@ BACKTEST_STRATEGY_RULES = {
         "tp1_rr": 1.5,
         "tp2_rr": 3.0,
         "max_hold_days": 5,
-        "min_price": 10.0
+        "min_price": 5.0
     },
     "Reversal Hunter": {
         "direction": "long",

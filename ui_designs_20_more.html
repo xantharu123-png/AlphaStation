@@ -1,0 +1,2207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alpha Station V70.7 Pro - Dashboard Designs 11-30</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&family=Sora:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow-x: hidden;
+        }
+
+        /* ===== HEADER & NAVIGATION ===== */
+        .header {
+            background: #0f0f0f;
+            border-bottom: 1px solid #333;
+            padding: 1rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .nav-container {
+            max-width: 100%;
+            overflow-x: auto;
+            padding: 0.5rem 0;
+        }
+
+        .nav-buttons {
+            display: flex;
+            gap: 0.5rem;
+            padding: 0 1rem;
+            min-width: min-content;
+        }
+
+        .nbtn {
+            padding: 0.5rem 1rem;
+            border: 1px solid #444;
+            background: #1f1f1f;
+            color: #aaa;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .nbtn:hover {
+            border-color: #666;
+            background: #2a2a2a;
+        }
+
+        .nbtn.on {
+            background: #0066ff;
+            border-color: #0066ff;
+            color: #fff;
+        }
+
+        .title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: #00d4ff;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        /* ===== PANELS CONTAINER ===== */
+        .panels-container {
+            padding: 2rem;
+            min-height: calc(100vh - 100px);
+        }
+
+        .panel {
+            display: none;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .panel.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* ===== SHARED DATA ===== */
+        .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 3px solid #0066ff;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            border-radius: 4px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        /* ===== DESIGN 11: CYBERPUNK NEON ===== */
+        #p11 {
+            background: #0a0e27;
+            color: #00ff88;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        #p11 .description {
+            background: rgba(0, 255, 136, 0.05);
+            border-left-color: #00ff88;
+        }
+
+        #p11 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            text-shadow: 0 0 20px rgba(0, 255, 136, 0.5);
+            border-bottom: 2px solid #ff00ff;
+            padding-bottom: 1rem;
+        }
+
+        #p11 .section {
+            margin-bottom: 2rem;
+            border: 2px solid #00ff88;
+            padding: 1.5rem;
+            border-radius: 2px;
+            background: rgba(0, 255, 136, 0.03);
+            box-shadow: inset 0 0 20px rgba(0, 255, 136, 0.1), 0 0 30px rgba(255, 0, 255, 0.2);
+        }
+
+        #p11 .section-title {
+            font-size: 1.2rem;
+            color: #ff00ff;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+
+        #p11 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.7rem 0;
+            border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+        }
+
+        #p11 .item:last-child {
+            border-bottom: none;
+        }
+
+        #p11 .value {
+            color: #00ffff;
+        }
+
+        #p11 .grade {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border: 1px solid currentColor;
+            border-radius: 2px;
+            font-weight: 600;
+        }
+
+        /* ===== DESIGN 12: NEWSPAPER/FINANCIAL TIMES ===== */
+        #p12 {
+            background: #f5f1eb;
+            color: #1a1a1a;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            line-height: 1.8;
+        }
+
+        #p12 .description {
+            background: #e8dcc8;
+            border-left: 4px solid #8b6f47;
+            color: #1a1a1a;
+        }
+
+        #p12 .panel-title {
+            font-size: 2.2rem;
+            font-weight: bold;
+            border-bottom: 3px double #1a1a1a;
+            padding-bottom: 1rem;
+            margin-bottom: 2rem;
+            letter-spacing: 1px;
+        }
+
+        #p12 .columns {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        #p12 .section {
+            break-inside: avoid;
+        }
+
+        #p12 .section-title {
+            font-size: 1.3rem;
+            font-weight: bold;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            font-family: 'Inter', sans-serif;
+            letter-spacing: 2px;
+            border-bottom: 1px solid #1a1a1a;
+            padding-bottom: 0.5rem;
+        }
+
+        #p12 .item {
+            margin-bottom: 0.8rem;
+            padding-bottom: 0.8rem;
+            border-bottom: 1px dotted #999;
+        }
+
+        #p12 .item:last-child {
+            border-bottom: none;
+        }
+
+        /* ===== DESIGN 13: macOS NATIVE ===== */
+        #p13 {
+            background: #f5f5f7;
+            color: #1d1d1d;
+            font-family: '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif;
+        }
+
+        #p13 .description {
+            background: rgba(0, 102, 255, 0.08);
+            border-left: 4px solid #0066ff;
+            color: #1d1d1d;
+        }
+
+        #p13 .panel-title {
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 2rem;
+            color: #000;
+        }
+
+        #p13 .section {
+            background: #fff;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e5e5e7;
+        }
+
+        #p13 .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #000;
+        }
+
+        #p13 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.8rem 0;
+            font-size: 0.95rem;
+        }
+
+        #p13 .item:not(:last-child) {
+            border-bottom: 1px solid #e5e5e7;
+        }
+
+        #p13 .value {
+            font-weight: 500;
+            color: #0066ff;
+        }
+
+        /* ===== DESIGN 14: DASHBOARD TILES ===== */
+        #p14 {
+            background: #0f1419;
+        }
+
+        #p14 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+        }
+
+        #p14 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            color: #00d4ff;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        #p14 .tile-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        #p14 .tile {
+            background: linear-gradient(135deg, rgba(0, 102, 255, 0.1) 0%, rgba(0, 212, 255, 0.05) 100%);
+            border: 2px solid;
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        #p14 .tile:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.2);
+        }
+
+        #p14 .tile.purple { border-color: #9933ff; background: linear-gradient(135deg, rgba(153, 51, 255, 0.15) 0%, rgba(153, 51, 255, 0.05) 100%); }
+        #p14 .tile.green { border-color: #00d944; background: linear-gradient(135deg, rgba(0, 217, 68, 0.15) 0%, rgba(0, 217, 68, 0.05) 100%); }
+        #p14 .tile.blue { border-color: #0066ff; background: linear-gradient(135deg, rgba(0, 102, 255, 0.15) 0%, rgba(0, 102, 255, 0.05) 100%); }
+        #p14 .tile.yellow { border-color: #ffb300; background: linear-gradient(135deg, rgba(255, 179, 0, 0.15) 0%, rgba(255, 179, 0, 0.05) 100%); }
+        #p14 .tile.red { border-color: #ff3b30; background: linear-gradient(135deg, rgba(255, 59, 48, 0.15) 0%, rgba(255, 59, 48, 0.05) 100%); }
+
+        #p14 .tile-label {
+            font-size: 0.9rem;
+            color: #aaa;
+            margin-bottom: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #p14 .tile-value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        #p14 .tile-unit {
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        /* ===== DESIGN 15: DARK BRUTALIST ===== */
+        #p15 {
+            background: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+        }
+
+        #p15 .description {
+            background: #1a1a1a;
+            border-left: 6px solid #fff;
+            color: #fff;
+            border-radius: 0;
+        }
+
+        #p15 .panel-title {
+            font-size: 2rem;
+            font-weight: 900;
+            margin-bottom: 2rem;
+            text-transform: uppercase;
+            letter-spacing: 4px;
+            border: 4px solid #fff;
+            padding: 1rem;
+            border-radius: 0;
+        }
+
+        #p15 .section {
+            border: 4px solid #fff;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            border-radius: 0;
+            background: #000;
+        }
+
+        #p15 .section-title {
+            font-size: 1.3rem;
+            font-weight: 900;
+            margin-bottom: 1.5rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            border-bottom: 4px solid #fff;
+            padding-bottom: 1rem;
+        }
+
+        #p15 .item {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            padding: 0.8rem 0;
+            border-bottom: 2px solid #fff;
+            font-weight: bold;
+        }
+
+        #p15 .item:last-child {
+            border-bottom: none;
+        }
+
+        /* ===== DESIGN 16: STRIPE/FINTECH ===== */
+        #p16 {
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1038 100%);
+            color: #fff;
+            font-family: 'DM Sans', sans-serif;
+        }
+
+        #p16 .description {
+            background: rgba(102, 51, 255, 0.15);
+            border-left: 4px solid #6633ff;
+            color: #fff;
+        }
+
+        #p16 .panel-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            color: #fff;
+        }
+
+        #p16 .section {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(102, 51, 255, 0.3);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 1.5rem;
+            backdrop-filter: blur(10px);
+        }
+
+        #p16 .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            color: #6633ff;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #p16 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 1rem 0;
+            border-bottom: 1px solid rgba(102, 51, 255, 0.2);
+        }
+
+        #p16 .item:last-child {
+            border-bottom: none;
+        }
+
+        #p16 .value {
+            color: #00d4ff;
+            font-weight: 600;
+        }
+
+        /* ===== DESIGN 17: EXCEL SPREADSHEET ===== */
+        #p17 {
+            background: #fff;
+            color: #1f1f1f;
+            font-family: 'Calibri', sans-serif;
+        }
+
+        #p17 .description {
+            background: #fff2cc;
+            border-left: 4px solid #ffb700;
+            color: #1f1f1f;
+        }
+
+        #p17 .panel-title {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-bottom: 1rem;
+            font-family: 'Courier New', monospace;
+        }
+
+        #p17 .sheet-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid #d0d0d0;
+        }
+
+        #p17 .sheet-tab {
+            padding: 0.7rem 1.2rem;
+            background: #e8e8e8;
+            border: 1px solid #bbb;
+            border-bottom: none;
+            border-radius: 4px 4px 0 0;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        #p17 .sheet-tab.active {
+            background: #fff;
+            border-bottom: 2px solid #fff;
+        }
+
+        #p17 .grid-table {
+            border-collapse: collapse;
+            width: 100%;
+            background: #fff;
+            border: 1px solid #bbb;
+        }
+
+        #p17 .grid-table th {
+            background: #d0d0d0;
+            border: 1px solid #999;
+            padding: 0.7rem;
+            text-align: left;
+            font-weight: bold;
+            font-size: 0.95rem;
+        }
+
+        #p17 .grid-table td {
+            border: 1px solid #d0d0d0;
+            padding: 0.6rem 0.7rem;
+            font-size: 0.9rem;
+        }
+
+        #p17 .grid-table tr:nth-child(even) {
+            background: #f2f2f2;
+        }
+
+        /* ===== DESIGN 18: HUD/HEADS-UP DISPLAY ===== */
+        #p18 {
+            background: #001a33;
+            color: #00ff00;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        #p18 .description {
+            background: rgba(0, 255, 0, 0.08);
+            border-left: 4px solid #00ff00;
+            color: #00ff00;
+        }
+
+        #p18 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            border: 2px solid #00ff00;
+            padding: 1rem;
+            position: relative;
+        }
+
+        #p18 .panel-title::before {
+            content: "";
+            position: absolute;
+            top: -8px;
+            left: -8px;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #00ff00;
+        }
+
+        #p18 .section {
+            border: 2px solid #00ff00;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            position: relative;
+            clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+        }
+
+        #p18 .section-title {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 2px solid #00ff00;
+            padding-bottom: 0.7rem;
+        }
+
+        #p18 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.6rem 0;
+            border-left: 2px solid #00ff00;
+            padding-left: 1rem;
+            font-size: 0.95rem;
+        }
+
+        #p18 .value {
+            color: #00ffff;
+        }
+
+        /* ===== DESIGN 19: MATERIAL DESIGN 3 ===== */
+        #p19 {
+            background: #fffbfe;
+            color: #1a1a1a;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+        }
+
+        #p19 .description {
+            background: rgba(102, 51, 255, 0.12);
+            border-left: 4px solid #6633ff;
+            color: #1a1a1a;
+        }
+
+        #p19 .panel-title {
+            font-size: 1.9rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            color: #1a1a1a;
+        }
+
+        #p19 .section {
+            background: #f7f2fa;
+            border-radius: 16px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 3px 12px rgba(102, 51, 255, 0.1);
+        }
+
+        #p19 .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1.2rem;
+            color: #6633ff;
+            text-transform: capitalize;
+        }
+
+        #p19 .item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.9rem 0;
+            font-size: 0.95rem;
+        }
+
+        #p19 .item:not(:last-child) {
+            border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+        }
+
+        #p19 .value {
+            background: rgba(102, 51, 255, 0.15);
+            color: #6633ff;
+            padding: 0.4rem 0.8rem;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+
+        /* ===== DESIGN 20: SIDEBAR + DETAIL SPLIT ===== */
+        #p20 {
+            background: #1a1a1a;
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 0;
+            min-height: calc(100vh - 120px);
+        }
+
+        #p20 .description {
+            grid-column: 1 / -1;
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+            margin-bottom: 1rem;
+        }
+
+        #p20 .sidebar {
+            background: #0f0f0f;
+            border-right: 1px solid #333;
+            padding: 1.5rem;
+            overflow-y: auto;
+        }
+
+        #p20 .sidebar-item {
+            padding: 1rem;
+            background: #222;
+            border-radius: 6px;
+            margin-bottom: 0.8rem;
+            cursor: pointer;
+            border: 1px solid #333;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+        }
+
+        #p20 .sidebar-item:hover {
+            background: #2a2a2a;
+            border-color: #0066ff;
+        }
+
+        #p20 .sidebar-item.active {
+            background: #0066ff;
+            border-color: #0066ff;
+        }
+
+        #p20 .detail-view {
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #p20 .detail-header {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            color: #00d4ff;
+        }
+
+        #p20 .chart-placeholder {
+            background: rgba(0, 102, 255, 0.1);
+            border: 2px dashed #0066ff;
+            height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 2rem;
+            border-radius: 8px;
+            color: #666;
+        }
+
+        #p20 .detail-section {
+            margin-bottom: 1.5rem;
+        }
+
+        #p20 .detail-section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #p20 .detail-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.6rem 0;
+            border-bottom: 1px solid #333;
+            font-size: 0.9rem;
+        }
+
+        /* ===== DESIGN 21: COMPACT DATA GRID ===== */
+        #p21 {
+            background: #0a0a0a;
+            color: #ccc;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+
+        #p21 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+            font-size: 0.85rem;
+        }
+
+        #p21 .panel-title {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+            color: #00ff88;
+        }
+
+        #p21 .data-grid {
+            background: #111;
+            border: 1px solid #333;
+            overflow: auto;
+            border-radius: 2px;
+        }
+
+        #p21 .grid-row {
+            display: grid;
+            grid-template-columns: 200px 100px 100px 120px;
+            border-bottom: 1px solid #222;
+            padding: 0.5rem;
+        }
+
+        #p21 .grid-header {
+            background: #1a1a1a;
+            font-weight: 700;
+            padding: 0.7rem 0.5rem;
+            border-bottom: 2px solid #0066ff;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        #p21 .grid-cell {
+            padding: 0.5rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        #p21 .grid-row:hover {
+            background: rgba(0, 102, 255, 0.05);
+        }
+
+        /* ===== DESIGN 22: CARD STACK ===== */
+        #p22 {
+            background: #1f1f1f;
+        }
+
+        #p22 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+        }
+
+        #p22 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            color: #00d4ff;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        #p22 .stack-container {
+            perspective: 1000px;
+        }
+
+        #p22 .card {
+            background: linear-gradient(135deg, rgba(0, 102, 255, 0.1) 0%, rgba(0, 212, 255, 0.05) 100%);
+            border: 1px solid rgba(0, 102, 255, 0.3);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            z-index: 1;
+        }
+
+        #p22 .card:hover {
+            transform: translateX(10px) translateY(-5px);
+            border-color: #0066ff;
+            box-shadow: 0 15px 40px rgba(0, 102, 255, 0.3);
+        }
+
+        #p22 .card-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            color: #00d4ff;
+        }
+
+        #p22 .card-content {
+            font-size: 0.9rem;
+            line-height: 1.6;
+            overflow: hidden;
+            max-height: 0;
+            transition: max-height 0.3s;
+        }
+
+        #p22 .card:hover .card-content {
+            max-height: 200px;
+        }
+
+        /* ===== DESIGN 23: TIMELINE VIEW ===== */
+        #p23 {
+            background: #0f1419;
+        }
+
+        #p23 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+        }
+
+        #p23 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            color: #00d4ff;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        #p23 .timeline {
+            position: relative;
+            padding-left: 3rem;
+        }
+
+        #p23 .timeline::before {
+            content: "";
+            position: absolute;
+            left: 0.7rem;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(180deg, #0066ff 0%, #00ff88 100%);
+        }
+
+        #p23 .timeline-item {
+            position: relative;
+            margin-bottom: 2rem;
+            padding: 1.2rem;
+            background: rgba(0, 102, 255, 0.05);
+            border: 1px solid rgba(0, 102, 255, 0.2);
+            border-radius: 8px;
+        }
+
+        #p23 .timeline-item::before {
+            content: "";
+            position: absolute;
+            left: -2.5rem;
+            top: 1.5rem;
+            width: 12px;
+            height: 12px;
+            background: #0066ff;
+            border: 2px solid #0f1419;
+            border-radius: 50%;
+            box-shadow: 0 0 0 4px rgba(0, 102, 255, 0.3);
+        }
+
+        #p23 .timeline-label {
+            font-size: 0.85rem;
+            color: #00d4ff;
+            margin-bottom: 0.3rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #p23 .timeline-value {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        /* ===== DESIGN 24: POLAR/ARCTIC ===== */
+        #p24 {
+            background: linear-gradient(135deg, #0a1f3f 0%, #1a2f5f 100%);
+            color: #e0f4ff;
+            font-family: 'Sora', sans-serif;
+        }
+
+        #p24 .description {
+            background: rgba(224, 244, 255, 0.1);
+            border-left: 4px solid #6dd5ff;
+            color: #e0f4ff;
+        }
+
+        #p24 .panel-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            color: #6dd5ff;
+            text-shadow: 0 0 20px rgba(109, 213, 255, 0.3);
+        }
+
+        #p24 .section {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(109, 213, 255, 0.3);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            backdrop-filter: blur(10px);
+        }
+
+        #p24 .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #6dd5ff;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #p24 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.8rem 0;
+            border-bottom: 1px solid rgba(109, 213, 255, 0.2);
+        }
+
+        #p24 .item:last-child {
+            border-bottom: none;
+        }
+
+        #p24 .value {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        /* ===== DESIGN 25: WARM AMBER ===== */
+        #p25 {
+            background: #1a1410;
+            color: #f5e6d3;
+            font-family: 'Manrope', sans-serif;
+        }
+
+        #p25 .description {
+            background: rgba(218, 165, 104, 0.15);
+            border-left: 4px solid #daa568;
+            color: #f5e6d3;
+        }
+
+        #p25 .panel-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            color: #daa568;
+            font-family: 'Georgia', serif;
+        }
+
+        #p25 .section {
+            background: rgba(218, 165, 104, 0.08);
+            border: 2px solid #8b6f47;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5);
+        }
+
+        #p25 .section-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #daa568;
+            text-transform: capitalize;
+        }
+
+        #p25 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.8rem 0;
+            border-bottom: 1px solid rgba(218, 165, 104, 0.2);
+        }
+
+        #p25 .item:last-child {
+            border-bottom: none;
+        }
+
+        #p25 .value {
+            color: #f5e6d3;
+            font-weight: 600;
+        }
+
+        /* ===== DESIGN 26: NEON WIREFRAME ===== */
+        #p26 {
+            background: #000;
+            color: #0066ff;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        #p26 .description {
+            background: transparent;
+            border-left: 2px solid #0066ff;
+            color: #0066ff;
+        }
+
+        #p26 .panel-title {
+            font-size: 1.8rem;
+            font-weight: bold;
+            margin-bottom: 2rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            border: 2px solid #0066ff;
+            padding: 1rem;
+        }
+
+        #p26 .section {
+            border: 2px solid #0066ff;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            background: transparent;
+        }
+
+        #p26 .section-title {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 2px solid #0066ff;
+            padding-bottom: 0.7rem;
+        }
+
+        #p26 .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.6rem 0;
+            border-bottom: 1px solid #0066ff;
+        }
+
+        #p26 .item:last-child {
+            border-bottom: none;
+        }
+
+        #p26 .value {
+            color: #ff00ff;
+        }
+
+        /* ===== DESIGN 27: STATUSBOARD ===== */
+        #p27 {
+            background: #1a1a1a;
+        }
+
+        #p27 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+            font-size: 1rem;
+        }
+
+        #p27 .panel-title {
+            font-size: 3rem;
+            font-weight: 900;
+            margin-bottom: 2rem;
+            color: #00ff88;
+            font-family: 'Space Grotesk', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+
+        #p27 .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        #p27 .status-box {
+            background: rgba(0, 102, 255, 0.1);
+            border: 3px solid #00ff88;
+            padding: 2rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        #p27 .status-label {
+            font-size: 1.2rem;
+            color: #aaa;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        #p27 .status-value {
+            font-size: 3.5rem;
+            font-weight: 900;
+            color: #00ff88;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* ===== DESIGN 28: TAB GROUPS ===== */
+        #p28 {
+            background: #1a1a1a;
+        }
+
+        #p28 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+        }
+
+        #p28 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            color: #00d4ff;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        #p28 .tab-group {
+            margin-bottom: 2rem;
+        }
+
+        #p28 .group-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #00d4ff;
+        }
+
+        #p28 .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid #333;
+            padding-bottom: 0.5rem;
+        }
+
+        #p28 .tab {
+            padding: 0.6rem 1.2rem;
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        #p28 .tab:hover {
+            background: #2a2a2a;
+            border-color: #0066ff;
+        }
+
+        #p28 .tab.active {
+            background: #0066ff;
+            border-color: #0066ff;
+        }
+
+        #p28 .tab-content {
+            background: rgba(0, 102, 255, 0.05);
+            border: 1px solid rgba(0, 102, 255, 0.2);
+            border-radius: 6px;
+            padding: 1.2rem;
+            font-size: 0.9rem;
+        }
+
+        /* ===== DESIGN 29: FLOATING PANELS ===== */
+        #p29 {
+            background: #0a0a0a;
+            position: relative;
+            min-height: calc(100vh - 120px);
+        }
+
+        #p29 .description {
+            background: rgba(0, 102, 255, 0.1);
+            border-left: 4px solid #0066ff;
+            position: relative;
+            z-index: 5;
+        }
+
+        #p29 .panel-title {
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            color: #00d4ff;
+            font-family: 'Space Grotesk', sans-serif;
+            position: relative;
+            z-index: 5;
+        }
+
+        #p29 .floating-panel {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8);
+            position: absolute;
+            width: 300px;
+            cursor: move;
+            user-select: none;
+        }
+
+        #p29 .panel-header {
+            background: linear-gradient(90deg, #0066ff 0%, #00d4ff 100%);
+            color: #fff;
+            padding: 1rem;
+            border-radius: 5px 5px 0 0;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #p29 .panel-body {
+            padding: 1rem;
+            font-size: 0.9rem;
+        }
+
+        #p29 .panel-body .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #333;
+        }
+
+        #p29 .panel-body .item:last-child {
+            border-bottom: none;
+        }
+
+        #p29 .floating-panel:nth-child(1) { top: 200px; left: 50px; }
+        #p29 .floating-panel:nth-child(2) { top: 150px; left: 380px; }
+        #p29 .floating-panel:nth-child(3) { top: 350px; left: 680px; }
+
+        /* ===== DESIGN 30: MONO ELEGANT ===== */
+        #p30 {
+            background: #000;
+            color: #fff;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        #p30 .description {
+            background: transparent;
+            border-left: 3px solid #d4af37;
+            color: #fff;
+        }
+
+        #p30 .panel-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 3rem;
+            color: #d4af37;
+            letter-spacing: 2px;
+            font-family: 'Georgia', serif;
+        }
+
+        #p30 .section {
+            background: transparent;
+            border: none;
+            padding: 2rem 0;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid #d4af37;
+        }
+
+        #p30 .section:last-child {
+            border-bottom: none;
+        }
+
+        #p30 .section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            color: #d4af37;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+
+        #p30 .item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.8rem 0;
+            font-size: 0.95rem;
+            border: none;
+        }
+
+        #p30 .value {
+            color: #d4af37;
+            font-weight: 500;
+        }
+
+        #p30 .grade {
+            background: transparent;
+            border: 1px solid #d4af37;
+            color: #d4af37;
+            padding: 0.3rem 0.8rem;
+            border-radius: 2px;
+        }
+
+        /* ===== UTILITIES ===== */
+        .grade-s { color: #9933ff; }
+        .grade-a { color: #00d944; }
+        .grade-b { color: #0066ff; }
+        .grade-c { color: #ffb300; }
+
+        .positive { color: #00d944; }
+        .negative { color: #ff3b30; }
+
+        @media (max-width: 1200px) {
+            #p20 {
+                grid-template-columns: 1fr;
+            }
+
+            #p20 .sidebar {
+                border-right: none;
+                border-bottom: 1px solid #333;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                padding: 1rem;
+            }
+
+            #p12 .columns {
+                grid-template-columns: 1fr;
+            }
+
+            #p27 .status-grid {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">Alpha Station V70.7 Pro</div>
+        <div class="nav-container">
+            <div class="nav-buttons">
+                <button class="nbtn on" onclick="show(11)">11</button>
+                <button class="nbtn" onclick="show(12)">12</button>
+                <button class="nbtn" onclick="show(13)">13</button>
+                <button class="nbtn" onclick="show(14)">14</button>
+                <button class="nbtn" onclick="show(15)">15</button>
+                <button class="nbtn" onclick="show(16)">16</button>
+                <button class="nbtn" onclick="show(17)">17</button>
+                <button class="nbtn" onclick="show(18)">18</button>
+                <button class="nbtn" onclick="show(19)">19</button>
+                <button class="nbtn" onclick="show(20)">20</button>
+                <button class="nbtn" onclick="show(21)">21</button>
+                <button class="nbtn" onclick="show(22)">22</button>
+                <button class="nbtn" onclick="show(23)">23</button>
+                <button class="nbtn" onclick="show(24)">24</button>
+                <button class="nbtn" onclick="show(25)">25</button>
+                <button class="nbtn" onclick="show(26)">26</button>
+                <button class="nbtn" onclick="show(27)">27</button>
+                <button class="nbtn" onclick="show(28)">28</button>
+                <button class="nbtn" onclick="show(29)">29</button>
+                <button class="nbtn" onclick="show(30)">30</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="panels-container">
+        <!-- DESIGN 11: CYBERPUNK NEON -->
+        <div id="p11" class="panel active">
+            <div class="description">DESIGN 11: Cyberpunk Neon -- Dark background with neon cyan/magenta accents, glowing borders, futuristic vibe. Monospace fonts with text-shadows for glow effect.</div>
+            <div class="panel-title">ALPHA_STATION_NEURAL_NET</div>
+
+            <div class="section">
+                <div class="section-title">--- SCANNER_CLUSTER ---</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">--- MARKET_STATUS ---</div>
+                <div class="item"><span>BTC</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>SPY</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy</span> <span class="value positive">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">--- HOT_ASSETS ---</div>
+                <div class="item"><span>NVDA</span> <span class="grade grade-s">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="grade grade-s">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="grade grade-a">A/82</span></div>
+                <div class="item"><span>META</span> <span class="grade grade-a">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="grade grade-c">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 12: NEWSPAPER/FINANCIAL TIMES -->
+        <div id="p12" class="panel">
+            <div class="description">DESIGN 12: Newspaper/Financial Times -- Serif fonts, cream/beige background, column layout like a newspaper, classic financial reporting style.</div>
+            <div class="panel-title">THE DAILY ALPHA REPORT</div>
+
+            <div class="columns">
+                <div>
+                    <div class="section">
+                        <div class="section-title">Scanner Results</div>
+                        <div class="item">BI Long <strong>12 hits</strong></div>
+                        <div class="item">BTC Divergenz <strong>47 shorts</strong></div>
+                        <div class="item">Biotech FDA <strong>136</strong></div>
+                        <div class="item">Early Movers <strong>339 spikes</strong></div>
+                        <div class="item">Short Scanner <strong>8</strong></div>
+                        <div class="item">New Listings <strong>3</strong></div>
+                    </div>
+                </div>
+                <div>
+                    <div class="section">
+                        <div class="section-title">Market Data</div>
+                        <div class="item">BTC <strong>$66,527</strong></div>
+                        <div class="item">SPY <strong>512.30 -3.6%</strong></div>
+                        <div class="item">VIX <strong>18.4</strong></div>
+                        <div class="item">Energy <strong style="color: #006400">+6.2%</strong></div>
+                    </div>
+
+                    <div class="section">
+                        <div class="section-title">Top Positions</div>
+                        <div class="item">NVDA <strong>S/91</strong></div>
+                        <div class="item">PLTR <strong>S/88</strong></div>
+                        <div class="item">CRWD <strong>A/82</strong></div>
+                        <div class="item">META <strong>A/79</strong></div>
+                        <div class="item">BANANAS31 <strong>Short/75</strong></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 13: macOS NATIVE -->
+        <div id="p13" class="panel">
+            <div class="description">DESIGN 13: macOS Native -- Light gray backgrounds, subtle shadows, rounded corners, SF-like fonts, vibrancy effect. Minimal, clean Apple-style design.</div>
+            <div class="panel-title">Trading Dashboard</div>
+
+            <div class="section">
+                <div class="section-title">Scanner Results</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Market Data</div>
+                <div class="item"><span>BTC</span> <span class="value">$66,527 -0.2%</span></div>
+                <div class="item"><span>SPY</span> <span class="value">512.30 -3.6%</span></div>
+                <div class="item"><span>VIX</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Top Tickers</div>
+                <div class="item"><span>NVDA</span> <span class="value">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A/82</span></div>
+                <div class="item"><span>META</span> <span class="value">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 14: DASHBOARD TILES -->
+        <div id="p14" class="panel">
+            <div class="description">DESIGN 14: Dashboard Tiles -- Large square tiles with big numbers, color-coded by scanner type, grid layout. Hover effects for interactivity.</div>
+            <div class="panel-title">Scanner Overview</div>
+
+            <div class="tile-grid">
+                <div class="tile purple">
+                    <div class="tile-label">BI Long</div>
+                    <div class="tile-value">12</div>
+                    <div class="tile-unit">ACTIVE SIGNALS</div>
+                </div>
+                <div class="tile red">
+                    <div class="tile-label">BTC Divergenz</div>
+                    <div class="tile-value">47</div>
+                    <div class="tile-unit">SHORT SETUPS</div>
+                </div>
+                <div class="tile green">
+                    <div class="tile-label">Biotech FDA</div>
+                    <div class="tile-value">136</div>
+                    <div class="tile-unit">FDA PLAYS</div>
+                </div>
+                <div class="tile blue">
+                    <div class="tile-label">Early Movers</div>
+                    <div class="tile-value">339</div>
+                    <div class="tile-unit">SPIKES</div>
+                </div>
+                <div class="tile yellow">
+                    <div class="tile-label">Short Scanner</div>
+                    <div class="tile-value">8</div>
+                    <div class="tile-unit">SHORTS</div>
+                </div>
+                <div class="tile blue">
+                    <div class="tile-label">New Listings</div>
+                    <div class="tile-value">3</div>
+                    <div class="tile-unit">IPO/DEBUGS</div>
+                </div>
+            </div>
+
+            <div class="tile-grid">
+                <div class="tile blue">
+                    <div class="tile-label">BTC Price</div>
+                    <div class="tile-value">$66,527</div>
+                    <div class="tile-unit">-0.2%</div>
+                </div>
+                <div class="tile blue">
+                    <div class="tile-label">SPY Price</div>
+                    <div class="tile-value">512.30</div>
+                    <div class="tile-unit">-3.6%</div>
+                </div>
+                <div class="tile blue">
+                    <div class="tile-label">VIX</div>
+                    <div class="tile-value">18.4</div>
+                    <div class="tile-unit">VOLATILITY</div>
+                </div>
+                <div class="tile green">
+                    <div class="tile-label">Energy</div>
+                    <div class="tile-value">+6.2%</div>
+                    <div class="tile-unit">SECTOR GAIN</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 15: DARK BRUTALIST -->
+        <div id="p15" class="panel">
+            <div class="description">DESIGN 15: Dark Brutalist -- Raw, unpolished, monospace, thick borders, no rounded corners, bold typography. Stark and industrial aesthetic.</div>
+            <div class="panel-title">ALPHA STATION</div>
+
+            <div class="section">
+                <div class="section-title">SCANNER SIGNALS</div>
+                <div class="item"><span>BI LONG</span> <span>12</span></div>
+                <div class="item"><span>BTC DIVERGENZ</span> <span>47</span></div>
+                <div class="item"><span>BIOTECH FDA</span> <span>136</span></div>
+                <div class="item"><span>EARLY MOVERS</span> <span>339</span></div>
+                <div class="item"><span>SHORT SCANNER</span> <span>8</span></div>
+                <div class="item"><span>NEW LISTINGS</span> <span>3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">MARKET STATUS</div>
+                <div class="item"><span>BTC</span> <span>$66,527</span></div>
+                <div class="item"><span>SPY</span> <span>512.30</span></div>
+                <div class="item"><span>VIX</span> <span>18.4</span></div>
+                <div class="item"><span>ENERGY</span> <span>+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">TOP TICKERS</div>
+                <div class="item"><span>NVDA</span> <span>S/91</span></div>
+                <div class="item"><span>PLTR</span> <span>S/88</span></div>
+                <div class="item"><span>CRWD</span> <span>A/82</span></div>
+                <div class="item"><span>META</span> <span>A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span>Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 16: STRIPE/FINTECH -->
+        <div id="p16" class="panel">
+            <div class="description">DESIGN 16: Stripe/Fintech -- Clean dark with indigo/purple gradients, premium SaaS feel, Stripe-inspired. Glassmorphism with backdrop blur.</div>
+            <div class="panel-title">Alpha Dashboard</div>
+
+            <div class="section">
+                <div class="section-title">SCANNER CLUSTER</div>
+                <div class="item"><span>BI Long</span> <span class="value">12 Hits</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47 Shorts</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136 Plays</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339 Spikes</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8 Positions</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3 IPOs</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">MARKET OVERVIEW</div>
+                <div class="item"><span>Bitcoin</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>S&P 500</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX Index</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy Sector</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">HOT POSITIONS</div>
+                <div class="item"><span>NVDA</span> <span class="value">S / 91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S / 88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A / 82</span></div>
+                <div class="item"><span>META</span> <span class="value">A / 79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short / 75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 17: EXCEL SPREADSHEET -->
+        <div id="p17" class="panel">
+            <div class="description">DESIGN 17: Excel Spreadsheet -- Looks like an actual Excel sheet with gridlines, cell formatting, tabs at bottom. Familiar office productivity UI.</div>
+
+            <div class="sheet-tabs">
+                <div class="sheet-tab active">Scanners</div>
+                <div class="sheet-tab">Market</div>
+                <div class="sheet-tab">Tickers</div>
+            </div>
+
+            <table class="grid-table">
+                <thead>
+                    <tr>
+                        <th>Scanner</th>
+                        <th>Count</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>BI Long</td>
+                        <td>12</td>
+                        <td>LONG SIGNALS</td>
+                        <td style="color: #00b050;">Active</td>
+                    </tr>
+                    <tr>
+                        <td>BTC Divergenz</td>
+                        <td>47</td>
+                        <td>SHORT PLAYS</td>
+                        <td style="color: #ff6600;">Monitoring</td>
+                    </tr>
+                    <tr>
+                        <td>Biotech FDA</td>
+                        <td>136</td>
+                        <td>FDA EVENTS</td>
+                        <td style="color: #0070c0;">Pending</td>
+                    </tr>
+                    <tr>
+                        <td>Early Movers</td>
+                        <td>339</td>
+                        <td>SPIKES</td>
+                        <td style="color: #00b050;">Active</td>
+                    </tr>
+                    <tr>
+                        <td>Short Scanner</td>
+                        <td>8</td>
+                        <td>SHORTS</td>
+                        <td style="color: #ff0000;">Critical</td>
+                    </tr>
+                    <tr>
+                        <td>New Listings</td>
+                        <td>3</td>
+                        <td>IPO/DEBUYS</td>
+                        <td style="color: #00b050;">Active</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <table class="grid-table" style="margin-top: 2rem;">
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Price</th>
+                        <th>Change</th>
+                        <th>Note</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>BTC</td>
+                        <td>$66,527</td>
+                        <td>-0.2%</td>
+                        <td>Stable</td>
+                    </tr>
+                    <tr>
+                        <td>SPY</td>
+                        <td>512.30</td>
+                        <td>-3.6%</td>
+                        <td>Down</td>
+                    </tr>
+                    <tr>
+                        <td>VIX</td>
+                        <td>18.4</td>
+                        <td>--</td>
+                        <td>Normal</td>
+                    </tr>
+                    <tr>
+                        <td>Energy</td>
+                        <td>--</td>
+                        <td>+6.2%</td>
+                        <td>Up</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- DESIGN 18: HUD/HEADS-UP DISPLAY -->
+        <div id="p18" class="panel">
+            <div class="description">DESIGN 18: HUD/Heads-Up Display -- Sci-fi cockpit overlay, angular shapes, thin lines, radar-like elements. Futuristic targeting reticle aesthetic.</div>
+            <div class="panel-title">TARGET LOCK</div>
+
+            <div class="section">
+                <div class="section-title">SCANNER FEEDS</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">MARKET TELEMETRY</div>
+                <div class="item"><span>BTC PRICE</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>SPY PRICE</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX INDEX</span> <span class="value">18.4</span></div>
+                <div class="item"><span>ENERGY GAIN</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">TACTICAL TARGETS</div>
+                <div class="item"><span>NVDA</span> <span class="value">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A/82</span></div>
+                <div class="item"><span>META</span> <span class="value">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 19: MATERIAL DESIGN 3 -->
+        <div id="p19" class="panel">
+            <div class="description">DESIGN 19: Material Design 3 -- Google's Material You, dynamic color, rounded shapes, elevation layers. Modern, accessible, cohesive design language.</div>
+            <div class="panel-title">Insight Dashboard</div>
+
+            <div class="section">
+                <div class="section-title">Scanner signals</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Market snapshot</div>
+                <div class="item"><span>Bitcoin</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>S&P 500</span> <span class="value">512.30</span></div>
+                <div class="item"><span>Volatility</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Top performers</div>
+                <div class="item"><span>NVDA</span> <span class="value">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A/82</span></div>
+                <div class="item"><span>META</span> <span class="value">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 20: SIDEBAR + DETAIL SPLIT -->
+        <div id="p20" class="panel">
+            <div class="description">DESIGN 20: Sidebar + Detail Split -- Left list, right detail view with chart placeholder and trade info. Master-detail navigation pattern.</div>
+
+            <div class="sidebar">
+                <div class="sidebar-item active">BI Long (12)</div>
+                <div class="sidebar-item">BTC Divergenz (47)</div>
+                <div class="sidebar-item">Biotech FDA (136)</div>
+                <div class="sidebar-item">Early Movers (339)</div>
+                <div class="sidebar-item">Short Scanner (8)</div>
+                <div class="sidebar-item">New Listings (3)</div>
+            </div>
+
+            <div class="detail-view">
+                <div class="detail-header">BI Long Scanner</div>
+                <div class="chart-placeholder">[CHART AREA]</div>
+
+                <div class="detail-section">
+                    <div class="detail-section-title">Performance</div>
+                    <div class="detail-item"><span>Active Signals</span> <span>12</span></div>
+                    <div class="detail-item"><span>Win Rate</span> <span>67%</span></div>
+                    <div class="detail-item"><span>Avg Gain</span> <span>+2.4%</span></div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-section-title">Market Data</div>
+                    <div class="detail-item"><span>BTC</span> <span>$66,527</span></div>
+                    <div class="detail-item"><span>SPY</span> <span>512.30</span></div>
+                    <div class="detail-item"><span>VIX</span> <span>18.4</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 21: COMPACT DATA GRID -->
+        <div id="p21" class="panel">
+            <div class="description">DESIGN 21: Compact Data Grid -- Maximum information density, tiny fonts, every pixel used. Terminal-like quant experience with minimal spacing.</div>
+            <div class="panel-title">DATA GRID</div>
+
+            <div class="data-grid">
+                <div class="grid-row grid-header">
+                    <div class="grid-cell">SCANNER</div>
+                    <div class="grid-cell">COUNT</div>
+                    <div class="grid-cell">CHANGE</div>
+                    <div class="grid-cell">STATUS</div>
+                </div>
+                <div class="grid-row"><div class="grid-cell">BI_LONG</div><div class="grid-cell">12</div><div class="grid-cell">+2</div><div class="grid-cell">ACTIVE</div></div>
+                <div class="grid-row"><div class="grid-cell">BTC_DIVG</div><div class="grid-cell">47</div><div class="grid-cell">-3</div><div class="grid-cell">MONITOR</div></div>
+                <div class="grid-row"><div class="grid-cell">BIO_FDA</div><div class="grid-cell">136</div><div class="grid-cell">+12</div><div class="grid-cell">ACTIVE</div></div>
+                <div class="grid-row"><div class="grid-cell">EARLY_MV</div><div class="grid-cell">339</div><div class="grid-cell">+8</div><div class="grid-cell">ACTIVE</div></div>
+                <div class="grid-row"><div class="grid-cell">SHORT_SC</div><div class="grid-cell">8</div><div class="grid-cell">+1</div><div class="grid-cell">WARN</div></div>
+                <div class="grid-row"><div class="grid-cell">NEW_LIST</div><div class="grid-cell">3</div><div class="grid-cell">-1</div><div class="grid-cell">ACTIVE</div></div>
+                <div class="grid-row grid-header">
+                    <div class="grid-cell">ASSET</div>
+                    <div class="grid-cell">PRICE</div>
+                    <div class="grid-cell">CHG_24H</div>
+                    <div class="grid-cell">SIGNAL</div>
+                </div>
+                <div class="grid-row"><div class="grid-cell">BTC</div><div class="grid-cell">66527</div><div class="grid-cell">-0.2%</div><div class="grid-cell">HOLD</div></div>
+                <div class="grid-row"><div class="grid-cell">SPY</div><div class="grid-cell">512.30</div><div class="grid-cell">-3.6%</div><div class="grid-cell">SELL</div></div>
+                <div class="grid-row"><div class="grid-cell">VIX</div><div class="grid-cell">18.4</div><div class="grid-cell">+1.2%</div><div class="grid-cell">HOLD</div></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 22: CARD STACK -->
+        <div id="p22" class="panel">
+            <div class="description">DESIGN 22: Card Stack -- Stacked cards that expand on hover, layered depth effect. Interaction-rich with staggered reveal pattern.</div>
+            <div class="panel-title">Scanner Stack</div>
+
+            <div class="stack-container">
+                <div class="card">
+                    <div class="card-title">BI Long Strategy</div>
+                    <div class="card-content">12 Active signals. Buy long setup with confirmation. Average win: 2.4%</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">BTC Divergenz</div>
+                    <div class="card-content">47 Short opportunities. Divergence patterns on 4H chart. Risk/Reward 1:2.1</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Biotech FDA</div>
+                    <div class="card-content">136 FDA-related plays. Check dates and catalyst news for proper entry timing.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Early Movers</div>
+                    <div class="card-content">339 Spike detection signals. Pre-market volume spikes, 1-2 min window.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Short Scanner</div>
+                    <div class="card-content">8 Positions under watch. Strong resistance overhead, declining volume.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">New Listings</div>
+                    <div class="card-content">3 Recent IPOs/DeSPAC mergers. High volatility, plan risk management.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 23: TIMELINE VIEW -->
+        <div id="p23" class="panel">
+            <div class="description">DESIGN 23: Timeline View -- Signals as timeline events, chronological, like a social media feed. Narrative flow of trading activity.</div>
+            <div class="panel-title">Trading Timeline</div>
+
+            <div class="timeline">
+                <div class="timeline-item">
+                    <div class="timeline-label">Scan #1</div>
+                    <div class="timeline-value">BI Long Strategy</div>
+                    <div>12 active signals. Long setup confirmation at market open.</div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-label">Scan #2</div>
+                    <div class="timeline-value">BTC Divergenz Detection</div>
+                    <div>47 short opportunities flagged on 4H divergence patterns.</div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-label">Scan #3</div>
+                    <div class="timeline-value">Biotech FDA Calendar</div>
+                    <div>136 upcoming FDA plays identified. Catalyst dates locked.</div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-label">Scan #4</div>
+                    <div class="timeline-value">Early Morning Movers</div>
+                    <div>339 spike patterns detected in pre-market and first 2 minutes.</div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-label">Scan #5</div>
+                    <div class="timeline-value">Short Opportunity Scan</div>
+                    <div>8 resistance break candidates with volume decline confirmed.</div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-label">Scan #6</div>
+                    <div class="timeline-value">New Listing Tracker</div>
+                    <div>3 recent IPO/DeSPAC events ready for high-volatility trades.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 24: POLAR/ARCTIC -->
+        <div id="p24" class="panel">
+            <div class="description">DESIGN 24: Polar/Arctic -- Ice blue palette, white on dark blue, cold premium feel. Glacial color scheme with cool tones throughout.</div>
+            <div class="panel-title">ALPHA STATION</div>
+
+            <div class="section">
+                <div class="section-title">SCANNER SIGNALS</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">MARKET STATUS</div>
+                <div class="item"><span>BTC Price</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>SPY Price</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX Index</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy Sector</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">TOP TICKERS</div>
+                <div class="item"><span>NVDA</span> <span class="value">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A/82</span></div>
+                <div class="item"><span>META</span> <span class="value">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 25: WARM AMBER -->
+        <div id="p25" class="panel">
+            <div class="description">DESIGN 25: Warm Amber -- Dark brown/amber tones, warm and cozy, leather-like feel. Nostalgic, elegant aesthetic with rich warmth.</div>
+            <div class="panel-title">Trading Control Room</div>
+
+            <div class="section">
+                <div class="section-title">active scanners</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">market conditions</div>
+                <div class="item"><span>BTC</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>SPY</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">selected positions</div>
+                <div class="item"><span>NVDA</span> <span class="value">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A/82</span></div>
+                <div class="item"><span>META</span> <span class="value">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 26: NEON WIREFRAME -->
+        <div id="p26" class="panel">
+            <div class="description">DESIGN 26: Neon Wireframe -- Just borders, no fills, neon colored outlines on black, architectural. Blueprint aesthetic with colored line work.</div>
+            <div class="panel-title">WIREFRAME SYSTEM</div>
+
+            <div class="section">
+                <div class="section-title">scanner outputs</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">market feeds</div>
+                <div class="item"><span>BTC</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>SPY</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">position stack</div>
+                <div class="item"><span>NVDA</span> <span class="value">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="value">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="value">A/82</span></div>
+                <div class="item"><span>META</span> <span class="value">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="value">Short/75</span></div>
+            </div>
+        </div>
+
+        <!-- DESIGN 27: STATUSBOARD -->
+        <div id="p27" class="panel">
+            <div class="description">DESIGN 27: Statusboard -- TV dashboard style, large fonts readable from distance, key metrics only. Big numbers, minimal text, wall-mounted display.</div>
+
+            <div class="status-grid">
+                <div class="status-box">
+                    <div class="status-label">BI LONG</div>
+                    <div class="status-value">12</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">BTC DIVERGENZ</div>
+                    <div class="status-value">47</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">BIOTECH FDA</div>
+                    <div class="status-value">136</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">EARLY MOVERS</div>
+                    <div class="status-value">339</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">SHORT SCANNER</div>
+                    <div class="status-value">8</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">NEW LISTINGS</div>
+                    <div class="status-value">3</div>
+                </div>
+            </div>
+
+            <div class="status-grid" style="margin-top: 3rem;">
+                <div class="status-box">
+                    <div class="status-label">BTC</div>
+                    <div class="status-value" style="font-size: 2.5rem;">66527</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">SPY</div>
+                    <div class="status-value" style="font-size: 2.5rem;">512.30</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">VIX</div>
+                    <div class="status-value" style="font-size: 2.5rem;">18.4</div>
+                </div>
+                <div class="status-box">
+                    <div class="status-label">ENERGY</div>
+                    <div class="status-value">+6.2%</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 28: TAB GROUPS -->
+        <div id="p28" class="panel">
+            <div class="description">DESIGN 28: Tab Groups -- Grouped tabs: Scanners | Market | Tickers, each with sub-navigation. Organized tabbed interface with hierarchy.</div>
+            <div class="panel-title">Dashboard Control</div>
+
+            <div class="tab-group">
+                <div class="group-title">Scanners</div>
+                <div class="tabs">
+                    <div class="tab active">All Active</div>
+                    <div class="tab">Long Setups</div>
+                    <div class="tab">Short Setups</div>
+                </div>
+                <div class="tab-content">
+                    <div class="item" style="padding: 0.6rem 0; border: none;">BI Long: 12 signals</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">BTC Divergenz: 47 shorts</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">Biotech FDA: 136 plays</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">Early Movers: 339 spikes</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">Short Scanner: 8 positions</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">New Listings: 3 IPOs</div>
+                </div>
+            </div>
+
+            <div class="tab-group">
+                <div class="group-title">Market</div>
+                <div class="tabs">
+                    <div class="tab active">Price Feed</div>
+                    <div class="tab">Sectors</div>
+                    <div class="tab">Volatility</div>
+                </div>
+                <div class="tab-content">
+                    <div class="item" style="padding: 0.6rem 0; border: none;">BTC: $66,527 -0.2%</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">SPY: 512.30 -3.6%</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">VIX: 18.4</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">Energy: +6.2%</div>
+                </div>
+            </div>
+
+            <div class="tab-group">
+                <div class="group-title">Tickers</div>
+                <div class="tabs">
+                    <div class="tab active">Top Grades</div>
+                    <div class="tab">By Grade</div>
+                    <div class="tab">Watchlist</div>
+                </div>
+                <div class="tab-content">
+                    <div class="item" style="padding: 0.6rem 0; border: none;">NVDA: S/91</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">PLTR: S/88</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">CRWD: A/82</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">META: A/79</div>
+                    <div class="item" style="padding: 0.6rem 0; border: none;">BANANAS31: Short/75</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 29: FLOATING PANELS -->
+        <div id="p29" class="panel">
+            <div class="description">DESIGN 29: Floating Panels -- Draggable-looking panels with title bars, like desktop windows. Windowed application aesthetic with title bars.</div>
+            <div class="panel-title">Floating Window Manager</div>
+
+            <div class="floating-panel">
+                <div class="panel-header">Scanner Signals</div>
+                <div class="panel-body">
+                    <div class="item"><span>BI Long</span> <span>12</span></div>
+                    <div class="item"><span>BTC Divergenz</span> <span>47</span></div>
+                    <div class="item"><span>Biotech FDA</span> <span>136</span></div>
+                    <div class="item"><span>Early Movers</span> <span>339</span></div>
+                    <div class="item"><span>Short Scanner</span> <span>8</span></div>
+                    <div class="item"><span>New Listings</span> <span>3</span></div>
+                </div>
+            </div>
+
+            <div class="floating-panel">
+                <div class="panel-header">Market Data</div>
+                <div class="panel-body">
+                    <div class="item"><span>BTC</span> <span>$66,527</span></div>
+                    <div class="item"><span>SPY</span> <span>512.30</span></div>
+                    <div class="item"><span>VIX</span> <span>18.4</span></div>
+                    <div class="item"><span>Energy</span> <span>+6.2%</span></div>
+                </div>
+            </div>
+
+            <div class="floating-panel">
+                <div class="panel-header">Top Tickers</div>
+                <div class="panel-body">
+                    <div class="item"><span>NVDA</span> <span>S/91</span></div>
+                    <div class="item"><span>PLTR</span> <span>S/88</span></div>
+                    <div class="item"><span>CRWD</span> <span>A/82</span></div>
+                    <div class="item"><span>META</span> <span>A/79</span></div>
+                    <div class="item"><span>BANANAS31</span> <span>Short/75</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DESIGN 30: MONO ELEGANT -->
+        <div id="p30" class="panel">
+            <div class="description">DESIGN 30: Mono Elegant -- Single accent color (gold) on black, extreme minimalism, luxury feel. Refined, understated aesthetic with precious metal aesthetic.</div>
+            <div class="panel-title">Alpha Station</div>
+
+            <div class="section">
+                <div class="section-title">Scanner Cluster</div>
+                <div class="item"><span>BI Long</span> <span class="value">12</span></div>
+                <div class="item"><span>BTC Divergenz</span> <span class="value">47</span></div>
+                <div class="item"><span>Biotech FDA</span> <span class="value">136</span></div>
+                <div class="item"><span>Early Movers</span> <span class="value">339</span></div>
+                <div class="item"><span>Short Scanner</span> <span class="value">8</span></div>
+                <div class="item"><span>New Listings</span> <span class="value">3</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Market Overview</div>
+                <div class="item"><span>BTC</span> <span class="value">$66,527</span></div>
+                <div class="item"><span>SPY</span> <span class="value">512.30</span></div>
+                <div class="item"><span>VIX</span> <span class="value">18.4</span></div>
+                <div class="item"><span>Energy</span> <span class="value">+6.2%</span></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Selected Holdings</div>
+                <div class="item"><span>NVDA</span> <span class="grade">S/91</span></div>
+                <div class="item"><span>PLTR</span> <span class="grade">S/88</span></div>
+                <div class="item"><span>CRWD</span> <span class="grade">A/82</span></div>
+                <div class="item"><span>META</span> <span class="grade">A/79</span></div>
+                <div class="item"><span>BANANAS31</span> <span class="grade">Short/75</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function show(n) {
+            // Hide all panels
+            const panels = document.querySelectorAll('.panel');
+            panels.forEach(panel => panel.classList.remove('active'));
+
+            // Show selected panel
+            const selectedPanel = document.getElementById('p' + n);
+            if (selectedPanel) {
+                selectedPanel.classList.add('active');
+            }
+
+            // Update button states
+            const buttons = document.querySelectorAll('.nbtn');
+            buttons.forEach(btn => btn.classList.remove('on'));
+            event.target.classList.add('on');
+        }
+
+        // Initialize with first panel
+        document.addEventListener('DOMContentLoaded', () => {
+            show(11);
+        });
+    </script>
+</body>
+</html>

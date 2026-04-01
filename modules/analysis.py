@@ -141,7 +141,7 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
             sma200_bonus = 5
             details.append(f" Preis unter SMA200 (${sma200:.2f})")
         else:
-            dist_pct = (current_price - sma200) / sma200 * 100
+            dist_pct = (current_price - sma200) / sma200 * 100 if sma200 > 0 else 0
             if dist_pct < 2.0:
                 sma200_bonus = 3
                 details.append(f" Preis nur {dist_pct:.1f}% über SMA200 — Breakdown möglich")
@@ -503,12 +503,14 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
 
     daily_changes = []
     for i in range(1, len(bars)):
-        chg = ((bars[i]["close"] - bars[i-1]["close"]) / bars[i-1]["close"]) * 100
-        daily_changes.append(chg)
+        prev_close = bars[i-1]["close"]
+        if prev_close and prev_close > 0:
+            chg = ((bars[i]["close"] - prev_close) / prev_close) * 100
+            daily_changes.append(chg)
 
     all_highs = [b["high"] for b in bars]
     all_lows = [b["low"] for b in bars]
-    total_range_pct = ((max(all_highs) - min(all_lows)) / current_price) * 100
+    total_range_pct = ((max(all_highs) - min(all_lows)) / current_price) * 100 if current_price > 0 else 0
 
     volumes = [b["volume"] for b in bars]
     avg_vol = sum(volumes) / len(volumes) if volumes else 1

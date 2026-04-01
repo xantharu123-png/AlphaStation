@@ -662,7 +662,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     trend_detail = "Keine History"
 
     if ohlcv_data and len(ohlcv_data) >= 50:
-        closes = [d["close"] for d in ohlcv_data]
+        closes = [d.get("close", d.get("c", 0)) for d in ohlcv_data]
         # Verwende letzten OHLCV-Close für EMA-Vergleich (konsistent!)
         # Der extern übergebene `price` kann ein Snapshot sein der abweicht
         current_price = closes[-1]
@@ -859,7 +859,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     if ohlcv_data and len(ohlcv_data) >= 20:
         # Einfacher Check: Ist der aktuelle Preis nahe einem Allzeit-/52W High?
         # Oder gibt es starke Resistance aus dem Volume Profile?
-        recent_highs = [d["high"] for d in ohlcv_data[-60:]] if len(ohlcv_data) >= 60 else [d["high"] for d in ohlcv_data]
+        recent_highs = [d.get("high", d.get("h", 0)) for d in ohlcv_data[-60:]] if len(ohlcv_data) >= 60 else [d.get("high", d.get("h", 0)) for d in ohlcv_data]
         max_high = max(recent_highs) if recent_highs else price
 
         if is_long:
@@ -875,7 +875,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
                 resistance_detail = f"{dist_to_high:.1f}% unter Hoch — Overhead Supply"
         else:
             # Short: Preis nahe oder unter dem 60-Bar-Low
-            recent_lows = [d["low"] for d in ohlcv_data[-60:]] if len(ohlcv_data) >= 60 else [d["low"] for d in ohlcv_data]
+            recent_lows = [d.get("low", d.get("l", 0)) for d in ohlcv_data[-60:]] if len(ohlcv_data) >= 60 else [d.get("low", d.get("l", 0)) for d in ohlcv_data]
             min_low = min(recent_lows) if recent_lows else price
             dist_to_low = (price - min_low) / price * 100 if price > 0 else 0
             if price <= min_low * 1.03:
@@ -902,7 +902,7 @@ def calculate_confluence_score(ticker, price, change_pct, rvol, close_pos,
     mtf_detail = "Keine History"
 
     if ohlcv_data and len(ohlcv_data) >= 20:
-        closes = [d["close"] for d in ohlcv_data]
+        closes = [d.get("close", d.get("c", 0)) for d in ohlcv_data]
 
         # Weekly Trend: Letzte 5 Bars (= ca 1 Woche) vs. vorherige 5
         if len(closes) >= 10:

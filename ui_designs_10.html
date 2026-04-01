@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpha Station — 10 Design Concepts</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;}
+
+/* ── NAV ── */
+.topnav{position:fixed;top:0;left:0;right:0;z-index:9999;background:#0d1117;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:6px;padding:8px 12px;overflow-x:auto;flex-wrap:nowrap;}
+.topnav span{font:600 11px 'Inter',sans-serif;color:#8b949e;text-transform:uppercase;letter-spacing:1px;white-space:nowrap;margin-right:8px;}
+.nbtn{padding:6px 14px;border-radius:6px;border:1px solid #30363d;background:transparent;color:#c9d1d9;cursor:pointer;font:500 12px 'Inter',sans-serif;white-space:nowrap;transition:.15s;}
+.nbtn:hover{border-color:#58a6ff;color:#fff;}
+.nbtn.on{background:#1f6feb;border-color:#1f6feb;color:#fff;}
+
+.panel{display:none;padding-top:52px;min-height:100vh;}
+.panel.on{display:block;}
+
+/* ── SHARED ── */
+.mono{font-family:'JetBrains Mono',monospace;}
+.up{color:#3fb950;}
+.dn{color:#f85149;}
+.mut{color:#8b949e;}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font:600 11px/18px 'JetBrains Mono',monospace;}
+.tag-s{background:rgba(130,80,223,.18);color:#a371f7;}
+.tag-a{background:rgba(63,185,80,.15);color:#3fb950;}
+.tag-b{background:rgba(31,111,235,.15);color:#58a6ff;}
+.tag-c{background:rgba(210,153,34,.15);color:#d29922;}
+.tag-long{background:rgba(63,185,80,.12);color:#3fb950;}
+.tag-short{background:rgba(248,81,73,.12);color:#f85149;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 1. BLOOMBERG DARK                                        */
+/* ════════════════════════════════════════════════════════ */
+#p1{background:#000;color:#ff8c00;font-family:'JetBrains Mono',monospace;}
+#p1 .bb-grid{display:grid;grid-template-columns:220px 1fr 300px;grid-template-rows:32px 1fr;height:calc(100vh - 52px);border:1px solid #333;}
+#p1 .bb-bar{grid-column:1/-1;background:#1a1a00;border-bottom:1px solid #333;display:flex;align-items:center;padding:0 10px;gap:16px;font-size:11px;}
+#p1 .bb-bar b{color:#ff8c00;} #p1 .bb-bar span{color:#888;}
+#p1 .bb-nav{background:#0a0a00;border-right:1px solid #333;padding:8px 0;overflow-y:auto;}
+#p1 .bb-ni{padding:6px 12px;font-size:11px;color:#888;cursor:pointer;display:flex;justify-content:space-between;}
+#p1 .bb-ni:hover{background:#1a1a00;color:#ff8c00;}
+#p1 .bb-ni.on{background:#332200;color:#ff8c00;}
+#p1 .bb-ni .ct{color:#ff8c00;}
+#p1 .bb-main{padding:10px;overflow-y:auto;background:#000;}
+#p1 .bb-hdr{font-size:13px;color:#ff8c00;border-bottom:1px solid #333;padding-bottom:6px;margin-bottom:10px;display:flex;justify-content:space-between;}
+#p1 table{width:100%;border-collapse:collapse;font-size:11px;}
+#p1 th{text-align:left;padding:4px 8px;color:#666;border-bottom:1px solid #222;font-weight:400;}
+#p1 td{padding:5px 8px;border-bottom:1px solid #111;}
+#p1 tr:hover td{background:#111;}
+#p1 .bb-right{background:#0a0a00;border-left:1px solid #333;padding:10px;overflow-y:auto;font-size:11px;}
+#p1 .bb-sect{margin-bottom:14px;}
+#p1 .bb-sect-t{color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;}
+#p1 .bb-alert{padding:4px 8px;border-left:2px solid #ff8c00;margin-bottom:4px;color:#ccc;font-size:10px;}
+#p1 .desc{background:#0a0a00;padding:12px;margin:0 10px 10px;border:1px solid #333;font-size:12px;color:#888;line-height:1.5;}
+#p1 .desc b{color:#ff8c00;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 2. CLEAN WHITE                                           */
+/* ════════════════════════════════════════════════════════ */
+#p2{background:#fafbfc;color:#24292f;font-family:'Inter',sans-serif;}
+#p2 .cw-wrap{max-width:1280px;margin:0 auto;padding:24px;}
+#p2 .cw-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;}
+#p2 .cw-hdr h1{font-size:22px;font-weight:800;color:#0d1117;}
+#p2 .cw-tabs{display:flex;gap:4px;border-bottom:2px solid #d0d7de;padding-bottom:0;margin-bottom:24px;}
+#p2 .cw-tab{padding:10px 18px;font:500 13px 'Inter',sans-serif;color:#57606a;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;background:none;border-left:none;border-right:none;border-top:none;}
+#p2 .cw-tab:hover{color:#24292f;}
+#p2 .cw-tab.on{color:#0969da;border-bottom-color:#0969da;font-weight:600;}
+#p2 .cw-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;}
+#p2 .cw-card{background:#fff;border:1px solid #d0d7de;border-radius:10px;padding:16px;}
+#p2 .cw-card-l{font-size:11px;color:#57606a;text-transform:uppercase;letter-spacing:.5px;}
+#p2 .cw-card-v{font:700 28px 'JetBrains Mono',monospace;margin:4px 0;color:#0d1117;}
+#p2 .cw-card-c{font-size:12px;}
+#p2 .cw-tbl{background:#fff;border:1px solid #d0d7de;border-radius:10px;overflow:hidden;}
+#p2 .cw-tbl table{width:100%;border-collapse:collapse;}
+#p2 .cw-tbl th{padding:10px 16px;text-align:left;font-size:11px;color:#57606a;font-weight:600;background:#f6f8fa;border-bottom:1px solid #d0d7de;text-transform:uppercase;letter-spacing:.5px;}
+#p2 .cw-tbl td{padding:12px 16px;font-size:13px;border-bottom:1px solid #eaeef2;}
+#p2 .cw-tbl tr:hover td{background:#f6f8fa;}
+#p2 .desc{background:#fff;padding:14px 18px;margin-bottom:20px;border:1px solid #d0d7de;border-radius:10px;font-size:13px;color:#57606a;line-height:1.6;}
+#p2 .desc b{color:#0d1117;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 3. GLASSMORPHISM                                         */
+/* ════════════════════════════════════════════════════════ */
+#p3{background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);min-height:100vh;color:#e2e8f0;font-family:'DM Sans',sans-serif;}
+#p3 .gl-wrap{max-width:1320px;margin:0 auto;padding:24px;}
+#p3 .gl-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;}
+#p3 .gl-hdr h1{font-size:24px;font-weight:700;}
+#p3 .gl-hdr h1 span{background:linear-gradient(90deg,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+#p3 .glass{background:rgba(255,255,255,.06);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.1);border-radius:16px;}
+#p3 .gl-strip{display:flex;gap:20px;padding:14px 20px;margin-bottom:20px;}
+#p3 .gl-strip-i{font-size:13px;} #p3 .gl-strip-i small{color:#94a3b8;font-size:11px;margin-right:6px;}
+#p3 .gl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;}
+#p3 .gl-card{padding:20px;transition:.2s;cursor:pointer;position:relative;overflow:hidden;}
+#p3 .gl-card:hover{border-color:rgba(129,140,248,.4);transform:translateY(-2px);box-shadow:0 12px 40px rgba(0,0,0,.4);}
+#p3 .gl-card-name{font-size:16px;font-weight:700;margin-bottom:4px;}
+#p3 .gl-card-desc{font-size:12px;color:#94a3b8;margin-bottom:14px;line-height:1.5;}
+#p3 .gl-card-stats{display:flex;gap:20px;}
+#p3 .gl-card-stat-l{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;}
+#p3 .gl-card-stat-v{font:700 18px 'JetBrains Mono',monospace;}
+#p3 .gl-card-foot{margin-top:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08);font-size:11px;color:#64748b;display:flex;justify-content:space-between;}
+#p3 .gl-status{position:absolute;top:16px;right:16px;font-size:10px;font-weight:600;padding:3px 8px;border-radius:4px;}
+#p3 .gl-status.live{background:rgba(52,211,153,.15);color:#34d399;}
+#p3 .gl-status.scan{background:rgba(129,140,248,.15);color:#818cf8;animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+#p3 .desc{background:rgba(255,255,255,.04);padding:14px 18px;margin-bottom:20px;border:1px solid rgba(255,255,255,.08);border-radius:12px;font-size:13px;color:#94a3b8;line-height:1.6;}
+#p3 .desc b{color:#e2e8f0;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 4. SIDEBAR COMPACT                                       */
+/* ════════════════════════════════════════════════════════ */
+#p4{background:#161b22;color:#c9d1d9;font-family:'Inter',sans-serif;}
+#p4 .sc-grid{display:grid;grid-template-columns:56px 1fr;height:calc(100vh - 52px);}
+#p4 .sc-rail{background:#0d1117;border-right:1px solid #21262d;display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:2px;}
+#p4 .sc-ri{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:#8b949e;transition:.15s;font-family:'JetBrains Mono',monospace;}
+#p4 .sc-ri:hover{background:#21262d;color:#c9d1d9;}
+#p4 .sc-ri.on{background:rgba(31,111,235,.2);color:#58a6ff;}
+#p4 .sc-ri.sep{width:28px;height:1px;background:#21262d;cursor:default;margin:4px 0;}
+#p4 .sc-ri.sep:hover{background:#21262d;}
+#p4 .sc-main{padding:20px 28px;overflow-y:auto;}
+#p4 .sc-title{font-size:24px;font-weight:800;margin-bottom:4px;}
+#p4 .sc-sub{font-size:12px;color:#8b949e;margin-bottom:20px;}
+#p4 .sc-pills{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap;}
+#p4 .sc-pill{padding:5px 14px;border-radius:20px;border:1px solid #30363d;background:transparent;color:#8b949e;font:500 12px 'Inter',sans-serif;cursor:pointer;transition:.15s;}
+#p4 .sc-pill:hover{border-color:#58a6ff;color:#c9d1d9;}
+#p4 .sc-pill.on{background:#1f6feb;border-color:#1f6feb;color:#fff;}
+#p4 .sc-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;}
+#p4 .sc-item{background:#0d1117;border:1px solid #21262d;border-radius:10px;padding:14px;display:flex;gap:12px;cursor:pointer;transition:.15s;}
+#p4 .sc-item:hover{border-color:#30363d;background:#161b22;}
+#p4 .sc-rank{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font:700 13px 'JetBrains Mono',monospace;flex-shrink:0;}
+#p4 .sc-rank.s{background:rgba(130,80,223,.2);color:#a371f7;}
+#p4 .sc-rank.a{background:rgba(63,185,80,.15);color:#3fb950;}
+#p4 .sc-rank.b{background:rgba(31,111,235,.15);color:#58a6ff;}
+#p4 .sc-body{flex:1;min-width:0;}
+#p4 .sc-body-top{display:flex;justify-content:space-between;align-items:center;}
+#p4 .sc-ticker{font:700 14px 'JetBrains Mono',monospace;}
+#p4 .sc-name{font-size:11px;color:#8b949e;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#p4 .sc-meta{display:flex;gap:10px;margin-top:6px;font:400 11px 'JetBrains Mono',monospace;color:#8b949e;}
+#p4 .desc{background:#0d1117;padding:14px 18px;margin-bottom:18px;border:1px solid #21262d;border-radius:10px;font-size:13px;color:#8b949e;line-height:1.6;}
+#p4 .desc b{color:#c9d1d9;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 5. TERMINAL GREEN                                        */
+/* ════════════════════════════════════════════════════════ */
+#p5{background:#0a0a0a;color:#00ff41;font-family:'JetBrains Mono',monospace;font-size:12px;}
+#p5 .tm-wrap{max-width:1100px;margin:0 auto;padding:20px;}
+#p5 .tm-hdr{border-bottom:1px solid #1a3a1a;padding-bottom:8px;margin-bottom:16px;}
+#p5 .tm-hdr h1{font-size:14px;color:#00ff41;}
+#p5 .tm-hdr p{color:#006618;font-size:11px;margin-top:2px;}
+#p5 .tm-section{margin-bottom:20px;}
+#p5 .tm-section-t{color:#006618;font-size:10px;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px;border-bottom:1px dashed #1a3a1a;padding-bottom:4px;}
+#p5 table{width:100%;border-collapse:collapse;}
+#p5 th{text-align:left;padding:4px 10px;color:#006618;font-weight:400;border-bottom:1px solid #1a3a1a;}
+#p5 td{padding:5px 10px;border-bottom:1px solid #0a1a0a;}
+#p5 tr:hover td{background:#0a1a0a;}
+#p5 .tm-g{color:#00ff41;} #p5 .tm-r{color:#ff3333;} #p5 .tm-y{color:#ffff00;} #p5 .tm-w{color:#888;}
+#p5 .tm-bar{display:flex;gap:16px;margin-bottom:16px;padding:8px 12px;border:1px solid #1a3a1a;}
+#p5 .desc{border:1px solid #1a3a1a;padding:10px;margin-bottom:16px;color:#006618;line-height:1.6;}
+#p5 .desc b{color:#00ff41;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 6. NOTION MINIMAL                                        */
+/* ════════════════════════════════════════════════════════ */
+#p6{background:#fff;color:#37352f;font-family:'Inter',sans-serif;}
+#p6 .nm-wrap{max-width:900px;margin:0 auto;padding:40px 20px;}
+#p6 h1{font-size:32px;font-weight:700;margin-bottom:6px;}
+#p6 .nm-sub{font-size:14px;color:#9b9a97;margin-bottom:32px;}
+#p6 .nm-sect{margin-bottom:32px;}
+#p6 .nm-sect h2{font-size:18px;font-weight:600;margin-bottom:12px;padding-bottom:6px;border-bottom:1px solid #e9e9e7;}
+#p6 .nm-row{display:flex;padding:10px 0;border-bottom:1px solid #f1f1ef;align-items:center;gap:12px;cursor:pointer;transition:.1s;}
+#p6 .nm-row:hover{background:#f7f6f3;margin:0 -12px;padding:10px 12px;border-radius:4px;}
+#p6 .nm-row-icon{width:28px;height:28px;border-radius:4px;background:#f1f1ef;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
+#p6 .nm-row-body{flex:1;min-width:0;}
+#p6 .nm-row-name{font-size:14px;font-weight:500;}
+#p6 .nm-row-desc{font-size:12px;color:#9b9a97;margin-top:1px;}
+#p6 .nm-row-badge{font:600 12px 'JetBrains Mono',monospace;padding:2px 8px;border-radius:4px;background:#f1f1ef;}
+#p6 .nm-row-time{font-size:11px;color:#b4b4b0;}
+#p6 .nm-toggle{display:flex;gap:8px;margin-bottom:16px;}
+#p6 .nm-tog{padding:6px 12px;border-radius:4px;border:none;background:transparent;color:#9b9a97;font:500 13px 'Inter',sans-serif;cursor:pointer;}
+#p6 .nm-tog:hover{background:#f7f6f3;color:#37352f;}
+#p6 .nm-tog.on{background:#37352f;color:#fff;}
+#p6 .desc{background:#f7f6f3;padding:14px 18px;margin-bottom:24px;border-radius:8px;font-size:13px;color:#9b9a97;line-height:1.6;}
+#p6 .desc b{color:#37352f;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 7. SPLIT PANELS                                          */
+/* ════════════════════════════════════════════════════════ */
+#p7{background:#13111c;color:#e4e2f0;font-family:'Space Grotesk',sans-serif;}
+#p7 .sp-grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr 1fr;height:calc(100vh - 52px);gap:1px;background:#2a2740;}
+#p7 .sp-bar{grid-column:1/-1;background:#1a1726;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;}
+#p7 .sp-bar h1{font-size:16px;font-weight:700;}
+#p7 .sp-bar h1 span{color:#a78bfa;}
+#p7 .sp-panel{background:#13111c;padding:16px;overflow-y:auto;}
+#p7 .sp-panel-t{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;}
+#p7 .sp-panel-t small{font-size:10px;color:#6b6580;font-weight:400;}
+#p7 .sp-row{display:flex;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #1e1b2e;font-size:12px;cursor:pointer;align-items:center;}
+#p7 .sp-row:hover{background:#1a1726;}
+#p7 .sp-ticker{font:600 13px 'JetBrains Mono',monospace;}
+#p7 .sp-score{font:600 12px 'JetBrains Mono',monospace;}
+#p7 .desc{background:#1a1726;padding:12px 16px;margin:8px;border-radius:8px;font-size:12px;color:#6b6580;line-height:1.6;grid-column:1/-1;}
+#p7 .desc b{color:#e4e2f0;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 8. KANBAN CARDS                                          */
+/* ════════════════════════════════════════════════════════ */
+#p8{background:#1b1e2b;color:#d1d5e4;font-family:'DM Sans',sans-serif;}
+#p8 .kb-wrap{padding:20px;}
+#p8 .kb-hdr{margin-bottom:20px;}
+#p8 .kb-hdr h1{font-size:20px;font-weight:700;}
+#p8 .kb-hdr p{font-size:12px;color:#6c7293;margin-top:4px;}
+#p8 .kb-cols{display:flex;gap:14px;overflow-x:auto;padding-bottom:20px;}
+#p8 .kb-col{min-width:280px;max-width:300px;flex-shrink:0;}
+#p8 .kb-col-t{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+#p8 .kb-col-t .dot{width:8px;height:8px;border-radius:50%;}
+#p8 .kb-col-t .ct{margin-left:auto;font:500 11px 'JetBrains Mono',monospace;color:#6c7293;}
+#p8 .kb-card{background:#242837;border-radius:10px;padding:14px;margin-bottom:8px;border:1px solid #2d3148;cursor:pointer;transition:.15s;}
+#p8 .kb-card:hover{border-color:#4f5580;transform:translateY(-1px);}
+#p8 .kb-card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+#p8 .kb-card-ticker{font:700 14px 'JetBrains Mono',monospace;}
+#p8 .kb-card-name{font-size:11px;color:#6c7293;margin-bottom:8px;}
+#p8 .kb-card-row{display:flex;justify-content:space-between;font-size:11px;color:#8890b5;margin:3px 0;}
+#p8 .kb-card-row b{color:#d1d5e4;font-weight:500;}
+#p8 .desc{background:#242837;padding:14px 18px;margin-bottom:18px;border-radius:10px;border:1px solid #2d3148;font-size:13px;color:#6c7293;line-height:1.6;}
+#p8 .desc b{color:#d1d5e4;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 9. TRADING VIEW STYLE                                    */
+/* ════════════════════════════════════════════════════════ */
+#p9{background:#131722;color:#d1d4dc;font-family:'Inter',sans-serif;}
+#p9 .tv-grid{display:grid;grid-template-columns:1fr 340px;grid-template-rows:40px 1fr;height:calc(100vh - 52px);}
+#p9 .tv-bar{grid-column:1/-1;background:#1e222d;border-bottom:1px solid #2a2e39;display:flex;align-items:center;padding:0 12px;gap:12px;}
+#p9 .tv-bar-item{font-size:12px;color:#787b86;cursor:pointer;padding:4px 8px;border-radius:4px;}
+#p9 .tv-bar-item:hover{color:#d1d4dc;background:rgba(255,255,255,.05);}
+#p9 .tv-bar-item.on{color:#2962ff;}
+#p9 .tv-chart{background:#131722;border-right:1px solid #2a2e39;position:relative;display:flex;align-items:center;justify-content:center;}
+#p9 .tv-chart svg{width:100%;max-width:700px;height:300px;}
+#p9 .tv-right{background:#1e222d;padding:0;overflow-y:auto;}
+#p9 .tv-sect{border-bottom:1px solid #2a2e39;}
+#p9 .tv-sect-t{padding:10px 14px;font-size:12px;font-weight:600;color:#787b86;text-transform:uppercase;letter-spacing:.5px;cursor:pointer;display:flex;justify-content:space-between;}
+#p9 .tv-row{padding:8px 14px;display:flex;justify-content:space-between;align-items:center;font-size:12px;border-bottom:1px solid rgba(42,46,57,.5);cursor:pointer;}
+#p9 .tv-row:hover{background:rgba(255,255,255,.03);}
+#p9 .tv-ticker{font:600 13px 'JetBrains Mono',monospace;}
+#p9 .tv-val{font-family:'JetBrains Mono',monospace;font-size:11px;}
+#p9 .desc{background:#1e222d;padding:12px 16px;margin:10px;border-radius:8px;border:1px solid #2a2e39;font-size:12px;color:#787b86;line-height:1.6;grid-column:1/-1;}
+#p9 .desc b{color:#d1d4dc;}
+
+/* ════════════════════════════════════════════════════════ */
+/* 10. GRADIENT MODERN                                      */
+/* ════════════════════════════════════════════════════════ */
+#p10{background:#0f172a;color:#e2e8f0;font-family:'Inter',sans-serif;}
+#p10 .gm-wrap{max-width:1300px;margin:0 auto;padding:24px;}
+#p10 .gm-hdr{text-align:center;margin-bottom:28px;}
+#p10 .gm-hdr h1{font-size:28px;font-weight:900;background:linear-gradient(135deg,#38bdf8,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+#p10 .gm-hdr p{font-size:13px;color:#64748b;margin-top:6px;}
+#p10 .gm-hero{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:24px;}
+#p10 .gm-hero-card{background:linear-gradient(135deg,rgba(56,189,248,.08),rgba(129,140,248,.08));border:1px solid rgba(129,140,248,.15);border-radius:14px;padding:16px;text-align:center;}
+#p10 .gm-hero-l{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;}
+#p10 .gm-hero-v{font:700 22px 'JetBrains Mono',monospace;margin:6px 0;}
+#p10 .gm-hero-c{font-size:11px;}
+#p10 .gm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px;}
+#p10 .gm-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:20px;transition:.25s;cursor:pointer;position:relative;}
+#p10 .gm-card:hover{border-color:rgba(129,140,248,.3);transform:translateY(-2px);box-shadow:0 20px 50px rgba(0,0,0,.3);}
+#p10 .gm-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:16px 16px 0 0;}
+#p10 .gm-card.c-blue::before{background:linear-gradient(90deg,#38bdf8,#818cf8);}
+#p10 .gm-card.c-red::before{background:linear-gradient(90deg,#f87171,#fb923c);}
+#p10 .gm-card.c-green::before{background:linear-gradient(90deg,#34d399,#a3e635);}
+#p10 .gm-card.c-purple::before{background:linear-gradient(90deg,#a78bfa,#f472b6);}
+#p10 .gm-card-name{font-size:16px;font-weight:700;margin-bottom:4px;}
+#p10 .gm-card-desc{font-size:12px;color:#64748b;margin-bottom:14px;line-height:1.5;}
+#p10 .gm-card-stats{display:flex;gap:20px;}
+#p10 .gm-card-stat-l{font-size:10px;color:#475569;text-transform:uppercase;}
+#p10 .gm-card-stat-v{font:700 18px 'JetBrains Mono',monospace;margin-top:2px;}
+#p10 .gm-card-foot{margin-top:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;font-size:11px;color:#475569;}
+#p10 .desc{background:rgba(255,255,255,.03);padding:14px 18px;margin-bottom:20px;border:1px solid rgba(255,255,255,.06);border-radius:12px;font-size:13px;color:#64748b;line-height:1.6;}
+#p10 .desc b{color:#e2e8f0;}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+<span>Design</span>
+<button class="nbtn on" onclick="show(1)">1 Bloomberg</button>
+<button class="nbtn" onclick="show(2)">2 Clean White</button>
+<button class="nbtn" onclick="show(3)">3 Glass</button>
+<button class="nbtn" onclick="show(4)">4 Sidebar</button>
+<button class="nbtn" onclick="show(5)">5 Terminal</button>
+<button class="nbtn" onclick="show(6)">6 Notion</button>
+<button class="nbtn" onclick="show(7)">7 Split</button>
+<button class="nbtn" onclick="show(8)">8 Kanban</button>
+<button class="nbtn" onclick="show(9)">9 TradingView</button>
+<button class="nbtn" onclick="show(10)">10 Gradient</button>
+</nav>
+
+<!-- ═══ 1. BLOOMBERG ═══ -->
+<div id="p1" class="panel on">
+<div class="desc"><b>1. Bloomberg Dark</b> — Klassisches Terminal-Design. Alle Daten komprimiert, keine Verschwendung. Orange auf Schwarz. Perfekt fuer Profis die maximale Informationsdichte wollen.</div>
+<div class="bb-grid">
+<div class="bb-bar"><b>ALPHA STATION V70.7</b> <span>BTC 66,527 <span style="color:#ff3333">-0.2%</span></span> <span>SPY 512.30 <span style="color:#ff3333">-3.6%</span></span> <span>VIX 18.4</span> <span>Next: BI Long 15:00 ET</span> <span style="margin-left:auto;">27 MAR 2026 16:42 ET</span></div>
+<div class="bb-nav">
+<div class="bb-ni on">BI LONG <span class="ct">12</span></div>
+<div class="bb-ni">BI SHORT <span class="ct">8</span></div>
+<div class="bb-ni">BTC DIVERGENZ <span class="ct">47</span></div>
+<div class="bb-ni">SHORT SCANNER <span class="ct">8</span></div>
+<div class="bb-ni">EARLY MOVERS <span class="ct">23</span></div>
+<div class="bb-ni">NEW LISTINGS <span class="ct">3</span></div>
+<div class="bb-ni">BIOTECH FDA <span class="ct">136</span></div>
+<div class="bb-ni" style="color:#333;">────────────</div>
+<div class="bb-ni">MONEY FLOW</div>
+<div class="bb-ni">KALENDER</div>
+<div class="bb-ni">CRASH MONITOR</div>
+<div class="bb-ni" style="color:#333;">────────────</div>
+<div class="bb-ni">SUCHE</div>
+<div class="bb-ni">WATCHLIST</div>
+<div class="bb-ni">BACKTEST</div>
+<div class="bb-ni">AUTO-TRADER</div>
+</div>
+<div class="bb-main">
+<div class="bb-hdr"><span>BREAKOUT IMMINENT — LONG | 12 HITS | SCAN 23M AGO</span><span style="color:#888">[F5] REFRESH [F8] EXPORT</span></div>
+<table>
+<tr><th>#</th><th>TICKER</th><th>SCORE</th><th>GRADE</th><th>SIGNAL</th><th>R:R</th><th>ENTRY</th><th>STOP</th><th>TP1</th><th>VOL</th></tr>
+<tr><td>1</td><td style="color:#ff8c00">NVDA</td><td>91</td><td style="color:#a371f7">S</td><td>BREAKOUT</td><td>3.2</td><td>892.40</td><td style="color:#ff3333">878.50</td><td style="color:#00ff41">936.80</td><td>42.1M</td></tr>
+<tr><td>2</td><td style="color:#ff8c00">PLTR</td><td>88</td><td style="color:#a371f7">S</td><td>BULL FLAG</td><td>2.8</td><td>78.20</td><td style="color:#ff3333">75.60</td><td style="color:#00ff41">85.50</td><td>38.7M</td></tr>
+<tr><td>3</td><td style="color:#ff8c00">CRWD</td><td>82</td><td style="color:#3fb950">A</td><td>VOL SURGE</td><td>2.4</td><td>345.10</td><td style="color:#ff3333">338.00</td><td style="color:#00ff41">362.00</td><td>8.2M</td></tr>
+<tr><td>4</td><td style="color:#ff8c00">META</td><td>79</td><td style="color:#3fb950">A</td><td>BREAKOUT</td><td>2.1</td><td>512.30</td><td style="color:#ff3333">501.80</td><td style="color:#00ff41">534.40</td><td>22.5M</td></tr>
+<tr><td>5</td><td style="color:#ff8c00">COIN</td><td>71</td><td style="color:#58a6ff">B</td><td>DIP BUY</td><td>1.9</td><td>218.50</td><td style="color:#ff3333">210.20</td><td style="color:#00ff41">234.30</td><td>12.4M</td></tr>
+<tr><td>6</td><td style="color:#ff8c00">SHOP</td><td>68</td><td style="color:#58a6ff">B</td><td>EARLY MOM</td><td>1.8</td><td>98.70</td><td style="color:#ff3333">95.40</td><td style="color:#00ff41">104.60</td><td>6.8M</td></tr>
+</table>
+</div>
+<div class="bb-right">
+<div class="bb-sect"><div class="bb-sect-t">ALERTS</div>
+<div class="bb-alert" style="border-color:#3fb950">NVDA — Grade S detected / BI Long</div>
+<div class="bb-alert" style="border-color:#d29922">PCE Price Index tmrw 08:30 ET</div>
+<div class="bb-alert" style="border-color:#f85149">BANANAS31 SellProb 75/100</div>
+<div class="bb-alert">3 new PERP listings detected</div>
+</div>
+<div class="bb-sect"><div class="bb-sect-t">MARKET STATUS</div>
+<div style="font-size:11px;color:#888;line-height:1.8;">
+SPY -3.6% | QQQ -4.4% | IWM -0.6%<br>
+Leader: Energy +6.2%<br>
+Laggard: Communication -5.7%<br>
+Dispersion: 12% HIGH<br>
+Risk-On: -3.7% | Risk-Off: -4.5%<br>
+Crash Level: ELEVATED
+</div>
+</div>
+<div class="bb-sect"><div class="bb-sect-t">SCHEDULE</div>
+<div style="font-size:10px;color:#666;line-height:1.8;">
+15:00 BI Long<br>
+15:05 Strategies<br>
+15:15 Biotech<br>
+15:30 BI Short<br>
+Next NL Scan: 4m
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 2. CLEAN WHITE ═══ -->
+<div id="p2" class="panel">
+<div class="cw-wrap">
+<div class="desc"><b>2. Clean White</b> — Helles, modernes Design. Viel Weissraum, klare Typografie, sanfte Borders. Professionell und augenfreundlich. Ideal fuer laengere Sessions.</div>
+<div class="cw-hdr"><h1>Alpha Station</h1><div style="font-size:12px;color:#57606a;">V70.7 Pro · Server Online · Letzter Scan: vor 4 Min</div></div>
+<div class="cw-tabs">
+<button class="cw-tab on">Breakout Imminent</button>
+<button class="cw-tab">BTC Divergenz</button>
+<button class="cw-tab">Short Scanner</button>
+<button class="cw-tab">Biotech FDA</button>
+<button class="cw-tab">Early Movers</button>
+<button class="cw-tab">Money Flow</button>
+<button class="cw-tab">Kalender</button>
+<button class="cw-tab">Crash Monitor</button>
+</div>
+<div class="cw-cards">
+<div class="cw-card"><div class="cw-card-l">Kandidaten</div><div class="cw-card-v" style="color:#0969da;">12</div><div class="cw-card-c up">+3 seit letztem Scan</div></div>
+<div class="cw-card"><div class="cw-card-l">Grade S/A</div><div class="cw-card-v" style="color:#1a7f37;">4</div><div class="cw-card-c mut">Top-Setups</div></div>
+<div class="cw-card"><div class="cw-card-l">Durchschn. Score</div><div class="cw-card-v">72.4</div><div class="cw-card-c up">+5.2 vs gestern</div></div>
+<div class="cw-card"><div class="cw-card-l">Naechster Scan</div><div class="cw-card-v" style="font-size:20px;">15:00 ET</div><div class="cw-card-c mut">in 18 Min</div></div>
+</div>
+<div class="cw-tbl"><table>
+<tr><th>Ticker</th><th>Score</th><th>Grade</th><th>Signal</th><th>R:R</th><th>Entry</th><th>Stop</th><th>Target</th></tr>
+<tr><td class="mono" style="font-weight:600;">NVDA</td><td><span class="tag tag-s">91</span></td><td><span class="tag tag-s">S</span></td><td><span class="tag tag-long">Breakout</span></td><td class="mono">3.2</td><td class="mono">$892.40</td><td class="mono dn">$878.50</td><td class="mono up">$936.80</td></tr>
+<tr><td class="mono" style="font-weight:600;">PLTR</td><td><span class="tag tag-s">88</span></td><td><span class="tag tag-s">S</span></td><td><span class="tag tag-long">Bull Flag</span></td><td class="mono">2.8</td><td class="mono">$78.20</td><td class="mono dn">$75.60</td><td class="mono up">$85.50</td></tr>
+<tr><td class="mono" style="font-weight:600;">CRWD</td><td><span class="tag tag-a">82</span></td><td><span class="tag tag-a">A</span></td><td><span class="tag tag-long">Vol Surge</span></td><td class="mono">2.4</td><td class="mono">$345.10</td><td class="mono dn">$338.00</td><td class="mono up">$362.00</td></tr>
+<tr><td class="mono" style="font-weight:600;">META</td><td><span class="tag tag-a">79</span></td><td><span class="tag tag-a">A</span></td><td><span class="tag tag-long">Breakout</span></td><td class="mono">2.1</td><td class="mono">$512.30</td><td class="mono dn">$501.80</td><td class="mono up">$534.40</td></tr>
+</table></div>
+</div>
+</div>
+
+<!-- ═══ 3. GLASS ═══ -->
+<div id="p3" class="panel">
+<div class="gl-wrap">
+<div class="desc"><b>3. Glassmorphism</b> — Transparente Karten mit Blur-Effekt auf dunklem Gradient. Modern, elegant, hoher Wiedererkennungswert. Wie eine Premium-App.</div>
+<div class="gl-hdr"><h1>Alpha <span>Station</span></h1></div>
+<div class="glass gl-strip"><div class="gl-strip-i"><small>BTC</small> <span class="mono">$66,527</span> <span class="dn">-0.2%</span></div><div class="gl-strip-i"><small>SPY</small> <span class="mono">512.30</span> <span class="dn">-3.6%</span></div><div class="gl-strip-i"><small>VIX</small> <span class="mono" style="color:#f59e0b">18.4</span></div><div class="gl-strip-i"><small>Energy</small> <span class="up">+6.2%</span></div><div class="gl-strip-i" style="margin-left:auto;"><small>Next</small> PCE 08:30 ET</div></div>
+<div class="gl-grid">
+<div class="glass gl-card"><span class="gl-status scan">SCANNING</span><div class="gl-card-name">Breakout Imminent</div><div class="gl-card-desc">20-Signal Composite — findet Aktien kurz vor dem Ausbruch</div><div class="gl-card-stats"><div><div class="gl-card-stat-l">Kandidaten</div><div class="gl-card-stat-v" style="color:#818cf8">12</div></div><div><div class="gl-card-stat-l">Grade S/A</div><div class="gl-card-stat-v" style="color:#34d399">4</div></div><div><div class="gl-card-stat-l">Score</div><div class="gl-card-stat-v">72</div></div></div><div class="gl-card-foot"><span>vor 23 Min</span><span>15:00 ET</span></div></div>
+<div class="glass gl-card"><span class="gl-status live">LIVE 24/7</span><div class="gl-card-name">BTC Divergenz Short</div><div class="gl-card-desc">Altcoins die gegen BTC-Schwaeche pumpen</div><div class="gl-card-stats"><div><div class="gl-card-stat-l">Shorts</div><div class="gl-card-stat-v" style="color:#f87171">47</div></div><div><div class="gl-card-stat-l">Top</div><div class="gl-card-stat-v">BANANAS31</div></div><div><div class="gl-card-stat-l">SellProb</div><div class="gl-card-stat-v">68</div></div></div><div class="gl-card-foot"><span>vor 13 Min</span><span>Alle 2h</span></div></div>
+<div class="glass gl-card"><span class="gl-status scan">74%</span><div class="gl-card-name">Biotech FDA Scanner</div><div class="gl-card-desc">FDA Catalysts, Clinical Trials, Pipeline</div><div class="gl-card-stats"><div><div class="gl-card-stat-l">Treffer</div><div class="gl-card-stat-v">136</div></div><div><div class="gl-card-stat-l">Gescannt</div><div class="gl-card-stat-v">1075</div></div></div><div class="gl-card-foot"><span>1075/1437</span><span>Stuendlich</span></div></div>
+<div class="glass gl-card"><span class="gl-status live">LIVE</span><div class="gl-card-name">Early Movers</div><div class="gl-card-desc">Volume Spikes, Micro-Cap Momentum</div><div class="gl-card-stats"><div><div class="gl-card-stat-l">Spikes</div><div class="gl-card-stat-v">339</div></div><div><div class="gl-card-stat-l">Whales</div><div class="gl-card-stat-v">23</div></div></div><div class="gl-card-foot"><span>Crypto 24/7</span><span>5 Sub-Scanner</span></div></div>
+<div class="glass gl-card"><span class="gl-status live">LIVE</span><div class="gl-card-name">Crash Monitor</div><div class="gl-card-desc">SPY, VIX, Breadth, Credit Stress</div><div class="gl-card-stats"><div><div class="gl-card-stat-l">Risk</div><div class="gl-card-stat-v" style="color:#f59e0b">ERHOEHT</div></div><div><div class="gl-card-stat-l">VIX</div><div class="gl-card-stat-v">18.4</div></div></div><div class="gl-card-foot"><span>Alle 30 Min</span><span>2x taeglich</span></div></div>
+<div class="glass gl-card"><span class="gl-status live">LIVE</span><div class="gl-card-name">Money Flow Heatmap</div><div class="gl-card-desc">Sektor-Rotation auf einen Blick</div><div class="gl-card-stats"><div><div class="gl-card-stat-l">Leader</div><div class="gl-card-stat-v up">Energy</div></div><div><div class="gl-card-stat-l">Laggard</div><div class="gl-card-stat-v dn">Comms</div></div></div><div class="gl-card-foot"><span>Cache 10 Min</span><span>Polygon.io</span></div></div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 4. SIDEBAR COMPACT ═══ -->
+<div id="p4" class="panel">
+<div class="sc-grid">
+<div class="sc-rail">
+<div class="sc-ri on">BI</div><div class="sc-ri">DV</div><div class="sc-ri">SH</div><div class="sc-ri">EM</div><div class="sc-ri">NL</div><div class="sc-ri">BT</div>
+<div class="sc-ri sep"></div>
+<div class="sc-ri">MF</div><div class="sc-ri">KA</div><div class="sc-ri">CR</div>
+<div class="sc-ri sep"></div>
+<div class="sc-ri">SU</div><div class="sc-ri">WL</div><div class="sc-ri">BK</div><div class="sc-ri">AI</div>
+</div>
+<div class="sc-main">
+<div class="desc"><b>4. Sidebar Compact</b> — Schmale Icon-Leiste mit 2-Buchstaben-Kuerzeln. Maximaler Content-Bereich. Filter als Pills. Signal-Karten mit Grades. Wie Discord/Slack.</div>
+<div class="sc-title">Alle Signale</div>
+<div class="sc-sub">47 Short · 12 Long · 136 Biotech · 3 New Listings</div>
+<div class="sc-pills"><button class="sc-pill on">Alle</button><button class="sc-pill">Long</button><button class="sc-pill">Short</button><button class="sc-pill">Crypto</button><button class="sc-pill">Aktien</button><button class="sc-pill">Grade S</button><button class="sc-pill">R:R > 2.5</button></div>
+<div class="sc-list">
+<div class="sc-item"><div class="sc-rank s">S</div><div class="sc-body"><div class="sc-body-top"><span class="sc-ticker">NVDA</span><span class="tag tag-long">Long / Breakout</span></div><div class="sc-name">NVIDIA Corp — BI Scanner</div><div class="sc-meta"><span>Score 91</span><span>R:R 3.2</span><span class="up">$892</span><span class="dn">SL $878</span></div></div></div>
+<div class="sc-item"><div class="sc-rank s">S</div><div class="sc-body"><div class="sc-body-top"><span class="sc-ticker">PLTR</span><span class="tag tag-long">Long / Bull Flag</span></div><div class="sc-name">Palantir — BI Scanner</div><div class="sc-meta"><span>Score 88</span><span>R:R 2.8</span><span class="up">$78.20</span><span class="dn">SL $75.60</span></div></div></div>
+<div class="sc-item"><div class="sc-rank a">75</div><div class="sc-body"><div class="sc-body-top"><span class="sc-ticker">BANANAS31</span><span class="tag tag-short">Short / Divergenz</span></div><div class="sc-name">Banana For Scale — BTC Divergenz</div><div class="sc-meta"><span>SellProb 75</span><span>Div +56%</span><span style="color:#d29922">Bereit</span></div></div></div>
+<div class="sc-item"><div class="sc-rank a">A</div><div class="sc-body"><div class="sc-body-top"><span class="sc-ticker">CRWD</span><span class="tag tag-long">Long / Vol Surge</span></div><div class="sc-name">CrowdStrike — BI Scanner</div><div class="sc-meta"><span>Score 82</span><span>R:R 2.4</span><span class="up">$345</span><span class="dn">SL $338</span></div></div></div>
+<div class="sc-item"><div class="sc-rank b">B</div><div class="sc-body"><div class="sc-body-top"><span class="sc-ticker">COIN</span><span class="tag tag-long">Long / Dip Buy</span></div><div class="sc-name">Coinbase — BI Scanner</div><div class="sc-meta"><span>Score 71</span><span>R:R 1.9</span><span class="up">$218</span><span class="dn">SL $210</span></div></div></div>
+<div class="sc-item"><div class="sc-rank a">FDA</div><div class="sc-body"><div class="sc-body-top"><span class="sc-ticker">SAVA</span><span class="tag" style="background:rgba(130,80,223,.12);color:#a371f7;">Biotech / PDUFA</span></div><div class="sc-name">Cassava Sciences — FDA Catalyst</div><div class="sc-meta"><span>Phase 3</span><span>PDUFA Apr 12</span><span style="color:#a371f7">16 Tage</span></div></div></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 5. TERMINAL GREEN ═══ -->
+<div id="p5" class="panel">
+<div class="tm-wrap">
+<div class="desc"><b>5. Terminal Green</b> — Retro-Terminal Aesthetic. Gruen auf Schwarz, monospace only. Fuer Puristen die Daten in Rohform wollen. Hohe Informationsdichte, null Ablenkung.</div>
+<div class="tm-hdr"><h1>ALPHA STATION v70.7 PRO</h1><p>// AUTOMATED SCANNING SYSTEM // 178.104.69.209 // UPTIME 14d 6h</p></div>
+<div class="tm-bar"><span class="tm-g">BTC 66,527</span> <span class="tm-r">-0.2%</span> <span class="tm-w">|</span> <span class="tm-g">SPY 512.30</span> <span class="tm-r">-3.6%</span> <span class="tm-w">|</span> <span class="tm-y">VIX 18.4</span> <span class="tm-w">|</span> <span>NEXT_SCAN: BI_LONG 15:00 ET</span></div>
+<div class="tm-section"><div class="tm-section-t">[ BREAKOUT IMMINENT — LONG — 12 RESULTS ]</div>
+<table><tr><th>RANK</th><th>TICKER</th><th>SCORE</th><th>GRADE</th><th>SIGNAL</th><th>R:R</th><th>ENTRY</th><th>STOP</th><th>TARGET</th></tr>
+<tr><td class="tm-w">01</td><td class="tm-g">NVDA</td><td>91</td><td style="color:#a371f7">S</td><td>BREAKOUT</td><td>3.2</td><td>892.40</td><td class="tm-r">878.50</td><td class="tm-g">936.80</td></tr>
+<tr><td class="tm-w">02</td><td class="tm-g">PLTR</td><td>88</td><td style="color:#a371f7">S</td><td>BULL_FLAG</td><td>2.8</td><td>78.20</td><td class="tm-r">75.60</td><td class="tm-g">85.50</td></tr>
+<tr><td class="tm-w">03</td><td class="tm-g">CRWD</td><td>82</td><td style="color:#3fb950">A</td><td>VOL_SURGE</td><td>2.4</td><td>345.10</td><td class="tm-r">338.00</td><td class="tm-g">362.00</td></tr>
+<tr><td class="tm-w">04</td><td class="tm-g">META</td><td>79</td><td style="color:#3fb950">A</td><td>BREAKOUT</td><td>2.1</td><td>512.30</td><td class="tm-r">501.80</td><td class="tm-g">534.40</td></tr>
+</table></div>
+<div class="tm-section"><div class="tm-section-t">[ BTC DIVERGENZ SHORT — 47 CANDIDATES ]</div>
+<table><tr><th>RANK</th><th>TICKER</th><th>SELLPROB</th><th>DIV_7D</th><th>DIV_30D</th><th>TIMING</th><th>EXCHANGE</th></tr>
+<tr><td class="tm-w">01</td><td class="tm-g">BANANAS31</td><td class="tm-r">75/100</td><td>+56%</td><td>+202%</td><td class="tm-y">BEREIT</td><td>BITGET</td></tr>
+<tr><td class="tm-w">02</td><td class="tm-g">MSTR</td><td class="tm-r">68/100</td><td>+42%</td><td>+118%</td><td class="tm-y">NAHE_HIGH</td><td>MEXC</td></tr>
+</table></div>
+</div>
+</div>
+
+<!-- ═══ 6. NOTION ═══ -->
+<div id="p6" class="panel">
+<div class="nm-wrap">
+<div class="desc"><b>6. Notion Minimal</b> — Minimalistisch wie Notion. Viel Weissraum, leise Farben, Database-artige Listen. Aufgeraeumt, fokussiert, zen-artig. Content steht im Vordergrund.</div>
+<h1>Alpha Station</h1>
+<div class="nm-sub">Trading Scanner Dashboard — V70.7 Pro</div>
+<div class="nm-toggle"><button class="nm-tog on">Scanner</button><button class="nm-tog">Markt</button><button class="nm-tog">Tools</button></div>
+<div class="nm-sect"><h2>Scanner</h2>
+<div class="nm-row"><div class="nm-row-icon">BI</div><div class="nm-row-body"><div class="nm-row-name">Breakout Imminent</div><div class="nm-row-desc">20-Signal Composite Scoring</div></div><div class="nm-row-badge" style="color:#1a7f37">12 Hits</div><div class="nm-row-time">vor 23 Min</div></div>
+<div class="nm-row"><div class="nm-row-icon">DV</div><div class="nm-row-body"><div class="nm-row-name">BTC Divergenz Short</div><div class="nm-row-desc">Altcoins vs BTC-Schwaeche</div></div><div class="nm-row-badge" style="color:#cf222e">47 Shorts</div><div class="nm-row-time">vor 13 Min</div></div>
+<div class="nm-row"><div class="nm-row-icon">SH</div><div class="nm-row-body"><div class="nm-row-name">Short Scanner V2</div><div class="nm-row-desc">20-Signal Composite Short</div></div><div class="nm-row-badge">8 Hits</div><div class="nm-row-time">vor 2h</div></div>
+<div class="nm-row"><div class="nm-row-icon">EM</div><div class="nm-row-body"><div class="nm-row-name">Early Movers</div><div class="nm-row-desc">Volume Spikes, Momentum</div></div><div class="nm-row-badge" style="color:#0969da">339 Spikes</div><div class="nm-row-time">24/7</div></div>
+<div class="nm-row"><div class="nm-row-icon">NL</div><div class="nm-row-body"><div class="nm-row-name">New Listing Dump</div><div class="nm-row-desc">Neue PERP-Listings shorten</div></div><div class="nm-row-badge">3 Neue</div><div class="nm-row-time">alle 15m</div></div>
+<div class="nm-row"><div class="nm-row-icon">BT</div><div class="nm-row-body"><div class="nm-row-name">Biotech FDA</div><div class="nm-row-desc">FDA Catalysts, Pipeline</div></div><div class="nm-row-badge" style="color:#8250df">136 Treffer</div><div class="nm-row-time">74%</div></div>
+</div>
+<div class="nm-sect"><h2>Markt</h2>
+<div class="nm-row"><div class="nm-row-icon">MF</div><div class="nm-row-body"><div class="nm-row-name">Money Flow Heatmap</div><div class="nm-row-desc">Sektor-Rotation</div></div><div class="nm-row-badge" style="color:#1a7f37">Energy +6.2%</div><div class="nm-row-time">10m Cache</div></div>
+<div class="nm-row"><div class="nm-row-icon">KA</div><div class="nm-row-body"><div class="nm-row-name">Wirtschaftskalender</div><div class="nm-row-desc">FOMC, CPI, NFP, GDP</div></div><div class="nm-row-badge" style="color:#cf222e">PCE morgen</div><div class="nm-row-time">HIGH</div></div>
+<div class="nm-row"><div class="nm-row-icon">CM</div><div class="nm-row-body"><div class="nm-row-name">Crash Monitor</div><div class="nm-row-desc">SPY, VIX, Breadth</div></div><div class="nm-row-badge" style="color:#bf8700">ERHOEHT</div><div class="nm-row-time">30 Min</div></div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 7. SPLIT PANELS ═══ -->
+<div id="p7" class="panel">
+<div class="sp-grid">
+<div class="desc"><b>7. Split Panels</b> — Vier gleichgrosse Panels zeigen verschiedene Scanner gleichzeitig. Wie Multi-Monitor Setup auf einem Bildschirm. Alles parallel im Blick.</div>
+<div class="sp-bar"><h1>Alpha <span>Station</span></h1><span style="font-size:12px;color:#6b6580;" class="mono">BTC 66,527 <span class="dn">-0.2%</span> | SPY 512.30 <span class="dn">-3.6%</span> | VIX 18.4</span></div>
+<div class="sp-panel"><div class="sp-panel-t">Breakout Imminent Long <small>12 Hits / vor 23 Min</small></div>
+<div class="sp-row"><span class="sp-ticker">NVDA</span><span class="tag tag-s">S 91</span><span class="sp-score" style="color:#34d399">R:R 3.2</span></div>
+<div class="sp-row"><span class="sp-ticker">PLTR</span><span class="tag tag-s">S 88</span><span class="sp-score" style="color:#34d399">R:R 2.8</span></div>
+<div class="sp-row"><span class="sp-ticker">CRWD</span><span class="tag tag-a">A 82</span><span class="sp-score" style="color:#34d399">R:R 2.4</span></div>
+<div class="sp-row"><span class="sp-ticker">META</span><span class="tag tag-a">A 79</span><span class="sp-score" style="color:#34d399">R:R 2.1</span></div>
+<div class="sp-row"><span class="sp-ticker">COIN</span><span class="tag tag-b">B 71</span><span class="sp-score" style="color:#34d399">R:R 1.9</span></div>
+</div>
+<div class="sp-panel"><div class="sp-panel-t">BTC Divergenz Short <small>47 Shorts / vor 13 Min</small></div>
+<div class="sp-row"><span class="sp-ticker">BANANAS31</span><span class="tag tag-short">75</span><span class="sp-score" style="color:#6b6580">Div +56%</span></div>
+<div class="sp-row"><span class="sp-ticker">MSTR</span><span class="tag tag-short">68</span><span class="sp-score" style="color:#6b6580">Div +42%</span></div>
+<div class="sp-row"><span class="sp-ticker">DOGE</span><span class="tag tag-short">61</span><span class="sp-score" style="color:#6b6580">Div +38%</span></div>
+<div class="sp-row"><span class="sp-ticker">PEPE</span><span class="tag tag-short">58</span><span class="sp-score" style="color:#6b6580">Div +31%</span></div>
+</div>
+<div class="sp-panel"><div class="sp-panel-t">Biotech FDA <small>136 Treffer / 74%</small></div>
+<div class="sp-row"><span class="sp-ticker">SAVA</span><span class="tag" style="background:rgba(130,80,223,.15);color:#a78bfa;">PDUFA</span><span class="sp-score" style="color:#6b6580">Apr 12</span></div>
+<div class="sp-row"><span class="sp-ticker">MRNA</span><span class="tag" style="background:rgba(130,80,223,.15);color:#a78bfa;">Phase 3</span><span class="sp-score" style="color:#6b6580">May 1</span></div>
+<div class="sp-row"><span class="sp-ticker">ACAD</span><span class="tag" style="background:rgba(130,80,223,.15);color:#a78bfa;">AdCom</span><span class="sp-score" style="color:#6b6580">Apr 22</span></div>
+</div>
+<div class="sp-panel"><div class="sp-panel-t">Market Overview <small>Live</small></div>
+<div class="sp-row"><span>Energy</span><span style="color:#34d399;font:600 12px 'JetBrains Mono',monospace">+6.2%</span></div>
+<div class="sp-row"><span>Financials</span><span style="color:#f87171;font:600 12px 'JetBrains Mono',monospace">-0.5%</span></div>
+<div class="sp-row"><span>Technology</span><span style="color:#f87171;font:600 12px 'JetBrains Mono',monospace">-4.5%</span></div>
+<div class="sp-row"><span>Communication</span><span style="color:#f87171;font:600 12px 'JetBrains Mono',monospace">-5.7%</span></div>
+<div class="sp-row"><span>Crash Level</span><span style="color:#f59e0b;font:600 12px 'JetBrains Mono',monospace">ERHOEHT</span></div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 8. KANBAN ═══ -->
+<div id="p8" class="panel">
+<div class="kb-wrap">
+<div class="desc"><b>8. Kanban Columns</b> — Signale als Karten in Spalten organisiert nach Typ: Long, Short, Biotech, Monitoring. Wie Trello/JIRA fuer Trading. Drag-and-Drop denkbar.</div>
+<div class="kb-hdr"><h1>Alpha Station</h1><p>V70.7 Pro — Signal Board</p></div>
+<div class="kb-cols">
+<div class="kb-col"><div class="kb-col-t"><div class="dot" style="background:#3fb950"></div> Long Setups <span class="ct">12</span></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">NVDA</span><span class="tag tag-s">S 91</span></div><div class="kb-card-name">Breakout — BI Scanner</div><div class="kb-card-row"><span>Entry</span><b class="mono">$892.40</b></div><div class="kb-card-row"><span>R:R</span><b class="mono">3.2</b></div></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">PLTR</span><span class="tag tag-s">S 88</span></div><div class="kb-card-name">Bull Flag — BI Scanner</div><div class="kb-card-row"><span>Entry</span><b class="mono">$78.20</b></div><div class="kb-card-row"><span>R:R</span><b class="mono">2.8</b></div></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">CRWD</span><span class="tag tag-a">A 82</span></div><div class="kb-card-name">Volume Surge — BI Scanner</div><div class="kb-card-row"><span>Entry</span><b class="mono">$345.10</b></div><div class="kb-card-row"><span>R:R</span><b class="mono">2.4</b></div></div>
+</div>
+<div class="kb-col"><div class="kb-col-t"><div class="dot" style="background:#f85149"></div> Short Setups <span class="ct">47</span></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">BANANAS31</span><span class="tag tag-short">75</span></div><div class="kb-card-name">BTC Divergenz — SellProb</div><div class="kb-card-row"><span>Div 7d</span><b class="mono">+56%</b></div><div class="kb-card-row"><span>Timing</span><b style="color:#d29922">Bereit</b></div></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">MSTR</span><span class="tag tag-short">68</span></div><div class="kb-card-name">BTC Divergenz</div><div class="kb-card-row"><span>Div 7d</span><b class="mono">+42%</b></div><div class="kb-card-row"><span>Timing</span><b style="color:#d29922">Nahe High</b></div></div>
+</div>
+<div class="kb-col"><div class="kb-col-t"><div class="dot" style="background:#a371f7"></div> Biotech Catalysts <span class="ct">136</span></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">SAVA</span><span class="tag" style="background:rgba(130,80,223,.12);color:#a371f7">PDUFA</span></div><div class="kb-card-name">Cassava Sciences</div><div class="kb-card-row"><span>Datum</span><b>Apr 12</b></div><div class="kb-card-row"><span>Phase</span><b>3</b></div></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">MRNA</span><span class="tag" style="background:rgba(130,80,223,.12);color:#a371f7">Phase 3</span></div><div class="kb-card-name">Moderna</div><div class="kb-card-row"><span>Datum</span><b>May 1</b></div><div class="kb-card-row"><span>Readout</span><b>Pending</b></div></div>
+</div>
+<div class="kb-col"><div class="kb-col-t"><div class="dot" style="background:#d29922"></div> Monitoring <span class="ct">6</span></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">PRL</span><span class="tag" style="background:rgba(6,182,212,.12);color:#22d3ee">New</span></div><div class="kb-card-name">New Listing — MEXC</div><div class="kb-card-row"><span>Pump</span><b class="mono">+45%</b></div><div class="kb-card-row"><span>Exhaustion</span><b>72</b></div></div>
+<div class="kb-card"><div class="kb-card-top"><span class="kb-card-ticker">PCE</span><span class="tag" style="background:rgba(210,153,34,.12);color:#d29922">Event</span></div><div class="kb-card-name">Price Index — morgen 08:30 ET</div><div class="kb-card-row"><span>Impact</span><b style="color:#f85149">HIGH</b></div></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 9. TRADINGVIEW ═══ -->
+<div id="p9" class="panel">
+<div class="tv-grid">
+<div class="desc" style="grid-column:1/-1;grid-row:1;margin:0;border-radius:0;border:none;border-bottom:1px solid #2a2e39;"><b>9. TradingView Style</b> — Chart gross links, Scanner-Liste rechts. Wie TradingView Screener. Fokus auf den Chart, Signale als kompakte Liste daneben.</div>
+<div class="tv-bar"><div class="tv-bar-item on">1H</div><div class="tv-bar-item">4H</div><div class="tv-bar-item">1D</div><div class="tv-bar-item">1W</div><div style="width:1px;height:16px;background:#2a2e39;margin:0 4px;"></div><div class="tv-bar-item">Indicators</div><div class="tv-bar-item">Patterns</div><div style="margin-left:auto;" class="tv-bar-item mono">NVDA 892.40 <span class="up">+1.2%</span></div></div>
+<div class="tv-chart">
+<svg viewBox="0 0 700 300">
+<rect fill="#131722" width="700" height="300"/>
+<line x1="0" y1="75" x2="700" y2="75" stroke="#2a2e39" stroke-dasharray="4"/>
+<line x1="0" y1="150" x2="700" y2="150" stroke="#2a2e39" stroke-dasharray="4"/>
+<line x1="0" y1="225" x2="700" y2="225" stroke="#2a2e39" stroke-dasharray="4"/>
+<polyline fill="none" stroke="#2962ff" stroke-width="2" points="20,220 60,200 100,210 140,190 180,180 220,185 260,160 300,140 340,150 380,130 420,110 460,115 500,95 540,80 580,85 620,70 660,65"/>
+<polyline fill="none" stroke="rgba(41,98,255,.1)" stroke-width="0" points="20,220 60,200 100,210 140,190 180,180 220,185 260,160 300,140 340,150 380,130 420,110 460,115 500,95 540,80 580,85 620,70 660,65 660,300 20,300" fill="rgba(41,98,255,.08)"/>
+<line x1="540" y1="65" x2="700" y2="65" stroke="#26a69a" stroke-width="1" stroke-dasharray="3"/>
+<text x="660" y="60" fill="#26a69a" font-size="10" font-family="JetBrains Mono">TP 936.80</text>
+<line x1="540" y1="100" x2="700" y2="100" stroke="#ef5350" stroke-width="1" stroke-dasharray="3"/>
+<text x="660" y="112" fill="#ef5350" font-size="10" font-family="JetBrains Mono">SL 878.50</text>
+</svg>
+</div>
+<div class="tv-right">
+<div class="tv-sect"><div class="tv-sect-t">BI Scanner Long <span>12</span></div>
+<div class="tv-row"><span><span class="tv-ticker" style="color:#2962ff">NVDA</span></span><span class="tag tag-s" style="font-size:10px">S 91</span><span class="tv-val up">+1.2%</span></div>
+<div class="tv-row"><span><span class="tv-ticker">PLTR</span></span><span class="tag tag-s" style="font-size:10px">S 88</span><span class="tv-val up">+0.8%</span></div>
+<div class="tv-row"><span><span class="tv-ticker">CRWD</span></span><span class="tag tag-a" style="font-size:10px">A 82</span><span class="tv-val up">+2.1%</span></div>
+<div class="tv-row"><span><span class="tv-ticker">META</span></span><span class="tag tag-a" style="font-size:10px">A 79</span><span class="tv-val dn">-0.3%</span></div>
+</div>
+<div class="tv-sect"><div class="tv-sect-t">BTC Divergenz Short <span>47</span></div>
+<div class="tv-row"><span><span class="tv-ticker">BANANAS31</span></span><span class="tv-val">75</span><span class="tv-val dn">Short</span></div>
+<div class="tv-row"><span><span class="tv-ticker">MSTR</span></span><span class="tv-val">68</span><span class="tv-val dn">Short</span></div>
+</div>
+<div class="tv-sect"><div class="tv-sect-t">Biotech FDA <span>136</span></div>
+<div class="tv-row"><span><span class="tv-ticker">SAVA</span></span><span class="tv-val">PDUFA</span><span class="tv-val" style="color:#787b86">Apr 12</span></div>
+</div>
+<div class="tv-sect"><div class="tv-sect-t">Market</div>
+<div class="tv-row"><span>SPY</span><span class="tv-val dn">-3.6%</span></div>
+<div class="tv-row"><span>VIX</span><span class="tv-val" style="color:#f59e0b">18.4</span></div>
+<div class="tv-row"><span>Crash</span><span class="tv-val" style="color:#f59e0b">ERHOEHT</span></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- ═══ 10. GRADIENT MODERN ═══ -->
+<div id="p10" class="panel">
+<div class="gm-wrap">
+<div class="desc"><b>10. Gradient Modern</b> — Dunkler Hintergrund mit farbigen Gradient-Akzenten pro Scanner-Typ. Moderne Karten mit farbiger Oberkante. Premium-Look mit klarer visueller Hierarchie.</div>
+<div class="gm-hdr"><h1>Alpha Station</h1><p>V70.7 Pro — 14 Scanner aktiv — Server Online</p></div>
+<div class="gm-hero">
+<div class="gm-hero-card"><div class="gm-hero-l">BTC</div><div class="gm-hero-v">$66,527</div><div class="gm-hero-c dn">-0.2%</div></div>
+<div class="gm-hero-card"><div class="gm-hero-l">SPY</div><div class="gm-hero-v">512.30</div><div class="gm-hero-c dn">-3.6%</div></div>
+<div class="gm-hero-card"><div class="gm-hero-l">VIX</div><div class="gm-hero-v" style="color:#f59e0b">18.4</div><div class="gm-hero-c" style="color:#f59e0b">Erhoeht</div></div>
+<div class="gm-hero-card"><div class="gm-hero-l">Signals</div><div class="gm-hero-v" style="color:#818cf8">198</div><div class="gm-hero-c mut">12L + 47S + 136B + 3N</div></div>
+<div class="gm-hero-card"><div class="gm-hero-l">Next Event</div><div class="gm-hero-v" style="font-size:16px;">PCE</div><div class="gm-hero-c dn">08:30 ET</div></div>
+</div>
+<div class="gm-grid">
+<div class="gm-card c-blue"><div class="gm-card-name">Breakout Imminent</div><div class="gm-card-desc">20-Signal Composite — Aktien kurz vor Ausbruch</div><div class="gm-card-stats"><div><div class="gm-card-stat-l">Kandidaten</div><div class="gm-card-stat-v" style="color:#38bdf8">12</div></div><div><div class="gm-card-stat-l">Grade S/A</div><div class="gm-card-stat-v" style="color:#34d399">4</div></div><div><div class="gm-card-stat-l">Score</div><div class="gm-card-stat-v">72</div></div></div><div class="gm-card-foot"><span>vor 23 Min</span><span>15:00 ET</span></div></div>
+<div class="gm-card c-red"><div class="gm-card-name">BTC Divergenz Short</div><div class="gm-card-desc">Altcoins vs BTC-Schwaeche — Short-Signale</div><div class="gm-card-stats"><div><div class="gm-card-stat-l">Shorts</div><div class="gm-card-stat-v" style="color:#f87171">47</div></div><div><div class="gm-card-stat-l">Top</div><div class="gm-card-stat-v">BANANAS31</div></div><div><div class="gm-card-stat-l">SellProb</div><div class="gm-card-stat-v">68</div></div></div><div class="gm-card-foot"><span>vor 13 Min</span><span>Crypto 24/7</span></div></div>
+<div class="gm-card c-purple"><div class="gm-card-name">Biotech FDA Scanner</div><div class="gm-card-desc">FDA Catalysts, Clinical Trials, Pipeline-Tracker</div><div class="gm-card-stats"><div><div class="gm-card-stat-l">Treffer</div><div class="gm-card-stat-v">136</div></div><div><div class="gm-card-stat-l">Progress</div><div class="gm-card-stat-v">74%</div></div></div><div class="gm-card-foot"><span>1075/1437</span><span>Stuendlich</span></div></div>
+<div class="gm-card c-green"><div class="gm-card-name">Early Movers</div><div class="gm-card-desc">Volume Spikes, Micro-Cap Momentum, Rotation</div><div class="gm-card-stats"><div><div class="gm-card-stat-l">Spikes</div><div class="gm-card-stat-v">339</div></div><div><div class="gm-card-stat-l">Whales</div><div class="gm-card-stat-v">23</div></div></div><div class="gm-card-foot"><span>Crypto 24/7</span><span>5 Sub-Scanner</span></div></div>
+<div class="gm-card c-blue"><div class="gm-card-name">Money Flow Heatmap</div><div class="gm-card-desc">Smart Money Sektor-Rotation</div><div class="gm-card-stats"><div><div class="gm-card-stat-l">Leader</div><div class="gm-card-stat-v up">Energy</div></div><div><div class="gm-card-stat-l">Spread</div><div class="gm-card-stat-v">12%</div></div></div><div class="gm-card-foot"><span>Cache 10 Min</span><span>Polygon.io</span></div></div>
+<div class="gm-card c-red"><div class="gm-card-name">Crash Monitor</div><div class="gm-card-desc">SPY, VIX, Breadth, Credit Stress</div><div class="gm-card-stats"><div><div class="gm-card-stat-l">Risk</div><div class="gm-card-stat-v" style="color:#f59e0b">ERHOEHT</div></div><div><div class="gm-card-stat-l">VIX</div><div class="gm-card-stat-v">18.4</div></div></div><div class="gm-card-foot"><span>Alle 30 Min</span><span>2x taeglich</span></div></div>
+</div>
+</div>
+</div>
+
+<script>
+function show(n){
+document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
+document.querySelectorAll('.nbtn').forEach(b=>b.classList.remove('on'));
+document.getElementById('p'+n).classList.add('on');
+document.querySelectorAll('.nbtn')[n-1].classList.add('on');
+}
+</script>
+</body>
+</html>

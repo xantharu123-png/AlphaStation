@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpha Station — UI Redesign Concepts</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-secondary: #111827;
+    --bg-card: #1a1f2e;
+    --bg-card-hover: #222838;
+    --border: #2a3040;
+    --border-active: #3b82f6;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-blue: #3b82f6;
+    --accent-green: #10b981;
+    --accent-red: #ef4444;
+    --accent-orange: #f59e0b;
+    --accent-purple: #8b5cf6;
+    --accent-cyan: #06b6d4;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    overflow-x: hidden;
+  }
+
+  /* Concept Switcher */
+  .concept-nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+    background: rgba(10, 14, 23, 0.95);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .concept-nav h1 { font-size: 14px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; }
+  .concept-btn {
+    padding: 8px 20px; border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500;
+    transition: all 0.2s;
+  }
+  .concept-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+  .concept-btn.active { background: var(--accent-blue); border-color: var(--accent-blue); color: white; }
+
+  .concept { display: none; padding-top: 60px; min-height: 100vh; }
+  .concept.active { display: block; }
+
+  /* ═══════════════════════════════════════════ */
+  /* CONCEPT A: Command Center Layout            */
+  /* ═══════════════════════════════════════════ */
+  .cc-layout {
+    display: grid;
+    grid-template-columns: 260px 1fr 320px;
+    grid-template-rows: auto 1fr;
+    height: calc(100vh - 60px);
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .cc-topbar {
+    grid-column: 1 / -1;
+    background: var(--bg-secondary);
+    padding: 12px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .cc-logo { display: flex; align-items: center; gap: 10px; }
+  .cc-logo span { font-size: 18px; font-weight: 700; }
+  .cc-logo small { font-size: 11px; color: var(--text-muted); background: var(--bg-card); padding: 2px 8px; border-radius: 4px; }
+
+  .cc-status-bar { display: flex; gap: 16px; align-items: center; }
+  .cc-status-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .cc-status-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .cc-status-dot.green { background: var(--accent-green); box-shadow: 0 0 6px var(--accent-green); }
+  .cc-status-dot.red { background: var(--accent-red); box-shadow: 0 0 6px var(--accent-red); }
+  .cc-status-dot.orange { background: var(--accent-orange); box-shadow: 0 0 6px var(--accent-orange); }
+
+  /* Left Nav */
+  .cc-nav {
+    background: var(--bg-secondary);
+    padding: 12px;
+    overflow-y: auto;
+  }
+  .cc-nav-group { margin-bottom: 16px; }
+  .cc-nav-group-title {
+    font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 1.5px;
+    padding: 8px 12px 4px;
+  }
+  .cc-nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 8px; cursor: pointer;
+    transition: all 0.15s; font-size: 13px; color: var(--text-secondary);
+  }
+  .cc-nav-item:hover { background: var(--bg-card); color: var(--text-primary); }
+  .cc-nav-item.active { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.3); }
+  .cc-nav-icon { font-size: 16px; width: 24px; text-align: center; }
+  .cc-nav-badge {
+    margin-left: auto; font-size: 10px; font-weight: 600;
+    padding: 2px 6px; border-radius: 4px;
+    background: rgba(59, 130, 246, 0.2); color: var(--accent-blue);
+  }
+  .cc-nav-badge.alert { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
+  .cc-nav-badge.success { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); }
+
+  /* Main Content */
+  .cc-main {
+    background: var(--bg-primary);
+    padding: 20px;
+    overflow-y: auto;
+  }
+  .cc-main-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 20px;
+  }
+  .cc-main-title { font-size: 20px; font-weight: 700; }
+  .cc-main-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  .cc-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+  .cc-card {
+    background: var(--bg-card); border-radius: 12px; padding: 16px;
+    border: 1px solid var(--border); transition: all 0.2s;
+  }
+  .cc-card:hover { border-color: var(--border-active); transform: translateY(-1px); }
+  .cc-card-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .cc-card-value { font-size: 24px; font-weight: 700; margin: 4px 0; font-family: 'JetBrains Mono', monospace; }
+  .cc-card-change { font-size: 12px; }
+  .cc-card-change.up { color: var(--accent-green); }
+  .cc-card-change.down { color: var(--accent-red); }
+
+  /* Table */
+  .cc-table-wrap {
+    background: var(--bg-card); border-radius: 12px; border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .cc-table-header {
+    padding: 12px 16px; display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .cc-table-title { font-size: 14px; font-weight: 600; }
+  .cc-table-actions { display: flex; gap: 8px; }
+  .cc-table-action {
+    padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    font-size: 11px; font-family: 'Inter', sans-serif;
+  }
+  .cc-table-action:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { padding: 10px 16px; text-align: left; font-size: 11px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+  td { padding: 12px 16px; font-size: 13px; border-bottom: 1px solid rgba(42, 48, 64, 0.5); }
+  tr:hover td { background: var(--bg-card-hover); }
+  .ticker { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .score-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .score-s { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
+  .score-a { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
+  .score-b { background: rgba(59, 130, 246, 0.2); color: #93c5fd; }
+  .score-c { background: rgba(245, 158, 11, 0.2); color: #fcd34d; }
+
+  .signal-pill {
+    display: inline-flex; padding: 3px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 500;
+  }
+  .signal-long { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); }
+  .signal-short { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); }
+
+  /* Right Panel */
+  .cc-right {
+    background: var(--bg-secondary);
+    padding: 16px;
+    overflow-y: auto;
+  }
+  .cc-right-section { margin-bottom: 20px; }
+  .cc-right-title {
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 6px;
+  }
+
+  .cc-chart-placeholder {
+    background: var(--bg-card); border-radius: 10px; height: 200px;
+    border: 1px solid var(--border); display: flex; align-items: center;
+    justify-content: center; color: var(--text-muted); font-size: 12px;
+    position: relative; overflow: hidden;
+  }
+  .cc-chart-placeholder::before {
+    content: '';
+    position: absolute; bottom: 0; left: 0; right: 0; height: 60%;
+    background: linear-gradient(180deg, transparent, rgba(59, 130, 246, 0.05));
+  }
+
+  .cc-alert-item {
+    padding: 10px 12px; border-radius: 8px; margin-bottom: 8px;
+    border-left: 3px solid; font-size: 12px;
+  }
+  .cc-alert-item.info { background: rgba(59, 130, 246, 0.1); border-color: var(--accent-blue); }
+  .cc-alert-item.warning { background: rgba(245, 158, 11, 0.1); border-color: var(--accent-orange); }
+  .cc-alert-item.success { background: rgba(16, 185, 129, 0.1); border-color: var(--accent-green); }
+  .cc-alert-item.danger { background: rgba(239, 68, 68, 0.1); border-color: var(--accent-red); }
+  .cc-alert-time { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+
+  .cc-trade-setup {
+    background: var(--bg-card); border-radius: 10px; padding: 14px;
+    border: 1px solid var(--border); margin-bottom: 10px;
+  }
+  .cc-trade-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .cc-trade-ticker { font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .cc-trade-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); margin: 4px 0; }
+  .cc-trade-value { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); }
+
+  /* ═══════════════════════════════════════════ */
+  /* CONCEPT B: Dashboard Cards                  */
+  /* ═══════════════════════════════════════════ */
+  .db-layout {
+    max-width: 1400px; margin: 0 auto; padding: 20px;
+  }
+  .db-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  }
+  .db-title { font-size: 24px; font-weight: 800; }
+  .db-title span { background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+  .db-market-strip {
+    display: flex; gap: 20px; margin-bottom: 24px;
+    padding: 14px 20px; background: var(--bg-card); border-radius: 12px;
+    border: 1px solid var(--border);
+  }
+  .db-market-item { display: flex; align-items: center; gap: 8px; }
+  .db-market-label { font-size: 12px; color: var(--text-muted); }
+  .db-market-value { font-size: 14px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+  .db-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 16px;
+  }
+  .db-card {
+    background: var(--bg-card); border-radius: 16px; padding: 20px;
+    border: 1px solid var(--border); transition: all 0.2s;
+    cursor: pointer; position: relative; overflow: hidden;
+  }
+  .db-card:hover { border-color: var(--border-active); transform: translateY(-2px); box-shadow: 0 8px 30px rgba(0,0,0,0.3); }
+  .db-card-icon {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; margin-bottom: 12px;
+  }
+  .db-card-icon.blue { background: rgba(59, 130, 246, 0.15); }
+  .db-card-icon.green { background: rgba(16, 185, 129, 0.15); }
+  .db-card-icon.red { background: rgba(239, 68, 68, 0.15); }
+  .db-card-icon.purple { background: rgba(139, 92, 246, 0.15); }
+  .db-card-icon.orange { background: rgba(245, 158, 11, 0.15); }
+  .db-card-icon.cyan { background: rgba(6, 182, 212, 0.15); }
+  .db-card-name { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+  .db-card-desc { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5; }
+  .db-card-stats { display: flex; gap: 16px; }
+  .db-card-stat { }
+  .db-card-stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; }
+  .db-card-stat-value { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .db-card-status {
+    position: absolute; top: 16px; right: 16px;
+    font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 4px;
+  }
+  .db-card-status.live { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); }
+  .db-card-status.scanning { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); animation: pulse 2s infinite; }
+  .db-card-status.idle { background: rgba(100, 116, 139, 0.2); color: var(--text-muted); }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .db-card-footer {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 11px; color: var(--text-muted);
+  }
+
+  /* ═══════════════════════════════════════════ */
+  /* CONCEPT C: Minimal Pro                      */
+  /* ═══════════════════════════════════════════ */
+  .mp-layout {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    height: calc(100vh - 60px);
+  }
+  .mp-rail {
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    padding: 16px 0;
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+  }
+  .mp-rail-item {
+    width: 44px; height: 44px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; cursor: pointer; transition: all 0.15s;
+    position: relative; color: var(--text-muted);
+  }
+  .mp-rail-item:hover { background: var(--bg-card); color: var(--text-primary); }
+  .mp-rail-item.active { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); }
+  .mp-rail-item .mp-badge {
+    position: absolute; top: 4px; right: 4px; width: 8px; height: 8px;
+    border-radius: 50%; background: var(--accent-red);
+  }
+  .mp-rail-divider { width: 30px; height: 1px; background: var(--border); margin: 8px 0; }
+
+  .mp-content { padding: 24px 32px; overflow-y: auto; }
+  .mp-content-header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 24px;
+  }
+  .mp-content-title { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
+  .mp-content-breadcrumb { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  .mp-filters {
+    display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  .mp-filter {
+    padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    font-size: 12px; font-family: 'Inter', sans-serif; transition: all 0.15s;
+  }
+  .mp-filter:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+  .mp-filter.active { background: var(--accent-blue); border-color: var(--accent-blue); color: white; }
+
+  .mp-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+  .mp-signal-card {
+    background: var(--bg-card); border-radius: 12px; padding: 16px;
+    border: 1px solid var(--border); display: flex; gap: 14px;
+    transition: all 0.15s; cursor: pointer;
+  }
+  .mp-signal-card:hover { border-color: var(--border-active); }
+  .mp-signal-rank {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+    flex-shrink: 0;
+  }
+  .mp-signal-rank.s { background: linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(139, 92, 246, 0.1)); color: #a78bfa; }
+  .mp-signal-rank.a { background: linear-gradient(135deg, rgba(16, 185, 129, 0.3), rgba(16, 185, 129, 0.1)); color: #6ee7b7; }
+  .mp-signal-rank.b { background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(59, 130, 246, 0.1)); color: #93c5fd; }
+  .mp-signal-body { flex: 1; min-width: 0; }
+  .mp-signal-top { display: flex; justify-content: space-between; align-items: center; }
+  .mp-signal-ticker { font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .mp-signal-name { font-size: 12px; color: var(--text-muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mp-signal-meta { display: flex; gap: 12px; margin-top: 8px; }
+  .mp-signal-meta span { font-size: 11px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+
+  /* Label */
+  .concept-label {
+    background: var(--bg-card); padding: 16px 24px; margin: 0 20px 20px;
+    border-radius: 12px; border: 1px solid var(--border);
+    font-size: 13px; color: var(--text-secondary); line-height: 1.6;
+  }
+  .concept-label strong { color: var(--text-primary); }
+</style>
+</head>
+<body>
+
+<!-- Concept Switcher -->
+<nav class="concept-nav">
+  <h1>UI Redesign</h1>
+  <button class="concept-btn active" onclick="showConcept('a')">A: Command Center</button>
+  <button class="concept-btn" onclick="showConcept('b')">B: Dashboard Cards</button>
+  <button class="concept-btn" onclick="showConcept('c')">C: Minimal Pro</button>
+</nav>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- CONCEPT A: Command Center                       -->
+<!-- ════════════════════════════════════════════════ -->
+<div id="concept-a" class="concept active">
+  <div class="concept-label">
+    <strong>Konzept A: Command Center</strong> — Dreispaltiges Layout wie Bloomberg Terminal. Links Navigation nach Kategorie, Mitte die Daten, rechts Chart + Alerts. Alles auf einen Blick, ohne Tab-Wechsel.
+  </div>
+  <div class="cc-layout">
+    <!-- Top Bar -->
+    <div class="cc-topbar">
+      <div class="cc-logo">
+        <span>💎 Alpha Station</span>
+        <small>V70.7 PRO</small>
+      </div>
+      <div class="cc-status-bar">
+        <div class="cc-status-item"><div class="cc-status-dot green"></div> Server Online</div>
+        <div class="cc-status-item"><div class="cc-status-dot green"></div> BG Service</div>
+        <div class="cc-status-item"><div class="cc-status-dot red"></div> IBKR Offline</div>
+        <div class="cc-status-item"><div class="cc-status-dot orange"></div> Next Scan: 14:05 ET</div>
+        <div class="cc-status-item" style="font-family: 'JetBrains Mono', monospace;">BTC $66,527 <span style="color: var(--accent-red)">-0.2%</span></div>
+      </div>
+    </div>
+
+    <!-- Left Navigation -->
+    <div class="cc-nav">
+      <div class="cc-nav-group">
+        <div class="cc-nav-group-title">Scanner</div>
+        <div class="cc-nav-item active">
+          <span class="cc-nav-icon">🔮</span> Breakout Imminent
+          <span class="cc-nav-badge">12</span>
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">📉</span> BTC Divergenz
+          <span class="cc-nav-badge alert">47</span>
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🐻</span> Short Scanner
+          <span class="cc-nav-badge">8</span>
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🔥</span> Early Movers
+          <span class="cc-nav-badge success">23</span>
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🆕</span> New Listings
+          <span class="cc-nav-badge">3</span>
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🧬</span> Biotech FDA
+          <span class="cc-nav-badge">136</span>
+        </div>
+      </div>
+      <div class="cc-nav-group">
+        <div class="cc-nav-group-title">Markt</div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">💰</span> Money Flow
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">📅</span> Kalender
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🔴</span> Crash Monitor
+        </div>
+      </div>
+      <div class="cc-nav-group">
+        <div class="cc-nav-group-title">Tools</div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🔍</span> Suche
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">⭐</span> Watchlist
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🧪</span> Backtest Lab
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">📖</span> Guide
+        </div>
+      </div>
+      <div class="cc-nav-group">
+        <div class="cc-nav-group-title">Trading</div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🤖</span> Auto-Trader
+          <span class="cc-nav-badge" style="background: rgba(239, 68, 68, 0.2); color: var(--accent-red);">OFF</span>
+        </div>
+        <div class="cc-nav-item">
+          <span class="cc-nav-icon">🧠</span> AI Analyse
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="cc-main">
+      <div class="cc-main-header">
+        <div>
+          <div class="cc-main-title">🔮 Breakout Imminent Scanner</div>
+          <div class="cc-main-subtitle">20-Signal Composite Scoring | Letzter Scan: vor 23 Min</div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="cc-table-action">🔄 Scan starten</button>
+          <button class="cc-table-action">📥 CSV Export</button>
+        </div>
+      </div>
+
+      <div class="cc-cards">
+        <div class="cc-card">
+          <div class="cc-card-label">Kandidaten</div>
+          <div class="cc-card-value" style="color: var(--accent-blue);">12</div>
+          <div class="cc-card-change up">+3 seit letztem Scan</div>
+        </div>
+        <div class="cc-card">
+          <div class="cc-card-label">Grade S/A</div>
+          <div class="cc-card-value" style="color: var(--accent-green);">4</div>
+          <div class="cc-card-change">Top-Setups</div>
+        </div>
+        <div class="cc-card">
+          <div class="cc-card-label">Ø Score</div>
+          <div class="cc-card-value">72.4</div>
+          <div class="cc-card-change up">+5.2 vs gestern</div>
+        </div>
+      </div>
+
+      <div class="cc-table-wrap">
+        <div class="cc-table-header">
+          <div class="cc-table-title">Ergebnisse — Long</div>
+          <div class="cc-table-actions">
+            <button class="cc-table-action">Long</button>
+            <button class="cc-table-action">Short</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>#</th><th>Ticker</th><th>Score</th><th>Grade</th><th>Signal</th><th>R:R</th><th>Entry</th><th>Stop</th><th>TP1</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td class="ticker">NVDA</td><td><span class="score-badge score-s">91</span></td><td><span class="score-badge score-s">S</span></td><td><span class="signal-pill signal-long">Breakout</span></td><td>3.2</td><td style="font-family: 'JetBrains Mono', monospace;">$892.40</td><td style="font-family: 'JetBrains Mono', monospace;">$878.50</td><td style="font-family: 'JetBrains Mono', monospace;">$936.80</td></tr>
+            <tr><td>2</td><td class="ticker">PLTR</td><td><span class="score-badge score-s">88</span></td><td><span class="score-badge score-s">S</span></td><td><span class="signal-pill signal-long">Bull Flag</span></td><td>2.8</td><td style="font-family: 'JetBrains Mono', monospace;">$78.20</td><td style="font-family: 'JetBrains Mono', monospace;">$75.60</td><td style="font-family: 'JetBrains Mono', monospace;">$85.50</td></tr>
+            <tr><td>3</td><td class="ticker">CRWD</td><td><span class="score-badge score-a">82</span></td><td><span class="score-badge score-a">A</span></td><td><span class="signal-pill signal-long">Volume Surge</span></td><td>2.4</td><td style="font-family: 'JetBrains Mono', monospace;">$345.10</td><td style="font-family: 'JetBrains Mono', monospace;">$338.00</td><td style="font-family: 'JetBrains Mono', monospace;">$362.00</td></tr>
+            <tr><td>4</td><td class="ticker">META</td><td><span class="score-badge score-a">79</span></td><td><span class="score-badge score-a">A</span></td><td><span class="signal-pill signal-long">Breakout</span></td><td>2.1</td><td style="font-family: 'JetBrains Mono', monospace;">$512.30</td><td style="font-family: 'JetBrains Mono', monospace;">$501.80</td><td style="font-family: 'JetBrains Mono', monospace;">$534.40</td></tr>
+            <tr><td>5</td><td class="ticker">COIN</td><td><span class="score-badge score-b">71</span></td><td><span class="score-badge score-b">B</span></td><td><span class="signal-pill signal-long">Dip Buy</span></td><td>1.9</td><td style="font-family: 'JetBrains Mono', monospace;">$218.50</td><td style="font-family: 'JetBrains Mono', monospace;">$210.20</td><td style="font-family: 'JetBrains Mono', monospace;">$234.30</td></tr>
+            <tr><td>6</td><td class="ticker">SHOP</td><td><span class="score-badge score-b">68</span></td><td><span class="score-badge score-b">B</span></td><td><span class="signal-pill signal-long">Early Mom.</span></td><td>1.8</td><td style="font-family: 'JetBrains Mono', monospace;">$98.70</td><td style="font-family: 'JetBrains Mono', monospace;">$95.40</td><td style="font-family: 'JetBrains Mono', monospace;">$104.60</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Right Panel -->
+    <div class="cc-right">
+      <div class="cc-right-section">
+        <div class="cc-right-title">📊 NVDA — 4H Chart</div>
+        <div class="cc-chart-placeholder">
+          <svg width="280" height="160" viewBox="0 0 280 160">
+            <polyline fill="none" stroke="#3b82f6" stroke-width="2" points="10,120 30,110 50,100 70,105 90,90 110,95 130,80 150,70 170,75 190,60 210,50 230,55 250,40 270,35"/>
+            <polyline fill="none" stroke="#3b82f650" stroke-width="1" stroke-dasharray="4" points="10,85 270,85"/>
+            <line x1="230" y1="35" x2="230" y2="55" stroke="#10b981" stroke-width="1" stroke-dasharray="3"/>
+            <text x="235" y="32" fill="#10b981" font-size="9" font-family="JetBrains Mono">TP $936</text>
+            <text x="235" y="62" fill="#ef4444" font-size="9" font-family="JetBrains Mono">SL $878</text>
+            <line x1="230" y1="55" x2="230" y2="65" stroke="#ef4444" stroke-width="1" stroke-dasharray="3"/>
+          </svg>
+        </div>
+      </div>
+
+      <div class="cc-right-section">
+        <div class="cc-right-title">🔔 Letzte Alerts</div>
+        <div class="cc-alert-item success">
+          <div><strong>NVDA</strong> — Grade S Breakout erkannt</div>
+          <div class="cc-alert-time">vor 23 Min · BI Scanner Long</div>
+        </div>
+        <div class="cc-alert-item warning">
+          <div><strong>PCE Price Index</strong> morgen 08:30 ET</div>
+          <div class="cc-alert-time">vor 1h · Wirtschaftskalender</div>
+        </div>
+        <div class="cc-alert-item danger">
+          <div><strong>BANANAS31</strong> — SellProb 75/100</div>
+          <div class="cc-alert-time">vor 13 Min · BTC Divergenz</div>
+        </div>
+        <div class="cc-alert-item info">
+          <div><strong>3 neue Listings</strong> — PRL, CAPTCHA, CHIBI</div>
+          <div class="cc-alert-time">vor 45 Min · New Listing Scanner</div>
+        </div>
+      </div>
+
+      <div class="cc-right-section">
+        <div class="cc-right-title">⚡ Quick Trade</div>
+        <div class="cc-trade-setup">
+          <div class="cc-trade-header">
+            <span class="cc-trade-ticker">NVDA</span>
+            <span class="signal-pill signal-long">Long</span>
+          </div>
+          <div class="cc-trade-row"><span>Entry</span><span class="cc-trade-value">$892.40</span></div>
+          <div class="cc-trade-row"><span>Stop Loss</span><span class="cc-trade-value" style="color: var(--accent-red);">$878.50</span></div>
+          <div class="cc-trade-row"><span>Take Profit</span><span class="cc-trade-value" style="color: var(--accent-green);">$936.80</span></div>
+          <div class="cc-trade-row"><span>R:R</span><span class="cc-trade-value">3.2</span></div>
+          <div style="margin-top: 12px; display: flex; gap: 8px;">
+            <button style="flex:1; padding: 8px; border-radius: 8px; border: none; background: var(--accent-green); color: white; font-weight: 600; cursor: pointer; font-family: 'Inter', sans-serif;">📤 Send to TWS</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- CONCEPT B: Dashboard Cards                      -->
+<!-- ════════════════════════════════════════════════ -->
+<div id="concept-b" class="concept">
+  <div class="concept-label">
+    <strong>Konzept B: Dashboard Cards</strong> — Übersichtsseite mit Karten für jeden Scanner. Jede Karte zeigt Status, letzte Ergebnisse und Kennzahlen auf einen Blick. Klick öffnet den vollen Scanner. Ideal für den schnellen Überblick.
+  </div>
+  <div class="db-layout">
+    <div class="db-header">
+      <div>
+        <div class="db-title">💎 <span>Alpha Station</span> Pro</div>
+        <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">V70.7 · 14 Scanner · Server Online · Letzter Scan: vor 4 Min</div>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="mp-filter active">Alle</button>
+        <button class="mp-filter">Aktien</button>
+        <button class="mp-filter">Crypto</button>
+        <button class="mp-filter">Makro</button>
+      </div>
+    </div>
+
+    <div class="db-market-strip">
+      <div class="db-market-item"><span class="db-market-label">SPY</span><span class="db-market-value" style="color: var(--accent-red);">-3.6%</span></div>
+      <div class="db-market-item"><span class="db-market-label">QQQ</span><span class="db-market-value" style="color: var(--accent-red);">-4.4%</span></div>
+      <div class="db-market-item"><span class="db-market-label">BTC</span><span class="db-market-value" style="color: var(--accent-red);">-0.2%</span></div>
+      <div class="db-market-item"><span class="db-market-label">VIX</span><span class="db-market-value" style="color: var(--accent-orange);">18.4</span></div>
+      <div class="db-market-item"><span class="db-market-label">DXY</span><span class="db-market-value" style="color: var(--accent-green);">+0.3%</span></div>
+      <div style="margin-left: auto;"><span class="db-market-label">⏰ Nächstes Event: </span><span class="db-market-value">PCE 08:30 ET</span></div>
+    </div>
+
+    <div class="db-grid">
+      <div class="db-card">
+        <span class="db-card-status scanning">● SCANNING</span>
+        <div class="db-card-icon blue">🔮</div>
+        <div class="db-card-name">Breakout Imminent</div>
+        <div class="db-card-desc">20-Signal Composite — findet Aktien kurz vor dem Ausbruch</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Kandidaten</div><div class="db-card-stat-value">12</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Grade S/A</div><div class="db-card-stat-value" style="color: var(--accent-green);">4</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Ø Score</div><div class="db-card-stat-value">72</div></div>
+        </div>
+        <div class="db-card-footer"><span>Letzter Scan: vor 23 Min</span><span>Nächster: 15:00 ET</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status live">● LIVE</span>
+        <div class="db-card-icon red">📉</div>
+        <div class="db-card-name">BTC Divergenz Short</div>
+        <div class="db-card-desc">Altcoins die gegen BTC-Schwäche pumpen — Short-Kandidaten</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Shorts</div><div class="db-card-stat-value" style="color: var(--accent-red);">47</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Top Signal</div><div class="db-card-stat-value">BANANAS31</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Ø SellProb</div><div class="db-card-stat-value">68</div></div>
+        </div>
+        <div class="db-card-footer"><span>Letztes Update: vor 13 Min</span><span>24/7 Crypto</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status scanning">● SCANNING</span>
+        <div class="db-card-icon purple">🧬</div>
+        <div class="db-card-name">Biotech FDA Scanner</div>
+        <div class="db-card-desc">FDA Catalysts, Clinical Trial Ergebnisse, Pipeline-Tracker</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Treffer</div><div class="db-card-stat-value">136</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Progress</div><div class="db-card-stat-value">74%</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Gescannt</div><div class="db-card-stat-value">1075</div></div>
+        </div>
+        <div class="db-card-footer"><span>1075/1437 Aktien</span><span>Stündlich 15min versetzt</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status live">● LIVE</span>
+        <div class="db-card-icon orange">🔥</div>
+        <div class="db-card-name">Early Movers</div>
+        <div class="db-card-desc">Volume Spikes, Micro-Cap Momentum, Sektor-Rotation</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Spikes</div><div class="db-card-stat-value">339</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Whales</div><div class="db-card-stat-value">23</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Perps</div><div class="db-card-stat-value">1300</div></div>
+        </div>
+        <div class="db-card-footer"><span>Crypto 24/7</span><span>5 Sub-Scanner</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status live">● LIVE</span>
+        <div class="db-card-icon cyan">🆕</div>
+        <div class="db-card-name">New Listing Dump</div>
+        <div class="db-card-desc">Short-Signale für neue PERP-Listings — Multi-Exchange</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Neue</div><div class="db-card-stat-value" style="color: var(--accent-cyan);">3</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Exchanges</div><div class="db-card-stat-value">3</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Perps</div><div class="db-card-stat-value">1500+</div></div>
+        </div>
+        <div class="db-card-footer"><span>Alle 15 Min</span><span>Crypto.com + MEXC + Bitget</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status idle">● IDLE</span>
+        <div class="db-card-icon red">🐻</div>
+        <div class="db-card-name">Short Scanner V2</div>
+        <div class="db-card-desc">20-Signal Composite Scoring für Short-Setups</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Kandidaten</div><div class="db-card-stat-value">8</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Modus</div><div class="db-card-stat-value">Swing</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Ø Score</div><div class="db-card-stat-value">65</div></div>
+        </div>
+        <div class="db-card-footer"><span>Letzter Scan: vor 2h</span><span>Nächster: 14:30 ET</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status live">● LIVE</span>
+        <div class="db-card-icon green">💰</div>
+        <div class="db-card-name">Money Flow Heatmap</div>
+        <div class="db-card-desc">Smart Money Rotation — Sektoren, Assets, Themen</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Leader</div><div class="db-card-stat-value" style="color: var(--accent-green);">Energy</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Laggard</div><div class="db-card-stat-value" style="color: var(--accent-red);">Comms</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">Spread</div><div class="db-card-stat-value">12%</div></div>
+        </div>
+        <div class="db-card-footer"><span>Cache: 10 Min</span><span>Polygon.io Daten</span></div>
+      </div>
+
+      <div class="db-card">
+        <span class="db-card-status live">● LIVE</span>
+        <div class="db-card-icon red">🔴</div>
+        <div class="db-card-name">S&P 500 Crash Monitor</div>
+        <div class="db-card-desc">Frühwarnsystem — SPY, VIX, Breadth, Credit Stress</div>
+        <div class="db-card-stats">
+          <div class="db-card-stat"><div class="db-card-stat-label">Risk Level</div><div class="db-card-stat-value" style="color: var(--accent-orange);">ERHÖHT</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">VIX</div><div class="db-card-stat-value">18.4</div></div>
+          <div class="db-card-stat"><div class="db-card-stat-label">SPY SMA200</div><div class="db-card-stat-value" style="color: var(--accent-green);">ÜBER</div></div>
+        </div>
+        <div class="db-card-footer"><span>Alle 30 Min</span><span>2x täglich</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- CONCEPT C: Minimal Pro                          -->
+<!-- ════════════════════════════════════════════════ -->
+<div id="concept-c" class="concept">
+  <div class="concept-label">
+    <strong>Konzept C: Minimal Pro</strong> — Ultraschlanke Icon-Leiste links (wie Discord/Slack), maximaler Platz für Content. Weniger UI-Noise, fokussiert auf die Signale. Filter-Pills statt Dropdown-Menüs.
+  </div>
+  <div class="mp-layout">
+    <!-- Icon Rail -->
+    <div class="mp-rail">
+      <div class="mp-rail-item active" title="Dashboard">📊</div>
+      <div class="mp-rail-item" title="BI Scanner">🔮<div class="mp-badge"></div></div>
+      <div class="mp-rail-item" title="BTC Divergenz">📉</div>
+      <div class="mp-rail-item" title="Short Scanner">🐻</div>
+      <div class="mp-rail-item" title="Early Movers">🔥</div>
+      <div class="mp-rail-item" title="New Listings">🆕</div>
+      <div class="mp-rail-item" title="Biotech">🧬</div>
+      <div class="mp-rail-divider"></div>
+      <div class="mp-rail-item" title="Money Flow">💰</div>
+      <div class="mp-rail-item" title="Kalender">📅</div>
+      <div class="mp-rail-item" title="Crash Monitor">🔴</div>
+      <div class="mp-rail-divider"></div>
+      <div class="mp-rail-item" title="Suche">🔍</div>
+      <div class="mp-rail-item" title="Watchlist">⭐</div>
+      <div class="mp-rail-item" title="Backtest">🧪</div>
+      <div class="mp-rail-divider"></div>
+      <div class="mp-rail-item" title="AI">🤖</div>
+      <div class="mp-rail-item" title="Settings">⚙️</div>
+    </div>
+
+    <!-- Content -->
+    <div class="mp-content">
+      <div class="mp-content-header">
+        <div>
+          <div class="mp-content-title">Alle Signale</div>
+          <div class="mp-content-breadcrumb">47 Short · 12 Long · 136 Biotech · 3 New Listings — sortiert nach Score</div>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span style="font-size: 12px; color: var(--text-muted);">BTC $66,527</span>
+          <span style="font-size: 12px; color: var(--accent-red);">-0.2%</span>
+          <span style="font-size: 12px; color: var(--text-muted); margin-left: 8px;">SPY</span>
+          <span style="font-size: 12px; color: var(--accent-red);">-3.6%</span>
+        </div>
+      </div>
+
+      <div class="mp-filters">
+        <button class="mp-filter active">Alle</button>
+        <button class="mp-filter">Long</button>
+        <button class="mp-filter">Short</button>
+        <button class="mp-filter">Crypto</button>
+        <button class="mp-filter">Aktien</button>
+        <button class="mp-filter">Biotech</button>
+        <button class="mp-filter">Grade S</button>
+        <button class="mp-filter">Grade A</button>
+        <button class="mp-filter">R:R > 2.5</button>
+        <button class="mp-filter">Neuste zuerst</button>
+      </div>
+
+      <div class="mp-grid">
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank s">S</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">NVDA</span><span class="signal-pill signal-long">Long · Breakout</span></div>
+            <div class="mp-signal-name">NVIDIA Corp — BI Scanner</div>
+            <div class="mp-signal-meta">
+              <span>Score 91</span><span>R:R 3.2</span><span style="color: var(--accent-green);">Entry $892</span><span style="color: var(--accent-red);">SL $878</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank s">S</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">PLTR</span><span class="signal-pill signal-long">Long · Bull Flag</span></div>
+            <div class="mp-signal-name">Palantir Technologies — BI Scanner</div>
+            <div class="mp-signal-meta">
+              <span>Score 88</span><span>R:R 2.8</span><span style="color: var(--accent-green);">Entry $78.20</span><span style="color: var(--accent-red);">SL $75.60</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank s">75</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">BANANAS31</span><span class="signal-pill signal-short">Short · Divergenz</span></div>
+            <div class="mp-signal-name">Banana For Scale — BTC Divergenz</div>
+            <div class="mp-signal-meta">
+              <span>SellProb 75</span><span>Div +56%</span><span style="color: var(--accent-orange);">Bereit</span><span>MCap 23M</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank a">A</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">CRWD</span><span class="signal-pill signal-long">Long · Vol Surge</span></div>
+            <div class="mp-signal-name">CrowdStrike Holdings — BI Scanner</div>
+            <div class="mp-signal-meta">
+              <span>Score 82</span><span>R:R 2.4</span><span style="color: var(--accent-green);">Entry $345</span><span style="color: var(--accent-red);">SL $338</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank a">A</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">META</span><span class="signal-pill signal-long">Long · Breakout</span></div>
+            <div class="mp-signal-name">Meta Platforms — BI Scanner</div>
+            <div class="mp-signal-meta">
+              <span>Score 79</span><span>R:R 2.1</span><span style="color: var(--accent-green);">Entry $512</span><span style="color: var(--accent-red);">SL $501</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank b">68</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">MSTR</span><span class="signal-pill signal-short">Short · Divergenz</span></div>
+            <div class="mp-signal-name">MicroStrategy — BTC Divergenz</div>
+            <div class="mp-signal-meta">
+              <span>SellProb 68</span><span>Div +42%</span><span style="color: var(--accent-orange);">Nahe High</span><span>MCap 45B</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank b">B</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">COIN</span><span class="signal-pill signal-long">Long · Dip Buy</span></div>
+            <div class="mp-signal-name">Coinbase Global — BI Scanner</div>
+            <div class="mp-signal-meta">
+              <span>Score 71</span><span>R:R 1.9</span><span style="color: var(--accent-green);">Entry $218</span><span style="color: var(--accent-red);">SL $210</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank a">FDA</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">SAVA</span><span class="signal-pill signal-long" style="background: rgba(139, 92, 246, 0.15); color: var(--accent-purple);">Biotech · PDUFA</span></div>
+            <div class="mp-signal-name">Cassava Sciences — FDA Catalyst</div>
+            <div class="mp-signal-meta">
+              <span>PDUFA Apr 12</span><span>Phase 3</span><span style="color: var(--accent-purple);">16 Tage</span><span>MCap 1.2B</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mp-signal-card">
+          <div class="mp-signal-rank b">NEW</div>
+          <div class="mp-signal-body">
+            <div class="mp-signal-top"><span class="mp-signal-ticker">PRL_USDT</span><span class="signal-pill signal-short">Short · New Listing</span></div>
+            <div class="mp-signal-name">New PERP Listing — MEXC</div>
+            <div class="mp-signal-meta">
+              <span>Pump +45%</span><span>Exhaustion 72</span><span style="color: var(--accent-orange);">Monitoring</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showConcept(id) {
+  document.querySelectorAll('.concept').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.concept-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('concept-' + id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>
