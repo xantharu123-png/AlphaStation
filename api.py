@@ -622,9 +622,16 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         # V3.2: MDR-Tag für Multi-Day Runner
                         _mdr_label = None
                         if _is_mdr:
-                            if vortag_pct > 30 and change_pct > 15:
+                            # V3.3: Distribution-Check — sinkende RVOL + Fading = Crash-Risiko
+                            _mdr_fading = rvol < 0.8 and close_pos < 0.5  # RVOL sinkt + Preis faded
+                            _mdr_exhaustion = rvol < 0.5  # Volume kollabiert = Käufer weg
+
+                            if _mdr_fading or _mdr_exhaustion:
+                                _mdr_label = "MDR CRASH-RISIKO"
+                                _strat_score -= 10  # Malus statt Bonus
+                            elif vortag_pct > 30 and change_pct > 15:
                                 _mdr_label = "MDR ELITE"
-                                _strat_score += 15  # Bonus für MDR
+                                _strat_score += 15
                             elif vortag_pct > 15 and change_pct > 8:
                                 _mdr_label = "MDR STARK"
                                 _strat_score += 10

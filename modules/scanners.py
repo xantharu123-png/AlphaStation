@@ -1315,8 +1315,16 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         _total_move = (_recent[-1]["close"] - _recent[0]["close"]) / _recent[0]["close"] * 100
 
                     # Multi-Day Runner Scoring
-                    if _big_days >= 2 and _max_consec >= 2 and _total_move > 50:
-                        _mdr_bonus = 25  # Starker Multi-Day Runner
+                    # V3.3: Volume-Exhaustion-Check — sinkendes Volume = Distribution
+                    _last_day_vol = _recent[-1]["volume"] if _recent else 0
+                    _prev_day_vol = _recent[-2]["volume"] if len(_recent) >= 2 else 0
+                    _vol_declining = _prev_day_vol > 0 and _last_day_vol < _prev_day_vol * 0.5
+
+                    if _vol_declining and _total_move > 30:
+                        _mdr_bonus = 0
+                        _mdr_tag = f"MDR CRASH-RISIKO: {_total_move:.0f}% Move aber Volume -50%"
+                    elif _big_days >= 2 and _max_consec >= 2 and _total_move > 50:
+                        _mdr_bonus = 25
                         _mdr_tag = f"MDR ELITE: {_big_days} Big Days, {_total_move:.0f}% Move, {_vol_surge_days} Vol-Surges"
                     elif _big_days >= 2 and _total_move > 30:
                         _mdr_bonus = 18

@@ -1679,7 +1679,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">
                                     {item.ticker}
-                                    {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:'#f97316',color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
+                                    {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:item.mdr_tag.includes('CRASH') ? '#dc2626' : '#f97316',color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                 </td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
@@ -1825,7 +1825,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                 <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
                                 <td className="py-3 px-2 font-semibold">
                                     {item.ticker}
-                                    {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:'#f97316',color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
+                                    {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:item.mdr_tag.includes('CRASH') ? '#dc2626' : '#f97316',color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                 </td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right" style={{color: (item.change_pct || 0) >= 0 ? '#10b981' : '#ef4444'}}>{(item.change_pct || 0) >= 0 ? '+' : ''}{(item.change_pct || 0).toFixed(2)}%</td>
