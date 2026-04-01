@@ -1692,8 +1692,9 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         }
 
         # 9. Trade Setup — ATR-based, uses confluence direction
+        # V3.0: Auch für Grade B anzeigen (war vorher nur S/A)
         trade_setup = None
-        if signal_grade in ['S', 'A'] and confluence_direction != "NEUTRAL":
+        if signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
             if confluence_direction == "LONG":
                 entry = round(close, 2)
                 atr_stop = atr * 2 if atr else (close * 0.03)
