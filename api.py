@@ -3904,8 +3904,9 @@ def _orb_scanner_wrapper() -> None:
                         breakout_dir = "LONG"
                         breakout_bar_vol = bv
                         breakout_bar_idx = i
-                        # Volume Confirmation: Breakout-Bar Volume > 1.2x OR-Durchschnitt
-                        if or_avg_vol > 0 and bv >= or_avg_vol * 1.2:
+                        # V2.9: Volume Confirmation gelockert — 0.8x reicht (vorher 1.2x)
+                        # Breakouts mit wenig Volume werden über Score abgestraft, nicht komplett gefiltert
+                        if or_avg_vol > 0 and bv >= or_avg_vol * 0.8:
                             breakout_confirmed = True
                         break
 
@@ -3914,19 +3915,22 @@ def _orb_scanner_wrapper() -> None:
                         breakout_dir = "SHORT"
                         breakout_bar_vol = bv
                         breakout_bar_idx = i
-                        if or_avg_vol > 0 and bv >= or_avg_vol * 1.2:
+                        if or_avg_vol > 0 and bv >= or_avg_vol * 0.8:
                             breakout_confirmed = True
                         break
 
                 # ── Failed Breakout Detection (Crabel Reversal) ──
-                # Wenn Breakout in eine Richtung, dann Reversal durch OR zurück
-                if breakout_dir and len(post_or) > breakout_bar_idx + 2:
+                # V2.9 FIX: Strenger als vorher — nur wenn Preis DEUTLICH zurück in OR ist
+                # Alte Version: 2 Bars unter OR High = Failed → zu aggressiv bei normalen Pullbacks
+                # Neue Logik: Preis muss unter OR MIDPOINT sein (nicht nur unter OR High)
+                # UND Mehrheit der Bars nach Breakout müssen zurück sein
+                if breakout_dir and len(post_or) > breakout_bar_idx + 3:
                     subsequent = post_or[breakout_bar_idx + 1:]
+                    or_mid = (or_high + or_low) / 2
                     if breakout_dir == "LONG":
-                        # Failed Long: Preis fällt zurück unter OR High
                         fails_back = sum(1 for b in subsequent if b.get("c", 0) < or_high)
-                        if fails_back >= 2 and current_price < or_high:
-                            # Failed Breakout → potentieller Short
+                        # Failed nur wenn: Preis unter OR Midpoint UND >60% Bars zurück
+                        if len(subsequent) >= 3 and fails_back / len(subsequent) > 0.6 and current_price < or_mid:
                             failed_breakouts.append({
                                 **cand,
                                 "or_high": round(or_high, 2), "or_low": round(or_low, 2),
@@ -3937,10 +3941,10 @@ def _orb_scanner_wrapper() -> None:
                                 "stop": round(or_high + or_size * 0.15, 2),
                                 "target": round(or_low - or_size * 0.8, 2),
                             })
-                            breakout_dir = None  # Kein gültiger Breakout
+                            breakout_dir = None
                     elif breakout_dir == "SHORT":
                         fails_back = sum(1 for b in subsequent if b.get("c", 0) > or_low)
-                        if fails_back >= 2 and current_price > or_low:
+                        if len(subsequent) >= 3 and fails_back / len(subsequent) > 0.6 and current_price > or_mid:
                             failed_breakouts.append({
                                 **cand,
                                 "or_high": round(or_high, 2), "or_low": round(or_low, 2),
@@ -3957,14 +3961,20 @@ def _orb_scanner_wrapper() -> None:
                     continue
 
                 # ── Holding Check: Preis muss AKTUELL noch auf Breakout-Seite sein ──
-                # V2.2: Dynamischer Holding-Check — früh im Fenster (9:45-9:55) reicht 1 Bar
+                # V2.9 FIX: Gelockert — aktueller Preis ist das wichtigste Signal.
+                # Alte Version verlangte 2+ Bars über OR → killte fast alle Breakouts nach Pullback.
+                # Neue Logik: Preis auf Breakout-Seite ODER mindestens 1 Bar + Preis nah dran
                 bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
                 bars_below = sum(1 for b in post_or if b.get("c", 0) < or_low)
-                _min_hold_bars = 1 if len(post_or) <= 2 else 2  # Früh im Fenster: 1 Bar reicht
-                if breakout_dir == "LONG" and (current_price <= or_high or bars_above < _min_hold_bars):
-                    continue
-                if breakout_dir == "SHORT" and (current_price >= or_low or bars_below < _min_hold_bars):
-                    continue
+                if breakout_dir == "LONG":
+                    # Akzeptiere wenn: aktuell über OR ODER (mind. 1 Bar über UND Preis innerhalb 0.3% von OR High)
+                    _near_or = current_price >= or_high * 0.997
+                    if not (current_price > or_high or (bars_above >= 1 and _near_or)):
+                        continue
+                elif breakout_dir == "SHORT":
+                    _near_or = current_price <= or_low * 1.003
+                    if not (current_price < or_low or (bars_below >= 1 and _near_or)):
+                        continue
 
                 # ── Entry / Stop / Target Levels ──
                 if breakout_dir == "LONG":
