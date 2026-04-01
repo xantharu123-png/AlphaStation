@@ -1315,6 +1315,22 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
+                {/* Extension Warning */}
+                {d.ext_warning && (
+                    <div className={`p-3 rounded-lg mb-3 text-xs border ${d.ext_level === 'extreme' ? 'bg-red-50 border-red-300' : d.ext_level === 'high' ? 'bg-orange-50 border-orange-300' : 'bg-yellow-50 border-yellow-300'}`}>
+                        <div className="font-semibold text-sm mb-1" style={{color: d.ext_level === 'extreme' ? '#dc2626' : d.ext_level === 'high' ? '#ea580c' : '#ca8a04'}}>
+                            {d.ext_level === 'extreme' ? '⛔' : d.ext_level === 'high' ? '⚠️' : '📊'} Extension
+                        </div>
+                        <div style={{color: d.ext_level === 'extreme' ? '#dc2626' : d.ext_level === 'high' ? '#ea580c' : '#ca8a04', fontWeight: 600}}>
+                            {d.ext_warning}
+                        </div>
+                        <div className="mt-1 text-gray-600 flex gap-3">
+                            {d.ext_ma20 != null && <span>MA20: {d.ext_ma20 > 0 ? '+' : ''}{d.ext_ma20}%</span>}
+                            {d.ext_vwap != null && <span>VWAP: {d.ext_vwap > 0 ? '+' : ''}{d.ext_vwap}%</span>}
+                        </div>
+                    </div>
+                )}
+
                 {/* Trade Setup */}
                 {d.trade_setup && (
                     <div className="bg-green-50 border border-green-200 p-3 rounded-lg mb-3 text-xs">

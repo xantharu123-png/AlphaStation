@@ -1832,7 +1832,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             confluence_direction = bi_scanner["direction"]
             confluence = {**confluence, "direction": confluence_direction}
             # Trade Setup vom BI Scanner übernehmen wenn vorhanden
-            if bi_scanner.get("entry") and bi_scanner.get("stop_loss"):
+            if bi_scanner.get("entry") is not None and bi_scanner.get("stop_loss") is not None:
                 trade_setup = {
                     "entry": bi_scanner["entry"],
                     "stop": bi_scanner["stop_loss"],
@@ -1874,6 +1874,23 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                             "direction": "SHORT"
                         }
 
+        # V3.2: Extension-Score — wie weit ist Preis von MA20/VWAP entfernt
+        ext_ma20 = round((close - ma20) / ma20 * 100, 1) if (ma20 and ma20 > 0) else None
+        ext_vwap = round((close - vwap) / vwap * 100, 1) if (vwap and vwap > 0) else None
+        _ext_max = max(abs(ext_ma20 or 0), abs(ext_vwap or 0))
+        if _ext_max >= 50:
+            ext_warning = "EXTREM überextended — kein Entry"
+            ext_level = "extreme"
+        elif _ext_max >= 30:
+            ext_warning = "Stark überextended — hohes Risiko"
+            ext_level = "high"
+        elif _ext_max >= 15:
+            ext_warning = "Moderat extended — Pullback möglich"
+            ext_level = "moderate"
+        else:
+            ext_warning = None
+            ext_level = "normal"
+
         return {
             "ticker": ticker, "price": round(close, 2), "open": round(opn, 2),
             "high": round(high, 2), "low": round(low, 2), "volume": vol,
@@ -1886,6 +1903,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             # New fields
             "ema9": ema9, "ema20": ema20, "ema50": ema50, "ema100": ema100, "ema200": ema200,
             "vwap": vwap,
+            "ext_ma20": ext_ma20, "ext_vwap": ext_vwap, "ext_warning": ext_warning, "ext_level": ext_level,
             "macd": macd, "macd_signal": macd_signal, "macd_histogram": macd_histogram,
             "bb_upper": bb_upper, "bb_lower": bb_lower,
             "fib_levels": fib_levels,
