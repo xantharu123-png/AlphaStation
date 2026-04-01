@@ -234,7 +234,8 @@
 
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
-const API = window.location.protocol + '//' + window.location.hostname + ':8000';
+const API_PORT = new URLSearchParams(window.location.search).get('api_port') || '8000';
+const API = window.location.protocol + '//' + window.location.hostname + ':' + API_PORT;
 
 // Toast Component
 function ToastContainer() {
