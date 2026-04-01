@@ -243,6 +243,10 @@ def _check_and_alert(scanner_name, cache_file):
             ticker = r.get("ticker", r.get("Ticker", r.get("symbol", "")))
             grade = r.get("BI_Grade", r.get("Grade", r.get("grade", r.get("rating", ""))))
             score = r.get("BI_Score", r.get("Score", r.get("score", r.get("Alpha", 0))))
+            _rvol_check = r.get("RVOL", r.get("rvol", 0)) or 0
+            # RVOL Guard: Grade S/A braucht min RVOL 0.7 — Sicherheitsnetz
+            if grade in ("S", "A", "A+") and _rvol_check < 0.7:
+                grade = "B"  # Downgrade — kein Alert
             if grade not in _alert_grades:
                 continue
             ck = f"{scanner_name}_{ticker}"
@@ -2455,6 +2459,18 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
     cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
     results, cached_at = load_cache_file(cache_file)
     results = _normalize_keys(results, _BI_KEY_MAP)
+
+    # RVOL Guard: Korrigiere Grades bei Auslieferung (Sicherheitsnetz)
+    for r in results:
+        if isinstance(r, dict):
+            _rv = r.get("rvol", r.get("RVOL", 0)) or 0
+            _gr = r.get("grade", r.get("BI_Grade", ""))
+            if _rv < 0.7 and _gr in ("S", "A", "A+"):
+                r["grade"] = "B"
+                r["grade_label"] = "B — SOLIDE (RVOL zu niedrig)"
+            elif _rv < 0.5 and _gr == "B":
+                r["grade"] = "C"
+                r["grade_label"] = "C — WATCH (RVOL zu niedrig)"
 
     cache_age = None
     if cached_at:
