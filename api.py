@@ -353,6 +353,7 @@ _BI_KEY_MAP = {
     "Entry": "entry", "StopLoss": "stop_loss", "TP1": "tp1", "TP2": "tp2",
     "RiskReward": "risk_reward", "RVOL": "rvol", "SmartMoney": "smart_money",
     "Volumen": "volume", "AvgVolumen": "avg_volume",
+    "MDR_Tag": "mdr_tag", "MDR_Bonus": "mdr_bonus",
 }
 _BIOTECH_KEY_MAP = {
     "Ticker": "ticker", "Name": "name", "Score": "score", "Grade": "grade",
