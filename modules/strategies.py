@@ -44,7 +44,7 @@ STRATEGIES = {
     },
     "Breakout Long": {
         "description": "Momentum-Ausbruch mit Volumen-Bestätigung + Multi-Day Runner",
-        "filters": {"Change %": (3.0, 200.0), "RVOL": (1.5, 50.0), "Close Position": (0.60, 1.0)},
+        "filters": {"Change %": (3.0, 200.0), "RVOL": (1.5, 50.0), "Close Position": (0.60, 1.0), "Preis": (2.0, 100000.0)},
         "logic": "Anstieg 3%+ mit RVOL >1.5 + Close nahe High. Bei MDR (Vortag >10%): RVOL-Filter entfällt"
     },
     # V2.7: "Breakdown Short" und "Breakout Short" entfernt — redundant mit BI Scanner Short + Bear Scanner

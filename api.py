@@ -635,6 +635,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             elif _strat_score >= 60: _strat_grade = "A"
                             elif _strat_score >= 45: _strat_grade = "B"
                             elif _strat_score >= 30: _strat_grade = "C"
+                            else: _strat_grade = "D"
 
                         results.append({
                             "Ticker": ticker,
@@ -1721,8 +1722,9 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         if signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
             if confluence_direction == "LONG":
                 entry = round(close, 2)
-                atr_stop = atr * 2 if atr else (close * 0.03)
-                stop = round(max(support_1, close - atr_stop), 2)
+                atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                _sup = support_1 if (support_1 and support_1 > 0) else (close * 0.97)
+                stop = round(max(_sup, close - atr_stop), 2)
                 risk = entry - stop
                 if risk > 0:
                     tp1 = round(entry + risk, 2)
@@ -1735,8 +1737,9 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                     }
             else:  # SHORT
                 entry = round(close, 2)
-                atr_stop = atr * 2 if atr else (close * 0.03)
-                stop = round(min(resist_1, close + atr_stop), 2)
+                atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                _res = resist_1 if (resist_1 and resist_1 > 0) else (close * 1.03)
+                stop = round(min(_res, close + atr_stop), 2)
                 risk = stop - entry
                 if risk > 0:
                     tp1 = round(entry - risk, 2)
@@ -1841,28 +1844,32 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             elif not trade_setup and signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
                 if confluence_direction == "LONG":
                     _entry = round(close, 2)
-                    _atr_stop = atr * 2 if atr else (close * 0.03)
-                    _stop = round(max(support_1, close - _atr_stop), 2)
+                    _atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                    _sup = support_1 if (support_1 and support_1 > 0) else (close * 0.97)
+                    _stop = round(max(_sup, close - _atr_stop), 2)
                     _risk = _entry - _stop
                     if _risk > 0:
+                        _tp1 = round(_entry + _risk, 2)
+                        _tp2 = round(_entry + _risk * 1.618, 2)
                         trade_setup = {
                             "entry": _entry, "stop": _stop,
-                            "tp1": round(_entry + _risk, 2),
-                            "tp2": round(_entry + _risk * 1.618, 2),
-                            "rr": round((_entry + _risk - _entry) / _risk, 2),
+                            "tp1": _tp1, "tp2": _tp2,
+                            "rr": round((_tp1 - _entry) / _risk, 2),
                             "direction": "LONG"
                         }
                 else:  # SHORT
                     _entry = round(close, 2)
-                    _atr_stop = atr * 2 if atr else (close * 0.03)
-                    _stop = round(min(resist_1, close + _atr_stop), 2)
+                    _atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                    _res = resist_1 if (resist_1 and resist_1 > 0) else (close * 1.03)
+                    _stop = round(min(_res, close + _atr_stop), 2)
                     _risk = _stop - _entry
                     if _risk > 0:
+                        _tp1 = round(_entry - _risk, 2)
+                        _tp2 = round(_entry - _risk * 1.618, 2)
                         trade_setup = {
                             "entry": _entry, "stop": _stop,
-                            "tp1": round(_entry - _risk, 2),
-                            "tp2": round(_entry - _risk * 1.618, 2),
-                            "rr": round((_entry - (_entry - _risk)) / _risk, 2),
+                            "tp1": _tp1, "tp2": _tp2,
+                            "rr": round((_entry - _tp1) / _risk, 2),
                             "direction": "SHORT"
                         }
 
