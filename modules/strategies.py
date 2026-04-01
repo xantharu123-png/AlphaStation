@@ -918,37 +918,4 @@ BACKTEST_STRATEGY_RULES = {
         "entry": "next_open",
         "stop_pct": 0.05,
         "tp1_rr": 1.5,
-        "tp2_rr": 2.0,
-        "max_hold_days": 3,
-        "min_price": 5.0
-    },
-    "Early Momentum": {
-        "direction": "long",
-        "description": "Starker Tag (+3%+), Close nahe High → Momentum hält",
-        "signal": {
-            "change_pct_min": 3.0, "change_pct_max": 30.0,
-            "close_pos_min": 0.55
-        },
-        "entry": "at_close",
-        "stop_pct": 0.04,
-        "tp1_rr": 1.0,
-        "tp2_rr": 2.0,
-        "max_hold_days": 2,
-        "min_price": 5.0
-    },
-    "Whale Watch": {
-        "direction": "long",
-        "description": "Extremes Volumen (RVOL >3) mit klarer Richtung (+2%+)",
-        "signal": {
-            "change_pct_min": 2.0,
-            "rvol_min": 3.0,
-            "close_pos_min": 0.55
-        },
-        "entry": "next_open",
-        "stop_pct": 0.06,
-        "tp1_rr": 1.5,
-        "tp2_rr": 2.0,
-        "max_hold_days": 3,
-        "min_price": 5.0
-    }
-}
+    
