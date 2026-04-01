@@ -3695,12 +3695,27 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                     </div>
                 </div>
                 {stats.scanned > 0 && (
-                    <div className="flex gap-4 text-xs text-gray-500">
-                        <span>Gescannt: {stats.scanned}</span>
-                        <span>Kandidaten: {stats.candidates}</span>
-                        <span className="text-green-600 font-medium">Breakouts: {stats.breakouts}</span>
-                        <span className="text-red-500">Failed: {stats.failed || 0}</span>
-                        <span className="text-gray-400">{results?.market_time || ''}</span>
+                    <div className="space-y-1">
+                        <div className="flex gap-4 text-xs text-gray-500">
+                            <span>Gescannt: {stats.scanned}</span>
+                            <span>Kandidaten: {stats.candidates}</span>
+                            <span className="text-green-600 font-medium">Breakouts: {stats.breakouts}</span>
+                            <span className="text-red-500">Failed: {stats.failed || 0}</span>
+                            <span className="text-gray-400">{results?.market_time || ''}</span>
+                        </div>
+                        {stats.debug && (
+                            <div className="flex gap-3 text-[10px] text-gray-600 font-mono">
+                                {stats.debug.api_fail > 0 && <span className="text-red-400">API:{stats.debug.api_fail}</span>}
+                                {stats.debug.no_bars > 0 && <span>NoBars:{stats.debug.no_bars}</span>}
+                                {stats.debug.no_rth > 0 && <span>NoRTH:{stats.debug.no_rth}</span>}
+                                {stats.debug.no_or > 0 && <span>NoOR:{stats.debug.no_or}</span>}
+                                {stats.debug.or_wide > 0 && <span>ORweit:{stats.debug.or_wide}</span>}
+                                {stats.debug.or_narrow > 0 && <span>OReng:{stats.debug.or_narrow}</span>}
+                                <span className="text-yellow-500">InRange:{stats.debug.in_range}</span>
+                                <span className="text-orange-400">Failed:{stats.debug.failed}</span>
+                                <span className="text-green-400">Passed:{stats.debug.passed}</span>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

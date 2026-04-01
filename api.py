@@ -3859,24 +3859,30 @@ def _orb_scanner_wrapper() -> None:
         breakouts = []
         failed_breakouts = []
 
+        # V3.0 Debug-Counters: Wo gehen Kandidaten verloren?
+        _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0}
+
         for cand in candidates:
             t = cand["ticker"]
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{t}/range/5/minute/{today_str}/{today_str}"
                 resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "asc", "limit": 50000}, timeout=10)
                 if resp.status_code != 200:
+                    _dbg["api_fail"] += 1
                     continue
                 bars = resp.json().get("results", [])
                 if not bars or len(bars) < 2:
+                    _dbg["no_bars"] += 1
                     continue
                 bars = [b for b in bars if b.get("t", 0) >= market_open_ms]
                 if len(bars) < 2:
+                    _dbg["no_rth"] += 1
                     continue
 
                 # ── Opening Range bestimmen (9:30-9:45 = erste 3 5-Min Candles) ──
                 or_bars = [b for b in bars if b.get("t", 0) < or_end_ms]
                 if not or_bars or len(or_bars) < 2:
-                    # Nicht genug OR-Daten → Skip (kein Fallback auf bars[:3])
+                    _dbg["no_or"] += 1
                     continue
                 or_high = max(b.get("h", 0) for b in or_bars)
                 or_low = min(b.get("l", 999999) for b in or_bars)
@@ -3887,10 +3893,12 @@ def _orb_scanner_wrapper() -> None:
                 # OR > 2x ATR = zu volatil für ORB (schlechtes R:R, Mark Fisher Regel)
                 prev_atr_dollar = cand["prev_close"] * cand["prev_atr_pct"] / 100
                 if prev_atr_dollar > 0 and or_size > prev_atr_dollar * 2.0:
-                    continue  # OR zu weit — überspringe
+                    _dbg["or_wide"] += 1
+                    continue
 
                 # OR zu eng = kein echtes Setup (< 0.3% = noise)
                 if or_size_pct < 0.3:
+                    _dbg["or_narrow"] += 1
                     continue
 
                 # ── VWAP Berechnung ──
@@ -3969,7 +3977,17 @@ def _orb_scanner_wrapper() -> None:
                         })
 
                 if not breakout_dir:
+                    if bars_above >= 1 or bars_below >= 1:
+                        _dbg["failed"] += 1
+                    else:
+                        _dbg["in_range"] += 1
+                        # V3.0: Log die Top-5 "in range" Kandidaten für Debugging
+                        if _dbg["in_range"] <= 5:
+                            print(f"[ORB DBG] {t} IN RANGE: price={current_price:.2f} OR=[{or_low:.2f}-{or_high:.2f}] above={bars_above} below={bars_below} post_or={len(post_or)}")
                     continue
+
+                _dbg["passed"] += 1
+                print(f"[ORB DBG] {t} BREAKOUT {breakout_dir}: price={current_price:.2f} OR=[{or_low:.2f}-{or_high:.2f}] above={bars_above} below={bars_below} vol_confirmed={breakout_confirmed}")
 
                 # ── Entry / Stop / Target Levels ──
                 if breakout_dir == "LONG":
@@ -4122,11 +4140,13 @@ def _orb_scanner_wrapper() -> None:
             "stats": {
                 "scanned": len(prev_data), "candidates": len(candidates),
                 "breakouts": len(breakouts), "failed": len(failed_breakouts),
+                "debug": _dbg,
             },
             "or_phase": "active", "market_time": now_et.strftime("%H:%M ET"),
         }
         save_cache_file(ORB_CACHE, [result])
-        print(f"[ORB] V2 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")
+        print(f"[ORB] V3.0 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")
+        print(f"[ORB] Filter-Stats: {_dbg}")
 
         # ── Alert bei Grade S/A Breakouts ──
         alert_breakouts = [b for b in breakouts if b.get("grade") in ("S", "A")]
