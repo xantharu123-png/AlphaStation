@@ -1778,6 +1778,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                                 "tp1": item.get("tp1"),
                                 "tp2": item.get("tp2"),
                                 "risk_reward": item.get("risk_reward"),
+                                "rvol": item.get("rvol"),
                             }
                             break
                 if bi_scanner:
@@ -1787,7 +1788,18 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
 
         # Wenn BI Scanner Daten vorhanden → überschreibe signal_grade/score/confluence
         if bi_scanner:
-            signal_grade = bi_scanner["grade"] or signal_grade
+            _bi_grade = bi_scanner["grade"] or signal_grade
+            # RVOL Guard: Auch hier anwenden (nicht nur im List-Endpoint)
+            _bi_rvol = bi_scanner.get("rvol") or rvol or 0
+            if _bi_rvol < 0.7 and _bi_grade in ("S", "A", "A+"):
+                _bi_grade = "B"
+                bi_scanner["grade"] = "B"
+                bi_scanner["grade_label"] = "B — SOLIDE (RVOL zu niedrig)"
+            elif _bi_rvol < 0.5 and _bi_grade == "B":
+                _bi_grade = "C"
+                bi_scanner["grade"] = "C"
+                bi_scanner["grade_label"] = "C — WATCH (RVOL zu niedrig)"
+            signal_grade = _bi_grade
             score = bi_scanner["score"] if bi_scanner["score"] is not None else score
             confluence_direction = bi_scanner["direction"]
             confluence = {**confluence, "direction": confluence_direction}
@@ -1801,6 +1813,34 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                     "rr": bi_scanner.get("risk_reward"),
                     "direction": bi_scanner["direction"],
                 }
+            # V3.1: Trade Setup generieren falls BI Scanner keins hat aber Grade S/A/B
+            elif not trade_setup and signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
+                if confluence_direction == "LONG":
+                    _entry = round(close, 2)
+                    _atr_stop = atr * 2 if atr else (close * 0.03)
+                    _stop = round(max(support_1, close - _atr_stop), 2)
+                    _risk = _entry - _stop
+                    if _risk > 0:
+                        trade_setup = {
+                            "entry": _entry, "stop": _stop,
+                            "tp1": round(_entry + _risk, 2),
+                            "tp2": round(_entry + _risk * 1.618, 2),
+                            "rr": round((_entry + _risk - _entry) / _risk, 2),
+                            "direction": "LONG"
+                        }
+                else:  # SHORT
+                    _entry = round(close, 2)
+                    _atr_stop = atr * 2 if atr else (close * 0.03)
+                    _stop = round(min(resist_1, close + _atr_stop), 2)
+                    _risk = _stop - _entry
+                    if _risk > 0:
+                        trade_setup = {
+                            "entry": _entry, "stop": _stop,
+                            "tp1": round(_entry - _risk, 2),
+                            "tp2": round(_entry - _risk * 1.618, 2),
+                            "rr": round((_entry - (_entry - _risk)) / _risk, 2),
+                            "direction": "SHORT"
+                        }
 
         return {
             "ticker": ticker, "price": round(close, 2), "open": round(opn, 2),
