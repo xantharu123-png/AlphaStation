@@ -797,8 +797,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     Returns:
         (is_valid, score, max_score, details, direction_confidence, grade)
     """
-    if not bars or len(bars) < 10:
-        return False, 0, 188, ["Nicht genug Daten (min 10 Tage)"], 0, "D", 0, 0
+    if not bars or len(bars) < 15:
+        return False, 0, 188, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
 
     score = 0
     sm_fires = 0  # Smart Money Fires (Boosted-Signale auf Maximum)
@@ -1183,14 +1183,14 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
-            score += 7; sm_hits += 1
-            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri")
+            score += 7; sm_hits += 1; sm_fires += 1
+            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri [SM]")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
             score += 4; sm_hits += 1
             details.append(f" Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
-            score += 7; sm_hits += 1
-            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku")
+            score += 7; sm_hits += 1; sm_fires += 1
+            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku [SM]")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
             score += 4; sm_hits += 1
             details.append(f" Distribution: {distri_days} vs {accum_days} Tage")
@@ -1741,14 +1741,16 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # Crypto hat kein echtes Volume → weniger erreichbare Punkte als Aktien.
     # Signal 2 misst jetzt Body-Kompression (nicht mehr Spread-Duplikat von Signal 1),
     # was die Punkte-Verteilung etwas anders gewichtet.
+    # V2.9: Crypto-Schwellen angehoben — waren 41% unter Aktien (Grade-Inflation)
+    # Jetzt ~15% unter Aktien (Crypto hat weniger Volume-Signale, aber nicht 41% weniger)
     if crypto_mode:
-        if score >= 80 and smart_money_fires >= 3:
+        if score >= 95 and smart_money_fires >= 3:
             grade = "S"
-        elif score >= 70 and smart_money_fires >= 2:
+        elif score >= 85 and smart_money_fires >= 2:
             grade = "A"
-        elif score >= 60 and smart_money_hits >= 1:
+        elif score >= 72 and smart_money_hits >= 1:
             grade = "B"
-        elif score >= 50:
+        elif score >= 60:
             grade = "C"
         else:
             grade = "D"
@@ -5122,4 +5124,147 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     conf = _conf_rank.get(p.get("confidence", "Low"), 0)
                     # "forming" Patterns abwerten
                     is_forming = "forming" in p.get("pattern", "").lower()
-                    ret
+                    return (conf, 0 if is_forming else 1)
+
+                best_bull = max(bullish, key=_pattern_priority) if bullish else None
+                best_bear = max(bearish, key=_pattern_priority) if bearish else None
+
+                bull_score = _pattern_priority(best_bull) if best_bull else (0, 0)
+                bear_score = _pattern_priority(best_bear) if best_bear else (0, 0)
+
+                if bull_score > bear_score:
+                    # Bullish gewinnt — entferne alle bearish
+                    patterns = bullish + neutral
+                elif bear_score > bull_score:
+                    # Bearish gewinnt — entferne alle bullish
+                    patterns = bearish + neutral
+                else:
+                    # Gleichstand — beide entfernen, nur neutral behalten
+                    # Widersprüchliche Signale = kein klares Pattern
+                    patterns = neutral
+
+        return patterns
+
+    except Exception as e:
+        return []
+
+
+
+# ── Weitere Pattern-Funktionen (V70.4) ──
+
+def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
+    """
+    Scannt mehrere Aktien nach Harmonic Patterns.
+
+    Args:
+        tickers: Liste von Ticker-Symbolen
+        api_key: Polygon API Key
+        days: Anzahl Tage historische Daten
+        timeframe: "day" für Daily, "hour" für 4H (default)
+
+    Returns:
+        Liste von Aktien mit gefundenen Patterns
+    """
+    results = []
+
+    for i, ticker in enumerate(tickers):
+        try:
+            scan_result = scan_harmonic_patterns(ticker, api_key, days, timeframe=timeframe)
+
+            if scan_result.get("patterns"):
+                # Nimm das beste Pattern
+                best_pattern = scan_result["patterns"][0]
+
+                results.append({
+                    "Ticker": ticker,
+                    "Pattern": f"{best_pattern['emoji']} {best_pattern['pattern']}",
+                    "Direction": best_pattern["direction"],
+                    "Score": best_pattern["score"],
+                    "Matches": best_pattern["matches"],
+                    "SuccessRate": f"{best_pattern['success_rate']}%",
+                    "Entry": best_pattern["trade"]["entry"],
+                    "StopLoss": best_pattern["trade"]["stop_loss"],
+                    "TP1": best_pattern["trade"]["tp1"],
+                    "TP2": best_pattern["trade"]["tp2"],
+                    "RiskReward": best_pattern["trade"]["risk_reward"],
+                    "Price": scan_result["current_price"],
+                    "PatternData": best_pattern
+                })
+        except Exception as e:
+            continue
+
+        # Rate Limiting: Pause nach je 10 Calls
+        if i % 10 == 9:
+            time.sleep(0.5)
+
+    # Sortiere nach Score
+    results.sort(key=lambda x: x["Score"], reverse=True)
+    return results
+
+
+def find_harmonic_for_chart(ohlcv_data):
+    """
+    Findet Harmonic Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
+
+    Returns:
+        Liste von Patterns mit XABCD-Koordinaten für Chart-Rendering
+    """
+    if not ohlcv_data or len(ohlcv_data) < 20:
+        return []
+
+    try:
+        # Konvertiere zu find_pivots Format
+        prices = []
+        for d in ohlcv_data:
+            prices.append({
+                "date": str(d.get("time", "")),
+                "high": d["high"],
+                "low": d["low"],
+                "close": d["close"],
+                "open": d["open"],
+                "volume": d.get("volume", 0)
+            })
+
+        # Finde Pivots mit window=3 (sensibel genug für alle Timeframes)
+        pivots = find_pivots(prices, window=3)
+
+        if len(pivots) < 5:
+            return []
+
+        # Identifiziere Patterns
+        patterns = identify_harmonic_pattern(pivots, prices)
+
+        if not patterns:
+            return []
+
+        # Konvertiere zu Chart-Format mit time-Koordinaten
+        chart_patterns = []
+        for pat in patterns[:3]:  # Max 3 Patterns
+            points = []
+            pivot_indices = pat.get("pivot_indices", [])
+            point_labels = ["X", "A", "B", "C", "D"]
+
+            for idx, label in zip(pivot_indices, point_labels):
+                if idx < len(ohlcv_data):
+                    points.append({
+                        "time": ohlcv_data[idx]["time"],
+                        "price": pat["points"][label],
+                        "label": label
+                    })
+
+            if len(points) == 5:
+                chart_patterns.append({
+                    "pattern": pat["pattern"],
+                    "emoji": pat["emoji"],
+                    "direction": pat["direction"],
+                    "score": pat["score"],
+                    "matches": pat["matches"],
+                    "points": points,
+                    "ratios": pat["ratios"],
+                    "trade": pat.get("trade", {}),
+                    "success_rate": pat.get("success_rate", 0)
+                })
+
+        return chart_patterns
+    except Exception as e:
+        return []

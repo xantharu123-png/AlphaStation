@@ -194,7 +194,7 @@ def find_volume_voids(current_price, volume_profile, min_void_size_pct=1.0):
     # Score für Voids über Preis (Long-Potenzial)
     if voids_above:
         nearest_above = voids_above[0]
-        distance_pct = (nearest_above['low'] - current_price) / current_price * 100
+        distance_pct = (nearest_above['low'] - current_price) / current_price * 100 if current_price > 0 else 0
         
         # Näher = besser, größer = besser
         if distance_pct < 5:  # Innerhalb 5%
@@ -217,7 +217,7 @@ def find_volume_voids(current_price, volume_profile, min_void_size_pct=1.0):
     # Score für Voids unter Preis (fehlendes Support)
     if voids_below:
         nearest_below = voids_below[0]
-        distance_pct = (current_price - nearest_below['high']) / current_price * 100
+        distance_pct = (current_price - nearest_below['high']) / current_price * 100 if current_price > 0 else 0
         
         # Für Short: Näher = mehr Risiko/Chance
         if distance_pct < 5:
@@ -278,7 +278,7 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
         voids = []
         for bin in bins:
             if bin["volume"] < avg_vol * 0.5:
-                strength = 1 - (bin["volume"] / avg_vol) if avg_vol > 0 else 1
+                strength = max(0, min(1, 1 - (bin["volume"] / avg_vol))) if avg_vol > 0 else 1
                 voids.append({
                     "price_low": round(bin["low"], 2),
                     "price_high": round(bin["high"], 2),

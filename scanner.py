@@ -18359,4 +18359,401 @@ Das ist ein **Long-Signal** — Kaufdruck auf niedrigem Niveau.
         st.markdown("""
 **Insider Buying / Insider Selling**
 Erkennt offizielle SEC-Filings wenn Firmen-Insider (CEO, CFO, Directors, 10%+ Aktionäre) kaufen oder verkaufen.
-- *Insider Buying:* Wenn jemand der die Firma am besten kennt mit eigenem Geld kauft → bu
+- *Insider Buying:* Wenn jemand der die Firma am besten kennt mit eigenem Geld kauft → bullishes Signal
+- *Insider Selling:* Große Verkäufe können Warnsignal sein (aber oft auch nur Steuer-/Diversifikations-Gründe)
+
+*Empfohlen für:* Swing/Position Trading. Insider Buying ist eines der stärksten fundamentalen Signale. Am besten kombiniert mit technischer Bestätigung.
+""")
+
+        st.subheader("📦 Konsolidierungs-Strategien")
+
+        st.markdown("""
+**Consolidation 📦**
+Multi-Day Seitwärtsphase: Heute UND gestern enge Range (±2%) + sinkendes Volumen (RVOL 0.2-1.2).
+Nutzt 5 Tage History um echte mehrtägige Konsolidierungen zu finden.
+*Empfohlen für:* Breakout-Vorbereitung. Setze Alerts für den Ausbruch aus der Range.
+
+**Consolidation Breakout 🚀**
+Ausbruch aus mehrtägiger Range: Vortag war ruhig (±3%), heute >1.5% Anstieg + RVOL >1.5.
+Nutzt 15 Tage History für bessere Pattern-Erkennung.
+*Empfohlen für:* Swing Trading. Der Volumen-bestätigte Breakout aus einer Konsolidierung ist eines der zuverlässigsten Setups.
+
+**Reversal Setup 🪤**
+Mehrtägiger Abverkauf + heute bullische Umkehr: Vortag -2% bis -8%, heute +2% bis +15% mit erhöhtem Volumen.
+*Empfohlen für:* Aggressive Swing Trades. Höheres Risiko — Downtrends können weitergehen.
+
+**Tight Range 📐**
+Extrem enge Tagesrange (±1%) + sehr niedriges Volumen (RVOL 0.2-0.8). „Ruhe vor dem Sturm" — Richtung unklar!
+*Empfohlen für:* Straddle/Strangle-Optionsstrategien oder Breakout-Alerts in beide Richtungen.
+
+**High Volume Churn 📤**
+Hohes Volumen (RVOL >1.8) OHNE Preisfortschritt (±2%). Das ist Smart Money in Aktion!
+Akkumulation (bei Support) oder Distribution (bei Widerstand).
+*Empfohlen für:* Analyse-Tool — zeigt wo sich Big Player positionieren. Warte auf den Breakout in die Richtung.
+""")
+
+        st.subheader("🕳️ Volume Void Strategien")
+
+        st.markdown("""
+**Volume Void Long 🕳️⬆️ / Volume Void Short 🕳️⬇️**
+Analysiert das Volume Profile (wo wurde wie viel gehandelt) und findet „Löcher" — Preiszonen mit wenig historischem Volumen.
+- *Long:* Preis liegt UNTER einem Volume Void → wenig Widerstand, Preis kann schnell hochschießen
+- *Short:* Preis liegt ÜBER einem Volume Void → wenig Support, Preis kann schnell fallen
+
+*Empfohlen für:* Day/Swing Trading mit klaren Zielzonen. Volume Voids werden oft schnell durchlaufen.
+""")
+
+        st.subheader("🦋 Harmonic Patterns")
+
+        st.markdown("""
+**Harmonic Bullish 🦋⬆️ / Harmonic Bearish 🦋⬇️ / Harmonic All 🦋**
+Erkennt XABCD-Patterns basierend auf Fibonacci-Verhältnissen: Gartley, Bat, Butterfly, Crab.
+- Der Entry erfolgt am Punkt D (Completion Zone)
+- Stop-Loss knapp unter/über Punkt D
+- Take Profit bei den Fibonacci-Retracement-Levels von AD
+
+*Empfohlen für:* Erfahrene Swing Trader. Harmonic Patterns haben hohe Trefferquoten wenn korrekt identifiziert. Preis $5-500.
+""")
+
+        st.subheader("🔮 Breakout Imminent V2 (20-Signal Composite)")
+
+        st.markdown("""
+**Breakout Imminent Long 🔮⬆️ / Breakout Imminent Short 🔮⬇️**
+Das fortschrittlichste Setup im Scanner. Kombiniert **20 unabhängige Signale** aus 5 Kategorien zu einem Composite Score (max 200 Punkte):
+
+🔋 **ENERGIE (Compression-Signale):**
+1. **ATR Squeeze** — Volatilität schrumpft → Energie baut sich auf
+2. **Volume Dry-Up** — Volumen sinkt → Desinteresse vor Explosion
+3. **StdDev Compression** — Standardabweichung sinkt → statistische Breakout-Wahrscheinlichkeit steigt
+4. **Candle Body Compression** — Kerzenkörper werden kleiner (Doji-Cluster) → Gleichgewicht vor Ausbruch
+
+📊 **MOMENTUM (Frühindikatoren):**
+5. **RSI Drift** — RSI driftet Richtung 55+ (Long) / unter 45 (Short) → subtiler Bias
+6. **MACD Histogram Divergenz** — Histogram dreht bei flachem Preis → unsichtbares Momentum
+7. **Stochastic Momentum** — %K kreuzt %D in Extremzonen → Timing-Signal
+8. **ADX Turning** — ADX < 20 + steigend → neuer Trend formiert sich JETZT
+
+🏦 **SMART MONEY (Institutionelle Aktivität):**
+9. **OBV Divergenz** — OBV vs. Preis divergiert → Smart Money positioniert sich
+10. **Institutional Accumulation Days** — Hohes Volumen + kleine Kerzen → Fonds laden auf
+11. **Order Block Confluence** — Breakout-Level nahe institutioneller Kauf/Verkaufszone
+12. **Liquidity Pool Proximity** — Stop-Cluster über/unter Range → explosiver Stop-Hunt Effekt
+
+📐 **STRUKTUR (Pattern-Signale):**
+13. **Range Duration** — Konsolidierung >10 Tage → stärkerer Ausbruch
+14. **Boundary Tests** — 4+ Tests an Resistance/Support → Wand wird schwächer
+15. **Higher Lows / Lower Highs** — Strukturelle Verengung → Kontrolle wird übernommen
+16. **Fibonacci Confluence** — Preis nahe Key-Fib-Level (38.2%, 50%, 61.8%) → starker Wendepunkt
+
+🎯 **TARGETS (Breakout-Ziele):**
+17. **Volume Void Above/Below** — Low-Volume-Zone über/unter Preis = Vakuum-Effekt
+18. **FVG/Volume Imbalance** — Unfilled Fair Value Gaps = Preismagneten
+19. **Relative Stärke** — Resilience nach Dips (Long) / Schwäche nach Bounces (Short)
+20. **Close Position Clustering** — Closes nahe Highs (Long) / Lows (Short) → Bias bestätigt
+
+**Grade-System:**
+- 🏆 **S-Tier** (≥140): ELITE SETUP — höchste Wahrscheinlichkeit
+- 🔥 **A-Tier** (≥120): STARK — sehr guter Kandidat
+- ✅ **B-Tier** (≥100): SOLIDE — tradeworthy
+- ⚠️ **C-Tier** (≥80): WATCHLIST — beobachten
+
+**Schwellenwerte:** Long ≥100 Punkte, Short ≥90 Punkte. Nutzt 30 Tage History.
+Entry/SL/TP automatisch berechnet (ATR-basierter Stop, Measured Move Targets).
+
+*Empfohlen für:* Swing Trading (2-10 Tage). DAS beste Setup für frühzeitige Breakout-Erkennung.
+""")
+
+        st.subheader("🏦 Wyckoff Strategien")
+
+        st.markdown("""
+**Wyckoff Accumulation 🏦⬆️ / Wyckoff Distribution 🏦⬇️**
+Basiert auf Richard Wyckoff's Theorie der Akkumulations- und Distributions-Phasen:
+- *Accumulation:* Smart Money kauft leise in einer Trading Range. Erkennt: Enge Range + abnehmendes Volumen + steigende OBV-Divergenz.
+- *Distribution:* Smart Money verkauft leise. Erkennt: Enge Range + abnehmendes Volumen + fallende OBV-Divergenz.
+
+Nutzt 30 Tage History für die Analyse.
+⚠️ **Hinweis:** Echte Wyckoff-Analyse erfordert Wochen/Monate. Diese Strategien sind vereinfachte Versionen.
+
+*Empfohlen für:* Swing/Position Trading (Wochen). Einer der stärksten Ansätze für „Smart Money Following".
+""")
+
+        st.subheader("📈 MA Bounce Strategien")
+
+        st.markdown("""
+**SMA 50 Bounce Long / Short**
+Findet Aktien die sich dem 50-Tage Simple Moving Average nähern (max 3% Abstand).
+- *Long:* Preis kommt von OBEN → SMA50 als Support + SMA50 muss steigen
+- *Short:* Preis kommt von UNTEN → SMA50 als Resistance + SMA50 muss fallen
+
+**SMA 200 Bounce Long / Short 🏛️**
+Wie SMA 50, aber mit dem 200-Tage MA — dem wichtigsten MA überhaupt!
+Paul Tudor Jones: „Nichts ist so zuverlässig wie der SMA 200 als Support/Resistance."
+*Empfohlen für:* Position Trading. SMA200-Bounces sind langfristig sehr zuverlässig.
+
+**EMA 21 Bounce (Swing) 🎯**
+Linda Raschke's „Holy Grail" Setup: Pullback zur EMA 21 im Uptrend.
+EMA 21 ist DER Swing-Trading Moving Average. Max 2% Abstand.
+*Empfohlen für:* Swing Trading (3-10 Tage). Sehr zuverlässig in klaren Trends.
+""")
+
+    # =========================================================================
+    # FUTURES STRATEGIEN
+    # =========================================================================
+    with st.expander("📈 Futures Strategien", expanded=False):
+
+        st.markdown("""
+**📈 Alle zeigen**
+Zeigt alle verfügbaren Futures ohne Filter. Nützlich für einen schnellen Marktüberblick.
+
+---
+
+**Futures Momentum 📈**
+Futures mit >1% Tagesbewegung nach oben. Für Futures ist 1% bereits signifikant (gehebelt!).
+*Empfohlen für:* Intraday Trend-Following. Funktioniert besonders gut bei ES, NQ, CL.
+
+**Futures Breakdown 📉**
+Futures mit >1% Abverkauf. Short-Opportunity bei klarem Verkaufsdruck.
+*Empfohlen für:* Short Day Trades mit engen Stops.
+
+**Futures Reversal 🔄**
+Vorherige Session gefallen (>-2%), aktuelle Session steigend (+0.5%+). Mögliche Trendumkehr.
+*Empfohlen für:* Contrarian Day Trades. Bestätigung abwarten bevor du einsteigst!
+
+---
+
+**Globex Gap 🌙**
+Overnight Gap zwischen US Close und Asia/Europe Session. Mind. +0.3%.
+*Beste Zeit:* 18:00-08:00 UTC (Globex Overnight). Gap-Fill-Trades sind hier profitabel.
+
+**London Open Momentum 🇬🇧**
+Neue Richtung bei Eröffnung der London Session (+0.2%+).
+*Beste Zeit:* 07:00-10:00 UTC. Die Europa-Session setzt oft den Ton für den ganzen Tag.
+
+**NY Open Breakout 🗽**
+Breakout bei US-Börsenöffnung (+0.3%+). Höchste Liquidität des Tages.
+*Beste Zeit:* 13:30-16:00 UTC. Die „Power Hour" der Futures.
+
+---
+
+**High Volatility ⚡**
+Überdurchschnittliche Tagesbewegung (>2%). Für Futures bereits extrem — hohes Risiko, hohe Chance.
+*Empfohlen für:* Erfahrene Scalper mit striktem Risikomanagement.
+
+**Low Volatility Squeeze 🎯**
+Extrem enge Tagesrange (±0.3%). Breakout-Setup — die Feder ist gespannt!
+*Empfohlen für:* Breakout-Trades in beide Richtungen. Stop-Loss eng, Target weit.
+
+**VIX Spike Alert 🔥**
+Nur für VIX/VX Kontrakte! >5% Anstieg = Angst im Markt steigt massiv.
+*Empfohlen für:* Absicherung und Marktanalyse. VIX >25 = erhöhte Vorsicht bei Long-Positionen.
+""")
+
+    # =========================================================================
+    # FOREX STRATEGIEN
+    # =========================================================================
+    with st.expander("💱 Forex Strategien", expanded=False):
+
+        st.markdown("""
+**💱 Alle zeigen**
+Zeigt alle Forex-Paare ohne Filter.
+
+---
+
+**Forex Momentum 💹**
+Starke Pip-Bewegung >0.3%. Für Forex ist das bereits signifikant!
+*Empfohlen für:* Intraday Trend-Following. Am besten während der London/NY Overlap.
+
+**Forex Reversal 🔄**
+Letzte 24h gefallen (-0.5% bis -3%), jetzt steigend (+0.1%+). Mögliche Umkehr.
+*Empfohlen für:* Swing Trades. Bestätigung bei Support-Zonen abwarten.
+
+**Pip Hunter 🎯**
+Die größten Pip-Bewegungen des Tages (>0.5%). Top Movers nach absoluter Bewegung.
+*Empfohlen für:* Momentum Scalps. Folge der Richtung der größten Moves.
+
+---
+
+**Tokyo Session 🇯🇵** (00:00-09:00 UTC)
+Asiatische Session — oft ruhiger, aber JPY-Paare (USDJPY, EURJPY, GBPJPY, AUDJPY) sind aktiv.
+*Empfohlen für:* JPY-Pair Trading, ruhigere Märkte. Enge Ranges → Range-Trading.
+
+**London Session 🇬🇧** (08:00-17:00 UTC)
+Höchste Liquidität! EUR/GBP-Paare besonders aktiv. >0.2% Move = Momentum.
+*Empfohlen für:* Die produktivste Forex-Session. Trend-Trades + Breakouts.
+
+**NY Session 🗽** (13:00-22:00 UTC)
+USD-Paare am aktivsten: EURUSD, GBPUSD, USDJPY, USDCHF.
+*Empfohlen für:* USD-basierte Trades. News-Trades bei US-Wirtschaftsdaten.
+
+**London/NY Overlap 🔥** (13:00-17:00 UTC)
+Maximale Liquidität und Volatilität! >0.3% Move. BESTE Trading-Zeit im Forex.
+*Empfohlen für:* Alle Forex-Strategien. Hier passiert das meiste Volumen.
+
+---
+
+**Safe Haven Flow 🛡️**
+USD/CHF oder USD/JPY fallen >0.4% = Investoren flüchten in sichere Währungen (CHF, JPY).
+Risk-Off Signal für den gesamten Markt!
+*Empfohlen für:* Marktanalyse und Absicherung. Bei starkem Risk-Off → vorsichtig mit Aktien-Longs.
+
+**Risk-On Rally 🚀**
+AUD/USD, NZD/USD steigen >0.3% = Investoren gehen ins Risiko.
+Risk-On Signal — Aktienmärkte oft ebenfalls stark.
+*Empfohlen für:* Sentiment-Analyse. Risk-On → aggressive Trades möglich.
+
+**Exotic Movers 🌍**
+Große Bewegungen (>0.5%) in Emerging Market Währungen. Hohe Volatilität!
+*Empfohlen für:* Erfahrene Forex-Trader. Exotics haben wider Spreads → größere Positionsgrößen nötig.
+
+**Range Bound 📊**
+Minimale Bewegung (±0.15%). Seitwärtsmarkt = Range Trading möglich.
+*Empfohlen für:* Mean-Reversion Trades innerhalb der Range. Buy Low / Sell High.
+""")
+
+    # =========================================================================
+    # KRYPTO STRATEGIEN
+    # =========================================================================
+    with st.expander("🌐 Krypto Strategien", expanded=False):
+
+        st.markdown("""
+**🌐 Alle zeigen**
+Zeigt alle Krypto-Assets ohne Filter.
+
+⚠️ **Krypto-Besonderheiten:** RVOL bei Krypto = Turnover Ratio normalisiert (10% Turnover = RVOL 1.0).
+Typische Werte: 0.3-0.8 normal, >1.0 erhöht, >2.0 sehr hoch. Keine Gaps/Pre-Post Sessions.
+
+---
+
+**Volume Surge**
+RVOL >1.5 + Change >3%. Deutlich über Baseline = echtes Interesse, nicht nur Bot-Trading.
+*Empfohlen für:* Crypto Day Trading. Besonders nach News, Listings oder Whale-Transaktionen.
+
+**Bull Flag / Bear Flag**
+Basiert auf 6-Tage Durchschnitt (nicht Vortag!). Bull Flag: Avg >+0.5%/Tag + heute flach + sinkendes Volumen.
+*Empfohlen für:* Swing Trading (2-7 Tage). Krypto-Flags brechen oft explosiver aus als bei Aktien.
+
+**Breakout Long / Breakdown Short**
+>4% Bewegung + Close nahe High (Long) bzw. nahe Low (Short).
+*Empfohlen für:* Momentum Trades. Bei Krypto sind 4% normal — das ist der angepasste Threshold.
+
+**Low Cap Rockets 🚀**
+Market Cap <$500M + RVOL >1.2 + Change >5%. Die explosivsten Altcoins!
+*Empfohlen für:* Hochspekulative Trades. Extrem hohes Risiko! Nur mit Kapital das du verlieren kannst.
+
+**Dip Buy**
+Rücksetzer -3% bis -15% bei normalem Volumen (RVOL 0.3-1.5). Kein Panik-Dump.
+*Empfohlen für:* Nachkaufen bei etablierten Coins (BTC, ETH, SOL). Nicht bei Random-Altcoins!
+
+**Reversal Hunter**
+6-Tage Trend negativ (<-1%/Tag), heute Käufer (+2%+). Mögliche Trendwende.
+*Empfohlen für:* Contrarian Swing Trades. Am besten bei Coins mit starken Fundamentals.
+
+**Early Momentum**
+>3% Anstieg + RVOL >1.0. Positive Bewegung mit Volumen-Bestätigung.
+*Empfohlen für:* Trend-Following. Im 24/7 Krypto-Markt = aktuelles Momentum.
+
+**Whale Watch 🐋**
+RVOL >2.5 + Change >5%. Extrem hohes Volumen mit klarer Richtung.
+*Empfohlen für:* Folge den Walen! Whale-Buys bei Krypto sind oft über On-Chain Daten verifizierbar.
+
+**Accumulation 📦**
+Seitwärts (±2%) + leicht erhöhtes Volumen (RVOL 1.2-3.0). Jemand sammelt leise ein.
+*Empfohlen für:* Position Trading (Wochen/Monate). Akkumulation vor großen Moves erkennen.
+""")
+
+    # =========================================================================
+    # INTERNATIONALE STRATEGIEN
+    # =========================================================================
+    with st.expander("🌍 Internationale Aktien Strategien", expanded=False):
+
+        st.markdown("""
+⚠️ **Besonderheiten:** EU/UK/JP Aktien bewegen sich WENIGER als US-Aktien → niedrigere Thresholds!
+RVOL wird nach Tageszeit normalisiert (am Morgen niedrigeres Volumen = normal).
+
+---
+
+**🌍 Alle zeigen** — Alle Aktien der Börse ohne Filter.
+
+**🌍 Gewinner / 🌍 Verlierer**
+Einfach: Aktien im Plus (>0.3%) bzw. Minus (<-0.3%) heute. Für EU reicht das als Filter.
+*Empfohlen für:* Schnellen Marktüberblick.
+
+**🌍 Momentum**
+Change >1%. Für europäische Blue-Chips ist 1% bereits echtes Momentum!
+*Empfohlen für:* Trend-Following bei DAX, FTSE, CAC Aktien.
+
+**🌍 Breakout / 🌍 Breakdown**
+>1.5% Bewegung + Close nahe High (Breakout) bzw. Low (Breakdown).
+*Empfohlen für:* Day/Swing Trading an europäischen Börsen.
+
+**🌍 Dip Buy**
+Moderate Schwäche (-0.5% bis -5%). Kaufchance bei soliden Aktien.
+*Empfohlen für:* Value-orientierte Trades bei europäischen Dividenden-Aktien.
+
+**🌍 Volume Spike**
+RVOL >0.4 (normalisiert!) + positive Bewegung. Bei EU-Aktien selten >1.0 untertags.
+*Empfohlen für:* Erkennung von News-Events und institutioneller Aktivität.
+
+**🌍 Reversal**
+Vortag -1.5%+, heute +0.5%+. Bounce nach Schwäche.
+*Empfohlen für:* Contrarian Trades. Europäische Aktien kehren schneller zum Mittelwert zurück.
+
+**🌍 Bull Flag / 🌍 Bear Flag**
+Starker Vortag (±1.5%+), heute enge Range (±1%). Angepasste Thresholds für EU!
+*Empfohlen für:* Swing Trading (2-5 Tage).
+
+**🌍 Big Movers**
+Change >2%. Das ist VIEL für europäische Verhältnisse — meistens News-getrieben.
+*Empfohlen für:* Event-basiertes Trading. Earnings, M&A, Profit Warnings.
+
+**🌍 Whale Watch**
+RVOL >0.5 (normalisiert nach Tageszeit). Deutlich über Durchschnitt = Big Player aktiv.
+*Empfohlen für:* Smart Money Detection. Große Fonds bewegen europäische Aktien stärker als US.
+""")
+
+    # =========================================================================
+    # ALLGEMEINE TIPPS
+    # =========================================================================
+    with st.expander("💡 Allgemeine Trading-Tipps", expanded=False):
+
+        st.markdown("""
+### Strategie-Kombination
+
+Die besten Trades entstehen wenn **mehrere Strategien gleichzeitig** auf dieselbe Aktie zeigen:
+- Volume Surge + Breakout Long = bestätigter Ausbruch
+- Whale Watch + Insider Buying = Smart Money + Insider Agreement
+- Consolidation Breakout + Volume Void Long = Breakout durch dünn gehandelte Zone
+- Breakout Imminent + MA Bounce = statistische + technische Bestätigung
+
+### Risikomanagement
+
+1. **Positionsgröße:** Nie mehr als 1-2% deines Kapitals pro Trade riskieren
+2. **Stop-Loss:** IMMER setzen. Kein Trade ohne Exit-Plan!
+3. **Risk/Reward:** Mindestens 1:2 Verhältnis (riskiere 1 um 2 zu gewinnen)
+4. **Korrelation:** Nicht 5 Tech-Aktien gleichzeitig long — das ist EIN Trade, nicht fünf!
+
+### Zeitfilter
+
+- **09:30-10:30 ET:** Höchste Volatilität — ideal für Momentum/Breakout Strategien
+- **11:30-14:00 ET:** „Dead Zone" — weniger Volumen, mehr False Breakouts
+- **14:00-16:00 ET:** „Power Hour" — Institutionelle Anpassungen, wieder mehr Volumen
+- **Pre/After Market:** Weniger Liquidität, größere Spreads — Vorsicht!
+""")
+
+    st.divider()
+    st.caption("📖 Alpha Station V70.7 PRO — Strategy Guide | Alle Strategien werden kontinuierlich optimiert.")
+
+# -----------------------------------------------------------------------------
+# FOOTER
+# -----------------------------------------------------------------------------
+st.divider()
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.caption("Alpha Station V70.7 Pro")
+with c2:
+    st.caption(f"Watchlist: {len(st.session_state.watchlist)} Ticker")
+with c3:
+    if st.session_state.auto_refresh_enabled:
+        st.caption(f"🔄 Auto-Refresh: {st.session_state.refresh_interval} Min")
+    else:
+        st.caption("🔄 Auto-Refresh: Aus")

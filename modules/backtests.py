@@ -383,7 +383,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if range_pct < 2.0:
                 continue
 
-            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in window[-10:] if b["close"] > 0) / 10
+            _adr_bars = [b for b in window[-10:] if b["close"] > 0]
+            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in _adr_bars) / len(_adr_bars) if _adr_bars else 0
             if avg_daily_range < 0.3:
                 continue
 
@@ -482,7 +483,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # 20-Tage-MA muss in Richtung des Trades zeigen
             w_closes = [b["close"] for b in window]
             ma_20_current = sum(w_closes[-20:]) / 20 if len(w_closes) >= 20 else sum(w_closes) / len(w_closes)
-            ma_20_prev = sum(w_closes[-25:-5]) / 20 if len(w_closes) >= 25 else ma_20_current
+            ma_20_prev = sum(w_closes[-40:-20]) / 20 if len(w_closes) >= 40 else ma_20_current
             if direction == "long":
                 trend_ok = ma_20_current > ma_20_prev  # MA steigt = bullischer Trend
                 price_above_ma = window[-1]["close"] > ma_20_current  # Preis über MA

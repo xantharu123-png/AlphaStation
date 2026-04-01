@@ -720,6 +720,8 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
 
             # V2.8: Grade — proportional skaliert (max_score 188), mit SM-Bestätigung
             # Konsistent mit patterns.py + modules/scanners.py
+            _cand_rvol = cand.get("RVOL", 0)
+
             if bi_score >= 113 and sm_fires >= 4:
                 grade = "S"; grade_label = "S — ELITE"
             elif bi_score >= 99 and sm_fires >= 3:
@@ -730,6 +732,12 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
                 grade = "C"; grade_label = "C — WATCH"
             else:
                 grade = "D"; grade_label = "D — SCHWACH"
+
+            # RVOL Guard: Ohne Volumen kein Top-Grade
+            if _cand_rvol < 0.7 and grade in ("S", "A"):
+                grade = "B"; grade_label = "B — SOLIDE (RVOL zu niedrig)"
+            elif _cand_rvol < 0.5 and grade == "B":
+                grade = "C"; grade_label = "C — WATCH (RVOL zu niedrig)"
 
             results.append({
                 "Ticker": ticker, "Name": cand["Name"],

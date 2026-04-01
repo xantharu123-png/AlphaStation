@@ -522,7 +522,14 @@ def autotrader_scan_once(poly_key, config=None):
             result["signals_found"] += 1
 
             # Berechne Entry/Stop/TP (identisch zum Backtest)
-            atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
+            # True Range statt Simple Range (berücksichtigt Gap-Risiko)
+            _atr_bars = window[-5:]
+            _tr_vals = []
+            for _ai in range(len(_atr_bars)):
+                _h, _l = _atr_bars[_ai]["high"], _atr_bars[_ai]["low"]
+                _pc = _atr_bars[_ai - 1]["close"] if _ai > 0 else _atr_bars[_ai]["open"]
+                _tr_vals.append(max(_h - _l, abs(_h - _pc), abs(_l - _pc)))
+            atr_5 = sum(_tr_vals) / len(_tr_vals) if _tr_vals else 0
             range_high = max(b["high"] for b in window[-15:])
             range_low = min(b["low"] for b in window[-15:])
             range_size = range_high - range_low
@@ -1270,6 +1277,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # ── Grading — IMMER ausführen, mit SM-Bestätigung (Original-Logik) ──
                 # Proportional skaliert für max_score 188 (statt Original 200)
+                _cand_rvol = candidate.get("RVOL", 0)
+
                 if bi_score >= 113 and sm_fires >= 4:
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
                 elif bi_score >= 99 and sm_fires >= 3:
@@ -1280,6 +1289,13 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
                 else:
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
+
+                # ── RVOL Guard: Ohne Volumen kein Top-Grade ──
+                # Breakout ohne Volumen ist nicht vertrauenswürdig
+                if _cand_rvol < 0.7 and candidate["BI_Grade"] in ("S", "A"):
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE (RVOL zu niedrig)"
+                elif _cand_rvol < 0.5 and candidate["BI_Grade"] == "B":
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH (RVOL zu niedrig)"
 
                 results.append(candidate)
 

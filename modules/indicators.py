@@ -392,9 +392,12 @@ def calculate_vwap(ohlcv_data):
 
         current_vwap = vwap_values[-1] if vwap_values else typical_prices[-1]
 
-        # Standard Deviation berechnen
-        squared_diffs = [(tp - current_vwap) ** 2 for tp in typical_prices]
-        variance = sum(squared_diffs) / len(squared_diffs)
+        # Standard Deviation berechnen — Abweichung TP vs laufender VWAP
+        if len(vwap_values) == len(typical_prices):
+            squared_diffs = [(typical_prices[i] - vwap_values[i]) ** 2 for i in range(len(vwap_values))]
+        else:
+            squared_diffs = [(tp - current_vwap) ** 2 for tp in typical_prices]
+        variance = sum(squared_diffs) / len(squared_diffs) if squared_diffs else 0
         std_dev = variance ** 0.5
 
         return {

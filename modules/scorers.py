@@ -1915,4 +1915,51 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
     breakdown["catalyst_float"] = round(cat_score, 1)
     score += cat_score
 
-    # ═════════════════
+    # ══════════════════════════════════════════════════════════
+    # ── 6. PENALTIES — Widersprüche und Killsignale ──
+    # ══════════════════════════════════════════════════════════
+    penalty = 0
+
+    # FADING CONTRADICTION: Starker Move + schwache Position = TRAP
+    if is_up and abs_change >= 5 and pm_position < 35:
+        fading_penalty = -12
+        penalty += fading_penalty
+        warnings.append("FADING: Starker Gap wird abverkauft!")
+    elif not is_up and abs_change >= 5 and pm_position > 65:
+        fading_penalty = -12
+        penalty += fading_penalty
+        warnings.append("BOUNCE: Gap Down wird aufgekauft!")
+
+    # STALE GAP: Gap aber kein PM Momentum = keiner interessiert sich
+    if abs_change >= 3 and abs_pm_momentum < 0.3:
+        stale_penalty = -5
+        penalty += stale_penalty
+        warnings.append("Staler Gap: Kein PM-Interesse")
+
+    # DEAD VOLUME KILL: VolR < 0.2 → Score gecapped bei 25
+    is_dead_volume = vol_ratio < 0.2
+
+    breakdown["penalty"] = penalty
+    score += penalty
+
+    # ── FINAL SCORE ──
+    score = max(0, min(round(score), 100))
+
+    # Dead Volume Cap — NACH allen Berechnungen
+    if is_dead_volume:
+        score = min(score, 25)
+        warnings.insert(0, "DEAD VOLUME — Score gecapped!")
+
+    # Confidence Level
+    if score >= 75:
+        confidence = "HIGH"
+    elif score >= 55:
+        confidence = "MEDIUM"
+    elif score >= 35:
+        confidence = "LOW"
+    else:
+        confidence = "AVOID"
+
+    breakdown["warnings"] = warnings
+
+    return score, breakdown, confidence

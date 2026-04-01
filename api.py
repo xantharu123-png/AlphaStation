@@ -4833,4 +4833,122 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                             position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
                     else:
                         if i > 0 and ema9[i + 12] < ema21[i] and ema9[i + 11] >= ema21[i - 1]:
-                            pnl =
+                            pnl = ((closes[bar_idx] - position["entry_price"]) / position["entry_price"]) * 100
+                            trades.append({
+                                "entry_date": position["entry_date"],
+                                "entry_price": round(position["entry_price"], 2),
+                                "exit_date": dates[bar_idx],
+                                "exit_price": round(closes[bar_idx], 2),
+                                "pnl_pct": round(pnl, 2),
+                                "type": "LONG"
+                            })
+                            position = None
+
+        # Close any open position at last bar
+        if position is not None:
+            pnl = ((closes[-1] - position["entry_price"]) / position["entry_price"]) * 100
+            trades.append({
+                "entry_date": position["entry_date"],
+                "entry_price": round(position["entry_price"], 2),
+                "exit_date": dates[-1],
+                "exit_price": round(closes[-1], 2),
+                "pnl_pct": round(pnl, 2),
+                "type": "LONG (offen)"
+            })
+
+        # Calculate statistics
+        total_trades = len(trades)
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        losses_list = [t for t in trades if t["pnl_pct"] <= 0]
+        win_rate = round(len(wins) / total_trades * 100, 1) if total_trades > 0 else 0
+        avg_pnl = round(sum(t["pnl_pct"] for t in trades) / total_trades, 2) if total_trades > 0 else 0
+        total_return = round(sum(t["pnl_pct"] for t in trades), 2)
+        avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
+        avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
+        best_trade = round(max(t["pnl_pct"] for t in trades), 2) if trades else 0
+        worst_trade = round(min(t["pnl_pct"] for t in trades), 2) if trades else 0
+
+        # Max drawdown
+        max_dd = 0
+        peak = 0
+        equity = 0
+        for t in trades:
+            equity += t["pnl_pct"]
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+        max_drawdown = round(max_dd, 2)
+
+        return {
+            "ticker": ticker,
+            "strategy": strategy,
+            "months": months,
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "total_return": total_return,
+            "max_drawdown": max_drawdown,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade,
+            "trades": trades[-50:],  # Last 50 trades max
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker, "strategy": strategy}
+
+
+@app.post("/api/run-backtest")
+def run_backtest(request: BacktestRequest):
+    """Run a backtest for a ticker with given strategy."""
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+
+    result = _run_backtest(request.ticker, request.strategy, request.months)
+
+    # Cache result
+    try:
+        cache_key = f"/tmp/backtest_{request.ticker}_{request.strategy}.json"
+        with open(cache_key, "w") as f:
+            json.dump({"cached_at": datetime.now().isoformat(), "results": result}, f, default=_serialize_json)
+    except Exception as e:
+        print(f"[Warning] {e}")
+
+
+@app.get("/api/backtest-results")
+def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma_crossover")):
+    """Get cached backtest results."""
+    cache_key = f"/tmp/backtest_{ticker}_{strategy}.json"
+    if Path(cache_key).exists():
+        try:
+            with open(cache_key, "r") as f:
+                data = json.load(f)
+            return {"status": "success", "data": data.get("results", {}), "cached_at": data.get("cached_at")}
+        except Exception as e:
+            print(f"[Warning] {e}")
+    return {"status": "success", "data": {}, "cached_at": None}
+
+
+@app.get("/")
+def root():
+    """Root endpoint — API info."""
+    return {
+        "name": "TradingBot Scanner API",
+        "version": API_VERSION,
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+    }
+
+
+# ── Run with uvicorn ──
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+    )

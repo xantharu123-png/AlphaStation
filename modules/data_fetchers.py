@@ -248,10 +248,15 @@ def fetch_daily_candles_crypto(coin_id, days=30):
 
         # Stündliche Daten zu Daily OHLCV aggregieren
         from datetime import datetime as _dt
+        # Build volume lookup by timestamp for safe alignment
+        _vol_map = {}
+        for v_entry in (volumes or []):
+            if isinstance(v_entry, (list, tuple)) and len(v_entry) > 1:
+                _vol_map[v_entry[0]] = v_entry[1]
         daily = {}
         for i, (ts, p) in enumerate(prices):
             day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
-            vol = volumes[i][1] if i < len(volumes) and len(volumes[i]) > 1 else 0
+            vol = _vol_map.get(ts, 0)
             if day_key not in daily:
                 daily[day_key] = {"o": p, "h": p, "l": p, "c": p, "v": vol, "t": ts}
             else:
@@ -322,13 +327,16 @@ def fetch_multi_day_data(ticker, api_key, days=5):
         
         results = []
         for bar in data["results"][-days:]:  # Letzte N Tage
+            _c = bar.get("c", 0)
+            if not _c or _c <= 0:
+                continue  # Skip invalid zero-price bars
             results.append({
-                "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
-                "open": bar["o"],
-                "high": bar["h"],
-                "low": bar["l"],
-                "close": bar["c"],
-                "volume": bar["v"]
+                "date": datetime.fromtimestamp(bar.get("t", 0) / 1000).strftime("%Y-%m-%d") if bar.get("t") else "",
+                "open": bar.get("o", _c),
+                "high": bar.get("h", _c),
+                "low": bar.get("l", _c),
+                "close": _c,
+                "volume": bar.get("v", 0)
             })
         
         return results
@@ -426,7 +434,7 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
             data = resp.json()
             results = data.get("results", [])
             if results:
-                return [[r["t"], r["o"], r["h"], r["l"], r["c"], r.get("v", 0)] for r in results]
+                return [[r.get("t", 0), r.get("o", 0), r.get("h", 0), r.get("l", 0), r.get("c", 0), r.get("v", 0)] for r in results if r.get("c", 0) > 0]
     except Exception as e:
         pass
     return None
@@ -733,14 +741,17 @@ def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
             
             bars = []
             for r in data["results"]:
+                _c = r.get("c", 0)
+                if not _c or _c <= 0:
+                    continue  # Skip invalid zero-price bars
                 ts = r.get("t", 0)
                 dt = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
                 bars.append({
                     "date": dt,
-                    "open": r.get("o", 0),
-                    "high": r.get("h", 0),
-                    "low": r.get("l", 0),
-                    "close": r.get("c", 0),
+                    "open": r.get("o", _c),
+                    "high": r.get("h", _c),
+                    "low": r.get("l", _c),
+                    "close": _c,
                     "volume": r.get("v", 0),
                     "vwap": r.get("vw", 0)
                 })
