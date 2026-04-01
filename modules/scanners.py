@@ -1273,6 +1273,68 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _has_stage4 = any("Stage 4" in str(d) for d in candidate.get("ShortBonusDetails", []))
                     candidate["has_stage4"] = _has_stage4
 
+                # ── V3.2: Multi-Day Runner Bonus (ELAB-Pattern) ──
+                # Erkennt Aktien die 2+ Tage in Folge stark steigen mit hohem Volume
+                # Pattern: Day1 +30%+, Day2 Gap-Up + Hold, Day3 Gap-Up = Multi-Day Runner
+                # Kriterien: Low Float + Katalysator + aufeinanderfolgende Big Days
+                _mdr_bonus = 0
+                _mdr_tag = None
+                if direction == "long" and len(all_bars) >= 5:
+                    _recent = all_bars[-5:]  # Letzte 5 Tage
+                    _big_days = 0  # Tage mit >15% Gain
+                    _gap_ups = 0   # Gap-Ups (Open > PrevClose)
+                    _consec_green = 0  # Aufeinanderfolgende grüne Tage
+                    _max_consec = 0
+                    _total_move = 0
+                    _vol_surge_days = 0  # Tage mit >3x Avg Volume
+
+                    for i in range(1, len(_recent)):
+                        _prev_c = _recent[i-1]["close"]
+                        _cur_c = _recent[i]["close"]
+                        _cur_o = _recent[i]["open"]
+                        _cur_v = _recent[i]["volume"]
+
+                        if _prev_c > 0:
+                            _day_chg = (_cur_c - _prev_c) / _prev_c * 100
+                            _gap_pct = (_cur_o - _prev_c) / _prev_c * 100
+
+                            if _day_chg > 15:
+                                _big_days += 1
+                            if _gap_pct > 3:
+                                _gap_ups += 1
+                            if _cur_c > _prev_c:
+                                _consec_green += 1
+                                _max_consec = max(_max_consec, _consec_green)
+                            else:
+                                _consec_green = 0
+                            if _avg_vol_20 > 0 and _cur_v > _avg_vol_20 * 3:
+                                _vol_surge_days += 1
+
+                    # Gesamtbewegung der letzten 5 Tage
+                    if _recent[0]["close"] > 0:
+                        _total_move = (_recent[-1]["close"] - _recent[0]["close"]) / _recent[0]["close"] * 100
+
+                    # Multi-Day Runner Scoring
+                    if _big_days >= 2 and _max_consec >= 2 and _total_move > 50:
+                        _mdr_bonus = 25  # Starker Multi-Day Runner
+                        _mdr_tag = f"MDR ELITE: {_big_days} Big Days, {_total_move:.0f}% Move, {_vol_surge_days} Vol-Surges"
+                    elif _big_days >= 2 and _total_move > 30:
+                        _mdr_bonus = 18
+                        _mdr_tag = f"MDR STARK: {_big_days} Big Days, {_total_move:.0f}% Move"
+                    elif _big_days >= 1 and _gap_ups >= 1 and _total_move > 20:
+                        _mdr_bonus = 12
+                        _mdr_tag = f"MDR AKTIV: {_big_days} Big Day + Gap-Up, {_total_move:.0f}% Move"
+                    elif _max_consec >= 3 and _total_move > 15:
+                        _mdr_bonus = 8
+                        _mdr_tag = f"MDR BASIS: {_max_consec} Grüne Tage, {_total_move:.0f}% Move"
+
+                    if _mdr_bonus > 0:
+                        # NUR Info-Tag, KEIN Score-Bonus — BI Scanner misst "Breakout Imminent",
+                        # MDR ist bereits ausgebrochen. Score-Verfälschung vermeiden.
+                        details.append(f"🔥 {_mdr_tag}")
+                        candidate["MDR_Bonus"] = _mdr_bonus  # Informativ für Frontend
+                        candidate["MDR_Tag"] = _mdr_tag
+
                 candidate["BI_Score"] = max(0, bi_score)
 
                 # ── Grading — IMMER ausführen, mit SM-Bestätigung (Original-Logik) ──

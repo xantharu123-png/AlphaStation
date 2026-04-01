@@ -559,12 +559,16 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         prev_open = prev.get("o", prev_close)
                         vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
 
+                        # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
+                        # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
+                        _is_mdr = vortag_pct > 10 and change_pct > 5
+
                         # Filter anwenden
                         if not (change_min <= change_pct <= change_max):
                             continue
                         if not (price_min <= price <= price_max):
                             continue
-                        if "RVOL" in filters and not (rvol_min <= rvol <= rvol_max):
+                        if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
                             continue
                         if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
                             continue
@@ -613,6 +617,24 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         elif _strat_score >= 30: _strat_grade = "C"
                         else: _strat_grade = "D"
 
+                        # V3.2: MDR-Tag für Multi-Day Runner
+                        _mdr_label = None
+                        if _is_mdr:
+                            if vortag_pct > 30 and change_pct > 15:
+                                _mdr_label = "MDR ELITE"
+                                _strat_score += 15  # Bonus für MDR
+                            elif vortag_pct > 15 and change_pct > 8:
+                                _mdr_label = "MDR STARK"
+                                _strat_score += 10
+                            else:
+                                _mdr_label = "MDR"
+                                _strat_score += 5
+                            # Re-grade nach Bonus
+                            if _strat_score >= 75: _strat_grade = "S"
+                            elif _strat_score >= 60: _strat_grade = "A"
+                            elif _strat_score >= 45: _strat_grade = "B"
+                            elif _strat_score >= 30: _strat_grade = "C"
+
                         results.append({
                             "Ticker": ticker,
                             "ticker": ticker,
@@ -635,6 +657,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             "Vortag_Pct": round(vortag_pct, 2),
                             "score": _strat_score,
                             "grade": _strat_grade,
+                            "mdr_tag": _mdr_label,
                         })
                     except Exception:
                         continue
