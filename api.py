@@ -3734,9 +3734,15 @@ def _orb_scanner_wrapper() -> None:
         time_val = hour * 60 + minute
         weekday = now_et.weekday()
 
-        # Nur während ORB-Fenster: 9:45-11:00 ET, Mo-Fr
-        if weekday >= 5 or time_val < 585 or time_val >= 660:
+        # ORB-Fenster: 9:45-16:00 ET, Mo-Fr (erweitert bis Market Close für Scans nach Fenster)
+        # Automatischer Scheduler läuft nur 9:45-11:00, aber manueller Scan erlaubt bis 16:00
+        if weekday >= 5 or time_val < 585 or time_val >= 960:
             print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {'Mo-Fr' if weekday < 5 else 'Wochenende'}) — übersprungen")
+            # Trotzdem Cache mit Phase-Info speichern, damit Frontend Feedback gibt
+            _phase = "weekend" if weekday >= 5 else "pre_open" if time_val < 585 else "expired"
+            save_cache_file(ORB_CACHE, [{"breakouts": [], "failed_breakouts": [], "candidates": [],
+                "stats": {"scanned": 0, "candidates": 0, "breakouts": 0, "failed": 0},
+                "or_phase": _phase, "market_time": now_et.strftime("%H:%M ET")}])
             return
 
         print(f"[ORB] Scanner V2 gestartet ({now_et.strftime('%H:%M')} ET)...")

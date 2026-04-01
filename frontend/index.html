@@ -3769,7 +3769,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             {subView === 'breakouts' && breakouts.length === 0 && (
                 <div className="card p-6 text-center text-gray-400">
                     <p className="text-lg mb-1">Keine Breakouts</p>
-                    <p className="text-xs">ORB Scanner läuft nur Mo-Fr 9:45-11:00 ET</p>
+                    <p className="text-xs">{results?.or_phase === 'expired' ? 'ORB-Fenster abgelaufen — nächster Scan morgen 9:45 ET' : results?.or_phase === 'weekend' ? 'Wochenende — ORB Scanner Mo-Fr 9:45-11:00 ET' : results?.or_phase === 'pre_open' ? 'Pre-Market — ORB Scanner startet 9:45 ET' : `ORB Scanner aktiv Mo-Fr 9:45-11:00 ET (${results?.market_time || ''})`}</p>
                 </div>
             )}
 
