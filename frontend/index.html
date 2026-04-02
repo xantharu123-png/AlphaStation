@@ -237,6 +237,289 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const API_PORT = new URLSearchParams(window.location.search).get('api_port') || '8000';
 const API = window.location.protocol + '//' + window.location.hostname + ':' + API_PORT;
 
+// ══════════════════════════════════════════════════════════════
+// AUTH SYSTEM — Login, Register, Pricing, Feature Gating
+// ══════════════════════════════════════════════════════════════
+
+function useAuth() {
+    const [user, setUser] = useState(null);
+    const [limits, setLimits] = useState(null);
+    const [loading, setLoading] = useState(true);
+
+    const checkAuth = useCallback(async () => {
+        const token = localStorage.getItem('as_token');
+        if (!token) { setLoading(false); return; }
+        try {
+            const res = await fetch(`${API}/api/auth/me`, { headers: { 'Authorization': `Bearer ${token}` } });
+            if (res.ok) {
+                const data = await res.json();
+                setUser(data.user);
+                setLimits(data.limits);
+            } else {
+                localStorage.removeItem('as_token');
+                setUser(null); setLimits(null);
+            }
+        } catch { }
+        setLoading(false);
+    }, []);
+
+    useEffect(() => { checkAuth(); }, [checkAuth]);
+
+    const login = async (email, password) => {
+        const res = await fetch(`${API}/api/auth/login`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (res.ok && data.token) {
+            localStorage.setItem('as_token', data.token);
+            setUser(data.user);
+            await checkAuth();
+            return { success: true };
+        }
+        return { success: false, message: data.detail || data.message || 'Login fehlgeschlagen' };
+    };
+
+    const register = async (email, password, name) => {
+        const res = await fetch(`${API}/api/auth/register`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password, name })
+        });
+        const data = await res.json();
+        if (res.ok && data.token) {
+            localStorage.setItem('as_token', data.token);
+            setUser(data.user);
+            await checkAuth();
+            return { success: true };
+        }
+        return { success: false, message: data.detail || data.message || 'Registrierung fehlgeschlagen' };
+    };
+
+    const logout = () => {
+        localStorage.removeItem('as_token');
+        setUser(null); setLimits(null);
+    };
+
+    const getToken = () => localStorage.getItem('as_token');
+
+    return { user, limits, loading, login, register, logout, getToken, checkAuth };
+}
+
+// ── Login/Register Page ──
+function AuthPage({ onLogin, onRegister }) {
+    const [isLogin, setIsLogin] = useState(true);
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [name, setName] = useState('');
+    const [error, setError] = useState('');
+    const [submitting, setSubmitting] = useState(false);
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError(''); setSubmitting(true);
+        const result = isLogin ? await onLogin(email, password) : await onRegister(email, password, name);
+        if (!result.success) setError(result.message);
+        setSubmitting(false);
+    };
+
+    return (
+        <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)' }}>
+            <div style={{ width: '100%', maxWidth: 420, padding: 40, background: '#1e293b', borderRadius: 16, boxShadow: '0 25px 50px rgba(0,0,0,0.3)' }}>
+                <div style={{ textAlign: 'center', marginBottom: 32 }}>
+                    <h1 style={{ fontSize: 28, fontWeight: 700, color: '#f1f5f9', marginBottom: 4 }}>Alpha Station</h1>
+                    <p style={{ color: '#94a3b8', fontSize: 14 }}>Professional Trading Scanner</p>
+                </div>
+
+                <div style={{ display: 'flex', marginBottom: 24, background: '#0f172a', borderRadius: 8, padding: 4 }}>
+                    <button onClick={() => { setIsLogin(true); setError(''); }} style={{ flex: 1, padding: '8px 0', borderRadius: 6, fontSize: 14, fontWeight: 600, border: 'none', cursor: 'pointer', background: isLogin ? '#3b82f6' : 'transparent', color: isLogin ? '#fff' : '#94a3b8' }}>Login</button>
+                    <button onClick={() => { setIsLogin(false); setError(''); }} style={{ flex: 1, padding: '8px 0', borderRadius: 6, fontSize: 14, fontWeight: 600, border: 'none', cursor: 'pointer', background: !isLogin ? '#3b82f6' : 'transparent', color: !isLogin ? '#fff' : '#94a3b8' }}>Registrieren</button>
+                </div>
+
+                <form onSubmit={handleSubmit}>
+                    {!isLogin && (
+                        <input type="text" placeholder="Name" value={name} onChange={e => setName(e.target.value)}
+                            style={{ width: '100%', padding: '12px 16px', marginBottom: 12, background: '#0f172a', border: '1px solid #334155', borderRadius: 8, color: '#f1f5f9', fontSize: 14, boxSizing: 'border-box' }} />
+                    )}
+                    <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required
+                        style={{ width: '100%', padding: '12px 16px', marginBottom: 12, background: '#0f172a', border: '1px solid #334155', borderRadius: 8, color: '#f1f5f9', fontSize: 14, boxSizing: 'border-box' }} />
+                    <input type="password" placeholder="Passwort" value={password} onChange={e => setPassword(e.target.value)} required minLength={6}
+                        style={{ width: '100%', padding: '12px 16px', marginBottom: 16, background: '#0f172a', border: '1px solid #334155', borderRadius: 8, color: '#f1f5f9', fontSize: 14, boxSizing: 'border-box' }} />
+
+                    {error && <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>{error}</div>}
+
+                    <button type="submit" disabled={submitting}
+                        style={{ width: '100%', padding: '12px 0', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 600, cursor: submitting ? 'wait' : 'pointer', opacity: submitting ? 0.7 : 1 }}>
+                        {submitting ? '...' : (isLogin ? 'Einloggen' : 'Account erstellen')}
+                    </button>
+                </form>
+
+                <p style={{ textAlign: 'center', marginTop: 20, fontSize: 12, color: '#64748b' }}>
+                    7 Tage kostenlos testen — keine Kreditkarte nötig
+                </p>
+            </div>
+        </div>
+    );
+}
+
+// ── Pricing Page ──
+function PricingPage({ currentPlan, getToken }) {
+    const [loading, setLoading] = useState(null);
+    const plans = [
+        { id: 'basic', name: 'Basic', price: 29, features: ['4 Scanner Tabs', 'Scan alle 30 Min', '30 Ticker-Details / Stunde', 'Breakdown Stocks'] },
+        { id: 'pro', name: 'Pro', price: 79, popular: true, features: ['Alle Scanner Tabs', 'Echtzeit Scans (5 Min)', 'Volle Sidebar-Analyse', 'Email Alerts', 'Trade Setups (Entry/Stop/TP)', 'Unbegrenzte Ticker-Details'] },
+        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'ORB Scanner', 'Backtesting', 'API Access', 'Priority Support', 'Priority Scan Queue'] },
+    ];
+
+    const handleCheckout = async (planId) => {
+        setLoading(planId);
+        try {
+            const token = getToken();
+            const res = await fetch(`${API}/api/auth/checkout`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ plan: planId })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.url) window.location.href = data.url;
+            } else {
+                const err = await res.json();
+                if (window.addToast) window.addToast(err.detail || 'Fehler beim Checkout', 'error');
+            }
+        } catch (e) {
+            if (window.addToast) window.addToast('Verbindungsfehler', 'error');
+        }
+        setLoading(null);
+    };
+
+    return (
+        <div style={{ maxWidth: 960, margin: '0 auto', padding: '40px 20px' }}>
+            <h2 style={{ textAlign: 'center', fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Wähle deinen Plan</h2>
+            <p style={{ textAlign: 'center', color: 'var(--text-muted)', marginBottom: 40 }}>Jederzeit kündbar — keine versteckten Kosten</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 24 }}>
+                {plans.map(plan => (
+                    <div key={plan.id} className="card" style={{ padding: 28, borderRadius: 12, border: plan.popular ? '2px solid #3b82f6' : '1px solid var(--border-color)', position: 'relative' }}>
+                        {plan.popular && <div style={{ position: 'absolute', top: -12, left: '50%', transform: 'translateX(-50%)', background: '#3b82f6', color: '#fff', fontSize: 11, fontWeight: 700, padding: '3px 12px', borderRadius: 20 }}>BELIEBT</div>}
+                        <h3 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{plan.name}</h3>
+                        <div style={{ marginBottom: 20 }}>
+                            <span style={{ fontSize: 36, fontWeight: 800 }}>${plan.price}</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: 14 }}>/Monat</span>
+                        </div>
+                        <ul style={{ listStyle: 'none', padding: 0, marginBottom: 24 }}>
+                            {plan.features.map((f, i) => (
+                                <li key={i} style={{ padding: '6px 0', fontSize: 14, color: 'var(--text-muted)' }}>
+                                    <span style={{ color: '#10b981', marginRight: 8 }}>✓</span>{f}
+                                </li>
+                            ))}
+                        </ul>
+                        <button onClick={() => handleCheckout(plan.id)} disabled={loading === plan.id || currentPlan === plan.id}
+                            style={{ width: '100%', padding: '10px 0', border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+                                background: currentPlan === plan.id ? '#374151' : (plan.popular ? '#3b82f6' : '#1e293b'),
+                                color: '#fff', opacity: loading === plan.id ? 0.6 : 1 }}>
+                            {currentPlan === plan.id ? 'Aktueller Plan' : (loading === plan.id ? '...' : 'Jetzt starten')}
+                        </button>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+// ── Account Page ──
+function AccountPage({ user, limits, getToken, onPlanChange }) {
+    const [portalLoading, setPortalLoading] = useState(false);
+
+    const openBillingPortal = async () => {
+        setPortalLoading(true);
+        try {
+            const token = getToken();
+            const res = await fetch(`${API}/api/auth/billing-portal`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ return_url: window.location.href })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.url) window.location.href = data.url;
+            } else {
+                if (window.addToast) window.addToast('Billing Portal nicht verfügbar', 'error');
+            }
+        } catch {
+            if (window.addToast) window.addToast('Verbindungsfehler', 'error');
+        }
+        setPortalLoading(false);
+    };
+
+    const planColors = { free: '#64748b', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
+    const pc = planColors[user.plan] || '#64748b';
+
+    return (
+        <div style={{ maxWidth: 640, margin: '0 auto', padding: '40px 20px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 28 }}>Account & Abonnement</h2>
+
+            {/* User Info */}
+            <div className="card" style={{ padding: 24, marginBottom: 20, borderRadius: 12 }}>
+                <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Email</div>
+                <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{user.email}</div>
+                <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Name</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>{user.name || '—'}</div>
+            </div>
+
+            {/* Plan Info */}
+            <div className="card" style={{ padding: 24, marginBottom: 20, borderRadius: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <div>
+                        <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Aktueller Plan</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <span style={{ fontSize: 20, fontWeight: 700 }}>{limits?.plan_name || user.plan}</span>
+                            <span style={{ background: pc, color: '#fff', fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 10, textTransform: 'uppercase' }}>{user.plan}</span>
+                        </div>
+                    </div>
+                    {limits?.price > 0 && (
+                        <div style={{ textAlign: 'right' }}>
+                            <span style={{ fontSize: 28, fontWeight: 800 }}>${limits.price}</span>
+                            <span style={{ color: '#94a3b8', fontSize: 13 }}>/Monat</span>
+                        </div>
+                    )}
+                </div>
+
+                {/* Feature Summary */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 24px', fontSize: 13, color: '#94a3b8' }}>
+                    <div>Scanner Tabs: <span style={{ color: '#f1f5f9', fontWeight: 600 }}>{limits?.allowed_tabs ? limits.allowed_tabs.length : 'Alle'}</span></div>
+                    <div>Scan Intervall: <span style={{ color: '#f1f5f9', fontWeight: 600 }}>{limits?.scan_interval_min} Min</span></div>
+                    <div>Sidebar Detail: <span style={{ color: limits?.has_sidebar_detail ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_sidebar_detail ? 'Ja' : 'Nein'}</span></div>
+                    <div>Email Alerts: <span style={{ color: limits?.has_email_alerts ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_email_alerts ? 'Ja' : 'Nein'}</span></div>
+                    <div>Trade Setups: <span style={{ color: limits?.has_trade_setups ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_trade_setups ? 'Ja' : 'Nein'}</span></div>
+                    <div>ORB Scanner: <span style={{ color: limits?.has_orb_scanner ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_orb_scanner ? 'Ja' : 'Nein'}</span></div>
+                    <div>Backtesting: <span style={{ color: limits?.has_backtest ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_backtest ? 'Ja' : 'Nein'}</span></div>
+                    <div>API Access: <span style={{ color: limits?.has_api_access ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_api_access ? 'Ja' : 'Nein'}</span></div>
+                </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: 12 }}>
+                {user.plan !== 'free' && user.stripe_customer_id && (
+                    <button onClick={openBillingPortal} disabled={portalLoading}
+                        style={{ flex: 1, padding: '12px 0', background: '#1e293b', border: '1px solid #334155', color: '#f1f5f9', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: portalLoading ? 'wait' : 'pointer' }}>
+                        {portalLoading ? '...' : 'Abo verwalten (Stripe)'}
+                    </button>
+                )}
+                {user.plan !== 'elite' && (
+                    <button onClick={onPlanChange}
+                        style={{ flex: 1, padding: '12px 0', background: '#3b82f6', border: 'none', color: '#fff', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+                        Upgrade Plan
+                    </button>
+                )}
+            </div>
+
+            {user.trial_ends_at && user.plan === 'free' && (
+                <div style={{ marginTop: 16, padding: 14, background: '#1e293b', borderRadius: 8, fontSize: 13, color: '#94a3b8', textAlign: 'center' }}>
+                    Dein Free Trial endet am: <span style={{ color: '#f59e0b', fontWeight: 600 }}>{new Date(user.trial_ends_at).toLocaleDateString('de-DE')}</span>
+                </div>
+            )}
+        </div>
+    );
+}
+
 // Toast Component
 function ToastContainer() {
     const [toasts, setToasts] = useState([]);
@@ -1375,6 +1658,12 @@ function App() {
     const [serverStatus, setServerStatus] = useState(true);
     const [activeScans, setActiveScans] = useState(0);
     const [scanCache, setScanCache] = useState({});
+    const [showPricing, setShowPricing] = useState(false);
+    const [showAccount, setShowAccount] = useState(false);
+    const [showUserMenu, setShowUserMenu] = useState(false);
+
+    // ── Auth ──
+    const { user, limits, loading: authLoading, login, register, logout, getToken, checkAuth } = useAuth();
 
     // Wrapper: akzeptiert String (ticker) oder Objekt {ticker, grade, score, direction, ...}
     const handleSelectTicker = useCallback((tickerOrObj) => {
@@ -1437,7 +1726,7 @@ function App() {
         }
     }, [darkMode]);
 
-    const tabs = [
+    const allTabs = [
         { id: 'scanner', label: 'Scanner' },
         { id: 'bi-scanner', label: 'BI Scanner' },
         { id: 'biotech', label: 'Biotech' },
@@ -1456,66 +1745,165 @@ function App() {
         { id: 'suche', label: 'Suche' }
     ];
 
+    // Filter tabs based on user plan
+    const allowedTabs = limits?.allowed_tabs; // null = all allowed
+    const tabs = allowedTabs ? allTabs.filter(t => allowedTabs.includes(t.id)) : allTabs;
+
+    // Reset to 'scanner' if current tab is not in allowed list
+    useEffect(() => {
+        if (allowedTabs && !allowedTabs.includes(activeTab)) {
+            setActiveTab('scanner');
+        }
+    }, [allowedTabs, activeTab]);
+
+    // Close user menu when clicking outside
+    useEffect(() => {
+        if (!showUserMenu) return;
+        const handler = (e) => { if (!e.target.closest('[data-usermenu]')) setShowUserMenu(false); };
+        document.addEventListener('click', handler);
+        return () => document.removeEventListener('click', handler);
+    }, [showUserMenu]);
+
+    // Check if sidebar detail is allowed
+    const canUseSidebar = limits?.has_sidebar_detail !== false;
+
+    // Wrap handleSelectTicker with sidebar gate
+    const gatedSelectTicker = useCallback((tickerOrObj) => {
+        if (!canUseSidebar && tickerOrObj) {
+            if (window.addToast) window.addToast('Sidebar-Analyse ab Pro Plan verfügbar', 'info');
+            return;
+        }
+        handleSelectTicker(tickerOrObj);
+    }, [canUseSidebar, handleSelectTicker]);
+
+    // ── Auth Loading Screen ──
+    if (authLoading) {
+        return (
+            <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0f172a' }}>
+                <div style={{ textAlign: 'center' }}>
+                    <h1 style={{ fontSize: 28, fontWeight: 700, color: '#f1f5f9', marginBottom: 8 }}>Alpha Station</h1>
+                    <div style={{ color: '#64748b' }}>Laden...</div>
+                </div>
+            </div>
+        );
+    }
+
+    // ── Not logged in → Show Auth Page ──
+    if (!user) {
+        return <AuthPage onLogin={login} onRegister={register} />;
+    }
+
+    // ── Plan badge color ──
+    const planColors = { free: '#64748b', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
+    const planColor = planColors[user.plan] || '#64748b';
+
     return (
         <div className={darkMode ? 'dark' : ''}>
             {/* Header */}
             <div className="card border-b border-gray-200 sticky top-0 z-100">
                 <div className="max-w-full px-6 py-4">
                     <div className="flex justify-between items-center mb-4">
-                        <h1 className="text-2xl font-bold">Alpha Station</h1>
+                        <h1 className="text-2xl font-bold" style={{ cursor: 'pointer' }} onClick={() => { setShowPricing(false); setShowAccount(false); }}>Alpha Station</h1>
                         <div className="flex items-center gap-4">
                             <SchedulerStatus status={schedulerStatus} />
                             <div className="flex items-center gap-2">
                                 <span className={`status-dot ${serverStatus ? 'status-online' : 'status-offline'}`}></span>
                                 <span className="text-sm">{serverStatus ? 'Server Online' : 'Server Offline'}</span>
                             </div>
-                            <button
-                                onClick={() => setDarkMode(!darkMode)}
-                                className="icon-button text-xl"
-                            >
+                            <button onClick={() => setDarkMode(!darkMode)} className="icon-button text-xl">
                                 {darkMode ? '☀️' : '🌙'}
                             </button>
+
+                            {/* User Menu */}
+                            <div style={{ position: 'relative' }} data-usermenu="true">
+                                <button onClick={() => setShowUserMenu(!showUserMenu)}
+                                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: '#1e293b', border: '1px solid #334155', borderRadius: 8, cursor: 'pointer', color: '#f1f5f9', fontSize: 13 }}>
+                                    <span style={{ width: 28, height: 28, borderRadius: '50%', background: planColor, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 12, color: '#fff' }}>
+                                        {(user.name || user.email || '?')[0].toUpperCase()}
+                                    </span>
+                                    <span>{user.name || user.email?.split('@')[0]}</span>
+                                    <span style={{ background: planColor, color: '#fff', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, textTransform: 'uppercase' }}>{user.plan}</span>
+                                </button>
+
+                                {showUserMenu && (
+                                    <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, background: '#1e293b', border: '1px solid #334155', borderRadius: 10, minWidth: 200, boxShadow: '0 10px 30px rgba(0,0,0,0.4)', zIndex: 9999 }}
+                                        onClick={() => setShowUserMenu(false)}>
+                                        <div style={{ padding: '14px 16px', borderBottom: '1px solid #334155' }}>
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: '#f1f5f9' }}>{user.email}</div>
+                                            <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>Plan: <span style={{ color: planColor, fontWeight: 600, textTransform: 'capitalize' }}>{user.plan}</span></div>
+                                        </div>
+                                        {(user.plan === 'free' || user.plan === 'basic') && (
+                                            <button onClick={() => { setShowPricing(true); setShowAccount(false); }}
+                                                style={{ width: '100%', padding: '10px 16px', textAlign: 'left', border: 'none', background: 'none', color: '#3b82f6', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                                                Upgrade
+                                            </button>
+                                        )}
+                                        <button onClick={() => { setShowAccount(true); setShowPricing(false); }}
+                                            style={{ width: '100%', padding: '10px 16px', textAlign: 'left', border: 'none', background: 'none', color: '#f1f5f9', fontSize: 13, cursor: 'pointer' }}>
+                                            Account & Abo
+                                        </button>
+                                        <button onClick={() => { logout(); setShowUserMenu(false); }}
+                                            style={{ width: '100%', padding: '10px 16px', textAlign: 'left', border: 'none', background: 'none', color: '#ef4444', fontSize: 13, cursor: 'pointer', borderTop: '1px solid #334155' }}>
+                                            Ausloggen
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
 
-                    {/* Tab Navigation */}
-                    <div className="flex gap-6 overflow-x-auto pb-2">
-                        {tabs.map(tab => (
-                            <button
-                                key={tab.id}
-                                onClick={() => setActiveTab(tab.id)}
-                                className={`whitespace-nowrap pb-2 border-b-2 transition-all ${
-                                    activeTab === tab.id
-                                        ? 'tab-active font-semibold'
-                                        : 'tab-inactive'
-                                }`}
-                            >
-                                {tab.label}
-                            </button>
-                        ))}
-                    </div>
+                    {/* Tab Navigation — only visible when not on pricing/account pages */}
+                    {!showPricing && !showAccount && (
+                        <div className="flex gap-6 overflow-x-auto pb-2">
+                            {tabs.map(tab => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => setActiveTab(tab.id)}
+                                    className={`whitespace-nowrap pb-2 border-b-2 transition-all ${
+                                        activeTab === tab.id
+                                            ? 'tab-active font-semibold'
+                                            : 'tab-inactive'
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                 </div>
             </div>
 
-            {/* Main Content */}
-            <div className="max-w-full px-6 py-6">
-                {activeTab === 'scanner' && <ScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'biotech' && <BiotechTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'kalender' && <KalenderTab />}
-                {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-                {activeTab === 'backtest' && <BacktestTab />}
-                {activeTab === 'strategie-guide' && <StrategieGuideTab />}
-                {activeTab === 'new-listing' && <NewListingTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'orb' && <ORBScannerTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                {activeTab === 'suche' && <SucheTab onSelectTicker={handleSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
-            </div>
+            {/* Pricing Page */}
+            {showPricing && (
+                <PricingPage currentPlan={user.plan} getToken={getToken} />
+            )}
+
+            {/* Account Page */}
+            {showAccount && (
+                <AccountPage user={user} limits={limits} getToken={getToken} onPlanChange={() => { setShowAccount(false); setShowPricing(true); }} />
+            )}
+
+            {/* Main Content — only visible when not on pricing/account pages */}
+            {!showPricing && !showAccount && (
+                <div className="max-w-full px-6 py-6">
+                    {activeTab === 'scanner' && <ScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'biotech' && <BiotechTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'kalender' && <KalenderTab />}
+                    {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                    {activeTab === 'backtest' && <BacktestTab />}
+                    {activeTab === 'strategie-guide' && <StrategieGuideTab />}
+                    {activeTab === 'new-listing' && <NewListingTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'suche' && <SucheTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                </div>
+            )}
 
             {/* Detail Sidebar */}
             {selectedTicker && (

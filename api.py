@@ -33,9 +33,24 @@ from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from fastapi import FastAPI, BackgroundTasks, Query, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# V3.4: Auth & Subscription System
+try:
+    from modules.auth import (
+        register_user, login_user, verify_token, get_user_plan,
+        get_user_limits, check_tab_access, check_feature,
+        create_checkout_session, create_billing_portal,
+        handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
+    )
+    HAS_AUTH = True
+except ImportError as _auth_err:
+    HAS_AUTH = False
+    print(f"[Warning] Auth module not loaded: {_auth_err}")
 import requests as req
 
 # Import scanner modules
@@ -1428,6 +1443,175 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Serve Frontend (index.html) ──
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    """Serve the React frontend."""
+    frontend_path = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
+    if os.path.exists(frontend_path):
+        with open(frontend_path, "r") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Alpha Station</h1><p>Frontend not found</p>", status_code=404)
+
+
+# ══════════════════════════════════════════════════════════════
+# V3.4: AUTH & SUBSCRIPTION ENDPOINTS
+# ══════════════════════════════════════════════════════════════
+
+def _get_token_from_header(authorization: str = Header(None)) -> Optional[str]:
+    """Extract JWT token from Authorization header."""
+    if not authorization:
+        return None
+    if authorization.startswith("Bearer "):
+        return authorization[7:]
+    return authorization
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class CheckoutRequest(BaseModel):
+    plan: str  # basic, pro, elite
+
+
+class BillingPortalRequest(BaseModel):
+    return_url: str = ""
+
+
+@app.post("/api/auth/register")
+async def api_register(req_body: RegisterRequest):
+    """Register a new user account."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    result = register_user(req_body.email, req_body.password, req_body.name)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.post("/api/auth/login")
+async def api_login(req_body: LoginRequest):
+    """Login with email + password. Returns JWT token."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    result = login_user(req_body.email, req_body.password)
+    if not result["success"]:
+        raise HTTPException(status_code=401, detail=result["message"])
+    return result
+
+
+@app.get("/api/auth/me")
+async def api_get_me(authorization: str = Header(None)):
+    """Get current user info + plan limits from JWT token."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    limits = get_user_limits(token)
+    # Load full user data from DB
+    email = payload.get("email", "")
+    from modules.auth import _load_users
+    db = _load_users()
+    db_user = db.get("users", {}).get(email, {})
+    return {
+        "user": {
+            "id": payload.get("sub"),
+            "email": email,
+            "name": db_user.get("name", ""),
+            "plan": limits.get("plan", "free"),
+            "stripe_customer_id": db_user.get("stripe_customer_id"),
+            "trial_ends_at": db_user.get("trial_ends_at"),
+        },
+        "limits": limits,
+    }
+
+
+@app.get("/api/auth/plans")
+async def api_get_plans():
+    """Get available plans and pricing."""
+    return {
+        "plans": [
+            {"id": "basic", "name": "Basic", "price": 29, "interval": "month",
+             "features": ["4 Scanner Tabs", "Scan alle 30min", "30 Ticker-Details/Stunde"]},
+            {"id": "pro", "name": "Pro", "price": 79, "interval": "month",
+             "features": ["Alle Scanner", "Echtzeit Scans", "Volle Sidebar-Analyse", "Email Alerts", "Trade Setups"],
+             "popular": True},
+            {"id": "elite", "name": "Elite", "price": 149, "interval": "month",
+             "features": ["Alles aus Pro", "ORB Scanner", "Backtesting", "API Access", "Priority Support"]},
+        ]
+    }
+
+
+@app.post("/api/auth/checkout")
+async def api_create_checkout(req_body: CheckoutRequest, authorization: str = Header(None)):
+    """Create Stripe checkout session for subscription."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Login required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    email = payload.get("email")
+    base_url = "http://178.104.69.209:3000"
+    checkout_url = create_checkout_session(
+        email=email,
+        plan=req_body.plan,
+        success_url=f"{base_url}?checkout=success&plan={req_body.plan}",
+        cancel_url=f"{base_url}?checkout=cancel",
+    )
+    if not checkout_url:
+        raise HTTPException(status_code=500, detail="Could not create checkout session. Check Stripe configuration.")
+    return {"url": checkout_url}
+
+
+@app.post("/api/auth/billing-portal")
+async def api_billing_portal(req_body: BillingPortalRequest, authorization: str = Header(None)):
+    """Create Stripe billing portal session for subscription management."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Login required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    email = payload.get("email")
+    return_url = req_body.return_url or "http://178.104.69.209:3000"
+    portal_url = create_billing_portal(email, return_url)
+    if not portal_url:
+        raise HTTPException(status_code=500, detail="Could not create billing portal")
+    return {"url": portal_url}
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events (subscription changes, payments)."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    result = handle_stripe_webhook(payload, sig_header)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Webhook error"))
+    return {"status": "ok"}
 
 
 # ── Endpoints ──
