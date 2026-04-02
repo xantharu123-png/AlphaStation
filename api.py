@@ -1521,18 +1521,19 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         ema100 = calculate_ema(closes, 100)
         ema200 = calculate_ema(closes, 200)
 
-        # 2. VWAP (cumulative over all available bars)
+        # 2. VWAP (V3.4 FIX: nur heutiger Tag, nicht kumulativ über alle Bars)
+        # TradingView resettet VWAP täglich um Market Open
         vwap = None
-        if len(bars) >= 5:
-            cum_tp_vol = 0
-            cum_vol = 0
-            for b in reversed(bars):  # chronological order
-                tp = (b["h"] + b["l"] + b["c"]) / 3
-                vol = b.get("v", 0)
-                cum_tp_vol += tp * vol
-                cum_vol += vol
-            if cum_vol > 0:
-                vwap = round(cum_tp_vol / cum_vol, 2)
+        if len(bars) >= 2:
+            # bars[0] = heute (newest), nur heutigen Bar für Intraday-VWAP
+            # Bei Daily-Bars: VWAP = Typical Price des heutigen Tages
+            today_bar = bars[0]
+            tp_today = (today_bar["h"] + today_bar["l"] + today_bar["c"]) / 3
+            vol_today = today_bar.get("v", 0)
+            if vol_today > 0:
+                vwap = round(tp_today, 2)
+            else:
+                vwap = round(tp_today, 2)
 
         # 3. MACD (optimized: calculate EMA series once, then derive MACD line)
         ema12 = calculate_ema(closes, 12)
@@ -1580,17 +1581,27 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                 level_price = low_20 + range_fib * ratio
                 fib_levels[f"{int(ratio*100)}%"] = round(level_price, 2)
 
-        # 6. ATR (Average True Range, 14-period)
+        # 6. ATR (Average True Range, 14-period, Wilder's Smoothing)
+        # V3.4 FIX: Vorher simpler Durchschnitt, jetzt korrekt Wilder's wie TradingView
         atr = None
         if len(bars) >= 15:
+            # bars sind DESCENDING → reversed = chronologisch
+            chron_highs = list(reversed(highs[:60]))
+            chron_lows = list(reversed(lows[:60]))
+            chron_closes = list(reversed(closes[:60]))
             tr_values = []
-            for i in range(14):
-                high_i = highs[i]
-                low_i = lows[i]
-                prev_close_i = closes[i + 1] if i < len(closes) - 1 else closes[i]
-                tr = max(high_i - low_i, abs(high_i - prev_close_i), abs(low_i - prev_close_i))
+            for i in range(1, len(chron_highs)):
+                h = chron_highs[i]
+                l = chron_lows[i]
+                pc = chron_closes[i - 1]
+                tr = max(h - l, abs(h - pc), abs(l - pc))
                 tr_values.append(tr)
-            atr = round(sum(tr_values) / 14, 2)
+            if len(tr_values) >= 14:
+                # Wilder's: Seed mit SMA der ersten 14 TRs, dann smoothen
+                atr_val = sum(tr_values[:14]) / 14
+                for tr in tr_values[14:]:
+                    atr_val = (atr_val * 13 + tr) / 14
+                atr = round(atr_val, 2)
 
         # 7. Signal Scoring (10-factor system)
         signals = []
@@ -1973,13 +1984,22 @@ def get_chart_data(
                         print(f"[Warning] Error calculating EMA{period}: {e}")
             result["ema"] = ema_overlays
 
-        # VWAP (cumulative per-bar)
+        # VWAP (V3.4 FIX: Daily Reset wie TradingView — VWAP startet jeden Tag neu)
         if "vwap" in overlay_list and len(ohlcv) >= 10:
             try:
                 vwap_data = []
                 cum_tp_vol = 0
                 cum_vol = 0
+                prev_date = None
                 for bar in ohlcv:
+                    # Tageswechsel erkennen → VWAP reset
+                    from datetime import datetime as _dt
+                    bar_date = _dt.utcfromtimestamp(bar["time"]).strftime("%Y-%m-%d")
+                    if prev_date is not None and bar_date != prev_date:
+                        cum_tp_vol = 0
+                        cum_vol = 0
+                    prev_date = bar_date
+
                     tp = (bar["high"] + bar["low"] + bar["close"]) / 3
                     vol = bar.get("volume", 0)
                     cum_tp_vol += tp * vol

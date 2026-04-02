@@ -1881,18 +1881,21 @@ def find_pivots(prices, window=5):
 def check_fibonacci_ratio(actual, target, tolerance=0.05):
     """
     Prüft ob ein Verhältnis innerhalb der Toleranz liegt.
-    
+    V3.4 FIX: Toleranz ist jetzt PROZENTUAL (relativ zum Target).
+    Vorher absolut → bei hohen Targets (Crab 2.618) war Toleranz viel zu eng.
+
     Args:
         actual: Berechnetes Verhältnis
         target: Ziel-Fibonacci-Level (z.B. 0.618)
-        tolerance: Erlaubte Abweichung (default 5%)
-    
+        tolerance: Erlaubte prozentuale Abweichung (0.05 = 5%)
+
     Returns:
         (is_valid, deviation_pct)
     """
     deviation = abs(actual - target)
     deviation_pct = (deviation / target) * 100 if target > 0 else 100
-    is_valid = deviation <= tolerance
+    # V3.4: Prozentuale Toleranz statt absolut (5% = tolerance von 0.05)
+    is_valid = deviation_pct <= (tolerance * 100) if target > 0 else False
     return is_valid, deviation_pct
 
 
@@ -2028,6 +2031,13 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
             
             ratios = pattern_def["ratios"]
             
+            # V3.4 FIX: Range-Check mit prozentualer Toleranz statt absolut
+            def _range_check(actual, min_val, max_val, tol):
+                """Prüft ob actual in Range liegt, mit prozentualer Toleranz."""
+                tol_low = min_val * tol if min_val > 0 else tol
+                tol_high = max_val * tol if max_val > 0 else tol
+                return (min_val - tol_low) <= actual <= (max_val + tol_high)
+
             # AB/XA Check
             if "AB_XA" in ratios:
                 target = ratios["AB_XA"]
@@ -2036,9 +2046,9 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(ab_retracement, target_val, tol)
                 else:  # Range
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= ab_retracement <= (max_val + tol)
+                    is_valid = _range_check(ab_retracement, min_val, max_val, tol)
                     dev = 0 if is_valid else min(abs(ab_retracement - min_val), abs(ab_retracement - max_val)) * 100
-                
+
                 total_checks += 1
                 if is_valid:
                     matches += 1
@@ -2046,7 +2056,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     details.append(f" AB/XA: {ab_retracement:.3f}")
                 else:
                     details.append(f" AB/XA: {ab_retracement:.3f}")
-            
+
             # BC/AB Check
             if "BC_AB" in ratios:
                 target = ratios["BC_AB"]
@@ -2055,8 +2065,8 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(bc_retracement, target_val, tol)
                 else:
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= bc_retracement <= (max_val + tol)
-                
+                    is_valid = _range_check(bc_retracement, min_val, max_val, tol)
+
                 total_checks += 1
                 if is_valid:
                     matches += 1
@@ -2064,7 +2074,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     details.append(f" BC/AB: {bc_retracement:.3f}")
                 else:
                     details.append(f" BC/AB: {bc_retracement:.3f}")
-            
+
             # CD/BC Check
             if "CD_BC" in ratios:
                 target = ratios["CD_BC"]
@@ -2073,7 +2083,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(cd_extension, target_val, tol)
                 else:
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= cd_extension <= (max_val + tol)
+                    is_valid = _range_check(cd_extension, min_val, max_val, tol)
                 
                 total_checks += 1
                 if is_valid:
@@ -2091,7 +2101,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(ad_retracement, target_val, tol)
                 else:
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= ad_retracement <= (max_val + tol)
+                    is_valid = _range_check(ad_retracement, min_val, max_val, tol)
                 
                 total_checks += 1
                 if is_valid:

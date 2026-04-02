@@ -264,21 +264,35 @@ def calculate_macd(bars, fast=12, slow=26, signal=9):
     if not bars or len(bars) < slow + signal:
         return None, None, None
     closes = [b["close"] for b in bars]
-    # EMA Berechnung
+    # V3.4 FIX: EMA mit SMA-Seed statt data[0] (TradingView-konform)
     def _ema(data, period):
-        ema = [data[0]]
+        if len(data) < period:
+            return data[:]
+        sma_seed = sum(data[:period]) / period
+        ema = [None] * (period - 1) + [sma_seed]
         k = 2 / (period + 1)
-        for i in range(1, len(data)):
+        for i in range(period, len(data)):
             ema.append(data[i] * k + ema[-1] * (1 - k))
         return ema
     ema_fast = _ema(closes, fast)
     ema_slow = _ema(closes, slow)
-    macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(closes))]
-    signal_line = _ema(macd_line[slow-1:], signal)  # Signal ab slow-1
-    # Histogram = MACD - Signal (nur für die letzten signal Perioden)
-    offset = slow - 1
-    hist = [macd_line[offset + i] - signal_line[i] for i in range(len(signal_line))]
-    return macd_line[-1], signal_line[-1], hist
+    # MACD-Linie ab dem Punkt wo beide EMAs existieren (= slow-1)
+    macd_line = []
+    for i in range(len(closes)):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            macd_line.append(ema_fast[i] - ema_slow[i])
+    if len(macd_line) < signal:
+        return None, None, None
+    # V3.4 FIX: Signal = EMA9 der GESAMTEN MACD-Linie, nicht eines Subsets
+    signal_line = _ema(macd_line, signal)
+    # Histogram = MACD - Signal
+    hist = []
+    for i in range(len(macd_line)):
+        if signal_line[i] is not None:
+            hist.append(macd_line[i] - signal_line[i])
+        else:
+            hist.append(0)
+    return macd_line[-1], signal_line[-1], hist[-1] if hist else 0
 
 
 def calculate_stochastic(bars, k_period=14, d_period=3):
