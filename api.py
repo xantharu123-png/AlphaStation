@@ -4505,7 +4505,7 @@ def _crash_monitor_wrapper() -> None:
             ("IWM", "Russell 2000", "Russell 2000 ETF"),
         ]
 
-        # VIX via Polygon snapshot (works on some plans)
+        # VIX via Polygon snapshot + historical for 5d/20d change
         try:
             vix_url = "https://api.polygon.io/v3/snapshot?ticker.any_of=I:VIX&apiKey=" + POLYGON_KEY
             vix_resp = rate_limited_get(vix_url, params={})
@@ -4517,8 +4517,25 @@ def _crash_monitor_wrapper() -> None:
                     vix_prev = vix_session.get("previous_close", vix_price)
                     if vix_price > 0:
                         chg = ((vix_price - vix_prev) / vix_prev * 100) if vix_prev else 0
+                        # V3.4 FIX: Historische VIX-Daten für 5d/20d Change holen
+                        vix_5d = 0
+                        vix_20d = 0
+                        try:
+                            from datetime import timedelta
+                            _end = datetime.now().strftime("%Y-%m-%d")
+                            _start = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+                            _vix_hist_url = f"https://api.polygon.io/v2/aggs/ticker/I:VIX/range/1/day/{_start}/{_end}"
+                            _vix_hist = rate_limited_get(_vix_hist_url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                            if _vix_hist.status_code == 200:
+                                _vix_bars = _vix_hist.json().get("results", [])
+                                if len(_vix_bars) >= 6:
+                                    vix_5d = round(((vix_price - _vix_bars[5]["c"]) / _vix_bars[5]["c"] * 100), 2)
+                                if len(_vix_bars) >= 21:
+                                    vix_20d = round(((vix_price - _vix_bars[20]["c"]) / _vix_bars[20]["c"] * 100), 2)
+                        except Exception as _vhist_err:
+                            print(f"[Crash Monitor] VIX history error: {_vhist_err}")
                         result["vix"] = {"ticker": "I:VIX", "name": "VIX", "price": round(vix_price, 2),
-                                         "change_1d": round(chg, 2), "change_5d": 0, "change_20d": 0}
+                                         "change_1d": round(chg, 2), "change_5d": vix_5d, "change_20d": vix_20d}
                         if vix_price >= 30: result["vix"]["level"] = "EXTREME"
                         elif vix_price >= 25: result["vix"]["level"] = "HIGH"
                         elif vix_price >= 20: result["vix"]["level"] = "ELEVATED"
@@ -4560,9 +4577,14 @@ def _crash_monitor_wrapper() -> None:
                         else:
                             est_vix = 13 + avg_abs_change * 1.3
                         est_vix = round(max(12, min(50, est_vix)), 1)
+                        # V3.4: 5d/20d Change aus UVXY-Bars ableiten
+                        _uvxy_5d = 0
+                        _uvxy_20d = 0
+                        if len(bars) >= 6:
+                            _uvxy_5d = round(((bars[0]["c"] - bars[5]["c"]) / bars[5]["c"] * 100) / 1.5, 2)
                         result["vix"] = {"ticker": "UVXY", "name": "VIX (est.)", "price": est_vix,
-                                         "change_1d": round(uvxy_chg_pct / 1.5, 2),  # Rough: divide UVXY change by leverage
-                                         "change_5d": 0, "change_20d": 0}
+                                         "change_1d": round(uvxy_chg_pct / 1.5, 2),
+                                         "change_5d": _uvxy_5d, "change_20d": _uvxy_20d}
                         if est_vix >= 30: result["vix"]["level"] = "EXTREME"
                         elif est_vix >= 25: result["vix"]["level"] = "HIGH"
                         elif est_vix >= 20: result["vix"]["level"] = "ELEVATED"
@@ -4608,52 +4630,44 @@ def _crash_monitor_wrapper() -> None:
                 print(f"[Warning] Error processing market index: {e}")
                 continue
 
-        # Market breadth - count gainers vs losers via snapshot
+        # Market breadth — V3.4 FIX: Full Snapshot statt nur Gainers/Losers (die geben nur Top 250)
         try:
-            # Marktbreite: Gainers vs Losers Count + durchschnittliche Veränderung
             up = 0
             down = 0
             unchanged = 0
-            gainers_avg_chg = 0
-            losers_avg_chg = 0
+            gainers_chgs = []
+            losers_chgs = []
 
-            for endpoint in ["gainers", "losers"]:
-                snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                try:
-                    snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
-                    print(f"[Crash Monitor] {endpoint} endpoint: status={snap_resp.status_code}")
-                except Exception as req_err:
-                    print(f"[Crash Monitor] {endpoint} request FAILED: {req_err}")
-                    continue
+            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            try:
+                snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                print(f"[Crash Monitor] Full snapshot: status={snap_resp.status_code}")
+            except Exception as req_err:
+                print(f"[Crash Monitor] Full snapshot FAILED: {req_err}")
+                snap_resp = None
 
-                if snap_resp.status_code != 200:
-                    print(f"[Warning] {endpoint} returned {snap_resp.status_code}: {snap_resp.text[:200]}")
-                    continue
-
-                tickers = snap_resp.json().get("tickers", [])
-                print(f"[Crash Monitor] {endpoint}: {len(tickers)} tickers received")
-
-                # Gainers endpoint = alle steigenden, Losers endpoint = alle fallenden
-                # Count direkt aus der Anzahl der Tickers (robust, kein todaysChangePerc nötig)
-                changes = []
-                for t in tickers:
+            if snap_resp and snap_resp.status_code == 200:
+                all_tickers = snap_resp.json().get("tickers", [])
+                print(f"[Crash Monitor] Full snapshot: {len(all_tickers)} tickers received")
+                for t in all_tickers:
                     try:
                         tod = t.get("todaysChangePerc", 0)
-                        if isinstance(tod, (int, float)) and tod != 0:
-                            changes.append(tod)
+                        if not isinstance(tod, (int, float)):
+                            continue
+                        if tod > 0:
+                            up += 1
+                            gainers_chgs.append(tod)
+                        elif tod < 0:
+                            down += 1
+                            losers_chgs.append(tod)
+                        else:
+                            unchanged += 1
                     except Exception:
                         continue
 
-                if endpoint == "gainers":
-                    up = len(tickers)  # Alle Tickers im Gainers-Endpoint sind Gewinner
-                    if changes:
-                        gainers_avg_chg = round(sum(changes) / len(changes), 2)
-                elif endpoint == "losers":
-                    down = len(tickers)  # Alle Tickers im Losers-Endpoint sind Verlierer
-                    if changes:
-                        losers_avg_chg = round(sum(changes) / len(changes), 2)
-
-                print(f"[Crash Monitor] {endpoint}: count={len(tickers)}, avg_chg={changes and round(sum(changes)/len(changes),2) or 0}")
+            gainers_avg_chg = round(sum(gainers_chgs) / len(gainers_chgs), 2) if gainers_chgs else 0
+            losers_avg_chg = round(sum(losers_chgs) / len(losers_chgs), 2) if losers_chgs else 0
+            print(f"[Crash Monitor] Breadth raw: {up} up, {down} down, {unchanged} unchanged")
 
             total = up + down + unchanged
             ratio = round(up / down, 2) if down > 0 else 0
