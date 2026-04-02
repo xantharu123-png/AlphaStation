@@ -35,7 +35,7 @@ except ImportError:
 
 # ── Config ──
 AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH", "/tmp/alpha_station_users.json")
-JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
+JWT_SECRET = os.environ.get("JWT_SECRET", "as_jwt_2026_alpha_station_prod_key_x9k2m")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 
@@ -43,9 +43,9 @@ JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_IDS = {
-    "basic_monthly": os.environ.get("STRIPE_PRICE_BASIC", ""),
-    "pro_monthly": os.environ.get("STRIPE_PRICE_PRO", ""),
-    "elite_monthly": os.environ.get("STRIPE_PRICE_ELITE", ""),
+    "basic_monthly": os.environ.get("STRIPE_PRICE_BASIC", "price_1THqyWEOIB5wAqvUrLNLCPZD"),
+    "pro_monthly": os.environ.get("STRIPE_PRICE_PRO", "price_1THqysEOIB5wAqvU6MG9iywG"),
+    "elite_monthly": os.environ.get("STRIPE_PRICE_ELITE", "price_1THqzjEOIB5wAqvUTrVwLzha"),
 }
 
 if HAS_STRIPE and STRIPE_SECRET_KEY:
