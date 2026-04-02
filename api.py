@@ -519,7 +519,10 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         print(f"[Strategy Scan] {strategy_name}: Change {change_min}..{change_max}%, Preis ${price_min}..${price_max}")
 
         # Polygon Snapshot: Gainers + Losers
+        # V3.4: AH/PM Fallback — wenn Gainers/Losers leer, Full Snapshot mit lastTrade
         results = []
+        _all_snapshot_tickers = []
+        _strat_extended = False
         for endpoint in ["gainers", "losers"]:
             try:
                 url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
@@ -527,154 +530,184 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                 if resp.status_code != 200:
                     print(f"[Strategy Scan] {endpoint} API error: {resp.status_code}")
                     continue
-                tickers = resp.json().get("tickers", [])
-                for t in tickers:
-                    try:
-                        ticker = t.get("ticker", "")
-                        day = t.get("day", {})
-                        prev = t.get("prevDay", {})
-                        if not ticker or not prev.get("c"):
-                            continue
+                _all_snapshot_tickers.extend(resp.json().get("tickers", []))
+            except Exception as e:
+                print(f"[Strategy Scan] {endpoint} error: {e}")
 
+        # AH/PM Fallback: Wenn wenig Ergebnisse → Full Snapshot
+        if len(_all_snapshot_tickers) < 20:
+            print(f"[Strategy Scan] Nur {len(_all_snapshot_tickers)} Ticker — Extended Hours Modus")
+            _strat_extended = True
+            try:
+                _full_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+                _full_resp = rate_limited_get(_full_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                if _full_resp.status_code == 200:
+                    _full_all = _full_resp.json().get("tickers", [])
+                    # Filtere auf Ticker mit lastTrade und signifikantem AH Move
+                    for _ft in _full_all:
+                        _lt_p = _ft.get("lastTrade", {}).get("p", 0)
+                        _day_c = _ft.get("day", {}).get("c", 0)
+                        if _lt_p and _day_c and _day_c > 0:
+                            _ah_chg = abs((_lt_p - _day_c) / _day_c * 100)
+                            if _ah_chg >= 3:  # Min 3% AH Move
+                                _ft["_ext_price"] = _lt_p
+                                _ft["_ext_change"] = (_lt_p - _day_c) / _day_c * 100
+                                _all_snapshot_tickers.append(_ft)
+                    print(f"[Strategy Scan] Extended: {len(_all_snapshot_tickers)} Ticker total")
+            except Exception as _ext_err:
+                print(f"[Strategy Scan] Extended fetch failed: {_ext_err}")
+
+        for t in _all_snapshot_tickers:
+                try:
+                    ticker = t.get("ticker", "")
+                    day = t.get("day", {})
+                    prev = t.get("prevDay", {})
+                    if not ticker or not prev.get("c"):
+                        continue
+
+                    # V3.4: Extended Hours → AH/PM Preis nutzen
+                    if _strat_extended and t.get("_ext_price"):
+                        price = t["_ext_price"]
+                        prev_close = day.get("c", 0) or prev.get("c", 0)
+                        change_pct = t.get("_ext_change", 0)
+                    else:
                         price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
                         prev_close = prev.get("c", 0)
-                        if not price or not prev_close:
-                            continue
+                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+                    if not price or not prev_close:
+                        continue
 
-                        change_pct = ((price - prev_close) / prev_close * 100)
-                        volume = day.get("v", 0)
-                        prev_vol = prev.get("v", 1)
-                        rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
-                        dollar_vol = volume * price
+                    volume = day.get("v", 0)
+                    prev_vol = prev.get("v", 1)
+                    rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
+                    dollar_vol = volume * price
 
-                        # Close Position (wo im Tagesrange: 0=Low, 1=High)
-                        day_high = day.get("h", price)
-                        day_low = day.get("l", price)
-                        day_open = day.get("o", prev_close)
-                        day_range = day_high - day_low
-                        close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
+                    # Close Position (wo im Tagesrange: 0=Low, 1=High)
+                    day_high = day.get("h", price)
+                    day_low = day.get("l", price)
+                    day_open = day.get("o", prev_close)
+                    day_range = day_high - day_low
+                    close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
 
-                        # V2.2: Gap % = Open vs Previous Close
-                        gap_pct = ((day_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                    # V2.2: Gap % = Open vs Previous Close
+                    gap_pct = ((day_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
 
-                        # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
-                        prev_open = prev.get("o", prev_close)
-                        vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
+                    # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
+                    prev_open = prev.get("o", prev_close)
+                    vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
 
-                        # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
-                        # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
-                        # V3.4: Erweitert — auch extreme Tages-Moves (>30%) oder
-                        # Kombination aus starkem Vortag + starkem Heute erkennen
-                        _is_mdr = (vortag_pct > 10 and change_pct > 5) or (change_pct > 30 and close_pos > 0.6)
+                    # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
+                    # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
+                    # V3.4: Erweitert — auch extreme Tages-Moves (>30%) oder
+                    # Kombination aus starkem Vortag + starkem Heute erkennen
+                    _is_mdr = (vortag_pct > 10 and change_pct > 5) or (change_pct > 30 and close_pos > 0.6)
 
-                        # Filter anwenden
-                        if not (change_min <= change_pct <= change_max):
-                            continue
-                        if not (price_min <= price <= price_max):
-                            continue
-                        if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
-                            continue
-                        if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
-                            continue
-                        if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
-                            continue
-                        if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
-                            continue
-                        if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
-                            continue
+                    # Filter anwenden
+                    if not (change_min <= change_pct <= change_max):
+                        continue
+                    if not (price_min <= price <= price_max):
+                        continue
+                    if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
+                        continue
+                    if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                        continue
+                    if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
+                        continue
+                    if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
+                        continue
+                    if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
+                        continue
 
-                        # V2.2: Scoring für Strategie-Ergebnisse
-                        _strat_score = 0
-                        # Change-Stärke (0-30)
-                        _ac = abs(change_pct)
-                        if _ac >= 10: _strat_score += 30
-                        elif _ac >= 5: _strat_score += 20
-                        elif _ac >= 3: _strat_score += 12
-                        else: _strat_score += 5
-                        # RVOL (0-25)
-                        if rvol >= 3.0: _strat_score += 25
-                        elif rvol >= 2.0: _strat_score += 18
-                        elif rvol >= 1.5: _strat_score += 12
-                        elif rvol >= 1.0: _strat_score += 6
-                        # Close Position (0-15)
-                        if "Change %" in filters:
-                            _cm, _ = filters["Change %"]
-                            if _cm >= 0:  # Bullish: Close near High = gut
-                                if close_pos >= 0.8: _strat_score += 15
-                                elif close_pos >= 0.6: _strat_score += 10
-                            else:  # Bearish: Close near Low = gut
-                                if close_pos <= 0.2: _strat_score += 15
-                                elif close_pos <= 0.4: _strat_score += 10
-                        # Dollar Volume (0-15)
-                        if dollar_vol >= 10_000_000: _strat_score += 15
-                        elif dollar_vol >= 5_000_000: _strat_score += 10
-                        elif dollar_vol >= 1_000_000: _strat_score += 6
-                        # Gap-Qualität (0-15)
-                        _ag = abs(gap_pct)
-                        if _ag >= 5: _strat_score += 12
-                        elif _ag >= 2: _strat_score += 15  # Sweet spot
-                        elif _ag >= 1: _strat_score += 8
-                        # Grade
+                    # V2.2: Scoring für Strategie-Ergebnisse
+                    _strat_score = 0
+                    # Change-Stärke (0-30)
+                    _ac = abs(change_pct)
+                    if _ac >= 10: _strat_score += 30
+                    elif _ac >= 5: _strat_score += 20
+                    elif _ac >= 3: _strat_score += 12
+                    else: _strat_score += 5
+                    # RVOL (0-25)
+                    if rvol >= 3.0: _strat_score += 25
+                    elif rvol >= 2.0: _strat_score += 18
+                    elif rvol >= 1.5: _strat_score += 12
+                    elif rvol >= 1.0: _strat_score += 6
+                    # Close Position (0-15)
+                    if "Change %" in filters:
+                        _cm, _ = filters["Change %"]
+                        if _cm >= 0:  # Bullish: Close near High = gut
+                            if close_pos >= 0.8: _strat_score += 15
+                            elif close_pos >= 0.6: _strat_score += 10
+                        else:  # Bearish: Close near Low = gut
+                            if close_pos <= 0.2: _strat_score += 15
+                            elif close_pos <= 0.4: _strat_score += 10
+                    # Dollar Volume (0-15)
+                    if dollar_vol >= 10_000_000: _strat_score += 15
+                    elif dollar_vol >= 5_000_000: _strat_score += 10
+                    elif dollar_vol >= 1_000_000: _strat_score += 6
+                    # Gap-Qualität (0-15)
+                    _ag = abs(gap_pct)
+                    if _ag >= 5: _strat_score += 12
+                    elif _ag >= 2: _strat_score += 15  # Sweet spot
+                    elif _ag >= 1: _strat_score += 8
+                    # Grade
+                    if _strat_score >= 75: _strat_grade = "S"
+                    elif _strat_score >= 60: _strat_grade = "A"
+                    elif _strat_score >= 45: _strat_grade = "B"
+                    elif _strat_score >= 30: _strat_grade = "C"
+                    else: _strat_grade = "D"
+
+                    # V3.2: MDR-Tag für Multi-Day Runner
+                    _mdr_label = None
+                    if _is_mdr:
+                        # V3.3: Distribution-Check — sinkende RVOL + Fading = Crash-Risiko
+                        _mdr_fading = rvol < 0.8 and close_pos < 0.5  # RVOL sinkt + Preis faded
+                        _mdr_exhaustion = rvol < 0.5  # Volume kollabiert = Käufer weg
+
+                        if _mdr_fading or _mdr_exhaustion:
+                            _mdr_label = "MDR CRASH-RISIKO"
+                            _strat_score -= 10  # Malus statt Bonus
+                        elif vortag_pct > 30 and change_pct > 15:
+                            _mdr_label = "MDR ELITE"
+                            _strat_score += 15
+                        elif vortag_pct > 15 and change_pct > 8:
+                            _mdr_label = "MDR STARK"
+                            _strat_score += 10
+                        else:
+                            _mdr_label = "MDR"
+                            _strat_score += 5
+                        # Re-grade nach Bonus
                         if _strat_score >= 75: _strat_grade = "S"
                         elif _strat_score >= 60: _strat_grade = "A"
                         elif _strat_score >= 45: _strat_grade = "B"
                         elif _strat_score >= 30: _strat_grade = "C"
                         else: _strat_grade = "D"
 
-                        # V3.2: MDR-Tag für Multi-Day Runner
-                        _mdr_label = None
-                        if _is_mdr:
-                            # V3.3: Distribution-Check — sinkende RVOL + Fading = Crash-Risiko
-                            _mdr_fading = rvol < 0.8 and close_pos < 0.5  # RVOL sinkt + Preis faded
-                            _mdr_exhaustion = rvol < 0.5  # Volume kollabiert = Käufer weg
-
-                            if _mdr_fading or _mdr_exhaustion:
-                                _mdr_label = "MDR CRASH-RISIKO"
-                                _strat_score -= 10  # Malus statt Bonus
-                            elif vortag_pct > 30 and change_pct > 15:
-                                _mdr_label = "MDR ELITE"
-                                _strat_score += 15
-                            elif vortag_pct > 15 and change_pct > 8:
-                                _mdr_label = "MDR STARK"
-                                _strat_score += 10
-                            else:
-                                _mdr_label = "MDR"
-                                _strat_score += 5
-                            # Re-grade nach Bonus
-                            if _strat_score >= 75: _strat_grade = "S"
-                            elif _strat_score >= 60: _strat_grade = "A"
-                            elif _strat_score >= 45: _strat_grade = "B"
-                            elif _strat_score >= 30: _strat_grade = "C"
-                            else: _strat_grade = "D"
-
-                        results.append({
-                            "Ticker": ticker,
-                            "ticker": ticker,
-                            "Preis": round(price, 2),
-                            "price": round(price, 2),
-                            "Change_Pct": round(change_pct, 2),
-                            "change_pct": round(change_pct, 2),
-                            "Volume": volume,
-                            "volume": volume,
-                            "RVOL": rvol,
-                            "rvol": rvol,
-                            "Dollar_Volume": round(dollar_vol),
-                            "Prev_Close": round(prev_close, 2),
-                            "Day_Open": round(day_open, 2),
-                            "Day_High": round(day_high, 2),
-                            "Day_Low": round(day_low, 2),
-                            "Close_Position": round(close_pos, 2),
-                            "Gap_Pct": round(gap_pct, 2),
-                            "gap_pct": round(gap_pct, 2),
-                            "Vortag_Pct": round(vortag_pct, 2),
-                            "score": _strat_score,
-                            "grade": _strat_grade,
-                            "mdr_tag": _mdr_label,
-                        })
-                    except Exception:
-                        continue
-            except Exception as e:
-                print(f"[Strategy Scan] {endpoint} error: {e}")
+                    results.append({
+                        "Ticker": ticker,
+                        "ticker": ticker,
+                        "Preis": round(price, 2),
+                        "price": round(price, 2),
+                        "Change_Pct": round(change_pct, 2),
+                        "change_pct": round(change_pct, 2),
+                        "Volume": volume,
+                        "volume": volume,
+                        "RVOL": rvol,
+                        "rvol": rvol,
+                        "Dollar_Volume": round(dollar_vol),
+                        "Prev_Close": round(prev_close, 2),
+                        "Day_Open": round(day_open, 2),
+                        "Day_High": round(day_high, 2),
+                        "Day_Low": round(day_low, 2),
+                        "Close_Position": round(close_pos, 2),
+                        "Gap_Pct": round(gap_pct, 2),
+                        "gap_pct": round(gap_pct, 2),
+                        "Vortag_Pct": round(vortag_pct, 2),
+                        "score": _strat_score,
+                        "grade": _strat_grade,
+                        "mdr_tag": _mdr_label,
+                    })
+                except Exception:
+                    continue
 
         # Sortieren nach |Change%| absteigend
         results.sort(key=lambda x: abs(x.get("Change_Pct", 0)), reverse=True)
@@ -769,27 +802,73 @@ def _bear_scan_wrapper() -> None:
         result["inverse_etfs"].sort(key=lambda x: x.get("change_5d", 0), reverse=True)
 
         # --- Section 2: Breakdown stocks V2.2 — mit Score/Grade System ---
+        # V3.4 FIX: AH/PM-fähig — Full Snapshot nutzen wenn Losers-Endpoint leer (AH/PM)
         try:
             snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
             snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
 
             losers = []
+            _raw_tickers = []
+            _is_extended_hours = False
             if snap_resp.status_code == 200:
-                tickers = snap_resp.json().get("tickers", [])
-                print(f"[Bear] Losers endpoint returned {len(tickers)} tickers")
+                _raw_tickers = snap_resp.json().get("tickers", [])
+
+            # V3.4: Wenn Losers-Endpoint wenig/keine Ergebnisse → Extended Hours
+            # Full Snapshot holen und lastTrade vs day.close vergleichen
+            if len(_raw_tickers) < 10:
+                print(f"[Bear] Losers endpoint nur {len(_raw_tickers)} Ticker — Extended Hours Modus")
+                _is_extended_hours = True
+                try:
+                    _full_snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+                    _full_resp = rate_limited_get(_full_snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                    if _full_resp.status_code == 200:
+                        _all = _full_resp.json().get("tickers", [])
+                        # Finde AH/PM Losers: lastTrade.p vs day.c (Regular Close)
+                        _ah_losers = []
+                        for _t in _all:
+                            try:
+                                _lt = _t.get("lastTrade", {}).get("p", 0)
+                                _dc = _t.get("day", {}).get("c", 0)
+                                if not _lt or not _dc or _dc <= 0:
+                                    continue
+                                _ah_chg = ((_lt - _dc) / _dc) * 100
+                                # V3.4: Min $3 Preis + Min $50k Dollar-Volume AH
+                                _ah_vol = _t.get("day", {}).get("v", 0)
+                                _ah_dv = _lt * _ah_vol if _ah_vol else 0
+                                if _ah_chg < -3 and _lt >= 3 and _ah_dv >= 50_000:
+                                    _t["_ah_change_pct"] = _ah_chg
+                                    _t["_ah_price"] = _lt
+                                    _ah_losers.append(_t)
+                            except Exception:
+                                continue
+                        _ah_losers.sort(key=lambda x: x.get("_ah_change_pct", 0))
+                        _raw_tickers = _ah_losers[:250]
+                        print(f"[Bear] Extended Hours: {len(_raw_tickers)} AH/PM Losers gefunden")
+                except Exception as _ext_err:
+                    print(f"[Bear] Extended Hours fetch failed: {_ext_err}")
+
+            if _raw_tickers:
+                tickers = _raw_tickers
+                print(f"[Bear] Processing {len(tickers)} tickers (extended={_is_extended_hours})")
                 for t in tickers:
                     try:
                         day = t.get("day", {})
                         prev = t.get("prevDay", {})
-                        price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                        prev_close = prev.get("c", 0)
+                        # V3.4: Bei Extended Hours → AH-Preis und AH-Change nutzen
+                        if _is_extended_hours and t.get("_ah_price"):
+                            price = t["_ah_price"]
+                            prev_close = day.get("c", 0) or prev.get("c", 0)  # Vergleich vs Regular Close
+                            chg_pct = t.get("_ah_change_pct", 0)
+                        else:
+                            price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                            prev_close = prev.get("c", 0)
+                            chg_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
                         if not price or not prev_close or price < 3:
                             continue
                         vol = day.get("v", 0)
                         dollar_vol = price * vol
-                        if dollar_vol < 300_000:
+                        if dollar_vol < 300_000 and not _is_extended_hours:
                             continue
-                        chg_pct = ((price - prev_close) / prev_close) * 100
                         if chg_pct > -3:
                             continue
 
@@ -868,6 +947,8 @@ def _bear_scan_wrapper() -> None:
                             score_details.append(f"RVOL {rvol:.1f}x (schwach)")
 
                         # 3. MA20 Trend (0-20): Unter MA20 = bestätigter Downtrend
+                        # V3.4 FIX: Kein Abzug mehr wenn über MA20 — bei frischen Breakdowns
+                        # ist der Preis oft noch über MA20 (gerade erst gedroppt)
                         if ma20_dist < -10:
                             score += 20; score_details.append(f"MA20 {ma20_dist:.1f}% (weit darunter)")
                         elif ma20_dist < -5:
@@ -876,9 +957,10 @@ def _bear_scan_wrapper() -> None:
                             score += 10; score_details.append(f"MA20 {ma20_dist:.1f}%")
                         elif ma20_dist < 0:
                             score += 5
-                        # Über MA20 = gegen den Trend → Abzug
+                        elif ma20_dist < 5:
+                            score += 0; score_details.append(f"Knapp über MA20 ({ma20_dist:+.1f}%)")
                         else:
-                            score -= 5; score_details.append(f"Über MA20 ({ma20_dist:+.1f}%)")
+                            score_details.append(f"Weit über MA20 ({ma20_dist:+.1f}%) — Vorsicht")
 
                         # 4. MA50 Trend (0-15)
                         if ma50_dist < -10:
@@ -906,14 +988,14 @@ def _bear_scan_wrapper() -> None:
                         elif price > 200:
                             score += 7  # Teuer aber shortbar
 
-                        # ── Grade ──
-                        if score >= 80:
+                        # ── Grade (V3.4: Recalibriert — vorher war S/A fast unerreichbar) ──
+                        if score >= 70:
                             grade = "S"
-                        elif score >= 65:
+                        elif score >= 55:
                             grade = "A"
-                        elif score >= 50:
+                        elif score >= 40:
                             grade = "B"
-                        elif score >= 35:
+                        elif score >= 25:
                             grade = "C"
                         else:
                             grade = "D"

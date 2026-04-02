@@ -2452,11 +2452,8 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 
 // Short Scanner Tab
 function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [subTab, setSubTab] = useState('breakdown');
-    const [inverseETFs, setInverseETFs] = useState(scanCache.short_inverse || []);
     const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
     const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
-    const { sorted: sortedInverse, toggleSort: toggleInverseSort } = useSortable(inverseETFs, 'change_pct');
     const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'change_pct');
     const pollTimeoutRef = useRef(null);
 
@@ -2473,9 +2470,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 if (response.ok) {
                     const data = await response.json();
                     const bear = (data.data && data.data[0]) || {};
-                    setInverseETFs(bear.inverse_etfs || []);
                     setBreakdownStocks(bear.breakdown_stocks || []);
-                    updateScanCache('short_inverse', bear.inverse_etfs || []);
                     updateScanCache('short_breakdown', bear.breakdown_stocks || []);
                 }
             } catch (err) { console.error('Error:', err); }
@@ -2512,17 +2507,14 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         if (res.ok) {
                             const data = await res.json();
                             const bear = (data.data && data.data[0]) || {};
-                            const inverse = bear.inverse_etfs || [];
                             const breakdown = bear.breakdown_stocks || [];
                             const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
                             if (isNewData) {
-                                setInverseETFs(inverse);
                                 setBreakdownStocks(breakdown);
-                                updateScanCache('short_inverse', inverse);
                                 updateScanCache('short_breakdown', breakdown);
                                 setIsScanning(false);
                                 updateScanCache('short_scanning', false);
-                                if (window.addToast) window.addToast(`Scan fertig: ${inverse.length + breakdown.length} Ergebnisse`, 'success');
+                                if (window.addToast) window.addToast(`Scan fertig: ${breakdown.length} Short-Kandidaten`, 'success');
                                 return;
                             }
                         }
@@ -2543,48 +2535,10 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
     return (
         <div className="space-y-6">
-            <div className="flex gap-2 border-b border-gray-200">
-                <button onClick={() => setSubTab('breakdown')} className={`secondary-tab ${subTab === 'breakdown' ? 'active' : 'inactive'}`}>Short-Kandidaten</button>
-                <button onClick={() => setSubTab('inverse-etfs')} className={`secondary-tab ${subTab === 'inverse-etfs' ? 'active' : 'inactive'}`}>Hedging-ETFs</button>
-            </div>
-
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="bear" />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                {subTab === 'inverse-etfs' && (
-                    <table className="w-full text-sm">
-                        <thead className="border-b border-gray-200">
-                            <tr>
-                                <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleInverseSort('ticker')}>Ticker</th>
-                                <th className="text-left py-2 px-2">Name</th>
-                                <th className="text-left py-2 px-2">Underlying</th>
-                                <th className="text-right py-2 px-2">Preis</th>
-                                <th className="text-right py-2 px-2">1D%</th>
-                                <th className="text-right py-2 px-2">5D%</th>
-                                <th className="text-right py-2 px-2">20D%</th>
-                                <th className="text-right py-2 px-2">RVOL</th>
-                                <th className="text-left py-2 px-2">Signal</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {sortedInverse.map((item, idx) => (
-                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                    <td className="py-3 px-2 font-semibold">{item.ticker}</td>
-                                    <td className="py-3 px-2">{item.name}</td>
-                                    <td className="py-3 px-2">{item.underlying}</td>
-                                    <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
-                                    <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                    <td className="py-3 px-2"><span className="signal-badge signal-bearish">{item.signal || 'SHORT'}</span></td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
-
-                {subTab === 'breakdown' && (
+                {(
                     <table className="w-full text-sm">
                         <thead className="border-b border-gray-200">
                             <tr>
