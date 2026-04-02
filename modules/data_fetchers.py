@@ -1102,13 +1102,14 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
     """Polygon.io OHLCV für US-Aktien."""
     try:
         # Timeframe mapping: (multiplier, span, days_back, max_bars)
+        # V3.4: Mehr Bars für saubere EMA-Berechnung (EMA200 braucht ~600+ Bars zum Einschwingen)
         tf_map = {
-            "5m": ("5", "minute", 7, 500),
-            "15m": ("15", "minute", 21, 500),
-            "1H": ("1", "hour", 90, 500),
-            "4H": ("1", "hour", 180, 500),
-            "1D": ("1", "day", 730, 500),
-            "1W": ("1", "week", 1825, 260),
+            "5m": ("5", "minute", 10, 800),
+            "15m": ("15", "minute", 30, 800),
+            "1H": ("1", "hour", 180, 800),
+            "4H": ("1", "hour", 365, 800),
+            "1D": ("1", "day", 1095, 800),
+            "1W": ("1", "week", 2555, 500),
         }
         
         if timeframe not in tf_map:

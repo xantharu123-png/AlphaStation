@@ -1168,7 +1168,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 })()}
                 {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
                     const _vd = (d.confluence?.direction || '').toUpperCase();
-                    const filtered = chartData.patterns.harmonic.filter(h => !_vd || _vd === 'NEUTRAL' || h.direction === _vd);
+                    const filtered = chartData.patterns.harmonic.filter(h => (!_vd || _vd === 'NEUTRAL' || h.direction === _vd) && (h.score || 0) >= 30);
                     return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
                         {filtered.map((h, i) => (

@@ -563,7 +563,9 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
 
                         # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
                         # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
-                        _is_mdr = vortag_pct > 10 and change_pct > 5
+                        # V3.4: Erweitert — auch extreme Tages-Moves (>30%) oder
+                        # Kombination aus starkem Vortag + starkem Heute erkennen
+                        _is_mdr = (vortag_pct > 10 and change_pct > 5) or (change_pct > 30 and close_pos > 0.6)
 
                         # Filter anwenden
                         if not (change_min <= change_pct <= change_max):
@@ -2093,11 +2095,13 @@ def get_chart_data(
                 # find_pivots needs {date, high, low, close}
                 patterns_result = {}
 
-                # Harmonic patterns
+                # Harmonic patterns (V3.4: Score >= 30 Filter — niedrige Scores sind Noise)
                 try:
                     harmonics = find_harmonic_for_chart(ohlcv)
                     if harmonics:
-                        patterns_result["harmonic"] = harmonics[:3]
+                        harmonics = [h for h in harmonics if (h.get("score") or 0) >= 30]
+                        if harmonics:
+                            patterns_result["harmonic"] = harmonics[:3]
                 except Exception as e:
                     print(f"Harmonic error: {e}")
 
