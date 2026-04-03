@@ -2526,14 +2526,16 @@ function App() {
         { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'orb', label: 'ORB Scanner' },
         { id: 'autotrader', label: 'Auto-Trader' },
-        { id: 'chart-analyse', label: 'Chart & Analyse' }
+        { id: 'chart-analyse', label: 'Chart & Analyse' },
+        { id: 'admin', label: 'Admin' }
     ];
 
     // Filter tabs based on user plan + admin status
     const allowedTabs = limits?.allowed_tabs; // null = all allowed
     const isAdmin = user?.is_admin === true;
     const tabs = (allowedTabs ? allTabs.filter(t => allowedTabs.includes(t.id)) : allTabs)
-        .filter(t => t.id !== 'backtest' || isAdmin);
+        .filter(t => t.id !== 'backtest' || isAdmin)
+        .filter(t => t.id !== 'admin' || isAdmin);
 
     // Reset to 'scanner' if current tab is not in allowed list
     useEffect(() => {
@@ -2732,6 +2734,7 @@ function App() {
                     {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'autotrader' && <AutoTraderTab />}
                     {activeTab === 'chart-analyse' && <ChartAnalyseTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                    {activeTab === 'admin' && <AdminTab />}
                 </div>
             )}
 
@@ -5957,6 +5960,485 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <div style={{ fontSize: 13, lineHeight: 1.7 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(aiData.analysis || 'Keine Analyse') }}></div>
                             </div>
                         )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ── Admin Tab ──
+function AdminTab() {
+    const [activePanel, setActivePanel] = useState('users');
+    const [users, setUsers] = useState([]);
+    const [stats, setStats] = useState(null);
+    const [logs, setLogs] = useState([]);
+    const [coupons, setCoupons] = useState([]);
+    const [tickets, setTickets] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [editingUser, setEditingUser] = useState(null);
+    const [newCoupon, setNewCoupon] = useState({ code: '', plan: 'pro', duration_days: 30, max_uses: 10, description: '' });
+    const [showNewCoupon, setShowNewCoupon] = useState(false);
+    const [replyText, setReplyText] = useState({});
+    const [searchTerm, setSearchTerm] = useState('');
+    const [toast, setToast] = useState(null);
+
+    const token = localStorage.getItem('as_token');
+    const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const showToast = (msg, type = 'success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 3000);
+    };
+
+    // Fetch data based on active panel
+    useEffect(() => {
+        if (activePanel === 'users') fetchUsers();
+        if (activePanel === 'stats') fetchStats();
+        if (activePanel === 'logs') fetchLogs();
+        if (activePanel === 'coupons') fetchCoupons();
+        if (activePanel === 'tickets') fetchTickets();
+    }, [activePanel]);
+
+    const fetchUsers = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`${API}/api/admin/users`, { headers });
+            if (res.ok) setUsers(await res.json().then(d => d.users || d));
+        } catch(e) { console.error(e); }
+        setLoading(false);
+    };
+
+    const fetchStats = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`${API}/api/admin/stats`, { headers });
+            if (res.ok) setStats(await res.json());
+        } catch(e) { console.error(e); }
+        setLoading(false);
+    };
+
+    const fetchLogs = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`${API}/api/admin/logs`, { headers });
+            if (res.ok) { const d = await res.json(); setLogs(d.logs || []); }
+        } catch(e) { console.error(e); }
+        setLoading(false);
+    };
+
+    const fetchCoupons = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`${API}/api/admin/coupons`, { headers });
+            if (res.ok) { const d = await res.json(); setCoupons(d.coupons || []); }
+        } catch(e) { console.error(e); }
+        setLoading(false);
+    };
+
+    const fetchTickets = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`${API}/api/admin/tickets`, { headers });
+            if (res.ok) { const d = await res.json(); setTickets(d.tickets || []); }
+        } catch(e) { console.error(e); }
+        setLoading(false);
+    };
+
+    const changePlan = async (email, plan) => {
+        try {
+            const res = await fetch(`${API}/api/admin/users/${encodeURIComponent(email)}/plan`, {
+                method: 'PUT', headers, body: JSON.stringify({ plan })
+            });
+            if (res.ok) { showToast(`Plan für ${email} → ${plan}`); fetchUsers(); fetchStats(); setEditingUser(null); }
+            else showToast('Fehler beim Ändern', 'error');
+        } catch(e) { showToast('Fehler', 'error'); }
+    };
+
+    const deleteUser = async (email) => {
+        if (!confirm(`User ${email} wirklich löschen?`)) return;
+        try {
+            const res = await fetch(`${API}/api/admin/users/${encodeURIComponent(email)}`, { method: 'DELETE', headers });
+            if (res.ok) { showToast(`${email} gelöscht`); fetchUsers(); fetchStats(); }
+        } catch(e) { showToast('Fehler', 'error'); }
+    };
+
+    const createCoupon = async () => {
+        if (!newCoupon.code) return showToast('Code erforderlich', 'error');
+        try {
+            const res = await fetch(`${API}/api/admin/coupons`, {
+                method: 'POST', headers, body: JSON.stringify(newCoupon)
+            });
+            if (res.ok) { showToast(`Gutschein ${newCoupon.code} erstellt`); fetchCoupons(); setShowNewCoupon(false); setNewCoupon({ code: '', plan: 'pro', duration_days: 30, max_uses: 10, description: '' }); }
+            else { const d = await res.json(); showToast(d.detail || 'Fehler', 'error'); }
+        } catch(e) { showToast('Fehler', 'error'); }
+    };
+
+    const toggleCoupon = async (code) => {
+        try {
+            const res = await fetch(`${API}/api/admin/coupons/${encodeURIComponent(code)}/toggle`, { method: 'PUT', headers });
+            if (res.ok) fetchCoupons();
+        } catch(e) {}
+    };
+
+    const deleteCoupon = async (code) => {
+        if (!confirm(`Gutschein ${code} löschen?`)) return;
+        try {
+            const res = await fetch(`${API}/api/admin/coupons/${encodeURIComponent(code)}`, { method: 'DELETE', headers });
+            if (res.ok) { showToast('Gelöscht'); fetchCoupons(); }
+        } catch(e) {}
+    };
+
+    const replyTicket = async (id) => {
+        const msg = replyText[id];
+        if (!msg) return;
+        try {
+            const res = await fetch(`${API}/api/admin/tickets/${id}/reply`, {
+                method: 'PUT', headers, body: JSON.stringify({ message: msg })
+            });
+            if (res.ok) { showToast('Antwort gesendet'); setReplyText(p => ({...p, [id]: ''})); fetchTickets(); }
+        } catch(e) { showToast('Fehler', 'error'); }
+    };
+
+    const changeTicketStatus = async (id, status) => {
+        try {
+            const res = await fetch(`${API}/api/admin/tickets/${id}/status`, {
+                method: 'PUT', headers, body: JSON.stringify({ status })
+            });
+            if (res.ok) fetchTickets();
+        } catch(e) {}
+    };
+
+    const panels = [
+        { id: 'users', label: 'User', icon: '👥' },
+        { id: 'stats', label: 'Statistiken', icon: '📊' },
+        { id: 'coupons', label: 'Gutscheine', icon: '🎟️' },
+        { id: 'tickets', label: 'Tickets', icon: '🎫' },
+        { id: 'logs', label: 'System Logs', icon: '📋' },
+    ];
+
+    const planColors = { trial: '#f59e0b', expired: '#6b7280', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
+    const planLabels = { trial: 'Trial', expired: 'Expired', basic: 'Basic', pro: 'Pro', elite: 'Elite' };
+
+    const filteredUsers = users.filter(u =>
+        u.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        u.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        u.plan?.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+
+    const cardStyle = { background: 'var(--card-bg)', border: '1px solid var(--border-color)', borderRadius: 12, padding: 20 };
+    const badgeStyle = (color) => ({ display: 'inline-block', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700, background: `${color}22`, color, border: `1px solid ${color}44` });
+
+    return (
+        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+            {/* Toast */}
+            {toast && (
+                <div style={{ position: 'fixed', top: 20, right: 20, zIndex: 9999, padding: '12px 24px', borderRadius: 10,
+                    background: toast.type === 'error' ? '#ef4444' : '#10b981', color: '#fff', fontSize: 14, fontWeight: 600,
+                    boxShadow: '0 4px 20px rgba(0,0,0,0.3)', animation: 'fadeIn 0.3s' }}>
+                    {toast.msg}
+                </div>
+            )}
+
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg, #ef4444, #f59e0b)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>⚡</div>
+                <div>
+                    <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Admin Panel</h2>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Alpha Station Verwaltung</div>
+                </div>
+            </div>
+
+            {/* Panel Navigation */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 24, background: 'var(--card-bg)', border: '1px solid var(--border-color)', borderRadius: 10, padding: 4, flexWrap: 'wrap' }}>
+                {panels.map(p => (
+                    <button key={p.id} onClick={() => setActivePanel(p.id)}
+                        style={{ padding: '8px 16px', borderRadius: 8, border: 'none', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                            background: activePanel === p.id ? '#3b82f6' : 'transparent',
+                            color: activePanel === p.id ? '#fff' : 'var(--text-muted)',
+                            transition: 'all 0.2s' }}>
+                        {p.icon} {p.label}
+                    </button>
+                ))}
+            </div>
+
+            {/* ═══ USERS PANEL ═══ */}
+            {activePanel === 'users' && (
+                <div>
+                    <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <input value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
+                            placeholder="Suche nach Email, Name oder Plan..."
+                            style={{ flex: 1, minWidth: 200, padding: '10px 16px', borderRadius: 10, border: '1px solid var(--border-color)', background: 'var(--card-bg)', color: 'var(--text-primary)', fontSize: 13 }} />
+                        <button onClick={fetchUsers} className="button" style={{ padding: '10px 20px', fontSize: 13 }}>
+                            🔄 Aktualisieren
+                        </button>
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{filteredUsers.length} User</span>
+                    </div>
+
+                    {loading ? (
+                        <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Laden...</div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {filteredUsers.map(u => (
+                                <div key={u.email} style={{ ...cardStyle, padding: 16, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                                    <div style={{ width: 38, height: 38, borderRadius: '50%', background: u.is_admin ? 'linear-gradient(135deg, #ef4444, #f59e0b)' : 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, fontWeight: 700, color: '#fff', flexShrink: 0 }}>
+                                        {(u.name || u.email || '?')[0].toUpperCase()}
+                                    </div>
+                                    <div style={{ flex: 1, minWidth: 180 }}>
+                                        <div style={{ fontWeight: 700, fontSize: 14 }}>{u.name || 'Kein Name'} {u.is_admin && <span style={{ fontSize: 10, color: '#ef4444', fontWeight: 800 }}>ADMIN</span>}</div>
+                                        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{u.email}</div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                        <span style={badgeStyle(planColors[u.plan] || '#6b7280')}>{planLabels[u.plan] || u.plan}</span>
+                                        {u.stripe_customer_id && <span style={{ fontSize: 10, color: '#10b981' }}>💳 Stripe</span>}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'right', minWidth: 120 }}>
+                                        <div>Registriert: {u.created_at ? new Date(u.created_at).toLocaleDateString('de-DE') : '—'}</div>
+                                        <div>Letzter Login: {u.last_login ? new Date(u.last_login).toLocaleDateString('de-DE') : '—'}</div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 6 }}>
+                                        {editingUser === u.email ? (
+                                            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                                {['trial', 'basic', 'pro', 'elite', 'expired'].map(p => (
+                                                    <button key={p} onClick={() => changePlan(u.email, p)}
+                                                        style={{ padding: '4px 10px', borderRadius: 6, border: `1px solid ${planColors[p]}44`, background: u.plan === p ? `${planColors[p]}22` : 'transparent',
+                                                            color: planColors[p], fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                                                        {planLabels[p]}
+                                                    </button>
+                                                ))}
+                                                <button onClick={() => setEditingUser(null)} style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer' }}>✕</button>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <button onClick={() => setEditingUser(u.email)}
+                                                    style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-primary)', fontSize: 11, cursor: 'pointer' }}>
+                                                    ✏️ Plan
+                                                </button>
+                                                {!u.is_admin && (
+                                                    <button onClick={() => deleteUser(u.email)}
+                                                        style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #ef444444', background: 'transparent', color: '#ef4444', fontSize: 11, cursor: 'pointer' }}>
+                                                        🗑️
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ═══ STATS PANEL ═══ */}
+            {activePanel === 'stats' && (
+                <div>
+                    {loading || !stats ? (
+                        <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Laden...</div>
+                    ) : (
+                        <>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 24 }}>
+                                {[
+                                    { label: 'Gesamt User', value: stats.total_users, color: '#3b82f6', icon: '👥' },
+                                    { label: 'Neue heute', value: stats.new_today, color: '#10b981', icon: '🆕' },
+                                    { label: 'Neue diese Woche', value: stats.new_this_week, color: '#8b5cf6', icon: '📈' },
+                                    { label: 'Aktiv heute', value: stats.active_today, color: '#f59e0b', icon: '🔥' },
+                                    { label: 'Est. MRR', value: `$${stats.estimated_mrr || 0}`, color: '#10b981', icon: '💰' },
+                                ].map((s, i) => (
+                                    <div key={i} style={{ ...cardStyle, textAlign: 'center' }}>
+                                        <div style={{ fontSize: 24, marginBottom: 4 }}>{s.icon}</div>
+                                        <div style={{ fontSize: 28, fontWeight: 800, color: s.color }}>{s.value}</div>
+                                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{s.label}</div>
+                                    </div>
+                                ))}
+                            </div>
+                            {/* Users by Plan */}
+                            <div style={cardStyle}>
+                                <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>User nach Plan</h3>
+                                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                                    {Object.entries(stats.users_by_plan || {}).map(([plan, count]) => (
+                                        <div key={plan} style={{ flex: 1, minWidth: 120, textAlign: 'center', padding: 16, borderRadius: 10, background: `${planColors[plan] || '#6b7280'}11`, border: `1px solid ${planColors[plan] || '#6b7280'}33` }}>
+                                            <div style={{ fontSize: 24, fontWeight: 800, color: planColors[plan] || '#6b7280' }}>{count}</div>
+                                            <div style={{ fontSize: 12, fontWeight: 600, color: planColors[plan] || '#6b7280', marginTop: 4 }}>{planLabels[plan] || plan}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <button onClick={fetchStats} className="button" style={{ marginTop: 16, padding: '10px 20px', fontSize: 13 }}>🔄 Aktualisieren</button>
+                        </>
+                    )}
+                </div>
+            )}
+
+            {/* ═══ COUPONS PANEL ═══ */}
+            {activePanel === 'coupons' && (
+                <div>
+                    <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
+                        <button onClick={() => setShowNewCoupon(!showNewCoupon)} className="button" style={{ padding: '10px 20px', fontSize: 13, background: showNewCoupon ? '#ef4444' : '#3b82f6' }}>
+                            {showNewCoupon ? '✕ Abbrechen' : '+ Neuer Gutschein'}
+                        </button>
+                        <button onClick={fetchCoupons} className="button" style={{ padding: '10px 20px', fontSize: 13, background: '#374151' }}>🔄</button>
+                    </div>
+
+                    {showNewCoupon && (
+                        <div style={{ ...cardStyle, marginBottom: 16, border: '1px solid #3b82f644' }}>
+                            <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Neuer Gutschein</h4>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                                <div>
+                                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Code</label>
+                                    <input value={newCoupon.code} onChange={e => setNewCoupon(p => ({...p, code: e.target.value.toUpperCase()}))}
+                                        placeholder="z.B. FRIEND50" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13 }} />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Plan</label>
+                                    <select value={newCoupon.plan} onChange={e => setNewCoupon(p => ({...p, plan: e.target.value}))}
+                                        style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13 }}>
+                                        <option value="basic">Basic ($29)</option>
+                                        <option value="pro">Pro ($79)</option>
+                                        <option value="elite">Elite ($149)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Laufzeit (Tage)</label>
+                                    <input type="number" value={newCoupon.duration_days} onChange={e => setNewCoupon(p => ({...p, duration_days: parseInt(e.target.value) || 30}))}
+                                        style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13 }} />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Max. Einlösungen</label>
+                                    <input type="number" value={newCoupon.max_uses} onChange={e => setNewCoupon(p => ({...p, max_uses: parseInt(e.target.value) || 1}))}
+                                        style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13 }} />
+                                </div>
+                            </div>
+                            <div style={{ marginTop: 12 }}>
+                                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Beschreibung</label>
+                                <input value={newCoupon.description} onChange={e => setNewCoupon(p => ({...p, description: e.target.value}))}
+                                    placeholder="z.B. Freunde-Rabatt 30 Tage Pro"
+                                    style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13 }} />
+                            </div>
+                            <button onClick={createCoupon} className="button" style={{ marginTop: 12, padding: '10px 24px', fontSize: 13 }}>
+                                ✅ Gutschein erstellen
+                            </button>
+                        </div>
+                    )}
+
+                    {loading ? (
+                        <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Laden...</div>
+                    ) : coupons.length === 0 ? (
+                        <div style={{ ...cardStyle, textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Keine Gutscheine vorhanden</div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {coupons.map(c => (
+                                <div key={c.code} style={{ ...cardStyle, padding: 16, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', opacity: c.active ? 1 : 0.5 }}>
+                                    <div style={{ minWidth: 100 }}>
+                                        <div style={{ fontSize: 16, fontWeight: 800, fontFamily: 'monospace', color: '#3b82f6' }}>{c.code}</div>
+                                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{c.description || '—'}</div>
+                                    </div>
+                                    <span style={badgeStyle(planColors[c.plan] || '#6b7280')}>{planLabels[c.plan] || c.plan}</span>
+                                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                                        <div>{c.duration_days} Tage</div>
+                                        <div>{c.uses || 0} / {c.max_uses} eingelöst</div>
+                                    </div>
+                                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                                        <button onClick={() => toggleCoupon(c.code)}
+                                            style={{ padding: '4px 12px', borderRadius: 6, border: `1px solid ${c.active ? '#ef444444' : '#10b98144'}`, background: 'transparent',
+                                                color: c.active ? '#ef4444' : '#10b981', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}>
+                                            {c.active ? 'Deaktivieren' : 'Aktivieren'}
+                                        </button>
+                                        <button onClick={() => deleteCoupon(c.code)}
+                                            style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #ef444444', background: 'transparent', color: '#ef4444', fontSize: 11, cursor: 'pointer' }}>
+                                            🗑️
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ═══ TICKETS PANEL ═══ */}
+            {activePanel === 'tickets' && (
+                <div>
+                    <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
+                        <button onClick={fetchTickets} className="button" style={{ padding: '10px 20px', fontSize: 13 }}>🔄 Aktualisieren</button>
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {tickets.filter(t => t.status === 'open').length} offen / {tickets.length} gesamt
+                        </span>
+                    </div>
+
+                    {loading ? (
+                        <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Laden...</div>
+                    ) : tickets.length === 0 ? (
+                        <div style={{ ...cardStyle, textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Keine Tickets vorhanden</div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {tickets.sort((a, b) => (a.status === 'open' ? -1 : 1)).map(t => (
+                                <div key={t.id} style={{ ...cardStyle, opacity: t.status === 'closed' ? 0.6 : 1 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                                        <span style={badgeStyle(t.status === 'open' ? '#f59e0b' : t.status === 'in_progress' ? '#3b82f6' : '#10b981')}>
+                                            {t.status === 'open' ? 'Offen' : t.status === 'in_progress' ? 'In Bearbeitung' : 'Geschlossen'}
+                                        </span>
+                                        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>#{t.id}</span>
+                                        <span style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>{t.subject}</span>
+                                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t.email}</span>
+                                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t.created_at ? new Date(t.created_at).toLocaleString('de-DE') : ''}</span>
+                                    </div>
+                                    <div style={{ fontSize: 13, lineHeight: 1.6, padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8, marginBottom: 12, whiteSpace: 'pre-wrap' }}>
+                                        {t.message}
+                                    </div>
+
+                                    {/* Replies */}
+                                    {(t.replies || []).length > 0 && (
+                                        <div style={{ marginBottom: 12, paddingLeft: 16, borderLeft: '2px solid var(--border-color)' }}>
+                                            {t.replies.map((r, i) => (
+                                                <div key={i} style={{ marginBottom: 8 }}>
+                                                    <div style={{ fontSize: 11, color: r.from === 'admin' ? '#3b82f6' : 'var(--text-muted)', fontWeight: 600 }}>
+                                                        {r.from === 'admin' ? '👑 Admin' : r.from} — {r.created_at ? new Date(r.created_at).toLocaleString('de-DE') : ''}
+                                                    </div>
+                                                    <div style={{ fontSize: 13, marginTop: 2 }}>{r.message}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {/* Reply + Status Controls */}
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                        <input value={replyText[t.id] || ''} onChange={e => setReplyText(p => ({...p, [t.id]: e.target.value}))}
+                                            placeholder="Antwort schreiben..."
+                                            style={{ flex: 1, minWidth: 200, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 12 }}
+                                            onKeyDown={e => e.key === 'Enter' && replyTicket(t.id)} />
+                                        <button onClick={() => replyTicket(t.id)} className="button" style={{ padding: '8px 16px', fontSize: 12 }}>Antworten</button>
+                                        <select value={t.status} onChange={e => changeTicketStatus(t.id, e.target.value)}
+                                            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 12 }}>
+                                            <option value="open">Offen</option>
+                                            <option value="in_progress">In Bearbeitung</option>
+                                            <option value="closed">Geschlossen</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ═══ LOGS PANEL ═══ */}
+            {activePanel === 'logs' && (
+                <div>
+                    <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
+                        <button onClick={fetchLogs} className="button" style={{ padding: '10px 20px', fontSize: 13 }}>🔄 Aktualisieren</button>
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{logs.length} Zeilen</span>
+                    </div>
+                    <div style={{ ...cardStyle, maxHeight: 600, overflowY: 'auto', fontFamily: 'monospace', fontSize: 11, lineHeight: 1.8, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                        {loading ? 'Laden...' : logs.length === 0 ? 'Keine Logs vorhanden' : logs.map((line, i) => (
+                            <div key={i} style={{
+                                color: line.includes('ERROR') ? '#ef4444' : line.includes('WARNING') ? '#f59e0b' : line.includes('INFO') ? '#3b82f6' : 'var(--text-muted)',
+                                borderBottom: '1px solid rgba(255,255,255,0.03)', padding: '2px 0'
+                            }}>
+                                {line}
+                            </div>
+                        ))}
                     </div>
                 </div>
             )}

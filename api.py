@@ -46,6 +46,7 @@ try:
         get_user_limits, check_tab_access, check_feature,
         create_checkout_session, create_billing_portal,
         handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
+        ADMIN_EMAILS, AUTH_DB_PATH,
     )
     HAS_AUTH = True
 except ImportError as _auth_err:
@@ -1495,6 +1496,40 @@ class CheckoutRequest(BaseModel):
 
 class BillingPortalRequest(BaseModel):
     return_url: str = ""
+
+
+# ── Admin Models ──
+class PlanUpdateRequest(BaseModel):
+    plan: str
+
+
+class CouponCreateRequest(BaseModel):
+    code: str
+    plan: str
+    duration_days: int
+    max_uses: int
+    description: str = ""
+
+
+class CouponToggleRequest(BaseModel):
+    pass
+
+
+class RedeemCouponRequest(BaseModel):
+    code: str
+
+
+class TicketCreateRequest(BaseModel):
+    subject: str
+    message: str
+
+
+class TicketReplyRequest(BaseModel):
+    message: str
+
+
+class TicketStatusRequest(BaseModel):
+    status: str
 
 
 @app.post("/api/auth/register")
@@ -5469,6 +5504,525 @@ def autotrader_clear_positions():
     _autotrader_state_write(state)
     _autotrader_log("Positionen zurückgesetzt via API", "INFO")
     return {"ok": True}
+
+
+# ── Admin System ──
+
+def _require_admin(authorization: Optional[str]):
+    """
+    Helper: Extract token, verify it, check admin status.
+    Returns (payload, email) on success, raises HTTPException(403) if not admin.
+    """
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    # Extract token from "Bearer <token>"
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    email = payload.get("email", "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return payload, email
+
+
+def _load_coupons() -> Dict:
+    """Load coupons from JSON file."""
+    coupon_path = "/tmp/alpha_station_coupons.json"
+    if os.path.exists(coupon_path):
+        try:
+            with open(coupon_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"coupons": []}
+    return {"coupons": []}
+
+
+def _save_coupons(data: Dict):
+    """Save coupons to JSON file."""
+    try:
+        coupon_path = "/tmp/alpha_station_coupons.json"
+        with open(coupon_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Error] Coupons speichern fehlgeschlagen: {e}")
+
+
+def _load_tickets() -> Dict:
+    """Load support tickets from JSON file."""
+    ticket_path = "/tmp/alpha_station_tickets.json"
+    if os.path.exists(ticket_path):
+        try:
+            with open(ticket_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"tickets": [], "next_id": 1}
+    return {"tickets": [], "next_id": 1}
+
+
+def _save_tickets(data: Dict):
+    """Save support tickets to JSON file."""
+    try:
+        ticket_path = "/tmp/alpha_station_tickets.json"
+        with open(ticket_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Error] Tickets speichern fehlgeschlagen: {e}")
+
+
+# ── Admin: User Management ──
+
+@app.get("/api/admin/users")
+def admin_list_users(authorization: Optional[str] = Header(None)):
+    """List all users (admin only)."""
+    _require_admin(authorization)
+
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    users = []
+
+    for email, user_data in db.get("users", {}).items():
+        users.append({
+            "email": email,
+            "name": user_data.get("name", ""),
+            "plan": user_data.get("plan", "trial"),
+            "created_at": user_data.get("created_at", ""),
+            "last_login": user_data.get("last_login", ""),
+            "trial_ends_at": user_data.get("trial_ends_at", ""),
+            "stripe_customer_id": user_data.get("stripe_customer_id", ""),
+            "is_admin": email in ADMIN_EMAILS,
+        })
+
+    return {"users": users}
+
+
+@app.put("/api/admin/users/{email}/plan")
+def admin_update_user_plan(email: str, req_body: PlanUpdateRequest, authorization: Optional[str] = Header(None)):
+    """Update a user's plan manually (admin only)."""
+    _require_admin(authorization)
+
+    email = email.lower().strip()
+    plan = req_body.plan.lower().strip()
+
+    # Validate plan
+    valid_plans = ["trial", "expired", "basic", "pro", "elite"]
+    if plan not in valid_plans:
+        raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
+
+    # Load and update database
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+
+    if email not in db.get("users", {}):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db["users"][email]["plan"] = plan
+
+    # Save database
+    try:
+        with open(AUTH_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2)
+        return {"success": True, "message": f"Plan für {email} auf {plan} aktualisiert"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+
+
+@app.delete("/api/admin/users/{email}")
+def admin_delete_user(email: str, authorization: Optional[str] = Header(None)):
+    """Delete a user from database (admin only)."""
+    _require_admin(authorization)
+
+    email = email.lower().strip()
+
+    # Load database
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+
+    if email not in db.get("users", {}):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    del db["users"][email]
+
+    # Save database
+    try:
+        with open(AUTH_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2)
+        return {"success": True, "message": f"Benutzer {email} gelöscht"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+
+
+@app.get("/api/admin/stats")
+def admin_get_stats(authorization: Optional[str] = Header(None)):
+    """Get admin statistics (admin only)."""
+    _require_admin(authorization)
+
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    users = db.get("users", {})
+
+    # Basic counts
+    total_users = len(users)
+    users_by_plan = {}
+    for plan in ["trial", "expired", "basic", "pro", "elite"]:
+        users_by_plan[plan] = 0
+
+    new_today = 0
+    new_this_week = 0
+    active_today = 0
+    estimated_mrr = 0
+
+    now = datetime.utcnow()
+    today_str = now.strftime("%Y-%m-%d")
+    week_ago = now - timedelta(days=7)
+
+    plan_prices = {"basic": 29, "pro": 79, "elite": 149, "trial": 0, "expired": 0}
+
+    for email, user_data in users.items():
+        plan = user_data.get("plan", "trial")
+        users_by_plan[plan] = users_by_plan.get(plan, 0) + 1
+
+        # Created today
+        created_at = user_data.get("created_at", "")
+        if created_at.startswith(today_str):
+            new_today += 1
+
+        # Created this week
+        if created_at:
+            try:
+                created_date = datetime.fromisoformat(created_at.split("T")[0])
+                if created_date >= week_ago:
+                    new_this_week += 1
+            except Exception:
+                pass
+
+        # Active today
+        last_login = user_data.get("last_login", "")
+        if last_login.startswith(today_str):
+            active_today += 1
+
+        # MRR (paying plans only)
+        if plan in ["basic", "pro", "elite"]:
+            estimated_mrr += plan_prices.get(plan, 0)
+
+    return {
+        "total_users": total_users,
+        "users_by_plan": users_by_plan,
+        "new_today": new_today,
+        "new_this_week": new_this_week,
+        "active_today": active_today,
+        "estimated_mrr": estimated_mrr,
+    }
+
+
+@app.get("/api/admin/logs")
+def admin_get_logs(authorization: Optional[str] = Header(None)):
+    """Get last 200 lines from scanner log (admin only)."""
+    _require_admin(authorization)
+
+    log_path = "/tmp/alpha_station_scanner.log"
+    lines = []
+
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, "r") as f:
+                all_lines = f.readlines()
+                # Get last 200 lines
+                lines = [line.rstrip("\n") for line in all_lines[-200:]]
+        except Exception as e:
+            lines = [f"Fehler beim Lesen der Log-Datei: {str(e)}"]
+
+    return {"logs": lines}
+
+
+# ── Admin: Coupon Management ──
+
+@app.post("/api/admin/coupons")
+def admin_create_coupon(req_body: CouponCreateRequest, authorization: Optional[str] = Header(None)):
+    """Create a new coupon (admin only)."""
+    payload, admin_email = _require_admin(authorization)
+
+    code = req_body.code.upper().strip()
+    plan = req_body.plan.lower().strip()
+
+    # Validate inputs
+    valid_plans = ["trial", "basic", "pro", "elite"]
+    if plan not in valid_plans:
+        raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
+
+    if req_body.duration_days < 1:
+        raise HTTPException(status_code=400, detail="duration_days must be >= 1")
+
+    if req_body.max_uses < 1:
+        raise HTTPException(status_code=400, detail="max_uses must be >= 1")
+
+    # Load existing coupons
+    data = _load_coupons()
+
+    # Check for duplicate
+    for coupon in data.get("coupons", []):
+        if coupon["code"] == code:
+            raise HTTPException(status_code=400, detail="Coupon code already exists")
+
+    # Create coupon
+    coupon = {
+        "code": code,
+        "plan": plan,
+        "duration_days": req_body.duration_days,
+        "max_uses": req_body.max_uses,
+        "uses": 0,
+        "created_at": datetime.utcnow().isoformat(),
+        "created_by": admin_email,
+        "description": req_body.description,
+        "active": True,
+    }
+
+    data["coupons"].append(coupon)
+    _save_coupons(data)
+
+    return {"success": True, "coupon": coupon}
+
+
+@app.get("/api/admin/coupons")
+def admin_list_coupons(authorization: Optional[str] = Header(None)):
+    """List all coupons (admin only)."""
+    _require_admin(authorization)
+
+    data = _load_coupons()
+    return {"coupons": data.get("coupons", [])}
+
+
+@app.put("/api/admin/coupons/{code}/toggle")
+def admin_toggle_coupon(code: str, authorization: Optional[str] = Header(None)):
+    """Toggle coupon active/inactive (admin only)."""
+    _require_admin(authorization)
+
+    code = code.upper().strip()
+    data = _load_coupons()
+
+    for coupon in data.get("coupons", []):
+        if coupon["code"] == code:
+            coupon["active"] = not coupon["active"]
+            _save_coupons(data)
+            return {"success": True, "coupon": coupon}
+
+    raise HTTPException(status_code=404, detail="Coupon not found")
+
+
+@app.delete("/api/admin/coupons/{code}")
+def admin_delete_coupon(code: str, authorization: Optional[str] = Header(None)):
+    """Delete a coupon (admin only)."""
+    _require_admin(authorization)
+
+    code = code.upper().strip()
+    data = _load_coupons()
+
+    original_count = len(data.get("coupons", []))
+    data["coupons"] = [c for c in data.get("coupons", []) if c["code"] != code]
+
+    if len(data["coupons"]) == original_count:
+        raise HTTPException(status_code=404, detail="Coupon not found")
+
+    _save_coupons(data)
+    return {"success": True, "message": f"Coupon {code} gelöscht"}
+
+
+# ── Coupon Redemption (any authenticated user) ──
+
+@app.post("/api/redeem-coupon")
+def redeem_coupon(req_body: RedeemCouponRequest, authorization: Optional[str] = Header(None)):
+    """Redeem a coupon code (any authenticated user)."""
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    user_email = payload.get("email", "")
+    code = req_body.code.upper().strip()
+
+    # Load coupons
+    coupon_data = _load_coupons()
+    coupon = None
+    coupon_index = -1
+
+    for idx, c in enumerate(coupon_data.get("coupons", [])):
+        if c["code"] == code:
+            coupon = c
+            coupon_index = idx
+            break
+
+    if not coupon:
+        raise HTTPException(status_code=404, detail="Coupon not found")
+
+    if not coupon.get("active", False):
+        raise HTTPException(status_code=400, detail="Coupon is not active")
+
+    if coupon.get("uses", 0) >= coupon.get("max_uses", 0):
+        raise HTTPException(status_code=400, detail="Coupon has reached max uses")
+
+    # Load user database and update plan
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+
+    if user_email not in db.get("users", {}):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Update user plan
+    db["users"][user_email]["plan"] = coupon["plan"]
+
+    # Increment coupon uses
+    coupon_data["coupons"][coupon_index]["uses"] += 1
+
+    # Save both
+    try:
+        with open(AUTH_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2)
+        _save_coupons(coupon_data)
+
+        return {
+            "success": True,
+            "message": f"Plan auf {coupon['plan']} aktualisiert via Coupon {code}",
+            "new_plan": coupon["plan"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+
+
+# ── Support Tickets ──
+
+@app.post("/api/admin/tickets")
+def create_ticket(req_body: TicketCreateRequest, authorization: Optional[str] = Header(None)):
+    """Create a support ticket (any authenticated user)."""
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    user_email = payload.get("email", "")
+
+    # Load tickets
+    data = _load_tickets()
+    ticket_id = data.get("next_id", 1)
+
+    # Create ticket
+    ticket = {
+        "id": ticket_id,
+        "email": user_email,
+        "subject": req_body.subject.strip(),
+        "message": req_body.message.strip(),
+        "status": "open",
+        "created_at": datetime.utcnow().isoformat(),
+        "replies": [],
+    }
+
+    data["tickets"].append(ticket)
+    data["next_id"] = ticket_id + 1
+    _save_tickets(data)
+
+    return {"success": True, "ticket": ticket}
+
+
+@app.get("/api/admin/tickets")
+def admin_list_tickets(authorization: Optional[str] = Header(None)):
+    """List all support tickets (admin only)."""
+    _require_admin(authorization)
+
+    data = _load_tickets()
+    return {"tickets": data.get("tickets", [])}
+
+
+@app.put("/api/admin/tickets/{ticket_id}/reply")
+def admin_reply_ticket(ticket_id: int, req_body: TicketReplyRequest, authorization: Optional[str] = Header(None)):
+    """Reply to a support ticket (admin only)."""
+    _require_admin(authorization)
+
+    data = _load_tickets()
+    ticket = None
+
+    for t in data.get("tickets", []):
+        if t["id"] == ticket_id:
+            ticket = t
+            break
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    reply = {
+        "message": req_body.message.strip(),
+        "from": "admin",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    ticket["replies"].append(reply)
+    _save_tickets(data)
+
+    return {"success": True, "ticket": ticket}
+
+
+@app.put("/api/admin/tickets/{ticket_id}/status")
+def admin_update_ticket_status(ticket_id: int, req_body: TicketStatusRequest, authorization: Optional[str] = Header(None)):
+    """Update ticket status (admin only)."""
+    _require_admin(authorization)
+
+    valid_statuses = ["open", "closed", "in_progress"]
+    if req_body.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
+
+    data = _load_tickets()
+    ticket = None
+
+    for t in data.get("tickets", []):
+        if t["id"] == ticket_id:
+            ticket = t
+            break
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    ticket["status"] = req_body.status
+    _save_tickets(data)
+
+    return {"success": True, "ticket": ticket}
+
+
+@app.get("/api/my-tickets")
+def get_my_tickets(authorization: Optional[str] = Header(None)):
+    """Get user's own support tickets (any authenticated user)."""
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    user_email = payload.get("email", "")
+
+    # Load tickets
+    data = _load_tickets()
+    user_tickets = [t for t in data.get("tickets", []) if t["email"] == user_email]
+
+    return {"tickets": user_tickets}
 
 
 # ── Run with uvicorn ──
