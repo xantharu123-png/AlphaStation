@@ -21,8 +21,75 @@
     <!-- TradingView Lightweight Charts -->
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 
+    <!-- ═══ Anti-Copy / Anti-Inspect Protection ═══ -->
+    <script>
+    (function(){
+        // 1. Block right-click context menu
+        document.addEventListener('contextmenu', function(e){ e.preventDefault(); return false; });
+
+        // 2. Block keyboard shortcuts (F12, Ctrl+U, Ctrl+S, Ctrl+Shift+I/J/C, Ctrl+P)
+        document.addEventListener('keydown', function(e){
+            // F12
+            if(e.key === 'F12') { e.preventDefault(); return false; }
+            // Ctrl+U (View Source)
+            if(e.ctrlKey && e.key === 'u') { e.preventDefault(); return false; }
+            // Ctrl+S (Save Page)
+            if(e.ctrlKey && e.key === 's') { e.preventDefault(); return false; }
+            // Ctrl+P (Print)
+            if(e.ctrlKey && e.key === 'p') { e.preventDefault(); return false; }
+            // Ctrl+Shift+I (DevTools)
+            if(e.ctrlKey && e.shiftKey && e.key === 'I') { e.preventDefault(); return false; }
+            // Ctrl+Shift+J (Console)
+            if(e.ctrlKey && e.shiftKey && e.key === 'J') { e.preventDefault(); return false; }
+            // Ctrl+Shift+C (Element Picker)
+            if(e.ctrlKey && e.shiftKey && e.key === 'C') { e.preventDefault(); return false; }
+            // Ctrl+Shift+K (Firefox Console)
+            if(e.ctrlKey && e.shiftKey && e.key === 'K') { e.preventDefault(); return false; }
+        });
+
+        // 3. Block drag & drop of images/content
+        document.addEventListener('dragstart', function(e){ e.preventDefault(); return false; });
+
+        // 4. DevTools detection — debugger loop + size detection
+        var _devtoolsOpen = false;
+        var _el = new Image();
+        Object.defineProperty(_el, 'id', { get: function(){ _devtoolsOpen = true; }});
+        setInterval(function(){
+            _devtoolsOpen = false;
+            console.dir(_el);
+            if(_devtoolsOpen){
+                document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0a0f1e;color:#ef4444;font-family:Inter,sans-serif;font-size:24px;font-weight:700;text-align:center;padding:40px;">Developer Tools sind nicht erlaubt.<br>Bitte schliesse die DevTools um fortzufahren.</div>';
+            }
+        }, 1500);
+
+        // 5. Detect window size anomaly (DevTools docked changes inner size)
+        var _checkResize = function(){
+            var widthThreshold = window.outerWidth - window.innerWidth > 160;
+            var heightThreshold = window.outerHeight - window.innerHeight > 160;
+            if(widthThreshold || heightThreshold){
+                document.title = 'Alpha Station — DevTools erkannt';
+            }
+        };
+        window.addEventListener('resize', _checkResize);
+    })();
+    </script>
+
     <style>
-        * { font-family: 'Inter', sans-serif; }
+        /* Anti-select / Anti-copy */
+        * {
+            font-family: 'Inter', sans-serif;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        /* Allow text selection in input fields and textareas */
+        input, textarea, [contenteditable="true"] {
+            -webkit-user-select: text;
+            -moz-user-select: text;
+            -ms-user-select: text;
+            user-select: text;
+        }
 
         :root {
             --bg-primary: #f8f9fb;
