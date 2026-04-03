@@ -342,6 +342,7 @@ function AuthPage({ onLogin, onRegister }) {
         setError(''); setSubmitting(true);
         const result = isLogin ? await onLogin(email, password) : await onRegister(email, password, name);
         if (!result.success) setError(result.message);
+        else setShowAuth(false);
         setSubmitting(false);
     };
 
@@ -1099,7 +1100,7 @@ Mehr erfahren ↓
                         <div style={{ textAlign: 'center', marginBottom: 28 }}>
                             <div style={{ width: 48, height: 48, borderRadius: 14, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 20, marginBottom: 12 }}>A</div>
                             <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{isLogin ? 'Willkommen zurück' : 'Account erstellen'}</h2>
-                            <p style={{ color: '#94a3b8', fontSize: 14 }}>{isLogin ? 'Logge dich in Alpha Station ein' : 'Voller Zugang für 24h — nur $1'}</p>
+                            <p style={{ color: '#94a3b8', fontSize: 14 }}>{isLogin ? 'Logge dich in Alpha Station ein' : 'Erstelle deinen Alpha Station Account'}</p>
                         </div>
 
                         <form onSubmit={handleSubmit}>
@@ -1119,7 +1120,7 @@ Mehr erfahren ↓
 
                             <button type="submit" disabled={submitting}
                                 style={{ width: '100%', padding: '13px 0', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', color: '#fff', border: 'none', borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: submitting ? 'wait' : 'pointer', opacity: submitting ? 0.7 : 1, boxShadow: '0 4px 15px rgba(59,130,246,0.3)' }}>
-                                {submitting ? 'Laden...' : (isLogin ? 'Einloggen' : 'Registrieren & $1 Trial starten')}
+                                {submitting ? 'Laden...' : (isLogin ? 'Einloggen' : 'Registrieren')}
                             </button>
                         </form>
 
