@@ -352,12 +352,12 @@ function AuthPage({ onLogin, onRegister }) {
     ];
 
     const faqs = [
-        { q: 'Kann ich kostenlos testen?', a: 'Ja! Registriere dich und teste Alpha Station 7 Tage lang kostenlos. Keine Kreditkarte nötig.' },
+        { q: 'Kann ich Alpha Station testen?', a: 'Ja! Für nur $1 bekommst du 24 Stunden vollen Zugang zu allen Features. Danach wählst du deinen Plan.' },
         { q: 'Welche Märkte werden gescannt?', a: 'US Stocks (NYSE, NASDAQ), ETFs, und Krypto. Wir scannen über 8.000 Ticker in Echtzeit.' },
         { q: 'Kann ich jederzeit kündigen?', a: 'Ja, dein Abo ist monatlich kündbar. Kein Vertrag, keine versteckten Kosten.' },
         { q: 'Brauche ich Trading-Erfahrung?', a: 'Alpha Station richtet sich an aktive Trader. Grundkenntnisse in technischer Analyse sind hilfreich. Jedes Signal kommt mit Score, Grade und vollständiger Indikator-Analyse — so kannst du fundierte Entscheidungen treffen.' },
         { q: 'Welche Datenquelle wird verwendet?', a: 'Wir nutzen Polygon.io für Echtzeit- und historische Marktdaten — dieselbe Quelle wie professionelle Hedgefonds.' },
-        { q: 'Was passiert nach dem Free Trial?', a: 'Nach 7 Tagen wählst du einen Plan. Kein automatisches Abo — du entscheidest selbst, ob und welchen Plan du möchtest.' },
+        { q: 'Was passiert nach den 24 Stunden?', a: 'Dein Trial läuft ab und du wählst einen Plan. Kein automatisches Abo — du entscheidest selbst, ob und welchen Plan du möchtest.' },
     ];
 
     const [openFaq, setOpenFaq] = useState(null);
@@ -376,7 +376,7 @@ function AuthPage({ onLogin, onRegister }) {
                     <button onClick={() => document.getElementById('pricing').scrollIntoView({behavior:'smooth'})} style={{ padding: '9px 16px', background: 'none', border: 'none', color: '#94a3b8', fontSize: 14, cursor: 'pointer' }}>Pricing</button>
                     <div style={{ width: 1, height: 20, background: '#334155', margin: '0 8px' }} />
                     <button onClick={() => openAuth(true)} style={{ padding: '9px 22px', background: 'transparent', border: '1px solid #334155', borderRadius: 8, color: '#f1f5f9', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>Login</button>
-                    <button onClick={() => openAuth(false)} style={{ padding: '9px 22px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 15px rgba(59,130,246,0.3)' }}>Kostenlos testen</button>
+                    <button onClick={() => openAuth(false)} style={{ padding: '9px 22px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 15px rgba(59,130,246,0.3)' }}>Für $1 testen</button>
                 </div>
             </nav>
 
@@ -409,13 +409,13 @@ function AuthPage({ onLogin, onRegister }) {
                         <button onClick={() => openAuth(false)} style={{ padding: '16px 40px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 12, color: '#fff', fontSize: 17, fontWeight: 700, cursor: 'pointer', boxShadow: '0 8px 30px rgba(59,130,246,0.4)', transition: 'all 0.2s', letterSpacing: '-0.3px' }}
                             onMouseOver={e => { e.target.style.transform='translateY(-2px)'; e.target.style.boxShadow='0 12px 40px rgba(59,130,246,0.5)'; }}
                             onMouseOut={e => { e.target.style.transform='translateY(0)'; e.target.style.boxShadow='0 8px 30px rgba(59,130,246,0.4)'; }}>
-                            7 Tage kostenlos testen
+                            24h testen für nur $1
                         </button>
                         <button onClick={() => document.getElementById('demo-preview').scrollIntoView({behavior:'smooth'})} style={{ padding: '16px 32px', background: 'rgba(255,255,255,0.04)', border: '1px solid #334155', borderRadius: 12, color: '#f1f5f9', fontSize: 17, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
 Mehr erfahren ↓
                         </button>
                     </div>
-                    <p style={{ marginTop: 14, fontSize: 13, color: '#475569' }}>Keine Kreditkarte nötig — sofort loslegen</p>
+                    <p style={{ marginTop: 14, fontSize: 13, color: '#475569' }}>Voller Zugang — alle Scanner, alle Features, 24 Stunden</p>
                 </div>
             </section>
 
@@ -566,7 +566,7 @@ Mehr erfahren ↓
                         {/* Connection line */}
                         <div style={{ position: 'absolute', top: 45, left: '20%', right: '20%', height: 2, background: 'linear-gradient(90deg, transparent, rgba(59,130,246,0.3), transparent)', zIndex: 0 }} />
                         {[
-                            { step: '1', title: 'Registrieren', desc: 'Email eingeben, Passwort wählen. 30 Sekunden. Kein Kreditkarten-Bullshit.', color: '#3b82f6' },
+                            { step: '1', title: 'Registrieren & $1 Trial', desc: 'Account erstellen, $1 zahlen — sofort vollen Zugang zu allen Scannern für 24 Stunden.', color: '#3b82f6' },
                             { step: '2', title: 'Scanner startet', desc: 'Sofort scannen. Über 8.000 Aktien werden analysiert, Ergebnisse in unter 5 Minuten.', color: '#8b5cf6' },
                             { step: '3', title: 'Trade profitabel', desc: 'Klick auf ein Signal, sieh die vollständige Analyse mit Entry, Stop-Loss und Take-Profit — und trade.', color: '#10b981' },
                         ].map((s, i) => (
@@ -612,7 +612,7 @@ Mehr erfahren ↓
                 <div style={{...revealStyle('sec-pricing'), maxWidth: 1060, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 50 }}>
                         <h2 style={{ fontSize: 'clamp(28px, 3vw, 40px)', fontWeight: 800, marginBottom: 12, letterSpacing: '-0.5px' }}>Investiere in deinen Vorteil</h2>
-                        <p style={{ color: '#94a3b8', fontSize: 17 }}>Jederzeit kündbar. Starte mit 7 Tagen kostenlos.</p>
+                        <p style={{ color: '#94a3b8', fontSize: 17 }}>Jederzeit kündbar. Starte mit dem $1 Trial.</p>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20, alignItems: 'start' }}>
                         {plans.map(plan => (
@@ -639,7 +639,7 @@ Mehr erfahren ↓
                             </div>
                         ))}
                     </div>
-                    <p style={{ textAlign: 'center', marginTop: 20, fontSize: 13, color: '#475569' }}>Alle Pläne starten mit 7 Tagen kostenlos. Keine Kreditkarte nötig.</p>
+                    <p style={{ textAlign: 'center', marginTop: 20, fontSize: 13, color: '#475569' }}>Starte mit dem $1 Trial — voller Zugang, 24 Stunden, alle Features.</p>
                 </div>
             </section>
 
@@ -664,13 +664,13 @@ Mehr erfahren ↓
                 <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 700, height: 700, borderRadius: '50%', background: 'radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 60%)', pointerEvents: 'none' }} />
                 <div style={{ position: 'relative' }}>
                     <h2 style={{ fontSize: 'clamp(30px, 4vw, 46px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-1px' }}>Dein nächster Trade<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>wartet schon.</span></h2>
-                    <p style={{ color: '#94a3b8', fontSize: 18, marginBottom: 36, maxWidth: 480, margin: '0 auto 36px' }}>Starte jetzt kostenlos. In 60 Sekunden scannt Alpha Station den Markt für dich.</p>
+                    <p style={{ color: '#94a3b8', fontSize: 18, marginBottom: 36, maxWidth: 480, margin: '0 auto 36px' }}>$1. 24 Stunden. Alle Scanner. Starte jetzt und überzeug dich selbst.</p>
                     <button onClick={() => openAuth(false)} style={{ padding: '18px 52px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 14, color: '#fff', fontSize: 18, fontWeight: 700, cursor: 'pointer', boxShadow: '0 10px 40px rgba(59,130,246,0.4)', transition: 'all 0.2s' }}
                         onMouseOver={e => { e.target.style.transform='translateY(-3px)'; e.target.style.boxShadow='0 14px 50px rgba(59,130,246,0.5)'; }}
                         onMouseOut={e => { e.target.style.transform='translateY(0)'; e.target.style.boxShadow='0 10px 40px rgba(59,130,246,0.4)'; }}>
-                        Jetzt kostenlos starten
+                        Jetzt für $1 testen
                     </button>
-                    <p style={{ marginTop: 14, fontSize: 13, color: '#475569' }}>7 Tage gratis — keine Kreditkarte — jederzeit kündbar</p>
+                    <p style={{ marginTop: 14, fontSize: 13, color: '#475569' }}>$1 für 24h voller Zugang — kein Auto-Abo — jederzeit kündbar</p>
                 </div>
             </section>
 
@@ -695,7 +695,7 @@ Mehr erfahren ↓
                         <div style={{ textAlign: 'center', marginBottom: 28 }}>
                             <div style={{ width: 48, height: 48, borderRadius: 14, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 20, marginBottom: 12 }}>A</div>
                             <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{isLogin ? 'Willkommen zurück' : 'Account erstellen'}</h2>
-                            <p style={{ color: '#94a3b8', fontSize: 14 }}>{isLogin ? 'Logge dich in Alpha Station ein' : '7 Tage kostenlos — keine Kreditkarte'}</p>
+                            <p style={{ color: '#94a3b8', fontSize: 14 }}>{isLogin ? 'Logge dich in Alpha Station ein' : 'Voller Zugang für 24h — nur $1'}</p>
                         </div>
 
                         <form onSubmit={handleSubmit}>
@@ -715,7 +715,7 @@ Mehr erfahren ↓
 
                             <button type="submit" disabled={submitting}
                                 style={{ width: '100%', padding: '13px 0', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', color: '#fff', border: 'none', borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: submitting ? 'wait' : 'pointer', opacity: submitting ? 0.7 : 1, boxShadow: '0 4px 15px rgba(59,130,246,0.3)' }}>
-                                {submitting ? 'Laden...' : (isLogin ? 'Einloggen' : 'Kostenlos registrieren')}
+                                {submitting ? 'Laden...' : (isLogin ? 'Einloggen' : 'Registrieren & $1 Trial starten')}
                             </button>
                         </form>
 
@@ -893,9 +893,9 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                 )}
             </div>
 
-            {user.trial_ends_at && user.plan === 'free' && (
+            {user.trial_ends_at && user.plan === 'trial' && (
                 <div style={{ marginTop: 16, padding: 14, background: '#1e293b', borderRadius: 8, fontSize: 13, color: '#94a3b8', textAlign: 'center' }}>
-                    Dein Free Trial endet am: <span style={{ color: '#f59e0b', fontWeight: 600 }}>{new Date(user.trial_ends_at).toLocaleDateString('de-DE')}</span>
+                    Dein Trial endet am: <span style={{ color: '#f59e0b', fontWeight: 600 }}>{new Date(user.trial_ends_at).toLocaleString('de-DE')}</span>
                 </div>
             )}
         </div>
@@ -2175,8 +2175,51 @@ function App() {
         return <AuthPage onLogin={login} onRegister={register} />;
     }
 
+    // ── Expired / No Plan → Show Trial + Pricing Page ──
+    if (user.plan === 'expired') {
+        return (
+            <div style={{ minHeight: '100vh', background: '#0a0f1e', color: '#f1f5f9', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+                <nav style={{ padding: '16px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(59,130,246,0.1)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 10, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 16 }}>A</div>
+                        <span style={{ fontSize: 20, fontWeight: 700 }}>Alpha Station</span>
+                    </div>
+                    <button onClick={logout} style={{ padding: '8px 18px', background: 'transparent', border: '1px solid #334155', borderRadius: 8, color: '#94a3b8', fontSize: 13, cursor: 'pointer' }}>Ausloggen</button>
+                </nav>
+                <div style={{ maxWidth: 700, margin: '60px auto', padding: '0 24px', textAlign: 'center' }}>
+                    <h1 style={{ fontSize: 32, fontWeight: 800, marginBottom: 12 }}>Willkommen, {user.name || user.email?.split('@')[0]}</h1>
+                    <p style={{ color: '#94a3b8', fontSize: 17, marginBottom: 40 }}>Wähle deinen Zugang zu Alpha Station</p>
+
+                    {/* $1 Trial Card */}
+                    <div style={{ padding: 36, background: 'linear-gradient(135deg, rgba(16,185,129,0.08), rgba(59,130,246,0.06))', borderRadius: 20, border: '2px solid rgba(16,185,129,0.3)', marginBottom: 32, position: 'relative' }}>
+                        <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: 'linear-gradient(135deg, #10b981, #059669)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '5px 18px', borderRadius: 20 }}>EMPFOHLEN</div>
+                        <h3 style={{ fontSize: 24, fontWeight: 800, marginBottom: 6 }}>24h Trial</h3>
+                        <div style={{ marginBottom: 16 }}>
+                            <span style={{ fontSize: 52, fontWeight: 800 }}>$1</span>
+                            <span style={{ color: '#64748b', fontSize: 15 }}> einmalig</span>
+                        </div>
+                        <p style={{ color: '#94a3b8', fontSize: 15, marginBottom: 24 }}>Voller Zugang zu <strong style={{ color: '#f1f5f9' }}>allen Scannern</strong>, allen Features, 24 Stunden lang. Kein Auto-Abo.</p>
+                        <button onClick={async () => {
+                            const token = getToken();
+                            try {
+                                const res = await fetch(`${API}/api/auth/checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ plan: 'trial' }) });
+                                if (res.ok) { const data = await res.json(); if (data.url) window.location.href = data.url; }
+                            } catch {}
+                        }} style={{ padding: '14px 48px', background: 'linear-gradient(135deg, #10b981, #059669)', border: 'none', borderRadius: 12, color: '#fff', fontSize: 16, fontWeight: 700, cursor: 'pointer', boxShadow: '0 8px 25px rgba(16,185,129,0.3)' }}>
+                            Jetzt für $1 testen
+                        </button>
+                    </div>
+
+                    <p style={{ color: '#64748b', fontSize: 14, marginBottom: 32 }}>— oder direkt einen Plan wählen —</p>
+
+                    <PricingPage currentPlan="expired" getToken={getToken} />
+                </div>
+            </div>
+        );
+    }
+
     // ── Plan badge color ──
-    const planColors = { free: '#64748b', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
+    const planColors = { trial: '#10b981', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
     const planColor = planColors[user.plan] || '#64748b';
 
     return (

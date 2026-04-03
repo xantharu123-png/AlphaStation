@@ -43,6 +43,7 @@ JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_IDS = {
+    "trial": os.environ.get("STRIPE_PRICE_TRIAL", ""),  # $1 one-time payment
     "basic_monthly": os.environ.get("STRIPE_PRICE_BASIC", "price_1THqyWEOIB5wAqvUrLNLCPZD"),
     "pro_monthly": os.environ.get("STRIPE_PRICE_PRO", "price_1THqysEOIB5wAqvU6MG9iywG"),
     "elite_monthly": os.environ.get("STRIPE_PRICE_ELITE", "price_1THqzjEOIB5wAqvUTrVwLzha"),
@@ -53,18 +54,32 @@ if HAS_STRIPE and STRIPE_SECRET_KEY:
 
 # ── Plan Definitions ──
 PLANS = {
-    "free": {
-        "name": "Free Trial",
+    "trial": {
+        "name": "$1 Trial (24h)",
+        "price": 1,
+        "max_scanner_tabs": 99,
+        "scan_interval_min": 5,
+        "has_sidebar_detail": True,
+        "has_email_alerts": True,
+        "has_trade_setups": True,
+        "has_orb_scanner": True,
+        "has_backtest": True,
+        "has_api_access": False,
+        "max_ticker_detail_per_hour": 999,
+        "duration_hours": 24,
+    },
+    "expired": {
+        "name": "Trial abgelaufen",
         "price": 0,
-        "max_scanner_tabs": 2,
-        "scan_interval_min": 60,
+        "max_scanner_tabs": 0,
+        "scan_interval_min": 999,
         "has_sidebar_detail": False,
         "has_email_alerts": False,
         "has_trade_setups": False,
         "has_orb_scanner": False,
         "has_backtest": False,
         "has_api_access": False,
-        "max_ticker_detail_per_hour": 10,
+        "max_ticker_detail_per_hour": 0,
     },
     "basic": {
         "name": "Basic",
@@ -109,9 +124,10 @@ PLANS = {
 
 # Allowed scanner tabs per plan
 SCANNER_TABS_BY_PLAN = {
-    "free": ["scanner", "short-scanner"],
+    "trial": None,  # Full access during trial
+    "expired": [],  # No access after trial
     "basic": ["scanner", "short-scanner", "bi-scanner", "crash-monitor"],
-    "pro": None,   # None = all tabs
+    "pro": None,    # None = all tabs
     "elite": None,  # None = all tabs
 }
 
@@ -200,18 +216,18 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "email": email,
         "name": name or email.split("@")[0],
         "password_hash": _hash_password(password),
-        "plan": "free",
+        "plan": "expired",  # No access until $1 trial or plan purchase
         "stripe_customer_id": None,
         "stripe_subscription_id": None,
         "created_at": datetime.utcnow().isoformat(),
         "last_login": datetime.utcnow().isoformat(),
-        "trial_ends_at": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+        "trial_ends_at": None,
     }
 
     db["users"][email] = user
     _save_users(db)
 
-    token = create_token(user_id, email, "free")
+    token = create_token(user_id, email, "expired")
     return {
         "success": True,
         "message": "Account erstellt",
@@ -220,8 +236,8 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
             "id": user_id,
             "email": email,
             "name": user["name"],
-            "plan": "free",
-            "trial_ends_at": user["trial_ends_at"],
+            "plan": "expired",
+            "trial_ends_at": None,
         },
     }
 
@@ -269,8 +285,13 @@ def create_checkout_session(email: str, plan: str, success_url: str, cancel_url:
         print("[Auth] Stripe not configured")
         return None
 
-    price_key = f"{plan}_monthly"
-    price_id = STRIPE_PRICE_IDS.get(price_key)
+    is_trial = (plan == "trial")
+    if is_trial:
+        price_id = STRIPE_PRICE_IDS.get("trial")
+    else:
+        price_key = f"{plan}_monthly"
+        price_id = STRIPE_PRICE_IDS.get(price_key)
+
     if not price_id:
         print(f"[Auth] No Stripe price ID for plan: {plan}")
         return None
@@ -294,15 +315,17 @@ def create_checkout_session(email: str, plan: str, success_url: str, cancel_url:
             db["users"][email] = user
             _save_users(db)
 
-        session = stripe.checkout.Session.create(
-            customer=customer_id,
-            payment_method_types=["card"],
-            line_items=[{"price": price_id, "quantity": 1}],
-            mode="subscription",
-            success_url=success_url,
-            cancel_url=cancel_url,
-            metadata={"email": email, "plan": plan},
-        )
+        # Trial = one-time payment, Plans = subscription
+        session_params = {
+            "customer": customer_id,
+            "payment_method_types": ["card"],
+            "line_items": [{"price": price_id, "quantity": 1}],
+            "mode": "payment" if is_trial else "subscription",
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "metadata": {"email": email, "plan": plan},
+        }
+        session = stripe.checkout.Session.create(**session_params)
         return session.url
     except Exception as e:
         print(f"[Auth] Stripe checkout error: {e}")
@@ -352,11 +375,19 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
         customer_id = data.get("customer")
 
         if email and email in db["users"]:
-            db["users"][email]["plan"] = plan
-            db["users"][email]["stripe_subscription_id"] = subscription_id
-            db["users"][email]["stripe_customer_id"] = customer_id
-            _save_users(db)
-            print(f"[Auth] Subscription activated: {email} → {plan}")
+            if plan == "trial":
+                # $1 Trial — activate 24h full access
+                db["users"][email]["plan"] = "trial"
+                db["users"][email]["trial_ends_at"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+                db["users"][email]["stripe_customer_id"] = customer_id
+                _save_users(db)
+                print(f"[Auth] Trial activated: {email} → 24h until {db['users'][email]['trial_ends_at']}")
+            else:
+                db["users"][email]["plan"] = plan
+                db["users"][email]["stripe_subscription_id"] = subscription_id
+                db["users"][email]["stripe_customer_id"] = customer_id
+                _save_users(db)
+                print(f"[Auth] Subscription activated: {email} → {plan}")
 
     elif event_type == "customer.subscription.updated":
         customer_id = data.get("customer")
@@ -375,8 +406,8 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
                                 db["users"][email]["plan"] = new_plan
                                 print(f"[Auth] Plan updated: {email} → {new_plan}")
                 elif status in ("canceled", "unpaid", "past_due"):
-                    db["users"][email]["plan"] = "free"
-                    print(f"[Auth] Subscription ended: {email} → free")
+                    db["users"][email]["plan"] = "expired"
+                    print(f"[Auth] Subscription ended: {email} → expired")
                 _save_users(db)
                 break
 
@@ -384,10 +415,10 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
         customer_id = data.get("customer")
         for email, user in db["users"].items():
             if user.get("stripe_customer_id") == customer_id:
-                db["users"][email]["plan"] = "free"
+                db["users"][email]["plan"] = "expired"
                 db["users"][email]["stripe_subscription_id"] = None
                 _save_users(db)
-                print(f"[Auth] Subscription deleted: {email} → free")
+                print(f"[Auth] Subscription deleted: {email} → expired")
                 break
 
     return {"success": True, "event_type": event_type}
@@ -395,22 +426,35 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
 
 # ── Feature Gating ──
 def get_user_plan(token: str) -> str:
-    """Get user's plan from token. Returns plan name or 'free'."""
+    """Get user's plan from token. Checks trial expiry."""
     payload = verify_token(token)
     if not payload:
-        return "free"
+        return "expired"
     email = payload.get("email", "")
-    # Always check DB for latest plan (in case webhook updated it)
     db = _load_users()
     user = db["users"].get(email)
-    if user:
-        return user.get("plan", "free")
-    return payload.get("plan", "free")
+    if not user:
+        return "expired"
+    plan = user.get("plan", "expired")
+    # Check if trial has expired
+    if plan == "trial":
+        trial_ends = user.get("trial_ends_at")
+        if trial_ends:
+            try:
+                end_dt = datetime.fromisoformat(trial_ends)
+                if datetime.utcnow() > end_dt:
+                    # Trial expired — update DB
+                    user["plan"] = "expired"
+                    _save_users(db)
+                    return "expired"
+            except (ValueError, TypeError):
+                pass
+    return plan
 
 
 def get_plan_features(plan: str) -> Dict:
     """Get feature set for a plan."""
-    return PLANS.get(plan, PLANS["free"])
+    return PLANS.get(plan, PLANS["expired"])
 
 
 def check_feature(token: str, feature: str) -> bool:
