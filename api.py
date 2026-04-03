@@ -191,11 +191,17 @@ def _load_secrets():
     return secrets
 
 _SECRETS = _load_secrets()
+
+# Fix: POLYGON_KEY aus secrets.toml laden falls env var leer
+if not POLYGON_KEY:
+    POLYGON_KEY = _SECRETS.get("POLYGON_KEY", "")
+
 _EMAIL_COOLDOWN = {}
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
 _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach Restart
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 
+print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (secrets.toml fehlt)'}")
 
 
