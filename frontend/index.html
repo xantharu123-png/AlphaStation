@@ -412,7 +412,7 @@ function AuthPage({ onLogin, onRegister }) {
                             7 Tage kostenlos testen
                         </button>
                         <button onClick={() => document.getElementById('demo-preview').scrollIntoView({behavior:'smooth'})} style={{ padding: '16px 32px', background: 'rgba(255,255,255,0.04)', border: '1px solid #334155', borderRadius: 12, color: '#f1f5f9', fontSize: 17, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 20 }}>\u25B6</span> Live Demo ansehen
+Mehr erfahren ↓
                         </button>
                     </div>
                     <p style={{ marginTop: 14, fontSize: 13, color: '#475569' }}>Keine Kreditkarte nötig — sofort loslegen</p>
@@ -451,7 +451,7 @@ function AuthPage({ onLogin, onRegister }) {
                             <div style={{ fontSize: 13, fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 20 }}>Ohne Alpha Station</div>
                             {['Manuell Charts durchklicken', 'Breakouts erst sehen wenn es zu spät ist', 'Keine Ahnung ob Long oder Short', 'After Hours komplett verpassen', 'Kein klarer Plan für Entry und Stop-Loss', 'Stundenlang Screener durchsuchen'].map((t, i) => (
                                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', fontSize: 14, color: '#f87171' }}>
-                                    <span style={{ fontSize: 16, flexShrink: 0 }}>\u2717</span> {t}
+                                    <span style={{ fontSize: 16, flexShrink: 0 }}>✗</span> {t}
                                 </div>
                             ))}
                         </div>
@@ -466,7 +466,7 @@ function AuthPage({ onLogin, onRegister }) {
                             <div style={{ fontSize: 13, fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 20 }}>Mit Alpha Station</div>
                             {['Scanner findet Setups automatisch', 'Sofort sehen: Long Breakout oder Short Breakdown', 'BI Scanner prüft 20+ Indikatoren gleichzeitig', 'After Hours & Pre-Market abgedeckt', 'Biotech-Scanner trackt FDA Catalysts live', 'Alles in einem Dashboard, in Echtzeit'].map((t, i) => (
                                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', fontSize: 14, color: '#60a5fa' }}>
-                                    <span style={{ color: '#10b981', fontSize: 16, flexShrink: 0 }}>\u2713</span> {t}
+                                    <span style={{ color: '#10b981', fontSize: 16, flexShrink: 0 }}>✓</span> {t}
                                 </div>
                             ))}
                         </div>
@@ -485,7 +485,7 @@ function AuthPage({ onLogin, onRegister }) {
                     {/* Big USP cards — alternating layout */}
                     {[
                         { tag: 'HERZSTÜCK', title: 'BI Scanner — 20+ Indikatoren in einem Scan', desc: 'Der BI Scanner ist kein normaler Screener. Er analysiert jeden Ticker gleichzeitig mit über 20 technischen Indikatoren: EMA-Crossovers, RSI, MACD, VWAP, Bollinger Bands, ATR, Volumen-Profil, Support/Resistance, Fibonacci und mehr. Erst wenn mehrere Indikatoren gleichzeitig übereinstimmen (Confluence), schlägt der Scanner an. Long und Short — du siehst sofort die Richtung und die Stärke des Signals.', color: '#3b82f6', metrics: [{ v: '20+', l: 'Indikatoren' }, { v: 'S-D', l: 'Confluence Grade' }, { v: 'L / S', l: 'Long & Short' }],
-                          preview: { bg: 'linear-gradient(135deg, #0f172a, #1a2744)', lines: ['BI Scanner — Confluence Analyse', '', 'NVDA  Score: 91  Grade: S  LONG  [8/8]', '  EMA20>50 \u2713  RSI:62 \u2713  MACD+ \u2713  Vol+ \u2713', '', 'SMCI  Score: 82  Grade: A  SHORT [7/8]', '  EMA20<50 \u2713  RSI:28 \u2713  MACD- \u2713  Vol+ \u2713', '', 'Nur Confluence-Treffer angezeigt'] } },
+                          preview: { bg: 'linear-gradient(135deg, #0f172a, #1a2744)', lines: ['BI Scanner — Confluence Analyse', '', 'NVDA  Score: 91  Grade: S  LONG  [8/8]', '  EMA20>50 ✓  RSI:62 ✓  MACD+ ✓  Vol+ ✓', '', 'SMCI  Score: 82  Grade: A  SHORT [7/8]', '  EMA20<50 ✓  RSI:28 ✓  MACD- ✓  Vol+ ✓', '', 'Nur Confluence-Treffer angezeigt'] } },
                         { tag: 'BIOTECH', title: 'Biotech & FDA Catalyst Scanner', desc: 'Der Biotech-Sektor bewegt sich durch Catalysts: FDA Approvals, PDUFA Dates, Clinical Trial Results, Phase-Übergänge. Unser Biotech Scanner trackt alle relevanten Events und scannt speziell nach Biotech-Aktien mit bevorstehenden Katalysatoren. Du siehst auf einen Blick, welche Biotechs vor einem Binary Event stehen — und kannst dich frühzeitig positionieren, bevor der Markt reagiert.', color: '#10b981', metrics: [{ v: 'FDA', l: 'Approval Tracking' }, { v: 'PDUFA', l: 'Dates kalender' }, { v: 'Phase', l: 'Trial Tracking' }],
                           preview: { bg: 'linear-gradient(135deg, #0f172a, #0f2a1a)', lines: ['Biotech Scanner — FDA Catalysts', '', 'MRNA   PDUFA: 14. Apr   Phase 3 Complete', '  RSV Vaccine — FDA Decision in 12 Tagen', '', 'SAVA   Phase 2 Results   Expected Q2', '  Alzheimer Drug — Binary Event', '', 'VRTX   FDA Approval    +18.4% Potential'] } },
                         { tag: 'EXTENDED HOURS', title: 'After Hours & Pre-Market Scanner', desc: 'Die meisten Scanner zeigen dir nur Regular Hours. Alpha Station scannt auch After Hours und Pre-Market — in Echtzeit. Wenn eine Aktie nachbörslich auf Earnings crasht oder vorbörslich auf News explodiert, bist du der Erste der es sieht. Kein Aufwachen mit bösen Überraschungen. Kein verpasster Gap-Up. Du bist immer informiert.', color: '#f59e0b', metrics: [{ v: '4:00 AM', l: 'Pre-Market Start' }, { v: '8:00 PM', l: 'After Hours End' }, { v: 'Live', l: 'Extended Scans' }],
@@ -514,7 +514,7 @@ function AuthPage({ onLogin, onRegister }) {
                                     <div style={{ width: '100%', padding: 20, background: 'rgba(0,0,0,0.4)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)', fontFamily: '"SF Mono", "Fira Code", monospace' }}>
                                         {usp.preview.lines.map((line, j) => (
                                             <div key={j} style={{ fontSize: 12.5, color: line === '' ? 'transparent' : (line.includes('Score:') || line.includes('Entry') || line.includes('empfohlen') || line.includes('WARNUNG') ? '#60a5fa' : (line.includes('-') && line.includes('%') ? '#f87171' : (line.includes('+') && line.includes('%') ? '#34d399' : '#94a3b8'))), padding: '3px 0', whiteSpace: 'pre' }}>
-                                                {line || '\u00A0'}
+                                                {line || ''}
                                             </div>
                                         ))}
                                     </div>
@@ -592,7 +592,7 @@ function AuthPage({ onLogin, onRegister }) {
                         ].map((t, i) => (
                             <div key={i} style={{ padding: 28, background: 'rgba(30,41,59,0.4)', borderRadius: 16, border: '1px solid rgba(51,65,85,0.4)' }}>
                                 <div style={{ display: 'flex', gap: 2, marginBottom: 14 }}>
-                                    {Array(t.rating).fill(0).map((_, j) => <span key={j} style={{ color: '#f59e0b', fontSize: 16 }}>\u2605</span>)}
+                                    {Array(t.rating).fill(0).map((_, j) => <span key={j} style={{ color: '#f59e0b', fontSize: 16 }}>★</span>)}
                                 </div>
                                 <p style={{ fontSize: 14, color: '#cbd5e1', lineHeight: 1.7, marginBottom: 18 }}>"{t.text}"</p>
                                 <div>
@@ -624,7 +624,7 @@ function AuthPage({ onLogin, onRegister }) {
                                 <ul style={{ listStyle: 'none', padding: 0, marginBottom: 32 }}>
                                     {plan.features.map((f, i) => (
                                         <li key={i} style={{ padding: '8px 0', fontSize: 14, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 10 }}>
-                                            <span style={{ color: '#10b981', fontSize: 16, flexShrink: 0 }}>\u2713</span>{f}
+                                            <span style={{ color: '#10b981', fontSize: 16, flexShrink: 0 }}>✓</span>{f}
                                         </li>
                                     ))}
                                 </ul>
@@ -688,7 +688,7 @@ function AuthPage({ onLogin, onRegister }) {
                 <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
                     onClick={e => { if (e.target === e.currentTarget) setShowAuth(false); }}>
                     <div style={{ width: '100%', maxWidth: 420, padding: 40, background: '#1e293b', borderRadius: 20, boxShadow: '0 25px 60px rgba(0,0,0,0.5)', position: 'relative', animation: 'fadeIn 0.2s ease-out' }}>
-                        <button onClick={() => setShowAuth(false)} style={{ position: 'absolute', top: 16, right: 16, background: 'none', border: 'none', color: '#64748b', fontSize: 22, cursor: 'pointer', lineHeight: 1 }}>\u00D7</button>
+                        <button onClick={() => setShowAuth(false)} style={{ position: 'absolute', top: 16, right: 16, background: 'none', border: 'none', color: '#64748b', fontSize: 22, cursor: 'pointer', lineHeight: 1 }}>×</button>
 
                         <div style={{ textAlign: 'center', marginBottom: 28 }}>
                             <div style={{ width: 48, height: 48, borderRadius: 14, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 20, marginBottom: 12 }}>A</div>
