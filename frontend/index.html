@@ -396,7 +396,7 @@ function AuthPage({ onLogin, onRegister }) {
                         <span style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>bevor es der Markt tut</span>
                     </h1>
                     <p style={{ fontSize: 'clamp(17px, 2vw, 21px)', color: '#94a3b8', maxWidth: 620, margin: '0 auto 20px', lineHeight: 1.65 }}>
-                        8.000+ US-Aktien. 15+ Strategien. 20+ Indikatoren pro Scan. Automatische Analyse mit Entry, Stop-Loss und Take-Profit — alle 5 Minuten.
+                        8.000+ US-Aktien. 15+ Strategien. 20+ Indikatoren pro Scan. Analyse mit Entry, Stop-Loss und Take-Profit — alle 5 Minuten.
                     </p>
 
                     {/* USP Pills */}
@@ -483,46 +483,220 @@ Mehr erfahren ↓
                         <p style={{ color: '#94a3b8', fontSize: 17, maxWidth: 560, margin: '0 auto' }}>Jeder Scanner wurde für einen spezifischen Markt-Zustand entwickelt. Du bist vorbereitet — egal was passiert.</p>
                     </div>
 
-                    {/* Big USP cards — alternating layout */}
-                    {[
-                        { tag: 'HERZSTÜCK', title: 'BI Scanner — 20+ Indikatoren in einem Scan', desc: 'Der BI Scanner ist kein normaler Screener. Er analysiert jeden Ticker gleichzeitig mit über 20 technischen Indikatoren: EMA-Crossovers, RSI, MACD, VWAP, Bollinger Bands, ATR, Volumen-Profil, Support/Resistance, Fibonacci und mehr. Erst wenn mehrere Indikatoren gleichzeitig übereinstimmen (Confluence), schlägt der Scanner an. Long und Short — du siehst sofort die Richtung und die Stärke des Signals.', color: '#3b82f6', metrics: [{ v: '20+', l: 'Indikatoren' }, { v: 'S-D', l: 'Confluence Grade' }, { v: 'L / S', l: 'Long & Short' }],
-                          preview: { bg: 'linear-gradient(135deg, #0f172a, #1a2744)', lines: ['BI Scanner — Confluence Analyse', '', 'NVDA  Score: 91  Grade: S  LONG  [8/8]', '  EMA20>50 ✓  RSI:62 ✓  MACD+ ✓  Vol+ ✓', '', 'SMCI  Score: 82  Grade: A  SHORT [7/8]', '  EMA20<50 ✓  RSI:28 ✓  MACD- ✓  Vol+ ✓', '', 'Nur Confluence-Treffer angezeigt'] } },
-                        { tag: 'BIOTECH', title: 'Biotech & FDA Catalyst Scanner', desc: 'Der Biotech-Sektor bewegt sich durch Catalysts: FDA Approvals, PDUFA Dates, Clinical Trial Results, Phase-Übergänge. Unser Biotech Scanner trackt alle relevanten Events und scannt speziell nach Biotech-Aktien mit bevorstehenden Katalysatoren. Du siehst auf einen Blick, welche Biotechs vor einem Binary Event stehen — und kannst dich frühzeitig positionieren, bevor der Markt reagiert.', color: '#10b981', metrics: [{ v: 'FDA', l: 'Approval Tracking' }, { v: 'PDUFA', l: 'Dates kalender' }, { v: 'Phase', l: 'Trial Tracking' }],
-                          preview: { bg: 'linear-gradient(135deg, #0f172a, #0f2a1a)', lines: ['Biotech Scanner — FDA Catalysts', '', 'MRNA   PDUFA: 14. Apr   Phase 3 Complete', '  RSV Vaccine — FDA Decision in 12 Tagen', '', 'SAVA   Phase 2 Results   Expected Q2', '  Alzheimer Drug — Binary Event', '', 'VRTX   FDA Approval    +18.4% Potential'] } },
-                        { tag: 'EXTENDED HOURS', title: 'After Hours & Pre-Market Scanner', desc: 'Die meisten Scanner zeigen dir nur Regular Hours. Alpha Station scannt auch After Hours und Pre-Market — in Echtzeit. Wenn eine Aktie nachbörslich auf Earnings crasht oder vorbörslich auf News explodiert, bist du der Erste der es sieht. Kein Aufwachen mit bösen Überraschungen. Kein verpasster Gap-Up. Du bist immer informiert.', color: '#f59e0b', metrics: [{ v: '4:00 AM', l: 'Pre-Market Start' }, { v: '8:00 PM', l: 'After Hours End' }, { v: 'Live', l: 'Extended Scans' }],
-                          preview: { bg: 'linear-gradient(135deg, #0f172a, #1a2210)', lines: ['Extended Hours Scanner — 21:47 PM', '', 'SMCI    -6.2%  AH   Vol: $2.4M   Breakdown', '  Earnings Miss — Guidance gesenkt', '', 'MARA   +4.8%  AH   Vol: $890K', '  BTC über $72K — Miner Rally', '', 'RIVN    -3.1%  AH   Vol: $1.1M   Downgrade'] } },
-                        { tag: 'RISIKOMANAGEMENT', title: 'Crash Monitor & Fear Score', desc: 'Alpha Station berechnet einen proprietären Fear Score basierend auf VIX, Advance/Decline Ratio, Put/Call Ratio und Marktbreite. Du siehst in Echtzeit, ob der Markt in Panik-Modus ist — und kannst dein Risiko entsprechend anpassen. Ob Crash, Korrektur oder Sell-Off: Der Crash Monitor warnt dich bevor es zu spät ist. Schütze dein Portfolio, statt zuzusehen wie es schmilzt.', color: '#ef4444', metrics: [{ v: 'VIX', l: 'Live Tracking' }, { v: 'A/D', l: 'Marktbreite' }, { v: 'P/C', l: 'Put/Call Ratio' }],
-                          preview: { bg: 'linear-gradient(135deg, #0f172a, #2a1215)', lines: ['Crash Monitor — Fear Score: 72 / 100', '', 'VIX:        28.40  (+12.3% 5d)    WARNUNG', 'A/D Ratio:  0.34   Stark bearish', 'Put/Call:   1.42   Hedging aktiv', '', 'Status: ERHÖHTES RISIKO', 'Empfehlung: Positionen reduzieren'] } },
-                    ].map((usp, i) => (
-                        <div key={i} data-reveal id={`usp-${i}`} style={{ maxWidth: 1000, margin: '0 auto 48px', ...revealStyle(`usp-${i}`) }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: i % 2 === 0 ? '1fr 1fr' : '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: `1px solid ${usp.color}22`, background: 'rgba(15,23,42,0.5)' }}>
-                                {/* Text side */}
-                                <div style={{ padding: '40px 36px', order: i % 2 === 0 ? 1 : 2 }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: usp.color, textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>{usp.tag}</div>
-                                    <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>{usp.title}</h3>
-                                    <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>{usp.desc}</p>
-                                    <div style={{ display: 'flex', gap: 24 }}>
-                                        {usp.metrics.map((m, j) => (
-                                            <div key={j}>
-                                                <div style={{ fontSize: 20, fontWeight: 800, color: usp.color }}>{m.v}</div>
-                                                <div style={{ fontSize: 12, color: '#64748b' }}>{m.l}</div>
-                                            </div>
-                                        ))}
-                                    </div>
+                    {/* BI Scanner USP */}
+                    <div data-reveal id="usp-0" style={{ maxWidth: 1000, margin: '0 auto 48px', ...revealStyle('usp-0') }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(59,130,246,0.12)', background: 'rgba(15,23,42,0.5)' }}>
+                            <div style={{ padding: '40px 36px' }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>HERZSTÜCK</div>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>BI Scanner — 20+ Indikatoren in einem Scan</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der BI Scanner ist kein normaler Screener. Er analysiert jeden Ticker gleichzeitig mit über 20 technischen Indikatoren: EMA-Crossovers, RSI, MACD, VWAP, Bollinger Bands, ATR, Volumen-Profil, Support/Resistance, Fibonacci und mehr. Erst wenn mehrere Indikatoren gleichzeitig übereinstimmen (Confluence), schlägt der Scanner an. Long und Short — du siehst sofort die Richtung und die Stärke des Signals.</p>
+                                <div style={{ display: 'flex', gap: 24 }}>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>20+</div><div style={{ fontSize: 12, color: '#64748b' }}>Indikatoren</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>S-D</div><div style={{ fontSize: 12, color: '#64748b' }}>Confluence Grade</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>L / S</div><div style={{ fontSize: 12, color: '#64748b' }}>Long & Short</div></div>
                                 </div>
-                                {/* Preview side */}
-                                <div style={{ padding: 28, order: i % 2 === 0 ? 2 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: usp.preview.bg }}>
-                                    <div style={{ width: '100%', padding: 20, background: 'rgba(0,0,0,0.4)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)', fontFamily: '"SF Mono", "Fira Code", monospace' }}>
-                                        {usp.preview.lines.map((line, j) => (
-                                            <div key={j} style={{ fontSize: 12.5, color: line === '' ? 'transparent' : (line.includes('Score:') || line.includes('Entry') || line.includes('empfohlen') || line.includes('WARNUNG') ? '#60a5fa' : (line.includes('-') && line.includes('%') ? '#f87171' : (line.includes('+') && line.includes('%') ? '#34d399' : '#94a3b8'))), padding: '3px 0', whiteSpace: 'pre' }}>
-                                                {line || ''}
+                            </div>
+                            <div style={{ padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0f172a, #1a2744)' }}>
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    {[
+                                        { ticker: 'NVDA', grade: 'S', score: 91, dir: 'LONG', change: '+3.2%', changeColor: '#10b981' },
+                                        { ticker: 'SMCI', grade: 'A', score: 82, dir: 'SHORT', change: '-4.1%', changeColor: '#ef4444' },
+                                        { ticker: 'PLTR', grade: 'A', score: 78, dir: 'LONG', change: '+2.8%', changeColor: '#10b981' },
+                                    ].map((r, j) => (
+                                        <div key={j} style={{ padding: '14px 16px', background: 'rgba(0,0,0,0.35)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                    <span style={{ fontSize: 16, fontWeight: 800, color: '#f1f5f9' }}>{r.ticker}</span>
+                                                    <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: r.dir === 'LONG' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)', color: r.dir === 'LONG' ? '#10b981' : '#ef4444' }}>{r.dir}</span>
+                                                </div>
+                                                <span style={{ fontSize: 14, fontWeight: 700, color: r.changeColor }}>{r.change}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <div style={{ display: 'flex', gap: 6 }}>
+                                                    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'rgba(59,130,246,0.15)', color: '#60a5fa', fontWeight: 600 }}>Grade {r.grade}</span>
+                                                    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'rgba(59,130,246,0.08)', color: '#94a3b8', fontWeight: 600 }}>Score: {r.score}</span>
+                                                </div>
+                                                <div style={{ width: 60, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                                                    <div style={{ width: `${r.score}%`, height: '100%', borderRadius: 2, background: r.score >= 85 ? '#10b981' : '#3b82f6' }}></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Biotech USP */}
+                    <div data-reveal id="usp-1" style={{ maxWidth: 1000, margin: '0 auto 48px', ...revealStyle('usp-1') }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(16,185,129,0.12)', background: 'rgba(15,23,42,0.5)' }}>
+                            <div style={{ padding: 24, order: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0f172a, #0f2a1a)' }}>
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    {[
+                                        { ticker: 'MRNA', event: 'PDUFA', date: '14. Apr', detail: 'RSV Vaccine — FDA Decision', phase: 'Phase 3', daysLeft: 12, color: '#f59e0b' },
+                                        { ticker: 'SAVA', event: 'Phase 2', date: 'Q2 2026', detail: 'Alzheimer Drug — Binary Event', phase: 'Phase 2', daysLeft: null, color: '#8b5cf6' },
+                                        { ticker: 'VRTX', event: 'Approval', date: 'Erwartet', detail: 'Pain Drug — Potential +18%', phase: 'NDA Filed', daysLeft: null, color: '#10b981' },
+                                    ].map((r, j) => (
+                                        <div key={j} style={{ padding: '14px 16px', background: 'rgba(0,0,0,0.35)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                    <span style={{ fontSize: 16, fontWeight: 800, color: '#f1f5f9' }}>{r.ticker}</span>
+                                                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: `${r.color}20`, color: r.color }}>{r.event}</span>
+                                                </div>
+                                                <span style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8' }}>{r.date}</span>
+                                            </div>
+                                            <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>{r.detail}</div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'rgba(16,185,129,0.12)', color: '#10b981', fontWeight: 600 }}>{r.phase}</span>
+                                                {r.daysLeft && <span style={{ fontSize: 10, fontWeight: 700, color: '#f59e0b' }}>in {r.daysLeft} Tagen</span>}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <div style={{ padding: '40px 36px', order: 2 }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#10b981', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>BIOTECH</div>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Biotech & FDA Catalyst Scanner</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Biotech-Sektor bewegt sich durch Catalysts: FDA Approvals, PDUFA Dates, Clinical Trial Results, Phase-Übergänge. Unser Biotech Scanner trackt alle relevanten Events und scannt speziell nach Biotech-Aktien mit bevorstehenden Katalysatoren. Du siehst auf einen Blick, welche Biotechs vor einem Binary Event stehen — und kannst dich frühzeitig positionieren, bevor der Markt reagiert.</p>
+                                <div style={{ display: 'flex', gap: 24 }}>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#10b981' }}>FDA</div><div style={{ fontSize: 12, color: '#64748b' }}>Approval Tracking</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#10b981' }}>PDUFA</div><div style={{ fontSize: 12, color: '#64748b' }}>Dates Kalender</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#10b981' }}>Phase</div><div style={{ fontSize: 12, color: '#64748b' }}>Trial Tracking</div></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* After Hours USP */}
+                    <div data-reveal id="usp-2" style={{ maxWidth: 1000, margin: '0 auto 48px', ...revealStyle('usp-2') }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(245,158,11,0.12)', background: 'rgba(15,23,42,0.5)' }}>
+                            <div style={{ padding: '40px 36px' }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>EXTENDED HOURS</div>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>After Hours & Pre-Market Scanner</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Die meisten Scanner zeigen dir nur Regular Hours. Alpha Station scannt auch After Hours und Pre-Market — in Echtzeit. Wenn eine Aktie nachbörslich auf Earnings crasht oder vorbörslich auf News explodiert, bist du der Erste der es sieht. Kein Aufwachen mit bösen Überraschungen. Kein verpasster Gap-Up. Du bist immer informiert.</p>
+                                <div style={{ display: 'flex', gap: 24 }}>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>4:00 AM</div><div style={{ fontSize: 12, color: '#64748b' }}>Pre-Market Start</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>8:00 PM</div><div style={{ fontSize: 12, color: '#64748b' }}>After Hours End</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Live</div><div style={{ fontSize: 12, color: '#64748b' }}>Extended Scans</div></div>
+                                </div>
+                            </div>
+                            <div style={{ padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0f172a, #1a2210)' }}>
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'rgba(245,158,11,0.08)', borderRadius: 8, border: '1px solid rgba(245,158,11,0.15)' }}>
+                                        <span style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b' }}>AFTER HOURS — 21:47 PM</span>
+                                        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', fontWeight: 600 }}>LIVE</span>
+                                    </div>
+                                    {[
+                                        { ticker: 'SMCI', change: '-6.2%', vol: '2.4M', reason: 'Earnings Miss — Guidance gesenkt', type: 'Breakdown', changeColor: '#ef4444' },
+                                        { ticker: 'MARA', change: '+4.8%', vol: '890K', reason: 'BTC über $72K — Miner Rally', type: 'Breakout', changeColor: '#10b981' },
+                                        { ticker: 'RIVN', change: '-3.1%', vol: '1.1M', reason: 'Analyst Downgrade', type: 'Gap Down', changeColor: '#ef4444' },
+                                    ].map((r, j) => (
+                                        <div key={j} style={{ padding: '12px 16px', background: 'rgba(0,0,0,0.35)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                    <span style={{ fontSize: 15, fontWeight: 800, color: '#f1f5f9' }}>{r.ticker}</span>
+                                                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: r.changeColor === '#10b981' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)', color: r.changeColor }}>{r.type}</span>
+                                                </div>
+                                                <span style={{ fontSize: 14, fontWeight: 700, color: r.changeColor }}>{r.change}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b' }}>
+                                                <span>{r.reason}</span>
+                                                <span>Vol: ${r.vol}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Crash Monitor USP */}
+                    <div data-reveal id="usp-3" style={{ maxWidth: 1000, margin: '0 auto 48px', ...revealStyle('usp-3') }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(239,68,68,0.12)', background: 'rgba(15,23,42,0.5)' }}>
+                            <div style={{ padding: 24, order: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0f172a, #2a1215)' }}>
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                    {/* Fear gauge */}
+                                    <div style={{ padding: '20px 20px 16px', background: 'rgba(0,0,0,0.35)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)', textAlign: 'center' }}>
+                                        <div style={{ fontSize: 11, fontWeight: 600, color: '#64748b', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '1px' }}>Market Fear Score</div>
+                                        <div style={{ fontSize: 48, fontWeight: 800, color: '#ef4444', lineHeight: 1 }}>72</div>
+                                        <div style={{ fontSize: 12, color: '#f87171', fontWeight: 600, marginTop: 4 }}>ERHÖHTES RISIKO</div>
+                                        <div style={{ width: '100%', height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.06)', marginTop: 12, overflow: 'hidden' }}>
+                                            <div style={{ width: '72%', height: '100%', borderRadius: 3, background: 'linear-gradient(90deg, #f59e0b, #ef4444)' }}></div>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#475569', marginTop: 4 }}>
+                                            <span>Gier</span><span>Neutral</span><span>Panik</span>
+                                        </div>
+                                    </div>
+                                    {/* Indicators */}
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                        {[
+                                            { label: 'VIX', value: '28.40', sub: '+12.3% (5d)', color: '#ef4444' },
+                                            { label: 'Put/Call', value: '1.42', sub: 'Hedging aktiv', color: '#f59e0b' },
+                                            { label: 'A/D Ratio', value: '0.34', sub: 'Stark bearish', color: '#ef4444' },
+                                            { label: 'Breadth', value: '22%', sub: 'Unter MA200', color: '#f87171' },
+                                        ].map((ind, j) => (
+                                            <div key={j} style={{ padding: '10px 12px', background: 'rgba(0,0,0,0.3)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.04)' }}>
+                                                <div style={{ fontSize: 10, color: '#64748b', marginBottom: 2 }}>{ind.label}</div>
+                                                <div style={{ fontSize: 16, fontWeight: 800, color: ind.color }}>{ind.value}</div>
+                                                <div style={{ fontSize: 9, color: '#475569' }}>{ind.sub}</div>
                                             </div>
                                         ))}
                                     </div>
                                 </div>
                             </div>
+                            <div style={{ padding: '40px 36px', order: 2 }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>RISIKOMANAGEMENT</div>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Crash Monitor & Fear Score</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Alpha Station berechnet einen proprietären Fear Score basierend auf VIX, Advance/Decline Ratio, Put/Call Ratio und Marktbreite. Du siehst in Echtzeit, ob der Markt in Panik-Modus ist — und kannst dein Risiko entsprechend anpassen. Ob Crash, Korrektur oder Sell-Off: Der Crash Monitor warnt dich bevor es zu spät ist. Schütze dein Portfolio, statt zuzusehen wie es schmilzt.</p>
+                                <div style={{ display: 'flex', gap: 24 }}>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#ef4444' }}>VIX</div><div style={{ fontSize: 12, color: '#64748b' }}>Live Tracking</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#ef4444' }}>A/D</div><div style={{ fontSize: 12, color: '#64748b' }}>Marktbreite</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#ef4444' }}>P/C</div><div style={{ fontSize: 12, color: '#64748b' }}>Put/Call Ratio</div></div>
+                                </div>
+                            </div>
                         </div>
-                    ))}
+                    </div>
+                    {/* Crypto USP */}
+                    <div data-reveal id="usp-4" style={{ maxWidth: 1000, margin: '0 auto 48px', ...revealStyle('usp-4') }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(139,92,246,0.12)', background: 'rgba(15,23,42,0.5)' }}>
+                            <div style={{ padding: '40px 36px' }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#8b5cf6', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>CRYPTO</div>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Finde Coins bevor sie ausbrechen</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Crypto Scanner trackt Hunderte von Coins in Echtzeit. Whale Accumulation, ungewöhnliche Volume Spikes, Narrative-Shifts und Micro-Cap Momentum — du siehst die Bewegung bevor sie auf Twitter trendet. Early Movers Score, Degen Score und Whale Score zeigen dir genau, welche Coins gerade aufgebaut werden. Inklusive Perpetual-Daten, Funding Rates und Open Interest.</p>
+                                <div style={{ display: 'flex', gap: 24 }}>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#8b5cf6' }}>500+</div><div style={{ fontSize: 12, color: '#64748b' }}>Coins gescannt</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#8b5cf6' }}>Live</div><div style={{ fontSize: 12, color: '#64748b' }}>Whale Tracking</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#8b5cf6' }}>Perps</div><div style={{ fontSize: 12, color: '#64748b' }}>Funding & OI</div></div>
+                                </div>
+                            </div>
+                            <div style={{ padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0f172a, #1a1640)' }}>
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    {[
+                                        { coin: 'PEPE', change: '+42.3%', score: 88, narrative: 'Meme Coin', signal: 'Whale Accumulation', whaleScore: 94, changeColor: '#10b981' },
+                                        { coin: 'ARB', change: '+18.7%', score: 76, narrative: 'L2 / DeFi', signal: 'Volume Breakout', whaleScore: 71, changeColor: '#10b981' },
+                                        { coin: 'INJ', change: '+12.4%', score: 72, narrative: 'DeFi / RWA', signal: 'Funding Spike', whaleScore: 68, changeColor: '#10b981' },
+                                    ].map((r, j) => (
+                                        <div key={j} style={{ padding: '14px 16px', background: 'rgba(0,0,0,0.35)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                    <span style={{ fontSize: 16, fontWeight: 800, color: '#f1f5f9' }}>{r.coin}</span>
+                                                    <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'rgba(139,92,246,0.12)', color: '#a78bfa' }}>{r.narrative}</span>
+                                                </div>
+                                                <span style={{ fontSize: 14, fontWeight: 700, color: r.changeColor }}>{r.change}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <div style={{ display: 'flex', gap: 6 }}>
+                                                    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'rgba(139,92,246,0.12)', color: '#a78bfa', fontWeight: 600 }}>Score: {r.score}</span>
+                                                    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'rgba(245,158,11,0.1)', color: '#f59e0b', fontWeight: 600 }}>{r.signal}</span>
+                                                </div>
+                                                <span style={{ fontSize: 10, color: '#64748b' }}>Whale: {r.whaleScore}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
