@@ -361,6 +361,7 @@ function AuthPage({ onLogin, onRegister }) {
     ];
 
     const [openFaq, setOpenFaq] = useState(null);
+    const [showLegal, setShowLegal] = useState(null); // 'agb', 'datenschutz', 'impressum'
 
     return (
         <div style={{ minHeight: '100vh', background: '#0a0f1e', color: '#f1f5f9', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflowX: 'hidden' }}>
@@ -557,6 +558,50 @@ Mehr erfahren ↓
                 </div>
             </section>
 
+            {/* ── Trade Setups (Entry/SL/TP) ── */}
+            <section data-reveal style={{ padding: '80px 24px' }} {...{id: 'sec-tradesetup'}}>
+                <div style={{...revealStyle('sec-tradesetup'), maxWidth: 900, margin: '0 auto'}}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40, alignItems: 'center' }}>
+                        <div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: '#10b981', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>TRADE SETUPS</div>
+                            <h2 style={{ fontSize: 'clamp(26px, 3vw, 36px)', fontWeight: 800, marginBottom: 16, lineHeight: 1.2 }}>Wir sagen dir wo Entry, Stop-Loss und Take-Profit liegen.</h2>
+                            <p style={{ fontSize: 16, color: '#94a3b8', lineHeight: 1.75, marginBottom: 20 }}>
+                                Jedes Signal kommt mit einer konkreten Handelsempfehlung: wo du einsteigen kannst, wo dein Stop-Loss liegen sollte und wo du Gewinne mitnehmen kannst. Risk-Reward Ratio inklusive.
+                            </p>
+                            <p style={{ fontSize: 16, color: '#e2e8f0', lineHeight: 1.75, marginBottom: 24, fontWeight: 500 }}>
+                                Aber am Ende entscheidest immer du. Alpha Station gibt dir die Daten und die Analyse — du bist der Boss und triffst die finale Entscheidung.
+                            </p>
+                            <div style={{ padding: 16, background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.15)', borderRadius: 12, fontSize: 13, color: '#94a3b8', lineHeight: 1.6 }}>
+                                <strong style={{ color: '#60a5fa' }}>Hinweis:</strong> Alpha Station liefert technische Analysen und Vorschläge — keine Finanzberatung. Alle Handelsentscheidungen triffst du eigenverantwortlich.
+                            </div>
+                        </div>
+                        <div style={{ padding: 24, background: 'linear-gradient(135deg, #0f172a, #132218)', borderRadius: 16, border: '1px solid rgba(16,185,129,0.15)', fontFamily: '"SF Mono", "Fira Code", monospace' }}>
+                            <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>Trade Setup — NVDA (Long)</div>
+                            <div style={{ display: 'grid', gap: 12 }}>
+                                <div style={{ padding: '12px 16px', background: 'rgba(16,185,129,0.08)', borderRadius: 8, borderLeft: '3px solid #10b981' }}>
+                                    <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>ENTRY</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: '#10b981' }}>$142.50</div>
+                                    <div style={{ fontSize: 12, color: '#94a3b8' }}>Über VWAP + EMA20 Kreuzung</div>
+                                </div>
+                                <div style={{ padding: '12px 16px', background: 'rgba(239,68,68,0.08)', borderRadius: 8, borderLeft: '3px solid #ef4444' }}>
+                                    <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>STOP-LOSS</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: '#ef4444' }}>$138.80 <span style={{ fontSize: 13, fontWeight: 400 }}>(-2.6%)</span></div>
+                                    <div style={{ fontSize: 12, color: '#94a3b8' }}>Unter Support Level</div>
+                                </div>
+                                <div style={{ padding: '12px 16px', background: 'rgba(59,130,246,0.08)', borderRadius: 8, borderLeft: '3px solid #3b82f6' }}>
+                                    <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>TAKE-PROFIT</div>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: '#3b82f6' }}>$153.20 <span style={{ fontSize: 13, fontWeight: 400 }}>(+7.5%)</span></div>
+                                    <div style={{ fontSize: 12, color: '#94a3b8' }}>Nächste Resistance Zone</div>
+                                </div>
+                                <div style={{ textAlign: 'center', padding: '8px 0', fontSize: 14, fontWeight: 700, color: '#f59e0b' }}>
+                                    Risk : Reward = 1 : 2.8
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             {/* ── How it Works ── */}
             <section data-reveal style={{ padding: '60px 24px 80px', background: 'linear-gradient(180deg, transparent, rgba(59,130,246,0.03), transparent)' }} {...{id: 'sec-how'}}>
                 <div style={{...revealStyle('sec-how'), maxWidth: 900, margin: '0 auto', textAlign: 'center'}}>
@@ -676,14 +721,123 @@ Mehr erfahren ↓
 
             {/* ── Footer ── */}
             <footer style={{ padding: '40px 24px', borderTop: '1px solid #1e293b' }}>
-                <div style={{ maxWidth: 900, margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <div style={{ width: 28, height: 28, borderRadius: 8, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 12 }}>A</div>
-                        <span style={{ fontSize: 15, fontWeight: 600 }}>Alpha Station</span>
+                <div style={{ maxWidth: 900, margin: '0 auto' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ width: 28, height: 28, borderRadius: 8, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 12 }}>A</div>
+                            <span style={{ fontSize: 15, fontWeight: 600 }}>Alpha Station</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: 20 }}>
+                            <span onClick={() => setShowLegal('agb')} style={{ fontSize: 13, color: '#475569', cursor: 'pointer', textDecoration: 'underline' }}>AGB</span>
+                            <span onClick={() => setShowLegal('datenschutz')} style={{ fontSize: 13, color: '#475569', cursor: 'pointer', textDecoration: 'underline' }}>Datenschutz</span>
+                            <span onClick={() => setShowLegal('impressum')} style={{ fontSize: 13, color: '#475569', cursor: 'pointer', textDecoration: 'underline' }}>Impressum</span>
+                        </div>
                     </div>
-                    <p style={{ fontSize: 13, color: '#475569' }}>&copy; 2026 Alpha Station. Alle Rechte vorbehalten.</p>
+                    <div style={{ fontSize: 12, color: '#334155', lineHeight: 1.6 }}>
+                        Alpha Station bietet technische Marktanalysen und Handelsvorschläge. Dies stellt keine Anlageberatung dar. Alle Handelsentscheidungen erfolgen eigenverantwortlich. Vergangene Ergebnisse garantieren keine zukünftigen Gewinne.
+                    </div>
+                    <p style={{ fontSize: 12, color: '#334155', marginTop: 8 }}>&copy; 2026 Alpha Station. Alle Rechte vorbehalten.</p>
                 </div>
             </footer>
+
+            {/* ── Legal Pages Modal ── */}
+            {showLegal && (
+                <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)', overflowY: 'auto' }}
+                    onClick={e => { if (e.target === e.currentTarget) setShowLegal(null); }}>
+                    <div style={{ maxWidth: 760, margin: '40px auto', padding: '40px 48px', background: '#1e293b', borderRadius: 20, position: 'relative' }}>
+                        <button onClick={() => setShowLegal(null)} style={{ position: 'absolute', top: 16, right: 20, background: 'none', border: 'none', color: '#64748b', fontSize: 24, cursor: 'pointer' }}>×</button>
+
+                        {showLegal === 'agb' && (
+                            <div>
+                                <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 24 }}>Allgemeine Geschäftsbedingungen (AGB)</h2>
+                                <div style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.8 }}>
+                                    <p style={{ marginBottom: 16 }}><strong style={{ color: '#f1f5f9' }}>Stand: April 2026</strong></p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>1. Geltungsbereich</p>
+                                    <p style={{ marginBottom: 12 }}>Diese AGB gelten für die Nutzung der Plattform "Alpha Station" (nachfolgend "Dienst"), betrieben von Alpha Station (nachfolgend "Anbieter"). Mit der Registrierung akzeptiert der Nutzer diese AGB.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>2. Leistungsbeschreibung</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner, technische Indikatoren, Chartanalysen und Handelsvorschläge (Entry, Stop-Loss, Take-Profit) für US-amerikanische Wertpapiere. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren dar.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>3. Haftungsausschluss & Risikohinweis</p>
+                                    <p style={{ marginBottom: 12 }}>Der Handel mit Wertpapieren ist mit erheblichen Risiken verbunden und kann zum Totalverlust des eingesetzten Kapitals führen. Die vom Dienst bereitgestellten Analysen, Signale und Handelsvorschläge sind rein informativer Natur. Der Anbieter übernimmt keinerlei Haftung für Verluste, die aus Handelsentscheidungen resultieren, die auf Grundlage der bereitgestellten Informationen getroffen werden. Vergangene Ergebnisse und Analysen sind keine Garantie für zukünftige Gewinne. Der Nutzer handelt stets auf eigenes Risiko und eigene Verantwortung.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>4. Registrierung & Account</p>
+                                    <p style={{ marginBottom: 12 }}>Für die Nutzung ist eine Registrierung mit gültiger Email-Adresse erforderlich. Der Nutzer ist für die Geheimhaltung seiner Zugangsdaten verantwortlich. Jeder Nutzer darf nur einen Account führen. Der Anbieter behält sich vor, Accounts bei Verstößen gegen diese AGB zu sperren oder zu löschen.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>5. Preise & Zahlung</p>
+                                    <p style={{ marginBottom: 12 }}>Die aktuellen Preise sind auf der Plattform einsehbar. Der $1 Trial gewährt 24 Stunden vollen Zugang und verlängert sich nicht automatisch. Abonnements (Basic, Pro, Elite) werden monatlich über Stripe abgerechnet. Alle Preise verstehen sich in US-Dollar. Der Anbieter behält sich Preisanpassungen vor, wobei bestehende Abonnements bis zum Ende der laufenden Periode unberührt bleiben.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>6. Kündigung</p>
+                                    <p style={{ marginBottom: 12 }}>Abonnements können jederzeit zum Ende des aktuellen Abrechnungszeitraums gekündigt werden. Die Kündigung erfolgt über das Stripe Billing Portal oder per Email. Bereits gezahlte Beträge werden nicht erstattet. Der $1 Trial endet automatisch nach 24 Stunden ohne weitere Verpflichtungen.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>7. Verfügbarkeit</p>
+                                    <p style={{ marginBottom: 12 }}>Der Anbieter bemüht sich um eine hohe Verfügbarkeit des Dienstes, garantiert jedoch keine ununterbrochene Erreichbarkeit. Wartungsarbeiten, technische Störungen oder Ausfälle der Datenquellen können die Verfügbarkeit beeinträchtigen. Insbesondere können Echtzeit-Daten durch Drittanbieter (Polygon.io) verzögert oder unvollständig sein.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>8. Geistiges Eigentum</p>
+                                    <p style={{ marginBottom: 12 }}>Alle Inhalte, Algorithmen, Scanner-Logiken und Darstellungen der Plattform sind urheberrechtlich geschützt. Das Kopieren, Weiterverbreiten oder kommerzielle Nutzen der Analysen, Signale oder Software ist ohne ausdrückliche Genehmigung untersagt.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>9. Nutzungsbeschränkungen</p>
+                                    <p style={{ marginBottom: 12 }}>Der Nutzer verpflichtet sich, den Dienst nicht missbräuchlich zu nutzen. Insbesondere ist es untersagt: automatisierte Zugriffe (Bots, Scraping) ohne API-Berechtigung durchzuführen, den Dienst für illegale Zwecke zu verwenden, Sicherheitsmechanismen zu umgehen oder den Account an Dritte weiterzugeben.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>10. Änderungen der AGB</p>
+                                    <p style={{ marginBottom: 12 }}>Der Anbieter behält sich vor, diese AGB jederzeit anzupassen. Änderungen werden per Email mitgeteilt. Die fortgesetzte Nutzung nach Mitteilung gilt als Zustimmung.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>11. Schlussbestimmungen</p>
+                                    <p style={{ marginBottom: 12 }}>Sollten einzelne Bestimmungen dieser AGB unwirksam sein, bleibt die Wirksamkeit der übrigen Bestimmungen unberührt.</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {showLegal === 'datenschutz' && (
+                            <div>
+                                <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 24 }}>Datenschutzerklärung</h2>
+                                <div style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.8 }}>
+                                    <p style={{ marginBottom: 16 }}><strong style={{ color: '#f1f5f9' }}>Stand: April 2026</strong></p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>1. Verantwortlicher</p>
+                                    <p style={{ marginBottom: 12 }}>Verantwortlich für die Datenverarbeitung ist der Betreiber von Alpha Station. Kontakt: siehe Impressum.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>2. Erhobene Daten</p>
+                                    <p style={{ marginBottom: 12 }}>Bei der Nutzung von Alpha Station werden folgende Daten erhoben: Email-Adresse und Name (bei Registrierung), Zahlungsdaten (verarbeitet durch Stripe, nicht auf unseren Servern gespeichert), Nutzungsdaten (aufgerufene Ticker, Scan-Zeitpunkte), technische Daten (IP-Adresse, Browser-Typ, Zeitstempel).</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>3. Zweck der Verarbeitung</p>
+                                    <p style={{ marginBottom: 12 }}>Die Daten werden ausschließlich zur Bereitstellung und Verbesserung des Dienstes, zur Abrechnung und Kontoverwaltung sowie für technische Sicherheit und Missbrauchsprävention verwendet.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>4. Drittanbieter</p>
+                                    <p style={{ marginBottom: 12 }}>Wir nutzen folgende Drittanbieter: Stripe (Zahlungsabwicklung, USA), Polygon.io (Marktdaten, USA). Durch die Nutzung dieser Dienste können Daten in die USA übertragen werden.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>5. Speicherdauer</p>
+                                    <p style={{ marginBottom: 12 }}>Personenbezogene Daten werden solange gespeichert, wie ein aktives Konto besteht. Nach Kontolöschung werden die Daten innerhalb von 30 Tagen gelöscht, sofern keine gesetzlichen Aufbewahrungspflichten bestehen.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>6. Rechte der Nutzer</p>
+                                    <p style={{ marginBottom: 12 }}>Nutzer haben das Recht auf Auskunft, Berichtigung, Löschung und Datenübertragbarkeit ihrer personenbezogenen Daten. Anfragen können per Email an den Anbieter gerichtet werden.</p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>7. Cookies</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station verwendet ausschließlich technisch notwendige Cookies und LocalStorage zur Sitzungsverwaltung (Login-Token). Es werden keine Tracking-Cookies oder Analyse-Tools von Drittanbietern eingesetzt.</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {showLegal === 'impressum' && (
+                            <div>
+                                <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 24 }}>Impressum</h2>
+                                <div style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.8 }}>
+                                    <p style={{ marginBottom: 16 }}>
+                                        <strong style={{ color: '#f1f5f9' }}>Alpha Station</strong><br />
+                                        Miroslav Mikulic<br />
+                                        <br />
+                                        Email: miroslav.mikulic@gmail.com<br />
+                                    </p>
+
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>Haftungshinweis</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station stellt technische Analysetools für den Wertpapierhandel bereit. Der Dienst bietet keine Anlageberatung und keine Aufforderung zum Handel. Alle bereitgestellten Informationen, Analysen und Handelsvorschläge dienen ausschließlich zu Informationszwecken. Jede Investitionsentscheidung liegt in der alleinigen Verantwortung des Nutzers. Der Handel mit Wertpapieren birgt Risiken bis hin zum Totalverlust.</p>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* ── Auth Modal ── */}
             {showAuth && (
@@ -725,6 +879,11 @@ Mehr erfahren ↓
                                 {isLogin ? 'Registrieren' : 'Einloggen'}
                             </span>
                         </p>
+                        {!isLogin && (
+                            <p style={{ textAlign: 'center', marginTop: 10, fontSize: 11, color: '#475569' }}>
+                                Mit der Registrierung akzeptierst du die <span onClick={() => { setShowAuth(false); setShowLegal('agb'); }} style={{ color: '#64748b', cursor: 'pointer', textDecoration: 'underline' }}>AGB</span> und <span onClick={() => { setShowAuth(false); setShowLegal('datenschutz'); }} style={{ color: '#64748b', cursor: 'pointer', textDecoration: 'underline' }}>Datenschutzerklärung</span>
+                            </p>
+                        )}
                     </div>
                 </div>
             )}
