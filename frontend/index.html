@@ -348,7 +348,7 @@ function AuthPage({ onLogin, onRegister }) {
     const plans = [
         { id: 'basic', name: 'Basic', price: 29, features: ['4 Scanner Tabs', 'Scan alle 30 Minuten', '30 Ticker-Details pro Stunde', 'Breakdown Stocks Scanner', 'Crash Monitor'], cta: 'Basic starten' },
         { id: 'pro', name: 'Pro', price: 79, popular: true, features: ['Alle Scanner Tabs inkl. Biotech', 'Echtzeit-Scans alle 5 Min', 'Volle Sidebar-Chartanalyse', 'Email Alerts bei Signalen', 'Trade Setups (Entry/Stop/TP)', 'Unbegrenzte Ticker-Details', 'Money Flow & BI Scanner'], cta: 'Pro starten' },
-        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'ORB Scanner (Opening Range)', 'Backtesting Engine', 'API Access', 'Priority Support', 'Priority Scan Queue'], cta: 'Elite starten' },
+        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'Auto-Trader (IBKR)', 'ORB Scanner (Opening Range)', 'Backtesting Engine', 'API Access', 'Priority Support'], cta: 'Elite starten' },
     ];
 
     const faqs = [
@@ -396,12 +396,12 @@ function AuthPage({ onLogin, onRegister }) {
                         <span style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>bevor es der Markt tut</span>
                     </h1>
                     <p style={{ fontSize: 'clamp(17px, 2vw, 21px)', color: '#94a3b8', maxWidth: 620, margin: '0 auto 20px', lineHeight: 1.65 }}>
-                        8.000+ US-Aktien. 15+ Strategien. 20+ Indikatoren pro Scan. Analyse mit Entry, Stop-Loss und Take-Profit — alle 5 Minuten.
+                        8.000+ US-Aktien & 500+ Crypto Coins. 15+ Strategien. 20+ Indikatoren pro Scan. Analyse mit Entry, Stop-Loss und Take-Profit — alle 5 Minuten.
                     </p>
 
                     {/* USP Pills */}
                     <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 36 }}>
-                        {['Long & Short Breakouts live', 'BI Scanner (20+ Indikatoren)', 'Biotech & FDA Tracker', 'After Hours Tracking', 'Crash Monitor'].map((usp, i) => (
+                        {['Long & Short Breakouts live', 'BI Scanner (20+ Indikatoren)', 'Crypto & Whale Tracking', 'Biotech & FDA Tracker', 'After Hours & Crash Monitor'].map((usp, i) => (
                             <span key={i} style={{ padding: '6px 16px', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 20, fontSize: 13, color: '#60a5fa', fontWeight: 500 }}>{usp}</span>
                         ))}
                     </div>
@@ -424,7 +424,7 @@ Mehr erfahren ↓
             <section style={{ padding: '20px 24px 40px', maxWidth: 900, margin: '0 auto' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, background: 'rgba(255,255,255,0.03)', borderRadius: 18, overflow: 'hidden', border: '1px solid rgba(51,65,85,0.3)' }}>
                     {[
-                        { value: '8.000+', label: 'Aktien gescannt', sub: 'NYSE + NASDAQ' },
+                        { value: '8.000+', label: 'Aktien & Coins', sub: 'NYSE, NASDAQ & Crypto' },
                         { value: '15+', label: 'Scanner & Strategien', sub: 'Long, Short, Biotech...' },
                         { value: '5 Min', label: 'Echtzeit-Intervall', sub: 'Auch After Hours' },
                         { value: '20+', label: 'Indikatoren pro Scan', sub: 'BI Scanner Analyse' },
@@ -1082,7 +1082,7 @@ function PricingPage({ currentPlan, getToken }) {
     const plans = [
         { id: 'basic', name: 'Basic', price: 29, features: ['4 Scanner Tabs', 'Scan alle 30 Min', '30 Ticker-Details / Stunde', 'Breakdown Stocks'] },
         { id: 'pro', name: 'Pro', price: 79, popular: true, features: ['Alle Scanner Tabs', 'Echtzeit Scans (5 Min)', 'Volle Sidebar-Analyse', 'Email Alerts', 'Trade Setups (Entry/Stop/TP)', 'Unbegrenzte Ticker-Details'] },
-        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'ORB Scanner', 'Backtesting', 'API Access', 'Priority Support', 'Priority Scan Queue'] },
+        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'Auto-Trader (IBKR)', 'ORB Scanner', 'Backtesting', 'API Access', 'Priority Support'] },
     ];
 
     const handleCheckout = async (planId) => {
@@ -2457,6 +2457,7 @@ function App() {
         { id: 'new-listing', label: 'New Listing' },
         { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'orb', label: 'ORB Scanner' },
+        { id: 'autotrader', label: 'Auto-Trader' },
         { id: 'chart-analyse', label: 'Chart & Analyse' }
     ];
 
@@ -2659,6 +2660,7 @@ function App() {
                     {activeTab === 'new-listing' && <NewListingTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'autotrader' && <AutoTraderTab />}
                     {activeTab === 'chart-analyse' && <ChartAnalyseTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 </div>
             )}
@@ -4936,6 +4938,235 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 }
 
 // Suche (Search) Tab
+function AutoTraderTab() {
+    const [status, setStatus] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [actionLoading, setActionLoading] = useState(null);
+    const [editConfig, setEditConfig] = useState(null);
+    const [showLog, setShowLog] = useState(false);
+
+    const fetchStatus = async () => {
+        try {
+            const res = await fetch(`${API}/api/autotrader/status`);
+            if (res.ok) setStatus(await res.json());
+        } catch (e) { console.error('AT status error', e); }
+        finally { setLoading(false); }
+    };
+
+    useEffect(() => {
+        fetchStatus();
+        const interval = setInterval(fetchStatus, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const doAction = async (endpoint, body = null) => {
+        setActionLoading(endpoint);
+        try {
+            const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+            if (body) opts.body = JSON.stringify(body);
+            const res = await fetch(`${API}/api/autotrader/${endpoint}`, opts);
+            const data = await res.json();
+            if (data.ok) {
+                if (window.addToast) window.addToast(data.message || 'Erfolgreich', 'success');
+            } else {
+                if (window.addToast) window.addToast(data.error || 'Fehler', 'error');
+            }
+            setTimeout(fetchStatus, 500);
+        } catch (e) {
+            if (window.addToast) window.addToast('Verbindungsfehler', 'error');
+        }
+        setActionLoading(null);
+    };
+
+    const saveConfig = async () => {
+        if (!editConfig) return;
+        await doAction('config', { config: editConfig });
+        setEditConfig(null);
+    };
+
+    if (loading) return <div style={{ textAlign: 'center', padding: 60 }}><div className="loading-spinner" style={{ margin: '0 auto' }}></div></div>;
+
+    const st = status?.state || {};
+    const cfg = editConfig || status?.config || {};
+    const isRunning = status?.thread_alive;
+    const positions = st.positions || [];
+    const logEntries = (status?.log || []).slice().reverse();
+
+    const statusColor = isRunning ? '#10b981' : '#ef4444';
+    const statusText = isRunning ? 'Aktiv' : 'Gestoppt';
+
+    return (
+        <div className="space-y-4">
+            {/* Header */}
+            <div className="card" style={{ padding: 20, borderRadius: 12, border: `1px solid ${statusColor}33`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                    <div style={{ width: 48, height: 48, borderRadius: 14, background: `${statusColor}15`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <svg width="24" height="24" fill="none" stroke={statusColor} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                    </div>
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Auto-Trader</h2>
+                            <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 20, background: `${statusColor}15`, color: statusColor }}>{statusText}</span>
+                            <span style={{ fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: 'rgba(139,92,246,0.1)', color: '#a78bfa' }}>
+                                {cfg.mode === 'full' ? 'FULL AUTO' : 'SEMI AUTO'}
+                            </span>
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                            BI Scanner → IBKR Bracket Orders {status?.market_hours ? '(Markt offen)' : '(Markt geschlossen)'}
+                        </div>
+                    </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                    {!isRunning ? (
+                        <button onClick={() => doAction('start')} disabled={actionLoading} className="button" style={{ padding: '8px 20px', background: '#10b981' }}>
+                            {actionLoading === 'start' ? 'Startet...' : 'Starten'}
+                        </button>
+                    ) : (
+                        <button onClick={() => doAction('stop')} disabled={actionLoading} className="button" style={{ padding: '8px 20px', background: '#ef4444' }}>
+                            {actionLoading === 'stop' ? 'Stoppt...' : 'Stoppen'}
+                        </button>
+                    )}
+                    <button onClick={() => doAction('scan-once')} disabled={actionLoading || isRunning} className="button" style={{ padding: '8px 20px', background: '#3b82f6' }}>
+                        {actionLoading === 'scan-once' ? 'Scannt...' : 'Einmal scannen'}
+                    </button>
+                </div>
+            </div>
+
+            {/* Stats Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+                {[
+                    { label: 'Positionen', value: `${positions.length} / ${cfg.max_positions || 5}`, color: '#3b82f6' },
+                    { label: 'Trades heute', value: st.trades_today || 0, color: '#8b5cf6' },
+                    { label: 'Tages P&L', value: `${(st.daily_pnl || 0) >= 0 ? '+' : ''}${(st.daily_pnl || 0).toFixed(1)}%`, color: (st.daily_pnl || 0) >= 0 ? '#10b981' : '#ef4444' },
+                    { label: 'Position Size', value: `$${cfg.position_size || 2000}`, color: '#f59e0b' },
+                    { label: 'Min R:R', value: `${cfg.min_rr || 2.0}x`, color: '#06b6d4' },
+                    { label: 'Letzter Scan', value: st.last_scan ? new Date(st.last_scan).toLocaleTimeString('de-DE', {hour:'2-digit', minute:'2-digit'}) : '—', color: '#64748b' },
+                ].map((s, i) => (
+                    <div key={i} className="card" style={{ padding: 14, borderRadius: 10, border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>{s.label}</div>
+                        <div style={{ fontSize: 20, fontWeight: 800, color: s.color }}>{s.value}</div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Positions */}
+            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>Offene Positionen</h3>
+                    {positions.length > 0 && (
+                        <button onClick={() => doAction('clear-positions')} style={{ fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>
+                            Alle zurücksetzen
+                        </button>
+                    )}
+                </div>
+                {positions.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+                        Keine offenen Positionen
+                    </div>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {positions.map((p, i) => (
+                            <div key={i} style={{ padding: '12px 14px', background: 'var(--card-bg)', borderRadius: 10, border: '1px solid var(--border-color)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <span style={{ fontSize: 15, fontWeight: 800 }}>{p.ticker}</span>
+                                        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'rgba(59,130,246,0.12)', color: '#3b82f6' }}>Grade {p.grade}</span>
+                                        <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: p.mode === 'AUTO' ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.12)', color: p.mode === 'AUTO' ? '#10b981' : '#f59e0b' }}>{p.mode}</span>
+                                    </div>
+                                    <span style={{ fontSize: 12, fontWeight: 700, color: '#3b82f6' }}>{p.shares} Shares</span>
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, fontSize: 11 }}>
+                                    <div><span style={{ color: 'var(--text-muted)' }}>Entry</span><div style={{ fontWeight: 700 }}>${p.entry}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)' }}>Stop</span><div style={{ fontWeight: 700, color: '#ef4444' }}>${p.stop}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)' }}>TP1</span><div style={{ fontWeight: 700, color: '#10b981' }}>${p.tp1}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)' }}>TP2</span><div style={{ fontWeight: 700, color: '#10b981' }}>${p.tp2}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)' }}>R:R</span><div style={{ fontWeight: 700, color: '#3b82f6' }}>{p.rr}x</div></div>
+                                </div>
+                                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{p.date} {p.time} — Score: {p.score_pct}%</div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Settings */}
+            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>Einstellungen</h3>
+                    {editConfig ? (
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <button onClick={saveConfig} className="button" style={{ padding: '5px 14px', fontSize: 12, background: '#10b981' }}>Speichern</button>
+                            <button onClick={() => setEditConfig(null)} style={{ padding: '5px 14px', fontSize: 12, background: 'none', border: '1px solid var(--border-color)', borderRadius: 6, cursor: 'pointer', color: 'var(--text-color)' }}>Abbrechen</button>
+                        </div>
+                    ) : (
+                        <button onClick={() => setEditConfig({...cfg})} style={{ padding: '5px 14px', fontSize: 12, background: 'none', border: '1px solid var(--border-color)', borderRadius: 6, cursor: 'pointer', color: 'var(--text-color)' }}>Bearbeiten</button>
+                    )}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                    {[
+                        { key: 'mode', label: 'Modus', type: 'select', options: [{ v: 'semi', l: 'Semi Auto (TWS bestätigen)' }, { v: 'full', l: 'Full Auto (sofort aktiv)' }] },
+                        { key: 'max_positions', label: 'Max Positionen', type: 'number' },
+                        { key: 'position_size', label: 'Position Size ($)', type: 'number' },
+                        { key: 'min_rr', label: 'Min Risk:Reward', type: 'number', step: 0.1 },
+                        { key: 'min_bi_pct', label: 'Min BI Score (%)', type: 'number' },
+                        { key: 'min_smart_money', label: 'Min Smart Money Hits', type: 'number' },
+                        { key: 'scan_interval_min', label: 'Scan Intervall (Min)', type: 'number' },
+                        { key: 'max_daily_loss_pct', label: 'Max Tagesverlust (%)', type: 'number', step: 0.5 },
+                        { key: 'cooldown_days', label: 'Cooldown (Tage)', type: 'number' },
+                        { key: 'min_price', label: 'Min Preis ($)', type: 'number' },
+                        { key: 'min_volume', label: 'Min Volumen', type: 'number' },
+                        { key: 'max_tickers_scan', label: 'Max Tickers / Scan', type: 'number' },
+                    ].map(({ key, label, type, options, step }) => (
+                        <div key={key}>
+                            <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>{label}</label>
+                            {type === 'select' ? (
+                                <select value={cfg[key] || ''} disabled={!editConfig}
+                                    onChange={e => editConfig && setEditConfig({...editConfig, [key]: e.target.value})}
+                                    style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--card-bg)', color: 'var(--text-color)', fontSize: 13 }}>
+                                    {options.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                                </select>
+                            ) : (
+                                <input type="number" value={cfg[key] ?? ''} disabled={!editConfig} step={step || 1}
+                                    onChange={e => editConfig && setEditConfig({...editConfig, [key]: parseFloat(e.target.value) || 0})}
+                                    style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--card-bg)', color: 'var(--text-color)', fontSize: 13, boxSizing: 'border-box' }} />
+                            )}
+                        </div>
+                    ))}
+                </div>
+                <div style={{ marginTop: 10, fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                    Semi Auto: Orders werden in TWS als inaktiv platziert — du bestätigst manuell. Full Auto: Orders gehen sofort live.
+                </div>
+            </div>
+
+            {/* Log */}
+            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: showLog ? 12 : 0, cursor: 'pointer' }} onClick={() => setShowLog(!showLog)}>
+                    <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>Log ({logEntries.length})</h3>
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{showLog ? '▲ Einklappen' : '▼ Aufklappen'}</span>
+                </div>
+                {showLog && (
+                    <div style={{ maxHeight: 300, overflowY: 'auto', fontSize: 11, fontFamily: '"SF Mono", "Fira Code", monospace' }}>
+                        {logEntries.length === 0 ? (
+                            <div style={{ color: 'var(--text-muted)', padding: '16px 0', textAlign: 'center' }}>Noch keine Log-Einträge</div>
+                        ) : logEntries.map((entry, i) => (
+                            <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid var(--border-color)', display: 'flex', gap: 8 }}>
+                                <span style={{ color: '#64748b', flexShrink: 0 }}>{entry.time?.substring(11) || ''}</span>
+                                <span style={{ fontWeight: 600, flexShrink: 0, color: entry.level === 'ERROR' ? '#ef4444' : entry.level === 'WARN' ? '#f59e0b' : entry.level === 'TRADE' ? '#10b981' : '#64748b' }}>{entry.level}</span>
+                                <span style={{ color: 'var(--text-color)' }}>{entry.msg}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* IBKR Hinweis */}
+            <div style={{ padding: 14, borderRadius: 10, background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.15)', fontSize: 12, color: '#f59e0b' }}>
+                <strong>Hinweis:</strong> Der Auto-Trader benötigt eine aktive IBKR TWS/Gateway Verbindung auf dem Server. Ohne IBKR-Verbindung werden Signale erkannt, aber keine Orders platziert.
+            </div>
+        </div>
+    );
+}
+
 function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [searchTicker, setSearchTicker] = useState('');
     const [activeTicker, setActiveTicker] = useState(null);

@@ -127,8 +127,8 @@ SCANNER_TABS_BY_PLAN = {
     "trial": None,  # Full access during trial
     "expired": [],  # No access after trial
     "basic": ["scanner", "short-scanner", "bi-scanner", "crash-monitor", "chart-analyse"],
-    "pro": None,    # None = all tabs
-    "elite": None,  # None = all tabs
+    "pro": ["scanner", "short-scanner", "bi-scanner", "crash-monitor", "chart-analyse", "biotech", "btc-divergenz", "early-movers", "money-flow", "kalender", "watchlist", "strategie-guide", "new-listing", "volume-spikes"],
+    "elite": None,  # None = all tabs (inkl. autotrader, orb, backtest)
 }
 
 

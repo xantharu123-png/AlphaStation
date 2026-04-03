@@ -61,6 +61,15 @@ from modules.scanners import (
     _biotech_cache_load,
     _bi_progress_read,
     _biotech_progress_read,
+    _autotrader_config_load,
+    _autotrader_config_save,
+    _autotrader_state_read,
+    _autotrader_state_write,
+    _autotrader_log,
+    _autotrader_request_stop,
+    _autotrader_is_market_hours,
+    autotrader_scan_once,
+    autotrader_background_loop,
 )
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily, fetch_daily_candles_crypto
@@ -5375,6 +5384,90 @@ def root():
         "docs": "/docs",
         "openapi": "/openapi.json",
     }
+
+
+# ── Auto-Trader Endpoints ──
+_autotrader_thread = None
+
+class AutotraderConfigUpdate(BaseModel):
+    config: dict
+
+@app.get("/api/autotrader/status")
+def autotrader_status():
+    """Get Auto-Trader status, config, and recent log."""
+    state = _autotrader_state_read()
+    config = _autotrader_config_load()
+    market_hours = _autotrader_is_market_hours()
+    # Read log
+    log_entries = []
+    try:
+        import json as _json
+        with open("/tmp/alpha_autotrader_log.json", "r") as f:
+            log_entries = _json.load(f)
+    except Exception:
+        pass
+    return {
+        "state": state,
+        "config": config,
+        "market_hours": market_hours,
+        "thread_alive": _autotrader_thread is not None and _autotrader_thread.is_alive() if _autotrader_thread else False,
+        "log": log_entries[-50:],  # Last 50 entries
+    }
+
+@app.post("/api/autotrader/config")
+def autotrader_update_config(body: AutotraderConfigUpdate):
+    """Update Auto-Trader configuration."""
+    config = _autotrader_config_load()
+    config.update(body.config)
+    _autotrader_config_save(config)
+    _autotrader_log(f"Config aktualisiert: {list(body.config.keys())}", "INFO")
+    return {"ok": True, "config": config}
+
+@app.post("/api/autotrader/start")
+def autotrader_start():
+    """Start the Auto-Trader background loop."""
+    global _autotrader_thread
+    if _autotrader_thread and _autotrader_thread.is_alive():
+        return {"ok": False, "error": "Auto-Trader läuft bereits"}
+    poly_key = os.environ.get("POLYGON_KEY", "")
+    if not poly_key:
+        return {"ok": False, "error": "Polygon API Key fehlt"}
+    from modules.scanners import _autotrader_clear_stop
+    _autotrader_clear_stop()
+    _autotrader_thread = threading.Thread(target=autotrader_background_loop, args=(poly_key,), daemon=True)
+    _autotrader_thread.start()
+    _autotrader_log("Auto-Trader gestartet via API", "INFO")
+    return {"ok": True, "message": "Auto-Trader gestartet"}
+
+@app.post("/api/autotrader/stop")
+def autotrader_stop():
+    """Stop the Auto-Trader background loop."""
+    _autotrader_request_stop()
+    state = _autotrader_state_read()
+    state["status"] = "stopped"
+    _autotrader_state_write(state)
+    _autotrader_log("Auto-Trader gestoppt via API", "INFO")
+    return {"ok": True, "message": "Auto-Trader wird gestoppt"}
+
+@app.post("/api/autotrader/scan-once")
+def autotrader_run_single_scan():
+    """Run a single Auto-Trader scan (not background loop)."""
+    poly_key = os.environ.get("POLYGON_KEY", "")
+    if not poly_key:
+        return {"ok": False, "error": "Polygon API Key fehlt"}
+    result = autotrader_scan_once(poly_key)
+    return {"ok": True, "result": result}
+
+@app.post("/api/autotrader/clear-positions")
+def autotrader_clear_positions():
+    """Clear all tracked positions (does NOT close actual broker positions)."""
+    state = _autotrader_state_read()
+    state["positions"] = []
+    state["trades_today"] = 0
+    state["daily_pnl"] = 0
+    _autotrader_state_write(state)
+    _autotrader_log("Positionen zurückgesetzt via API", "INFO")
+    return {"ok": True}
 
 
 # ── Run with uvicorn ──
