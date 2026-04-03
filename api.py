@@ -1681,6 +1681,22 @@ def get_health():
         },
     )
 
+@app.get("/api/debug-keys")
+def debug_keys():
+    """Temp debug: zeigt ob secrets.toml geladen wird."""
+    import pathlib
+    p1 = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    p2 = Path.home() / ".streamlit" / "secrets.toml"
+    return {
+        "polygon_key_len": len(POLYGON_KEY),
+        "polygon_key_first4": POLYGON_KEY[:4] if POLYGON_KEY else "LEER",
+        "secrets_loaded_keys": list(_SECRETS.keys()),
+        "path1_exists": p1.exists(),
+        "path1": str(p1),
+        "path2_exists": p2.exists(),
+        "path2": str(p2),
+    }
+
 
 @app.post("/api/test-email")
 def test_email_alert():
