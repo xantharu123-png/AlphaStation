@@ -126,7 +126,7 @@ PLANS = {
 SCANNER_TABS_BY_PLAN = {
     "trial": None,  # Full access during trial
     "expired": [],  # No access after trial
-    "basic": ["scanner", "short-scanner", "bi-scanner", "crash-monitor"],
+    "basic": ["scanner", "short-scanner", "bi-scanner", "crash-monitor", "chart-analyse"],
     "pro": None,    # None = all tabs
     "elite": None,  # None = all tabs
 }

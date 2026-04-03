@@ -2283,7 +2283,7 @@ function App() {
         { id: 'new-listing', label: 'New Listing' },
         { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'orb', label: 'ORB Scanner' },
-        { id: 'suche', label: 'Suche' }
+        { id: 'chart-analyse', label: 'Chart & Analyse' }
     ];
 
     // Filter tabs based on user plan
@@ -2485,7 +2485,7 @@ function App() {
                     {activeTab === 'new-listing' && <NewListingTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                    {activeTab === 'suche' && <SucheTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                    {activeTab === 'chart-analyse' && <ChartAnalyseTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                 </div>
             )}
 
@@ -4762,96 +4762,727 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 }
 
 // Suche (Search) Tab
-function SucheTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
+function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {} }) {
     const [searchTicker, setSearchTicker] = useState('');
-    const [searchResults, setSearchResults] = useState(null);
+    const [activeTicker, setActiveTicker] = useState(null);
+    const [tickerData, setTickerData] = useState(null);
+    const [chartData, setChartData] = useState(null);
     const [loading, setLoading] = useState(false);
-    const pollTimeoutRef = useRef(null);
+    const [timeframe, setTimeframe] = useState('4H');
+    const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
+    const [aiData, setAiData] = useState(null);
+    const [aiLoading, setAiLoading] = useState(false);
+    const [showInfoPanel, setShowInfoPanel] = useState(true);
+    const chartContainer = useRef(null);
+    const chartRef = useRef(null);
+    const candleSeriesRef = useRef(null);
+    const overlaySeriesRef = useRef([]);
+    const savedVisibleRange = useRef(null);
+    const prevOverlaysRef = useRef(null);
 
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
-    }, []);
+    const TIMEFRAMES = ['5m', '15m', '1H', '4H', '1D', '1W'];
+    const EMA_COLORS = { ema9: '#f59e0b', ema20: '#3b82f6', ema50: '#ef4444', ema100: '#8b5cf6', ema200: '#14b8a6' };
 
-    const performSearch = async () => {
-        if (!searchTicker.trim()) return;
-
+    const performSearch = async (ticker) => {
+        const t = (ticker || searchTicker).trim().toUpperCase();
+        if (!t) return;
         setLoading(true);
+        setAiData(null);
         try {
-            const response = await fetch(`${API}/api/ticker-detail?ticker=${searchTicker.toUpperCase()}`);
+            const response = await fetch(`${API}/api/ticker-detail?ticker=${t}`);
             if (response.ok) {
                 const data = await response.json();
-                setSearchResults(data);
+                setTickerData(data);
+                setActiveTicker(t);
             } else {
-                setSearchResults(null);
+                setTickerData(null);
+                setActiveTicker(null);
                 if (window.addToast) window.addToast('Ticker nicht gefunden', 'error');
             }
         } catch (err) {
-            setSearchResults(null);
+            setTickerData(null);
             if (window.addToast) window.addToast('Suchfehler', 'error');
         } finally {
             setLoading(false);
         }
     };
 
+    // Fetch chart data when ticker or timeframe changes
+    useEffect(() => {
+        if (!activeTicker) return;
+        const controller = new AbortController();
+        const fetchChart = async () => {
+            try {
+                const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
+                const res = await fetch(`${API}/api/chart-data?ticker=${activeTicker}&timeframe=${timeframe}&overlays=${allOverlays}`, { signal: controller.signal });
+                if (controller.signal.aborted) return;
+                if (res.ok) {
+                    setChartData(await res.json());
+                } else {
+                    setChartData({ ticker: activeTicker, timeframe, candles: [], error: 'Keine Chart-Daten verfügbar' });
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                setChartData({ ticker: activeTicker, timeframe, candles: [], error: 'Chart-Daten konnten nicht geladen werden' });
+            }
+        };
+        fetchChart();
+        return () => controller.abort();
+    }, [activeTicker, timeframe]);
+
+    // Render chart
+    useEffect(() => {
+        if (!chartData || !chartContainer.current) return;
+        if (!chartData.candles || chartData.candles.length === 0) return;
+        try {
+            const isOverlayChange = prevOverlaysRef.current && chartData === prevOverlaysRef.current._chartData;
+            if (chartRef.current) {
+                try {
+                    savedVisibleRange.current = {
+                        logical: chartRef.current.timeScale().getVisibleLogicalRange(),
+                        scrollPos: chartRef.current.timeScale().scrollPosition(),
+                    };
+                } catch(e) {}
+                chartRef.current.remove();
+            }
+            prevOverlaysRef.current = { ...overlays, _chartData: chartData };
+            overlaySeriesRef.current = [];
+
+            const { createChart, LineStyle, CrosshairMode } = window.LightweightCharts;
+            const containerWidth = chartContainer.current.clientWidth || 900;
+            const chartHeight = 500;
+
+            chartRef.current = createChart(chartContainer.current, {
+                layout: { textColor: '#999', background: { color: '#1a1a2e' }, fontSize: 11 },
+                grid: { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.04)' } },
+                width: containerWidth, height: chartHeight,
+                crosshair: { mode: CrosshairMode.Normal },
+                rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+                timeScale: { timeVisible: timeframe.includes('m') || timeframe.includes('H'), secondsVisible: false, borderColor: 'rgba(255,255,255,0.1)', rightOffset: 12, barSpacing: 8, minBarSpacing: 4 },
+            });
+
+            candleSeriesRef.current = chartRef.current.addCandlestickSeries({
+                upColor: '#10b981', downColor: '#ef4444',
+                borderUpColor: '#10b981', borderDownColor: '#ef4444',
+                wickUpColor: '#10b981', wickDownColor: '#ef4444',
+            });
+            const candles = (chartData.candles || []).map(c => ({
+                time: c.time, open: c.open, high: c.high, low: c.low, close: c.close
+            }));
+            if (candles.length > 0) candleSeriesRef.current.setData(candles);
+
+            // Volume overlay
+            if (overlays.vol && chartData.volume) {
+                const volSeries = chartRef.current.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol' });
+                chartRef.current.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+                volSeries.setData(chartData.volume);
+                overlaySeriesRef.current.push(volSeries);
+            }
+
+            // EMA lines
+            if (overlays.ema && chartData.ema) {
+                Object.entries(chartData.ema).forEach(([key, data]) => {
+                    if (data && data.length > 0) {
+                        const line = chartRef.current.addLineSeries({
+                            color: EMA_COLORS[key] || '#888', lineWidth: key === 'ema200' ? 2 : 1,
+                            priceLineVisible: false, lastValueVisible: false, title: key.toUpperCase(),
+                        });
+                        line.setData(data);
+                        overlaySeriesRef.current.push(line);
+                    }
+                });
+            }
+
+            // VWAP
+            if (overlays.vwap && chartData.vwap && chartData.vwap.length > 0) {
+                const vwapLine = chartRef.current.addLineSeries({
+                    color: '#f97316', lineWidth: 2, lineStyle: LineStyle.Dotted,
+                    priceLineVisible: false, lastValueVisible: false, title: 'VWAP',
+                });
+                vwapLine.setData(chartData.vwap);
+                overlaySeriesRef.current.push(vwapLine);
+            }
+
+            // Bollinger Bands
+            if (overlays.bb && chartData.bollinger && chartData.bollinger.length > 0) {
+                const bbUpper = chartRef.current.addLineSeries({ color: 'rgba(147,51,234,0.5)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'BB+' });
+                const bbLower = chartRef.current.addLineSeries({ color: 'rgba(147,51,234,0.5)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: 'BB-' });
+                bbUpper.setData(chartData.bollinger.map(b => ({ time: b.time, value: b.upper })));
+                bbLower.setData(chartData.bollinger.map(b => ({ time: b.time, value: b.lower })));
+                overlaySeriesRef.current.push(bbUpper, bbLower);
+            }
+
+            // Support/Resistance
+            if (overlays.sr && chartData.sr) {
+                const sr = chartData.sr;
+                const addPriceLine = (price, title, color, style, width) => {
+                    if (price && price > 0) {
+                        candleSeriesRef.current.createPriceLine({ price, color, lineWidth: width || 1, lineStyle: style || LineStyle.Dashed, axisLabelVisible: true, title });
+                    }
+                };
+                if (sr.support_levels) {
+                    sr.support_levels.slice(0, 4).forEach((lvl, i) => {
+                        const lw = Math.min(3, Math.max(1, Math.ceil((lvl.strength || 1) / 2)));
+                        addPriceLine(lvl.price, `S${i+1} ${lvl.type || ''}`, '#10b981', (lvl.strength || 1) >= 4 ? LineStyle.Solid : LineStyle.Dashed, lw);
+                    });
+                }
+                if (sr.resistance_levels) {
+                    sr.resistance_levels.slice(0, 4).forEach((lvl, i) => {
+                        const lw = Math.min(3, Math.max(1, Math.ceil((lvl.strength || 1) / 2)));
+                        addPriceLine(lvl.price, `R${i+1} ${lvl.type || ''}`, '#ef4444', (lvl.strength || 1) >= 4 ? LineStyle.Solid : LineStyle.Dashed, lw);
+                    });
+                }
+                if (sr.pivot) addPriceLine(sr.pivot, 'Pivot', '#fbbf24', LineStyle.Solid, 1);
+                if (sr.pdh) addPriceLine(sr.pdh, 'PDH', '#94a3b8', LineStyle.Dotted, 1);
+                if (sr.pdl) addPriceLine(sr.pdl, 'PDL', '#94a3b8', LineStyle.Dotted, 1);
+                if (sr.period_high) addPriceLine(sr.period_high, 'Period High', '#64748b', LineStyle.Dotted, 1);
+                if (sr.period_low) addPriceLine(sr.period_low, 'Period Low', '#64748b', LineStyle.Dotted, 1);
+            }
+
+            // VRVP
+            if (overlays.vrvp && chartData.vrvp) {
+                const vp = chartData.vrvp;
+                const addVPLine = (price, title, color, style, width) => {
+                    if (price && price > 0) {
+                        candleSeriesRef.current.createPriceLine({ price, color, lineWidth: width || 1, lineStyle: style || LineStyle.Dashed, axisLabelVisible: true, title });
+                    }
+                };
+                addVPLine(vp.poc, 'POC', '#06b6d4', LineStyle.Solid, 2);
+                addVPLine(vp.vah, 'VAH', '#0891b2', LineStyle.Dashed, 1);
+                addVPLine(vp.val, 'VAL', '#0891b2', LineStyle.Dashed, 1);
+
+                if (vp.bins && vp.bins.length > 0 && chartRef.current) {
+                    const maxVol = Math.max(...vp.bins.map(b => b.volume));
+                    const maxBarWidth = chartContainer.current ? chartContainer.current.clientWidth * 0.15 : 80;
+                    const existingCanvas = chartContainer.current.querySelector('.vrvp-canvas');
+                    if (existingCanvas) existingCanvas.remove();
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'vrvp-canvas';
+                    canvas.style.position = 'absolute';
+                    canvas.style.top = '0';
+                    canvas.style.right = '48px';
+                    canvas.style.pointerEvents = 'none';
+                    canvas.style.zIndex = '5';
+                    canvas.width = Math.ceil(maxBarWidth + 10);
+                    canvas.height = chartContainer.current.clientHeight;
+                    chartContainer.current.style.position = 'relative';
+                    chartContainer.current.appendChild(canvas);
+
+                    const drawVRVP = () => {
+                        const ctx = canvas.getContext('2d');
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        const series = candleSeriesRef.current;
+                        if (!series) return;
+                        vp.bins.forEach(bin => {
+                            const yMid = series.priceToCoordinate(bin.mid);
+                            const yHigh = series.priceToCoordinate(bin.high);
+                            const yLow = series.priceToCoordinate(bin.low);
+                            if (yMid === null || yHigh === null || yLow === null) return;
+                            const barH = Math.max(2, Math.abs(yLow - yHigh));
+                            const barW = Math.max(2, (bin.volume / maxVol) * maxBarWidth);
+                            const y = Math.min(yHigh, yLow);
+                            const isPOC = Math.abs(bin.mid - vp.poc) < (bin.high - bin.low);
+                            const isVA = bin.mid >= vp.val && bin.mid <= vp.vah;
+                            ctx.fillStyle = isPOC ? 'rgba(6, 182, 212, 0.45)' : isVA ? 'rgba(34, 211, 238, 0.25)' : 'rgba(100, 116, 139, 0.18)';
+                            ctx.fillRect(canvas.width - barW, y, barW, barH);
+                            ctx.strokeStyle = isPOC ? 'rgba(6, 182, 212, 0.7)' : isVA ? 'rgba(34, 211, 238, 0.4)' : 'rgba(100, 116, 139, 0.3)';
+                            ctx.lineWidth = 0.5;
+                            ctx.strokeRect(canvas.width - barW, y, barW, barH);
+                        });
+                    };
+                    drawVRVP();
+                    chartRef.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
+                    chartRef.current.subscribeCrosshairMove(drawVRVP);
+                }
+            }
+
+            // Fibonacci
+            if (overlays.fib && chartData.fib) {
+                const fibColors = {
+                    '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
+                    '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
+                    '127%': '#06b6d4', '161%': '#14b8a6', '200%': '#10b981', '261%': '#059669',
+                    '-27%': '#f43f5e', '-61%': '#e11d48', '-100%': '#be123c', '-161%': '#9f1239',
+                };
+                const extendedKeys = ['127%', '161%', '200%', '261%', '-27%', '-61%', '-100%', '-161%'];
+                Object.entries(chartData.fib).forEach(([level, price]) => {
+                    const isExtended = extendedKeys.includes(level);
+                    candleSeriesRef.current.createPriceLine({
+                        price, color: fibColors[level] || '#6b7280',
+                        lineWidth: 1, lineStyle: isExtended ? LineStyle.Dashed : LineStyle.Dotted,
+                        axisLabelVisible: true, title: `Fib ${level}`,
+                    });
+                });
+            }
+
+            // Patterns
+            if (overlays.patterns && chartData.patterns) {
+                const markers = [];
+                const _viewDir = (tickerData?.confluence?.direction || '').toUpperCase();
+
+                if (chartData.patterns.pivots) {
+                    chartData.patterns.pivots.forEach(p => {
+                        if (p.time) {
+                            markers.push({
+                                time: p.time,
+                                position: p.type === 'high' ? 'aboveBar' : 'belowBar',
+                                color: p.type === 'high' ? '#ef4444' : '#10b981',
+                                shape: p.type === 'high' ? 'arrowDown' : 'arrowUp',
+                                text: p.type === 'high' ? 'H' : 'L',
+                            });
+                        }
+                    });
+                }
+
+                if (chartData.patterns.chart_patterns) {
+                    chartData.patterns.chart_patterns
+                        .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
+                        .forEach(p => {
+                        const lastCandle = candles[candles.length - 1];
+                        if (lastCandle) {
+                            markers.push({
+                                time: lastCandle.time,
+                                position: p.type === 'bullish' ? 'belowBar' : 'aboveBar',
+                                color: p.type === 'bullish' ? '#10b981' : '#ef4444',
+                                shape: 'circle',
+                                text: (p.pattern || '').substring(0, 12),
+                            });
+                        }
+                    });
+                }
+
+                if (chartData.patterns.harmonic) {
+                    chartData.patterns.harmonic
+                        .filter(h => !_viewDir || _viewDir === 'NEUTRAL' || h.direction === _viewDir)
+                        .forEach(h => {
+                        if (h.points && h.points.length >= 5) {
+                            const hLine = chartRef.current.addLineSeries({
+                                color: h.direction === 'LONG' ? '#10b981' : '#ef4444',
+                                lineWidth: 2, lastValueVisible: false, priceLineVisible: false,
+                                title: h.pattern || 'Harmonic',
+                            });
+                            const points = h.points.map(pt => ({ time: pt.time || pt.t, value: pt.price || pt.p })).filter(pt => pt.time && pt.value);
+                            if (points.length > 0) hLine.setData(points);
+                            overlaySeriesRef.current.push(hLine);
+                        }
+                    });
+                }
+
+                if (chartData.patterns.order_blocks) {
+                    const obs = chartData.patterns.order_blocks;
+                    if (obs.nearest_bull_ob) {
+                        candleSeriesRef.current.createPriceLine({ price: obs.nearest_bull_ob.ob_high || obs.nearest_bull_ob.level, color: '#10b981', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'Bull OB' });
+                    }
+                    if (obs.nearest_bear_ob) {
+                        candleSeriesRef.current.createPriceLine({ price: obs.nearest_bear_ob.ob_low || obs.nearest_bear_ob.level, color: '#ef4444', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'Bear OB' });
+                    }
+                }
+
+                if (chartData.patterns.liquidity) {
+                    const liq = chartData.patterns.liquidity;
+                    if (liq.nearest_buyside) {
+                        candleSeriesRef.current.createPriceLine({ price: liq.nearest_buyside.level, color: '#3b82f6', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Buy Liq' });
+                    }
+                    if (liq.nearest_sellside) {
+                        candleSeriesRef.current.createPriceLine({ price: liq.nearest_sellside.level, color: '#f59e0b', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Sell Liq' });
+                    }
+                }
+
+                if (markers.length > 0) {
+                    markers.sort((a, b) => a.time - b.time);
+                    candleSeriesRef.current.setMarkers(markers);
+                }
+            }
+
+            // Restore zoom
+            if (isOverlayChange && savedVisibleRange.current) {
+                try {
+                    if (savedVisibleRange.current.logical) {
+                        chartRef.current.timeScale().setVisibleLogicalRange(savedVisibleRange.current.logical);
+                    }
+                } catch(e) {
+                    chartRef.current.timeScale().fitContent();
+                }
+            } else {
+                const totalBars = candles.length;
+                const barsToShow = Math.min(totalBars, 120);
+                chartRef.current.timeScale().setVisibleLogicalRange({ from: totalBars - barsToShow, to: totalBars - 1 });
+                savedVisibleRange.current = null;
+            }
+        } catch (err) { console.error('Chart error:', err); }
+        return () => {
+            if (chartRef.current) {
+                try {
+                    savedVisibleRange.current = {
+                        logical: chartRef.current.timeScale().getVisibleLogicalRange(),
+                        scrollPos: chartRef.current.timeScale().scrollPosition(),
+                    };
+                } catch(e) {}
+                chartRef.current.remove();
+                chartRef.current = null;
+            }
+        };
+    }, [chartData, overlays, tickerData]);
+
+    // Resize chart on window resize
+    useEffect(() => {
+        const handleResize = () => {
+            if (chartRef.current && chartContainer.current) {
+                chartRef.current.applyOptions({ width: chartContainer.current.clientWidth });
+            }
+        };
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    const loadAiAnalysis = async () => {
+        if (!activeTicker) return;
+        setAiLoading(true);
+        try {
+            const res = await fetch(`${API}/api/ai-analysis?ticker=${activeTicker}`);
+            if (res.ok) { setAiData(await res.json()); } else { setAiData({ analysis: 'API Fehler: ' + res.status }); }
+        } catch (err) { setAiData({ analysis: 'Verbindungsfehler' }); }
+        finally { setAiLoading(false); }
+    };
+
+    const renderMarkdown = (text) => {
+        if (!text) return '';
+        let safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        return safe.replace(/\*\*(\d+)\.\s*(.*?)\*\*/g, '<br/><strong>$1. $2</strong>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>');
+    };
+
+    const d = tickerData || {};
+    const price = d.price || 0;
+    const change = d.change_1d || 0;
+    const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
+
     return (
-        <div className="space-y-6">
-            <div className="card border border-gray-200 p-6 rounded-lg">
-                <label className="block text-sm font-semibold mb-3">Ticker suchen</label>
-                <div className="flex gap-2">
-                    <input
-                        type="text"
-                        value={searchTicker}
-                        onChange={(e) => setSearchTicker(e.target.value)}
-                        onKeyPress={(e) => e.key === 'Enter' && performSearch()}
-                        placeholder="z.B. AAPL"
-                        className="flex-1"
-                    />
-                    <button onClick={performSearch} disabled={loading} className="button">
-                        {loading ? 'Sucht...' : 'Suchen'}
+        <div className="space-y-4">
+            {/* Search Bar */}
+            <div className="card border border-gray-200 p-4 rounded-lg">
+                <div className="flex gap-2 items-center">
+                    <div style={{ position: 'relative', flex: 1 }}>
+                        <svg style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', width: 18, height: 18, color: '#6b7280' }} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                        <input
+                            type="text"
+                            value={searchTicker}
+                            onChange={(e) => setSearchTicker(e.target.value.toUpperCase())}
+                            onKeyPress={(e) => e.key === 'Enter' && performSearch()}
+                            placeholder="Ticker eingeben — z.B. AAPL, TSLA, NVDA, AMZN..."
+                            style={{ paddingLeft: 40, width: '100%', fontSize: 15 }}
+                        />
+                    </div>
+                    <button onClick={() => performSearch()} disabled={loading} className="button" style={{ padding: '10px 24px', fontWeight: 700 }}>
+                        {loading ? 'Laden...' : 'Analysieren'}
                     </button>
                 </div>
             </div>
 
-            {searchResults && (
-                <div className="space-y-6">
-                    <div className="metric-card" style={{ borderColor: '#2563eb' }}>
-                        <div className="flex justify-between items-start mb-4">
+            {/* Welcome state */}
+            {!activeTicker && !loading && (
+                <div style={{ textAlign: 'center', padding: '80px 20px' }}>
+                    <div style={{ width: 64, height: 64, borderRadius: 16, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }}>
+                        <svg width="32" height="32" fill="none" stroke="white" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+                    </div>
+                    <h3 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>Chart & Analyse</h3>
+                    <p style={{ color: 'var(--text-muted)', maxWidth: 500, margin: '0 auto', lineHeight: 1.6 }}>
+                        Gib oben einen Ticker ein und erhalte sofort den vollständigen Chart mit allen Indikatoren, Pattern-Erkennung, Harmonic Patterns, Support/Resistance, Trade Setups und mehr.
+                    </p>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 24, flexWrap: 'wrap' }}>
+                        {['AAPL', 'TSLA', 'NVDA', 'META', 'MSFT', 'AMZN'].map(t => (
+                            <button key={t} onClick={() => { setSearchTicker(t); performSearch(t); }}
+                                style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--card-bg)', cursor: 'pointer', fontSize: 13, fontWeight: 600, color: 'var(--text-color)', transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#3b82f6'; e.currentTarget.style.color = '#3b82f6'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border-color)'; e.currentTarget.style.color = 'var(--text-color)'; }}>
+                                {t}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Loading state */}
+            {loading && (
+                <div style={{ textAlign: 'center', padding: '60px 20px' }}>
+                    <div className="loading-spinner" style={{ margin: '0 auto 16px' }}></div>
+                    <p style={{ color: 'var(--text-muted)' }}>Analyse wird geladen...</p>
+                </div>
+            )}
+
+            {/* Results */}
+            {activeTicker && tickerData && !loading && (
+                <div>
+                    {/* Header bar */}
+                    <div className="card border border-gray-200 p-4 rounded-lg" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
                             <div>
-                                <h2 className="text-2xl font-bold">{searchResults.ticker}</h2>
-                                <p className="text-2xl font-bold mt-2">${searchResults.price?.toFixed(2)}</p>
-                                <p className={`text-lg font-semibold mt-1 ${searchResults.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>
-                                    ({searchResults.change_pct?.toFixed(2)}%)
-                                </p>
+                                <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>{activeTicker}</h2>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+                                    <span style={{ fontSize: 22, fontWeight: 700 }}>${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)}</span>
+                                    <span style={{ fontSize: 16, fontWeight: 600, color: change >= 0 ? '#10b981' : '#ef4444' }}>({change >= 0 ? '+' : ''}{change.toFixed(2)}%)</span>
+                                </div>
                             </div>
-                            <span className={`grade-badge grade-${(searchResults.grade || 'D').toLowerCase()}`}>
-                                Grade {searchResults.grade || 'D'}
-                            </span>
+                            {d.signal_grade && (
+                                <span className={`grade-badge grade-${d.signal_grade.toLowerCase()}`} style={{ fontSize: 14 }}>
+                                    Grade {d.signal_grade} ({d.signal_score != null ? Math.round(d.signal_score) : 0}P)
+                                </span>
+                            )}
+                            {d.confluence && (
+                                <span className={`signal-badge signal-${d.confluence.direction === 'LONG' ? 'bullish' : d.confluence.direction === 'SHORT' ? 'bearish' : 'neutral'}`} style={{ fontSize: 13 }}>
+                                    {d.confluence.direction}
+                                </span>
+                            )}
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <button onClick={() => setShowInfoPanel(!showInfoPanel)} className="button" style={{ padding: '6px 14px', fontSize: 12 }}>
+                                {showInfoPanel ? 'Info ausblenden' : 'Info einblenden'}
+                            </button>
+                            <button onClick={() => onSelectTicker(activeTicker)} className="button" style={{ padding: '6px 14px', fontSize: 12, background: '#374151' }}>
+                                In Sidebar öffnen
+                            </button>
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-4">
-                        <div className="card border border-gray-200 p-4 rounded-lg">
-                            <div className="text-sm font-semibold text-gray-600">RSI</div>
-                            <div className="text-2xl font-bold mt-2">{searchResults.rsi?.toFixed(1)}</div>
+                    {/* Timeframe + Overlay controls */}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', gap: 4, background: 'var(--card-bg)', border: '1px solid var(--border-color)', borderRadius: 8, padding: 3 }}>
+                            {TIMEFRAMES.map(tf => (
+                                <button key={tf} onClick={() => setTimeframe(tf)}
+                                    style={{ padding: '5px 12px', borderRadius: 6, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                                        background: timeframe === tf ? '#3b82f6' : 'transparent',
+                                        color: timeframe === tf ? '#fff' : 'var(--text-muted)',
+                                    }}>
+                                    {tf}
+                                </button>
+                            ))}
                         </div>
-                        <div className="card border border-gray-200 p-4 rounded-lg">
-                            <div className="text-sm font-semibold text-gray-600">RVOL</div>
-                            <div className="text-2xl font-bold mt-2">{searchResults.rvol?.toFixed(2)}</div>
-                        </div>
-                        <div className="card border border-gray-200 p-4 rounded-lg">
-                            <div className="text-sm font-semibold text-gray-600">MA20</div>
-                            <div className="text-2xl font-bold mt-2">${searchResults.ma20?.toFixed(2)}</div>
-                        </div>
-                        <div className="card border border-gray-200 p-4 rounded-lg">
-                            <div className="text-sm font-semibold text-gray-600">MA50</div>
-                            <div className="text-2xl font-bold mt-2">${searchResults.ma50?.toFixed(2)}</div>
+                        <div style={{ width: 1, height: 24, background: 'var(--border-color)' }}></div>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {[
+                                { key: 'ema', label: 'EMA', color: '#3b82f6' },
+                                { key: 'vwap', label: 'VWAP', color: '#f97316' },
+                                { key: 'sr', label: 'S/R', color: '#fbbf24' },
+                                { key: 'fib', label: 'Fib', color: '#8b5cf6' },
+                                { key: 'bb', label: 'BB', color: '#9333ea' },
+                                { key: 'vrvp', label: 'VRVP', color: '#06b6d4' },
+                                { key: 'patterns', label: 'Patterns', color: '#10b981' },
+                                { key: 'vol', label: 'Vol', color: '#6b7280' },
+                            ].map(({ key, label, color }) => (
+                                <button key={key}
+                                    onClick={() => setOverlays(prev => ({...prev, [key]: !prev[key]}))}
+                                    style={{
+                                        padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                                        background: overlays[key] ? color : `${color}15`,
+                                        color: overlays[key] ? '#fff' : color,
+                                        border: `1.5px solid ${overlays[key] ? color : `${color}44`}`,
+                                        transition: 'all 0.15s',
+                                    }}>
+                                    {label}
+                                </button>
+                            ))}
                         </div>
                     </div>
 
-                    <button onClick={() => onSelectTicker(searchResults.ticker)} className="button" style={{ width: '100%' }}>
-                        Details anzeigen
-                    </button>
+                    {/* Chart */}
+                    <div style={{ marginTop: 12, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+                        {chartData && chartData.candles && chartData.candles.length === 0 ? (
+                            <div style={{ textAlign: 'center', padding: '60px 20px', background: '#1a1a2e', color: '#64748b' }}>
+                                {chartData.error || 'Keine Chart-Daten verfügbar'}
+                            </div>
+                        ) : !chartData ? (
+                            <div style={{ display: 'flex', justifyContent: 'center', padding: '60px 20px', background: '#1a1a2e' }}><div className="loading-spinner"></div></div>
+                        ) : null}
+                        <div ref={chartContainer} style={{ position: 'relative', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
+                    </div>
+
+                    {/* Pattern badges */}
+                    {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
+                        const _vd = (d.confluence?.direction || '').toUpperCase();
+                        const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
+                        return filtered.length > 0 ? (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                            {filtered.map((p, i) => (
+                                <span key={i} style={{ display: 'inline-block', padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                                    background: p.type === 'bullish' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                                    color: p.type === 'bullish' ? '#10b981' : '#ef4444',
+                                    border: `1px solid ${p.type === 'bullish' ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                                }}>
+                                    {p.pattern} ({p.confidence || ''})
+                                </span>
+                            ))}
+                        </div>
+                        ) : null;
+                    })()}
+
+                    {/* Harmonic badges */}
+                    {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
+                        const _vd = (d.confluence?.direction || '').toUpperCase();
+                        const filtered = chartData.patterns.harmonic.filter(h => (!_vd || _vd === 'NEUTRAL' || h.direction === _vd) && (h.score || 0) >= 30);
+                        return filtered.length > 0 ? (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                            {filtered.map((h, i) => (
+                                <span key={i} style={{ display: 'inline-block', padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                                    background: h.direction === 'LONG' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                                    color: h.direction === 'LONG' ? '#10b981' : '#ef4444',
+                                    border: `1px solid ${h.direction === 'LONG' ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                                }}>
+                                    {h.pattern} {h.direction} (Score: {h.score || ''})
+                                </span>
+                            ))}
+                        </div>
+                        ) : null;
+                    })()}
+
+                    {/* Info panels */}
+                    {showInfoPanel && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, marginTop: 16 }}>
+                            {/* Trade Setup */}
+                            {d.trade_setup && (
+                                <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.05)' }}>
+                                    <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: '#10b981', display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                                        Trade Setup ({d.trade_setup.direction})
+                                    </h4>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
+                                        <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Entry</span><div style={{ fontWeight: 700 }}>${d.trade_setup.entry}</div></div>
+                                        <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Stop Loss</span><div style={{ fontWeight: 700, color: '#ef4444' }}>${d.trade_setup.stop}</div></div>
+                                        <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Take Profit 1</span><div style={{ fontWeight: 700, color: '#10b981' }}>${d.trade_setup.tp1}</div></div>
+                                        <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Take Profit 2</span><div style={{ fontWeight: 700, color: '#10b981' }}>${d.trade_setup.tp2}</div></div>
+                                        <div style={{ gridColumn: 'span 2', textAlign: 'center', marginTop: 4 }}>
+                                            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Risk/Reward</span>
+                                            <div style={{ fontSize: 20, fontWeight: 800, color: '#10b981' }}>{d.trade_setup.rr}x</div>
+                                        </div>
+                                    </div>
+                                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, textAlign: 'center', fontStyle: 'italic' }}>
+                                        Empfohlen — du entscheidest selbst.
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Technische Indikatoren */}
+                            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Technische Indikatoren</h4>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>RSI (14)</span><div style={{ fontWeight: 700 }}>{d.rsi?.toFixed(1) || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>RVOL</span><div style={{ fontWeight: 700 }}>{d.rvol?.toFixed(2) || '-'}x</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>ATR</span><div style={{ fontWeight: 700 }}>{d.atr?.toFixed(2) || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>VWAP</span><div style={{ fontWeight: 700 }}>${d.vwap || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>MACD</span><div style={{ fontWeight: 700 }}>{d.macd || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>MACD Signal</span><div style={{ fontWeight: 700 }}>{d.macd_signal || '-'}</div></div>
+                                </div>
+                            </div>
+
+                            {/* Moving Averages */}
+                            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Moving Averages</h4>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
+                                    {[
+                                        { label: 'EMA 9', val: d.ema9, color: '#f59e0b' },
+                                        { label: 'EMA 20', val: d.ema20, color: '#3b82f6' },
+                                        { label: 'MA 20', val: d.ma20 },
+                                        { label: 'MA 50', val: d.ma50 },
+                                        { label: 'EMA 100', val: d.ema100, color: '#8b5cf6' },
+                                        { label: 'EMA 200', val: d.ema200, color: '#14b8a6' },
+                                    ].map(({ label, val, color }) => (
+                                        <div key={label}>
+                                            <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{label}</span>
+                                            <div style={{ fontWeight: 700, color: val && price > val ? '#10b981' : val ? '#ef4444' : 'inherit' }}>
+                                                {val ? `$${val}` : '-'}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Support / Resistance */}
+                            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Support / Resistance</h4>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Support</span><div style={{ fontWeight: 700, color: '#10b981' }}>${d.support_1 || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Resistance</span><div style={{ fontWeight: 700, color: '#ef4444' }}>${d.resistance_1 || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Pivot</span><div style={{ fontWeight: 700 }}>${d.pivot || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Range Position</span><div style={{ fontWeight: 700 }}>{d.range_position?.toFixed(0) || '-'}%</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>20D High</span><div style={{ fontWeight: 700 }}>${d.high_20d || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>20D Low</span><div style={{ fontWeight: 700 }}>${d.low_20d || '-'}</div></div>
+                                </div>
+                                {d.fib_levels && (
+                                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border-color)' }}>
+                                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Fibonacci Levels</div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, fontSize: 11 }}>
+                                            {Object.entries(d.fib_levels).map(([k, v]) => (
+                                                <div key={k}><span style={{ color: 'var(--text-muted)' }}>{k}</span> ${v}</div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Preis */}
+                            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Preis & Volumen</h4>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, fontSize: 13 }}>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>1D</span><div style={{ fontWeight: 700, color: change >= 0 ? '#10b981' : '#ef4444' }}>{change}%</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>5D</span><div style={{ fontWeight: 700, color: (d.change_5d ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>{d.change_5d || '-'}%</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>20D</span><div style={{ fontWeight: 700, color: (d.change_20d ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>{d.change_20d || '-'}%</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Open</span><div style={{ fontWeight: 700 }}>${d.open || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>High</span><div style={{ fontWeight: 700 }}>${d.high || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Low</span><div style={{ fontWeight: 700 }}>${d.low || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Volumen</span><div style={{ fontWeight: 700 }}>{(d.volume || 0).toLocaleString()}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Avg Vol</span><div style={{ fontWeight: 700 }}>{(d.avg_volume || 0).toLocaleString()}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>BB Band</span><div style={{ fontWeight: 700 }}>${d.bb_upper || '-'} / ${d.bb_lower || '-'}</div></div>
+                                </div>
+                            </div>
+
+                            {/* Signale */}
+                            {d.signals && d.signals.length > 0 && (
+                                <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
+                                    <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Signale ({d.confluence?.bullish || 0} Bull / {d.confluence?.bearish || 0} Bear)</h4>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                        {d.signals.map((s, i) => (
+                                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 }}>
+                                                <span style={{ color: 'var(--text-muted)' }}>{s.name}</span>
+                                                <span style={{ color: signalColor(s.status), fontWeight: 600 }}>{s.detail}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Extension Warning */}
+                            {d.ext_warning && (
+                                <div className="card" style={{ padding: 16, borderRadius: 12,
+                                    border: `1px solid ${d.ext_level === 'extreme' ? '#ef4444' : d.ext_level === 'high' ? '#f97316' : '#eab308'}`,
+                                    background: d.ext_level === 'extreme' ? 'rgba(239,68,68,0.05)' : d.ext_level === 'high' ? 'rgba(249,115,22,0.05)' : 'rgba(234,179,8,0.05)',
+                                }}>
+                                    <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, color: d.ext_level === 'extreme' ? '#ef4444' : d.ext_level === 'high' ? '#f97316' : '#eab308' }}>
+                                        Extension Warning
+                                    </h4>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: d.ext_level === 'extreme' ? '#ef4444' : d.ext_level === 'high' ? '#f97316' : '#eab308' }}>
+                                        {d.ext_warning}
+                                    </div>
+                                    <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-muted)', display: 'flex', gap: 12 }}>
+                                        {d.ext_ma20 != null && <span>MA20: {d.ext_ma20 > 0 ? '+' : ''}{d.ext_ma20}%</span>}
+                                        {d.ext_vwap != null && <span>VWAP: {d.ext_vwap > 0 ? '+' : ''}{d.ext_vwap}%</span>}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* AI Analysis */}
+                    <div style={{ marginTop: 16 }}>
+                        {!aiData && (
+                            <button onClick={loadAiAnalysis} disabled={aiLoading} className="button" style={{ width: '100%', padding: '12px 0' }}>
+                                {aiLoading ? 'KI analysiert...' : 'KI Analyse starten'}
+                            </button>
+                        )}
+                        {aiData && (
+                            <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid rgba(59,130,246,0.3)', background: 'rgba(59,130,246,0.05)' }}>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10, color: '#3b82f6' }}>KI Analyse</h4>
+                                <div style={{ fontSize: 13, lineHeight: 1.7 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(aiData.analysis || 'Keine Analyse') }}></div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
         </div>
