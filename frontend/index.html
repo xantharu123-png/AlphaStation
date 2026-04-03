@@ -93,6 +93,60 @@
         .icon-button { cursor: pointer; transition: transform 0.2s, color 0.2s; }
         .icon-button:hover { transform: scale(1.1); color: var(--accent); }
 
+        /* ═══ Mega Menu ═══ */
+        .mega-nav { position: relative; display: flex; gap: 2px; }
+        .mega-nav-btn {
+            padding: 8px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+            border-radius: 8px; transition: all 0.2s; border: none; background: none;
+            color: var(--text-muted); position: relative; font-family: inherit;
+        }
+        .mega-nav-btn:hover { color: var(--text-primary); background: rgba(59,130,246,0.06); }
+        .mega-nav-btn.active { color: var(--accent); }
+        .mega-nav-btn.active::after {
+            content: ''; position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%);
+            width: 18px; height: 2px; background: var(--accent); border-radius: 1px;
+        }
+        .mega-cat-count {
+            font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; margin-left: 5px;
+            background: rgba(59,130,246,0.12); color: var(--accent);
+        }
+        .mega-panel-dropdown {
+            position: absolute; top: calc(100% + 8px); left: 0; min-width: 680px;
+            background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: 16px; padding: 20px 24px; z-index: 200;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.12);
+            animation: megaFadeSlide 0.18s ease;
+        }
+        [data-theme="dark"] .mega-panel-dropdown {
+            background: rgba(22, 24, 34, 0.97);
+            backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+            border-color: rgba(59,130,246,0.12);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4), 0 0 30px rgba(59,130,246,0.04);
+        }
+        @keyframes megaFadeSlide {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .mega-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 2px; }
+        .mega-group-title {
+            font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
+            color: var(--text-muted); padding: 6px 12px 4px; grid-column: 1 / -1; opacity: 0.7;
+        }
+        .mega-menu-item {
+            display: flex; align-items: center; gap: 11px; padding: 10px 12px;
+            border-radius: 10px; cursor: pointer; transition: all 0.15s; border: none;
+            background: none; text-align: left; width: 100%; font-family: inherit;
+        }
+        .mega-menu-item:hover { background: rgba(59,130,246,0.06); }
+        [data-theme="dark"] .mega-menu-item:hover { background: rgba(59,130,246,0.08); }
+        .mega-icon-wrap {
+            width: 34px; height: 34px; border-radius: 8px; display: flex;
+            align-items: center; justify-content: center; flex-shrink: 0; transition: transform 0.15s;
+        }
+        .mega-menu-item:hover .mega-icon-wrap { transform: scale(1.08); }
+        .mega-item-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+        .mega-item-desc { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+
         .toast { position: fixed; bottom: 20px; right: 20px; background-color: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 9999; }
         .toast.error { border-color: var(--danger); color: var(--danger); }
         .toast.success { border-color: var(--success); color: var(--success); }
@@ -2552,6 +2606,92 @@ function App() {
         .filter(t => t.id !== 'backtest' || isAdmin)
         .filter(t => t.id !== 'admin' || isAdmin);
 
+    // ═══ Mega Menu Categories with SVG icons ═══
+    const megaCategories = [
+        {
+            label: 'Scanner', count: null, // dynamic
+            groups: [
+                { title: 'AKTIEN SCANNER', items: [
+                    { id: 'scanner', name: 'Scanner', desc: 'Haupt-Scanner mit Grading', svg: 'M3 12L9 6L13 10L21 2M21 2H15M21 2V8', color: '#3b82f6' },
+                    { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
+                    { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
+                    { id: 'money-flow', name: 'Money Flow', desc: 'Institutionelle Bewegungen', svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6' },
+                    { id: 'volume-spikes', name: 'Volume Spikes', desc: 'Ungewöhnliches Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
+                    { id: 'orb', name: 'ORB Scanner', desc: 'Opening Range Breakout', svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899' },
+                ]},
+                { title: 'SPEZIAL', items: [
+                    { id: 'biotech', name: 'Biotech', desc: 'FDA Katalysatoren', svg: 'M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z', color: '#10b981' },
+                    { id: 'crash-monitor', name: 'Crash Monitor', desc: 'Markt-Risiko Überwachung', svg: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01', color: '#ef4444' },
+                ]},
+            ]
+        },
+        {
+            label: 'Analyse', count: null,
+            groups: [
+                { title: null, items: [
+                    { id: 'chart-analyse', name: 'Chart & Analyse', desc: 'Interaktive Charts mit Indikatoren', svg: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z', color: '#3b82f6' },
+                    { id: 'strategie-guide', name: 'Strategie Guide', desc: 'Trading-Strategien & Playbooks', svg: 'M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2zM22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z', color: '#f59e0b' },
+                ]},
+            ]
+        },
+        {
+            label: 'Tools', count: null,
+            groups: [
+                { title: null, items: [
+                    { id: 'kalender', name: 'Kalender', desc: 'Earnings, IPOs, FDA Dates', svg: 'M3 3H21V21H3ZM7 7V17M12 10V17M17 5V17', color: '#3b82f6' },
+                    { id: 'backtest', name: 'Backtest', desc: 'Strategien historisch testen', svg: 'M12 20V10M18 20V4M6 20V16', color: '#8b5cf6' },
+                    { id: 'watchlist', name: 'Watchlist', desc: 'Deine beobachteten Aktien', svg: 'M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z', color: '#f97316' },
+                    { id: 'autotrader', name: 'Auto-Trader', desc: 'Automatisierte Trade-Ausführung', svg: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z', color: '#10b981' },
+                ]},
+            ]
+        },
+        {
+            label: 'Krypto', count: null,
+            groups: [
+                { title: null, items: [
+                    { id: 'btc-divergenz', name: 'BTC-Divergenz', desc: 'Krypto vs Tech-Stock Korrelation', svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316' },
+                    { id: 'early-movers', name: 'Early Movers', desc: 'Whale Accumulation & Micro-Caps', svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#f59e0b' },
+                    { id: 'new-listing', name: 'New Listings', desc: 'Frisch gelistete Coins & Aktien', svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#10b981' },
+                ]},
+            ]
+        },
+    ];
+
+    // Filter mega categories based on allowed tabs
+    const filteredMegaCategories = megaCategories.map(cat => ({
+        ...cat,
+        groups: cat.groups.map(g => ({
+            ...g,
+            items: g.items.filter(item => {
+                if (!tabs.find(t => t.id === item.id)) return false;
+                return true;
+            })
+        })).filter(g => g.items.length > 0)
+    })).filter(cat => cat.groups.some(g => g.items.length > 0)).map(cat => ({
+        ...cat,
+        count: cat.groups.reduce((sum, g) => sum + g.items.length, 0)
+    }));
+
+    // Find which category the current activeTab belongs to
+    const activeCatLabel = megaCategories.find(cat =>
+        cat.groups.some(g => g.items.some(i => i.id === activeTab))
+    )?.label || null;
+
+    const [openMegaCat, setOpenMegaCat] = useState(null);
+    const megaTimerRef = useRef(null);
+
+    const showMegaPanel = (label) => {
+        clearTimeout(megaTimerRef.current);
+        setOpenMegaCat(label);
+    };
+    const scheduleMegaHide = () => {
+        megaTimerRef.current = setTimeout(() => setOpenMegaCat(null), 180);
+    };
+    const keepMegaOpen = () => { clearTimeout(megaTimerRef.current); };
+    const hideMegaPanel = () => {
+        megaTimerRef.current = setTimeout(() => setOpenMegaCat(null), 100);
+    };
+
     // Reset to 'scanner' if current tab is not in allowed list
     useEffect(() => {
         if (allowedTabs && !allowedTabs.includes(activeTab)) {
@@ -2698,21 +2838,53 @@ function App() {
                         </div>
                     </div>
 
-                    {/* Tab Navigation — only visible when not on pricing/account pages */}
+                    {/* Mega Menu Navigation — only visible when not on pricing/account pages */}
                     {!showPricing && !showAccount && (
-                        <div className="flex gap-6 overflow-x-auto pb-2">
-                            {tabs.map(tab => (
+                        <div className="mega-nav" style={{ position: 'relative' }}>
+                            {filteredMegaCategories.map(cat => (
                                 <button
-                                    key={tab.id}
-                                    onClick={() => setActiveTab(tab.id)}
-                                    className={`whitespace-nowrap pb-2 border-b-2 transition-all ${
-                                        activeTab === tab.id
-                                            ? 'tab-active font-semibold'
-                                            : 'tab-inactive'
-                                    }`}
+                                    key={cat.label}
+                                    className={`mega-nav-btn${activeCatLabel === cat.label ? ' active' : ''}`}
+                                    onMouseEnter={() => showMegaPanel(cat.label)}
+                                    onMouseLeave={scheduleMegaHide}
                                 >
-                                    {tab.label}
+                                    {cat.label}
+                                    {cat.count > 2 && <span className="mega-cat-count">{cat.count}</span>}
                                 </button>
+                            ))}
+                            {isAdmin && (
+                                <button
+                                    className={`mega-nav-btn${activeTab === 'admin' ? ' active' : ''}`}
+                                    onClick={() => { setActiveTab('admin'); setOpenMegaCat(null); }}
+                                >
+                                    Admin
+                                </button>
+                            )}
+
+                            {/* Mega dropdown panels */}
+                            {filteredMegaCategories.map(cat => openMegaCat === cat.label && (
+                                <div key={cat.label} className="mega-panel-dropdown"
+                                    onMouseEnter={keepMegaOpen} onMouseLeave={hideMegaPanel}>
+                                    <div className="mega-grid">
+                                        {cat.groups.map((group, gi) => (
+                                            <React.Fragment key={gi}>
+                                                {group.title && <div className="mega-group-title" style={gi > 0 ? {marginTop: 8} : {}}>{group.title}</div>}
+                                                {group.items.map(item => (
+                                                    <button key={item.id} className="mega-menu-item"
+                                                        onClick={() => { setActiveTab(item.id); setOpenMegaCat(null); }}>
+                                                        <div className="mega-icon-wrap" style={{ background: item.color + '18' }}>
+                                                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke={item.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={item.svg} /></svg>
+                                                        </div>
+                                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                            <span className="mega-item-name">{item.name}</span>
+                                                            <span className="mega-item-desc">{item.desc}</span>
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </React.Fragment>
+                                        ))}
+                                    </div>
+                                </div>
                             ))}
                         </div>
                     )}
