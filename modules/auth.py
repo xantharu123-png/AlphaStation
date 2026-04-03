@@ -43,7 +43,7 @@ JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_IDS = {
-    "trial": os.environ.get("STRIPE_PRICE_TRIAL", ""),  # $1 one-time payment
+    "trial": os.environ.get("STRIPE_PRICE_TRIAL", "price_1TI0SHEOIB5wAqvU3oFEI079"),  # $1 one-time payment
     "basic_monthly": os.environ.get("STRIPE_PRICE_BASIC", "price_1THqyWEOIB5wAqvUrLNLCPZD"),
     "pro_monthly": os.environ.get("STRIPE_PRICE_PRO", "price_1THqysEOIB5wAqvU6MG9iywG"),
     "elite_monthly": os.environ.get("STRIPE_PRICE_ELITE", "price_1THqzjEOIB5wAqvUTrVwLzha"),
