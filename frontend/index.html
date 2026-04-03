@@ -743,11 +743,18 @@ Mehr erfahren ↓
                                     <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}>NEU</span>
                                 </div>
                                 <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Auto-Trader — Vom Signal zum Trade</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Auto-Trader verbindet den BI Scanner direkt mit deinem Interactive Brokers Konto. Wenn ein Signal mit hohem Confluence-Score erkannt wird, platziert das System automatisch Bracket Orders — Entry, Stop-Loss und Take-Profit. Du wählst: Semi Auto (du bestätigst in TWS) oder Full Auto (Orders gehen sofort live). Position Sizing, Max Positionen, Tages-Verlustlimit und Cooldown-Perioden — alles konfigurierbar. Du tradest wie ein Algorithmus, behältst aber die volle Kontrolle.</p>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 16 }}>Der Auto-Trader verbindet den BI Scanner direkt mit deinem Interactive Brokers Konto. Wenn ein Signal mit hohem Confluence-Score erkannt wird, platziert das System automatisch Bracket Orders — Entry, Stop-Loss und Take-Profit. Du wählst: Semi Auto (du bestätigst in TWS) oder Full Auto (Orders gehen sofort live). Position Sizing, Max Positionen, Tages-Verlustlimit und Cooldown-Perioden — alles konfigurierbar.</p>
+                                <div style={{ padding: '14px 18px', borderRadius: 12, background: 'linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02))', border: '1px solid rgba(16,185,129,0.2)', marginBottom: 20 }}>
+                                    <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Unser Backtest beweist:</div>
+                                    <div style={{ fontSize: 28, fontWeight: 800, color: '#10b981', lineHeight: 1.2 }}>+140% Gewinn in 12 Monaten</div>
+                                    <div style={{ fontSize: 14, color: '#f1f5f9', fontWeight: 600, marginTop: 4 }}>Das ist einmalig auf dem Markt.</div>
+                                    <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>Backtest-verifiziert — nur mit BI Scanner Signalen.*</div>
+                                    <div style={{ fontSize: 10, color: '#475569', marginTop: 6, fontStyle: 'italic' }}>*Backtested Performance. Vergangene Ergebnisse sind keine Garantie für zukünftige Gewinne.</div>
+                                </div>
                                 <div style={{ display: 'flex', gap: 24 }}>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>+140%</div><div style={{ fontSize: 12, color: '#64748b' }}>Backtest 12M</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>IBKR</div><div style={{ fontSize: 12, color: '#64748b' }}>Broker Integration</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Semi / Full</div><div style={{ fontSize: 12, color: '#64748b' }}>Auto Modus</div></div>
-                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Bracket</div><div style={{ fontSize: 12, color: '#64748b' }}>Entry + SL + TP</div></div>
                                 </div>
                             </div>
                         </div>
@@ -2522,9 +2529,11 @@ function App() {
         { id: 'chart-analyse', label: 'Chart & Analyse' }
     ];
 
-    // Filter tabs based on user plan
+    // Filter tabs based on user plan + admin status
     const allowedTabs = limits?.allowed_tabs; // null = all allowed
-    const tabs = allowedTabs ? allTabs.filter(t => allowedTabs.includes(t.id)) : allTabs;
+    const isAdmin = user?.is_admin === true;
+    const tabs = (allowedTabs ? allTabs.filter(t => allowedTabs.includes(t.id)) : allTabs)
+        .filter(t => t.id !== 'backtest' || isAdmin);
 
     // Reset to 'scanner' if current tab is not in allowed list
     useEffect(() => {

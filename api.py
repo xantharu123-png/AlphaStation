@@ -1544,6 +1544,7 @@ async def api_get_me(authorization: str = Header(None)):
             "plan": limits.get("plan", "free"),
             "stripe_customer_id": db_user.get("stripe_customer_id"),
             "trial_ends_at": db_user.get("trial_ends_at"),
+            "is_admin": limits.get("is_admin", False),
         },
         "limits": limits,
     }

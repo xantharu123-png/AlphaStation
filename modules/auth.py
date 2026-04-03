@@ -37,6 +37,7 @@ except ImportError:
 AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH", "/tmp/alpha_station_users.json")
 JWT_SECRET = os.environ.get("JWT_SECRET", "as_jwt_2026_alpha_station_prod_key_x9k2m")
 JWT_ALGORITHM = "HS256"
+ADMIN_EMAILS = {"miroslav.mikulic@gmail.com"}
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 
 # Stripe config (set via environment variables)
@@ -271,6 +272,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "email": email,
             "name": user.get("name", ""),
             "plan": plan,
+            "is_admin": email in ADMIN_EMAILS,
             "stripe_customer_id": user.get("stripe_customer_id"),
             "stripe_subscription_id": user.get("stripe_subscription_id"),
             "trial_ends_at": user.get("trial_ends_at"),
@@ -478,11 +480,19 @@ def get_user_limits(token: str) -> Dict:
     plan = get_user_plan(token)
     features = get_plan_features(plan)
     allowed_tabs = SCANNER_TABS_BY_PLAN.get(plan)
+    # Check admin
+    payload = verify_token(token)
+    email = payload.get("email", "") if payload else ""
+    is_admin = email in ADMIN_EMAILS
+    # Admins get all tabs
+    if is_admin:
+        allowed_tabs = None
     return {
         "plan": plan,
         "plan_name": features["name"],
         "price": features["price"],
         "allowed_tabs": allowed_tabs,  # None = all
+        "is_admin": is_admin,
         "scan_interval_min": features["scan_interval_min"],
         "has_sidebar_detail": features["has_sidebar_detail"],
         "has_email_alerts": features["has_email_alerts"],
