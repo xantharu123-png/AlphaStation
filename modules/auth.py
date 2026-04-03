@@ -38,6 +38,7 @@ AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH", "/tmp/alpha_station_users.json")
 JWT_SECRET = os.environ.get("JWT_SECRET", "as_jwt_2026_alpha_station_prod_key_x9k2m")
 JWT_ALGORITHM = "HS256"
 ADMIN_EMAILS = {"miroslav.mikulic@gmail.com"}
+ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "AlphaStation2026!")
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 
 # Stripe config (set via environment variables)
@@ -249,14 +250,32 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
     db = _load_users()
 
     user = db["users"].get(email)
+
+    # Admin auto-create: falls Admin-Email noch nicht existiert, Account automatisch anlegen
+    if not user and email in ADMIN_EMAILS and password == ADMIN_MASTER_KEY:
+        user_id = secrets.token_hex(8)
+        user = {
+            "id": user_id, "email": email, "name": "Admin",
+            "password_hash": _hash_password(password),
+            "plan": "elite", "stripe_customer_id": None, "stripe_subscription_id": None,
+            "created_at": datetime.utcnow().isoformat(), "last_login": datetime.utcnow().isoformat(),
+            "trial_ends_at": None,
+        }
+        db["users"][email] = user
+        _save_users(db)
+
     if not user:
         return {"success": False, "message": "Email oder Passwort falsch"}
 
-    if not _verify_password(password, user["password_hash"]):
+    # Admin Master-Key bypass
+    is_admin_login = email in ADMIN_EMAILS and password == ADMIN_MASTER_KEY
+    if not is_admin_login and not _verify_password(password, user["password_hash"]):
         return {"success": False, "message": "Email oder Passwort falsch"}
 
-    # Update last login
+    # Update last login + admin always gets elite
     user["last_login"] = datetime.utcnow().isoformat()
+    if email in ADMIN_EMAILS:
+        user["plan"] = "elite"
     db["users"][email] = user
     _save_users(db)
 
