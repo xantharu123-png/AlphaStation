@@ -1746,6 +1746,41 @@ def get_scan_status():
     }
 
 
+@app.get("/api/ticker-search")
+def search_tickers(q: str = Query(..., description="Search query (ticker or company name)")):
+    """Search tickers by symbol or company name via Polygon.io."""
+    try:
+        q = q.strip().upper()
+        if not q:
+            return {"results": []}
+        # Polygon Ticker Search API
+        url = "https://api.polygon.io/v3/reference/tickers"
+        resp = rate_limited_get(url, params={
+            "apiKey": POLYGON_KEY,
+            "search": q,
+            "active": "true",
+            "limit": 15,
+            "order": "asc",
+            "sort": "ticker",
+        })
+        if resp.status_code != 200:
+            return {"results": []}
+        data = resp.json().get("results", [])
+        results = []
+        for t in data:
+            ticker = t.get("ticker", "")
+            results.append({
+                "ticker": ticker,
+                "name": t.get("name", ""),
+                "market": t.get("market", ""),
+                "type": t.get("type", ""),
+                "locale": t.get("locale", ""),
+            })
+        return {"results": results}
+    except Exception as e:
+        return {"results": []}
+
+
 @app.get("/api/ticker-detail")
 def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. NVDA, AAPL, X:BTCUSD)")):
     """Get detailed price data for a single ticker (30 days, key metrics)."""
