@@ -914,7 +914,7 @@ Mehr erfahren ↓
                             { svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#f59e0b', name: 'Early Movers', desc: 'Volume Spikes, Whale Accumulation, Micro-Cap Momentum' },
                             { svg: 'M3 3H21V21H3ZM7 7V17M12 10V17M17 5V17', color: '#3b82f6', name: 'Kalender', desc: 'Earnings, IPOs, FDA Dates, Dividenden — alles im Blick' },
                             { svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316', name: 'BTC-Divergenz', desc: 'Korrelation zwischen Krypto und Tech-Stocks tracken' },
-                            { svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#10b981', name: 'New Listings', desc: 'Frisch gelistete Aktien mit Momentum erkennen' },
+                            { svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale' },
                             { svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1', name: 'Volume Spikes', desc: 'Ungewöhnliches Volumen erkennen bevor der Move kommt' },
                             { svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899', name: 'ORB Scanner', desc: 'Opening Range Breakout — die erste Stunde profitabel nutzen' },
                         ].map((s, i) => (
@@ -1568,7 +1568,7 @@ function SchedulerStatus({ status }) {
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Movers', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'New Listing', volume_spikes: 'Volume Spikes' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Movers', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes' };
 
     return (
         <div className="flex items-center gap-2">
@@ -1769,7 +1769,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const fetchChart = async () => {
             try {
                 if (isExchangeCrypto && scannerData?.contract && scannerData?.exchange) {
-                    // NLS Coins: direkt von der Exchange holen
+                    // Pump & Dump Coins: direkt von der Exchange holen
                     const contract = scannerData.contract;
                     const exchange = scannerData.exchange;
                     const res = await fetch(`${API}/api/exchange-chart?symbol=${encodeURIComponent(contract)}&exchange=${encodeURIComponent(exchange)}&timeframe=${timeframe}&count=100`, { signal });
@@ -2400,11 +2400,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Content Grid - 2 columns when wide */}
                 <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
 
-                {/* NLS (Exchange Crypto) Detail Panel */}
+                {/* Pump & Dump Detail Panel */}
                 {isExchangeCrypto && scannerData && (
                 <>
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">New Listing Info</h4>
+                    <h4 className="font-semibold text-sm mb-2">Pump & Dump Info</h4>
                     <div className="grid grid-cols-2 gap-2">
                         <div><span className="text-gray-500">Exchange</span> <span className="font-semibold text-blue-600">{scannerData.exchange || '–'}</span></div>
                         <div><span className="text-gray-500">Contract</span> <span className="font-semibold text-xs">{scannerData.contract || '–'}</span></div>
@@ -2721,7 +2721,7 @@ function App() {
         { id: 'watchlist', label: 'Watchlist' },
         { id: 'backtest', label: 'Backtest' },
         { id: 'strategie-guide', label: 'Strategie Guide' },
-        { id: 'new-listing', label: 'New Listing' },
+        { id: 'new-listing', label: 'Pump & Dump' },
         { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'orb', label: 'ORB Scanner' },
         { id: 'autotrader', label: 'Auto-Trader' },
@@ -2781,7 +2781,7 @@ function App() {
                 { title: null, items: [
                     { id: 'btc-divergenz', name: 'BTC-Divergenz', desc: 'Krypto vs Tech-Stock Korrelation', svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316' },
                     { id: 'early-movers', name: 'Early Movers', desc: 'Whale Accumulation & Micro-Caps', svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#f59e0b' },
-                    { id: 'new-listing', name: 'New Listings', desc: 'Frisch gelistete Coins & Aktien', svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#10b981' },
+                    { id: 'new-listing', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale', svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444' },
                 ]},
             ]
         },
@@ -4913,7 +4913,7 @@ function StrategieGuideTab() {
     );
 }
 
-// New Listing Scanner Tab
+// Pump & Dump Scanner Tab (ehemals New Listing Scanner)
 function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [results, setResults] = useState(scanCache.newlisting_results || []);
     const [stats, setStats] = useState(scanCache.newlisting_stats || null);

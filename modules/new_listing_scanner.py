@@ -1292,20 +1292,203 @@ def add_to_monitoring(symbol, exchange="crypto.com"):
 
 
 def cleanup_monitoring(monitoring):
-    """Entfernt abgelaufene Einträge (> 72h)."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=CONFIG["monitor_hours_max"])
+    """Entfernt abgelaufene Einträge. Neue Listings: 72h, Pumps: 48h."""
+    now = datetime.now(timezone.utc)
+    cutoff_listing = now - timedelta(hours=CONFIG["monitor_hours_max"])
+    cutoff_pump = now - timedelta(hours=48)  # Pumps dumpen schneller
     to_remove = []
     for sym, data in monitoring.items():
         try:
             detected = datetime.fromisoformat(data["detected_at"].replace("Z", "+00:00"))
+            is_pump = data.get("source") == "pump_detection"
+            cutoff = cutoff_pump if is_pump else cutoff_listing
             if detected < cutoff:
                 to_remove.append(sym)
         except Exception:
             pass
     for sym in to_remove:
         monitoring[sym]["status"] = "expired"
-        log.info(f"⏰ NLS: {sym} — Monitoring abgelaufen (>{CONFIG['monitor_hours_max']}h)")
+        source = monitoring[sym].get("source", "new_listing")
+        log.info(f"⏰ P&D: {sym} ({source}) — Monitoring abgelaufen")
     return monitoring
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PUMP DETECTION — Zweiter Erkennungsweg neben neue Listings
+# Scannt ALLE Perps auf extreme Pump-Bedingungen und fügt sie zum Monitoring hinzu
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def detect_active_pumps(all_perps):
+    """
+    Scannt alle bekannten Perps auf aktive Pump & Dump Bedingungen.
+    Nutzt Ticker-Daten (24h Change, Volume, Funding) um extreme Pumps zu erkennen.
+
+    Kriterien für Pump-Erkennung:
+    - 24h Change > 25%  ODER
+    - 24h Change > 15% UND Funding < -0.05%  ODER
+    - 24h Change > 15% UND Volume extrem hoch
+
+    Returns: Liste von {symbol, exchange, pump_reason, ticker_data}
+    """
+    monitoring = load_monitoring_list()
+    already_monitored = set(monitoring.keys())
+    detected_pumps = []
+
+    # Gruppiere Perps nach Exchange für Batch-Processing
+    exchange_perps = {}
+    for p in all_perps:
+        ex = p.get("exchange", "")
+        if ex not in exchange_perps:
+            exchange_perps[ex] = []
+        exchange_perps[ex].append(p)
+
+    # Schnell-Scan: Nutze Bulk-Ticker-APIs (1 Call pro Exchange statt pro Coin)
+    exchange_tickers = {}
+
+    # MEXC: Bulk-Ticker (alle Futures in einem Call)
+    try:
+        resp = req.get("https://contract.mexc.com/api/v1/contract/ticker", timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success") and data.get("data"):
+                for t in data["data"]:
+                    sym = t.get("symbol", "")
+                    if not sym.endswith("_USDT"):
+                        continue
+                    change = float(t.get("riseFallRate", 0)) * 100
+                    volume = float(t.get("amount24", 0))
+                    fr = float(t.get("fundingRate", 0))
+                    last_price = float(t.get("lastPrice", 0))
+                    exchange_tickers[f"mexc:{sym}"] = {
+                        "symbol": sym,
+                        "exchange": "mexc",
+                        "change_24h": change,
+                        "volume_usd_24h": volume,
+                        "funding_rate": fr,
+                        "price": last_price,
+                    }
+    except Exception as e:
+        log.warning(f"Pump-Detection MEXC Error: {e}")
+
+    # Bitget: Bulk-Ticker
+    try:
+        resp = req.get("https://api.bitget.com/api/v2/mix/market/tickers",
+                       params={"productType": "USDT-FUTURES"}, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("code") == "00000" and data.get("data"):
+                for t in data["data"]:
+                    sym = t.get("symbol", "")
+                    if not sym.endswith("USDT"):
+                        continue
+                    change = float(t.get("change24h", 0)) * 100
+                    volume = float(t.get("usdtVolume", 0))
+                    fr = float(t.get("fundingRate", 0))
+                    last_price = float(t.get("lastPr", 0))
+                    exchange_tickers[f"bitget:{sym}"] = {
+                        "symbol": sym,
+                        "exchange": "bitget",
+                        "change_24h": change,
+                        "volume_usd_24h": volume,
+                        "funding_rate": fr,
+                        "price": last_price,
+                    }
+    except Exception as e:
+        log.warning(f"Pump-Detection Bitget Error: {e}")
+
+    # Binance: Bulk-Ticker
+    try:
+        resp = req.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                for t in data:
+                    sym = t.get("symbol", "")
+                    if not sym.endswith("USDT"):
+                        continue
+                    change = float(t.get("priceChangePercent", 0))
+                    volume = float(t.get("quoteVolume", 0))
+                    last_price = float(t.get("lastPrice", 0))
+                    exchange_tickers[f"binance:{sym}"] = {
+                        "symbol": sym,
+                        "exchange": "binance",
+                        "change_24h": change,
+                        "volume_usd_24h": volume,
+                        "funding_rate": 0,  # Binance braucht separaten Call
+                        "price": last_price,
+                    }
+    except Exception as e:
+        log.warning(f"Pump-Detection Binance Error: {e}")
+
+    log.info(f"🔍 Pump-Detection: {len(exchange_tickers)} Perp-Ticker geladen")
+
+    # Filter auf extreme Pumps
+    for key, ticker in exchange_tickers.items():
+        change = ticker["change_24h"]
+        volume = ticker["volume_usd_24h"]
+        fr = ticker["funding_rate"]
+        fr_pct = fr * 100
+        sym = ticker["symbol"]
+
+        # Skip wenn schon überwacht
+        if sym in already_monitored:
+            continue
+
+        # === PUMP-KRITERIEN ===
+        pump_reasons = []
+
+        # Kriterium 1: Extremer Pump (>25% in 24h)
+        if change > 25:
+            pump_reasons.append(f"24h +{change:.0f}% (extremer Pump)")
+
+        # Kriterium 2: Starker Pump + negative Funding (Smart Money shortet)
+        if change > 15 and fr_pct < -0.05:
+            pump_reasons.append(f"24h +{change:.0f}% + FR {fr_pct:.3f}% (Shorts bauen auf)")
+
+        # Kriterium 3: Starker Pump + extremes Volume
+        if change > 15 and volume > 50_000_000:
+            pump_reasons.append(f"24h +{change:.0f}% + Vol ${volume/1e6:.0f}M (Hype-Volume)")
+
+        if not pump_reasons:
+            continue
+
+        # Doppel-Check: Nicht shorten wenn Pump schon vorbei (negative 24h = schon gedumpt)
+        if change < 0:
+            continue
+
+        detected_pumps.append({
+            "symbol": sym,
+            "exchange": ticker["exchange"],
+            "pump_reasons": pump_reasons,
+            "change_24h": change,
+            "volume_usd_24h": volume,
+            "funding_rate": fr,
+            "price": ticker["price"],
+            "source": "pump_detection",
+        })
+
+    # Sortiere nach Change (stärkste Pumps zuerst)
+    detected_pumps.sort(key=lambda x: x["change_24h"], reverse=True)
+
+    # Max 15 Pumps zur Überwachung hinzufügen (Rate-Limiting beachten)
+    added = 0
+    for pump in detected_pumps[:15]:
+        sym = pump["symbol"]
+        if sym not in already_monitored:
+            add_to_monitoring(sym, pump["exchange"])
+            # Markiere als pump-detected (nicht new-listing)
+            monitoring = load_monitoring_list()
+            if sym in monitoring:
+                monitoring[sym]["source"] = "pump_detection"
+                monitoring[sym]["pump_reasons"] = pump["pump_reasons"]
+                monitoring[sym]["change_24h_detected"] = pump["change_24h"]
+                save_monitoring_list(monitoring)
+            added += 1
+            log.info(f"🔥 PUMP DETECTED: {sym} auf {pump['exchange']} — "
+                     f"{', '.join(pump['pump_reasons'])}")
+
+    log.info(f"🔥 Pump-Detection: {len(detected_pumps)} Pumps erkannt, {added} neu zum Monitoring")
+    return detected_pumps
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1314,23 +1497,28 @@ def cleanup_monitoring(monitoring):
 
 def run_new_listing_scanner():
     """
-    Hauptfunktion des New Listing Dump Scanners.
+    Pump & Dump Scanner (ehemals New Listing Scanner).
 
-    1. Prüft auf neue PERP-Listings (Cache-Diff)
-    2. Für jedes überwachte Listing: Candles + Ticker + Book holen
-    3. Exhaustion Score berechnen
-    4. Safety prüfen
-    5. Ggf. Short-Signal generieren
-    6. Ergebnisse als JSON speichern
+    ZWEI Erkennungswege:
+    1. Neue PERP-Listings erkennen (Cache-Diff, launchTime, isNew)
+    2. Aktive Pumps erkennen (24h Change + Funding + Volume)
+
+    Pipeline danach identisch:
+    - Candles + Ticker holen
+    - Exhaustion Score berechnen
+    - Safety prüfen
+    - Short-Signal generieren
+    - Ergebnisse als JSON speichern
 
     Returns: dict mit Ergebnissen
     """
-    log.info("🆕 === New Listing Scanner gestartet ===")
+    log.info("🔥 === Pump & Dump Scanner gestartet ===")
     start_time = time.time()
 
     results = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "new_listings_detected": [],
+        "pumps_detected": [],
         "signals": [],
         "watchlist": [],
         "monitoring": [],
@@ -1338,11 +1526,25 @@ def run_new_listing_scanner():
     }
 
     try:
-        # ── Phase 1: Neue Listings erkennen ──
+        # ── Phase 1a: Neue Listings erkennen ──
         new_listings, all_perps = detect_new_listings()
         for nl in new_listings:
             results["new_listings_detected"].append(nl["symbol"])
             add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"))
+
+        # ── Phase 1b: Aktive Pumps erkennen (NEUER Erkennungsweg) ──
+        try:
+            active_pumps = detect_active_pumps(all_perps)
+            for pump in active_pumps:
+                results["pumps_detected"].append({
+                    "symbol": pump["symbol"],
+                    "exchange": pump["exchange"],
+                    "change_24h": pump["change_24h"],
+                    "reasons": pump["pump_reasons"],
+                })
+        except Exception as e:
+            log.warning(f"Pump-Detection Error: {e}\n{traceback.format_exc()}")
+            results["errors"].append(f"Pump-Detection: {str(e)}")
 
         # ── Phase 2: Alle überwachten Listings analysieren ──
         monitoring = load_monitoring_list()
@@ -1351,8 +1553,9 @@ def run_new_listing_scanner():
         active = {k: v for k, v in monitoring.items()
                   if v.get("status") == "monitoring"}
 
-        log.info(f" NLS: {len(active)} Listings in Überwachung, "
-                 f"{len(new_listings)} neu erkannt, "
+        log.info(f"🔥 P&D: {len(active)} Coins in Überwachung, "
+                 f"{len(new_listings)} neue Listings, "
+                 f"{len(results.get('pumps_detected', []))} Pumps erkannt, "
                  f"{len(all_perps)} PERP-Instrumente total")
 
         for symbol, mon_data in active.items():
