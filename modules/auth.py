@@ -67,6 +67,8 @@ PLANS = {
         "has_orb_scanner": True,
         "has_backtest": True,
         "has_api_access": False,
+        "has_ai_analysis": True,        # Trial darf AI testen
+        "ai_calls_per_day": 5,          # Aber max 5 pro Tag
         "max_ticker_detail_per_hour": 999,
         "duration_hours": 24,
     },
@@ -81,6 +83,8 @@ PLANS = {
         "has_orb_scanner": False,
         "has_backtest": False,
         "has_api_access": False,
+        "has_ai_analysis": False,
+        "ai_calls_per_day": 0,
         "max_ticker_detail_per_hour": 0,
     },
     "basic": {
@@ -94,6 +98,8 @@ PLANS = {
         "has_orb_scanner": False,
         "has_backtest": False,
         "has_api_access": False,
+        "has_ai_analysis": False,       # Basic: keine AI
+        "ai_calls_per_day": 0,
         "max_ticker_detail_per_hour": 30,
     },
     "pro": {
@@ -107,6 +113,8 @@ PLANS = {
         "has_orb_scanner": False,
         "has_backtest": False,
         "has_api_access": False,
+        "has_ai_analysis": True,        # Pro: AI erlaubt
+        "ai_calls_per_day": 20,         # Max 20 pro Tag
         "max_ticker_detail_per_hour": 999,
     },
     "elite": {
@@ -120,6 +128,8 @@ PLANS = {
         "has_orb_scanner": True,
         "has_backtest": True,
         "has_api_access": True,
+        "has_ai_analysis": True,        # Elite: AI unlimitiert
+        "ai_calls_per_day": 999,
         "max_ticker_detail_per_hour": 999,
     },
 }

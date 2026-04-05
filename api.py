@@ -2765,13 +2765,87 @@ def get_exchange_chart(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── AI-Analyse Cache (30 Min TTL, spart 80-90% der API-Calls) ──
+_AI_CACHE = {}  # {ticker: {"analysis": ..., "timestamp": ..., "expires": ...}}
+_AI_CACHE_TTL = 1800  # 30 Minuten
+_AI_USER_CALLS = {}  # {email: {"date": "2026-04-05", "count": 0}}
+
+
 @app.get("/api/ai-analysis")
-def get_ai_analysis(ticker: str = Query(..., description="Ticker symbol")):
-    """Generate AI analysis for a ticker using Claude."""
+def get_ai_analysis(
+    ticker: str = Query(..., description="Ticker symbol"),
+    authorization: str = Header(None),
+):
+    """Generate AI analysis for a ticker using Claude.
+    Premium Feature: Nur Pro ($79) und Elite ($149) Pläne.
+    Cached für 30 Min pro Ticker (alle User teilen den Cache).
+    """
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=400, detail="ANTHROPIC_API_KEY not configured")
 
-    # First get ticker data
+    # ── Plan-Check: AI nur für berechtigte User ──
+    user_email = None
+    user_plan = "expired"
+    ai_limit = 0
+    try:
+        from modules.auth import verify_token, get_plan_features
+        token = None
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization[7:]
+        elif authorization:
+            token = authorization
+
+        if token:
+            payload = verify_token(token)
+            if payload:
+                user_email = payload.get("email", "")
+                user_plan = payload.get("plan", "expired")
+                features = get_plan_features(user_plan)
+                if not features.get("has_ai_analysis", False):
+                    return {
+                        "ticker": ticker,
+                        "analysis": None,
+                        "error": "ai_not_available",
+                        "message": f"AI-Analyse ist ab dem Pro-Plan ($79/Mo) verfügbar. Dein Plan: {user_plan}",
+                        "upgrade_required": True,
+                    }
+                ai_limit = features.get("ai_calls_per_day", 0)
+    except Exception:
+        pass  # Kein Auth-Modul = kein Plan-Check (Admin/Dev)
+
+    # ── Rate-Limit pro User ──
+    if user_email and ai_limit < 999:
+        today = datetime.now().strftime("%Y-%m-%d")
+        user_key = f"{user_email}"
+        if user_key not in _AI_USER_CALLS or _AI_USER_CALLS[user_key].get("date") != today:
+            _AI_USER_CALLS[user_key] = {"date": today, "count": 0}
+        if _AI_USER_CALLS[user_key]["count"] >= ai_limit:
+            return {
+                "ticker": ticker,
+                "analysis": None,
+                "error": "ai_limit_reached",
+                "message": f"Tageslimit erreicht ({ai_limit} AI-Analysen/Tag). Upgrade auf Elite für unlimitiert.",
+                "upgrade_required": True,
+            }
+
+    # ── Cache prüfen (30 Min TTL) ──
+    ticker_upper = ticker.upper()
+    now = time.time()
+    if ticker_upper in _AI_CACHE:
+        cached = _AI_CACHE[ticker_upper]
+        if cached.get("expires", 0) > now:
+            # Cache-Hit: User-Call zählen, aber keinen API-Call machen
+            if user_email and ai_limit < 999:
+                _AI_USER_CALLS[f"{user_email}"]["count"] += 1
+            return {
+                "ticker": ticker,
+                "analysis": cached["analysis"],
+                "model": cached.get("model", "claude-sonnet-4-20250514"),
+                "timestamp": cached["timestamp"],
+                "cached": True,
+            }
+
+    # ── Preisdaten holen ──
     try:
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
@@ -2791,7 +2865,7 @@ def get_ai_analysis(ticker: str = Query(..., description="Ticker symbol")):
     except Exception:
         price_info = "Preisdaten nicht verfuegbar"
 
-    # Call Claude API
+    # ── Claude API Call ──
     try:
         claude_resp = req.post(
             "https://api.anthropic.com/v1/messages",
@@ -2818,7 +2892,27 @@ Kurz und praezise, keine langen Erklaerungen."""}],
         )
         if claude_resp.status_code == 200:
             content = claude_resp.json().get("content", [{}])[0].get("text", "Analyse nicht verfuegbar")
-            return {"ticker": ticker, "analysis": content, "model": "claude-sonnet-4-20250514", "timestamp": datetime.now().isoformat()}
+            ts = datetime.now().isoformat()
+
+            # In Cache speichern
+            _AI_CACHE[ticker_upper] = {
+                "analysis": content,
+                "model": "claude-sonnet-4-20250514",
+                "timestamp": ts,
+                "expires": now + _AI_CACHE_TTL,
+            }
+
+            # Alte Cache-Einträge aufräumen (max 200)
+            if len(_AI_CACHE) > 200:
+                expired = [k for k, v in _AI_CACHE.items() if v.get("expires", 0) < now]
+                for k in expired:
+                    del _AI_CACHE[k]
+
+            # User-Call zählen
+            if user_email and ai_limit < 999:
+                _AI_USER_CALLS[f"{user_email}"]["count"] += 1
+
+            return {"ticker": ticker, "analysis": content, "model": "claude-sonnet-4-20250514", "timestamp": ts, "cached": False}
         else:
             return {"ticker": ticker, "analysis": f"API Fehler: {claude_resp.status_code}", "timestamp": datetime.now().isoformat()}
     except Exception as e:

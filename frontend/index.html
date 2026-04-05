@@ -1811,9 +1811,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const loadAiAnalysis = async () => {
         setAiLoading(true);
         try {
-            const res = await fetch(`${API}/api/ai-analysis?ticker=${ticker}`);
-            if (res.ok) {
-                setAiData(await res.json());
+            const token = localStorage.getItem('as_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            const res = await fetch(`${API}/api/ai-analysis?ticker=${ticker}`, { headers });
+            const data = await res.json();
+            if (data.error === 'ai_not_available' || data.error === 'ai_limit_reached') {
+                setAiData({ analysis: data.message, upgrade_required: true });
+            } else if (res.ok) {
+                setAiData(data);
             } else {
                 setAiData({ analysis: 'API Fehler: ' + res.status });
             }
@@ -5973,8 +5978,17 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         if (!activeTicker) return;
         setAiLoading(true);
         try {
-            const res = await fetch(`${API}/api/ai-analysis?ticker=${activeTicker}`);
-            if (res.ok) { setAiData(await res.json()); } else { setAiData({ analysis: 'API Fehler: ' + res.status }); }
+            const token = localStorage.getItem('as_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            const res = await fetch(`${API}/api/ai-analysis?ticker=${activeTicker}`, { headers });
+            const data = await res.json();
+            if (data.error === 'ai_not_available' || data.error === 'ai_limit_reached') {
+                setAiData({ analysis: data.message, upgrade_required: true });
+            } else if (res.ok) {
+                setAiData(data);
+            } else {
+                setAiData({ analysis: 'API Fehler: ' + res.status });
+            }
         } catch (err) { setAiData({ analysis: 'Verbindungsfehler' }); }
         finally { setAiLoading(false); }
     };
