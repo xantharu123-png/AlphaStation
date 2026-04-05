@@ -33,9 +33,25 @@ from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from fastapi import FastAPI, BackgroundTasks, Query, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# V3.4: Auth & Subscription System
+try:
+    from modules.auth import (
+        register_user, login_user, verify_token, get_user_plan,
+        get_user_limits, check_tab_access, check_feature,
+        create_checkout_session, create_billing_portal,
+        handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
+        ADMIN_EMAILS, AUTH_DB_PATH,
+    )
+    HAS_AUTH = True
+except ImportError as _auth_err:
+    HAS_AUTH = False
+    print(f"[Warning] Auth module not loaded: {_auth_err}")
 import requests as req
 
 # Import scanner modules
@@ -46,6 +62,15 @@ from modules.scanners import (
     _biotech_cache_load,
     _bi_progress_read,
     _biotech_progress_read,
+    _autotrader_config_load,
+    _autotrader_config_save,
+    _autotrader_state_read,
+    _autotrader_state_write,
+    _autotrader_log,
+    _autotrader_request_stop,
+    _autotrader_is_market_hours,
+    autotrader_scan_once,
+    autotrader_background_loop,
 )
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily, fetch_daily_candles_crypto
@@ -166,11 +191,17 @@ def _load_secrets():
     return secrets
 
 _SECRETS = _load_secrets()
+
+# Fix: POLYGON_KEY aus secrets.toml laden falls env var leer
+if not POLYGON_KEY:
+    POLYGON_KEY = _SECRETS.get("POLYGON_KEY", "")
+
 _EMAIL_COOLDOWN = {}
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
 _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach Restart
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 
+print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (secrets.toml fehlt)'}")
 
 
@@ -243,6 +274,11 @@ def _check_and_alert(scanner_name, cache_file):
             ticker = r.get("ticker", r.get("Ticker", r.get("symbol", "")))
             grade = r.get("BI_Grade", r.get("Grade", r.get("grade", r.get("rating", ""))))
             score = r.get("BI_Score", r.get("Score", r.get("score", r.get("Alpha", 0))))
+            _rvol_raw = r.get("RVOL", r.get("rvol", None))
+            _rvol_check = _rvol_raw if _rvol_raw is not None else 0
+            # RVOL Guard: Grade S/A braucht min RVOL 0.7 — Sicherheitsnetz
+            if grade in ("S", "A", "A+") and _rvol_check < 0.7:
+                grade = "B"  # Downgrade — kein Alert
             if grade not in _alert_grades:
                 continue
             ck = f"{scanner_name}_{ticker}"
@@ -348,6 +384,7 @@ _BI_KEY_MAP = {
     "Entry": "entry", "StopLoss": "stop_loss", "TP1": "tp1", "TP2": "tp2",
     "RiskReward": "risk_reward", "RVOL": "rvol", "SmartMoney": "smart_money",
     "Volumen": "volume", "AvgVolumen": "avg_volume",
+    "MDR_Tag": "mdr_tag", "MDR_Bonus": "mdr_bonus",
 }
 _BIOTECH_KEY_MAP = {
     "Ticker": "ticker", "Name": "name", "Score": "score", "Grade": "grade",
@@ -513,7 +550,10 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         print(f"[Strategy Scan] {strategy_name}: Change {change_min}..{change_max}%, Preis ${price_min}..${price_max}")
 
         # Polygon Snapshot: Gainers + Losers
+        # V3.4: AH/PM Fallback — wenn Gainers/Losers leer, Full Snapshot mit lastTrade
         results = []
+        _all_snapshot_tickers = []
+        _strat_extended = False
         for endpoint in ["gainers", "losers"]:
             try:
                 url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
@@ -521,121 +561,184 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                 if resp.status_code != 200:
                     print(f"[Strategy Scan] {endpoint} API error: {resp.status_code}")
                     continue
-                tickers = resp.json().get("tickers", [])
-                for t in tickers:
-                    try:
-                        ticker = t.get("ticker", "")
-                        day = t.get("day", {})
-                        prev = t.get("prevDay", {})
-                        if not ticker or not prev.get("c"):
-                            continue
+                _all_snapshot_tickers.extend(resp.json().get("tickers", []))
+            except Exception as e:
+                print(f"[Strategy Scan] {endpoint} error: {e}")
 
+        # AH/PM Fallback: Wenn wenig Ergebnisse → Full Snapshot
+        if len(_all_snapshot_tickers) < 20:
+            print(f"[Strategy Scan] Nur {len(_all_snapshot_tickers)} Ticker — Extended Hours Modus")
+            _strat_extended = True
+            try:
+                _full_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+                _full_resp = rate_limited_get(_full_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                if _full_resp.status_code == 200:
+                    _full_all = _full_resp.json().get("tickers", [])
+                    # Filtere auf Ticker mit lastTrade und signifikantem AH Move
+                    for _ft in _full_all:
+                        _lt_p = _ft.get("lastTrade", {}).get("p", 0)
+                        _day_c = _ft.get("day", {}).get("c", 0)
+                        if _lt_p and _day_c and _day_c > 0:
+                            _ah_chg = abs((_lt_p - _day_c) / _day_c * 100)
+                            if _ah_chg >= 3:  # Min 3% AH Move
+                                _ft["_ext_price"] = _lt_p
+                                _ft["_ext_change"] = (_lt_p - _day_c) / _day_c * 100
+                                _all_snapshot_tickers.append(_ft)
+                    print(f"[Strategy Scan] Extended: {len(_all_snapshot_tickers)} Ticker total")
+            except Exception as _ext_err:
+                print(f"[Strategy Scan] Extended fetch failed: {_ext_err}")
+
+        for t in _all_snapshot_tickers:
+                try:
+                    ticker = t.get("ticker", "")
+                    day = t.get("day", {})
+                    prev = t.get("prevDay", {})
+                    if not ticker or not prev.get("c"):
+                        continue
+
+                    # V3.4: Extended Hours → AH/PM Preis nutzen
+                    if _strat_extended and t.get("_ext_price"):
+                        price = t["_ext_price"]
+                        prev_close = day.get("c", 0) or prev.get("c", 0)
+                        change_pct = t.get("_ext_change", 0)
+                    else:
                         price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
                         prev_close = prev.get("c", 0)
-                        if not price or not prev_close:
-                            continue
+                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+                    if not price or not prev_close:
+                        continue
 
-                        change_pct = ((price - prev_close) / prev_close * 100)
-                        volume = day.get("v", 0)
-                        prev_vol = prev.get("v", 1)
-                        rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
-                        dollar_vol = volume * price
+                    volume = day.get("v", 0)
+                    prev_vol = prev.get("v", 1)
+                    rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
+                    dollar_vol = volume * price
 
-                        # Close Position (wo im Tagesrange: 0=Low, 1=High)
-                        day_high = day.get("h", price)
-                        day_low = day.get("l", price)
-                        day_open = day.get("o", prev_close)
-                        day_range = day_high - day_low
-                        close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
+                    # Close Position (wo im Tagesrange: 0=Low, 1=High)
+                    day_high = day.get("h", price)
+                    day_low = day.get("l", price)
+                    day_open = day.get("o", prev_close)
+                    day_range = day_high - day_low
+                    close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
 
-                        # V2.2: Gap % = Open vs Previous Close
-                        gap_pct = ((day_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                    # V2.2: Gap % = Open vs Previous Close
+                    gap_pct = ((day_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
 
-                        # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
-                        prev_open = prev.get("o", prev_close)
-                        vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
+                    # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
+                    prev_open = prev.get("o", prev_close)
+                    vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
 
-                        # Filter anwenden
-                        if not (change_min <= change_pct <= change_max):
-                            continue
-                        if not (price_min <= price <= price_max):
-                            continue
-                        if "RVOL" in filters and not (rvol_min <= rvol <= rvol_max):
-                            continue
-                        if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
-                            continue
-                        if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
-                            continue
-                        if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
-                            continue
-                        if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
-                            continue
+                    # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
+                    # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
+                    # V3.4: Erweitert — auch extreme Tages-Moves (>30%) oder
+                    # Kombination aus starkem Vortag + starkem Heute erkennen
+                    _is_mdr = (vortag_pct > 10 and change_pct > 5) or (change_pct > 30 and close_pos > 0.6)
 
-                        # V2.2: Scoring für Strategie-Ergebnisse
-                        _strat_score = 0
-                        # Change-Stärke (0-30)
-                        _ac = abs(change_pct)
-                        if _ac >= 10: _strat_score += 30
-                        elif _ac >= 5: _strat_score += 20
-                        elif _ac >= 3: _strat_score += 12
-                        else: _strat_score += 5
-                        # RVOL (0-25)
-                        if rvol >= 3.0: _strat_score += 25
-                        elif rvol >= 2.0: _strat_score += 18
-                        elif rvol >= 1.5: _strat_score += 12
-                        elif rvol >= 1.0: _strat_score += 6
-                        # Close Position (0-15)
-                        if "Change %" in filters:
-                            _cm, _ = filters["Change %"]
-                            if _cm >= 0:  # Bullish: Close near High = gut
-                                if close_pos >= 0.8: _strat_score += 15
-                                elif close_pos >= 0.6: _strat_score += 10
-                            else:  # Bearish: Close near Low = gut
-                                if close_pos <= 0.2: _strat_score += 15
-                                elif close_pos <= 0.4: _strat_score += 10
-                        # Dollar Volume (0-15)
-                        if dollar_vol >= 10_000_000: _strat_score += 15
-                        elif dollar_vol >= 5_000_000: _strat_score += 10
-                        elif dollar_vol >= 1_000_000: _strat_score += 6
-                        # Gap-Qualität (0-15)
-                        _ag = abs(gap_pct)
-                        if _ag >= 5: _strat_score += 12
-                        elif _ag >= 2: _strat_score += 15  # Sweet spot
-                        elif _ag >= 1: _strat_score += 8
-                        # Grade
+                    # Filter anwenden
+                    if not (change_min <= change_pct <= change_max):
+                        continue
+                    if not (price_min <= price <= price_max):
+                        continue
+                    if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
+                        continue
+                    if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                        continue
+                    if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
+                        continue
+                    if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
+                        continue
+                    if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
+                        continue
+
+                    # V2.2: Scoring für Strategie-Ergebnisse
+                    _strat_score = 0
+                    # Change-Stärke (0-30)
+                    _ac = abs(change_pct)
+                    if _ac >= 10: _strat_score += 30
+                    elif _ac >= 5: _strat_score += 20
+                    elif _ac >= 3: _strat_score += 12
+                    else: _strat_score += 5
+                    # RVOL (0-25)
+                    if rvol >= 3.0: _strat_score += 25
+                    elif rvol >= 2.0: _strat_score += 18
+                    elif rvol >= 1.5: _strat_score += 12
+                    elif rvol >= 1.0: _strat_score += 6
+                    # Close Position (0-15)
+                    if "Change %" in filters:
+                        _cm, _ = filters["Change %"]
+                        if _cm >= 0:  # Bullish: Close near High = gut
+                            if close_pos >= 0.8: _strat_score += 15
+                            elif close_pos >= 0.6: _strat_score += 10
+                        else:  # Bearish: Close near Low = gut
+                            if close_pos <= 0.2: _strat_score += 15
+                            elif close_pos <= 0.4: _strat_score += 10
+                    # Dollar Volume (0-15)
+                    if dollar_vol >= 10_000_000: _strat_score += 15
+                    elif dollar_vol >= 5_000_000: _strat_score += 10
+                    elif dollar_vol >= 1_000_000: _strat_score += 6
+                    # Gap-Qualität (0-15)
+                    _ag = abs(gap_pct)
+                    if _ag >= 5: _strat_score += 12
+                    elif _ag >= 2: _strat_score += 15  # Sweet spot
+                    elif _ag >= 1: _strat_score += 8
+                    # Grade
+                    if _strat_score >= 75: _strat_grade = "S"
+                    elif _strat_score >= 60: _strat_grade = "A"
+                    elif _strat_score >= 45: _strat_grade = "B"
+                    elif _strat_score >= 30: _strat_grade = "C"
+                    else: _strat_grade = "D"
+
+                    # V3.2: MDR-Tag für Multi-Day Runner
+                    _mdr_label = None
+                    if _is_mdr:
+                        # V3.3: Distribution-Check — sinkende RVOL + Fading = Crash-Risiko
+                        _mdr_fading = rvol < 0.8 and close_pos < 0.5  # RVOL sinkt + Preis faded
+                        _mdr_exhaustion = rvol < 0.5  # Volume kollabiert = Käufer weg
+
+                        if _mdr_fading or _mdr_exhaustion:
+                            _mdr_label = "MDR CRASH-RISIKO"
+                            _strat_score -= 10  # Malus statt Bonus
+                        elif vortag_pct > 30 and change_pct > 15:
+                            _mdr_label = "MDR ELITE"
+                            _strat_score += 15
+                        elif vortag_pct > 15 and change_pct > 8:
+                            _mdr_label = "MDR STARK"
+                            _strat_score += 10
+                        else:
+                            _mdr_label = "MDR"
+                            _strat_score += 5
+                        # Re-grade nach Bonus
                         if _strat_score >= 75: _strat_grade = "S"
                         elif _strat_score >= 60: _strat_grade = "A"
                         elif _strat_score >= 45: _strat_grade = "B"
                         elif _strat_score >= 30: _strat_grade = "C"
                         else: _strat_grade = "D"
 
-                        results.append({
-                            "Ticker": ticker,
-                            "ticker": ticker,
-                            "Preis": round(price, 2),
-                            "price": round(price, 2),
-                            "Change_Pct": round(change_pct, 2),
-                            "change_pct": round(change_pct, 2),
-                            "Volume": volume,
-                            "volume": volume,
-                            "RVOL": rvol,
-                            "rvol": rvol,
-                            "Dollar_Volume": round(dollar_vol),
-                            "Prev_Close": round(prev_close, 2),
-                            "Day_Open": round(day_open, 2),
-                            "Day_High": round(day_high, 2),
-                            "Day_Low": round(day_low, 2),
-                            "Close_Position": round(close_pos, 2),
-                            "Gap_Pct": round(gap_pct, 2),
-                            "gap_pct": round(gap_pct, 2),
-                            "Vortag_Pct": round(vortag_pct, 2),
-                            "score": _strat_score,
-                            "grade": _strat_grade,
-                        })
-                    except Exception:
-                        continue
-            except Exception as e:
-                print(f"[Strategy Scan] {endpoint} error: {e}")
+                    results.append({
+                        "Ticker": ticker,
+                        "ticker": ticker,
+                        "Preis": round(price, 2),
+                        "price": round(price, 2),
+                        "Change_Pct": round(change_pct, 2),
+                        "change_pct": round(change_pct, 2),
+                        "Volume": volume,
+                        "volume": volume,
+                        "RVOL": rvol,
+                        "rvol": rvol,
+                        "Dollar_Volume": round(dollar_vol),
+                        "Prev_Close": round(prev_close, 2),
+                        "Day_Open": round(day_open, 2),
+                        "Day_High": round(day_high, 2),
+                        "Day_Low": round(day_low, 2),
+                        "Close_Position": round(close_pos, 2),
+                        "Gap_Pct": round(gap_pct, 2),
+                        "gap_pct": round(gap_pct, 2),
+                        "Vortag_Pct": round(vortag_pct, 2),
+                        "score": _strat_score,
+                        "grade": _strat_grade,
+                        "mdr_tag": _mdr_label,
+                    })
+                except Exception:
+                    continue
 
         # Sortieren nach |Change%| absteigend
         results.sort(key=lambda x: abs(x.get("Change_Pct", 0)), reverse=True)
@@ -730,27 +833,73 @@ def _bear_scan_wrapper() -> None:
         result["inverse_etfs"].sort(key=lambda x: x.get("change_5d", 0), reverse=True)
 
         # --- Section 2: Breakdown stocks V2.2 — mit Score/Grade System ---
+        # V3.4 FIX: AH/PM-fähig — Full Snapshot nutzen wenn Losers-Endpoint leer (AH/PM)
         try:
             snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
             snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
 
             losers = []
+            _raw_tickers = []
+            _is_extended_hours = False
             if snap_resp.status_code == 200:
-                tickers = snap_resp.json().get("tickers", [])
-                print(f"[Bear] Losers endpoint returned {len(tickers)} tickers")
+                _raw_tickers = snap_resp.json().get("tickers", [])
+
+            # V3.4: Wenn Losers-Endpoint wenig/keine Ergebnisse → Extended Hours
+            # Full Snapshot holen und lastTrade vs day.close vergleichen
+            if len(_raw_tickers) < 10:
+                print(f"[Bear] Losers endpoint nur {len(_raw_tickers)} Ticker — Extended Hours Modus")
+                _is_extended_hours = True
+                try:
+                    _full_snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+                    _full_resp = rate_limited_get(_full_snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                    if _full_resp.status_code == 200:
+                        _all = _full_resp.json().get("tickers", [])
+                        # Finde AH/PM Losers: lastTrade.p vs day.c (Regular Close)
+                        _ah_losers = []
+                        for _t in _all:
+                            try:
+                                _lt = _t.get("lastTrade", {}).get("p", 0)
+                                _dc = _t.get("day", {}).get("c", 0)
+                                if not _lt or not _dc or _dc <= 0:
+                                    continue
+                                _ah_chg = ((_lt - _dc) / _dc) * 100
+                                # V3.4: Min $3 Preis + Min $50k Dollar-Volume AH
+                                _ah_vol = _t.get("day", {}).get("v", 0)
+                                _ah_dv = _lt * _ah_vol if _ah_vol else 0
+                                if _ah_chg < -3 and _lt >= 3 and _ah_dv >= 50_000:
+                                    _t["_ah_change_pct"] = _ah_chg
+                                    _t["_ah_price"] = _lt
+                                    _ah_losers.append(_t)
+                            except Exception:
+                                continue
+                        _ah_losers.sort(key=lambda x: x.get("_ah_change_pct", 0))
+                        _raw_tickers = _ah_losers[:250]
+                        print(f"[Bear] Extended Hours: {len(_raw_tickers)} AH/PM Losers gefunden")
+                except Exception as _ext_err:
+                    print(f"[Bear] Extended Hours fetch failed: {_ext_err}")
+
+            if _raw_tickers:
+                tickers = _raw_tickers
+                print(f"[Bear] Processing {len(tickers)} tickers (extended={_is_extended_hours})")
                 for t in tickers:
                     try:
                         day = t.get("day", {})
                         prev = t.get("prevDay", {})
-                        price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                        prev_close = prev.get("c", 0)
+                        # V3.4: Bei Extended Hours → AH-Preis und AH-Change nutzen
+                        if _is_extended_hours and t.get("_ah_price"):
+                            price = t["_ah_price"]
+                            prev_close = day.get("c", 0) or prev.get("c", 0)  # Vergleich vs Regular Close
+                            chg_pct = t.get("_ah_change_pct", 0)
+                        else:
+                            price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+                            prev_close = prev.get("c", 0)
+                            chg_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
                         if not price or not prev_close or price < 3:
                             continue
                         vol = day.get("v", 0)
                         dollar_vol = price * vol
-                        if dollar_vol < 300_000:
+                        if dollar_vol < 300_000 and not _is_extended_hours:
                             continue
-                        chg_pct = ((price - prev_close) / prev_close) * 100
                         if chg_pct > -3:
                             continue
 
@@ -829,6 +978,8 @@ def _bear_scan_wrapper() -> None:
                             score_details.append(f"RVOL {rvol:.1f}x (schwach)")
 
                         # 3. MA20 Trend (0-20): Unter MA20 = bestätigter Downtrend
+                        # V3.4 FIX: Kein Abzug mehr wenn über MA20 — bei frischen Breakdowns
+                        # ist der Preis oft noch über MA20 (gerade erst gedroppt)
                         if ma20_dist < -10:
                             score += 20; score_details.append(f"MA20 {ma20_dist:.1f}% (weit darunter)")
                         elif ma20_dist < -5:
@@ -837,9 +988,10 @@ def _bear_scan_wrapper() -> None:
                             score += 10; score_details.append(f"MA20 {ma20_dist:.1f}%")
                         elif ma20_dist < 0:
                             score += 5
-                        # Über MA20 = gegen den Trend → Abzug
+                        elif ma20_dist < 5:
+                            score += 0; score_details.append(f"Knapp über MA20 ({ma20_dist:+.1f}%)")
                         else:
-                            score -= 5; score_details.append(f"Über MA20 ({ma20_dist:+.1f}%)")
+                            score_details.append(f"Weit über MA20 ({ma20_dist:+.1f}%) — Vorsicht")
 
                         # 4. MA50 Trend (0-15)
                         if ma50_dist < -10:
@@ -867,14 +1019,14 @@ def _bear_scan_wrapper() -> None:
                         elif price > 200:
                             score += 7  # Teuer aber shortbar
 
-                        # ── Grade ──
-                        if score >= 80:
+                        # ── Grade (V3.4: Recalibriert — vorher war S/A fast unerreichbar) ──
+                        if score >= 70:
                             grade = "S"
-                        elif score >= 65:
+                        elif score >= 55:
                             grade = "A"
-                        elif score >= 50:
+                        elif score >= 40:
                             grade = "B"
-                        elif score >= 35:
+                        elif score >= 25:
                             grade = "C"
                         else:
                             grade = "D"
@@ -1309,6 +1461,210 @@ app.add_middleware(
 )
 
 
+# ── Serve Frontend (index.html) ──
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    """Serve the React frontend."""
+    frontend_path = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
+    if os.path.exists(frontend_path):
+        with open(frontend_path, "r") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Alpha Station</h1><p>Frontend not found</p>", status_code=404)
+
+
+# ══════════════════════════════════════════════════════════════
+# V3.4: AUTH & SUBSCRIPTION ENDPOINTS
+# ══════════════════════════════════════════════════════════════
+
+def _get_token_from_header(authorization: str = Header(None)) -> Optional[str]:
+    """Extract JWT token from Authorization header."""
+    if not authorization:
+        return None
+    if authorization.startswith("Bearer "):
+        return authorization[7:]
+    return authorization
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class CheckoutRequest(BaseModel):
+    plan: str  # basic, pro, elite
+
+
+class BillingPortalRequest(BaseModel):
+    return_url: str = ""
+
+
+# ── Admin Models ──
+class PlanUpdateRequest(BaseModel):
+    plan: str
+
+
+class CouponCreateRequest(BaseModel):
+    code: str
+    plan: str
+    duration_days: int
+    max_uses: int
+    description: str = ""
+
+
+class CouponToggleRequest(BaseModel):
+    pass
+
+
+class RedeemCouponRequest(BaseModel):
+    code: str
+
+
+class TicketCreateRequest(BaseModel):
+    subject: str
+    message: str
+
+
+class TicketReplyRequest(BaseModel):
+    message: str
+
+
+class TicketStatusRequest(BaseModel):
+    status: str
+
+
+@app.post("/api/auth/register")
+async def api_register(req_body: RegisterRequest):
+    """Register a new user account."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    result = register_user(req_body.email, req_body.password, req_body.name)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.post("/api/auth/login")
+async def api_login(req_body: LoginRequest):
+    """Login with email + password. Returns JWT token."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    result = login_user(req_body.email, req_body.password)
+    if not result["success"]:
+        raise HTTPException(status_code=401, detail=result["message"])
+    return result
+
+
+@app.get("/api/auth/me")
+async def api_get_me(authorization: str = Header(None)):
+    """Get current user info + plan limits from JWT token."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    limits = get_user_limits(token)
+    # Load full user data from DB
+    email = payload.get("email", "")
+    from modules.auth import _load_users
+    db = _load_users()
+    db_user = db.get("users", {}).get(email, {})
+    return {
+        "user": {
+            "id": payload.get("sub"),
+            "email": email,
+            "name": db_user.get("name", ""),
+            "plan": limits.get("plan", "free"),
+            "stripe_customer_id": db_user.get("stripe_customer_id"),
+            "trial_ends_at": db_user.get("trial_ends_at"),
+            "is_admin": limits.get("is_admin", False),
+        },
+        "limits": limits,
+    }
+
+
+@app.get("/api/auth/plans")
+async def api_get_plans():
+    """Get available plans and pricing."""
+    return {
+        "plans": [
+            {"id": "basic", "name": "Basic", "price": 29, "interval": "month",
+             "features": ["4 Scanner Tabs", "Scan alle 30min", "30 Ticker-Details/Stunde"]},
+            {"id": "pro", "name": "Pro", "price": 79, "interval": "month",
+             "features": ["Alle Scanner", "Echtzeit Scans", "Volle Sidebar-Analyse", "Email Alerts", "Trade Setups"],
+             "popular": True},
+            {"id": "elite", "name": "Elite", "price": 149, "interval": "month",
+             "features": ["Alles aus Pro", "ORB Scanner", "Backtesting", "API Access", "Priority Support"]},
+        ]
+    }
+
+
+@app.post("/api/auth/checkout")
+async def api_create_checkout(req_body: CheckoutRequest, authorization: str = Header(None)):
+    """Create Stripe checkout session for subscription."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Login required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    email = payload.get("email")
+    base_url = "http://178.104.69.209:3000"
+    checkout_url = create_checkout_session(
+        email=email,
+        plan=req_body.plan,
+        success_url=f"{base_url}?checkout=success&plan={req_body.plan}",
+        cancel_url=f"{base_url}?checkout=cancel",
+    )
+    if not checkout_url:
+        raise HTTPException(status_code=500, detail="Could not create checkout session. Check Stripe configuration.")
+    return {"url": checkout_url}
+
+
+@app.post("/api/auth/billing-portal")
+async def api_billing_portal(req_body: BillingPortalRequest, authorization: str = Header(None)):
+    """Create Stripe billing portal session for subscription management."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Login required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    email = payload.get("email")
+    return_url = req_body.return_url or "http://178.104.69.209:3000"
+    portal_url = create_billing_portal(email, return_url)
+    if not portal_url:
+        raise HTTPException(status_code=500, detail="Could not create billing portal")
+    return {"url": portal_url}
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events (subscription changes, payments)."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    result = handle_stripe_webhook(payload, sig_header)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Webhook error"))
+    return {"status": "ok"}
+
+
 # ── Endpoints ──
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -1324,6 +1680,22 @@ def get_health():
             "ANTHROPIC_API_KEY": bool(ANTHROPIC_API_KEY),
         },
     )
+
+@app.get("/api/debug-keys")
+def debug_keys():
+    """Temp debug: zeigt ob secrets.toml geladen wird."""
+    import pathlib
+    p1 = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    p2 = Path.home() / ".streamlit" / "secrets.toml"
+    return {
+        "polygon_key_len": len(POLYGON_KEY),
+        "polygon_key_first4": POLYGON_KEY[:4] if POLYGON_KEY else "LEER",
+        "secrets_loaded_keys": list(_SECRETS.keys()),
+        "path1_exists": p1.exists(),
+        "path1": str(p1),
+        "path2_exists": p2.exists(),
+        "path2": str(p2),
+    }
 
 
 @app.post("/api/test-email")
@@ -1394,6 +1766,41 @@ def get_scan_status():
         "scans": scans_copy,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.get("/api/ticker-search")
+def search_tickers(q: str = Query(..., description="Search query (ticker or company name)")):
+    """Search tickers by symbol or company name via Polygon.io."""
+    try:
+        q = q.strip().upper()
+        if not q:
+            return {"results": []}
+        # Polygon Ticker Search API
+        url = "https://api.polygon.io/v3/reference/tickers"
+        resp = rate_limited_get(url, params={
+            "apiKey": POLYGON_KEY,
+            "search": q,
+            "active": "true",
+            "limit": 15,
+            "order": "asc",
+            "sort": "ticker",
+        })
+        if resp.status_code != 200:
+            return {"results": []}
+        data = resp.json().get("results", [])
+        results = []
+        for t in data:
+            ticker = t.get("ticker", "")
+            results.append({
+                "ticker": ticker,
+                "name": t.get("name", ""),
+                "market": t.get("market", ""),
+                "type": t.get("type", ""),
+                "locale": t.get("locale", ""),
+            })
+        return {"results": results}
+    except Exception as e:
+        return {"results": []}
 
 
 @app.get("/api/ticker-detail")
@@ -1482,18 +1889,19 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         ema100 = calculate_ema(closes, 100)
         ema200 = calculate_ema(closes, 200)
 
-        # 2. VWAP (cumulative over all available bars)
+        # 2. VWAP (V3.4 FIX: nur heutiger Tag, nicht kumulativ über alle Bars)
+        # TradingView resettet VWAP täglich um Market Open
         vwap = None
-        if len(bars) >= 5:
-            cum_tp_vol = 0
-            cum_vol = 0
-            for b in reversed(bars):  # chronological order
-                tp = (b["h"] + b["l"] + b["c"]) / 3
-                vol = b.get("v", 0)
-                cum_tp_vol += tp * vol
-                cum_vol += vol
-            if cum_vol > 0:
-                vwap = round(cum_tp_vol / cum_vol, 2)
+        if len(bars) >= 2:
+            # bars[0] = heute (newest), nur heutigen Bar für Intraday-VWAP
+            # Bei Daily-Bars: VWAP = Typical Price des heutigen Tages
+            today_bar = bars[0]
+            tp_today = (today_bar["h"] + today_bar["l"] + today_bar["c"]) / 3
+            vol_today = today_bar.get("v", 0)
+            if vol_today > 0:
+                vwap = round(tp_today, 2)
+            else:
+                vwap = round(tp_today, 2)
 
         # 3. MACD (optimized: calculate EMA series once, then derive MACD line)
         ema12 = calculate_ema(closes, 12)
@@ -1541,17 +1949,27 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                 level_price = low_20 + range_fib * ratio
                 fib_levels[f"{int(ratio*100)}%"] = round(level_price, 2)
 
-        # 6. ATR (Average True Range, 14-period)
+        # 6. ATR (Average True Range, 14-period, Wilder's Smoothing)
+        # V3.4 FIX: Vorher simpler Durchschnitt, jetzt korrekt Wilder's wie TradingView
         atr = None
         if len(bars) >= 15:
+            # bars sind DESCENDING → reversed = chronologisch
+            chron_highs = list(reversed(highs[:60]))
+            chron_lows = list(reversed(lows[:60]))
+            chron_closes = list(reversed(closes[:60]))
             tr_values = []
-            for i in range(14):
-                high_i = highs[i]
-                low_i = lows[i]
-                prev_close_i = closes[i + 1] if i < len(closes) - 1 else closes[i]
-                tr = max(high_i - low_i, abs(high_i - prev_close_i), abs(low_i - prev_close_i))
+            for i in range(1, len(chron_highs)):
+                h = chron_highs[i]
+                l = chron_lows[i]
+                pc = chron_closes[i - 1]
+                tr = max(h - l, abs(h - pc), abs(l - pc))
                 tr_values.append(tr)
-            atr = round(sum(tr_values) / 14, 2)
+            if len(tr_values) >= 14:
+                # Wilder's: Seed mit SMA der ersten 14 TRs, dann smoothen
+                atr_val = sum(tr_values[:14]) / 14
+                for tr in tr_values[14:]:
+                    atr_val = (atr_val * 13 + tr) / 14
+                atr = round(atr_val, 2)
 
         # 7. Signal Scoring (10-factor system)
         signals = []
@@ -1688,12 +2106,14 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         }
 
         # 9. Trade Setup — ATR-based, uses confluence direction
+        # V3.0: Auch für Grade B anzeigen (war vorher nur S/A)
         trade_setup = None
-        if signal_grade in ['S', 'A'] and confluence_direction != "NEUTRAL":
+        if signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
             if confluence_direction == "LONG":
                 entry = round(close, 2)
-                atr_stop = atr * 2 if atr else (close * 0.03)
-                stop = round(max(support_1, close - atr_stop), 2)
+                atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                _sup = support_1 if (support_1 and support_1 > 0) else (close * 0.97)
+                stop = round(max(_sup, close - atr_stop), 2)
                 risk = entry - stop
                 if risk > 0:
                     tp1 = round(entry + risk, 2)
@@ -1706,8 +2126,9 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                     }
             else:  # SHORT
                 entry = round(close, 2)
-                atr_stop = atr * 2 if atr else (close * 0.03)
-                stop = round(min(resist_1, close + atr_stop), 2)
+                atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                _res = resist_1 if (resist_1 and resist_1 > 0) else (close * 1.03)
+                stop = round(min(_res, close + atr_stop), 2)
                 risk = stop - entry
                 if risk > 0:
                     tp1 = round(entry - risk, 2)
@@ -1773,6 +2194,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                                 "tp1": item.get("tp1"),
                                 "tp2": item.get("tp2"),
                                 "risk_reward": item.get("risk_reward"),
+                                "rvol": item.get("rvol"),
                             }
                             break
                 if bi_scanner:
@@ -1782,12 +2204,23 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
 
         # Wenn BI Scanner Daten vorhanden → überschreibe signal_grade/score/confluence
         if bi_scanner:
-            signal_grade = bi_scanner["grade"] or signal_grade
+            _bi_grade = bi_scanner["grade"] or signal_grade
+            # RVOL Guard: Auch hier anwenden (nicht nur im List-Endpoint)
+            _bi_rvol = bi_scanner.get("rvol") if bi_scanner.get("rvol") is not None else (rvol if rvol is not None else 0)
+            if _bi_rvol < 0.7 and _bi_grade in ("S", "A", "A+"):
+                _bi_grade = "B"
+                bi_scanner["grade"] = "B"
+                bi_scanner["grade_label"] = "B — SOLIDE (RVOL zu niedrig)"
+            elif _bi_rvol < 0.5 and _bi_grade == "B":
+                _bi_grade = "C"
+                bi_scanner["grade"] = "C"
+                bi_scanner["grade_label"] = "C — WATCH (RVOL zu niedrig)"
+            signal_grade = _bi_grade
             score = bi_scanner["score"] if bi_scanner["score"] is not None else score
             confluence_direction = bi_scanner["direction"]
             confluence = {**confluence, "direction": confluence_direction}
             # Trade Setup vom BI Scanner übernehmen wenn vorhanden
-            if bi_scanner.get("entry") and bi_scanner.get("stop_loss"):
+            if bi_scanner.get("entry") is not None and bi_scanner.get("stop_loss") is not None:
                 trade_setup = {
                     "entry": bi_scanner["entry"],
                     "stop": bi_scanner["stop_loss"],
@@ -1796,6 +2229,55 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                     "rr": bi_scanner.get("risk_reward"),
                     "direction": bi_scanner["direction"],
                 }
+            # V3.1: Trade Setup generieren falls BI Scanner keins hat aber Grade S/A/B
+            elif not trade_setup and signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
+                if confluence_direction == "LONG":
+                    _entry = round(close, 2)
+                    _atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                    _sup = support_1 if (support_1 and support_1 > 0) else (close * 0.97)
+                    _stop = round(max(_sup, close - _atr_stop), 2)
+                    _risk = _entry - _stop
+                    if _risk > 0:
+                        _tp1 = round(_entry + _risk, 2)
+                        _tp2 = round(_entry + _risk * 1.618, 2)
+                        trade_setup = {
+                            "entry": _entry, "stop": _stop,
+                            "tp1": _tp1, "tp2": _tp2,
+                            "rr": round((_tp1 - _entry) / _risk, 2),
+                            "direction": "LONG"
+                        }
+                else:  # SHORT
+                    _entry = round(close, 2)
+                    _atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
+                    _res = resist_1 if (resist_1 and resist_1 > 0) else (close * 1.03)
+                    _stop = round(min(_res, close + _atr_stop), 2)
+                    _risk = _stop - _entry
+                    if _risk > 0:
+                        _tp1 = round(_entry - _risk, 2)
+                        _tp2 = round(_entry - _risk * 1.618, 2)
+                        trade_setup = {
+                            "entry": _entry, "stop": _stop,
+                            "tp1": _tp1, "tp2": _tp2,
+                            "rr": round((_entry - _tp1) / _risk, 2),
+                            "direction": "SHORT"
+                        }
+
+        # V3.2: Extension-Score — wie weit ist Preis von MA20/VWAP entfernt
+        ext_ma20 = round((close - ma20) / ma20 * 100, 1) if (ma20 and ma20 > 0) else None
+        ext_vwap = round((close - vwap) / vwap * 100, 1) if (vwap and vwap > 0) else None
+        _ext_max = max(abs(ext_ma20 or 0), abs(ext_vwap or 0))
+        if _ext_max >= 50:
+            ext_warning = "EXTREM überextended — kein Entry"
+            ext_level = "extreme"
+        elif _ext_max >= 30:
+            ext_warning = "Stark überextended — hohes Risiko"
+            ext_level = "high"
+        elif _ext_max >= 15:
+            ext_warning = "Moderat extended — Pullback möglich"
+            ext_level = "moderate"
+        else:
+            ext_warning = None
+            ext_level = "normal"
 
         return {
             "ticker": ticker, "price": round(close, 2), "open": round(opn, 2),
@@ -1809,6 +2291,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             # New fields
             "ema9": ema9, "ema20": ema20, "ema50": ema50, "ema100": ema100, "ema200": ema200,
             "vwap": vwap,
+            "ext_ma20": ext_ma20, "ext_vwap": ext_vwap, "ext_warning": ext_warning, "ext_level": ext_level,
             "macd": macd, "macd_signal": macd_signal, "macd_histogram": macd_histogram,
             "bb_upper": bb_upper, "bb_lower": bb_lower,
             "fib_levels": fib_levels,
@@ -1869,13 +2352,22 @@ def get_chart_data(
                         print(f"[Warning] Error calculating EMA{period}: {e}")
             result["ema"] = ema_overlays
 
-        # VWAP (cumulative per-bar)
+        # VWAP (V3.4 FIX: Daily Reset wie TradingView — VWAP startet jeden Tag neu)
         if "vwap" in overlay_list and len(ohlcv) >= 10:
             try:
                 vwap_data = []
                 cum_tp_vol = 0
                 cum_vol = 0
+                prev_date = None
                 for bar in ohlcv:
+                    # Tageswechsel erkennen → VWAP reset
+                    from datetime import datetime as _dt
+                    bar_date = _dt.utcfromtimestamp(bar["time"]).strftime("%Y-%m-%d")
+                    if prev_date is not None and bar_date != prev_date:
+                        cum_tp_vol = 0
+                        cum_vol = 0
+                    prev_date = bar_date
+
                     tp = (bar["high"] + bar["low"] + bar["close"]) / 3
                     vol = bar.get("volume", 0)
                     cum_tp_vol += tp * vol
@@ -1991,11 +2483,13 @@ def get_chart_data(
                 # find_pivots needs {date, high, low, close}
                 patterns_result = {}
 
-                # Harmonic patterns
+                # Harmonic patterns (V3.4: Score >= 30 Filter — niedrige Scores sind Noise)
                 try:
                     harmonics = find_harmonic_for_chart(ohlcv)
                     if harmonics:
-                        patterns_result["harmonic"] = harmonics[:3]
+                        harmonics = [h for h in harmonics if (h.get("score") or 0) >= 30]
+                        if harmonics:
+                            patterns_result["harmonic"] = harmonics[:3]
                 except Exception as e:
                     print(f"Harmonic error: {e}")
 
@@ -2455,6 +2949,19 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
     cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
     results, cached_at = load_cache_file(cache_file)
     results = _normalize_keys(results, _BI_KEY_MAP)
+
+    # RVOL Guard: Korrigiere Grades bei Auslieferung (Sicherheitsnetz)
+    for r in results:
+        if isinstance(r, dict):
+            _rv_raw = r.get("rvol", r.get("RVOL", None))
+            _rv = _rv_raw if _rv_raw is not None else 0
+            _gr = r.get("grade", r.get("BI_Grade", ""))
+            if _rv < 0.7 and _gr in ("S", "A", "A+"):
+                r["grade"] = "B"
+                r["grade_label"] = "B — SOLIDE (RVOL zu niedrig)"
+            elif _rv < 0.5 and _gr == "B":
+                r["grade"] = "C"
+                r["grade_label"] = "C — WATCH (RVOL zu niedrig)"
 
     cache_age = None
     if cached_at:
@@ -3499,17 +4006,21 @@ def _new_listing_wrapper() -> None:
         return
 
     try:
-        Path("/opt/tradingbot/data_cache").mkdir(parents=True, exist_ok=True)
+        # Korrekter Cache-Pfad = gleich wie im Modul (relativ zu app/)
+        from pathlib import Path as _P
+        _data_dir = _P(__file__).parent / "data_cache"
+        _data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Detect new listings
+        # Detect new listings (mit First-Run-Seed + Timestamp-Filter)
         new_listings, all_perps = detect_new_listings()
         if not new_listings:
             print("[New Listing] No new listings detected")
             save_cache_file(NEW_LISTING_CACHE, [])
             return
 
+        print(f"[New Listing] {len(new_listings)} neue Listings erkannt, verarbeite max 30...")
         results = []
-        for listing in new_listings[:20]:  # Limit to 20
+        for listing in new_listings[:30]:  # Limit to 30
             try:
                 # listing can be a dict or string — normalize
                 if isinstance(listing, str):
@@ -3528,7 +4039,6 @@ def _new_listing_wrapper() -> None:
                     display_symbol = symbol
 
                 # Use ORIGINAL symbol for API calls — each exchange needs its own format!
-                # MEXC: AAVE_USDT, Bitget: AAVEUSDT, Crypto.com: AAVEUSD-PERP
                 ticker_data = fetch_ticker_for(symbol, exchange)
                 if not ticker_data:
                     print(f"[New Listing] No ticker for {symbol} ({exchange}), skipping")
@@ -3537,13 +4047,25 @@ def _new_listing_wrapper() -> None:
                 # Fetch candles with original symbol
                 candles = fetch_candles_for(symbol, exchange)
 
-                # Fetch orderbook (only crypto.com, use original symbol)
+                # Fetch orderbook (only crypto.com)
                 orderbook = fetch_cryptocom_orderbook(symbol) if exchange == "crypto.com" else None
 
-                # Calculate exhaustion
+                # Calculate exhaustion (ticker als 2. param, nicht symbol!)
                 exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
-                    candles or [], symbol, orderbook
+                    candles or [], ticker_data, orderbook
                 )
+
+                # Listing-Datum ermitteln (aus Exchange-Daten)
+                listing_date = None
+                if isinstance(listing, dict):
+                    lt = listing.get("launch_time") or listing.get("create_time", 0)
+                    if lt and int(lt) > 0:
+                        try:
+                            listing_date = datetime.fromtimestamp(
+                                int(lt) / 1000, tz=timezone.utc
+                            ).strftime('%Y-%m-%d %H:%M')
+                        except Exception:
+                            pass
 
                 results.append({
                     "symbol": display_symbol,
@@ -3552,21 +4074,28 @@ def _new_listing_wrapper() -> None:
                     "price": ticker_data.get("price", 0),
                     "change_24h": ticker_data.get("change_24h", 0),
                     "volume_24h": ticker_data.get("volume_24h", 0),
+                    "volume_usd_24h": ticker_data.get("volume_usd_24h", 0),
                     "market_cap": ticker_data.get("market_cap", 0),
                     "exhaustion_score": exhaustion_score,
                     "exhaustion_details": exhaustion_details,
                     "pump_data": pump_data,
-                    "listing_date": listing.get("listing_date") if isinstance(listing, dict) else None,
-                    "time_since_listing_hours": listing.get("time_since_listing_hours") if isinstance(listing, dict) else None,
+                    "listing_date": listing_date,
+                    "is_new_flag": listing.get("is_new", False) if isinstance(listing, dict) else False,
                 })
+                import time as _t
+                _t.sleep(0.3)  # Rate limiting
             except Exception as e:
                 print(f"[New Listing] Error processing {listing if isinstance(listing, str) else listing.get('symbol', 'unknown')}: {e}")
+                import traceback as _tb
+                _tb.print_exc()
                 continue
 
         save_cache_file(NEW_LISTING_CACHE, results)
-        print(f"[New Listing] Processed {len(results)} new listings")
+        print(f"[New Listing] Processed {len(results)} new listings successfully")
     except Exception as e:
         print(f"New listing wrapper error: {e}")
+        import traceback as _tb
+        _tb.print_exc()
 
 
 @app.post("/api/new-listing-scan")
@@ -3718,9 +4247,15 @@ def _orb_scanner_wrapper() -> None:
         time_val = hour * 60 + minute
         weekday = now_et.weekday()
 
-        # Nur während ORB-Fenster: 9:45-11:00 ET, Mo-Fr
-        if weekday >= 5 or time_val < 585 or time_val >= 660:
+        # ORB-Fenster: 9:45-16:00 ET, Mo-Fr (erweitert bis Market Close für Scans nach Fenster)
+        # Automatischer Scheduler läuft nur 9:45-11:00, aber manueller Scan erlaubt bis 16:00
+        if weekday >= 5 or time_val < 585 or time_val >= 960:
             print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {'Mo-Fr' if weekday < 5 else 'Wochenende'}) — übersprungen")
+            # Trotzdem Cache mit Phase-Info speichern, damit Frontend Feedback gibt
+            _phase = "weekend" if weekday >= 5 else "pre_open" if time_val < 585 else "expired"
+            save_cache_file(ORB_CACHE, [{"breakouts": [], "failed_breakouts": [], "candidates": [],
+                "stats": {"scanned": 0, "candidates": 0, "breakouts": 0, "failed": 0},
+                "or_phase": _phase, "market_time": now_et.strftime("%H:%M ET")}])
             return
 
         print(f"[ORB] Scanner V2 gestartet ({now_et.strftime('%H:%M')} ET)...")
@@ -3843,24 +4378,30 @@ def _orb_scanner_wrapper() -> None:
         breakouts = []
         failed_breakouts = []
 
+        # V3.0 Debug-Counters: Wo gehen Kandidaten verloren?
+        _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0}
+
         for cand in candidates:
             t = cand["ticker"]
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{t}/range/5/minute/{today_str}/{today_str}"
                 resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "asc", "limit": 50000}, timeout=10)
                 if resp.status_code != 200:
+                    _dbg["api_fail"] += 1
                     continue
                 bars = resp.json().get("results", [])
                 if not bars or len(bars) < 2:
+                    _dbg["no_bars"] += 1
                     continue
                 bars = [b for b in bars if b.get("t", 0) >= market_open_ms]
                 if len(bars) < 2:
+                    _dbg["no_rth"] += 1
                     continue
 
                 # ── Opening Range bestimmen (9:30-9:45 = erste 3 5-Min Candles) ──
                 or_bars = [b for b in bars if b.get("t", 0) < or_end_ms]
                 if not or_bars or len(or_bars) < 2:
-                    # Nicht genug OR-Daten → Skip (kein Fallback auf bars[:3])
+                    _dbg["no_or"] += 1
                     continue
                 or_high = max(b.get("h", 0) for b in or_bars)
                 or_low = min(b.get("l", 999999) for b in or_bars)
@@ -3871,10 +4412,12 @@ def _orb_scanner_wrapper() -> None:
                 # OR > 2x ATR = zu volatil für ORB (schlechtes R:R, Mark Fisher Regel)
                 prev_atr_dollar = cand["prev_close"] * cand["prev_atr_pct"] / 100
                 if prev_atr_dollar > 0 and or_size > prev_atr_dollar * 2.0:
-                    continue  # OR zu weit — überspringe
+                    _dbg["or_wide"] += 1
+                    continue
 
                 # OR zu eng = kein echtes Setup (< 0.3% = noise)
                 if or_size_pct < 0.3:
+                    _dbg["or_narrow"] += 1
                     continue
 
                 # ── VWAP Berechnung ──
@@ -3888,83 +4431,82 @@ def _orb_scanner_wrapper() -> None:
                 current_price = bars[-1].get("c", 0)
                 post_or = [b for b in bars if b.get("t", 0) >= or_end_ms]
 
-                # ── Breakout Detection mit Volume Confirmation ──
+                # ══════════════════════════════════════════════════════
+                # V3.0 REWRITE: Current-State Breakout Detection
+                # Alte Logik suchte den ERSTEN Ausbruch → Pullback = tot.
+                # Neue Logik: Wo ist der Preis JETZT relativ zu OR?
+                # ══════════════════════════════════════════════════════
                 breakout_dir = None
                 breakout_confirmed = False
                 breakout_bar_vol = 0
-                breakout_bar_idx = -1
-                retest_detected = False
+                or_mid = (or_high + or_low) / 2
 
-                for i, b in enumerate(post_or):
-                    bc = b.get("c", 0)
-                    bv = b.get("v", 0)
-
-                    # LONG Breakout: Close über OR High
-                    if bc > or_high and breakout_dir != "LONG":
-                        breakout_dir = "LONG"
-                        breakout_bar_vol = bv
-                        breakout_bar_idx = i
-                        # Volume Confirmation: Breakout-Bar Volume > 1.2x OR-Durchschnitt
-                        if or_avg_vol > 0 and bv >= or_avg_vol * 1.2:
-                            breakout_confirmed = True
-                        break
-
-                    # SHORT Breakout: Close unter OR Low
-                    if bc < or_low and breakout_dir != "SHORT":
-                        breakout_dir = "SHORT"
-                        breakout_bar_vol = bv
-                        breakout_bar_idx = i
-                        if or_avg_vol > 0 and bv >= or_avg_vol * 1.2:
-                            breakout_confirmed = True
-                        break
-
-                # ── Failed Breakout Detection (Crabel Reversal) ──
-                # Wenn Breakout in eine Richtung, dann Reversal durch OR zurück
-                if breakout_dir and len(post_or) > breakout_bar_idx + 2:
-                    subsequent = post_or[breakout_bar_idx + 1:]
-                    if breakout_dir == "LONG":
-                        # Failed Long: Preis fällt zurück unter OR High
-                        fails_back = sum(1 for b in subsequent if b.get("c", 0) < or_high)
-                        if fails_back >= 2 and current_price < or_high:
-                            # Failed Breakout → potentieller Short
-                            failed_breakouts.append({
-                                **cand,
-                                "or_high": round(or_high, 2), "or_low": round(or_low, 2),
-                                "or_size_pct": round(or_size_pct, 2),
-                                "vwap": round(vwap, 2), "direction": "FAILED_LONG→SHORT",
-                                "current_price": round(current_price, 2),
-                                "entry": round(or_low - or_size * 0.05, 2),
-                                "stop": round(or_high + or_size * 0.15, 2),
-                                "target": round(or_low - or_size * 0.8, 2),
-                            })
-                            breakout_dir = None  # Kein gültiger Breakout
-                    elif breakout_dir == "SHORT":
-                        fails_back = sum(1 for b in subsequent if b.get("c", 0) > or_low)
-                        if fails_back >= 2 and current_price > or_low:
-                            failed_breakouts.append({
-                                **cand,
-                                "or_high": round(or_high, 2), "or_low": round(or_low, 2),
-                                "or_size_pct": round(or_size_pct, 2),
-                                "vwap": round(vwap, 2), "direction": "FAILED_SHORT→LONG",
-                                "current_price": round(current_price, 2),
-                                "entry": round(or_high + or_size * 0.05, 2),
-                                "stop": round(or_low - or_size * 0.15, 2),
-                                "target": round(or_high + or_size * 0.8, 2),
-                            })
-                            breakout_dir = None
-
-                if not breakout_dir:
-                    continue
-
-                # ── Holding Check: Preis muss AKTUELL noch auf Breakout-Seite sein ──
-                # V2.2: Dynamischer Holding-Check — früh im Fenster (9:45-9:55) reicht 1 Bar
+                # Zähle Bars über/unter OR
                 bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
                 bars_below = sum(1 for b in post_or if b.get("c", 0) < or_low)
-                _min_hold_bars = 1 if len(post_or) <= 2 else 2  # Früh im Fenster: 1 Bar reicht
-                if breakout_dir == "LONG" and (current_price <= or_high or bars_above < _min_hold_bars):
+                bars_inside = len(post_or) - bars_above - bars_below
+
+                # ── Schritt 1: Aktueller Preis bestimmt Richtung ──
+                if current_price > or_high:
+                    breakout_dir = "LONG"
+                elif current_price < or_low:
+                    breakout_dir = "SHORT"
+                elif bars_above >= 2 and current_price >= or_mid:
+                    # Preis in OR, aber war mehrfach drüber → Retest-Breakout
+                    breakout_dir = "LONG"
+                elif bars_below >= 2 and current_price <= or_mid:
+                    breakout_dir = "SHORT"
+
+                # ── Schritt 2: Volume Confirmation — gab es einen Bar mit Volume? ──
+                if breakout_dir:
+                    for b in post_or:
+                        bv = b.get("v", 0)
+                        bc = b.get("c", 0)
+                        if breakout_dir == "LONG" and bc > or_high:
+                            breakout_bar_vol = max(breakout_bar_vol, bv)
+                        elif breakout_dir == "SHORT" and bc < or_low:
+                            breakout_bar_vol = max(breakout_bar_vol, bv)
+                    if or_avg_vol > 0 and breakout_bar_vol >= or_avg_vol * 0.8:
+                        breakout_confirmed = True
+
+                # ── Schritt 3: Failed Breakout — Preis DEUTLICH zurück in OR ──
+                if not breakout_dir and (bars_above >= 1 or bars_below >= 1):
+                    # Es GAB einen Ausbruch, aber Preis ist zurück in OR
+                    if bars_above >= 1 and current_price < or_mid:
+                        failed_breakouts.append({
+                            **cand,
+                            "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                            "or_size_pct": round(or_size_pct, 2),
+                            "vwap": round(vwap, 2), "direction": "FAILED_LONG→SHORT",
+                            "current_price": round(current_price, 2),
+                            "entry": round(or_low - or_size * 0.05, 2),
+                            "stop": round(or_high + or_size * 0.15, 2),
+                            "target": round(or_low - or_size * 0.8, 2),
+                        })
+                    elif bars_below >= 1 and current_price > or_mid:
+                        failed_breakouts.append({
+                            **cand,
+                            "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                            "or_size_pct": round(or_size_pct, 2),
+                            "vwap": round(vwap, 2), "direction": "FAILED_SHORT→LONG",
+                            "current_price": round(current_price, 2),
+                            "entry": round(or_high + or_size * 0.05, 2),
+                            "stop": round(or_low - or_size * 0.15, 2),
+                            "target": round(or_high + or_size * 0.8, 2),
+                        })
+
+                if not breakout_dir:
+                    if bars_above >= 1 or bars_below >= 1:
+                        _dbg["failed"] += 1
+                    else:
+                        _dbg["in_range"] += 1
+                        # V3.0: Log die Top-5 "in range" Kandidaten für Debugging
+                        if _dbg["in_range"] <= 5:
+                            print(f"[ORB DBG] {t} IN RANGE: price={current_price:.2f} OR=[{or_low:.2f}-{or_high:.2f}] above={bars_above} below={bars_below} post_or={len(post_or)}")
                     continue
-                if breakout_dir == "SHORT" and (current_price >= or_low or bars_below < _min_hold_bars):
-                    continue
+
+                _dbg["passed"] += 1
+                print(f"[ORB DBG] {t} BREAKOUT {breakout_dir}: price={current_price:.2f} OR=[{or_low:.2f}-{or_high:.2f}] above={bars_above} below={bars_below} vol_confirmed={breakout_confirmed}")
 
                 # ── Entry / Stop / Target Levels ──
                 if breakout_dir == "LONG":
@@ -4117,11 +4659,13 @@ def _orb_scanner_wrapper() -> None:
             "stats": {
                 "scanned": len(prev_data), "candidates": len(candidates),
                 "breakouts": len(breakouts), "failed": len(failed_breakouts),
+                "debug": _dbg,
             },
             "or_phase": "active", "market_time": now_et.strftime("%H:%M ET"),
         }
         save_cache_file(ORB_CACHE, [result])
-        print(f"[ORB] V2 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")
+        print(f"[ORB] V3.0 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")
+        print(f"[ORB] Filter-Stats: {_dbg}")
 
         # ── Alert bei Grade S/A Breakouts ──
         alert_breakouts = [b for b in breakouts if b.get("grade") in ("S", "A")]
@@ -4351,7 +4895,7 @@ def _crash_monitor_wrapper() -> None:
             ("IWM", "Russell 2000", "Russell 2000 ETF"),
         ]
 
-        # VIX via Polygon snapshot (works on some plans)
+        # VIX via Polygon snapshot + historical for 5d/20d change
         try:
             vix_url = "https://api.polygon.io/v3/snapshot?ticker.any_of=I:VIX&apiKey=" + POLYGON_KEY
             vix_resp = rate_limited_get(vix_url, params={})
@@ -4363,8 +4907,25 @@ def _crash_monitor_wrapper() -> None:
                     vix_prev = vix_session.get("previous_close", vix_price)
                     if vix_price > 0:
                         chg = ((vix_price - vix_prev) / vix_prev * 100) if vix_prev else 0
+                        # V3.4 FIX: Historische VIX-Daten für 5d/20d Change holen
+                        vix_5d = 0
+                        vix_20d = 0
+                        try:
+                            from datetime import timedelta
+                            _end = datetime.now().strftime("%Y-%m-%d")
+                            _start = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+                            _vix_hist_url = f"https://api.polygon.io/v2/aggs/ticker/I:VIX/range/1/day/{_start}/{_end}"
+                            _vix_hist = rate_limited_get(_vix_hist_url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
+                            if _vix_hist.status_code == 200:
+                                _vix_bars = _vix_hist.json().get("results", [])
+                                if len(_vix_bars) >= 6:
+                                    vix_5d = round(((vix_price - _vix_bars[5]["c"]) / _vix_bars[5]["c"] * 100), 2)
+                                if len(_vix_bars) >= 21:
+                                    vix_20d = round(((vix_price - _vix_bars[20]["c"]) / _vix_bars[20]["c"] * 100), 2)
+                        except Exception as _vhist_err:
+                            print(f"[Crash Monitor] VIX history error: {_vhist_err}")
                         result["vix"] = {"ticker": "I:VIX", "name": "VIX", "price": round(vix_price, 2),
-                                         "change_1d": round(chg, 2), "change_5d": 0, "change_20d": 0}
+                                         "change_1d": round(chg, 2), "change_5d": vix_5d, "change_20d": vix_20d}
                         if vix_price >= 30: result["vix"]["level"] = "EXTREME"
                         elif vix_price >= 25: result["vix"]["level"] = "HIGH"
                         elif vix_price >= 20: result["vix"]["level"] = "ELEVATED"
@@ -4406,9 +4967,14 @@ def _crash_monitor_wrapper() -> None:
                         else:
                             est_vix = 13 + avg_abs_change * 1.3
                         est_vix = round(max(12, min(50, est_vix)), 1)
+                        # V3.4: 5d/20d Change aus UVXY-Bars ableiten
+                        _uvxy_5d = 0
+                        _uvxy_20d = 0
+                        if len(bars) >= 6:
+                            _uvxy_5d = round(((bars[0]["c"] - bars[5]["c"]) / bars[5]["c"] * 100) / 1.5, 2)
                         result["vix"] = {"ticker": "UVXY", "name": "VIX (est.)", "price": est_vix,
-                                         "change_1d": round(uvxy_chg_pct / 1.5, 2),  # Rough: divide UVXY change by leverage
-                                         "change_5d": 0, "change_20d": 0}
+                                         "change_1d": round(uvxy_chg_pct / 1.5, 2),
+                                         "change_5d": _uvxy_5d, "change_20d": _uvxy_20d}
                         if est_vix >= 30: result["vix"]["level"] = "EXTREME"
                         elif est_vix >= 25: result["vix"]["level"] = "HIGH"
                         elif est_vix >= 20: result["vix"]["level"] = "ELEVATED"
@@ -4454,52 +5020,44 @@ def _crash_monitor_wrapper() -> None:
                 print(f"[Warning] Error processing market index: {e}")
                 continue
 
-        # Market breadth - count gainers vs losers via snapshot
+        # Market breadth — V3.4 FIX: Full Snapshot statt nur Gainers/Losers (die geben nur Top 250)
         try:
-            # Marktbreite: Gainers vs Losers Count + durchschnittliche Veränderung
             up = 0
             down = 0
             unchanged = 0
-            gainers_avg_chg = 0
-            losers_avg_chg = 0
+            gainers_chgs = []
+            losers_chgs = []
 
-            for endpoint in ["gainers", "losers"]:
-                snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                try:
-                    snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
-                    print(f"[Crash Monitor] {endpoint} endpoint: status={snap_resp.status_code}")
-                except Exception as req_err:
-                    print(f"[Crash Monitor] {endpoint} request FAILED: {req_err}")
-                    continue
+            snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            try:
+                snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                print(f"[Crash Monitor] Full snapshot: status={snap_resp.status_code}")
+            except Exception as req_err:
+                print(f"[Crash Monitor] Full snapshot FAILED: {req_err}")
+                snap_resp = None
 
-                if snap_resp.status_code != 200:
-                    print(f"[Warning] {endpoint} returned {snap_resp.status_code}: {snap_resp.text[:200]}")
-                    continue
-
-                tickers = snap_resp.json().get("tickers", [])
-                print(f"[Crash Monitor] {endpoint}: {len(tickers)} tickers received")
-
-                # Gainers endpoint = alle steigenden, Losers endpoint = alle fallenden
-                # Count direkt aus der Anzahl der Tickers (robust, kein todaysChangePerc nötig)
-                changes = []
-                for t in tickers:
+            if snap_resp and snap_resp.status_code == 200:
+                all_tickers = snap_resp.json().get("tickers", [])
+                print(f"[Crash Monitor] Full snapshot: {len(all_tickers)} tickers received")
+                for t in all_tickers:
                     try:
                         tod = t.get("todaysChangePerc", 0)
-                        if isinstance(tod, (int, float)) and tod != 0:
-                            changes.append(tod)
+                        if not isinstance(tod, (int, float)):
+                            continue
+                        if tod > 0:
+                            up += 1
+                            gainers_chgs.append(tod)
+                        elif tod < 0:
+                            down += 1
+                            losers_chgs.append(tod)
+                        else:
+                            unchanged += 1
                     except Exception:
                         continue
 
-                if endpoint == "gainers":
-                    up = len(tickers)  # Alle Tickers im Gainers-Endpoint sind Gewinner
-                    if changes:
-                        gainers_avg_chg = round(sum(changes) / len(changes), 2)
-                elif endpoint == "losers":
-                    down = len(tickers)  # Alle Tickers im Losers-Endpoint sind Verlierer
-                    if changes:
-                        losers_avg_chg = round(sum(changes) / len(changes), 2)
-
-                print(f"[Crash Monitor] {endpoint}: count={len(tickers)}, avg_chg={changes and round(sum(changes)/len(changes),2) or 0}")
+            gainers_avg_chg = round(sum(gainers_chgs) / len(gainers_chgs), 2) if gainers_chgs else 0
+            losers_avg_chg = round(sum(losers_chgs) / len(losers_chgs), 2) if losers_chgs else 0
+            print(f"[Crash Monitor] Breadth raw: {up} up, {down} down, {unchanged} unchanged")
 
             total = up + down + unchanged
             ratio = round(up / down, 2) if down > 0 else 0
@@ -4941,6 +5499,609 @@ def root():
         "docs": "/docs",
         "openapi": "/openapi.json",
     }
+
+
+# ── Auto-Trader Endpoints ──
+_autotrader_thread = None
+
+class AutotraderConfigUpdate(BaseModel):
+    config: dict
+
+@app.get("/api/autotrader/status")
+def autotrader_status():
+    """Get Auto-Trader status, config, and recent log."""
+    state = _autotrader_state_read()
+    config = _autotrader_config_load()
+    market_hours = _autotrader_is_market_hours()
+    # Read log
+    log_entries = []
+    try:
+        import json as _json
+        with open("/tmp/alpha_autotrader_log.json", "r") as f:
+            log_entries = _json.load(f)
+    except Exception:
+        pass
+    return {
+        "state": state,
+        "config": config,
+        "market_hours": market_hours,
+        "thread_alive": _autotrader_thread is not None and _autotrader_thread.is_alive() if _autotrader_thread else False,
+        "log": log_entries[-50:],  # Last 50 entries
+    }
+
+@app.post("/api/autotrader/config")
+def autotrader_update_config(body: AutotraderConfigUpdate):
+    """Update Auto-Trader configuration."""
+    config = _autotrader_config_load()
+    config.update(body.config)
+    _autotrader_config_save(config)
+    _autotrader_log(f"Config aktualisiert: {list(body.config.keys())}", "INFO")
+    return {"ok": True, "config": config}
+
+@app.post("/api/autotrader/start")
+def autotrader_start():
+    """Start the Auto-Trader background loop."""
+    global _autotrader_thread
+    if _autotrader_thread and _autotrader_thread.is_alive():
+        return {"ok": False, "error": "Auto-Trader läuft bereits"}
+    poly_key = os.environ.get("POLYGON_KEY", "")
+    if not poly_key:
+        return {"ok": False, "error": "Polygon API Key fehlt"}
+    from modules.scanners import _autotrader_clear_stop
+    _autotrader_clear_stop()
+    _autotrader_thread = threading.Thread(target=autotrader_background_loop, args=(poly_key,), daemon=True)
+    _autotrader_thread.start()
+    _autotrader_log("Auto-Trader gestartet via API", "INFO")
+    return {"ok": True, "message": "Auto-Trader gestartet"}
+
+@app.post("/api/autotrader/stop")
+def autotrader_stop():
+    """Stop the Auto-Trader background loop."""
+    _autotrader_request_stop()
+    state = _autotrader_state_read()
+    state["status"] = "stopped"
+    _autotrader_state_write(state)
+    _autotrader_log("Auto-Trader gestoppt via API", "INFO")
+    return {"ok": True, "message": "Auto-Trader wird gestoppt"}
+
+@app.post("/api/autotrader/scan-once")
+def autotrader_run_single_scan():
+    """Run a single Auto-Trader scan (not background loop)."""
+    poly_key = os.environ.get("POLYGON_KEY", "")
+    if not poly_key:
+        return {"ok": False, "error": "Polygon API Key fehlt"}
+    result = autotrader_scan_once(poly_key)
+    return {"ok": True, "result": result}
+
+@app.post("/api/autotrader/clear-positions")
+def autotrader_clear_positions():
+    """Clear all tracked positions (does NOT close actual broker positions)."""
+    state = _autotrader_state_read()
+    state["positions"] = []
+    state["trades_today"] = 0
+    state["daily_pnl"] = 0
+    _autotrader_state_write(state)
+    _autotrader_log("Positionen zurückgesetzt via API", "INFO")
+    return {"ok": True}
+
+
+# ── Admin System ──
+
+def _require_admin(authorization: Optional[str]):
+    """
+    Helper: Extract token, verify it, check admin status.
+    Returns (payload, email) on success, raises HTTPException(403) if not admin.
+    """
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    # Extract token from "Bearer <token>"
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    email = payload.get("email", "")
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return payload, email
+
+
+def _load_coupons() -> Dict:
+    """Load coupons from JSON file."""
+    coupon_path = "/tmp/alpha_station_coupons.json"
+    if os.path.exists(coupon_path):
+        try:
+            with open(coupon_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"coupons": []}
+    return {"coupons": []}
+
+
+def _save_coupons(data: Dict):
+    """Save coupons to JSON file."""
+    try:
+        coupon_path = "/tmp/alpha_station_coupons.json"
+        with open(coupon_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Error] Coupons speichern fehlgeschlagen: {e}")
+
+
+def _load_tickets() -> Dict:
+    """Load support tickets from JSON file."""
+    ticket_path = "/tmp/alpha_station_tickets.json"
+    if os.path.exists(ticket_path):
+        try:
+            with open(ticket_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"tickets": [], "next_id": 1}
+    return {"tickets": [], "next_id": 1}
+
+
+def _save_tickets(data: Dict):
+    """Save support tickets to JSON file."""
+    try:
+        ticket_path = "/tmp/alpha_station_tickets.json"
+        with open(ticket_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Error] Tickets speichern fehlgeschlagen: {e}")
+
+
+# ── Admin: User Management ──
+
+@app.get("/api/admin/users")
+def admin_list_users(authorization: Optional[str] = Header(None)):
+    """List all users (admin only)."""
+    _require_admin(authorization)
+
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    users = []
+
+    for email, user_data in db.get("users", {}).items():
+        users.append({
+            "email": email,
+            "name": user_data.get("name", ""),
+            "plan": user_data.get("plan", "trial"),
+            "created_at": user_data.get("created_at", ""),
+            "last_login": user_data.get("last_login", ""),
+            "trial_ends_at": user_data.get("trial_ends_at", ""),
+            "stripe_customer_id": user_data.get("stripe_customer_id", ""),
+            "is_admin": email in ADMIN_EMAILS,
+        })
+
+    return {"users": users}
+
+
+@app.put("/api/admin/users/{email}/plan")
+def admin_update_user_plan(email: str, req_body: PlanUpdateRequest, authorization: Optional[str] = Header(None)):
+    """Update a user's plan manually (admin only)."""
+    _require_admin(authorization)
+
+    email = email.lower().strip()
+    plan = req_body.plan.lower().strip()
+
+    # Validate plan
+    valid_plans = ["trial", "expired", "basic", "pro", "elite"]
+    if plan not in valid_plans:
+        raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
+
+    # Load and update database
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+
+    if email not in db.get("users", {}):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db["users"][email]["plan"] = plan
+
+    # Save database
+    try:
+        with open(AUTH_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2)
+        return {"success": True, "message": f"Plan für {email} auf {plan} aktualisiert"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+
+
+@app.delete("/api/admin/users/{email}")
+def admin_delete_user(email: str, authorization: Optional[str] = Header(None)):
+    """Delete a user from database (admin only)."""
+    _require_admin(authorization)
+
+    email = email.lower().strip()
+
+    # Load database
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+
+    if email not in db.get("users", {}):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    del db["users"][email]
+
+    # Save database
+    try:
+        with open(AUTH_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2)
+        return {"success": True, "message": f"Benutzer {email} gelöscht"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+
+
+@app.get("/api/admin/stats")
+def admin_get_stats(authorization: Optional[str] = Header(None)):
+    """Get admin statistics (admin only)."""
+    _require_admin(authorization)
+
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    users = db.get("users", {})
+
+    # Basic counts
+    total_users = len(users)
+    users_by_plan = {}
+    for plan in ["trial", "expired", "basic", "pro", "elite"]:
+        users_by_plan[plan] = 0
+
+    new_today = 0
+    new_this_week = 0
+    active_today = 0
+    estimated_mrr = 0
+
+    now = datetime.utcnow()
+    today_str = now.strftime("%Y-%m-%d")
+    week_ago = now - timedelta(days=7)
+
+    plan_prices = {"basic": 29, "pro": 79, "elite": 149, "trial": 0, "expired": 0}
+
+    for email, user_data in users.items():
+        plan = user_data.get("plan", "trial")
+        users_by_plan[plan] = users_by_plan.get(plan, 0) + 1
+
+        # Created today
+        created_at = user_data.get("created_at", "")
+        if created_at.startswith(today_str):
+            new_today += 1
+
+        # Created this week
+        if created_at:
+            try:
+                created_date = datetime.fromisoformat(created_at.split("T")[0])
+                if created_date >= week_ago:
+                    new_this_week += 1
+            except Exception:
+                pass
+
+        # Active today
+        last_login = user_data.get("last_login", "")
+        if last_login.startswith(today_str):
+            active_today += 1
+
+        # MRR (paying plans only)
+        if plan in ["basic", "pro", "elite"]:
+            estimated_mrr += plan_prices.get(plan, 0)
+
+    return {
+        "total_users": total_users,
+        "users_by_plan": users_by_plan,
+        "new_today": new_today,
+        "new_this_week": new_this_week,
+        "active_today": active_today,
+        "estimated_mrr": estimated_mrr,
+    }
+
+
+@app.get("/api/admin/logs")
+def admin_get_logs(authorization: Optional[str] = Header(None)):
+    """Get last 200 lines from scanner log (admin only)."""
+    _require_admin(authorization)
+
+    log_path = "/tmp/alpha_station_scanner.log"
+    lines = []
+
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, "r") as f:
+                all_lines = f.readlines()
+                # Get last 200 lines
+                lines = [line.rstrip("\n") for line in all_lines[-200:]]
+        except Exception as e:
+            lines = [f"Fehler beim Lesen der Log-Datei: {str(e)}"]
+
+    return {"logs": lines}
+
+
+# ── Admin: Coupon Management ──
+
+@app.post("/api/admin/coupons")
+def admin_create_coupon(req_body: CouponCreateRequest, authorization: Optional[str] = Header(None)):
+    """Create a new coupon (admin only)."""
+    payload, admin_email = _require_admin(authorization)
+
+    code = req_body.code.upper().strip()
+    plan = req_body.plan.lower().strip()
+
+    # Validate inputs
+    valid_plans = ["trial", "basic", "pro", "elite"]
+    if plan not in valid_plans:
+        raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
+
+    if req_body.duration_days < 1:
+        raise HTTPException(status_code=400, detail="duration_days must be >= 1")
+
+    if req_body.max_uses < 1:
+        raise HTTPException(status_code=400, detail="max_uses must be >= 1")
+
+    # Load existing coupons
+    data = _load_coupons()
+
+    # Check for duplicate
+    for coupon in data.get("coupons", []):
+        if coupon["code"] == code:
+            raise HTTPException(status_code=400, detail="Coupon code already exists")
+
+    # Create coupon
+    coupon = {
+        "code": code,
+        "plan": plan,
+        "duration_days": req_body.duration_days,
+        "max_uses": req_body.max_uses,
+        "uses": 0,
+        "created_at": datetime.utcnow().isoformat(),
+        "created_by": admin_email,
+        "description": req_body.description,
+        "active": True,
+    }
+
+    data["coupons"].append(coupon)
+    _save_coupons(data)
+
+    return {"success": True, "coupon": coupon}
+
+
+@app.get("/api/admin/coupons")
+def admin_list_coupons(authorization: Optional[str] = Header(None)):
+    """List all coupons (admin only)."""
+    _require_admin(authorization)
+
+    data = _load_coupons()
+    return {"coupons": data.get("coupons", [])}
+
+
+@app.put("/api/admin/coupons/{code}/toggle")
+def admin_toggle_coupon(code: str, authorization: Optional[str] = Header(None)):
+    """Toggle coupon active/inactive (admin only)."""
+    _require_admin(authorization)
+
+    code = code.upper().strip()
+    data = _load_coupons()
+
+    for coupon in data.get("coupons", []):
+        if coupon["code"] == code:
+            coupon["active"] = not coupon["active"]
+            _save_coupons(data)
+            return {"success": True, "coupon": coupon}
+
+    raise HTTPException(status_code=404, detail="Coupon not found")
+
+
+@app.delete("/api/admin/coupons/{code}")
+def admin_delete_coupon(code: str, authorization: Optional[str] = Header(None)):
+    """Delete a coupon (admin only)."""
+    _require_admin(authorization)
+
+    code = code.upper().strip()
+    data = _load_coupons()
+
+    original_count = len(data.get("coupons", []))
+    data["coupons"] = [c for c in data.get("coupons", []) if c["code"] != code]
+
+    if len(data["coupons"]) == original_count:
+        raise HTTPException(status_code=404, detail="Coupon not found")
+
+    _save_coupons(data)
+    return {"success": True, "message": f"Coupon {code} gelöscht"}
+
+
+# ── Coupon Redemption (any authenticated user) ──
+
+@app.post("/api/redeem-coupon")
+def redeem_coupon(req_body: RedeemCouponRequest, authorization: Optional[str] = Header(None)):
+    """Redeem a coupon code (any authenticated user)."""
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    user_email = payload.get("email", "")
+    code = req_body.code.upper().strip()
+
+    # Load coupons
+    coupon_data = _load_coupons()
+    coupon = None
+    coupon_index = -1
+
+    for idx, c in enumerate(coupon_data.get("coupons", [])):
+        if c["code"] == code:
+            coupon = c
+            coupon_index = idx
+            break
+
+    if not coupon:
+        raise HTTPException(status_code=404, detail="Coupon not found")
+
+    if not coupon.get("active", False):
+        raise HTTPException(status_code=400, detail="Coupon is not active")
+
+    if coupon.get("uses", 0) >= coupon.get("max_uses", 0):
+        raise HTTPException(status_code=400, detail="Coupon has reached max uses")
+
+    # Load user database and update plan
+    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+
+    if user_email not in db.get("users", {}):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Update user plan
+    db["users"][user_email]["plan"] = coupon["plan"]
+
+    # Increment coupon uses
+    coupon_data["coupons"][coupon_index]["uses"] += 1
+
+    # Save both
+    try:
+        with open(AUTH_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2)
+        _save_coupons(coupon_data)
+
+        return {
+            "success": True,
+            "message": f"Plan auf {coupon['plan']} aktualisiert via Coupon {code}",
+            "new_plan": coupon["plan"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+
+
+# ── Support Tickets ──
+
+@app.post("/api/admin/tickets")
+def create_ticket(req_body: TicketCreateRequest, authorization: Optional[str] = Header(None)):
+    """Create a support ticket (any authenticated user)."""
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    user_email = payload.get("email", "")
+
+    # Load tickets
+    data = _load_tickets()
+    ticket_id = data.get("next_id", 1)
+
+    # Create ticket
+    ticket = {
+        "id": ticket_id,
+        "email": user_email,
+        "subject": req_body.subject.strip(),
+        "message": req_body.message.strip(),
+        "status": "open",
+        "created_at": datetime.utcnow().isoformat(),
+        "replies": [],
+    }
+
+    data["tickets"].append(ticket)
+    data["next_id"] = ticket_id + 1
+    _save_tickets(data)
+
+    return {"success": True, "ticket": ticket}
+
+
+@app.get("/api/admin/tickets")
+def admin_list_tickets(authorization: Optional[str] = Header(None)):
+    """List all support tickets (admin only)."""
+    _require_admin(authorization)
+
+    data = _load_tickets()
+    return {"tickets": data.get("tickets", [])}
+
+
+@app.put("/api/admin/tickets/{ticket_id}/reply")
+def admin_reply_ticket(ticket_id: int, req_body: TicketReplyRequest, authorization: Optional[str] = Header(None)):
+    """Reply to a support ticket (admin only)."""
+    _require_admin(authorization)
+
+    data = _load_tickets()
+    ticket = None
+
+    for t in data.get("tickets", []):
+        if t["id"] == ticket_id:
+            ticket = t
+            break
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    reply = {
+        "message": req_body.message.strip(),
+        "from": "admin",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    ticket["replies"].append(reply)
+    _save_tickets(data)
+
+    return {"success": True, "ticket": ticket}
+
+
+@app.put("/api/admin/tickets/{ticket_id}/status")
+def admin_update_ticket_status(ticket_id: int, req_body: TicketStatusRequest, authorization: Optional[str] = Header(None)):
+    """Update ticket status (admin only)."""
+    _require_admin(authorization)
+
+    valid_statuses = ["open", "closed", "in_progress"]
+    if req_body.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
+
+    data = _load_tickets()
+    ticket = None
+
+    for t in data.get("tickets", []):
+        if t["id"] == ticket_id:
+            ticket = t
+            break
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    ticket["status"] = req_body.status
+    _save_tickets(data)
+
+    return {"success": True, "ticket": ticket}
+
+
+@app.get("/api/my-tickets")
+def get_my_tickets(authorization: Optional[str] = Header(None)):
+    """Get user's own support tickets (any authenticated user)."""
+    if not authorization:
+        raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=403, detail="Invalid Authorization header format")
+
+    token = parts[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    user_email = payload.get("email", "")
+
+    # Load tickets
+    data = _load_tickets()
+    user_tickets = [t for t in data.get("tickets", []) if t["email"] == user_email]
+
+    return {"tickets": user_tickets}
 
 
 # ── Run with uvicorn ──
