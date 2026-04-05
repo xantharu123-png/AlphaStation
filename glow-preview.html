@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Heartbeat Schrift-Pulse — Preview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0f1a; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; }
+  .label { font-size: 13px; color: #64748b; margin-bottom: 16px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; border: 1px solid #1e293b; padding: 6px 16px; border-radius: 20px; }
+  .variant { margin-bottom: 60px; text-align: center; padding: 60px 40px; border-radius: 20px; border: 1px solid #1e293b; width: 100%; max-width: 850px; }
+  h1 { font-size: clamp(38px, 5.5vw, 64px); font-weight: 800; line-height: 1.08; letter-spacing: -2px; }
+  .line1 { display: block; background: linear-gradient(135deg, #f1f5f9, #e2e8f0); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+  /* ═══ A: Scale Heartbeat — Schrift wird größer/kleiner ═══ */
+  .va .line2 {
+    display: inline-block;
+    background: linear-gradient(135deg, #22d3ee, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 6px rgba(59,130,246,0.4));
+    animation: heartScale 2.5s ease-in-out infinite;
+    transform-origin: center center;
+  }
+  @keyframes heartScale {
+    0%   { transform: scale(1); filter: drop-shadow(0 0 6px rgba(59,130,246,0.4)); }
+    12%  { transform: scale(1.04); filter: drop-shadow(0 0 14px rgba(59,130,246,0.7)) drop-shadow(0 0 30px rgba(139,92,246,0.4)); }
+    20%  { transform: scale(1); filter: drop-shadow(0 0 6px rgba(59,130,246,0.4)); }
+    32%  { transform: scale(1.06); filter: drop-shadow(0 0 18px rgba(59,130,246,0.8)) drop-shadow(0 0 40px rgba(139,92,246,0.5)); }
+    45%  { transform: scale(1); filter: drop-shadow(0 0 6px rgba(59,130,246,0.4)); }
+    100% { transform: scale(1); filter: drop-shadow(0 0 6px rgba(59,130,246,0.4)); }
+  }
+
+  /* ═══ B: Brightness Heartbeat — Schrift leuchtet heller/dunkler ═══ */
+  .vb .line2 {
+    display: inline-block;
+    background: linear-gradient(135deg, #22d3ee, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    animation: heartBright 2.5s ease-in-out infinite;
+  }
+  @keyframes heartBright {
+    0%   { filter: brightness(0.7) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+    12%  { filter: brightness(1.2) drop-shadow(0 0 14px rgba(59,130,246,0.8)) drop-shadow(0 0 30px rgba(139,92,246,0.4)); }
+    20%  { filter: brightness(0.7) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+    32%  { filter: brightness(1.4) drop-shadow(0 0 20px rgba(59,130,246,0.9)) drop-shadow(0 0 45px rgba(34,211,238,0.5)); }
+    45%  { filter: brightness(0.7) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+    100% { filter: brightness(0.7) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+  }
+
+  /* ═══ C: Scale + Brightness kombi ═══ */
+  .vc .line2 {
+    display: inline-block;
+    background: linear-gradient(135deg, #22d3ee, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    animation: heartCombo 2.5s ease-in-out infinite;
+    transform-origin: center center;
+  }
+  @keyframes heartCombo {
+    0%   { transform: scale(1); filter: brightness(0.75) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+    12%  { transform: scale(1.03); filter: brightness(1.15) drop-shadow(0 0 14px rgba(59,130,246,0.7)) drop-shadow(0 0 28px rgba(139,92,246,0.4)); }
+    20%  { transform: scale(1); filter: brightness(0.75) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+    32%  { transform: scale(1.05); filter: brightness(1.3) drop-shadow(0 0 18px rgba(59,130,246,0.85)) drop-shadow(0 0 40px rgba(34,211,238,0.45)); }
+    45%  { transform: scale(1); filter: brightness(0.75) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+    100% { transform: scale(1); filter: brightness(0.75) drop-shadow(0 0 4px rgba(59,130,246,0.3)); }
+  }
+
+  /* ═══ D: Opacity Heartbeat — Text blinkt wie Herzschlag ═══ */
+  .vd .line2 {
+    display: inline-block;
+    background: linear-gradient(135deg, #22d3ee, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 10px rgba(59,130,246,0.5)) drop-shadow(0 0 25px rgba(139,92,246,0.3));
+    animation: heartOpacity 2.5s ease-in-out infinite;
+  }
+  @keyframes heartOpacity {
+    0%   { opacity: 0.55; }
+    12%  { opacity: 1; }
+    20%  { opacity: 0.55; }
+    32%  { opacity: 1; }
+    45%  { opacity: 0.55; }
+    100% { opacity: 0.55; }
+  }
+</style>
+</head>
+<body>
+
+<h2 style="font-size: 22px; font-weight: 300; color: #94a3b8; margin-bottom: 50px;">Heartbeat — Schrift pulsiert</h2>
+
+<!-- A -->
+<div class="label">A — Scale (Schrift wird grösser/kleiner)</div>
+<div class="variant va">
+  <h1>
+    <span class="line1">Finde die besten Trades</span>
+    <span class="line2">bevor es der Markt tut</span>
+  </h1>
+</div>
+
+<!-- B -->
+<div class="label">B — Brightness (Schrift leuchtet heller/dunkler)</div>
+<div class="variant vb">
+  <h1>
+    <span class="line1">Finde die besten Trades</span>
+    <span class="line2">bevor es der Markt tut</span>
+  </h1>
+</div>
+
+<!-- C -->
+<div class="label">C — Scale + Brightness kombiniert</div>
+<div class="variant vc">
+  <h1>
+    <span class="line1">Finde die besten Trades</span>
+    <span class="line2">bevor es der Markt tut</span>
+  </h1>
+</div>
+
+<!-- D -->
+<div class="label">D — Opacity (Ein-/Ausblenden wie Herzschlag)</div>
+<div class="variant vd">
+  <h1>
+    <span class="line1">Finde die besten Trades</span>
+    <span class="line2">bevor es der Markt tut</span>
+  </h1>
+</div>
+
+</body>
+</html>

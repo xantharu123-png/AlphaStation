@@ -1921,24 +1921,22 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
     penalty = 0
 
     # FADING CONTRADICTION: Starker Move + schwache Position = TRAP
-    # +7% Long aber Position 25% = Leute verkaufen den Gap → gefährlich!
     if is_up and abs_change >= 5 and pm_position < 35:
         fading_penalty = -12
         penalty += fading_penalty
-        warnings.append(" FADING: Starker Gap wird abverkauft!")
+        warnings.append("FADING: Starker Gap wird abverkauft!")
     elif not is_up and abs_change >= 5 and pm_position > 65:
         fading_penalty = -12
         penalty += fading_penalty
-        warnings.append(" BOUNCE: Gap Down wird aufgekauft!")
+        warnings.append("BOUNCE: Gap Down wird aufgekauft!")
 
     # STALE GAP: Gap aber kein PM Momentum = keiner interessiert sich
     if abs_change >= 3 and abs_pm_momentum < 0.3:
         stale_penalty = -5
         penalty += stale_penalty
-        warnings.append(" Staler Gap: Kein PM-Interesse")
+        warnings.append("Staler Gap: Kein PM-Interesse")
 
     # DEAD VOLUME KILL: VolR < 0.2 → Score gecapped bei 25
-    # Egal wie gut alles andere aussieht — ohne Volume ist nichts zuverlässig
     is_dead_volume = vol_ratio < 0.2
 
     breakdown["penalty"] = penalty
@@ -1950,17 +1948,17 @@ def calculate_pm_quality_score(pm_change, gap_pct, pm_position, rs_vs_spy, vol_r
     # Dead Volume Cap — NACH allen Berechnungen
     if is_dead_volume:
         score = min(score, 25)
-        warnings.insert(0, " DEAD VOLUME — Score gecapped!")
+        warnings.insert(0, "DEAD VOLUME — Score gecapped!")
 
     # Confidence Level
     if score >= 75:
-        confidence = " HIGH"
+        confidence = "HIGH"
     elif score >= 55:
-        confidence = " MEDIUM"
+        confidence = "MEDIUM"
     elif score >= 35:
-        confidence = " LOW"
+        confidence = "LOW"
     else:
-        confidence = " AVOID"
+        confidence = "AVOID"
 
     breakdown["warnings"] = warnings
 

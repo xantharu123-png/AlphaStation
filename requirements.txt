@@ -1,9 +1,8 @@
-streamlit
-pandas
-numpy
+fastapi
+uvicorn[standard]
 requests
 pytz
-streamlit-autorefresh
-anthropic
-ib_insync
-nest_asyncio
+numpy
+pandas
+PyJWT
+stripe

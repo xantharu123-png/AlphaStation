@@ -4006,21 +4006,17 @@ def _new_listing_wrapper() -> None:
         return
 
     try:
-        # Korrekter Cache-Pfad = gleich wie im Modul (relativ zu app/)
-        from pathlib import Path as _P
-        _data_dir = _P(__file__).parent / "data_cache"
-        _data_dir.mkdir(parents=True, exist_ok=True)
+        Path("/opt/tradingbot/data_cache").mkdir(parents=True, exist_ok=True)
 
-        # Detect new listings (mit First-Run-Seed + Timestamp-Filter)
+        # Detect new listings
         new_listings, all_perps = detect_new_listings()
         if not new_listings:
             print("[New Listing] No new listings detected")
             save_cache_file(NEW_LISTING_CACHE, [])
             return
 
-        print(f"[New Listing] {len(new_listings)} neue Listings erkannt, verarbeite max 30...")
         results = []
-        for listing in new_listings[:30]:  # Limit to 30
+        for listing in new_listings[:20]:  # Limit to 20
             try:
                 # listing can be a dict or string — normalize
                 if isinstance(listing, str):
@@ -4039,6 +4035,7 @@ def _new_listing_wrapper() -> None:
                     display_symbol = symbol
 
                 # Use ORIGINAL symbol for API calls — each exchange needs its own format!
+                # MEXC: AAVE_USDT, Bitget: AAVEUSDT, Crypto.com: AAVEUSD-PERP
                 ticker_data = fetch_ticker_for(symbol, exchange)
                 if not ticker_data:
                     print(f"[New Listing] No ticker for {symbol} ({exchange}), skipping")
@@ -4047,25 +4044,13 @@ def _new_listing_wrapper() -> None:
                 # Fetch candles with original symbol
                 candles = fetch_candles_for(symbol, exchange)
 
-                # Fetch orderbook (only crypto.com)
+                # Fetch orderbook (only crypto.com, use original symbol)
                 orderbook = fetch_cryptocom_orderbook(symbol) if exchange == "crypto.com" else None
 
-                # Calculate exhaustion (ticker als 2. param, nicht symbol!)
+                # Calculate exhaustion
                 exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
-                    candles or [], ticker_data, orderbook
+                    candles or [], symbol, orderbook
                 )
-
-                # Listing-Datum ermitteln (aus Exchange-Daten)
-                listing_date = None
-                if isinstance(listing, dict):
-                    lt = listing.get("launch_time") or listing.get("create_time", 0)
-                    if lt and int(lt) > 0:
-                        try:
-                            listing_date = datetime.fromtimestamp(
-                                int(lt) / 1000, tz=timezone.utc
-                            ).strftime('%Y-%m-%d %H:%M')
-                        except Exception:
-                            pass
 
                 results.append({
                     "symbol": display_symbol,
@@ -4074,28 +4059,21 @@ def _new_listing_wrapper() -> None:
                     "price": ticker_data.get("price", 0),
                     "change_24h": ticker_data.get("change_24h", 0),
                     "volume_24h": ticker_data.get("volume_24h", 0),
-                    "volume_usd_24h": ticker_data.get("volume_usd_24h", 0),
                     "market_cap": ticker_data.get("market_cap", 0),
                     "exhaustion_score": exhaustion_score,
                     "exhaustion_details": exhaustion_details,
                     "pump_data": pump_data,
-                    "listing_date": listing_date,
-                    "is_new_flag": listing.get("is_new", False) if isinstance(listing, dict) else False,
+                    "listing_date": listing.get("listing_date") if isinstance(listing, dict) else None,
+                    "time_since_listing_hours": listing.get("time_since_listing_hours") if isinstance(listing, dict) else None,
                 })
-                import time as _t
-                _t.sleep(0.3)  # Rate limiting
             except Exception as e:
                 print(f"[New Listing] Error processing {listing if isinstance(listing, str) else listing.get('symbol', 'unknown')}: {e}")
-                import traceback as _tb
-                _tb.print_exc()
                 continue
 
         save_cache_file(NEW_LISTING_CACHE, results)
-        print(f"[New Listing] Processed {len(results)} new listings successfully")
+        print(f"[New Listing] Processed {len(results)} new listings")
     except Exception as e:
         print(f"New listing wrapper error: {e}")
-        import traceback as _tb
-        _tb.print_exc()
 
 
 @app.post("/api/new-listing-scan")

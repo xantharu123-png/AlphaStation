@@ -797,8 +797,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     Returns:
         (is_valid, score, max_score, details, direction_confidence, grade)
     """
-    if not bars or len(bars) < 10:
-        return False, 0, 188, ["Nicht genug Daten (min 10 Tage)"], 0, "D", 0, 0
+    if not bars or len(bars) < 15:
+        return False, 0, 188, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
 
     score = 0
     sm_fires = 0  # Smart Money Fires (Boosted-Signale auf Maximum)
@@ -1183,14 +1183,14 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
-            score += 7; sm_hits += 1
-            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri")
+            score += 7; sm_hits += 1; sm_fires += 1
+            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri [SM]")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
             score += 4; sm_hits += 1
             details.append(f" Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
-            score += 7; sm_hits += 1
-            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku")
+            score += 7; sm_hits += 1; sm_fires += 1
+            details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku [SM]")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
             score += 4; sm_hits += 1
             details.append(f" Distribution: {distri_days} vs {accum_days} Tage")
@@ -1741,14 +1741,16 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # Crypto hat kein echtes Volume → weniger erreichbare Punkte als Aktien.
     # Signal 2 misst jetzt Body-Kompression (nicht mehr Spread-Duplikat von Signal 1),
     # was die Punkte-Verteilung etwas anders gewichtet.
+    # V2.9: Crypto-Schwellen angehoben — waren 41% unter Aktien (Grade-Inflation)
+    # Jetzt ~15% unter Aktien (Crypto hat weniger Volume-Signale, aber nicht 41% weniger)
     if crypto_mode:
-        if score >= 80 and smart_money_fires >= 3:
+        if score >= 95 and smart_money_fires >= 3:
             grade = "S"
-        elif score >= 70 and smart_money_fires >= 2:
+        elif score >= 85 and smart_money_fires >= 2:
             grade = "A"
-        elif score >= 60 and smart_money_hits >= 1:
+        elif score >= 72 and smart_money_hits >= 1:
             grade = "B"
-        elif score >= 50:
+        elif score >= 60:
             grade = "C"
         else:
             grade = "D"
@@ -1879,18 +1881,21 @@ def find_pivots(prices, window=5):
 def check_fibonacci_ratio(actual, target, tolerance=0.05):
     """
     Prüft ob ein Verhältnis innerhalb der Toleranz liegt.
-    
+    V3.4 FIX: Toleranz ist jetzt PROZENTUAL (relativ zum Target).
+    Vorher absolut → bei hohen Targets (Crab 2.618) war Toleranz viel zu eng.
+
     Args:
         actual: Berechnetes Verhältnis
         target: Ziel-Fibonacci-Level (z.B. 0.618)
-        tolerance: Erlaubte Abweichung (default 5%)
-    
+        tolerance: Erlaubte prozentuale Abweichung (0.05 = 5%)
+
     Returns:
         (is_valid, deviation_pct)
     """
     deviation = abs(actual - target)
     deviation_pct = (deviation / target) * 100 if target > 0 else 100
-    is_valid = deviation <= tolerance
+    # V3.4: Prozentuale Toleranz statt absolut (5% = tolerance von 0.05)
+    is_valid = deviation_pct <= (tolerance * 100) if target > 0 else False
     return is_valid, deviation_pct
 
 
@@ -2026,6 +2031,13 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
             
             ratios = pattern_def["ratios"]
             
+            # V3.4 FIX: Range-Check mit prozentualer Toleranz statt absolut
+            def _range_check(actual, min_val, max_val, tol):
+                """Prüft ob actual in Range liegt, mit prozentualer Toleranz."""
+                tol_low = min_val * tol if min_val > 0 else tol
+                tol_high = max_val * tol if max_val > 0 else tol
+                return (min_val - tol_low) <= actual <= (max_val + tol_high)
+
             # AB/XA Check
             if "AB_XA" in ratios:
                 target = ratios["AB_XA"]
@@ -2034,9 +2046,9 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(ab_retracement, target_val, tol)
                 else:  # Range
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= ab_retracement <= (max_val + tol)
+                    is_valid = _range_check(ab_retracement, min_val, max_val, tol)
                     dev = 0 if is_valid else min(abs(ab_retracement - min_val), abs(ab_retracement - max_val)) * 100
-                
+
                 total_checks += 1
                 if is_valid:
                     matches += 1
@@ -2044,7 +2056,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     details.append(f" AB/XA: {ab_retracement:.3f}")
                 else:
                     details.append(f" AB/XA: {ab_retracement:.3f}")
-            
+
             # BC/AB Check
             if "BC_AB" in ratios:
                 target = ratios["BC_AB"]
@@ -2053,8 +2065,8 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(bc_retracement, target_val, tol)
                 else:
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= bc_retracement <= (max_val + tol)
-                
+                    is_valid = _range_check(bc_retracement, min_val, max_val, tol)
+
                 total_checks += 1
                 if is_valid:
                     matches += 1
@@ -2062,7 +2074,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     details.append(f" BC/AB: {bc_retracement:.3f}")
                 else:
                     details.append(f" BC/AB: {bc_retracement:.3f}")
-            
+
             # CD/BC Check
             if "CD_BC" in ratios:
                 target = ratios["CD_BC"]
@@ -2071,7 +2083,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(cd_extension, target_val, tol)
                 else:
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= cd_extension <= (max_val + tol)
+                    is_valid = _range_check(cd_extension, min_val, max_val, tol)
                 
                 total_checks += 1
                 if is_valid:
@@ -2089,7 +2101,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     is_valid, dev = check_fibonacci_ratio(ad_retracement, target_val, tol)
                 else:
                     min_val, max_val, tol = target
-                    is_valid = (min_val - tol) <= ad_retracement <= (max_val + tol)
+                    is_valid = _range_check(ad_retracement, min_val, max_val, tol)
                 
                 total_checks += 1
                 if is_valid:
@@ -5153,26 +5165,26 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
 def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
     """
     Scannt mehrere Aktien nach Harmonic Patterns.
-    
+
     Args:
         tickers: Liste von Ticker-Symbolen
         api_key: Polygon API Key
         days: Anzahl Tage historische Daten
         timeframe: "day" für Daily, "hour" für 4H (default)
-    
+
     Returns:
         Liste von Aktien mit gefundenen Patterns
     """
     results = []
-    
+
     for i, ticker in enumerate(tickers):
         try:
             scan_result = scan_harmonic_patterns(ticker, api_key, days, timeframe=timeframe)
-            
+
             if scan_result.get("patterns"):
                 # Nimm das beste Pattern
                 best_pattern = scan_result["patterns"][0]
-                
+
                 results.append({
                     "Ticker": ticker,
                     "Pattern": f"{best_pattern['emoji']} {best_pattern['pattern']}",
@@ -5190,11 +5202,11 @@ def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
                 })
         except Exception as e:
             continue
-        
+
         # Rate Limiting: Pause nach je 10 Calls
         if i % 10 == 9:
             time.sleep(0.5)
-    
+
     # Sortiere nach Score
     results.sort(key=lambda x: x["Score"], reverse=True)
     return results
@@ -5203,13 +5215,13 @@ def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
 def find_harmonic_for_chart(ohlcv_data):
     """
     Findet Harmonic Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
-    
+
     Returns:
         Liste von Patterns mit XABCD-Koordinaten für Chart-Rendering
     """
     if not ohlcv_data or len(ohlcv_data) < 20:
         return []
-    
+
     try:
         # Konvertiere zu find_pivots Format
         prices = []
@@ -5222,26 +5234,26 @@ def find_harmonic_for_chart(ohlcv_data):
                 "open": d["open"],
                 "volume": d.get("volume", 0)
             })
-        
+
         # Finde Pivots mit window=3 (sensibel genug für alle Timeframes)
         pivots = find_pivots(prices, window=3)
-        
+
         if len(pivots) < 5:
             return []
-        
+
         # Identifiziere Patterns
         patterns = identify_harmonic_pattern(pivots, prices)
-        
+
         if not patterns:
             return []
-        
+
         # Konvertiere zu Chart-Format mit time-Koordinaten
         chart_patterns = []
         for pat in patterns[:3]:  # Max 3 Patterns
             points = []
             pivot_indices = pat.get("pivot_indices", [])
             point_labels = ["X", "A", "B", "C", "D"]
-            
+
             for idx, label in zip(pivot_indices, point_labels):
                 if idx < len(ohlcv_data):
                     points.append({
@@ -5249,7 +5261,7 @@ def find_harmonic_for_chart(ohlcv_data):
                         "price": pat["points"][label],
                         "label": label
                     })
-            
+
             if len(points) == 5:
                 chart_patterns.append({
                     "pattern": pat["pattern"],
@@ -5262,9 +5274,7 @@ def find_harmonic_for_chart(ohlcv_data):
                     "trade": pat.get("trade", {}),
                     "success_rate": pat.get("success_rate", 0)
                 })
-        
+
         return chart_patterns
     except Exception as e:
         return []
-
-

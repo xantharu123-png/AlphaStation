@@ -720,6 +720,8 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
 
             # V2.8: Grade — proportional skaliert (max_score 188), mit SM-Bestätigung
             # Konsistent mit patterns.py + modules/scanners.py
+            _cand_rvol = cand.get("RVOL", 0)
+
             if bi_score >= 113 and sm_fires >= 4:
                 grade = "S"; grade_label = "S — ELITE"
             elif bi_score >= 99 and sm_fires >= 3:
@@ -730,6 +732,12 @@ def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
                 grade = "C"; grade_label = "C — WATCH"
             else:
                 grade = "D"; grade_label = "D — SCHWACH"
+
+            # RVOL Guard: Ohne Volumen kein Top-Grade
+            if _cand_rvol < 0.7 and grade in ("S", "A"):
+                grade = "B"; grade_label = "B — SOLIDE (RVOL zu niedrig)"
+            elif _cand_rvol < 0.5 and grade == "B":
+                grade = "C"; grade_label = "C — WATCH (RVOL zu niedrig)"
 
             results.append({
                 "Ticker": ticker, "Name": cand["Name"],
@@ -2302,70 +2310,4 @@ def run_once():
     except Exception as e:
         print(f"   ❌ Strategien: {e}")
 
-    print("\n📡 ORB Scanner...")
-    try:
-        _run_orb_scanner(poly_key)
-        _check_and_alert_scan_results("orb", secrets)
-    except Exception as e:
-        print(f"   ❌ ORB: {e}")
-
-    print("\n📡 New Listing Scanner...")
-    try:
-        _nls_r = _run_new_listing_scanner()
-        _alert_nls_signals(_nls_r, secrets)
-    except Exception as e:
-        print(f"   ❌ NLS: {e}")
-
-    print("\n✅ Fertig!")
-
-
-def stop_service():
-    if PID_FILE.exists():
-        pid = int(PID_FILE.read_text().strip())
-        try:
-            # B-07: Validate PID before killing
-            import subprocess
-            result = subprocess.run(['ps', '-p', str(pid), '-o', 'cmd='], capture_output=True, text=True)
-            if 'bg_service' not in result.stdout:
-                print(f"❌ PID {pid} ist nicht bg_service, abbruch")
-                return
-
-            os.kill(pid, signal.SIGTERM)
-            print(f"⏹️ Stop an PID {pid}")
-            time.sleep(2)
-            try:
-                os.kill(pid, 0)
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                print("✅ Beendet.")
-        except ProcessLookupError:
-            print(f"⚠️ PID {pid} läuft nicht.")
-        PID_FILE.unlink(missing_ok=True)
-    else:
-        print("ℹ️ Kein Service läuft.")
-
-
-def show_status():
-    if STATUS_FILE.exists():
-        with open(STATUS_FILE) as f:
-            status = json.load(f)
-        svc = status.get("_service", {})
-        print(f"{'🟢' if svc.get('running') else '🔴'} Service PID {svc.get('pid', '?')}")
-        for scanner in ["crash_monitor", "btc_divergence", "bi_long", "bi_short"]:
-            info = status.get(scanner, {})
-            age = cache_age(scanner)
-            age_str = f"{age:.0f}s" if age else "kein Cache"
-            print(f"  {'✅' if info.get('status')=='ok' else '⏳'} {scanner}: {info.get('detail', '')} ({age_str})")
-    else:
-        print("ℹ️ Kein Status.")
-
-
-if __name__ == "__main__":
-    cmd = sys.argv[1].lower() if len(sys.argv) > 1 else ""
-    if cmd == "start": run_service()
-    elif cmd == "stop": stop_service()
-    elif cmd == "status": show_status()
-    elif cmd == "once": run_once()
-    else:
-        print(__doc__)
-        print("Befehle: start | stop | status | once")
+ 
