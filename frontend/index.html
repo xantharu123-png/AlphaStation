@@ -3040,7 +3040,7 @@ function App() {
                                     onMouseLeave={scheduleMegaHide}
                                 >
                                     {cat.label}
-                                    {cat.count > 2 && <span className="mega-cat-count">{cat.count}</span>}
+                                    {/* count hidden */}
                                 </button>
                             ))}
                             {isAdmin && (
@@ -5042,22 +5042,6 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 
     return (
         <div className="space-y-6">
-            {stats && (
-                <div className="grid grid-cols-3 gap-4">
-                    <div className="metric-card blue">
-                        <div className="text-sm font-semibold text-gray-600">Neue Listings</div>
-                        <div className="text-2xl font-bold mt-2">{stats.new_listings}</div>
-                    </div>
-                    <div className="metric-card green">
-                        <div className="text-sm font-semibold text-gray-600">Exchanges Überwacht</div>
-                        <div className="text-2xl font-bold mt-2">{stats.exchanges_monitored}</div>
-                    </div>
-                    <div className="metric-card orange">
-                        <div className="text-sm font-semibold text-gray-600">Aktive Signale</div>
-                        <div className="text-2xl font-bold mt-2">{stats.active_signals}</div>
-                    </div>
-                </div>
-            )}
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
 
