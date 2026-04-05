@@ -2409,30 +2409,37 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div><span className="text-gray-500">Contract</span> <span className="font-semibold text-xs">{scannerData.contract || '–'}</span></div>
                         <div><span className="text-gray-500">Preis</span> <span className="font-semibold">${scannerData.price?.toFixed(6) || '–'}</span></div>
                         <div><span className="text-gray-500">24h Change</span> <span className={`font-semibold ${(scannerData.change_24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{scannerData.change_24h?.toFixed(1) || '–'}%</span></div>
+                        {scannerData.volume_24h && <div><span className="text-gray-500">Vol 24h</span> <span className="font-semibold">{scannerData.volume_24h > 1e6 ? (scannerData.volume_24h/1e6).toFixed(1)+'M' : scannerData.volume_24h > 1e3 ? (scannerData.volume_24h/1e3).toFixed(0)+'K' : scannerData.volume_24h}</span></div>}
+                        {scannerData.listing_date && <div><span className="text-gray-500">Gelistet</span> <span className="font-semibold">{scannerData.listing_date}</span></div>}
                     </div>
                 </div>
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Exhaustion Analyse</h4>
                     <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Exhaustion</span> <span className={`font-semibold px-2 py-0.5 rounded ${(scannerData.exhaustion_score||0) >= 70 ? 'bg-red-100 text-red-800' : (scannerData.exhaustion_score||0) >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'}`}>{scannerData.exhaustion_score?.toFixed(0) || '–'}/100</span></div>
+                        <div><span className="text-gray-500">Signal</span> <span className={`font-semibold px-2 py-0.5 rounded ${scannerData.signal?.includes('SHORT') ? 'bg-red-100 text-red-800' : scannerData.signal === 'WATCH' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'}`}>{scannerData.signal || '–'}</span></div>
                         <div><span className="text-gray-500">Pump %</span> <span className={`font-semibold ${(scannerData.pump_pct||0) > 0 ? 'color-positive' : 'color-negative'}`}>{scannerData.pump_pct ? `+${scannerData.pump_pct}%` : '–'}</span></div>
                         <div><span className="text-gray-500">vom ATH %</span> <span className="font-semibold color-negative">{scannerData.from_ath_pct ? `-${scannerData.from_ath_pct}%` : '–'}</span></div>
-                        <div><span className="text-gray-500">Exhaustion</span> <span className={`font-semibold px-2 py-0.5 rounded ${(scannerData.exhaustion_score||0) >= 70 ? 'bg-red-100 text-red-800' : (scannerData.exhaustion_score||0) >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'}`}>{scannerData.exhaustion_score?.toFixed(0) || '–'}</span></div>
-                        <div><span className="text-gray-500">Signal</span> <span className={`font-semibold px-2 py-0.5 rounded ${scannerData.signal?.startsWith('SHORT') ? 'bg-red-100 text-red-800' : scannerData.signal === 'WATCH' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'}`}>{scannerData.signal || '–'}</span></div>
-                        <div><span className="text-gray-500">Vol Ratio</span> <span className="font-semibold">{scannerData.vol_ratio || '–'}x</span></div>
-                        <div><span className="text-gray-500">Stunden getrackt</span> <span className="font-semibold">{scannerData.hours_tracked || '–'}h</span></div>
-                        {scannerData.volume_24h && <div><span className="text-gray-500">Vol 24h</span> <span className="font-semibold">{scannerData.volume_24h > 1e6 ? (scannerData.volume_24h/1e6).toFixed(1)+'M' : scannerData.volume_24h > 1e3 ? (scannerData.volume_24h/1e3).toFixed(0)+'K' : scannerData.volume_24h}</span></div>}
-                        {scannerData.listing_date && <div><span className="text-gray-500">Gelistet</span> <span className="font-semibold">{scannerData.listing_date}</span></div>}
+                        {scannerData.confirmations > 0 && <div className="col-span-2"><span className="text-gray-500">Bestätigungen</span> <span className={`font-semibold px-2 py-0.5 rounded ${scannerData.confirmations >= 3 ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>{scannerData.confirmations}/5</span></div>}
                     </div>
                 </div>
-                {scannerData.exhaustion_details && (
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Exhaustion Details</h4>
+                    <h4 className="font-semibold text-sm mb-2">Short-Indikatoren</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Funding Rate</span> <span className={`font-semibold ${(scannerData.funding_rate||0) > 0.05 ? 'color-negative' : (scannerData.funding_rate||0) > 0 ? 'text-yellow-600' : ''}`}>{scannerData.funding_rate ? `${scannerData.funding_rate.toFixed(3)}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Long %</span> <span className={`font-semibold ${(scannerData.long_pct||50) > 65 ? 'color-negative' : ''}`}>{scannerData.long_pct ? `${scannerData.long_pct.toFixed(0)}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Red Candles</span> <span className={`font-semibold ${(scannerData.red_streak||0) >= 4 ? 'color-negative' : ''}`}>{scannerData.red_streak || '–'}</span></div>
+                        <div><span className="text-gray-500">Vol Ratio</span> <span className="font-semibold">{scannerData.vol_ratio || '–'}x</span></div>
+                        <div><span className="text-gray-500">BTC Divergenz</span> <span className={`font-semibold ${(scannerData.btc_divergence||0) < -5 ? 'color-negative' : ''}`}>{scannerData.btc_divergence ? `${scannerData.btc_divergence > 0 ? '+' : ''}${scannerData.btc_divergence}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Alter</span> <span className="font-semibold">{scannerData.hours_tracked || '–'}h</span></div>
+                    </div>
+                </div>
+                {scannerData.exhaustion_details && Array.isArray(scannerData.exhaustion_details) && (
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Score Details</h4>
                     <div className="space-y-1">
-                        {Object.entries(scannerData.exhaustion_details || {}).map(([key, val]) => (
-                            <div key={key} className="flex justify-between">
-                                <span className="text-gray-500">{key.replace(/_/g, ' ')}</span>
-                                <span className="font-semibold">{typeof val === 'number' ? val.toFixed(1) : String(val)}</span>
-                            </div>
+                        {scannerData.exhaustion_details.map((line, i) => (
+                            <div key={i} className="text-xs text-gray-600">{line}</div>
                         ))}
                     </div>
                 </div>
@@ -5055,6 +5062,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('pump_pct')}>Pump%{sortKey === 'pump_pct' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('from_ath_pct')}>vom ATH%{sortKey === 'from_ath_pct' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('exhaustion_score')}>Exhaustion{sortKey === 'exhaustion_score' && ' ↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('funding_rate')}>Funding{sortKey === 'funding_rate' && ' ↓'}</th>
                             <th className="text-center py-2 px-2">Signal</th>
                             <th className="text-left py-2 px-2">Gelistet</th>
                         </tr>
@@ -5068,7 +5076,8 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <td className={`py-3 px-2 text-right font-semibold ${item.pump_pct > 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct ? `+${item.pump_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right color-negative">{item.from_ath_pct ? `-${item.from_ath_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
-                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.signal?.startsWith('SHORT') ? 'signal-bearish' : item.signal === 'WATCH' ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.signal || '—'}</span></td>
+                                <td className={`py-3 px-2 text-right font-semibold ${item.funding_rate > 0.05 ? 'color-negative' : item.funding_rate > 0 ? 'text-yellow-600' : ''}`}>{item.funding_rate ? `${item.funding_rate.toFixed(3)}%` : '—'}</td>
+                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.signal?.includes('SHORT') ? 'signal-bearish' : item.signal === 'WATCH' ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.signal || '—'}{item.confirmations >= 3 ? ` (${item.confirmations})` : ''}</span></td>
                                 <td className="py-3 px-2 text-sm text-gray-500">{item.listing_date || '—'}</td>
                             </tr>
                         ))}

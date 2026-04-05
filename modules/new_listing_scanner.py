@@ -318,13 +318,14 @@ def fetch_binance_futures_instruments():
 
 
 def fetch_binance_ticker(symbol):
-    """Binance Futures 24h Ticker."""
+    """Binance Futures 24h Ticker + OI + Funding + Long/Short Ratio."""
     data = _api_get(f"{BINANCE_FUTURES_BASE}/ticker/24hr", {"symbol": symbol})
     if not data or not isinstance(data, dict):
         return None
-    return {
+
+    result = {
         "price": float(data.get("lastPrice", 0)),
-        "bid": float(data.get("lastPrice", 0)),  # Bid/Ask nicht in 24h ticker
+        "bid": float(data.get("lastPrice", 0)),
         "ask": float(data.get("lastPrice", 0)),
         "high_24h": float(data.get("highPrice", 0)),
         "low_24h": float(data.get("lowPrice", 0)),
@@ -332,8 +333,37 @@ def fetch_binance_ticker(symbol):
         "volume_usd_24h": float(data.get("quoteVolume", 0)),
         "change_24h": float(data.get("priceChangePercent", 0)),
         "open_interest": 0,
+        "funding_rate": 0,
+        "long_short_ratio": 0,
         "timestamp": int(data.get("closeTime", 0)),
     }
+
+    # OI separat holen
+    try:
+        oi_data = _api_get(f"{BINANCE_FUTURES_BASE}/openInterest", {"symbol": symbol})
+        if oi_data and isinstance(oi_data, dict):
+            result["open_interest"] = float(oi_data.get("openInterest", 0))
+    except Exception:
+        pass
+
+    # Funding Rate separat holen
+    try:
+        fr_data = _api_get(f"{BINANCE_FUTURES_BASE}/premiumIndex", {"symbol": symbol})
+        if fr_data and isinstance(fr_data, dict):
+            result["funding_rate"] = float(fr_data.get("lastFundingRate", 0))
+    except Exception:
+        pass
+
+    # Top Trader Long/Short Ratio (Accounts)
+    try:
+        ls_data = _api_get("https://fapi.binance.com/futures/data/topLongShortAccountRatio",
+                           {"symbol": symbol, "period": "1h", "limit": 1})
+        if ls_data and isinstance(ls_data, list) and len(ls_data) > 0:
+            result["long_short_ratio"] = float(ls_data[0].get("longShortRatio", 0))
+    except Exception:
+        pass
+
+    return result
 
 
 def fetch_binance_candles(symbol, timeframe="1h", count=50):
@@ -868,54 +898,214 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     score += min(10, pts)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 7. OI vs PRICE DIVERGENZ (0-5)
+    # 7. OI vs PRICE DIVERGENZ (0-10)
     #    OI steigt während Preis stagniert/fällt = Longs sind trapped
+    #    Höheres Gewicht weil einer der zuverlässigsten Indikatoren
     # ═══════════════════════════════════════════════════════════════════════
     if ticker and ticker.get("open_interest", 0) > 0:
         oi = ticker["open_interest"]
-        # Hohe OI bei fallenden Preisen = trapped longs
-        if current_from_ath >= 5 and oi > 0:
-            pts = 5
-            details.append(f" OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/5 (Trapped Longs)")
+        if current_from_ath >= 10 and oi > 0:
+            pts = 10  # Preis stark unter ATH + hohe OI = massive trapped Longs
+            details.append(f"📊 OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (Trapped Longs!)")
+        elif current_from_ath >= 5 and oi > 0:
+            pts = 7
+            details.append(f"📊 OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (Trapped Longs)")
         elif current_from_ath >= 2:
-            pts = 2
-            details.append(f" OI: {oi:,.0f} → {pts}/5")
+            pts = 4
+            details.append(f"📊 OI: {oi:,.0f} → {pts}/10")
         else:
             pts = 0
-            details.append(f" OI: {oi:,.0f} (neutral)")
+            details.append(f"📊 OI: {oi:,.0f} (neutral)")
         score += pts
+        pump_data["open_interest"] = oi
     else:
-        details.append(" OI: keine Daten")
+        details.append("📊 OI: keine Daten")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 8. FUNDING RATE (0-5 Bonus)
-    #    Hohe positive Funding = Longs zahlen Shorts → Überhitzung
-    #    Nur MEXC/Bitget liefern funding_rate im Ticker
+    # 8. FUNDING RATE (0-15)
+    #    DER stärkste Dump-Indikator bei neuen Listings!
+    #    Hohe positive Funding = Longs überhitzt, zahlen Shorts
+    #    Extrem hohe Funding (>0.1%) bei neuen Listings = fast sicherer Dump
     # ═══════════════════════════════════════════════════════════════════════
     fr = ticker.get("funding_rate", 0) if ticker else 0
     if fr and fr > 0:
         fr_pct = fr * 100  # z.B. 0.001 → 0.1%
-        if fr_pct >= 0.1:    # Extrem hohe Funding (> 0.1% pro 8h)
-            pts = 5
-        elif fr_pct >= 0.05:  # Überdurchschnittlich
-            pts = 3
-        elif fr_pct >= 0.01:  # Leicht positiv
-            pts = 1
+        if fr_pct >= 0.3:      # Extrem (> 0.3% pro 8h = 3.6%/Tag Kosten!)
+            pts = 15
+        elif fr_pct >= 0.1:    # Sehr hoch (> 0.1%)
+            pts = 12
+        elif fr_pct >= 0.05:   # Überdurchschnittlich
+            pts = 8
+        elif fr_pct >= 0.02:   # Leicht erhöht
+            pts = 4
+        elif fr_pct >= 0.01:   # Leicht positiv
+            pts = 2
         else:
             pts = 0
         score += pts
         pump_data["funding_rate"] = round(fr_pct, 4)
-        details.append(f" Funding: {fr_pct:.3f}% (positive = Longs zahlen) → {pts}/5")
+        details.append(f"💰 Funding: {fr_pct:.3f}% (Longs zahlen) → {pts}/15")
     elif fr and fr < 0:
-        # Negative Funding = Shorts zahlen → gegen uns, Score-Malus
         fr_pct = fr * 100
-        score = max(0, score - 3)
+        # Negative Funding = Shorts zahlen → GEGEN unseren Short
+        malus = 5 if fr_pct < -0.05 else 3 if fr_pct < -0.02 else 1
+        score = max(0, score - malus)
         pump_data["funding_rate"] = round(fr_pct, 4)
-        details.append(f" Funding: {fr_pct:.3f}% (negativ! Shorts zahlen) → -3 Malus")
+        details.append(f"💰 Funding: {fr_pct:.3f}% (negativ! Shorts zahlen) → -{malus} Malus")
     else:
-        details.append(" Funding: keine Daten (Crypto.com)")
+        details.append("💰 Funding: keine Daten")
 
-    return min(100, score), details, pump_data
+    # ═══════════════════════════════════════════════════════════════════════
+    # 9. LONG/SHORT RATIO (0-15)
+    #    Wenn >65% der Top-Trader Long sind → einseitig positioniert
+    #    = Liquidation Cascade wahrscheinlich → Dump
+    #    Binance liefert topLongShortAccountRatio
+    # ═══════════════════════════════════════════════════════════════════════
+    ls_ratio = ticker.get("long_short_ratio", 0) if ticker else 0
+    if ls_ratio and ls_ratio > 0:
+        # long_short_ratio > 1 = mehr Longs als Shorts
+        long_pct = (ls_ratio / (1 + ls_ratio)) * 100  # z.B. 2.5 → 71.4% Long
+        if long_pct >= 80:       # Extrem einseitig → fast sicherer Dump
+            pts = 15
+        elif long_pct >= 72:     # Stark einseitig
+            pts = 12
+        elif long_pct >= 65:     # Deutlich Long-lastig
+            pts = 8
+        elif long_pct >= 58:     # Leicht Long-lastig
+            pts = 4
+        elif long_pct >= 55:     # Marginal
+            pts = 2
+        else:
+            pts = 0
+        score += pts
+        pump_data["long_short_ratio"] = round(ls_ratio, 2)
+        pump_data["long_pct"] = round(long_pct, 1)
+        details.append(f"⚖️ L/S Ratio: {ls_ratio:.2f} ({long_pct:.0f}% Long) → {pts}/15")
+    else:
+        details.append("⚖️ L/S Ratio: keine Daten")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 10. CONSECUTIVE RED CANDLES (0-10)
+    #     4+ rote Candles hintereinander nach ATH = Distribution aktiv
+    #     Einfach aber sehr effektiv als Bestätigung
+    # ═══════════════════════════════════════════════════════════════════════
+    red_streak = 0
+    max_red_streak = 0
+    for c in candles:
+        if c["close"] < c["open"]:
+            red_streak += 1
+            max_red_streak = max(max_red_streak, red_streak)
+        else:
+            red_streak = 0
+
+    # Aktuelle Streak (am Ende der Candle-Reihe) zählt mehr
+    current_red_streak = 0
+    for c in reversed(candles):
+        if c["close"] < c["open"]:
+            current_red_streak += 1
+        else:
+            break
+
+    effective_streak = max(max_red_streak, current_red_streak)
+    if effective_streak >= 6:
+        pts = 10  # 6+ rote Candles = starke Distribution
+    elif effective_streak >= 5:
+        pts = 8
+    elif effective_streak >= 4:
+        pts = 6
+    elif effective_streak >= 3:
+        pts = 3
+    else:
+        pts = 0
+    score += pts
+    pump_data["red_streak"] = effective_streak
+    pump_data["current_red_streak"] = current_red_streak
+    details.append(f"🔴 Red Candles: {effective_streak} hintereinander (aktuell {current_red_streak}) → {pts}/10")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 11. ZEIT SEIT LISTING (0-10)
+    #     Neue Listings haben vorhersehbaren Lebenszyklus:
+    #     0-6h: Hype-Phase (zu früh für Short)
+    #     6-24h: Peak-Zone (aufpassen)
+    #     24-72h: ideales Short-Fenster (Hype vorbei, Dump beginnt)
+    #     >72h: späte Phase (Dump läuft oder schon durch)
+    # ═══════════════════════════════════════════════════════════════════════
+    hours = pump_data.get("hours_tracked", n)
+    if hours >= 24 and hours <= 72:
+        pts = 10  # Sweet Spot: Hype ist vorbei, Dump-Phase
+    elif hours >= 12 and hours < 24:
+        pts = 7   # Noch in der Transition
+    elif hours >= 6 and hours < 12:
+        pts = 4   # Noch recht früh aber möglich
+    elif hours > 72 and hours <= 168:
+        pts = 5   # Spät aber noch relevant (1-7 Tage)
+    elif hours > 168:
+        pts = 2   # Sehr spät (>7 Tage)
+    else:
+        pts = 0   # Zu früh (<6h)
+    score += pts
+    pump_data["listing_age_hours"] = hours
+    details.append(f"⏱️ Listing Alter: {hours}h → {pts}/10 ({'Sweet Spot!' if 24 <= hours <= 72 else 'Zu früh' if hours < 6 else 'Spät' if hours > 72 else ''})")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 12. BTC KORRELATION (0-10)
+    #     Wenn BTC stabil/steigt aber der Coin fällt → eigenständiger Dump
+    #     Stärkeres Signal als marktweiter Abverkauf
+    # ═══════════════════════════════════════════════════════════════════════
+    btc_divergence_pts = 0
+    try:
+        btc_candles = fetch_binance_candles("BTCUSDT", "1h", min(n, 24))
+        if btc_candles and len(btc_candles) >= 3:
+            btc_first = btc_candles[0]["open"]
+            btc_last = btc_candles[-1]["close"]
+            btc_change = ((btc_last - btc_first) / btc_first * 100) if btc_first > 0 else 0
+
+            # Coin-Change über gleichen Zeitraum
+            coin_recent = candles[-min(len(candles), len(btc_candles)):]
+            coin_first = coin_recent[0]["open"] if coin_recent else first_price
+            coin_change = ((current_price - coin_first) / coin_first * 100) if coin_first > 0 else 0
+
+            divergence = coin_change - btc_change  # negativ = Coin underperformt BTC
+
+            if divergence <= -15:       # Coin fällt 15%+ mehr als BTC
+                btc_divergence_pts = 10
+            elif divergence <= -10:
+                btc_divergence_pts = 8
+            elif divergence <= -5:
+                btc_divergence_pts = 5
+            elif divergence <= -2:
+                btc_divergence_pts = 3
+            else:
+                btc_divergence_pts = 0
+
+            # Bonus: BTC steigt aber Coin fällt = extrastarkes Signal
+            if btc_change > 0 and coin_change < -3:
+                btc_divergence_pts = min(10, btc_divergence_pts + 2)
+
+            pump_data["btc_change_pct"] = round(btc_change, 1)
+            pump_data["coin_change_pct"] = round(coin_change, 1)
+            pump_data["btc_divergence"] = round(divergence, 1)
+            details.append(f"₿ BTC Divergenz: BTC {btc_change:+.1f}% vs Coin {coin_change:+.1f}% (Div: {divergence:+.1f}%) → {btc_divergence_pts}/10")
+        else:
+            details.append("₿ BTC Divergenz: keine BTC-Daten")
+    except Exception as e:
+        details.append(f"₿ BTC Divergenz: Fehler ({e})")
+
+    score += btc_divergence_pts
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # GESAMT-SCORE (max 155 Punkte → normalisiert auf 0-100)
+    # ═══════════════════════════════════════════════════════════════════════
+    # Komponenten: 20+20+15+15+15+10+10+15+15+10+10+10 = 165 max (mit Bonus)
+    # Normalisieren auf 0-100 für einheitliche Schwellenwerte
+    max_possible = 165
+    normalized = int(round(score / max_possible * 100))
+
+    pump_data["raw_score"] = score
+    pump_data["max_score"] = max_possible
+    details.append(f"══ GESAMT: {score}/{max_possible} Punkte → normalisiert {normalized}/100")
+
+    return min(100, normalized), details, pump_data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

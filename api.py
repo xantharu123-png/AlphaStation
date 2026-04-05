@@ -4148,7 +4148,21 @@ def _new_listing_wrapper() -> None:
                 _exh = exhaustion_score or 0
                 _pump = pump_data.get("pump_pct", 0) if pump_data else 0
                 _from_ath = pump_data.get("from_ath_pct", 0) if pump_data else 0
-                if _exh >= 70 and _from_ath > 10:
+                _funding = pump_data.get("funding_rate", 0) if pump_data else 0
+                _long_pct = pump_data.get("long_pct", 50) if pump_data else 50
+                _red_streak = pump_data.get("red_streak", 0) if pump_data else 0
+
+                # Konfidenz-Zähler: wie viele unabhängige Signale bestätigen den Short?
+                _confirmations = 0
+                if _from_ath > 10: _confirmations += 1
+                if _funding > 0.05: _confirmations += 1     # Hohe Funding
+                if _long_pct > 65: _confirmations += 1       # Longs überladen
+                if _red_streak >= 4: _confirmations += 1     # Distribution aktiv
+                if pump_data and pump_data.get("btc_divergence", 0) < -5: _confirmations += 1  # BTC Divergenz
+
+                if _exh >= 75 and _confirmations >= 3:
+                    _signal = "SHORT ⚡"  # High Confidence: 3+ Bestätigungen
+                elif _exh >= 70 and _from_ath > 10:
                     _signal = "SHORT"
                 elif _exh >= 50 and _from_ath > 5:
                     _signal = "SHORT (Watch)"
@@ -4178,9 +4192,15 @@ def _new_listing_wrapper() -> None:
                     "exhaustion_score": _exh,
                     "exhaustion_details": exhaustion_details,
                     "signal": _signal,
+                    "confirmations": _confirmations,
                     "listing_date": _listing_ts,
                     "hours_tracked": pump_data.get("hours_tracked", 0) if pump_data else 0,
                     "vol_ratio": round(pump_data.get("vol_ratio", 0), 2) if pump_data else 0,
+                    "funding_rate": round(_funding, 4) if _funding else 0,
+                    "long_pct": round(_long_pct, 1),
+                    "red_streak": _red_streak,
+                    "btc_divergence": round(pump_data.get("btc_divergence", 0), 1) if pump_data else 0,
+                    "raw_score": pump_data.get("raw_score", 0) if pump_data else 0,
                 })
             except Exception as e:
                 print(f"[New Listing] Error processing {listing if isinstance(listing, str) else listing.get('symbol', 'unknown')}: {e}")
