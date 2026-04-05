@@ -19,8 +19,10 @@ Pipeline:
 5. SIGNAL   — Short-Entry mit Entry/Stop/TP wenn Score + Safety OK
 
 Unterstützte Exchanges:
-- Crypto.com Exchange (Primär — PERP-Trading)
-- MEXC (Sekundär — Frühwarnung, listet am schnellsten)
+- Binance (Größte Exchange — 581 Perps, onboardDate verfügbar)
+- MEXC (Schnellste Listings — 750 Perps, isNew-Flag + createTime)
+- Bitget (539 Perps, launchTime verfügbar)
+- Crypto.com Exchange (238 Perps, PERP-Trading)
 """
 
 import os
@@ -285,6 +287,82 @@ def fetch_mexc_candles(symbol, timeframe="1h", count=50):
     return candles
 
 
+# ── Binance Futures API (581 Perps, onboardDate verfügbar) ───────────────────
+
+BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
+
+def fetch_binance_futures_instruments():
+    """
+    Holt alle Binance USDT-M Perpetual-Kontrakte mit onboardDate.
+    Binance = größte Exchange, Listings hier sind besonders relevant.
+    """
+    data = _api_get(f"{BINANCE_FUTURES_BASE}/exchangeInfo")
+    if not data:
+        return []
+
+    symbols = data.get("symbols", [])
+    perps = []
+    for s in symbols:
+        if s.get("contractType") == "PERPETUAL" and s.get("status") == "TRADING":
+            perps.append({
+                "symbol": s.get("symbol", ""),
+                "base": s.get("baseAsset", ""),
+                "quote": s.get("quoteAsset", "USDT"),
+                "instrument_name": s.get("symbol", ""),
+                "tradable": True,
+                "max_leverage": "125",  # Binance default max
+                "exchange": "binance",
+                "onboard_date": s.get("onboardDate", 0),
+            })
+    return perps
+
+
+def fetch_binance_ticker(symbol):
+    """Binance Futures 24h Ticker."""
+    data = _api_get(f"{BINANCE_FUTURES_BASE}/ticker/24hr", {"symbol": symbol})
+    if not data or not isinstance(data, dict):
+        return None
+    return {
+        "price": float(data.get("lastPrice", 0)),
+        "bid": float(data.get("lastPrice", 0)),  # Bid/Ask nicht in 24h ticker
+        "ask": float(data.get("lastPrice", 0)),
+        "high_24h": float(data.get("highPrice", 0)),
+        "low_24h": float(data.get("lowPrice", 0)),
+        "volume_24h": float(data.get("volume", 0)),
+        "volume_usd_24h": float(data.get("quoteVolume", 0)),
+        "change_24h": float(data.get("priceChangePercent", 0)),
+        "open_interest": 0,
+        "timestamp": int(data.get("closeTime", 0)),
+    }
+
+
+def fetch_binance_candles(symbol, timeframe="1h", count=50):
+    """Binance Futures Klines."""
+    tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+    data = _api_get(f"{BINANCE_FUTURES_BASE}/klines", {
+        "symbol": symbol,
+        "interval": tf_map.get(timeframe, "1h"),
+        "limit": count,
+    })
+    if not data or not isinstance(data, list):
+        return []
+    candles = []
+    for c in data:
+        # Format: [openTime, open, high, low, close, volume, closeTime, quoteVolume, ...]
+        if isinstance(c, list) and len(c) >= 8:
+            candles.append({
+                "timestamp": int(c[0]) // 1000,
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
+                "volume": float(c[5]),
+                "volume_usd": float(c[7]),
+            })
+    candles.sort(key=lambda x: x["timestamp"])
+    return candles
+
+
 # ── Bitget Futures API (539 Perps, launchTime verfügbar) ─────────────────────
 
 BITGET_BASE = "https://api.bitget.com/api/v2/mix"
@@ -385,6 +463,8 @@ def fetch_ticker_for(symbol, exchange):
         return fetch_mexc_ticker(symbol)
     elif exchange == "bitget":
         return fetch_bitget_ticker(symbol)
+    elif exchange == "binance":
+        return fetch_binance_ticker(symbol)
     else:
         return fetch_cryptocom_ticker(symbol)
 
@@ -395,6 +475,8 @@ def fetch_candles_for(symbol, exchange, timeframe="1h", count=50):
         return fetch_mexc_candles(symbol, timeframe, count)
     elif exchange == "bitget":
         return fetch_bitget_candles(symbol, timeframe, count)
+    elif exchange == "binance":
+        return fetch_binance_candles(symbol, timeframe, count)
     else:
         return fetch_cryptocom_candles(symbol, timeframe, count)
 
@@ -410,17 +492,30 @@ def detect_new_listings():
     - MEXC (755 Perps — schnellste Listings!)
     - Bitget (539 Perps)
 
+    WICHTIG: Beim ersten Lauf (kein Cache vorhanden) wird der Cache geseeded
+    OHNE alles als "neu" zu melden. Nur Instrumente mit nachweislich kürzlichem
+    Listing-Datum (launchTime/createTime/isNew) werden als New Listings erkannt.
+    Ab dem 2. Lauf greift zusätzlich Cache-Diff für neue Symbole.
+
     Gibt neue PERP-Instrumente + alle aktuellen zurück.
     """
     CACHE_DIR.mkdir(exist_ok=True)
     all_new = []
     all_perps = []
 
-    # ── Alle 3 Exchanges abfragen ──
+    # ── Stock-Token & Index-Filter Patterns ──
+    STOCK_PATTERNS = ("STOCK_", "STOCK-", "US30_", "US30-", "HK50_", "HK50-",
+                      "SP500_", "SP500-", "EU50_", "NASDAQ_", "FTSE_")
+
+    def _is_stock_token(sym):
+        return any(pat in sym.upper() for pat in STOCK_PATTERNS)
+
+    # ── Alle 4 Exchanges abfragen ──
     exchanges = {
         "crypto.com": fetch_cryptocom_instruments,
         "mexc": fetch_mexc_futures_instruments,
         "bitget": fetch_bitget_futures_instruments,
+        "binance": fetch_binance_futures_instruments,
     }
 
     for ex_name, fetcher in exchanges.items():
@@ -435,24 +530,37 @@ def detect_new_listings():
 
             # Exchange-spezifischer Cache
             cache_file = CACHE_DIR / f"nls_cache_{ex_name.replace('.', '_')}.json"
+            is_first_run = not cache_file.exists()
             cached_symbols = set()
-            if cache_file.exists():
+
+            if not is_first_run:
                 try:
                     cached = json.loads(cache_file.read_text())
                     cached_symbols = set(cached.get("symbols", []))
                 except Exception:
-                    pass
+                    is_first_run = True  # Korrupter Cache = wie erster Lauf
 
-            # Diff
-            new_symbols = current_symbols - cached_symbols
-            new_listings = [p for p in perps if p["symbol"] in new_symbols]
+            if is_first_run:
+                # ══ ERSTER LAUF: Cache seeden, NICHTS als "neu" aus Diff melden ══
+                # Beim allerersten Lauf sind alle Symbole unbekannt. Wir SEEDEN
+                # den Cache, damit ab dem nächsten Lauf Cache-Diff funktioniert.
+                # Neue Listings werden NUR über launchTime/createTime/isNew erkannt.
+                log.info(f"🌱 NLS: Erster Lauf für {ex_name} — "
+                         f"seede Cache mit {len(current_symbols)} Symbolen "
+                         f"(KEIN Cache-Diff, nur Timestamp-basierte Erkennung)")
+            else:
+                # ══ FOLGE-LAUF: Cache-Diff erkennt wirklich neue Symbole ══
+                new_symbols = current_symbols - cached_symbols
+                if new_symbols:
+                    new_listings = [p for p in perps if p["symbol"] in new_symbols]
+                    # Zusätzlicher Filter: Stock-Tokens raus
+                    new_listings = [n for n in new_listings if not _is_stock_token(n["symbol"])]
+                    if new_listings:
+                        log.info(f"🆕 NLS: {len(new_listings)} neue Perps auf {ex_name}: "
+                                 f"{', '.join(n['symbol'] for n in new_listings[:10])}")
+                        all_new.extend(new_listings)
 
-            if new_listings:
-                log.info(f"🆕 NLS: {len(new_listings)} neue Perps auf {ex_name}: "
-                         f"{', '.join(n['symbol'] for n in new_listings[:10])}")
-                all_new.extend(new_listings)
-
-            # Cache aktualisieren
+            # Cache aktualisieren (immer, auch beim ersten Lauf)
             if current_symbols:
                 cache_file.write_text(json.dumps({
                     "symbols": list(current_symbols),
@@ -464,55 +572,57 @@ def detect_new_listings():
         except Exception as e:
             log.warning(f"NLS {ex_name} Error: {e}\n{traceback.format_exc()}")
 
-    # ── Stock-Token & Index-Filter ──
-    # MEXC listet Stock-Perps (AAPLSTOCK_USDT etc.) und Indices (US30_USDT)
-    # Die folgen NICHT dem Crypto-Pump-Dump-Muster → rausfiltern
-    STOCK_PATTERNS = ("STOCK_", "STOCK-", "US30_", "US30-", "HK50_", "HK50-",
-                      "SP500_", "SP500-", "EU50_", "NASDAQ_", "FTSE_")
-    before_filter = len(all_new)
-    all_new = [n for n in all_new
-               if not any(pat in n["symbol"].upper() for pat in STOCK_PATTERNS)]
-    filtered = before_filter - len(all_new)
-    if filtered:
-        log.info(f" NLS: {filtered} Stock-Tokens/Indices gefiltert (kein Crypto-Pump-Dump)")
-
-    # ── MEXC isNew-Flag als Bonus-Erkennung ──
-    # Coins die schon im Cache waren aber von MEXC als "isNew" markiert sind
-    # = kürzlich gelistet, aber VOR unserem Seed → trotzdem überwachen!
+    # ── Deduplizieren (gleicher Base-Coin auf mehreren Exchanges) ──
     known_new = {n["symbol"] for n in all_new}
+
+    # ── MEXC isNew-Flag als zuverlässige Erkennung ──
+    # MEXC markiert kürzlich gelistete Coins mit isNew=True
     for p in all_perps:
         if p.get("exchange") == "mexc" and p.get("is_new"):
             sym = p["symbol"]
-            if sym not in known_new and not any(pat in sym.upper() for pat in STOCK_PATTERNS):
+            if sym not in known_new and not _is_stock_token(sym):
                 all_new.append(p)
                 known_new.add(sym)
-                log.info(f" NLS: {sym} via MEXC isNew-Flag erkannt (war schon im Cache)")
+                log.info(f"🆕 NLS: {sym} via MEXC isNew-Flag erkannt")
 
-    # ── Bitget launchTime Bonus-Erkennung ──
-    # Coins mit launchTime in den letzten 30 Tagen = kürzlich gelistet
-    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp() * 1000)
+    # ── Bitget launchTime Erkennung ──
+    # Coins mit launchTime in den letzten 14 Tagen = kürzlich gelistet
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=14)).timestamp() * 1000)
     for p in all_perps:
         if p.get("exchange") == "bitget" and p.get("launch_time", 0) > cutoff_ms:
             sym = p["symbol"]
-            if sym not in known_new and not any(pat in sym.upper() for pat in STOCK_PATTERNS):
+            if sym not in known_new and not _is_stock_token(sym):
                 all_new.append(p)
                 known_new.add(sym)
                 lt_str = datetime.fromtimestamp(p["launch_time"] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
-                log.info(f" NLS: {sym} via Bitget launchTime erkannt (gelistet {lt_str})")
+                log.info(f"🆕 NLS: {sym} via Bitget launchTime erkannt (gelistet {lt_str})")
 
-    # ── MEXC createTime Bonus-Erkennung ──
-    # Coins mit createTime in den letzten 30 Tagen
+    # ── MEXC createTime Erkennung ──
+    # Coins mit createTime in den letzten 14 Tagen
     for p in all_perps:
         if p.get("exchange") == "mexc" and p.get("create_time", 0) > cutoff_ms:
             sym = p["symbol"]
-            if sym not in known_new and not any(pat in sym.upper() for pat in STOCK_PATTERNS):
+            if sym not in known_new and not _is_stock_token(sym):
                 all_new.append(p)
                 known_new.add(sym)
                 ct_str = datetime.fromtimestamp(p["create_time"] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
-                log.info(f" NLS: {sym} via MEXC createTime erkannt (gelistet {ct_str})")
+                log.info(f"🆕 NLS: {sym} via MEXC createTime erkannt (gelistet {ct_str})")
+
+    # ── Binance onboardDate Erkennung ──
+    # Coins mit onboardDate in den letzten 14 Tagen
+    for p in all_perps:
+        if p.get("exchange") == "binance" and p.get("onboard_date", 0) > cutoff_ms:
+            sym = p["symbol"]
+            if sym not in known_new and not _is_stock_token(sym):
+                all_new.append(p)
+                known_new.add(sym)
+                ob_str = datetime.fromtimestamp(p["onboard_date"] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+                log.info(f"🆕 NLS: {sym} via Binance onboardDate erkannt (gelistet {ob_str})")
 
     if all_new:
         log.info(f"🆕 NLS TOTAL: {len(all_new)} neue/kürzliche Listings über alle Exchanges")
+    else:
+        log.info(f"📋 NLS: Keine neuen Listings erkannt (Cache-Diff + Timestamp-Check)")
 
     return all_new, all_perps
 
