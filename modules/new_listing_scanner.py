@@ -1300,19 +1300,19 @@ def seed_instrument_cache():
     # Prüfe ob ALLE Exchange-Caches existieren
     all_seeded = all(
         (CACHE_DIR / f"nls_cache_{ex}.json").exists()
-        for ex in ["crypto_com", "mexc", "bitget"]
+        for ex in ["crypto_com", "mexc", "bitget", "binance"]
     )
     if all_seeded:
         return False  # Alle Caches existieren schon
 
-    log.info(" NLS: Erster Start — lade initiale Instrument-Listen für 3 Exchanges...")
+    log.info(" NLS: Erster Start — lade initiale Instrument-Listen für 4 Exchanges...")
     total = 0
 
-    # Crypto.com
     exchanges_data = {
         "crypto_com": ("crypto.com", fetch_cryptocom_instruments),
         "mexc": ("mexc", fetch_mexc_futures_instruments),
         "bitget": ("bitget", fetch_bitget_futures_instruments),
+        "binance": ("binance", fetch_binance_futures_instruments),
     }
 
     for cache_key, (ex_name, fetcher) in exchanges_data.items():
@@ -1346,5 +1346,5 @@ def seed_instrument_cache():
             "note": "Multi-Exchange: siehe nls_cache_*.json",
         }, indent=2))
 
-    log.info(f" NLS: Total {total} Perps über 3 Exchanges gecached")
+    log.info(f" NLS: Total {total} Perps über 4 Exchanges gecached")
     return total > 0

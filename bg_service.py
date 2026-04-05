@@ -92,6 +92,26 @@ def _cleanup_old_cache():
             except:
                 pass
 
+# ── Cache bei Scan-Start löschen (frische Ergebnisse) ──
+_SCAN_CACHE_MAP = {
+    "bi_long": "/tmp/bi_cache_long.json",
+    "bi_short": "/tmp/bi_cache_short.json",
+    "bear_scan": "/tmp/bear_scanner_cache.json",
+    "biotech": "/tmp/biotech_scan_results.json",
+    "strategies": "/tmp/strategy_scan_results.json",
+    "orb": "/tmp/orb_scan_results.json",
+}
+
+def _clear_scan_cache(scanner_name):
+    """Löscht den alten Cache wenn ein neuer Scan startet."""
+    cache_file = _SCAN_CACHE_MAP.get(scanner_name)
+    if cache_file and os.path.exists(cache_file):
+        try:
+            os.unlink(cache_file)
+            log.debug(f"Cache gelöscht bei Scan-Start: {cache_file}")
+        except Exception:
+            pass
+
 # ── API Keys aus secrets.toml laden ──
 def _load_secrets():
     """Liest .streamlit/secrets.toml oder ~/.streamlit/secrets.toml"""
@@ -463,6 +483,7 @@ def _fetch_crash_monitor(poly_key):
 
 def _run_bi_scanner(poly_key, direction="long"):
     """BI Scanner via Polygon Snapshot → _bi_background_scan"""
+    _clear_scan_cache(f"bi_{direction}")
     label = "BI Long" if direction == "long" else "Bear Short"
     log.info(f"🔮 {label} Scanner...")
     _update_status(f"bi_{direction}", "fetching")
@@ -793,6 +814,7 @@ def _run_bear_scanner(poly_key, secrets):
     V2.8: Bear Scanner im Background Service — findet Crash-Kandidaten und sendet Alerts.
     Nutzt Polygon /losers Endpoint + History für Score/Grade.
     """
+    _clear_scan_cache("bear_scan")
     import requests as req
     log.info("Bear Scanner (bg_service)...")
     _update_status("bear_scan", "running")
@@ -968,6 +990,7 @@ def _run_strategy_scanner(poly_key, secrets):
 
     Nutzt Polygon Snapshot API (wie _run_bi_scanner) und wendet Strategie-Filter an.
     """
+    _clear_scan_cache("strategies")
     import requests as req
     log.info("📊 Strategie-Scanner (stündlich)...")
     _update_status("strategy_scan", "running")
@@ -1222,6 +1245,7 @@ def _run_strategy_scanner(poly_key, secrets):
 
 def _run_orb_scanner(poly_key):
     """ORB Scanner — läuft nur Mo-Fr 9:45-11:00 ET, speichert Ergebnisse als Cache"""
+    _clear_scan_cache("orb")
     import pytz
     et_tz = pytz.timezone('US/Eastern')
     now_et = datetime.now(et_tz)
@@ -1435,6 +1459,7 @@ def _run_orb_scanner(poly_key):
 
 def _run_biotech_scanner(poly_key):
     """Biotech Scanner — ruft _biotech_background_scan aus modules/scanners.py auf"""
+    _clear_scan_cache("biotech")
     log.info("🧬 Biotech Scanner...")
     _update_status("biotech", "running")
 
@@ -2295,7 +2320,7 @@ def run_once():
 
     print("\n📡 Bear Scanner Short...")
     _run_bear_scanner(poly_key, secrets)
-    _check_and_alert_scan_results("bi_short", secrets)
+    # Bear Scanner hat eigene Alert-Logik in _run_bear_scanner()
 
     print("\n📡 Biotech Scanner...")
     try:
