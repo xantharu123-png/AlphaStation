@@ -4052,19 +4052,43 @@ def _new_listing_wrapper() -> None:
                     candles or [], ticker_data, orderbook
                 )
 
+                # Signal-Logik: SHORT wenn Exhaustion hoch (Dump-Phase), sonst WATCH
+                _exh = exhaustion_score or 0
+                _pump = pump_data.get("pump_pct", 0) if pump_data else 0
+                _from_ath = pump_data.get("from_ath_pct", 0) if pump_data else 0
+                if _exh >= 70 and _from_ath > 10:
+                    _signal = "SHORT"
+                elif _exh >= 50 and _from_ath > 5:
+                    _signal = "SHORT (Watch)"
+                elif _exh >= 40:
+                    _signal = "WATCH"
+                else:
+                    _signal = "ZU FRÜH"
+
+                # Listing-Datum aus Exchange-Timestamps
+                _listing_ts = None
+                if isinstance(listing, dict):
+                    for ts_key in ["onboard_date", "create_time", "launch_time"]:
+                        ts_val = listing.get(ts_key, 0)
+                        if ts_val and ts_val > 0:
+                            _listing_ts = datetime.fromtimestamp(ts_val / 1000).strftime("%Y-%m-%d %H:%M")
+                            break
+
                 results.append({
                     "symbol": display_symbol,
                     "exchange": exchange,
                     "contract": symbol,
                     "price": ticker_data.get("price", 0),
                     "change_24h": ticker_data.get("change_24h", 0),
-                    "volume_24h": ticker_data.get("volume_24h", 0),
-                    "market_cap": ticker_data.get("market_cap", 0),
-                    "exhaustion_score": exhaustion_score,
+                    "volume_24h": ticker_data.get("volume_usd_24h", ticker_data.get("volume_24h", 0)),
+                    "pump_pct": round(_pump, 1),
+                    "from_ath_pct": round(_from_ath, 1),
+                    "exhaustion_score": _exh,
                     "exhaustion_details": exhaustion_details,
-                    "pump_data": pump_data,
-                    "listing_date": listing.get("listing_date") if isinstance(listing, dict) else None,
-                    "time_since_listing_hours": listing.get("time_since_listing_hours") if isinstance(listing, dict) else None,
+                    "signal": _signal,
+                    "listing_date": _listing_ts,
+                    "hours_tracked": pump_data.get("hours_tracked", 0) if pump_data else 0,
+                    "vol_ratio": round(pump_data.get("vol_ratio", 0), 2) if pump_data else 0,
                 })
             except Exception as e:
                 print(f"[New Listing] Error processing {listing if isinstance(listing, str) else listing.get('symbol', 'unknown')}: {e}")
@@ -4096,7 +4120,12 @@ def get_new_listing_results():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    stats = {
+        "new_listings": len(results) if results else 0,
+        "exchanges_monitored": len(set(r.get("exchange", "") for r in results)) if results else 0,
+        "active_signals": len([r for r in results if r.get("signal", "").startswith("SHORT")]) if results else 0,
+    }
+    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age, "stats": stats}
 
 
 # ── Volume Spikes Scanner ──
