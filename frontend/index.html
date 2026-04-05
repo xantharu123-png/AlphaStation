@@ -2089,15 +2089,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
                 const _viewDir = (d.confluence?.direction || '').toUpperCase();
 
-                // Chart pattern markers (gefiltert nach Richtung)
+                // Chart pattern markers (gefiltert nach Richtung) — auf korrekter Kerze
                 if (chartData.patterns.chart_patterns) {
                     chartData.patterns.chart_patterns
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
                         .forEach(p => {
-                        const lastCandle = candles[candles.length - 1];
-                        if (lastCandle) {
+                        // Nutze p.time vom Backend (korrekte Kerze), fallback auf letzte
+                        const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
+                        if (markerTime) {
                             markers.push({
-                                time: lastCandle.time,
+                                time: markerTime,
                                 position: p.type === 'bullish' ? 'belowBar' : 'aboveBar',
                                 color: p.type === 'bullish' ? '#10b981' : '#ef4444',
                                 shape: 'circle',
@@ -5056,15 +5057,15 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2">Symbol</th>
-                            <th className="text-left py-2 px-2">Exchange</th>
-                            <th className="text-right py-2 px-2">Preis</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('symbol')}>Symbol{sortKey === 'symbol' && ' ↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('exchange')}>Exchange{sortKey === 'exchange' && ' ↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis{sortKey === 'price' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('pump_pct')}>Pump%{sortKey === 'pump_pct' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('from_ath_pct')}>vom ATH%{sortKey === 'from_ath_pct' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('exhaustion_score')}>Exhaustion{sortKey === 'exhaustion_score' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('funding_rate')}>Funding{sortKey === 'funding_rate' && ' ↓'}</th>
-                            <th className="text-center py-2 px-2">Signal</th>
-                            <th className="text-left py-2 px-2">Gelistet</th>
+                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('signal')}>Signal{sortKey === 'signal' && ' ↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('listing_date')}>Gelistet{sortKey === 'listing_date' && ' ↓'}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -5911,10 +5912,10 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     chartData.patterns.chart_patterns
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
                         .forEach(p => {
-                        const lastCandle = candles[candles.length - 1];
-                        if (lastCandle) {
+                        const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
+                        if (markerTime) {
                             markers.push({
-                                time: lastCandle.time,
+                                time: markerTime,
                                 position: p.type === 'bullish' ? 'belowBar' : 'aboveBar',
                                 color: p.type === 'bullish' ? '#10b981' : '#ef4444',
                                 shape: 'circle',
