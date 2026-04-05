@@ -2497,9 +2497,23 @@ def get_chart_data(
                 try:
                     chart_pats = detect_chart_patterns(ohlcv)
                     if chart_pats:
-                        patterns_result["chart_patterns"] = chart_pats[:5]
+                        # Map detect_index → time für Chart-Marker
+                        mapped_count = 0
+                        fallback_count = 0
+                        for cp in chart_pats:
+                            idx = cp.get("detect_index")
+                            if idx is not None and 0 <= idx < len(ohlcv):
+                                cp["time"] = ohlcv[idx]["time"]
+                                mapped_count += 1
+                            elif ohlcv:
+                                cp["time"] = ohlcv[-1]["time"]
+                                fallback_count += 1
+                        if fallback_count > 0:
+                            print(f"[WARN] Chart patterns: {mapped_count} mapped, {fallback_count} fallback (no detect_index)")
+                        patterns_result["chart_patterns"] = chart_pats[:8]
                 except Exception as e:
                     print(f"Chart patterns error: {e}")
+                    import traceback; traceback.print_exc()
 
                 # Pivots (for marker annotations)
                 try:

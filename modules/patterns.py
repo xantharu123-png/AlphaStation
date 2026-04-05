@@ -5119,162 +5119,111 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         
         # === KONFLIKT-FILTER ===
         # Widersprüchliche Patterns entfernen (z.B. Double Bottom + Head & Shoulders)
-        # Regel: Wenn bullish UND bearish Patterns gleichzeitig erkannt werden,
-        # behalte nur die mit höherer Confidence. Bei Gleichstand: nur "confirmed" (nicht "forming").
-        if len(patterns) > 1:
-            bullish = [p for p in patterns if p.get("type") == "bullish"]
-            bearish = [p for p in patterns if p.get("type") == "bearish"]
-            neutral = [p for p in patterns if p.get("type") == "neutral"]
+        # Regel: Wenn bullish UND bearish Patterns gleicher Kategorie, behalte das mit höherer Konfidenz
+        structural_bulls = [p for p in patterns if p["type"] == "bullish" and p.get("confidence") in ("High", "Medium") and p["pattern"] in ("Double Bottom", "Cup & Handle", "Inv. Head & Shoulders", "Falling Wedge", "Base Breakout")]
+        structural_bears = [p for p in patterns if p["type"] == "bearish" and p.get("confidence") in ("High", "Medium") and p["pattern"] in ("Double Top", "Head & Shoulders", "Rising Wedge")]
 
-            if bullish and bearish:
-                # Conflict! Priorisiere nach: 1) Confidence, 2) Confirmed > Forming
-                _conf_rank = {"High": 3, "Medium": 2, "Low": 1}
+        if structural_bulls and structural_bears:
+            # Behalte nur die Seite mit der höheren Konfidenz
+            bull_has_high = any(p.get("confidence") == "High" for p in structural_bulls)
+            bear_has_high = any(p.get("confidence") == "High" for p in structural_bears)
+            if bull_has_high and not bear_has_high:
+                patterns = [p for p in patterns if p not in structural_bears]
+            elif bear_has_high and not bull_has_high:
+                patterns = [p for p in patterns if p not in structural_bulls]
 
-                def _pattern_priority(p):
-                    conf = _conf_rank.get(p.get("confidence", "Low"), 0)
-                    # "forming" Patterns abwerten
-                    is_forming = "forming" in p.get("pattern", "").lower()
-                    return (conf, 0 if is_forming else 1)
-
-                best_bull = max(bullish, key=_pattern_priority) if bullish else None
-                best_bear = max(bearish, key=_pattern_priority) if bearish else None
-
-                bull_score = _pattern_priority(best_bull) if best_bull else (0, 0)
-                bear_score = _pattern_priority(best_bear) if best_bear else (0, 0)
-
-                if bull_score > bear_score:
-                    # Bullish gewinnt — entferne alle bearish
-                    patterns = bullish + neutral
-                elif bear_score > bull_score:
-                    # Bearish gewinnt — entferne alle bullish
-                    patterns = bearish + neutral
-                else:
-                    # Gleichstand — beide entfernen, nur neutral behalten
-                    # Widersprüchliche Signale = kein klares Pattern
-                    patterns = neutral
-
-        return patterns
+        # (Post-Processing für detect_index ist jetzt AUSSERHALB des try-Blocks)
 
     except Exception as e:
-        return []
+        log.warning(f"detect_chart_patterns error: {e}")
+        import traceback
+        traceback.print_exc()
 
-
-
-# ── Weitere Pattern-Funktionen (V70.4) ──
-
-def scan_harmonic_batch(tickers, api_key, days=180, timeframe="hour"):
-    """
-    Scannt mehrere Aktien nach Harmonic Patterns.
-
-    Args:
-        tickers: Liste von Ticker-Symbolen
-        api_key: Polygon API Key
-        days: Anzahl Tage historische Daten
-        timeframe: "day" für Daily, "hour" für 4H (default)
-
-    Returns:
-        Liste von Aktien mit gefundenen Patterns
-    """
-    results = []
-
-    for i, ticker in enumerate(tickers):
-        try:
-            scan_result = scan_harmonic_patterns(ticker, api_key, days, timeframe=timeframe)
-
-            if scan_result.get("patterns"):
-                # Nimm das beste Pattern
-                best_pattern = scan_result["patterns"][0]
-
-                results.append({
-                    "Ticker": ticker,
-                    "Pattern": f"{best_pattern['emoji']} {best_pattern['pattern']}",
-                    "Direction": best_pattern["direction"],
-                    "Score": best_pattern["score"],
-                    "Matches": best_pattern["matches"],
-                    "SuccessRate": f"{best_pattern['success_rate']}%",
-                    "Entry": best_pattern["trade"]["entry"],
-                    "StopLoss": best_pattern["trade"]["stop_loss"],
-                    "TP1": best_pattern["trade"]["tp1"],
-                    "TP2": best_pattern["trade"]["tp2"],
-                    "RiskReward": best_pattern["trade"]["risk_reward"],
-                    "Price": scan_result["current_price"],
-                    "PatternData": best_pattern
-                })
-        except Exception as e:
-            continue
-
-        # Rate Limiting: Pause nach je 10 Calls
-        if i % 10 == 9:
-            time.sleep(0.5)
-
-    # Sortiere nach Score
-    results.sort(key=lambda x: x["Score"], reverse=True)
-    return results
-
-
-def find_harmonic_for_chart(ohlcv_data):
-    """
-    Findet Harmonic Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
-
-    Returns:
-        Liste von Patterns mit XABCD-Koordinaten für Chart-Rendering
-    """
-    if not ohlcv_data or len(ohlcv_data) < 20:
-        return []
-
+    # ═══════════════════════════════════════════════════════════════════
+    # POST-PROCESSING: detect_index für Chart-Marker zuweisen
+    # WICHTIG: Eigener try-Block, damit es IMMER läuft, auch wenn
+    # oben eine Exception geworfen wurde und patterns nur teilweise gefüllt ist.
+    # ═══════════════════════════════════════════════════════════════════
     try:
-        # Konvertiere zu find_pivots Format
-        prices = []
-        for d in ohlcv_data:
-            prices.append({
-                "date": str(d.get("time", "")),
-                "high": d["high"],
-                "low": d["low"],
-                "close": d["close"],
-                "open": d["open"],
-                "volume": d.get("volume", 0)
-            })
+        if patterns and ohlcv_data:
+            data_len = min(50, len(ohlcv_data))  # lookback
+            data = ohlcv_data[-data_len:]
+            offset = len(ohlcv_data) - data_len
 
-        # Finde Pivots mit window=3 (sensibel genug für alle Timeframes)
-        pivots = find_pivots(prices, window=3)
+            structural_pats = {"Double Top", "Double Top (forming)", "Head & Shoulders", "Head & Shoulders (forming)",
+                               "Double Bottom", "Double Bottom (forming)", "Inv. Head & Shoulders", "Inv. H&S (forming)"}
+            candle_pats = {"Hammer", "Inverted Hammer", "Shooting Star", "Hanging Man", "Doji",
+                          "Dragonfly Doji", "Gravestone Doji", "Bullish Marubozu", "Bearish Marubozu",
+                          "Bullish Engulfing", "Bearish Engulfing", "Piercing Line", "Dark Cloud Cover",
+                          "Tweezer Bottom", "Tweezer Top", "Morning Star", "Evening Star",
+                          "Three White Soldiers", "Three Black Crows"}
 
-        if len(pivots) < 5:
-            return []
+            for p in patterns:
+                if p.get("detect_index") is not None:
+                    continue  # Bereits gesetzt, nicht überschreiben
 
-        # Identifiziere Patterns
-        patterns = identify_harmonic_pattern(pivots, prices)
+                pname = p.get("pattern", "")
 
-        if not patterns:
-            return []
+                if pname in structural_pats:
+                    target_price = p.get("level2") or p.get("right_shoulder") or p.get("head")
+                    if target_price:
+                        best_idx = len(data) - 1
+                        best_diff = float("inf")
+                        for i in range(len(data) - 1, -1, -1):
+                            diff = abs(data[i]["high"] - target_price)
+                            diff_low = abs(data[i]["low"] - target_price)
+                            d_min = min(diff, diff_low)
+                            if d_min < best_diff:
+                                best_diff = d_min
+                                best_idx = i
+                        p["detect_index"] = best_idx + offset
+                    else:
+                        p["detect_index"] = len(ohlcv_data) - 1
 
-        # Konvertiere zu Chart-Format mit time-Koordinaten
-        chart_patterns = []
-        for pat in patterns[:3]:  # Max 3 Patterns
-            points = []
-            pivot_indices = pat.get("pivot_indices", [])
-            point_labels = ["X", "A", "B", "C", "D"]
+                elif pname in candle_pats:
+                    p["detect_index"] = len(ohlcv_data) - 1
 
-            for idx, label in zip(pivot_indices, point_labels):
-                if idx < len(ohlcv_data):
-                    points.append({
-                        "time": ohlcv_data[idx]["time"],
-                        "price": pat["points"][label],
-                        "label": label
-                    })
+                elif "Triangle" in pname or "Wedge" in pname or "Flag" in pname or "Pennant" in pname:
+                    p["detect_index"] = offset + int(data_len * 0.7)
 
-            if len(points) == 5:
-                chart_patterns.append({
-                    "pattern": pat["pattern"],
-                    "emoji": pat["emoji"],
-                    "direction": pat["direction"],
-                    "score": pat["score"],
-                    "matches": pat["matches"],
-                    "points": points,
-                    "ratios": pat["ratios"],
-                    "trade": pat.get("trade", {}),
-                    "success_rate": pat.get("success_rate", 0)
-                })
+                elif "Cup" in pname:
+                    p["detect_index"] = len(ohlcv_data) - 1
 
-        return chart_patterns
+                elif "Wyckoff" in pname or "Wolfe" in pname:
+                    p["detect_index"] = offset + int(data_len * 0.8)
+
+                elif "Base Breakout" in pname:
+                    p["detect_index"] = offset + int(data_len * 0.6)
+
+                elif "Volume Imbalance" in pname or "Fair Value Gap" in pname or "Opening Gap" in pname:
+                    zone_mid = p.get("zone_mid") or p.get("zone_high", 0)
+                    if zone_mid:
+                        best_idx = len(data) - 1
+                        best_diff = float("inf")
+                        for i in range(len(data)):
+                            d_min = min(abs(data[i]["high"] - zone_mid), abs(data[i]["low"] - zone_mid))
+                            if d_min < best_diff:
+                                best_diff = d_min
+                                best_idx = i
+                        p["detect_index"] = best_idx + offset
+                    else:
+                        p["detect_index"] = len(ohlcv_data) - 1
+
+                elif "Order Block" in pname:
+                    ob_level = p.get("zone_high") or p.get("zone_low", 0)
+                    best_idx = len(data) - 1
+                    best_diff = float("inf")
+                    for i in range(len(data)):
+                        d_min = min(abs(data[i]["high"] - ob_level), abs(data[i]["low"] - ob_level))
+                        if d_min < best_diff:
+                            best_diff = d_min
+                            best_idx = i
+                    p["detect_index"] = best_idx + offset
+
+                else:
+                    p["detect_index"] = len(ohlcv_data) - 1
+
     except Exception as e:
-        return []
+        log.warning(f"detect_index post-processing error: {e}")
+
+    return patterns
