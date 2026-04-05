@@ -1516,7 +1516,7 @@ function useSortable(data, defaultKey = null, defaultDesc = true) {
         } else {
             setSortKey(key);
             // V2.7: Numerische Spalten starten absteigend (beste zuerst), Text aufsteigend
-            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','EarlyScore','DegenScore','WhaleScore','NewScore'];
+            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','EarlyScore','DegenScore','WhaleScore'];
             setSortDesc(numericKeys.includes(key));
         }
     };
@@ -3738,7 +3738,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [volumeSpikes, setVolumeSpikes] = useState([]);
     const [microCaps, setMicroCaps] = useState([]);
     const [whaleAcc, setWhaleAcc] = useState([]);
-    const [recentlyListed, setRecentlyListed] = useState([]);
+    // recentlyListed entfernt — NLS deckt das ab
     const [narratives, setNarratives] = useState({});
     const [stats, setStats] = useState({});
     const [isScanning, setIsScanning] = useState(false);
@@ -3747,7 +3747,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const { sorted: sortedSpikes, toggleSort: toggleSpikeSort } = useSortable(volumeSpikes, 'EarlyScore');
     const { sorted: sortedMicro, toggleSort: toggleMicroSort } = useSortable(microCaps, 'DegenScore');
     const { sorted: sortedWhale, toggleSort: toggleWhaleSort } = useSortable(whaleAcc, 'WhaleScore');
-    const { sorted: sortedRecent, toggleSort: toggleRecentSort } = useSortable(recentlyListed, 'NewScore');
 
     // Utility functions for formatting
     const formatPrice = (price) => {
@@ -3790,7 +3789,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     setVolumeSpikes(em.volume_spikes || []);
                     setMicroCaps(em.micro_caps || []);
                     setWhaleAcc(em.whale_acc || []);
-                    setRecentlyListed(em.recently_listed || []);
                     setNarratives(em.narratives || {});
                     setStats(em.stats || {});
                 }
@@ -3829,7 +3827,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 setVolumeSpikes(em.volume_spikes || []);
                                 setMicroCaps(em.micro_caps || []);
                                 setWhaleAcc(em.whale_acc || []);
-                                setRecentlyListed(em.recently_listed || []);
                                 setNarratives(em.narratives || {});
                                 setStats(em.stats || {});
                                 setIsScanning(false);
@@ -3856,7 +3853,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 <button onClick={() => setSubTab('volume-spikes')} className={`secondary-tab ${subTab === 'volume-spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
                 <button onClick={() => setSubTab('micro-caps')} className={`secondary-tab ${subTab === 'micro-caps' ? 'active' : 'inactive'}`}>Micro-Caps</button>
                 <button onClick={() => setSubTab('whale-acc')} className={`secondary-tab ${subTab === 'whale-acc' ? 'active' : 'inactive'}`}>Whale Accumulation</button>
-                <button onClick={() => setSubTab('recently-listed')} className={`secondary-tab ${subTab === 'recently-listed' ? 'active' : 'inactive'}`}>Neu Gelistet</button>
                 <button onClick={() => setSubTab('narratives')} className={`secondary-tab ${subTab === 'narratives' ? 'active' : 'inactive'}`}>Narratives</button>
             </div>
 
@@ -3976,42 +3972,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                         <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.WhaleScore)}`}>{item.WhaleScore || '–'}</span></td>
                                         <td className="py-3 px-2 text-sm">{Array.isArray(item.Signals) ? item.Signals.join(', ') : item.Signals || '–'}</td>
                                         <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
-
-            {/* Recently Listed Tab */}
-            {subTab === 'recently-listed' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedRecent.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2">7d%</th>
-                                    <th className="text-right py-2 px-2">Vol 24h</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleRecentSort('NewScore')}>NewScore</th>
-                                    <th className="text-left py-2 px-2">Signal</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedRecent.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right">{formatMCap(item.Vol24h)}</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.NewScore)}`}>{item.NewScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
                                     </tr>
                                 ))}
                             </tbody>

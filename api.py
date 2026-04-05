@@ -3381,7 +3381,7 @@ def fetch_multi_exchange_perps():
             best = "MEXC"
             best_fr = m.get("funding_rate", 0)
             best_oi_ratio = m.get("oi_ratio", 0)
-            best_oi_usdt = m.get("hold_vol", 0)
+            best_oi_usdt = m.get("oi_usdt", 0)  # FIX: war hold_vol (Kontraktanzahl statt USDT)
             best_vol = mexc_vol
         else:
             continue
@@ -3401,20 +3401,22 @@ def fetch_multi_exchange_perps():
 
 
 def fetch_early_movers(_prefetched_perps=None):
-    """Early Movers Scanner V2.0 — Multi-Exchange (Bitget + MEXC)
+    """Early Movers Scanner V3.0 — Multi-Exchange (Bitget + MEXC)
 
-    5 strategies to find next 10x coins early:
+    4 strategies to find next 10x coins early:
     1. Volume Spike Detector: Vol/MCap anomalously high, price not yet exploded
     2. Micro-Cap Momentum: $1M-$50M MCap, early movement
-    3. Whale Accumulation: OI rising strongly but price still stable
-    4. Funding Rate Flip: FR negative → positive = squeeze coming
-    5. Narrative Tracker: Sector performance & laggards
+    3. Whale Accumulation: OI + FR + Preisstabilität = stille Akkumulation
+    4. Narrative Tracker: Sektor-Performance, Leaders & Laggards
 
-    Returns: dict with lists for each category
+    Alle Scores nutzen BTC-relative Performance für Alpha-Erkennung.
+    Symbol-Matching mit 1000x-Prefix für Börsen-Perps (1000PEPE etc.)
+
+    Returns: dict with volume_spikes, micro_caps, whale_acc, narratives, stats
     """
     all_coins = _fetch_coingecko_markets(pages=4)
     if not all_coins:
-        return {"volume_spikes": [], "micro_caps": [], "whale_acc": [], "narratives": {}, "recently_listed": [], "stats": {"error": "No data"}}
+        return {"volume_spikes": [], "micro_caps": [], "whale_acc": [], "narratives": {}, "stats": {"error": "No data"}}
 
     perp_data = _prefetched_perps if _prefetched_perps is not None else fetch_multi_exchange_perps()
 
@@ -3438,7 +3440,6 @@ def fetch_early_movers(_prefetched_perps=None):
     except Exception:
         pass
 
-    newly_listed_coins = []
     volume_spikes = []
     micro_caps = []
     whale_accumulations = []
@@ -3463,7 +3464,12 @@ def fetch_early_movers(_prefetched_perps=None):
             high_24h = coin.get("high_24h") or price
             low_24h = coin.get("low_24h") or price
 
+            # Perp-Match: Direkt oder mit 1000-Prefix (Börsen listen z.B. 1000PEPE, 1000SHIB)
             perp_info = perp_data.get(symbol, {})
+            if not perp_info:
+                perp_info = perp_data.get(f"1000{symbol}", {})
+            if not perp_info:
+                perp_info = perp_data.get(f"10000{symbol}", {})
             has_perp = bool(perp_info)
             funding_rate = perp_info.get("funding_rate", 0)
             oi_ratio = perp_info.get("oi_ratio", 0)
@@ -3477,9 +3483,8 @@ def fetch_early_movers(_prefetched_perps=None):
             vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0
             narrative = CRYPTO_NARRATIVES.get(cid, "")
             is_trending = cid in trending_ids
-            is_newly_listed = (mcap > 0 and vol_24h > 100_000
-                               and (change_14d == 0 or change_14d is None) and (change_30d == 0 or change_30d is None)
-                               and change_7d != 0)
+            # BTC-relative Performance (zeigt Alpha vs. Markt)
+            btc_relative_7d = round(change_7d - btc_7d, 2) if btc_7d else round(change_7d, 2)
 
             base_entry = {
                 "Symbol": symbol, "Name": name, "ID": cid,
@@ -3495,19 +3500,12 @@ def fetch_early_movers(_prefetched_perps=None):
                 "Narrative": narrative,
                 "High24h": high_24h, "Low24h": low_24h,
                 "IsTrending": is_trending,
-                "IsNewlyListed": is_newly_listed,
+                "BtcRelative7d": btc_relative_7d,
             }
-
-            # Newly listed coins
-            if is_newly_listed and change_7d > 0:
-                nl_entry = dict(base_entry)
-                nl_entry["Signal"] = "Newly listed"
-                nl_entry["NewScore"] = min(100, int(change_7d * 2 + vol_mcap_ratio))
-                newly_listed_coins.append(nl_entry)
 
             # 1. VOLUME SPIKE DETECTOR
             if mcap > 5_000_000 and vol_24h > 200_000:
-                if vol_mcap_ratio > 30 and change_7d < 100:
+                if vol_mcap_ratio > 30 and change_7d < 60:
                     if change_24h < -8:
                         pass
                     else:
@@ -3559,11 +3557,21 @@ def fetch_early_movers(_prefetched_perps=None):
                             recency_score = 5
 
                         trending_score = 10 if is_trending else 0
-                        total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score)
+
+                        # BTC-relative Alpha: Coin outperformt BTC = extra Punkte
+                        btc_alpha_score = 0
+                        if btc_relative_7d > 20:
+                            btc_alpha_score = 10
+                        elif btc_relative_7d > 10:
+                            btc_alpha_score = 7
+                        elif btc_relative_7d > 5:
+                            btc_alpha_score = 3
+
+                        total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score)
 
                         if total_score >= 30:
                             entry = dict(base_entry)
-                            entry["EarlyScore"] = total_score
+                            entry["EarlyScore"] = min(100, total_score)
                             entry["PricePosition"] = round(price_position, 2)
                             entry["RecencyScore"] = recency_score
                             entry["TrendingBonus"] = trending_score
@@ -3614,20 +3622,27 @@ def fetch_early_movers(_prefetched_perps=None):
                     if is_trending:
                         degen_score += 15
 
-                    if is_newly_listed:
-                        degen_score += 10
+                    # BUG FIX: Extreme Pumps (>200% 7d) = wahrscheinlich zu spät, Abzug
+                    if change_7d > 200:
+                        degen_score -= 15
+                    elif change_7d > 150:
+                        degen_score -= 10
+
+                    # BTC-Alpha Bonus
+                    if btc_relative_7d > 15:
+                        degen_score += 5
 
                     entry = dict(base_entry)
-                    entry["DegenScore"] = min(100, degen_score)
+                    entry["DegenScore"] = min(100, max(10, degen_score))
                     entry["Signal"] = f"MicroCap +{change_7d:.0f}% 7d"
                     if is_trending:
                         entry["Signal"] += " TRENDING"
-                    if is_newly_listed:
-                        entry["Signal"] += " NEW"
                     micro_caps.append(entry)
 
             # 3. WHALE ACCUMULATION
-            if has_perp and mcap > 10_000_000:
+            perp_vol_usdt = perp_info.get("volume24_usdt", 0) if perp_info else 0
+            perp_oi_usdt = perp_info.get("oi_usdt", 0) if perp_info else 0
+            if has_perp and mcap > 10_000_000 and perp_vol_usdt > 100_000:
                 whale_score = 0
                 signals = []
 
@@ -3639,6 +3654,13 @@ def fetch_early_movers(_prefetched_perps=None):
                     signals.append(f"OI/Vol {oi_ratio:.1f}x (positions building)")
                 elif oi_ratio >= 0.8:
                     whale_score += 10
+
+                # Bonus für absolut hohe OI (echte Whale-Größe)
+                if perp_oi_usdt > 10_000_000:
+                    whale_score += 10
+                    signals.append(f"OI ${perp_oi_usdt/1e6:.1f}M (significant)")
+                elif perp_oi_usdt > 1_000_000:
+                    whale_score += 5
 
                 fr_pct = funding_rate * 100
                 if fr_pct >= 0.05:
@@ -3654,19 +3676,36 @@ def fetch_early_movers(_prefetched_perps=None):
                         whale_score += 12
                         signals.append(f"FR negative {fr_pct:.3f}% + 1h pump → watch")
 
-                if 5 < change_7d < 40:
-                    whale_score += 15
-                elif change_7d <= 5:
-                    whale_score += 20
+                # BUG FIX: Whale = Akkumulation, Coin darf NICHT stark fallen
+                # Stabile/leicht steigende Coins = gut, fallende = schlecht
+                if -5 <= change_7d <= 5:
+                    whale_score += 20  # Stabil = perfekt für stille Akkumulation
+                    signals.append(f"Preis stabil ({change_7d:+.1f}%) trotz OI-Aufbau")
+                elif 5 < change_7d < 30:
+                    whale_score += 15  # Leicht steigend = gut
+                elif change_7d >= 30:
+                    whale_score += 5   # Schon zu stark gepumpt
+                elif -15 <= change_7d < -5:
+                    whale_score += 5   # Leicht fallend, noch ok
+                else:
+                    whale_score -= 10  # Stark fallend = OI sind Shorts, keine Whales
+                    signals.append(f"WARNUNG: Preis {change_7d:+.1f}% — OI wahrsch. Shorts")
 
                 if len(exchanges) >= 2:
                     whale_score += 10
                     signals.append(f"On {' + '.join(exchanges)}")
 
+                # BUG FIX: Negativen Score abfangen (kann durch Malus passieren)
+                whale_score = max(0, whale_score)
+
                 if whale_score >= 35:
                     entry = dict(base_entry)
                     entry["WhaleScore"] = min(100, whale_score)
                     entry["Signals"] = signals
+                    # BTC-Alpha für Whale: Coin hält sich besser als BTC = stärkeres Signal
+                    if btc_relative_7d > 5:
+                        entry["WhaleScore"] = min(100, entry["WhaleScore"] + 5)
+                        signals.append(f"Outperformt BTC um {btc_relative_7d:+.1f}%")
                     whale_accumulations.append(entry)
 
             # 4. NARRATIVE TRACKER
@@ -3675,11 +3714,12 @@ def fetch_early_movers(_prefetched_perps=None):
                     narrative_coins[narrative] = []
                 narrative_coins[narrative].append(base_entry)
 
-        except Exception:
+        except Exception as _coin_err:
+            print(f"[Early Movers] Error processing {coin.get('symbol','?')}: {_coin_err}")
             continue
 
     # Sort
-    newly_listed_coins.sort(key=lambda x: x.get("NewScore", 0), reverse=True)
+    # Neu Gelistet entfernt — wird vom NLS (New Listing Scanner) abgedeckt
     volume_spikes.sort(key=lambda x: x.get("EarlyScore", 0), reverse=True)
     micro_caps.sort(key=lambda x: x.get("DegenScore", 0), reverse=True)
     whale_accumulations.sort(key=lambda x: x.get("WhaleScore", 0), reverse=True)
@@ -3694,15 +3734,25 @@ def fetch_early_movers(_prefetched_perps=None):
         total_vol = sum(c["Vol24h"] for c in coins_list)
         total_mcap = sum(c.get("MCap", 0) for c in coins_list)
 
+        # BUG FIX: Laggards = Coins die deutlich unter dem Sektor-Durchschnitt liegen
+        # Bei avg_7d > 0: Coins die weniger als halb so viel gestiegen sind
+        # Bei avg_7d < 0: Coins die weniger gefallen sind als der Durchschnitt (= relativ stark)
         if avg_7d > 2:
             laggards = [c for c in coins_list if c.get("Change7d", 0) < avg_7d * 0.5 and c.get("Change7d", 0) > -10]
+        elif avg_7d < -2:
+            # Sektor fällt: "Laggards" = Coins die weniger fallen = Catch-Up Potential wenn Sektor dreht
+            laggards = [c for c in coins_list if c.get("Change7d", 0) > avg_7d * 0.5 and c.get("Change7d", 0) < 0]
         else:
             laggards = []
         leaders = sorted(coins_list, key=lambda x: x["Change7d"], reverse=True)[:3]
 
+        # BTC-relative Sektor-Performance
+        avg_btc_relative = round(avg_7d - btc_7d, 2) if btc_7d else round(avg_7d, 2)
+
         narrative_summary[narr] = {
             "avg_7d": round(avg_7d, 2),
             "avg_24h": round(avg_24h, 2),
+            "avg_btc_relative": avg_btc_relative,
             "total_vol": total_vol,
             "total_mcap": total_mcap,
             "count": len(coins_list),
@@ -3719,18 +3769,15 @@ def fetch_early_movers(_prefetched_perps=None):
         "micro_caps": len(micro_caps),
         "whale_acc": len(whale_accumulations),
         "narratives": len(narrative_summary),
-        "recently_listed": len(newly_listed_coins),
         "trending_coins": len(trending_ids),
         "btc_7d": btc_7d,
-        "perps_mexc": len(fetch_mexc_funding_oi()),
-        "perps_bitget": len(fetch_bitget_funding_oi()),
+        "perps_total": len(perp_data),
     }
 
     return {
         "volume_spikes": volume_spikes[:30],
         "micro_caps": micro_caps[:30],
         "whale_acc": whale_accumulations[:25],
-        "recently_listed": newly_listed_coins[:20],
         "narratives": narrative_summary,
         "stats": stats,
     }
