@@ -1741,6 +1741,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     };
 
     const isCrypto = scannerData?.isCrypto || false;
+    const isExchangeCrypto = scannerData?.isExchangeCrypto || false;
 
     // Fetch ticker detail data (metrics) — skip for crypto
     useEffect(() => {
@@ -1760,14 +1761,25 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         fetchData();
     }, [ticker, isCrypto]);
 
-    // Fetch chart data — crypto uses CoinGecko, stocks use Polygon
+    // Fetch chart data — Exchange-Crypto nutzt exchange-chart, CoinGecko-Crypto nutzt crypto-chart, Stocks nutzen Polygon
     // V2.8: AbortController verhindert Race Conditions bei schnellem Timeframe-Wechsel
     useEffect(() => {
         const controller = new AbortController();
         const signal = controller.signal;
         const fetchChart = async () => {
             try {
-                if (isCrypto) {
+                if (isExchangeCrypto && scannerData?.contract && scannerData?.exchange) {
+                    // NLS Coins: direkt von der Exchange holen
+                    const contract = scannerData.contract;
+                    const exchange = scannerData.exchange;
+                    const res = await fetch(`${API}/api/exchange-chart?symbol=${encodeURIComponent(contract)}&exchange=${encodeURIComponent(exchange)}&timeframe=${timeframe}&count=100`, { signal });
+                    if (signal.aborted) return;
+                    if (res.ok) {
+                        setChartData(await res.json());
+                    } else {
+                        setChartData({ ticker, timeframe, candles: [], error: 'Exchange-Chart nicht verfügbar' });
+                    }
+                } else if (isCrypto) {
                     const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
                     const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`, { signal });
                     if (signal.aborted) return;
@@ -1794,7 +1806,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         };
         fetchChart();
         return () => controller.abort();  // Vorherigen Request abbrechen
-    }, [ticker, timeframe, isCrypto]);
+    }, [ticker, timeframe, isCrypto, isExchangeCrypto]);
 
     const loadAiAnalysis = async () => {
         setAiLoading(true);
@@ -2211,8 +2223,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
     const d = tickerData || {};
     const cd = scannerData || {};  // crypto data from Early Movers
-    const price = isCrypto ? (cd.Price || 0) : (d.price || 0);
-    const change = isCrypto ? (cd.Change24h || 0) : (d.change_1d || 0);
+    const price = isExchangeCrypto ? (cd.price || 0) : isCrypto ? (cd.Price || 0) : (d.price || 0);
+    const change = isExchangeCrypto ? (cd.change_24h || 0) : isCrypto ? (cd.Change24h || 0) : (d.change_1d || 0);
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
@@ -2387,8 +2399,49 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Content Grid - 2 columns when wide */}
                 <div style={isWide ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } : {}}>
 
-                {/* Crypto Detail Panel */}
-                {isCrypto && cd && (
+                {/* NLS (Exchange Crypto) Detail Panel */}
+                {isExchangeCrypto && scannerData && (
+                <>
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">New Listing Info</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Exchange</span> <span className="font-semibold text-blue-600">{scannerData.exchange || '–'}</span></div>
+                        <div><span className="text-gray-500">Contract</span> <span className="font-semibold text-xs">{scannerData.contract || '–'}</span></div>
+                        <div><span className="text-gray-500">Preis</span> <span className="font-semibold">${scannerData.price?.toFixed(6) || '–'}</span></div>
+                        <div><span className="text-gray-500">24h Change</span> <span className={`font-semibold ${(scannerData.change_24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{scannerData.change_24h?.toFixed(1) || '–'}%</span></div>
+                    </div>
+                </div>
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Exhaustion Analyse</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div><span className="text-gray-500">Pump %</span> <span className={`font-semibold ${(scannerData.pump_pct||0) > 0 ? 'color-positive' : 'color-negative'}`}>{scannerData.pump_pct ? `+${scannerData.pump_pct}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">vom ATH %</span> <span className="font-semibold color-negative">{scannerData.from_ath_pct ? `-${scannerData.from_ath_pct}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Exhaustion</span> <span className={`font-semibold px-2 py-0.5 rounded ${(scannerData.exhaustion_score||0) >= 70 ? 'bg-red-100 text-red-800' : (scannerData.exhaustion_score||0) >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'}`}>{scannerData.exhaustion_score?.toFixed(0) || '–'}</span></div>
+                        <div><span className="text-gray-500">Signal</span> <span className={`font-semibold px-2 py-0.5 rounded ${scannerData.signal?.startsWith('SHORT') ? 'bg-red-100 text-red-800' : scannerData.signal === 'WATCH' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'}`}>{scannerData.signal || '–'}</span></div>
+                        <div><span className="text-gray-500">Vol Ratio</span> <span className="font-semibold">{scannerData.vol_ratio || '–'}x</span></div>
+                        <div><span className="text-gray-500">Stunden getrackt</span> <span className="font-semibold">{scannerData.hours_tracked || '–'}h</span></div>
+                        {scannerData.volume_24h && <div><span className="text-gray-500">Vol 24h</span> <span className="font-semibold">{scannerData.volume_24h > 1e6 ? (scannerData.volume_24h/1e6).toFixed(1)+'M' : scannerData.volume_24h > 1e3 ? (scannerData.volume_24h/1e3).toFixed(0)+'K' : scannerData.volume_24h}</span></div>}
+                        {scannerData.listing_date && <div><span className="text-gray-500">Gelistet</span> <span className="font-semibold">{scannerData.listing_date}</span></div>}
+                    </div>
+                </div>
+                {scannerData.exhaustion_details && (
+                <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
+                    <h4 className="font-semibold text-sm mb-2">Exhaustion Details</h4>
+                    <div className="space-y-1">
+                        {Object.entries(scannerData.exhaustion_details || {}).map(([key, val]) => (
+                            <div key={key} className="flex justify-between">
+                                <span className="text-gray-500">{key.replace(/_/g, ' ')}</span>
+                                <span className="font-semibold">{typeof val === 'number' ? val.toFixed(1) : String(val)}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+                )}
+                </>
+                )}
+
+                {/* Crypto Detail Panel (CoinGecko) */}
+                {isCrypto && !isExchangeCrypto && cd && (
                 <>
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Crypto Info</h4>
@@ -5024,7 +5077,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                     </thead>
                     <tbody>
                         {sorted.map((item, idx) => (
-                            <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
+                            <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker({ticker: item.symbol, isCrypto: true, isExchangeCrypto: true, exchange: item.exchange, contract: item.contract, ...item})}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.exchange}</td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(4)}</td>

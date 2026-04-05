@@ -2659,6 +2659,98 @@ def get_crypto_chart(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Exchange-spezifischer Chart-Endpoint (NLS Coins) ──────────────────────────
+@app.get("/api/exchange-chart")
+def get_exchange_chart(
+    symbol: str = Query(..., description="Contract symbol (e.g. BTCUSDT, SXTUSDT)"),
+    exchange: str = Query(..., description="Exchange name (binance, mexc, bitget, crypto_com)"),
+    timeframe: str = Query("1h", description="Timeframe (1m, 5m, 15m, 1h, 4h, 1d)"),
+    count: int = Query(100, description="Number of candles"),
+):
+    """Holt Chart-Daten direkt von einer Exchange (für NLS Coins die nicht auf CoinGecko sind)."""
+    if not HAS_NEW_LISTING_SCANNER:
+        raise HTTPException(status_code=501, detail="New listing scanner module not available")
+
+    try:
+        # Timeframe-Mapping von Frontend-Format
+        tf_map = {"5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d", "1W": "1d"}
+        tf = tf_map.get(timeframe, timeframe.lower())
+        limit = min(count, 500)
+        if timeframe == "1W":
+            limit = min(count * 7, 500)
+
+        bars = fetch_candles_for(symbol, exchange, timeframe=tf, count=limit)
+        if not bars or len(bars) < 2:
+            raise HTTPException(status_code=404, detail=f"No chart data for '{symbol}' on {exchange}")
+
+        # Weekly aggregation wenn 1W angefragt
+        if timeframe == "1W":
+            from datetime import datetime as _dt
+            weekly = {}
+            for b in bars:
+                dt = _dt.utcfromtimestamp(b["timestamp"])
+                week_start = dt - timedelta(days=dt.weekday())
+                wk = int(week_start.replace(hour=0, minute=0, second=0).timestamp())
+                if wk not in weekly:
+                    weekly[wk] = {"open": b["open"], "high": b["high"], "low": b["low"], "close": b["close"], "volume": 0, "timestamp": wk}
+                else:
+                    weekly[wk]["high"] = max(weekly[wk]["high"], b["high"])
+                    weekly[wk]["low"] = min(weekly[wk]["low"], b["low"])
+                    weekly[wk]["close"] = b["close"]
+                weekly[wk]["volume"] += b.get("volume", 0)
+            bars = sorted(weekly.values(), key=lambda x: x["timestamp"])
+
+        # Format für TradingView Lightweight Charts
+        candles = []
+        vol_data = []
+        for bar in bars:
+            ts = bar["timestamp"]
+            candle = {
+                "time": ts,
+                "open": round(bar["open"], 8),
+                "high": round(bar["high"], 8),
+                "low": round(bar["low"], 8),
+                "close": round(bar["close"], 8),
+            }
+            candles.append(candle)
+            vol_data.append({
+                "time": ts,
+                "value": int(bar.get("volume", 0)),
+                "color": "rgba(16,185,129,0.3)" if bar["close"] >= bar["open"] else "rgba(220,38,38,0.3)"
+            })
+
+        # EMA Overlays berechnen
+        closes = [c["close"] for c in candles]
+        times = [c["time"] for c in candles]
+        ema_overlays = {}
+        for period in [9, 20, 50]:
+            if len(closes) >= period:
+                try:
+                    ema_vals = calculate_ema_series(closes, period)
+                    ema_data = []
+                    start = len(times) - len(ema_vals)
+                    for i, val in enumerate(ema_vals):
+                        if val is not None:
+                            ema_data.append({"time": times[start + i], "value": round(val, 8)})
+                    if ema_data:
+                        ema_overlays[f"ema{period}"] = ema_data
+                except Exception:
+                    pass
+
+        return {
+            "ticker": symbol,
+            "exchange": exchange,
+            "timeframe": timeframe,
+            "candles": candles,
+            "volume": vol_data,
+            "ema": ema_overlays,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/ai-analysis")
 def get_ai_analysis(ticker: str = Query(..., description="Ticker symbol")):
     """Generate AI analysis for a ticker using Claude."""
