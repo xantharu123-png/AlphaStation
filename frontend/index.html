@@ -2727,7 +2727,7 @@ function App() {
     }, [darkMode]);
 
     const allTabs = [
-        { id: 'scanner', label: 'Scanner' },
+        { id: 'scanner', label: 'Aktien' },
         { id: 'bi-scanner', label: 'BI Scanner' },
         { id: 'biotech', label: 'Biotech' },
         { id: 'btc-divergenz', label: 'BTC-Divergenz' },
@@ -2757,10 +2757,10 @@ function App() {
     // ═══ Mega Menu Categories with SVG icons ═══
     const megaCategories = [
         {
-            label: 'Scanner', count: null, // dynamic
+            label: 'Aktien', count: null, // dynamic
             groups: [
                 { title: 'AKTIEN SCANNER', items: [
-                    { id: 'scanner', name: 'Scanner', desc: 'Haupt-Scanner mit Grading', svg: 'M3 12L9 6L13 10L21 2M21 2H15M21 2V8', color: '#3b82f6' },
+                    { id: 'scanner', name: 'Aktien Scanner', desc: 'Haupt-Scanner mit Grading', svg: 'M3 12L9 6L13 10L21 2M21 2H15M21 2V8', color: '#3b82f6' },
                     { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
                     { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
                     { id: 'money-flow', name: 'Money Flow', desc: 'Institutionelle Bewegungen', svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6' },
@@ -4713,7 +4713,7 @@ function BacktestTab() {
 // Strategie Guide Tab
 function StrategieGuideTab() {
     const [activeMarket, setActiveMarket] = useState('stocks');
-    const [strategies, setStrategies] = useState([]);
+    const [strategies, setStrategies] = useState({});
     const [expandedStrategy, setExpandedStrategy] = useState(null);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -4725,9 +4725,8 @@ function StrategieGuideTab() {
                 const response = await fetch(`${API}/api/strategies?market_type=${activeMarket}`);
                 if (response.ok) {
                     const data = await response.json();
-                    // API returns strategies as {name: config} dict — extract keys as array
                     const strats = data.strategies || {};
-                    setStrategies(typeof strats === 'object' && !Array.isArray(strats) ? Object.keys(strats) : (Array.isArray(strats) ? strats : []));
+                    setStrategies(typeof strats === 'object' && !Array.isArray(strats) ? strats : {});
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -4739,58 +4738,165 @@ function StrategieGuideTab() {
     }, [activeMarket]);
 
     const marketTypes = [
-        { id: 'stocks', label: 'Aktien' },
-        { id: 'crypto', label: 'Crypto' },
-        { id: 'futures', label: 'Futures' },
-        { id: 'forex', label: 'Forex' }
+        { id: 'stocks', label: 'Aktien', icon: '\ud83d\udcc8' },
+        { id: 'crypto', label: 'Crypto', icon: '\u20bf' },
+        { id: 'futures', label: 'Futures', icon: '\ud83d\udce6' },
+        { id: 'forex', label: 'Forex', icon: '\ud83d\udcb1' },
+        { id: 'international', label: 'International', icon: '\ud83c\udf0d' }
     ];
 
-    const filtered = strategies.filter(s =>
-        s.toLowerCase().includes(searchTerm.toLowerCase())
+    const strategyNames = Object.keys(strategies);
+    const filtered = strategyNames.filter(s =>
+        s.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (strategies[s]?.description || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (strategies[s]?.logic || '').toLowerCase().includes(searchTerm.toLowerCase())
     );
+
+    const formatFilter = (key, val) => {
+        if (typeof val === 'string') return `${key}: ${val}`;
+        if (Array.isArray(val) && val.length === 2) return `${key}: ${val[0]} bis ${val[1]}`;
+        return `${key}: ${JSON.stringify(val)}`;
+    };
+
+    const getDirectionBadge = (name, strat) => {
+        const n = name.toLowerCase();
+        if (strat?.harmonic_direction === 'LONG' || n.includes('long') || n.includes('bull') || n.includes('bounce long') || n.includes('breakout long') || n.includes('dip buy') || n.includes('reversal hunter') || n.includes('accumulation') || n.includes('gap up') || n.includes('momentum') && !n.includes('short') && !n.includes('bear') && !n.includes('down')) {
+            return { label: 'LONG', color: '#10b981' };
+        }
+        if (strat?.harmonic_direction === 'SHORT' || n.includes('short') || n.includes('bear') || n.includes('breakdown') || n.includes('gap down') || n.includes('fade') || n.includes('distribution')) {
+            return { label: 'SHORT', color: '#ef4444' };
+        }
+        if (n.includes('alle zeigen') || n.includes('all pattern') || strat?.harmonic_direction === 'ALL') {
+            return { label: 'ALLE', color: '#6b7280' };
+        }
+        return { label: 'WATCH', color: '#f59e0b' };
+    };
 
     return (
         <div className="space-y-6">
-            <div className="card border border-gray-200 p-6 rounded-lg">
-                <label className="block text-sm font-semibold mb-3">Suchfilter</label>
+            <div className="card border border-gray-200 p-4 rounded-lg flex items-center gap-3">
+                <svg className="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                 <input
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="Strategie suchen..."
-                    className="w-full"
+                    placeholder="Strategie, Beschreibung oder Logik suchen..."
+                    className="w-full bg-transparent outline-none"
                 />
+                {searchTerm && <button onClick={() => setSearchTerm('')} className="text-gray-400 hover:text-gray-600 text-lg">\u00d7</button>}
             </div>
 
-            <div className="flex gap-2 border-b border-gray-200">
+            <div className="flex gap-2 border-b border-gray-200 flex-wrap">
                 {marketTypes.map(market => (
                     <button
                         key={market.id}
-                        onClick={() => setActiveMarket(market.id)}
+                        onClick={() => { setActiveMarket(market.id); setExpandedStrategy(null); }}
                         className={`secondary-tab ${activeMarket === market.id ? 'active' : 'inactive'}`}
                     >
-                        {market.label}
+                        {market.icon} {market.label}
                     </button>
                 ))}
             </div>
 
+            <div className="text-xs text-gray-500">{filtered.length} von {strategyNames.length} Strategien</div>
+
             <div className="space-y-3">
                 {loading ? (
                     <div className="flex justify-center py-8"><div className="loading-spinner"></div></div>
+                ) : filtered.length === 0 ? (
+                    <div className="text-center text-gray-500 py-8">Keine Strategien gefunden</div>
                 ) : (
-                    filtered.map((strategy, idx) => (
-                        <div key={idx} className="card border border-gray-200 p-4 rounded-lg cursor-pointer" onClick={() => setExpandedStrategy(expandedStrategy === idx ? null : idx)}>
-                            <div className="flex justify-between items-center">
-                                <h3 className="font-semibold">{strategy}</h3>
-                                <span className="text-xl">{expandedStrategy === idx ? '−' : '+'}</span>
+                    filtered.map((name, idx) => {
+                        const strat = strategies[name] || {};
+                        const dir = getDirectionBadge(name, strat);
+                        const filters = strat.filters || {};
+                        const filterKeys = Object.keys(filters);
+                        const isExpanded = expandedStrategy === idx;
+                        return (
+                        <div key={idx} className="card border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="p-4 cursor-pointer hover:bg-gray-50" onClick={() => setExpandedStrategy(isExpanded ? null : idx)}>
+                                <div className="flex justify-between items-start gap-3">
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <h3 className="font-semibold text-sm">{name}</h3>
+                                            <span className="text-xs font-bold px-2 py-0.5 rounded" style={{background: dir.color + '20', color: dir.color}}>{dir.label}</span>
+                                            {strat.stocks_only && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">Nur Aktien</span>}
+                                            {strat.needs_history && <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">Multi-Day</span>}
+                                            {strat.needs_harmonic && <span className="text-xs px-1.5 py-0.5 rounded bg-orange-50 text-orange-600">Harmonic</span>}
+                                            {strat.needs_volume_profile && <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-50 text-cyan-600">Volume Profile</span>}
+                                            {strat.needs_ma && <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{strat.ma_type} {strat.ma_period}</span>}
+                                        </div>
+                                        <p className="text-xs text-gray-500 mt-1 truncate">{strat.description || '—'}</p>
+                                    </div>
+                                    <span className="text-lg text-gray-400 flex-shrink-0">{isExpanded ? '\u2212' : '+'}</span>
+                                </div>
                             </div>
-                            {expandedStrategy === idx && (
-                                <div className="mt-4 pt-4 border-t border-gray-200 text-sm text-gray-700">
-                                    <p>Detaillierte Beschreibung der Strategie {strategy}...</p>
+
+                            {isExpanded && (
+                                <div className="px-4 pb-4 border-t border-gray-100 space-y-3">
+                                    {/* Beschreibung */}
+                                    <div className="pt-3">
+                                        <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Beschreibung</div>
+                                        <p className="text-sm">{strat.description || 'Keine Beschreibung'}</p>
+                                    </div>
+
+                                    {/* Logik */}
+                                    {strat.logic && (
+                                        <div>
+                                            <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Logik / Regel</div>
+                                            <div className="text-sm bg-gray-50 rounded p-3 border border-gray-100 font-mono">{strat.logic}</div>
+                                        </div>
+                                    )}
+
+                                    {/* Filter */}
+                                    {filterKeys.length > 0 && (
+                                        <div>
+                                            <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Filter-Kriterien</div>
+                                            <div className="flex flex-wrap gap-2">
+                                                {filterKeys.map(k => (
+                                                    <span key={k} className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded font-mono">
+                                                        {formatFilter(k, filters[k])}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Zusatz-Infos */}
+                                    <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-gray-600">
+                                        {strat.best_time && (
+                                            <div><span className="font-semibold text-gray-400">Zeitfenster:</span> {strat.best_time}</div>
+                                        )}
+                                        {strat.best_pairs && (
+                                            <div><span className="font-semibold text-gray-400">Beste Paare:</span> {strat.best_pairs.join(', ')}</div>
+                                        )}
+                                        {strat.history_days && (
+                                            <div><span className="font-semibold text-gray-400">Historie:</span> {strat.history_days} Tage</div>
+                                        )}
+                                        {strat.pattern_type && (
+                                            <div><span className="font-semibold text-gray-400">Pattern:</span> {strat.pattern_type}</div>
+                                        )}
+                                        {strat.min_dollar_volume && (
+                                            <div><span className="font-semibold text-gray-400">Min. Volume:</span> ${(strat.min_dollar_volume/1000).toFixed(0)}k</div>
+                                        )}
+                                        {strat.min_range_pct && (
+                                            <div><span className="font-semibold text-gray-400">Min. Range:</span> {strat.min_range_pct}%</div>
+                                        )}
+                                        {strat.ma_approach && (
+                                            <div><span className="font-semibold text-gray-400">MA Approach:</span> {strat.ma_approach === 'from_above' ? 'Von oben (Support)' : 'Von unten (Resistance)'}</div>
+                                        )}
+                                        {strat.ma_distance_max && (
+                                            <div><span className="font-semibold text-gray-400">Max. Abstand:</span> {strat.ma_distance_max}%</div>
+                                        )}
+                                        {strat.harmonic_direction && (
+                                            <div><span className="font-semibold text-gray-400">Harmonic:</span> {strat.harmonic_direction}</div>
+                                        )}
+                                    </div>
                                 </div>
                             )}
                         </div>
-                    ))
+                        );
+                    })
                 )}
             </div>
         </div>
