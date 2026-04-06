@@ -3044,13 +3044,22 @@ Kurz und praezise, keine langen Erklaerungen."""}],
 
 @app.get("/api/strategies", response_model=StrategiesResponse)
 def list_strategies(market_type: str = Query("stocks", description="Market type: stocks, crypto, futures, forex")):
-    """List all strategies for a given market type."""
+    """List all strategies for a given market type. Strips internal fields for public API."""
     strategies = get_strategies_for_market(market_type)
+
+    # Strip internal calculation details — users should not see filters, logic, thresholds
+    # NO description — contains internal details; frontend has its own guide texts
+    _safe_keys = {"stocks_only", "needs_history", "needs_harmonic",
+                  "needs_volume_profile", "needs_ma", "ma_type", "ma_period",
+                  "best_time", "best_pairs", "harmonic_direction"}
+    safe_strategies = {}
+    for name, config in strategies.items():
+        safe_strategies[name] = {k: v for k, v in config.items() if k in _safe_keys}
 
     return StrategiesResponse(
         market_type=market_type,
-        strategies=strategies,
-        count=len(strategies),
+        strategies=safe_strategies,
+        count=len(safe_strategies),
     )
 
 

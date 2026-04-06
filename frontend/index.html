@@ -4745,18 +4745,93 @@ function StrategieGuideTab() {
         { id: 'international', label: 'International', icon: '\ud83c\udf0d' }
     ];
 
+    // User-freundliche Guide-Texte — erklären WAS die Strategie macht & WANN nützlich
+    const guideTexts = {
+        // === AKTIEN ===
+        'Volume Surge': 'Erkennt Aktien, bei denen plötzlich viel mehr gehandelt wird als üblich UND sich der Preis gleichzeitig bewegt. Wenn beides zusammenkommt, steckt oft echtes Interesse dahinter — nicht nur zufälliges Rauschen. Besonders nützlich um früh in einen Move einzusteigen.',
+        'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert 20 Tage Kurshistorie um echte Flaggen zu finden.',
+        'Bear Flag': 'Das Gegenstück zur Bull Flag — nach einem starken Abverkauf konsolidiert die Aktie in einer engen Range. Oft ein Zeichen, dass der Abwärtstrend weitergehen wird. Nützlich für Short-Setups.',
+        'Breakout Long': 'Findet Aktien, die gerade nach oben ausbrechen und ihren Tagesgewinn halten. Der Kurs schließt nahe dem Tageshoch — ein Zeichen, dass die Käufer die Kontrolle haben. Kann auch Multi-Day-Runner erkennen, die über mehrere Tage steigen.',
+        'Penny Rockets': 'Sucht günstige Aktien unter $5, die plötzlich explodieren. Nur liquide Aktien werden angezeigt (Mindest-Handelsvolumen), um illiquide Fallen zu vermeiden. Hochriskant, aber potentiell sehr profitabel.',
+        'Dip Buy': 'Findet qualitativ hochwertige Aktien im Rücksetzer, die NICHT in Panik verkauft werden. Wenn eine gute Aktie moderat fällt, aber das Handelsvolumen normal bleibt, ist das oft eine Kaufgelegenheit — kein Crash.',
+        'Reversal Hunter': 'Sucht nach Wendepunkten: Aktien, die gestern stark gefallen sind und heute wieder Käufer anziehen. Der Scanner unterscheidet zwischen echten Reversals (im Abwärtstrend) und normalen Pullback-Bounces (im Aufwärtstrend).',
+        'Early Momentum': 'Erkennt Aktien mit einem starken Tagesstart, die ihre Gewinne halten. Wenn der Kurs am Tageshoch oder nahe dran schließt, deutet das auf anhaltendes Momentum hin. Ideal für Intraday-Trader.',
+        'Whale Watch': 'Extrem hohes Handelsvolumen kombiniert mit klarer Kursrichtung nach oben. Wenn das Volumen 3x über dem Durchschnitt liegt und der Preis steigt, sind wahrscheinlich große institutionelle Käufer ("Whales") aktiv.',
+        'Whale Watch Short ': 'Das Short-Gegenstück: Extremes Volumen mit klarem Abverkauf. Große Spieler verkaufen in Menge — der Kurs schließt nahe dem Tagestief. Ein starkes Signal für weitere Schwäche.',
+        'Earnings Mover Long': 'Aktien, die nach Quartalszahlen oder News stark nach oben gappen und den Gap halten. Funktioniert im Pre-Market, After-Hours und regulärer Session. Der Gap muss mit hohem Volumen bestätigt sein.',
+        'Earnings Mover Short': 'Aktien, die nach schlechten Quartalszahlen oder News stark fallen und sich nicht erholen. Wenn der Kurs nahe dem Tagestief bleibt, deutet das auf weitere Schwäche hin — ein Short-Setup.',
+        'Gap Up': 'Einfacher Gap-Scanner: Aktien, die mit einer Lücke nach oben eröffnen. Gaps entstehen durch News, Earnings oder Overnight-Aktivität und bieten oft Trading-Chancen in der ersten Stunde.',
+        'Gap Down': 'Erkennt Aktien, die mit einer Lücke nach unten eröffnen. Nützlich für Gap-Fill-Trades (Preis kehrt zum Schlusskurs zurück) oder Continuation-Shorts.',
+        'Gap Up (High Vol)': 'Wie Gap Up, aber nur mit besonders hohem Volumen. Die Kombination Gap + Volumen zeigt echtes Momentum und nicht nur ein dünnes Overnight-Geschäft.',
+        'Gap Down (High Vol)': 'Gap nach unten mit überdurchschnittlichem Volumen — oft durch schlechte News oder Earnings ausgelöst. Stärkeres Signal als ein normaler Gap Down.',
+        'Long Wick Up': 'Erkennt Kerzen mit langer oberer Wick (Docht): Der Preis stieg stark, wurde dann aber zurückgewiesen. Dieses Candlestick-Pattern zeigt Verkaufsdruck an höheren Preisen und deutet oft auf eine Umkehr nach unten hin.',
+        'Long Wick Down': 'Das Gegenteil: Eine lange untere Wick zeigt, dass der Preis stark fiel, aber von Käufern aufgefangen wurde. Bekannt als "Hammer" in der Candlestick-Analyse — ein bullisches Umkehrsignal.',
+        'Insider Buying': 'Zeigt Aktien, bei denen Unternehmensinsider (CEOs, CFOs, Direktoren) eigene Aktien kaufen. Wenn diejenigen kaufen, die das Unternehmen am besten kennen, ist das ein starkes bullisches Signal.',
+        'Insider Selling': 'Große Insider-Verkäufe können ein Warnsignal sein. Allerdings verkaufen Insider aus vielen Gründen (Steuern, Diversifikation) — es muss nicht immer negativ sein. Trotzdem ein wichtiger Datenpunkt.',
+        'Consolidation ': 'Findet Aktien in einer mehrtägigen Seitwärtsphase mit sinkendem Volumen. Diese "Ruhe vor dem Sturm" geht oft einem großen Ausbruch voraus — die Richtung ist allerdings noch unklar. Basiert auf Wyckoff-Prinzipien.',
+        'Consolidation Breakout ': 'Der nächste Schritt nach der Konsolidierung: Erkennt Aktien, die gerade aus einer engen mehrtägigen Range ausbrechen. Der Ausbruch wird durch erhöhtes Volumen bestätigt — ein starkes Einstiegssignal.',
+        'Reversal Setup ': 'Sucht mehrtägige Abverkäufe, bei denen sich heute eine bullische Umkehr andeutet. Wenn nach mehreren roten Tagen plötzlich Käufer mit erhöhtem Volumen einsteigen, bildet sich möglicherweise ein Boden.',
+        'Tight Range ': 'Extrem enge Tagesrange bei niedrigem Volumen — die Aktie bewegt sich kaum noch. Dieses extreme Gleichgewicht löst sich fast immer in einem großen Move auf. Die Richtung ist allerdings noch unklar.',
+        'High Volume Churn ': 'Hohes Volumen OHNE Preisfortschritt. Das klingt langweilig, ist aber eines der wichtigsten Signale: Wenn viel gehandelt wird aber der Preis sich nicht bewegt, wechseln Aktien von schwachen zu starken Händen (Akkumulation) oder umgekehrt (Distribution).',
+        'Volume Void Long ⬆': 'Identifiziert Preiszonen über dem aktuellen Kurs, in denen historisch sehr wenig gehandelt wurde. In diesen "Volumen-Löchern" gibt es kaum Widerstand — der Preis kann schnell durchrutschen. Ein Volume-Profile-basiertes Setup.',
+        'Volume Void Short ⬇': 'Das Short-Gegenstück: Preiszonen unter dem aktuellen Kurs mit wenig historischem Volumen. Wenn der Preis dort hinein fällt, gibt es wenig Support und er kann schnell weiter fallen.',
+        'Harmonic Bullish ⬆': 'Scannt nach bullischen Harmonic Patterns wie Gartley, Bat, Butterfly und Crab. Diese Fibonacci-basierten Umkehr-Patterns werden seit Jahrzehnten von professionellen Tradern genutzt. Der Entry erfolgt am Punkt D des XABCD-Patterns.',
+        'Harmonic Bearish ⬇': 'Bärische Harmonic Patterns für Short-Setups. Gleiche Methodik wie die bullische Variante, nur in die andere Richtung.',
+        'Harmonic All Patterns ': 'Zeigt alle erkannten Harmonic Patterns unabhängig von der Richtung. Nützlich wenn du alle Fibonacci-Setups auf einen Blick sehen willst.',
+        'Wyckoff Accumulation ⬆': 'Basiert auf der Wyckoff-Methode: Erkennt Phasen, in denen Smart Money leise in einer Trading Range kauft. Klassische Zeichen sind sinkendes Volumen in der Range und versteckte Stärke. Einer der professionellsten und zuverlässigsten Ansätze der technischen Analyse — entwickelt von Richard Wyckoff in den 1930ern.',
+        'Wyckoff Distribution ⬇': 'Das Gegenteil der Akkumulation: Smart Money verkauft leise in einer Trading Range, während der Markt noch stabil aussieht. Erkennt versteckte Schwäche bevor der Abverkauf beginnt. Basiert auf der gleichen Wyckoff-Methodik.',
+        'SMA 50 Bounce Long ': 'Der 50-Tage-Durchschnitt (SMA 50) ist eine der wichtigsten Support-Zonen. Wenn der Preis von oben an den SMA 50 herankommt und der MA nach oben zeigt, bietet das oft eine Kaufgelegenheit. Swing-Trader nutzen dieses Setup regelmäßig.',
+        'SMA 50 Bounce Short ': 'Wenn eine Aktie im Abwärtstrend den SMA 50 von unten erreicht, wirkt er als Widerstand. Der Preis prallt oft nach unten ab — ein Short-Setup.',
+        'SMA 200 Bounce Long ': 'Der 200-Tage-Durchschnitt ist DER wichtigste langfristige Moving Average. Legendäre Trader wie Paul Tudor Jones nutzen ihn als ultimativen Support. Wenn eine Aktie den SMA 200 testet und hält, ist das oft ein starkes Kaufsignal.',
+        'SMA 200 Bounce Short ': 'Im Abwärtstrend wirkt der SMA 200 als massive Widerstandszone. Wenn eine gefallene Aktie bis zum SMA 200 steigt, wird sie dort oft abgewiesen.',
+        'EMA 21 Bounce (Swing) ': 'Der EMA 21 ist der klassische Swing-Trading Moving Average, bekannt durch Linda Raschke\'s "Holy Grail" Setup. Ein Pullback zur EMA 21 im Aufwärtstrend bietet eine der zuverlässigsten Einstiegsmöglichkeiten für Swing-Trades.',
+        // === CRYPTO ===
+        ' Alle zeigen': 'Zeigt alle verfügbaren Assets ohne Filter an. Nützlich um einen Gesamtüberblick über den Markt zu bekommen.',
+        'Low Cap Rockets ': 'Findet kleine Kryptowährungen (unter $500M Marktkapitalisierung) mit explosiven Moves. Small Caps können sich vervielfachen, sind aber auch extrem riskant. Nur Coins mit echtem Volumen werden angezeigt.',
+        'Accumulation ': 'Erkennt Coins, die seitwärts handeln aber leicht erhöhtes Volumen zeigen. Das deutet darauf hin, dass jemand still und leise Positionen aufbaut. Oft ein Vorbote eines größeren Moves.',
+        // === FUTURES ===
+        'Futures Momentum ': 'Erkennt Futures-Kontrakte mit starker Tagesbewegung. In den Futures-Märkten sind schon 1% signifikant, da oft mit hohem Hebel gehandelt wird.',
+        'Futures Breakdown ': 'Starker Abverkauf bei Futures — potenzielle Short-Chance. Futures-Breakdowns können sich schnell beschleunigen durch Margin Calls.',
+        'Futures Reversal ': 'Trendumkehr bei Futures: Nach einer schwachen Session dreht der Markt nach oben. Reversal-Trades in Futures sind besonders bei Rohstoffen profitabel.',
+        'Globex Gap ': 'Der Globex ist der elektronische Futures-Markt, der auch über Nacht läuft. Dieser Scanner findet Gaps zwischen dem US-Schlusskurs und der aktuellen Overnight-Session. Besonders relevant für Index-Futures (ES, NQ).',
+        'London Open Momentum 🇬🇧': 'Erkennt Momentum bei Eröffnung der Londoner Börse um 08:00 UTC. Der Londoner Markt bringt frische Liquidität und oft neue Trendrichtung. Besonders relevant für Gold, Öl und europäische Indizes.',
+        'NY Open Breakout ': 'Momentum bei US-Börsenöffnung — die liquideste Phase des Tages. Hier entstehen die größten Moves. Besonders profitabel für Index-Futures und Energie-Futures.',
+        'High Volatility ': 'Findet Futures mit überdurchschnittlicher Tagesbewegung. Hohe Volatilität bedeutet größere Chancen (und Risiken) — ideal für aktive Daytrader.',
+        'Low Volatility Squeeze ': 'Extrem enge Range bei Futures — die Volatilität ist zusammengepresst wie eine Feder. Historisch folgt auf solche Phasen fast immer ein großer Ausbruch.',
+        'VIX Spike Alert ': 'Erkennt starke Anstiege im VIX (Angst-Index). Wenn der VIX sprunghaft steigt, absichern sich große Spieler gegen einen Crash. Kann sowohl Warnsignal als auch Contrarian-Buy-Signal sein.',
+        // === FOREX ===
+        'Forex Momentum ': 'Erkennt Währungspaare mit starker Pip-Bewegung. Im Forex-Markt sind schon 0.3% signifikant, da mit großem Hebel gehandelt wird.',
+        'Forex Reversal ': 'Trendumkehr bei Währungspaaren: Nach einem starken Vortag dreht die Richtung. Forex-Reversals an Schlüsselniveaus sind eine der profitabelsten Strategien.',
+        'Pip Hunter ': 'Zeigt die größten Pip-Bewegungen des Tages. Nützlich um die aktivsten Paare zu finden und dort nach Setups zu suchen.',
+        'Tokyo Session 🇯🇵': 'Bewegungen während der Tokyo/Asien Session (00:00-09:00 UTC). Oft ruhiger, aber JPY-Paare (USDJPY, EURJPY) können hier sehr aktiv sein. Ideal für Trader in asiatischen Zeitzonen.',
+        'London Session 🇬🇧': 'Die London-Session (08:00-17:00 UTC) hat die höchste Liquidität weltweit. EUR und GBP-Paare sind besonders aktiv. Die besten Breakout-Setups entstehen in der ersten Stunde.',
+        'NY Session ': 'US-Session (13:00-22:00 UTC) mit Fokus auf USD-Paare. Die zweite große Liquiditätsphase des Tages. EURUSD, GBPUSD und USDJPY sind besonders aktiv.',
+        'London/NY Overlap ': 'Die Überlappung von London und New York (13:00-17:00 UTC) ist die volatilste Phase überhaupt. Maximale Liquidität und die größten Moves des Tages. Die beste Zeit für Forex-Trading.',
+        'Safe Haven Flow ': 'Erkennt Risk-Off Bewegungen: Investoren fliehen in sichere Währungen wie CHF und JPY. Wenn USDCHF und USDJPY fallen, deutet das auf Angst im Markt hin. Ein wichtiges Stimmungsbarometer.',
+        'Risk-On Rally ': 'Das Gegenteil: Risikofreudige Währungen wie AUD und NZD steigen. Das zeigt Optimismus im Markt und Appetite für Risiko. Oft korreliert mit steigenden Aktienmärkten.',
+        'Exotic Movers ': 'Große Bewegungen in Emerging-Market-Währungen. Exotische Paare haben höhere Spreads aber auch größere Schwankungen. Für erfahrene Forex-Trader.',
+        'Range Bound ': 'Findet Währungspaare mit minimaler Bewegung — ideal für Range-Trading-Strategien. Kauf am unteren Ende der Range, Verkauf am oberen.',
+        // === INTERNATIONAL ===
+        ' Gewinner': 'Zeigt alle Aktien der Börse, die heute im Plus sind. Einfacher Überblick über die stärksten Werte des Tages.',
+        ' Verlierer': 'Zeigt alle Aktien im Minus. Nützlich um Schwäche zu identifizieren oder Dip-Buy-Kandidaten zu finden.',
+        ' Momentum': 'Die stärksten positiven Bewegungen des Tages. Für europäische Blue-Chips ist >1% bereits signifikant.',
+        ' Breakout': 'Starker Ausbruch nach oben — der Kurs schließt nahe dem Tageshoch. Zeigt klare bullische Stärke.',
+        ' Breakdown': 'Starker Abverkauf — der Kurs schließt nahe dem Tagestief. Zeigt Verkaufsdruck und mögliche Short-Setups.',
+        ' Dip Buy': 'Moderate Schwäche bei soliden Aktien. Ein Rücksetzer bei niedrigem Panik-Level kann eine Kaufgelegenheit sein.',
+        ' Volume Spike': 'Deutlich überdurchschnittliches Volumen (zeitnormalisiert). Wenn eine normalerweise ruhige europäische Aktie plötzlich viel gehandelt wird, passiert etwas Wichtiges.',
+        ' Reversal': 'Trendumkehr: Gestern stark gefallen, heute Bounce. Zeigt, dass Käufer einsteigen und der Abverkauf möglicherweise vorbei ist.',
+        ' Bull Flag': 'Konsolidierung nach starkem Vortag — die Aktie pausiert in einer engen Range. Oft ein Zeichen, dass der Aufwärtstrend weitergeht.',
+        ' Bear Flag': 'Konsolidierung nach Abverkauf — enge Range nach rotem Vortag. Zeigt, dass Verkäufer noch nicht fertig sind.',
+        ' Big Movers': 'Die größten absoluten Bewegungen des Tages. Für europäische Märkte ist >2% bereits signifikant.',
+        ' Whale Watch': 'Extremes Volumen (zeitnormalisiert) — Big Player sind aktiv. Besonders relevant bei europäischen Aktien, die normalerweise weniger Volumen haben.',
+    };
+
     const strategyNames = Object.keys(strategies);
     const filtered = strategyNames.filter(s =>
         s.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (strategies[s]?.description || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (strategies[s]?.logic || '').toLowerCase().includes(searchTerm.toLowerCase())
+        (guideTexts[s] || '').toLowerCase().includes(searchTerm.toLowerCase())
     );
-
-    const formatFilter = (key, val) => {
-        if (typeof val === 'string') return `${key}: ${val}`;
-        if (Array.isArray(val) && val.length === 2) return `${key}: ${val[0]} bis ${val[1]}`;
-        return `${key}: ${JSON.stringify(val)}`;
-    };
 
     const getDirectionBadge = (name, strat) => {
         const n = name.toLowerCase();
@@ -4780,7 +4855,7 @@ function StrategieGuideTab() {
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="Strategie, Beschreibung oder Logik suchen..."
+                    placeholder="Strategie suchen..."
                     className="w-full bg-transparent outline-none"
                 />
                 {searchTerm && <button onClick={() => setSearchTerm('')} className="text-gray-400 hover:text-gray-600 text-lg">\u00d7</button>}
@@ -4809,8 +4884,7 @@ function StrategieGuideTab() {
                     filtered.map((name, idx) => {
                         const strat = strategies[name] || {};
                         const dir = getDirectionBadge(name, strat);
-                        const filters = strat.filters || {};
-                        const filterKeys = Object.keys(filters);
+                        const guide = guideTexts[name] || guideTexts[name.trim()] || null;
                         const isExpanded = expandedStrategy === idx;
                         return (
                         <div key={idx} className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -4826,7 +4900,7 @@ function StrategieGuideTab() {
                                             {strat.needs_volume_profile && <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-50 text-cyan-600">Volume Profile</span>}
                                             {strat.needs_ma && <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{strat.ma_type} {strat.ma_period}</span>}
                                         </div>
-                                        <p className="text-xs text-gray-500 mt-1 truncate">{strat.description || '—'}</p>
+                                        <p className="text-xs text-gray-500 mt-1 truncate">{guide ? guide.substring(0, 80) + '...' : '\u2014'}</p>
                                     </div>
                                     <span className="text-lg text-gray-400 flex-shrink-0">{isExpanded ? '\u2212' : '+'}</span>
                                 </div>
@@ -4834,64 +4908,22 @@ function StrategieGuideTab() {
 
                             {isExpanded && (
                                 <div className="px-4 pb-4 border-t border-gray-100 space-y-3">
-                                    {/* Beschreibung */}
+                                    {/* Guide-Text — erklärt WAS die Strategie macht, nicht WIE */}
                                     <div className="pt-3">
-                                        <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Beschreibung</div>
-                                        <p className="text-sm">{strat.description || 'Keine Beschreibung'}</p>
+                                        <p className="text-sm leading-relaxed">{guide || 'Keine Beschreibung verfügbar.'}</p>
                                     </div>
 
-                                    {/* Logik */}
-                                    {strat.logic && (
-                                        <div>
-                                            <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Logik / Regel</div>
-                                            <div className="text-sm bg-gray-50 rounded p-3 border border-gray-100 font-mono">{strat.logic}</div>
-                                        </div>
-                                    )}
-
-                                    {/* Filter */}
-                                    {filterKeys.length > 0 && (
-                                        <div>
-                                            <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Filter-Kriterien</div>
-                                            <div className="flex flex-wrap gap-2">
-                                                {filterKeys.map(k => (
-                                                    <span key={k} className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded font-mono">
-                                                        {formatFilter(k, filters[k])}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Zusatz-Infos */}
-                                    <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-gray-600">
+                                    {/* Allgemeine Hinweise — nur Session-Zeiten, Paare etc. */}
+                                    {(strat.best_time || strat.best_pairs) && (
+                                    <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-gray-600 bg-gray-50 rounded p-3">
                                         {strat.best_time && (
-                                            <div><span className="font-semibold text-gray-400">Zeitfenster:</span> {strat.best_time}</div>
+                                            <div><span className="font-semibold text-gray-500">Bestes Zeitfenster:</span> {strat.best_time}</div>
                                         )}
                                         {strat.best_pairs && (
-                                            <div><span className="font-semibold text-gray-400">Beste Paare:</span> {strat.best_pairs.join(', ')}</div>
-                                        )}
-                                        {strat.history_days && (
-                                            <div><span className="font-semibold text-gray-400">Historie:</span> {strat.history_days} Tage</div>
-                                        )}
-                                        {strat.pattern_type && (
-                                            <div><span className="font-semibold text-gray-400">Pattern:</span> {strat.pattern_type}</div>
-                                        )}
-                                        {strat.min_dollar_volume && (
-                                            <div><span className="font-semibold text-gray-400">Min. Volume:</span> ${(strat.min_dollar_volume/1000).toFixed(0)}k</div>
-                                        )}
-                                        {strat.min_range_pct && (
-                                            <div><span className="font-semibold text-gray-400">Min. Range:</span> {strat.min_range_pct}%</div>
-                                        )}
-                                        {strat.ma_approach && (
-                                            <div><span className="font-semibold text-gray-400">MA Approach:</span> {strat.ma_approach === 'from_above' ? 'Von oben (Support)' : 'Von unten (Resistance)'}</div>
-                                        )}
-                                        {strat.ma_distance_max && (
-                                            <div><span className="font-semibold text-gray-400">Max. Abstand:</span> {strat.ma_distance_max}%</div>
-                                        )}
-                                        {strat.harmonic_direction && (
-                                            <div><span className="font-semibold text-gray-400">Harmonic:</span> {strat.harmonic_direction}</div>
+                                            <div><span className="font-semibold text-gray-500">Empfohlene Paare:</span> {strat.best_pairs.join(', ')}</div>
                                         )}
                                     </div>
+                                    )}
                                 </div>
                             )}
                         </div>
