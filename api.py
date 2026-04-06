@@ -2352,21 +2352,24 @@ def get_chart_data(
                         print(f"[Warning] Error calculating EMA{period}: {e}")
             result["ema"] = ema_overlays
 
-        # VWAP (V3.4 FIX: Daily Reset wie TradingView — VWAP startet jeden Tag neu)
+        # VWAP V4.0: Intraday (5m/15m/1H) = Daily Reset, Higher TF (4H/1D/1W) = Session VWAP
         if "vwap" in overlay_list and len(ohlcv) >= 10:
             try:
                 vwap_data = []
                 cum_tp_vol = 0
                 cum_vol = 0
+                # Daily Reset nur bei echten Intraday-Timeframes
+                use_daily_reset = timeframe in ("5m", "15m", "1H")
                 prev_date = None
+
                 for bar in ohlcv:
-                    # Tageswechsel erkennen → VWAP reset
-                    from datetime import datetime as _dt
-                    bar_date = _dt.utcfromtimestamp(bar["time"]).strftime("%Y-%m-%d")
-                    if prev_date is not None and bar_date != prev_date:
-                        cum_tp_vol = 0
-                        cum_vol = 0
-                    prev_date = bar_date
+                    if use_daily_reset:
+                        from datetime import datetime as _dt
+                        bar_date = _dt.utcfromtimestamp(bar["time"]).strftime("%Y-%m-%d")
+                        if prev_date is not None and bar_date != prev_date:
+                            cum_tp_vol = 0
+                            cum_vol = 0
+                        prev_date = bar_date
 
                     tp = (bar["high"] + bar["low"] + bar["close"]) / 3
                     vol = bar.get("volume", 0)
