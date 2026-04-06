@@ -4625,6 +4625,11 @@ function BacktestTab() {
                     setResults(null);
                     setTrades([]);
                     if (window.addToast) window.addToast(data.error, 'error');
+                } else if (data.total_trades === 0) {
+                    setError('Keine Trades gefunden — probiere einen anderen Zeitraum oder Ticker');
+                    setResults(null);
+                    setTrades([]);
+                    if (window.addToast) window.addToast('Keine Trades gefunden', 'info');
                 } else {
                     setResults(data);
                     setTrades(data.trades || []);
@@ -4714,18 +4719,18 @@ function BacktestTab() {
                         </div>
                         <div className="metric-card orange">
                             <div className="text-xs font-semibold text-gray-500">Ø PnL pro Trade</div>
-                            <div className={`text-2xl font-bold mt-1 ${results.avg_pnl >= 0 ? 'color-positive' : 'color-negative'}`}>
-                                {results.avg_pnl >= 0 ? '+' : ''}{results.avg_pnl?.toFixed(2)}%
+                            <div className={`text-2xl font-bold mt-1 ${(results.avg_pnl ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>
+                                {(results.avg_pnl ?? 0) >= 0 ? '+' : ''}{(results.avg_pnl ?? 0).toFixed(2)}%
                             </div>
                         </div>
                         <div className="metric-card purple">
                             <div className="text-xs font-semibold text-gray-500">Max Drawdown</div>
-                            <div className="text-2xl font-bold mt-1 color-negative">-{results.max_drawdown?.toFixed(2)}%</div>
+                            <div className="text-2xl font-bold mt-1 color-negative">-{(results.max_drawdown ?? 0).toFixed(2)}%</div>
                         </div>
-                        <div className="metric-card" style={{ borderColor: results.total_return >= 0 ? '#10b981' : '#ef4444' }}>
+                        <div className="metric-card" style={{ borderColor: (results.total_return ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>
                             <div className="text-xs font-semibold text-gray-500">Gesamtrendite</div>
-                            <div className={`text-2xl font-bold mt-1 ${results.total_return >= 0 ? 'color-positive' : 'color-negative'}`}>
-                                {results.total_return >= 0 ? '+' : ''}{results.total_return?.toFixed(2)}%
+                            <div className={`text-2xl font-bold mt-1 ${(results.total_return ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>
+                                {(results.total_return ?? 0) >= 0 ? '+' : ''}{(results.total_return ?? 0).toFixed(2)}%
                             </div>
                         </div>
                     </div>
@@ -4733,19 +4738,19 @@ function BacktestTab() {
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <div className="card border border-gray-200 p-3 rounded-lg text-center">
                             <div className="text-xs text-gray-500">Bester Trade</div>
-                            <div className="text-lg font-bold color-positive mt-1">+{results.best_trade?.toFixed(2)}%</div>
+                            <div className="text-lg font-bold color-positive mt-1">+{(results.best_trade ?? 0).toFixed(2)}%</div>
                         </div>
                         <div className="card border border-gray-200 p-3 rounded-lg text-center">
                             <div className="text-xs text-gray-500">Schlechtester Trade</div>
-                            <div className="text-lg font-bold color-negative mt-1">{results.worst_trade?.toFixed(2)}%</div>
+                            <div className="text-lg font-bold color-negative mt-1">{(results.worst_trade ?? 0).toFixed(2)}%</div>
                         </div>
                         <div className="card border border-gray-200 p-3 rounded-lg text-center">
                             <div className="text-xs text-gray-500">Ø Gewinn</div>
-                            <div className="text-lg font-bold color-positive mt-1">+{results.avg_win?.toFixed(2)}%</div>
+                            <div className="text-lg font-bold color-positive mt-1">+{(results.avg_win ?? 0).toFixed(2)}%</div>
                         </div>
                         <div className="card border border-gray-200 p-3 rounded-lg text-center">
                             <div className="text-xs text-gray-500">Ø Verlust</div>
-                            <div className="text-lg font-bold color-negative mt-1">{results.avg_loss?.toFixed(2)}%</div>
+                            <div className="text-lg font-bold color-negative mt-1">{(results.avg_loss ?? 0).toFixed(2)}%</div>
                         </div>
                     </div>
 
@@ -4772,7 +4777,7 @@ function BacktestTab() {
                                             <td className="py-3 px-2 text-right">${trade.entry_price?.toFixed(2)}</td>
                                             <td className="py-3 px-2">{trade.exit_date}</td>
                                             <td className="py-3 px-2 text-right">${trade.exit_price?.toFixed(2)}</td>
-                                            <td className={`py-3 px-2 text-right font-semibold ${trade.pnl_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{trade.pnl_pct >= 0 ? '+' : ''}{trade.pnl_pct?.toFixed(2)}%</td>
+                                            <td className={`py-3 px-2 text-right font-semibold ${(trade.pnl_pct ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{(trade.pnl_pct ?? 0) >= 0 ? '+' : ''}{(trade.pnl_pct ?? 0).toFixed(2)}%</td>
                                             <td className="py-3 px-2 text-center text-xs">{trade.type || 'LONG'}</td>
                                         </tr>
                                     ))}
@@ -4825,14 +4830,14 @@ function StrategieGuideTab() {
     const guideTexts = {
         // === AKTIEN ===
         'Volume Surge': 'Erkennt Aktien, bei denen plötzlich viel mehr gehandelt wird als üblich UND sich der Preis gleichzeitig bewegt. Wenn beides zusammenkommt, steckt oft echtes Interesse dahinter — nicht nur zufälliges Rauschen. Besonders nützlich um früh in einen Move einzusteigen.',
-        'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert 20 Tage Kurshistorie um echte Flaggen zu finden.',
+        'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert mehrere Wochen Kurshistorie um echte Flaggen zu finden.',
         'Bear Flag': 'Das Gegenstück zur Bull Flag — nach einem starken Abverkauf konsolidiert die Aktie in einer engen Range. Oft ein Zeichen, dass der Abwärtstrend weitergehen wird. Nützlich für Short-Setups.',
         'Breakout Long': 'Findet Aktien, die gerade nach oben ausbrechen und ihren Tagesgewinn halten. Der Kurs schließt nahe dem Tageshoch — ein Zeichen, dass die Käufer die Kontrolle haben. Kann auch Multi-Day-Runner erkennen, die über mehrere Tage steigen.',
-        'Penny Rockets': 'Sucht günstige Aktien unter $5, die plötzlich explodieren. Nur liquide Aktien werden angezeigt (Mindest-Handelsvolumen), um illiquide Fallen zu vermeiden. Hochriskant, aber potentiell sehr profitabel.',
+        'Penny Rockets': 'Sucht günstige Aktien im Low-Price-Bereich, die plötzlich explodieren. Nur liquide Aktien werden angezeigt (Mindest-Handelsvolumen), um illiquide Fallen zu vermeiden. Hochriskant, aber potentiell sehr profitabel.',
         'Dip Buy': 'Findet qualitativ hochwertige Aktien im Rücksetzer, die NICHT in Panik verkauft werden. Wenn eine gute Aktie moderat fällt, aber das Handelsvolumen normal bleibt, ist das oft eine Kaufgelegenheit — kein Crash.',
         'Reversal Hunter': 'Sucht nach Wendepunkten: Aktien, die gestern stark gefallen sind und heute wieder Käufer anziehen. Der Scanner unterscheidet zwischen echten Reversals (im Abwärtstrend) und normalen Pullback-Bounces (im Aufwärtstrend).',
         'Early Momentum': 'Erkennt Aktien mit einem starken Tagesstart, die ihre Gewinne halten. Wenn der Kurs am Tageshoch oder nahe dran schließt, deutet das auf anhaltendes Momentum hin. Ideal für Intraday-Trader.',
-        'Whale Watch': 'Extrem hohes Handelsvolumen kombiniert mit klarer Kursrichtung nach oben. Wenn das Volumen 3x über dem Durchschnitt liegt und der Preis steigt, sind wahrscheinlich große institutionelle Käufer ("Whales") aktiv.',
+        'Whale Watch': 'Extrem hohes Handelsvolumen kombiniert mit klarer Kursrichtung nach oben. Wenn das Volumen weit über dem Durchschnitt liegt und der Preis steigt, sind wahrscheinlich große institutionelle Käufer ("Whales") aktiv.',
         'Whale Watch Short ': 'Das Short-Gegenstück: Extremes Volumen mit klarem Abverkauf. Große Spieler verkaufen in Menge — der Kurs schließt nahe dem Tagestief. Ein starkes Signal für weitere Schwäche.',
         'Earnings Mover Long': 'Aktien, die nach Quartalszahlen oder News stark nach oben gappen und den Gap halten. Funktioniert im Pre-Market, After-Hours und regulärer Session. Der Gap muss mit hohem Volumen bestätigt sein.',
         'Earnings Mover Short': 'Aktien, die nach schlechten Quartalszahlen oder News stark fallen und sich nicht erholen. Wenn der Kurs nahe dem Tagestief bleibt, deutet das auf weitere Schwäche hin — ein Short-Setup.',
@@ -4863,10 +4868,10 @@ function StrategieGuideTab() {
         'EMA 21 Bounce (Swing) ': 'Der EMA 21 ist der klassische Swing-Trading Moving Average, bekannt durch Linda Raschke\'s "Holy Grail" Setup. Ein Pullback zur EMA 21 im Aufwärtstrend bietet eine der zuverlässigsten Einstiegsmöglichkeiten für Swing-Trades.',
         // === CRYPTO ===
         ' Alle zeigen': 'Zeigt alle verfügbaren Assets ohne Filter an. Nützlich um einen Gesamtüberblick über den Markt zu bekommen.',
-        'Low Cap Rockets ': 'Findet kleine Kryptowährungen (unter $500M Marktkapitalisierung) mit explosiven Moves. Small Caps können sich vervielfachen, sind aber auch extrem riskant. Nur Coins mit echtem Volumen werden angezeigt.',
+        'Low Cap Rockets ': 'Findet kleine Kryptowährungen mit niedriger Marktkapitalisierung und explosiven Moves. Small Caps können sich vervielfachen, sind aber auch extrem riskant. Nur Coins mit echtem Volumen werden angezeigt.',
         'Accumulation ': 'Erkennt Coins, die seitwärts handeln aber leicht erhöhtes Volumen zeigen. Das deutet darauf hin, dass jemand still und leise Positionen aufbaut. Oft ein Vorbote eines größeren Moves.',
         // === FUTURES ===
-        'Futures Momentum ': 'Erkennt Futures-Kontrakte mit starker Tagesbewegung. In den Futures-Märkten sind schon 1% signifikant, da oft mit hohem Hebel gehandelt wird.',
+        'Futures Momentum ': 'Erkennt Futures-Kontrakte mit starker Tagesbewegung. In den Futures-Märkten zählen schon kleinere Bewegungen, da oft mit hohem Hebel gehandelt wird.',
         'Futures Breakdown ': 'Starker Abverkauf bei Futures — potenzielle Short-Chance. Futures-Breakdowns können sich schnell beschleunigen durch Margin Calls.',
         'Futures Reversal ': 'Trendumkehr bei Futures: Nach einer schwachen Session dreht der Markt nach oben. Reversal-Trades in Futures sind besonders bei Rohstoffen profitabel.',
         'Globex Gap ': 'Der Globex ist der elektronische Futures-Markt, der auch über Nacht läuft. Dieser Scanner findet Gaps zwischen dem US-Schlusskurs und der aktuellen Overnight-Session. Besonders relevant für Index-Futures (ES, NQ).',
@@ -4876,13 +4881,13 @@ function StrategieGuideTab() {
         'Low Volatility Squeeze ': 'Extrem enge Range bei Futures — die Volatilität ist zusammengepresst wie eine Feder. Historisch folgt auf solche Phasen fast immer ein großer Ausbruch.',
         'VIX Spike Alert ': 'Erkennt starke Anstiege im VIX (Angst-Index). Wenn der VIX sprunghaft steigt, absichern sich große Spieler gegen einen Crash. Kann sowohl Warnsignal als auch Contrarian-Buy-Signal sein.',
         // === FOREX ===
-        'Forex Momentum ': 'Erkennt Währungspaare mit starker Pip-Bewegung. Im Forex-Markt sind schon 0.3% signifikant, da mit großem Hebel gehandelt wird.',
+        'Forex Momentum ': 'Erkennt Währungspaare mit starker Pip-Bewegung. Im Forex-Markt zählen schon kleine Bewegungen, da mit großem Hebel gehandelt wird.',
         'Forex Reversal ': 'Trendumkehr bei Währungspaaren: Nach einem starken Vortag dreht die Richtung. Forex-Reversals an Schlüsselniveaus sind eine der profitabelsten Strategien.',
         'Pip Hunter ': 'Zeigt die größten Pip-Bewegungen des Tages. Nützlich um die aktivsten Paare zu finden und dort nach Setups zu suchen.',
         'Tokyo Session 🇯🇵': 'Bewegungen während der Tokyo/Asien Session (00:00-09:00 UTC). Oft ruhiger, aber JPY-Paare (USDJPY, EURJPY) können hier sehr aktiv sein. Ideal für Trader in asiatischen Zeitzonen.',
         'London Session 🇬🇧': 'Die London-Session (08:00-17:00 UTC) hat die höchste Liquidität weltweit. EUR und GBP-Paare sind besonders aktiv. Die besten Breakout-Setups entstehen in der ersten Stunde.',
         'NY Session ': 'US-Session (13:00-22:00 UTC) mit Fokus auf USD-Paare. Die zweite große Liquiditätsphase des Tages. EURUSD, GBPUSD und USDJPY sind besonders aktiv.',
-        'London/NY Overlap ': 'Die Überlappung von London und New York (13:00-17:00 UTC) ist die volatilste Phase überhaupt. Maximale Liquidität und die größten Moves des Tages. Die beste Zeit für Forex-Trading.',
+        'London/NY Overlap ': 'Die Überlappung von London und New York ist die volatilste Phase überhaupt. Maximale Liquidität und die größten Moves des Tages. Die beste Zeit für Forex-Trading.',
         'Safe Haven Flow ': 'Erkennt Risk-Off Bewegungen: Investoren fliehen in sichere Währungen wie CHF und JPY. Wenn USDCHF und USDJPY fallen, deutet das auf Angst im Markt hin. Ein wichtiges Stimmungsbarometer.',
         'Risk-On Rally ': 'Das Gegenteil: Risikofreudige Währungen wie AUD und NZD steigen. Das zeigt Optimismus im Markt und Appetite für Risiko. Oft korreliert mit steigenden Aktienmärkten.',
         'Exotic Movers ': 'Große Bewegungen in Emerging-Market-Währungen. Exotische Paare haben höhere Spreads aber auch größere Schwankungen. Für erfahrene Forex-Trader.',
@@ -4890,7 +4895,7 @@ function StrategieGuideTab() {
         // === INTERNATIONAL ===
         ' Gewinner': 'Zeigt alle Aktien der Börse, die heute im Plus sind. Einfacher Überblick über die stärksten Werte des Tages.',
         ' Verlierer': 'Zeigt alle Aktien im Minus. Nützlich um Schwäche zu identifizieren oder Dip-Buy-Kandidaten zu finden.',
-        ' Momentum': 'Die stärksten positiven Bewegungen des Tages. Für europäische Blue-Chips ist >1% bereits signifikant.',
+        ' Momentum': 'Die stärksten positiven Bewegungen des Tages. Für europäische Blue-Chips sind schon moderate Moves signifikant.',
         ' Breakout': 'Starker Ausbruch nach oben — der Kurs schließt nahe dem Tageshoch. Zeigt klare bullische Stärke.',
         ' Breakdown': 'Starker Abverkauf — der Kurs schließt nahe dem Tagestief. Zeigt Verkaufsdruck und mögliche Short-Setups.',
         ' Dip Buy': 'Moderate Schwäche bei soliden Aktien. Ein Rücksetzer bei niedrigem Panik-Level kann eine Kaufgelegenheit sein.',
@@ -4898,7 +4903,7 @@ function StrategieGuideTab() {
         ' Reversal': 'Trendumkehr: Gestern stark gefallen, heute Bounce. Zeigt, dass Käufer einsteigen und der Abverkauf möglicherweise vorbei ist.',
         ' Bull Flag': 'Konsolidierung nach starkem Vortag — die Aktie pausiert in einer engen Range. Oft ein Zeichen, dass der Aufwärtstrend weitergeht.',
         ' Bear Flag': 'Konsolidierung nach Abverkauf — enge Range nach rotem Vortag. Zeigt, dass Verkäufer noch nicht fertig sind.',
-        ' Big Movers': 'Die größten absoluten Bewegungen des Tages. Für europäische Märkte ist >2% bereits signifikant.',
+        ' Big Movers': 'Die größten absoluten Bewegungen des Tages. Zeigt die Top-Movers mit signifikanten Kursänderungen.',
         ' Whale Watch': 'Extremes Volumen (zeitnormalisiert) — Big Player sind aktiv. Besonders relevant bei europäischen Aktien, die normalerweise weniger Volumen haben.',
     };
 

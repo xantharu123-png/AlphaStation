@@ -5888,7 +5888,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         # ══════════════════════════════════════════════════════════
 
         if strategy == "sma_crossover":
-            for i in range(50, len(closes)):
+            for i in range(51, len(closes)):
                 sma20 = sum(closes[i-20:i]) / 20
                 sma50 = sum(closes[i-50:i]) / 50
                 prev_sma20 = sum(closes[i-21:i-1]) / 20
@@ -5959,7 +5959,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                             continue
                         bar_idx = 25 + m_idx + 1
                         if bar_idx >= len(dates):
-                            break
+                            continue
                         if position is None:
                             if macd_line[m_idx] > signal_line[i] and macd_line[m_idx - 1] <= signal_line[i - 1]:
                                 position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
@@ -5980,7 +5980,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     if closes[i] <= lower:
                         position = {"entry_date": dates[i], "entry_price": closes[i]}
                 else:
-                    if closes[i] >= upper or closes[i] >= sma:
+                    if closes[i] >= upper:
                         trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
                         position = None
 
@@ -6011,8 +6011,8 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             entry_type = rule.get("entry", "next_open")
             min_price = rule.get("min_price", 1.0)
 
-            # Pre-calc RVOL (20d avg volume)
-            avg_vols = [0] * len(bars)
+            # Pre-calc RVOL (20d avg volume) — init with 1.0 to avoid div-by-zero
+            avg_vols = [1.0] * len(bars)
             for i in range(20, len(bars)):
                 avg_vols[i] = sum(volumes[i-20:i]) / 20 if sum(volumes[i-20:i]) > 0 else 1
 
