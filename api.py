@@ -2524,6 +2524,12 @@ def get_chart_data(
                             elif ohlcv:
                                 cp["time"] = ohlcv[-1]["time"]
                                 fallback_count += 1
+                            # draw_points: Index → Time konvertieren
+                            if cp.get("draw_points"):
+                                for dp in cp["draw_points"]:
+                                    di = dp.get("index")
+                                    if di is not None and 0 <= di < len(ohlcv):
+                                        dp["time"] = ohlcv[di]["time"]
                         if fallback_count > 0:
                             print(f"[WARN] Chart patterns: {mapped_count} mapped, {fallback_count} fallback (no detect_index)")
                         patterns_result["chart_patterns"] = chart_pats[:8]

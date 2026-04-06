@@ -2095,12 +2095,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
                 const _viewDir = (d.confluence?.direction || '').toUpperCase();
 
-                // Chart pattern markers (gefiltert nach Richtung) — auf korrekter Kerze
+                // Chart pattern markers + Linien-Zeichnung
                 if (chartData.patterns.chart_patterns) {
                     chartData.patterns.chart_patterns
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
                         .forEach(p => {
-                        // Nutze p.time vom Backend (korrekte Kerze), fallback auf letzte
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
                         if (markerTime) {
                             markers.push({
@@ -2110,6 +2109,37 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 shape: 'circle',
                                 text: (p.pattern || '').substring(0, 12),
                             });
+                        }
+                        // draw_points: Pattern-Linien einzeichnen
+                        if (p.draw_points && p.draw_points.length >= 2) {
+                            const validPts = p.draw_points.filter(dp => dp.time && dp.price);
+                            if (validPts.length >= 2) {
+                                const patColor = p.type === 'bullish' ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)';
+                                // Pattern-Verbindungslinie
+                                const patLine = chart.current.addLineSeries({
+                                    color: patColor, lineWidth: 2, lineStyle: LineStyle.Dashed,
+                                    lastValueVisible: false, priceLineVisible: false,
+                                    crosshairMarkerVisible: false,
+                                });
+                                const sorted = [...validPts].sort((a, b) => a.time - b.time);
+                                patLine.setData(sorted.map(dp => ({ time: dp.time, value: dp.price })));
+                                overlaySeriesRef.current.push(patLine);
+                                // Neckline/Target als horizontale Linie
+                                if (p.neckline) {
+                                    candleSeries.current.createPriceLine({
+                                        price: p.neckline, color: '#f59e0b', lineWidth: 1,
+                                        lineStyle: LineStyle.Dashed, axisLabelVisible: true,
+                                        title: 'Neckline',
+                                    });
+                                }
+                                if (p.target) {
+                                    candleSeries.current.createPriceLine({
+                                        price: p.target, color: patColor, lineWidth: 1,
+                                        lineStyle: LineStyle.Dotted, axisLabelVisible: true,
+                                        title: 'Target',
+                                    });
+                                }
+                            }
                         }
                     });
                 }
@@ -5894,6 +5924,35 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 shape: 'circle',
                                 text: (p.pattern || '').substring(0, 12),
                             });
+                        }
+                        // draw_points: Pattern-Linien einzeichnen
+                        if (p.draw_points && p.draw_points.length >= 2) {
+                            const validPts = p.draw_points.filter(dp => dp.time && dp.price);
+                            if (validPts.length >= 2) {
+                                const patColor = p.type === 'bullish' ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)';
+                                const patLine = chartRef.current.addLineSeries({
+                                    color: patColor, lineWidth: 2, lineStyle: LineStyle.Dashed,
+                                    lastValueVisible: false, priceLineVisible: false,
+                                    crosshairMarkerVisible: false,
+                                });
+                                const sorted = [...validPts].sort((a, b) => a.time - b.time);
+                                patLine.setData(sorted.map(dp => ({ time: dp.time, value: dp.price })));
+                                overlaySeriesRef.current.push(patLine);
+                                if (p.neckline) {
+                                    candleSeriesRef.current.createPriceLine({
+                                        price: p.neckline, color: '#f59e0b', lineWidth: 1,
+                                        lineStyle: LineStyle.Dashed, axisLabelVisible: true,
+                                        title: 'Neckline',
+                                    });
+                                }
+                                if (p.target) {
+                                    candleSeriesRef.current.createPriceLine({
+                                        price: p.target, color: patColor, lineWidth: 1,
+                                        lineStyle: LineStyle.Dotted, axisLabelVisible: true,
+                                        title: 'Target',
+                                    });
+                                }
+                            }
                         }
                     });
                 }

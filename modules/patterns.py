@@ -4003,6 +4003,59 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
 
 
 # ── detect_chart_patterns (originally line 10979) ──
+def find_harmonic_for_chart(ohlcv_data):
+    """
+    Findet Harmonic Patterns direkt aus Chart-OHLCV-Daten (jeder Timeframe).
+    Returns: Liste von Patterns mit XABCD-Koordinaten für Chart-Rendering
+    """
+    if not ohlcv_data or len(ohlcv_data) < 20:
+        return []
+    try:
+        prices = []
+        for d in ohlcv_data:
+            prices.append({
+                "date": str(d.get("time", "")),
+                "high": d["high"],
+                "low": d["low"],
+                "close": d["close"],
+                "open": d["open"],
+                "volume": d.get("volume", 0)
+            })
+        pivots = find_pivots(prices, window=3)
+        if len(pivots) < 5:
+            return []
+        patterns = identify_harmonic_pattern(pivots, prices)
+        if not patterns:
+            return []
+        chart_patterns = []
+        for pat in patterns[:3]:
+            points = []
+            pivot_indices = pat.get("pivot_indices", [])
+            point_labels = ["X", "A", "B", "C", "D"]
+            for idx, label in zip(pivot_indices, point_labels):
+                if idx < len(ohlcv_data):
+                    points.append({
+                        "time": ohlcv_data[idx]["time"],
+                        "price": pat["points"][label],
+                        "label": label
+                    })
+            if len(points) == 5:
+                chart_patterns.append({
+                    "pattern": pat["pattern"],
+                    "emoji": pat["emoji"],
+                    "direction": pat["direction"],
+                    "score": pat["score"],
+                    "matches": pat["matches"],
+                    "points": points,
+                    "ratios": pat["ratios"],
+                    "trade": pat.get("trade", {}),
+                    "success_rate": pat.get("success_rate", 0)
+                })
+        return chart_patterns
+    except Exception as e:
+        return []
+
+
 def detect_chart_patterns(ohlcv_data, lookback=50):
     """
     Erkennt Chart-Patterns automatisch.
@@ -4116,6 +4169,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     
                     # Preis unter Neckline = bestätigt
                     if current_price < neckline:
+                        neckline_idx = idx1 + lows[idx1:idx2+1].index(min(lows[idx1:idx2+1]))
                         patterns.append({
                             "pattern": "Double Top",
                             "emoji": "",
@@ -4125,10 +4179,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "neckline": round(neckline, 2),
                             "target": round(neckline - depth, 2),
                             "confidence": "High" if vol_confirmation else "Medium",
-                            "description": f"Double Top @ ${top_avg:.2f} - Neckline ${neckline:.2f} broken. Target: ${neckline - depth:.2f}"
+                            "description": f"Double Top @ ${top_avg:.2f} - Neckline ${neckline:.2f} broken. Target: ${neckline - depth:.2f}",
+                            "draw_points": [{"index": idx1, "price": h1}, {"index": neckline_idx, "price": neckline}, {"index": idx2, "price": h2}]
                         })
                         break  # Nur das beste Pattern nehmen
                     elif current_price < top_avg * 0.97 and current_price > neckline:
+                        neckline_idx = idx1 + lows[idx1:idx2+1].index(min(lows[idx1:idx2+1]))
                         patterns.append({
                             "pattern": "Double Top (forming)",
                             "emoji": "",
@@ -4138,7 +4194,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "neckline": round(neckline, 2),
                             "target": round(neckline - depth, 2),
                             "confidence": "Low",
-                            "description": f"Potential Double Top @ ${top_avg:.2f}. Watch neckline ${neckline:.2f}"
+                            "description": f"Potential Double Top @ ${top_avg:.2f}. Watch neckline ${neckline:.2f}",
+                            "draw_points": [{"index": idx1, "price": h1}, {"index": neckline_idx, "price": neckline}, {"index": idx2, "price": h2}]
                         })
                         break
                 if patterns and patterns[-1]["pattern"].startswith("Double Top"):
@@ -4204,6 +4261,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     
                     # Preis über Neckline = bestätigt
                     if current_price > neckline:
+                        neckline_idx = idx1 + highs[idx1:idx2+1].index(max(highs[idx1:idx2+1]))
                         patterns.append({
                             "pattern": "Double Bottom",
                             "emoji": "",
@@ -4213,10 +4271,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "neckline": round(neckline, 2),
                             "target": round(neckline + depth, 2),
                             "confidence": "High" if vol_confirmation else "Medium",
-                            "description": f"Double Bottom @ ${bottom_avg:.2f} - Neckline ${neckline:.2f} broken. Target: ${neckline + depth:.2f}"
+                            "description": f"Double Bottom @ ${bottom_avg:.2f} - Neckline ${neckline:.2f} broken. Target: ${neckline + depth:.2f}",
+                            "draw_points": [{"index": idx1, "price": l1}, {"index": neckline_idx, "price": neckline}, {"index": idx2, "price": l2}]
                         })
                         break
                     elif current_price > bottom_avg + atr and current_price < neckline:
+                        neckline_idx = idx1 + highs[idx1:idx2+1].index(max(highs[idx1:idx2+1]))
                         patterns.append({
                             "pattern": "Double Bottom (forming)",
                             "emoji": "",
@@ -4226,7 +4286,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "neckline": round(neckline, 2),
                             "target": round(neckline + depth, 2),
                             "confidence": "Low",
-                            "description": f"Potential Double Bottom @ ${bottom_avg:.2f}. Watch neckline ${neckline:.2f}"
+                            "description": f"Potential Double Bottom @ ${bottom_avg:.2f}. Watch neckline ${neckline:.2f}",
+                            "draw_points": [{"index": idx1, "price": l1}, {"index": neckline_idx, "price": neckline}, {"index": idx2, "price": l2}]
                         })
                         break
                 if patterns and any(p["pattern"].startswith("Double Bottom") for p in patterns):
@@ -4272,7 +4333,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "neckline": round(neckline, 2),
                                 "target": round(neckline - (h2 - neckline), 2),
                                 "confidence": "High",
-                                "description": f"H&S Complete! Neckline ${neckline:.2f} broken. Target: ${neckline - (h2 - neckline):.2f}"
+                                "description": f"H&S Complete! Neckline ${neckline:.2f} broken. Target: ${neckline - (h2 - neckline):.2f}",
+                                "draw_points": [{"index": idx1, "price": h1}, {"index": idx2, "price": h2}, {"index": idx3, "price": h3}, {"index": idx1 + lows[idx1:idx3+1].index(min(lows[idx1:idx3+1])), "price": neckline}]
                             })
                         elif current_price < h3 * 0.97:
                             patterns.append({
@@ -4285,7 +4347,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "neckline": round(neckline, 2),
                                 "target": round(neckline - (h2 - neckline), 2),
                                 "confidence": "Medium",
-                                "description": f"H&S forming. Watch neckline @ ${neckline:.2f}"
+                                "description": f"H&S forming. Watch neckline @ ${neckline:.2f}",
+                                "draw_points": [{"index": idx1, "price": h1}, {"index": idx2, "price": h2}, {"index": idx3, "price": h3}, {"index": idx1 + lows[idx1:idx3+1].index(min(lows[idx1:idx3+1])), "price": neckline}]
                             })
                         
                         if any(p["pattern"].startswith("Head") for p in patterns):
@@ -4326,7 +4389,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "neckline": round(neckline, 2),
                                 "target": round(neckline + (neckline - l2), 2),
                                 "confidence": "High",
-                                "description": f"Inv. H&S Complete! Neckline ${neckline:.2f} broken. Target: ${neckline + (neckline - l2):.2f}"
+                                "description": f"Inv. H&S Complete! Neckline ${neckline:.2f} broken. Target: ${neckline + (neckline - l2):.2f}",
+                                "draw_points": [{"index": idx1, "price": l1}, {"index": idx2, "price": l2}, {"index": idx3, "price": l3}, {"index": idx1 + highs[idx1:idx3+1].index(max(highs[idx1:idx3+1])), "price": neckline}]
                             })
                         elif current_price > l3 + atr:
                             patterns.append({
@@ -4339,7 +4403,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "neckline": round(neckline, 2),
                                 "target": round(neckline + (neckline - l2), 2),
                                 "confidence": "Medium",
-                                "description": f"Inv. H&S forming. Watch neckline @ ${neckline:.2f}"
+                                "description": f"Inv. H&S forming. Watch neckline @ ${neckline:.2f}",
+                                "draw_points": [{"index": idx1, "price": l1}, {"index": idx2, "price": l2}, {"index": idx3, "price": l3}, {"index": idx1 + highs[idx1:idx3+1].index(max(highs[idx1:idx3+1])), "price": neckline}]
                             })
                         
                         if any(p["pattern"].startswith("Inverse") for p in patterns):
@@ -4363,6 +4428,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 # ASCENDING TRIANGLE: Flat resistance + rising support
                 if high_range < 0.02 and low_trend > 0.02:
                     resistance = sum(recent_highs) / len(recent_highs)
+                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
+                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
                     patterns.append({
                         "pattern": "Ascending Triangle",
                         "emoji": "⬆",
@@ -4370,12 +4437,15 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "resistance": round(resistance, 2),
                         "target": round(resistance * 1.05, 2),
                         "confidence": "Medium",
-                        "description": f"Ascending Triangle - Resistance @ ${resistance:.2f}. Breakout target +5%"
+                        "description": f"Ascending Triangle - Resistance @ ${resistance:.2f}. Breakout target +5%",
+                        "draw_points": [{"index": recent_high_indices[0], "price": recent_highs[0]}, {"index": recent_high_indices[-1], "price": recent_highs[-1]}, {"index": recent_low_indices[0], "price": recent_lows[0]}, {"index": recent_low_indices[-1], "price": recent_lows[-1]}]
                     })
                 
                 # DESCENDING TRIANGLE: Falling resistance + flat support
                 elif low_range < 0.02 and high_trend < -0.02:
                     support = sum(recent_lows) / len(recent_lows)
+                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
+                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
                     patterns.append({
                         "pattern": "Descending Triangle",
                         "emoji": "⬇",
@@ -4383,15 +4453,18 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "support": round(support, 2),
                         "target": round(support * 0.95, 2),
                         "confidence": "Medium",
-                        "description": f"Descending Triangle - Support @ ${support:.2f}. Breakdown target -5%"
+                        "description": f"Descending Triangle - Support @ ${support:.2f}. Breakdown target -5%",
+                        "draw_points": [{"index": recent_high_indices[0], "price": recent_highs[0]}, {"index": recent_high_indices[-1], "price": recent_highs[-1]}, {"index": recent_low_indices[0], "price": recent_lows[0]}, {"index": recent_low_indices[-1], "price": recent_lows[-1]}]
                     })
                 
                 # SYMMETRICAL TRIANGLE: Converging trendlines
                 elif high_trend < -0.01 and low_trend > 0.01:
                     apex_price = (recent_highs[-1] + recent_lows[-1]) / 2
                     range_pct = (recent_highs[-1] - recent_lows[-1]) / apex_price * 100
-                    
+
                     if range_pct < 5:
+                        recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
+                        recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
                         patterns.append({
                             "pattern": "Symmetrical Triangle",
                             "emoji": "",
@@ -4399,7 +4472,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "apex": round(apex_price, 2),
                             "range": f"{range_pct:.1f}%",
                             "confidence": "Medium",
-                            "description": f"Symmetrical Triangle - Apex @ ${apex_price:.2f}. Breakout imminent!"
+                            "description": f"Symmetrical Triangle - Apex @ ${apex_price:.2f}. Breakout imminent!",
+                            "draw_points": [{"index": recent_high_indices[0], "price": recent_highs[0]}, {"index": recent_high_indices[-1], "price": recent_highs[-1]}, {"index": recent_low_indices[0], "price": recent_lows[0]}, {"index": recent_low_indices[-1], "price": recent_lows[-1]}]
                         })
         
         # === FLAGS & PENNANTS ===
@@ -4440,7 +4514,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "pole_move": f"{pole_move*100:.1f}%",
                                 "target": round(closes[-1] * (1 + pole_move), 2),
                                 "confidence": "Medium",
-                                "description": f"Bull Flag after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move):.2f}"
+                                "description": f"Bull Flag after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move):.2f}",
+                                "draw_points": [{"index": 0, "price": closes[0]}, {"index": pole_end, "price": closes[pole_end]}, {"index": pole_end, "price": flag_highs[0]}, {"index": len(closes)-1, "price": flag_highs[-1]}, {"index": pole_end, "price": flag_lows[0]}, {"index": len(closes)-1, "price": flag_lows[-1]}]
                             })
                         elif flag_high_trend < 0 and flag_low_trend > 0:
                             patterns.append({
@@ -4450,7 +4525,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "pole_move": f"{pole_move*100:.1f}%",
                                 "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
                                 "confidence": "Medium",
-                                "description": f"Bullish Pennant after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
+                                "description": f"Bullish Pennant after {pole_move*100:.0f}% rally. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}",
+                                "draw_points": [{"index": 0, "price": closes[0]}, {"index": pole_end, "price": closes[pole_end]}, {"index": pole_end, "price": flag_highs[0]}, {"index": len(closes)-1, "price": flag_highs[-1]}, {"index": pole_end, "price": flag_lows[0]}, {"index": len(closes)-1, "price": flag_lows[-1]}]
                             })
                     
                     # BEAR FLAG: Starker Abfall + leichte Erholung
@@ -4463,7 +4539,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "pole_move": f"{pole_move*100:.1f}%",
                                 "target": round(closes[-1] * (1 + pole_move), 2),
                                 "confidence": "Medium",
-                                "description": f"Bear Flag after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move):.2f}"
+                                "description": f"Bear Flag after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move):.2f}",
+                                "draw_points": [{"index": 0, "price": closes[0]}, {"index": pole_end, "price": closes[pole_end]}, {"index": pole_end, "price": flag_highs[0]}, {"index": len(closes)-1, "price": flag_highs[-1]}, {"index": pole_end, "price": flag_lows[0]}, {"index": len(closes)-1, "price": flag_lows[-1]}]
                             })
                         elif flag_high_trend < 0 and flag_low_trend > 0:
                             patterns.append({
@@ -4473,7 +4550,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 "pole_move": f"{pole_move*100:.1f}%",
                                 "target": round(closes[-1] * (1 + pole_move * 0.8), 2),
                                 "confidence": "Medium",
-                                "description": f"Bearish Pennant after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}"
+                                "description": f"Bearish Pennant after {abs(pole_move)*100:.0f}% drop. Target: ${closes[-1] * (1 + pole_move * 0.8):.2f}",
+                                "draw_points": [{"index": 0, "price": closes[0]}, {"index": pole_end, "price": closes[pole_end]}, {"index": pole_end, "price": flag_highs[0]}, {"index": len(closes)-1, "price": flag_highs[-1]}, {"index": pole_end, "price": flag_lows[0]}, {"index": len(closes)-1, "price": flag_lows[-1]}]
                             })
         
         # === CUP & HANDLE ===
@@ -4501,6 +4579,9 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             cup_lip = max(left_avg, right_avg)
                             
                             if current_price > cup_lip * 0.95:
+                                cup_left_idx = int(len(cup_data) // 6)
+                                cup_bottom_idx = int(len(cup_data) // 2)
+                                cup_right_idx = int(2 * len(cup_data) // 3)
                                 patterns.append({
                                     "pattern": "Cup & Handle",
                                     "emoji": "⬆",
@@ -4509,7 +4590,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                     "breakout_level": round(cup_lip, 2),
                                     "target": round(cup_lip * (1 + cup_depth), 2),
                                     "confidence": "High" if current_price > cup_lip else "Medium",
-                                    "description": f"Cup & Handle - Breakout @ ${cup_lip:.2f}. Target: ${cup_lip * (1 + cup_depth):.2f}"
+                                    "description": f"Cup & Handle - Breakout @ ${cup_lip:.2f}. Target: ${cup_lip * (1 + cup_depth):.2f}",
+                                    "draw_points": [{"index": 0, "price": left_avg}, {"index": cup_left_idx, "price": left_avg}, {"index": cup_bottom_idx, "price": bottom_avg}, {"index": cup_right_idx, "price": right_avg}, {"index": cup_end, "price": cup_lip}]
                                 })
         
         # === WEDGES ===
@@ -4525,24 +4607,30 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 
                 # RISING WEDGE (bearish)
                 if high_slope > 0 and low_slope > 0 and are_converging and low_slope > high_slope:
+                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
+                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
                     patterns.append({
                         "pattern": "Rising Wedge",
                         "emoji": "⬇",
                         "type": "bearish",
                         "target": round(recent_lows[0], 2),
                         "confidence": "Medium",
-                        "description": f"Rising Wedge (bearish) - Target support @ ${recent_lows[0]:.2f}"
+                        "description": f"Rising Wedge (bearish) - Target support @ ${recent_lows[0]:.2f}",
+                        "draw_points": [{"index": recent_high_indices[0], "price": recent_highs[0]}, {"index": recent_high_indices[-1], "price": recent_highs[-1]}, {"index": recent_low_indices[0], "price": recent_lows[0]}, {"index": recent_low_indices[-1], "price": recent_lows[-1]}]
                     })
                 
                 # FALLING WEDGE (bullish)
                 elif high_slope < 0 and low_slope < 0 and are_converging and high_slope > low_slope:
+                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
+                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
                     patterns.append({
                         "pattern": "Falling Wedge",
                         "emoji": "⬆",
                         "type": "bullish",
                         "target": round(recent_highs[0], 2),
                         "confidence": "Medium",
-                        "description": f"Falling Wedge (bullish) - Target resistance @ ${recent_highs[0]:.2f}"
+                        "description": f"Falling Wedge (bullish) - Target resistance @ ${recent_highs[0]:.2f}",
+                        "draw_points": [{"index": recent_high_indices[0], "price": recent_highs[0]}, {"index": recent_high_indices[-1], "price": recent_highs[-1]}, {"index": recent_low_indices[0], "price": recent_lows[0]}, {"index": recent_low_indices[-1], "price": recent_lows[-1]}]
                     })
         
         # === BASE BREAKOUT ===
@@ -4579,7 +4667,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "breakout_pct": f"+{breakout_pct*100:.1f}%",
                             "target": round(base_high + (base_high - base_low), 2),
                             "confidence": "High" if breakout_pct > 0.10 else "Medium",
-                            "description": f"Base Breakout! Range ${base_low:.2f}-${base_high:.2f}, broke out +{breakout_pct*100:.1f}%. Target: ${base_high + (base_high - base_low):.2f}"
+                            "description": f"Base Breakout! Range ${base_low:.2f}-${base_high:.2f}, broke out +{breakout_pct*100:.1f}%. Target: ${base_high + (base_high - base_low):.2f}",
+                            "draw_points": [{"index": 0, "price": base_low}, {"index": base_end, "price": base_high}, {"index": base_end, "price": base_low}, {"index": len(closes)-1, "price": current_price}]
                         })
         
         # === WYCKOFF ACCUMULATION / DISTRIBUTION ===
@@ -4625,7 +4714,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "score": w_score,
                             "target": target,
                             "confidence": confidence,
-                            "description": f"Wyckoff {w_type} — {w_phase}. Range ${w_rl:.2f}-${w_rh:.2f}. Events: {', '.join(event_strs)}"
+                            "description": f"Wyckoff {w_type} — {w_phase}. Range ${w_rl:.2f}-${w_rh:.2f}. Events: {', '.join(event_strs)}",
+                            "draw_points": [{"index": 0, "price": w_rl}, {"index": len(data)-1, "price": w_rh}, {"index": len(data)-1, "price": (w_rl + w_rh) / 2}]
                         })
             
             except Exception:
@@ -4674,6 +4764,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "bars_ago": ww["bars_ago"],
                         "points": ww["points"],
                         "description": desc,
+                        "draw_points": [{"index": pts['p1']['index'], "price": pts['p1']['price']}, {"index": pts['p2']['index'], "price": pts['p2']['price']}, {"index": pts['p3']['index'], "price": pts['p3']['price']}, {"index": pts['p4']['index'], "price": pts['p4']['price']}, {"index": pts['p5']['index'], "price": pts['p5']['price']}]
                     })
             except Exception:
                 pass
@@ -4734,8 +4825,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 
                 # HAMMER (bullish) — Langer unterer Schatten, kleiner Body oben
                 # Bedingung: nach Downtrend, unterer Schatten ≥ 2x Body, oberer Schatten klein
-                if (is_downtrend and 
-                    lower_shadow0 >= body0 * 2 and 
+                if (is_downtrend and
+                    lower_shadow0 >= body0 * 2 and
                     upper_shadow0 <= body0 * 0.5 and
                     body0 > range0 * 0.05):  # Nicht komplett Doji
                     patterns.append({
@@ -4743,7 +4834,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "",
                         "type": "bullish",
                         "confidence": "High" if is_green0 else "Medium",
-                        "description": f"Hammer @ ${cl0:.2f} nach Downtrend — Käufer wehren sich am Tief. {'Grüner Body = stärker' if is_green0 else 'Roter Body = Bestätigung abwarten'}"
+                        "description": f"Hammer @ ${cl0:.2f} nach Downtrend — Käufer wehren sich am Tief. {'Grüner Body = stärker' if is_green0 else 'Roter Body = Bestätigung abwarten'}",
+                        "draw_points": [{"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": cl0}]
                     })
                 
                 # INVERTED HAMMER (bullish) — Langer oberer Schatten, kleiner Body unten, nach Downtrend
@@ -4756,7 +4848,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬆",
                         "type": "bullish",
                         "confidence": "Medium",
-                        "description": f"Inverted Hammer @ ${cl0:.2f} — Kaufdruck kommt auf, Bestätigung durch nächste grüne Kerze nötig"
+                        "description": f"Inverted Hammer @ ${cl0:.2f} — Kaufdruck kommt auf, Bestätigung durch nächste grüne Kerze nötig",
+                        "draw_points": [{"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": cl0}]
                     })
                 
                 # SHOOTING STAR (bearish) — Wie Inverted Hammer aber nach Uptrend
@@ -4769,7 +4862,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⭐⬇",
                         "type": "bearish",
                         "confidence": "High" if not is_green0 else "Medium",
-                        "description": f"Shooting Star @ ${cl0:.2f} nach Uptrend — Verkäufer drücken vom Hoch. {'Roter Body = stärker' if not is_green0 else 'Grüner Body = schwächer'}"
+                        "description": f"Shooting Star @ ${cl0:.2f} nach Uptrend — Verkäufer drücken vom Hoch. {'Roter Body = stärker' if not is_green0 else 'Grüner Body = schwächer'}",
+                        "draw_points": [{"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": cl0}]
                     })
                 
                 # HANGING MAN (bearish) — Wie Hammer aber nach Uptrend
@@ -4782,7 +4876,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "",
                         "type": "bearish",
                         "confidence": "Medium",
-                        "description": f"Hanging Man @ ${cl0:.2f} nach Uptrend — Verkaufsdruck nimmt zu trotz Erholung"
+                        "description": f"Hanging Man @ ${cl0:.2f} nach Uptrend — Verkaufsdruck nimmt zu trotz Erholung",
+                        "draw_points": [{"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": cl0}]
                     })
                 
                 # DOJI — Sehr kleiner Body, zeigt Unentschlossenheit
@@ -4810,7 +4905,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": doji_emoji,
                         "type": doji_bias,
                         "confidence": "Medium" if doji_bias != "neutral" else "Low",
-                        "description": f"{doji_desc} @ ${cl0:.2f}"
+                        "description": f"{doji_desc} @ ${cl0:.2f}",
+                        "draw_points": [{"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": (o0 + cl0) / 2}]
                     })
                 
                 # MARUBOZU — Große Kerze fast ohne Schatten (starkes Momentum)
@@ -4822,7 +4918,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": maru_emoji,
                         "type": "bullish" if is_green0 else "bearish",
                         "confidence": "High",
-                        "description": f"{maru_type} @ ${cl0:.2f} — Starkes Momentum, {'Käufer' if is_green0 else 'Verkäufer'} dominieren komplett"
+                        "description": f"{maru_type} @ ${cl0:.2f} — Starkes Momentum, {'Käufer' if is_green0 else 'Verkäufer'} dominieren komplett",
+                        "draw_points": [{"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": cl0}]
                     })
                 
                 # ─── TWO CANDLE PATTERNS ───
@@ -4837,7 +4934,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬆",
                         "type": "bullish",
                         "confidence": conf,
-                        "description": f"Bullish Engulfing @ ${cl0:.2f} — Grüne Kerze verschluckt rote. {'Nach Downtrend = starkes Reversal-Signal' if is_downtrend else 'Stärker nach Pullback'}"
+                        "description": f"Bullish Engulfing @ ${cl0:.2f} — Grüne Kerze verschluckt rote. {'Nach Downtrend = starkes Reversal-Signal' if is_downtrend else 'Stärker nach Pullback'}",
+                        "draw_points": [{"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # BEARISH ENGULFING — Rote Kerze verschluckt vorherige grüne komplett
@@ -4850,7 +4948,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬇",
                         "type": "bearish",
                         "confidence": conf,
-                        "description": f"Bearish Engulfing @ ${cl0:.2f} — Rote Kerze verschluckt grüne. {'Nach Uptrend = starkes Reversal-Signal' if is_uptrend else 'Stärker nach Bounce'}"
+                        "description": f"Bearish Engulfing @ ${cl0:.2f} — Rote Kerze verschluckt grüne. {'Nach Uptrend = starkes Reversal-Signal' if is_uptrend else 'Stärker nach Bounce'}",
+                        "draw_points": [{"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # PIERCING LINE (bullish) — Rote Kerze, dann grüne die über 50% der roten schließt
@@ -4862,7 +4961,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬆",
                         "type": "bullish",
                         "confidence": "Medium",
-                        "description": f"Piercing Line @ ${cl0:.2f} — Käufer drehen nach Gap Down, Recovery über 50%"
+                        "description": f"Piercing Line @ ${cl0:.2f} — Käufer drehen nach Gap Down, Recovery über 50%",
+                        "draw_points": [{"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # DARK CLOUD COVER (bearish) — Gegenteil von Piercing
@@ -4874,7 +4974,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬇",
                         "type": "bearish",
                         "confidence": "Medium",
-                        "description": f"Dark Cloud Cover @ ${cl0:.2f} — Verkäufer drehen nach Gap Up, Rückgang über 50%"
+                        "description": f"Dark Cloud Cover @ ${cl0:.2f} — Verkäufer drehen nach Gap Up, Rückgang über 50%",
+                        "draw_points": [{"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # TWEEZER BOTTOM (bullish) — Zwei Kerzen mit fast gleichem Tief
@@ -4886,7 +4987,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬆",
                         "type": "bullish",
                         "confidence": "Medium",
-                        "description": f"Tweezer Bottom @ ${l0:.2f} — Doppeltes Tief auf gleichem Level, Support bestätigt"
+                        "description": f"Tweezer Bottom @ ${l0:.2f} — Doppeltes Tief auf gleichem Level, Support bestätigt",
+                        "draw_points": [{"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # TWEEZER TOP (bearish) — Zwei Kerzen mit fast gleichem Hoch
@@ -4898,7 +5000,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬇",
                         "type": "bearish",
                         "confidence": "Medium",
-                        "description": f"Tweezer Top @ ${h0:.2f} — Doppeltes Hoch auf gleichem Level, Resistance bestätigt"
+                        "description": f"Tweezer Top @ ${h0:.2f} — Doppeltes Hoch auf gleichem Level, Resistance bestätigt",
+                        "draw_points": [{"index": len(data)-2, "price": h1}, {"index": len(data)-1, "price": h0}]
                     })
                 
                 # ─── THREE CANDLE PATTERNS ───
@@ -4914,7 +5017,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬆",
                         "type": "bullish",
                         "confidence": "High",
-                        "description": f"Morning Star @ ${cl0:.2f} — Klassisches 3-Kerzen Reversal nach Downtrend. Starkes Kaufsignal"
+                        "description": f"Morning Star @ ${cl0:.2f} — Klassisches 3-Kerzen Reversal nach Downtrend. Starkes Kaufsignal",
+                        "draw_points": [{"index": len(data)-3, "price": h2}, {"index": len(data)-3, "price": l2}, {"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # EVENING STAR (bearish) — Grüne Kerze, kleiner Body, rote Kerze
@@ -4928,7 +5032,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬇",
                         "type": "bearish",
                         "confidence": "High",
-                        "description": f"Evening Star @ ${cl0:.2f} — Klassisches 3-Kerzen Reversal nach Uptrend. Starkes Verkaufssignal"
+                        "description": f"Evening Star @ ${cl0:.2f} — Klassisches 3-Kerzen Reversal nach Uptrend. Starkes Verkaufssignal",
+                        "draw_points": [{"index": len(data)-3, "price": h2}, {"index": len(data)-3, "price": l2}, {"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
                 
                 # THREE WHITE SOLDIERS (bullish) — Drei aufeinanderfolgende grüne Kerzen
@@ -4941,7 +5046,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "",
                         "type": "bullish",
                         "confidence": "High" if is_downtrend else "Medium",
-                        "description": f"Three White Soldiers — Drei starke grüne Kerzen. {'Reversal nach Downtrend!' if is_downtrend else 'Trendfortsetzung'}"
+                        "description": f"Three White Soldiers — Drei starke grüne Kerzen. {'Reversal nach Downtrend!' if is_downtrend else 'Trendfortsetzung'}",
+                        "draw_points": [{"index": len(data)-3, "price": l2}, {"index": len(data)-3, "price": h2}, {"index": len(data)-2, "price": l1}, {"index": len(data)-2, "price": h1}, {"index": len(data)-1, "price": l0}, {"index": len(data)-1, "price": h0}]
                     })
                 
                 # THREE BLACK CROWS (bearish) — Drei aufeinanderfolgende rote Kerzen
@@ -4954,7 +5060,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "emoji": "⬛⬛⬛",
                         "type": "bearish",
                         "confidence": "High" if is_uptrend else "Medium",
-                        "description": f"Three Black Crows — Drei starke rote Kerzen. {'Reversal nach Uptrend!' if is_uptrend else 'Trendfortsetzung'}"
+                        "description": f"Three Black Crows — Drei starke rote Kerzen. {'Reversal nach Uptrend!' if is_uptrend else 'Trendfortsetzung'}",
+                        "draw_points": [{"index": len(data)-3, "price": h2}, {"index": len(data)-3, "price": l2}, {"index": len(data)-2, "price": h1}, {"index": len(data)-2, "price": l1}, {"index": len(data)-1, "price": h0}, {"index": len(data)-1, "price": l0}]
                     })
             
             except Exception:
@@ -4985,7 +5092,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "High" if zone["strength"] >= 3 else "Medium" if zone["strength"] >= 2 else "Low",
                         "description": f"Bullish {zone['type']} @ ${zone['zone_low']:.2f}-${zone['zone_high']:.2f} ({zone['gap_pct']:.1f}% gap). "
                                        f"Dist: {dist_pct:.1f}% unter Preis. Vol: {zone['vol_ratio']:.1f}x. {str_stars} "
-                                       f"{'CE 50% berührt' if zone['ce_filled'] else 'Unfilled'}"
+                                       f"{'CE 50% berührt' if zone['ce_filled'] else 'Unfilled'}",
+                        "draw_points": [{"index": 0, "price": zone["zone_low"]}, {"index": len(data)-1, "price": zone["zone_high"]}]
                     })
                 
                 for zone in vi_result["unfilled_bear"][:3]:
@@ -5005,7 +5113,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "High" if zone["strength"] >= 3 else "Medium" if zone["strength"] >= 2 else "Low",
                         "description": f"Bearish {zone['type']} @ ${zone['zone_low']:.2f}-${zone['zone_high']:.2f} ({zone['gap_pct']:.1f}% gap). "
                                        f"Dist: {dist_pct:.1f}% über Preis. Vol: {zone['vol_ratio']:.1f}x. {str_stars} "
-                                       f"{'CE 50% berührt' if zone['ce_filled'] else 'Unfilled'}"
+                                       f"{'CE 50% berührt' if zone['ce_filled'] else 'Unfilled'}",
+                        "draw_points": [{"index": 0, "price": zone["zone_low"]}, {"index": len(data)-1, "price": zone["zone_high"]}]
                     })
                 
                 # Stats als Meta-Info
@@ -5018,7 +5127,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "Info",
                         "description": f"Volume Imbalances: {stats['total']} total, {stats['unfilled']} unfilled, "
                                        f"Fill Rate: {stats['fill_rate']:.0f}%. "
-                                       f"Bull Support: {stats['bull_unfilled']}, Bear Resistance: {stats['bear_unfilled']}"
+                                       f"Bull Support: {stats['bull_unfilled']}, Bear Resistance: {stats['bear_unfilled']}",
+                        "draw_points": []
                     })
             
             except Exception:
@@ -5042,7 +5152,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "description": f"Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
                                        f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
                                        f"Dist: {ob['dist_pct']:.1f}% unter Preis. {stars} "
-                                       f"— Limit Buy bei Rückkehr in diese Zone."
+                                       f"— Limit Buy bei Rückkehr in diese Zone.",
+                        "draw_points": [{"index": 0, "price": ob['ob_low']}, {"index": len(data)-1, "price": ob['ob_high']}]
                     })
                 
                 for ob in ob_result["bearish_obs"][:3]:
@@ -5055,7 +5166,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "description": f"Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
                                        f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
                                        f"Dist: {ob['dist_pct']:.1f}% über Preis. {stars} "
-                                       f"— Limit Sell bei Rückkehr in diese Zone."
+                                       f"— Limit Sell bei Rückkehr in diese Zone.",
+                        "draw_points": [{"index": 0, "price": ob['ob_low']}, {"index": len(data)-1, "price": ob['ob_high']}]
                     })
             except Exception:
                 pass
@@ -5077,7 +5189,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "High" if lv["touches"] >= 3 else "Medium" if lv["touches"] >= 2 else "Low",
                         "description": f"BSL @ ${lv['level']:.2f} ({lv['touches']}x touches). "
                                        f"Dist: {lv['dist_pct']:.1f}% über Preis. {stars} "
-                                       f"Buy Stops der Shorts liegen hier — potentieller TP für Longs."
+                                       f"Buy Stops der Shorts liegen hier — potentieller TP für Longs.",
+                        "draw_points": [{"index": 0, "price": lv['level']}, {"index": len(data)-1, "price": lv['level']}]
                     })
                 
                 for lv in liq_result["sellside"][:3]:
@@ -5089,7 +5202,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         "confidence": "High" if lv["touches"] >= 3 else "Medium" if lv["touches"] >= 2 else "Low",
                         "description": f"SSL @ ${lv['level']:.2f} ({lv['touches']}x touches). "
                                        f"Dist: {lv['dist_pct']:.1f}% unter Preis. {stars} "
-                                       f"Sell Stops der Longs liegen hier — potentieller TP für Shorts."
+                                       f"Sell Stops der Longs liegen hier — potentieller TP für Shorts.",
+                        "draw_points": [{"index": 0, "price": lv['level']}, {"index": len(data)-1, "price": lv['level']}]
                     })
             except Exception:
                 pass
@@ -5112,7 +5226,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "type": "bullish" if s["direction"] == "LONG" else "bearish",
                             "confidence": "High" if s["score"] >= 60 else "Medium" if s["score"] >= 40 else "Low",
                             "description": f"{s['description']}\n"
-                                           f"Confluence: {conf_text}"
+                                           f"Confluence: {conf_text}",
+                            "draw_points": []
                         })
             except Exception:
                 pass
