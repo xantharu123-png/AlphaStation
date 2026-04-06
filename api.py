@@ -3625,11 +3625,16 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct):
     Phase 2: Breakout bestätigt, Preis +5-20%, Volume hoch
     Phase 3: Überhitzt, Preis >30% oder Vol/MCap extrem → DUMP-Gefahr
     """
-    c24 = abs(change_24h or 0)
-    c7d = abs(change_7d or 0)
+    c24 = change_24h or 0
+    c7d = change_7d or 0
     vm = vol_mcap_pct or 0
 
-    # Phase 3: Überhitzt
+    # Negative Changes (Crashes) = Phase 1 (niedrig bewertet, nicht "Überhitzt")
+    # Nur POSITIVE Pumps triggern Phase 2/3
+    if c24 < 0:
+        c24 = 0  # Crashes zählen nicht als Pump
+
+    # Phase 3: Überhitzt (nur bei starken POSITIVEN Moves)
     if c24 > 30 or (c24 > 20 and vm > 100) or c7d > 80 or vm > 150:
         return 3, "Überhitzt", "#ef4444"
     # Phase 2: Breakout
@@ -3652,7 +3657,7 @@ def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase):
         reasons.append(f"Vol/MCap extrem: {vm:.0f}%")
     if fr > 0.1:
         reasons.append(f"Funding Rate erhöht: {funding_rate*100:+.3f}%")
-    if (change_7d or 0) > 60:
+    if abs(change_7d or 0) > 60:
         reasons.append(f"7d Change extrem: {change_7d:+.1f}%")
 
     if phase == 3 or len(reasons) >= 2:
@@ -3678,7 +3683,7 @@ def fetch_early_movers(_prefetched_perps=None):
     """
     all_coins = _fetch_coingecko_markets(pages=4)
     if not all_coins:
-        return {"volume_spikes": [], "micro_caps": [], "whale_acc": [], "narratives": {}, "stats": {"error": "No data"}}
+        return {"coins": [], "stats": {"error": "No data"}}
 
     perp_data = _prefetched_perps if _prefetched_perps is not None else fetch_multi_exchange_perps()
 

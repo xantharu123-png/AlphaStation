@@ -1516,7 +1516,7 @@ function useSortable(data, defaultKey = null, defaultDesc = true) {
         } else {
             setSortKey(key);
             // V2.7: Numerische Spalten starten absteigend (beste zuerst), Text aufsteigend
-            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','phase','Price','Change24h','Change7d','VolMCapRatio','EarlyScore','DegenScore','WhaleScore'];
+            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','phase','Price','Change24h','Change7d','VolMCapRatio','EarlyScore','DegenScore','WhaleScore','risk_level','grade'];
             setSortDesc(numericKeys.includes(key));
         }
     };
