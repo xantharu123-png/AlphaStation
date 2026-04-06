@@ -2050,22 +2050,23 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 }
             }
 
-            // Fibonacci levels — V2.3: Extended Levels mit eigenen Farben
+            // Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
             if (overlays.fib && chartData.fib) {
+                const isShort = chartData.fib_direction === 'short';
                 const fibColors = {
                     '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
                     '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
-                    // Extended Long (nach oben)
-                    '127%': '#06b6d4', '161%': '#14b8a6', '200%': '#10b981', '261%': '#059669',
-                    // Extended Short (nach unten)
-                    '-27%': '#f43f5e', '-61%': '#e11d48', '-100%': '#be123c', '-161%': '#9f1239',
+                    // Extension-Targets
+                    '127%': isShort ? '#f43f5e' : '#06b6d4',
+                    '161%': isShort ? '#e11d48' : '#14b8a6',
+                    '200%': isShort ? '#be123c' : '#10b981',
                 };
-                const extendedKeys = ['127%', '161%', '200%', '261%', '-27%', '-61%', '-100%', '-161%'];
+                const extendedKeys = ['127%', '161%', '200%'];
                 Object.entries(chartData.fib).forEach(([level, price]) => {
                     const isExtended = extendedKeys.includes(level);
                     candleSeries.current.createPriceLine({
                         price, color: fibColors[level] || '#6b7280',
-                        lineWidth: isExtended ? 1 : 1,
+                        lineWidth: 1,
                         lineStyle: isExtended ? LineStyle.Dashed : LineStyle.Dotted,
                         axisLabelVisible: true, title: `Fib ${level}`,
                     });
@@ -5835,15 +5836,17 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 }
             }
 
-            // Fibonacci
+            // Fibonacci — V3.0: Richtungsabhängig
             if (overlays.fib && chartData.fib) {
+                const isShort = chartData.fib_direction === 'short';
                 const fibColors = {
                     '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
                     '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
-                    '127%': '#06b6d4', '161%': '#14b8a6', '200%': '#10b981', '261%': '#059669',
-                    '-27%': '#f43f5e', '-61%': '#e11d48', '-100%': '#be123c', '-161%': '#9f1239',
+                    '127%': isShort ? '#f43f5e' : '#06b6d4',
+                    '161%': isShort ? '#e11d48' : '#14b8a6',
+                    '200%': isShort ? '#be123c' : '#10b981',
                 };
-                const extendedKeys = ['127%', '161%', '200%', '261%', '-27%', '-61%', '-100%', '-161%'];
+                const extendedKeys = ['127%', '161%', '200%'];
                 Object.entries(chartData.fib).forEach(([level, price]) => {
                     const isExtended = extendedKeys.includes(level);
                     candleSeriesRef.current.createPriceLine({

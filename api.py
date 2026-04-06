@@ -2449,7 +2449,7 @@ def get_chart_data(
             except Exception as e:
                 print(f"VRVP error: {e}")
 
-        # Fibonacci levels — V2.3: Extended Levels für Long/Short
+        # Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
         if "fib" in overlay_list and len(ohlcv) >= 20:
             try:
                 h20 = max(highs[-20:])
@@ -2457,21 +2457,34 @@ def get_chart_data(
                 rng = h20 - l20
                 cur_price = closes[-1]
                 fib = {}
-                # Standard Retracement Levels (immer)
-                for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
-                    fib[f"{int(ratio*100)}%"] = round(l20 + rng * ratio, 2)
-                # V2.6: Extended Levels IMMER in BEIDE Richtungen anzeigen
-                # Long-Extended: über 100% hinaus (nach oben)
-                fib["127%"] = round(l20 + rng * 1.272, 2)
-                fib["161%"] = round(l20 + rng * 1.618, 2)
-                fib["200%"] = round(l20 + rng * 2.0, 2)
-                fib["261%"] = round(l20 + rng * 2.618, 2)
-                # Short-Extended: unter 0% hinaus (nach unten)
-                fib["-27%"] = round(l20 - rng * 0.272, 2)
-                fib["-61%"] = round(l20 - rng * 0.618, 2)
-                fib["-100%"] = round(l20 - rng * 1.0, 2)
-                fib["-161%"] = round(l20 - rng * 1.618, 2)
-                result["fib"] = fib
+
+                if rng > 0:
+                    # Bestimme Richtung: Preis näher am High = SHORT (Abverkauf erwartet)
+                    # Preis näher am Low = LONG (Erholung erwartet)
+                    mid = l20 + rng * 0.5
+                    is_short_bias = cur_price > mid  # Preis in oberer Hälfte = eher SHORT
+
+                    if is_short_bias:
+                        # SHORT: Fib von HIGH nach LOW (High=100%, Low=0%)
+                        # Retracement = wie weit ist Preis vom High zurückgekommen
+                        for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
+                            fib[f"{int(ratio*100)}%"] = round(h20 - rng * ratio, 2)
+                        # Extensions nach UNTEN (Short-Targets)
+                        fib["127%"] = round(h20 - rng * 1.272, 2)
+                        fib["161%"] = round(h20 - rng * 1.618, 2)
+                        fib["200%"] = round(h20 - rng * 2.0, 2)
+                    else:
+                        # LONG: Fib von LOW nach HIGH (Low=0%, High=100%)
+                        # Retracement = wie weit ist Preis vom Low gestiegen
+                        for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
+                            fib[f"{int(ratio*100)}%"] = round(l20 + rng * ratio, 2)
+                        # Extensions nach OBEN (Long-Targets)
+                        fib["127%"] = round(l20 + rng * 1.272, 2)
+                        fib["161%"] = round(l20 + rng * 1.618, 2)
+                        fib["200%"] = round(l20 + rng * 2.0, 2)
+
+                    result["fib"] = fib
+                    result["fib_direction"] = "short" if is_short_bias else "long"
             except Exception as e:
                 print(f"[Warning] Error calculating Fibonacci levels: {e}")
 
