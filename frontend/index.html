@@ -1978,6 +1978,25 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (sr.period_low) addPriceLine(sr.period_low, 'Period Low', '#64748b', LineStyle.Dotted, 1);
             }
 
+            // Diagonal Trendlines
+            if (overlays.sr && chartData.trendlines) {
+                chartData.trendlines.forEach(tl => {
+                    if (tl.points && tl.points.length >= 2) {
+                        const color = tl.type === 'support' ? '#10b981' : '#ef4444';
+                        const tlLine = chart.current.addLineSeries({
+                            color, lineWidth: 2,
+                            lineStyle: LineStyle.Solid,
+                            lastValueVisible: false, priceLineVisible: false,
+                            crosshairMarkerVisible: false,
+                            title: tl.type === 'support' ? 'Support TL' : 'Resistance TL',
+                        });
+                        const pts = tl.points.map(p => ({ time: p.time, value: p.price }));
+                        tlLine.setData(pts);
+                        overlaySeriesRef.current.push(tlLine);
+                    }
+                });
+            }
+
             // VRVP — V2.3: Volume Profile als Balken (horizontales Histogramm)
             if (overlays.vrvp && chartData.vrvp) {
                 const vp = chartData.vrvp;
@@ -2077,20 +2096,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             if (overlays.patterns && chartData.patterns) {
                 const markers = [];
 
-                // Pivot markers (swing highs/lows)
-                if (chartData.patterns.pivots) {
-                    chartData.patterns.pivots.forEach(p => {
-                        if (p.time) {
-                            markers.push({
-                                time: p.time,
-                                position: p.type === 'high' ? 'aboveBar' : 'belowBar',
-                                color: p.type === 'high' ? '#ef4444' : '#10b981',
-                                shape: p.type === 'high' ? 'arrowDown' : 'arrowUp',
-                                text: p.type === 'high' ? 'H' : 'L',
-                            });
-                        }
-                    });
-                }
+                // V4.0: Pivot-Marker entfernt (nur Noise) — Pivots werden intern genutzt
 
                 // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
                 const _viewDir = (d.confluence?.direction || '').toUpperCase();
@@ -5814,6 +5820,24 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 if (sr.period_low) addPriceLine(sr.period_low, 'Period Low', '#64748b', LineStyle.Dotted, 1);
             }
 
+            // Diagonal Trendlines
+            if (overlays.sr && chartData.trendlines) {
+                chartData.trendlines.forEach(tl => {
+                    if (tl.points && tl.points.length >= 2) {
+                        const color = tl.type === 'support' ? '#10b981' : '#ef4444';
+                        const tlLine = chartRef.current.addLineSeries({
+                            color, lineWidth: 2,
+                            lineStyle: LineStyle.Solid,
+                            lastValueVisible: false, priceLineVisible: false,
+                            crosshairMarkerVisible: false,
+                            title: tl.type === 'support' ? 'Support TL' : 'Resistance TL',
+                        });
+                        tlLine.setData(tl.points.map(p => ({ time: p.time, value: p.price })));
+                        overlaySeriesRef.current.push(tlLine);
+                    }
+                });
+            }
+
             // VRVP
             if (overlays.vrvp && chartData.vrvp) {
                 const vp = chartData.vrvp;
@@ -5897,19 +5921,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 const markers = [];
                 const _viewDir = (tickerData?.confluence?.direction || '').toUpperCase();
 
-                if (chartData.patterns.pivots) {
-                    chartData.patterns.pivots.forEach(p => {
-                        if (p.time) {
-                            markers.push({
-                                time: p.time,
-                                position: p.type === 'high' ? 'aboveBar' : 'belowBar',
-                                color: p.type === 'high' ? '#ef4444' : '#10b981',
-                                shape: p.type === 'high' ? 'arrowDown' : 'arrowUp',
-                                text: p.type === 'high' ? 'H' : 'L',
-                            });
-                        }
-                    });
-                }
+                // V4.0: Pivot-Marker entfernt (nur Noise)
 
                 if (chartData.patterns.chart_patterns) {
                     chartData.patterns.chart_patterns

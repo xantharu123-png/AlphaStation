@@ -4093,6 +4093,11 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
         atr_pct = atr / current_price if current_price > 0 else 0.02
         
+        # V4.0: Mindestabstand proportional zum Lookback
+        # lookback=50 → min_gap=10, lookback=150 → min_gap=25, lookback=200 → min_gap=30
+        min_pattern_gap = max(10, lookback // 6)
+        min_depth_atr = 2.5 if lookback >= 100 else 2.0  # Strengere Tiefe bei höheren TFs
+
         # Dual-Pass Swing-Erkennung: Großes + kleines Fenster
         # Pass 1: Adaptives großes Fenster (5-10) für etablierte Swings
         # Pass 2: Fenster=3 für scharfe Spikes (schnelle H&S-Köpfe etc.)
@@ -4126,7 +4131,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     idx1, idx2 = h1_data["index"], h2_data["index"]
                     
                     # KRITERIUM 1: Mindestabstand zwischen Tops (min 10 Bars)
-                    if idx2 - idx1 < 10:
+                    if idx2 - idx1 < min_pattern_gap:
                         continue
                     
                     # KRITERIUM 2: Ähnliche Höhe (innerhalb 1.5× ATR)
@@ -4138,7 +4143,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     top_avg = (h1 + h2) / 2
                     depth = top_avg - neckline
                     
-                    if depth < atr * 2:
+                    if depth < atr * min_depth_atr:
                         continue
                     
                     # KRITERIUM 4: VORHERIGER UPTREND
@@ -4211,7 +4216,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     idx1, idx2 = l1_data["index"], l2_data["index"]
                     
                     # KRITERIUM 1: Mindestabstand (min 10 Bars)
-                    if idx2 - idx1 < 10:
+                    if idx2 - idx1 < min_pattern_gap:
                         continue
                     
                     # KRITERIUM 2: Ähnliche Tiefe (innerhalb 1.5× ATR)
@@ -4223,7 +4228,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     bottom_avg = (l1 + l2) / 2
                     depth = neckline - bottom_avg
                     
-                    if depth < atr * 2:
+                    if depth < atr * min_depth_atr:
                         continue
                     
                     # KRITERIUM 4: VORHERIGER DOWNTREND
@@ -4303,16 +4308,17 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         h1, h2, h3 = sh1["price"], sh2["price"], sh3["price"]
                         idx1, idx2, idx3 = sh1["index"], sh2["index"], sh3["index"]
                         
-                        # Mindestabstand zwischen Schultern
-                        if idx2 - idx1 < 5 or idx3 - idx2 < 5:
+                        # Mindestabstand zwischen Schultern (proportional zum Lookback)
+                        hs_min_gap = max(8, min_pattern_gap // 2)
+                        if idx2 - idx1 < hs_min_gap or idx3 - idx2 < hs_min_gap:
                             continue
-                        
+
                         # Head muss höher als beide Shoulders
                         if not (h2 > h1 and h2 > h3):
                             continue
-                        
-                        # Head muss mindestens 1× ATR höher sein
-                        if h2 - max(h1, h3) < atr:
+
+                        # Head muss mindestens 1.5× ATR höher sein (strenger)
+                        if h2 - max(h1, h3) < atr * 1.5:
                             continue
                         
                         # Shoulders ähnlich hoch (innerhalb 2× ATR)
@@ -4367,11 +4373,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         l1, l2, l3 = sl1["price"], sl2["price"], sl3["price"]
                         idx1, idx2, idx3 = sl1["index"], sl2["index"], sl3["index"]
                         
-                        if idx2 - idx1 < 5 or idx3 - idx2 < 5:
+                        hs_min_gap = max(8, min_pattern_gap // 2)
+                        if idx2 - idx1 < hs_min_gap or idx3 - idx2 < hs_min_gap:
                             continue
                         if not (l2 < l1 and l2 < l3):
                             continue
-                        if min(l1, l3) - l2 < atr:
+                        if min(l1, l3) - l2 < atr * 1.5:
                             continue
                         if abs(l1 - l3) > atr * 2:
                             continue
