@@ -128,6 +128,7 @@ def _load_strategies():
             getattr(mod, "FUTURES_STRATEGIES", {}),
             getattr(mod, "FOREX_STRATEGIES", {}),
             getattr(mod, "INTERNATIONAL_STRATEGIES", {}),
+            getattr(mod, "BACKTEST_STRATEGY_RULES", {}),
         )
     finally:
         if _real_st:
@@ -135,8 +136,8 @@ def _load_strategies():
         else:
             _sys.modules.pop("streamlit", None)
 
-STRATEGIES, CRYPTO_STRATEGIES, FUTURES_STRATEGIES, FOREX_STRATEGIES, INTERNATIONAL_STRATEGIES = _load_strategies()
-print(f"[Init] Strategies loaded: {len(STRATEGIES)} Stock, {len(CRYPTO_STRATEGIES)} Crypto, {len(FUTURES_STRATEGIES)} Futures, {len(FOREX_STRATEGIES)} Forex, {len(INTERNATIONAL_STRATEGIES)} International")
+STRATEGIES, CRYPTO_STRATEGIES, FUTURES_STRATEGIES, FOREX_STRATEGIES, INTERNATIONAL_STRATEGIES, BACKTEST_RULES = _load_strategies()
+print(f"[Init] Strategies loaded: {len(STRATEGIES)} Stock, {len(CRYPTO_STRATEGIES)} Crypto, {len(FUTURES_STRATEGIES)} Futures, {len(FOREX_STRATEGIES)} Forex, {len(INTERNATIONAL_STRATEGIES)} International, {len(BACKTEST_RULES)} Backtest Rules")
 
 INVERSE_ETFS = {
     "SQQQ": ("3x Short Nasdaq", "QQQ"), "SPXS": ("3x Short S&P 500", "SPY"),
@@ -5795,10 +5796,73 @@ class BacktestRequest(BaseModel):
     months: int = 6
 
 
+def _calc_ema_series(data, period):
+    """Calculate EMA series from price data."""
+    if len(data) < period:
+        return []
+    emas = [sum(data[:period]) / period]
+    k = 2 / (period + 1)
+    for val in data[period:]:
+        emas.append(val * k + emas[-1] * (1 - k))
+    return emas
+
+
+def _backtest_stats(trades, ticker, strategy, months):
+    """Calculate backtest statistics from a list of trades."""
+    total_trades = len(trades)
+    if total_trades == 0:
+        return {
+            "ticker": ticker, "strategy": strategy, "months": months,
+            "total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_return": 0,
+            "max_drawdown": 0, "avg_win": 0, "avg_loss": 0, "best_trade": 0,
+            "worst_trade": 0, "trades": [], "timestamp": datetime.now().isoformat(),
+        }
+    wins = [t for t in trades if t["pnl_pct"] > 0]
+    losses_list = [t for t in trades if t["pnl_pct"] <= 0]
+    win_rate = round(len(wins) / total_trades * 100, 1)
+    avg_pnl = round(sum(t["pnl_pct"] for t in trades) / total_trades, 2)
+    total_return = round(sum(t["pnl_pct"] for t in trades), 2)
+    avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
+    avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
+    best_trade = round(max(t["pnl_pct"] for t in trades), 2)
+    worst_trade = round(min(t["pnl_pct"] for t in trades), 2)
+    max_dd = 0
+    peak = 0
+    equity = 0
+    for t in trades:
+        equity += t["pnl_pct"]
+        if equity > peak:
+            peak = equity
+        dd = peak - equity
+        if dd > max_dd:
+            max_dd = dd
+    return {
+        "ticker": ticker, "strategy": strategy, "months": months,
+        "total_trades": total_trades, "win_rate": win_rate, "avg_pnl": avg_pnl,
+        "total_return": total_return, "max_drawdown": round(max_dd, 2),
+        "avg_win": avg_win, "avg_loss": avg_loss, "best_trade": best_trade,
+        "worst_trade": worst_trade, "trades": trades[-50:],
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"):
+    """Create a trade record with PnL calculation."""
+    if direction == "short":
+        pnl = ((entry_price - exit_price) / entry_price) * 100
+    else:
+        pnl = ((exit_price - entry_price) / entry_price) * 100
+    return {
+        "entry_date": entry_date, "entry_price": round(entry_price, 2),
+        "exit_date": exit_date, "exit_price": round(exit_price, 2),
+        "pnl_pct": round(pnl, 2), "type": direction.upper(),
+    }
+
+
 def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
-    """Run a simple backtest on historical data."""
+    """Run backtest — supports indicator strategies + all BACKTEST_STRATEGY_RULES."""
     try:
-        # Fetch daily bars
+        # Fetch daily bars from Polygon
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": months * 22 + 60, "sort": "desc"})
         if resp.status_code != 200:
@@ -5809,155 +5873,257 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
         # Reverse to chronological
         bars = list(reversed(bars))
+        opens = [b["o"] for b in bars]
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
         closes = [b["c"] for b in bars]
+        volumes = [b.get("v", 0) for b in bars]
         dates = [datetime.fromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d") for b in bars]
 
         trades = []
-        position = None  # None = no position, dict = open position
+        position = None
+
+        # ══════════════════════════════════════════════════════════
+        # INDICATOR-BASED STRATEGIES
+        # ══════════════════════════════════════════════════════════
 
         if strategy == "sma_crossover":
-            # SMA20/SMA50 crossover
             for i in range(50, len(closes)):
                 sma20 = sum(closes[i-20:i]) / 20
                 sma50 = sum(closes[i-50:i]) / 50
                 prev_sma20 = sum(closes[i-21:i-1]) / 20
                 prev_sma50 = sum(closes[i-51:i-1]) / 50
-
                 if position is None:
-                    # Buy signal: SMA20 crosses above SMA50
                     if prev_sma20 <= prev_sma50 and sma20 > sma50:
                         position = {"entry_date": dates[i], "entry_price": closes[i]}
                 else:
-                    # Sell signal: SMA20 crosses below SMA50
                     if prev_sma20 >= prev_sma50 and sma20 < sma50:
-                        pnl = ((closes[i] - position["entry_price"]) / position["entry_price"]) * 100
-                        trades.append({
-                            "entry_date": position["entry_date"],
-                            "entry_price": round(position["entry_price"], 2),
-                            "exit_date": dates[i],
-                            "exit_price": round(closes[i], 2),
-                            "pnl_pct": round(pnl, 2),
-                            "type": "LONG"
-                        })
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
                         position = None
 
         elif strategy == "rsi_mean_reversion":
-            # RSI oversold/overbought mean reversion
             for i in range(15, len(closes)):
                 gains, losses = [], []
                 for j in range(14):
                     diff = closes[i-j] - closes[i-j-1]
-                    if diff > 0:
-                        gains.append(diff)
-                    else:
-                        losses.append(abs(diff))
+                    (gains if diff > 0 else losses).append(abs(diff))
                 avg_gain = sum(gains) / 14 if gains else 0.001
                 avg_loss = sum(losses) / 14 if losses else 0.001
-                rs = avg_gain / avg_loss
-                rsi = 100 - (100 / (1 + rs))
-
+                rsi = 100 - (100 / (1 + avg_gain / avg_loss))
                 if position is None:
-                    if rsi < 30:  # Oversold → Buy
+                    if rsi < 30:
                         position = {"entry_date": dates[i], "entry_price": closes[i]}
                 else:
-                    if rsi > 70:  # Overbought → Sell
-                        pnl = ((closes[i] - position["entry_price"]) / position["entry_price"]) * 100
-                        trades.append({
-                            "entry_date": position["entry_date"],
-                            "entry_price": round(position["entry_price"], 2),
-                            "exit_date": dates[i],
-                            "exit_price": round(closes[i], 2),
-                            "pnl_pct": round(pnl, 2),
-                            "type": "LONG"
-                        })
+                    if rsi > 70:
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
                         position = None
 
         elif strategy == "ema_crossover":
-            # EMA9/EMA21 crossover (faster signals)
-            def calc_ema_series(data, period):
-                emas = [sum(data[:period]) / period]
-                k = 2 / (period + 1)
-                for val in data[period:]:
-                    emas.append(val * k + emas[-1] * (1 - k))
-                return emas
-
             if len(closes) > 21:
-                ema9 = calc_ema_series(closes, 9)
-                ema21 = calc_ema_series(closes, 21)
-                # Align: ema9 starts at index 8, ema21 starts at index 20
-                for i in range(1, min(len(ema9), len(ema21))):
-                    bar_idx = 20 + i  # offset for ema21 start
+                ema9_full = _calc_ema_series(closes, 9)
+                ema21_full = _calc_ema_series(closes, 21)
+                # Align both to same index: ema9 starts at idx 8, ema21 at idx 20
+                offset = 21 - 9  # = 12
+                for i in range(1, len(ema21_full)):
+                    e9_idx = i + offset
+                    if e9_idx >= len(ema9_full) or e9_idx < 1:
+                        continue
+                    bar_idx = 20 + i
                     if bar_idx >= len(dates):
                         break
                     if position is None:
-                        if i > 0 and ema9[i + 12] > ema21[i] and ema9[i + 11] <= ema21[i - 1]:
+                        if ema9_full[e9_idx] > ema21_full[i] and ema9_full[e9_idx - 1] <= ema21_full[i - 1]:
                             position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
                     else:
-                        if i > 0 and ema9[i + 12] < ema21[i] and ema9[i + 11] >= ema21[i - 1]:
-                            pnl = ((closes[bar_idx] - position["entry_price"]) / position["entry_price"]) * 100
-                            trades.append({
-                                "entry_date": position["entry_date"],
-                                "entry_price": round(position["entry_price"], 2),
-                                "exit_date": dates[bar_idx],
-                                "exit_price": round(closes[bar_idx], 2),
-                                "pnl_pct": round(pnl, 2),
-                                "type": "LONG"
-                            })
+                        if ema9_full[e9_idx] < ema21_full[i] and ema9_full[e9_idx - 1] >= ema21_full[i - 1]:
+                            trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[bar_idx], closes[bar_idx]))
                             position = None
+
+        elif strategy == "macd":
+            if len(closes) > 35:
+                ema12 = _calc_ema_series(closes, 12)
+                ema26 = _calc_ema_series(closes, 26)
+                # MACD = EMA12 - EMA26, aligned to ema26 start (idx 25)
+                offset = 26 - 12  # = 14
+                macd_line = []
+                for i in range(len(ema26)):
+                    e12_idx = i + offset
+                    if e12_idx < len(ema12):
+                        macd_line.append(ema12[e12_idx] - ema26[i])
+                if len(macd_line) > 9:
+                    signal_line = _calc_ema_series(macd_line, 9)
+                    sig_offset = 9
+                    for i in range(1, len(signal_line)):
+                        m_idx = i + sig_offset - 1
+                        if m_idx >= len(macd_line) or m_idx < 1:
+                            continue
+                        bar_idx = 25 + m_idx + 1
+                        if bar_idx >= len(dates):
+                            break
+                        if position is None:
+                            if macd_line[m_idx] > signal_line[i] and macd_line[m_idx - 1] <= signal_line[i - 1]:
+                                position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
+                        else:
+                            if macd_line[m_idx] < signal_line[i] and macd_line[m_idx - 1] >= signal_line[i - 1]:
+                                trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[bar_idx], closes[bar_idx]))
+                                position = None
+
+        elif strategy == "bollinger_bands":
+            period = 20
+            for i in range(period, len(closes)):
+                window = closes[i-period:i]
+                sma = sum(window) / period
+                std = (sum((x - sma)**2 for x in window) / period) ** 0.5
+                upper = sma + 2 * std
+                lower = sma - 2 * std
+                if position is None:
+                    if closes[i] <= lower:
+                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                else:
+                    if closes[i] >= upper or closes[i] >= sma:
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
+                        position = None
+
+        elif strategy == "mean_reversion_sma":
+            # Buy when price drops >5% below SMA50, sell when back above SMA50
+            for i in range(50, len(closes)):
+                sma50 = sum(closes[i-50:i]) / 50
+                pct_from_sma = ((closes[i] - sma50) / sma50) * 100
+                if position is None:
+                    if pct_from_sma < -5:
+                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                else:
+                    if closes[i] > sma50:
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
+                        position = None
+
+        # ══════════════════════════════════════════════════════════
+        # RULE-BASED STRATEGIES (from BACKTEST_STRATEGY_RULES)
+        # ══════════════════════════════════════════════════════════
+
+        elif strategy in BACKTEST_RULES:
+            rule = BACKTEST_RULES[strategy]
+            sig = rule["signal"]
+            direction = rule.get("direction", "long")
+            stop_pct = rule.get("stop_pct", 0.05)
+            tp1_rr = rule.get("tp1_rr", 1.5)
+            max_hold = rule.get("max_hold_days", 5)
+            entry_type = rule.get("entry", "next_open")
+            min_price = rule.get("min_price", 1.0)
+
+            # Pre-calc RVOL (20d avg volume)
+            avg_vols = [0] * len(bars)
+            for i in range(20, len(bars)):
+                avg_vols[i] = sum(volumes[i-20:i]) / 20 if sum(volumes[i-20:i]) > 0 else 1
+
+            for i in range(2, len(bars) - 1):
+                if position is not None:
+                    # ── MANAGE OPEN POSITION: Stop/TP/MaxHold ──
+                    days_held = position.get("days_held", 0) + 1
+                    position["days_held"] = days_held
+                    entry_p = position["entry_price"]
+                    risk = abs(entry_p * stop_pct)
+
+                    if direction == "short":
+                        # Short: stop above entry, TP below
+                        stop_price = entry_p * (1 + stop_pct)
+                        tp_price = entry_p - risk * tp1_rr
+                        if highs[i] >= stop_price:
+                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], stop_price, "short"))
+                            position = None
+                            continue
+                        if lows[i] <= tp_price:
+                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], tp_price, "short"))
+                            position = None
+                            continue
+                    else:
+                        # Long: stop below entry, TP above
+                        stop_price = entry_p * (1 - stop_pct)
+                        tp_price = entry_p + risk * tp1_rr
+                        if lows[i] <= stop_price:
+                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], stop_price, "long"))
+                            position = None
+                            continue
+                        if highs[i] >= tp_price:
+                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], tp_price, "long"))
+                            position = None
+                            continue
+
+                    # Max hold days → exit at close
+                    if days_held >= max_hold:
+                        trades.append(_make_trade(position["entry_date"], entry_p, dates[i], closes[i], direction))
+                        position = None
+                    continue
+
+                # ── CHECK SIGNAL CONDITIONS ──
+                if closes[i] < min_price:
+                    continue
+
+                c = closes[i]
+                o = opens[i]
+                h = highs[i]
+                lo = lows[i]
+                prev_c = closes[i - 1]
+                change_pct = ((c - prev_c) / prev_c) * 100 if prev_c else 0
+                close_pos = (c - lo) / (h - lo) if (h - lo) > 0 else 0.5
+
+                # Gap %
+                gap_pct = ((o - prev_c) / prev_c) * 100 if prev_c else 0
+
+                # Prev day change %
+                prev_change_pct = ((prev_c - closes[i - 2]) / closes[i - 2]) * 100 if i >= 2 and closes[i - 2] else 0
+
+                # RVOL
+                rvol = volumes[i] / avg_vols[i] if avg_vols[i] > 0 else 1.0
+
+                # Check all signal conditions
+                match = True
+                if "change_pct_min" in sig and change_pct < sig["change_pct_min"]:
+                    match = False
+                if "change_pct_max" in sig and change_pct > sig["change_pct_max"]:
+                    match = False
+                if "close_pos_min" in sig and close_pos < sig["close_pos_min"]:
+                    match = False
+                if "close_pos_max" in sig and close_pos > sig["close_pos_max"]:
+                    match = False
+                if "gap_pct_min" in sig and gap_pct < sig["gap_pct_min"]:
+                    match = False
+                if "gap_pct_max" in sig and gap_pct > sig["gap_pct_max"]:
+                    match = False
+                if "prev_change_pct_min" in sig and prev_change_pct < sig["prev_change_pct_min"]:
+                    match = False
+                if "prev_change_pct_max" in sig and prev_change_pct > sig["prev_change_pct_max"]:
+                    match = False
+                if "rvol_min" in sig and rvol < sig["rvol_min"]:
+                    match = False
+                if "rvol_max" in sig and rvol > sig["rvol_max"]:
+                    match = False
+
+                if not match:
+                    continue
+
+                # ── ENTRY ──
+                if entry_type == "next_open" and i + 1 < len(bars):
+                    position = {"entry_date": dates[i + 1], "entry_price": opens[i + 1], "days_held": 0}
+                elif entry_type == "at_close":
+                    position = {"entry_date": dates[i], "entry_price": closes[i], "days_held": 0}
+                elif entry_type == "prev_high":
+                    # Entry only if next day breaks prev high
+                    if i + 1 < len(bars) and highs[i + 1] > highs[i]:
+                        position = {"entry_date": dates[i + 1], "entry_price": highs[i], "days_held": 0}
+
+        else:
+            return {"error": f"Unbekannte Strategie: {strategy}"}
 
         # Close any open position at last bar
         if position is not None:
-            pnl = ((closes[-1] - position["entry_price"]) / position["entry_price"]) * 100
-            trades.append({
-                "entry_date": position["entry_date"],
-                "entry_price": round(position["entry_price"], 2),
-                "exit_date": dates[-1],
-                "exit_price": round(closes[-1], 2),
-                "pnl_pct": round(pnl, 2),
-                "type": "LONG (offen)"
-            })
+            direction = BACKTEST_RULES.get(strategy, {}).get("direction", "long")
+            t = _make_trade(position["entry_date"], position["entry_price"], dates[-1], closes[-1], direction)
+            t["type"] += " (offen)"
+            trades.append(t)
 
-        # Calculate statistics
-        total_trades = len(trades)
-        wins = [t for t in trades if t["pnl_pct"] > 0]
-        losses_list = [t for t in trades if t["pnl_pct"] <= 0]
-        win_rate = round(len(wins) / total_trades * 100, 1) if total_trades > 0 else 0
-        avg_pnl = round(sum(t["pnl_pct"] for t in trades) / total_trades, 2) if total_trades > 0 else 0
-        total_return = round(sum(t["pnl_pct"] for t in trades), 2)
-        avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
-        avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
-        best_trade = round(max(t["pnl_pct"] for t in trades), 2) if trades else 0
-        worst_trade = round(min(t["pnl_pct"] for t in trades), 2) if trades else 0
+        return _backtest_stats(trades, ticker, strategy, months)
 
-        # Max drawdown
-        max_dd = 0
-        peak = 0
-        equity = 0
-        for t in trades:
-            equity += t["pnl_pct"]
-            if equity > peak:
-                peak = equity
-            dd = peak - equity
-            if dd > max_dd:
-                max_dd = dd
-        max_drawdown = round(max_dd, 2)
-
-        return {
-            "ticker": ticker,
-            "strategy": strategy,
-            "months": months,
-            "total_trades": total_trades,
-            "win_rate": win_rate,
-            "avg_pnl": avg_pnl,
-            "total_return": total_return,
-            "max_drawdown": max_drawdown,
-            "avg_win": avg_win,
-            "avg_loss": avg_loss,
-            "best_trade": best_trade,
-            "worst_trade": worst_trade,
-            "trades": trades[-50:],  # Last 50 trades max
-            "timestamp": datetime.now().isoformat(),
-        }
     except Exception as e:
         return {"error": str(e), "ticker": ticker, "strategy": strategy}
 
@@ -5979,6 +6145,28 @@ def run_backtest(request: BacktestRequest):
         print(f"[Warning] {e}")
 
     return result
+
+
+@app.get("/api/backtest-strategies")
+def list_backtest_strategies():
+    """List all available backtest strategies."""
+    indicator_strats = [
+        {"id": "sma_crossover", "name": "SMA Crossover (20/50)", "category": "Indikator", "direction": "long"},
+        {"id": "ema_crossover", "name": "EMA Crossover (9/21)", "category": "Indikator", "direction": "long"},
+        {"id": "rsi_mean_reversion", "name": "RSI Mean Reversion", "category": "Indikator", "direction": "long"},
+        {"id": "macd", "name": "MACD Crossover", "category": "Indikator", "direction": "long"},
+        {"id": "bollinger_bands", "name": "Bollinger Bands", "category": "Indikator", "direction": "long"},
+        {"id": "mean_reversion_sma", "name": "Mean Reversion (SMA50)", "category": "Indikator", "direction": "long"},
+    ]
+    rule_strats = []
+    for name, rule in BACKTEST_RULES.items():
+        rule_strats.append({
+            "id": name,
+            "name": name,
+            "category": "Scanner",
+            "direction": rule.get("direction", "long"),
+        })
+    return {"strategies": indicator_strats + rule_strats}
 
 
 @app.get("/api/backtest-results")

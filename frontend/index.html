@@ -4580,12 +4580,28 @@ function BacktestTab() {
     const [results, setResults] = useState(null);
     const [trades, setTrades] = useState([]);
     const [error, setError] = useState(null);
+    const [strategyOptions, setStrategyOptions] = useState([]);
 
-    const strategyOptions = [
-        { id: 'sma_crossover', label: 'SMA Crossover (20/50)', desc: 'Kauft wenn SMA20 den SMA50 von unten kreuzt' },
-        { id: 'ema_crossover', label: 'EMA Crossover (9/21)', desc: 'Schnellere Signale mit EMA9/EMA21' },
-        { id: 'rsi_mean_reversion', label: 'RSI Mean Reversion', desc: 'Kauft bei RSI Oversold, verkauft bei Overbought' },
-    ];
+    // Load available strategies from server
+    useEffect(() => {
+        const fetchStrategies = async () => {
+            try {
+                const resp = await fetch(`${API}/api/backtest-strategies`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    setStrategyOptions(data.strategies || []);
+                }
+            } catch (e) {
+                // Fallback if endpoint not available
+                setStrategyOptions([
+                    { id: 'sma_crossover', name: 'SMA Crossover (20/50)', category: 'Indikator', direction: 'long' },
+                    { id: 'ema_crossover', name: 'EMA Crossover (9/21)', category: 'Indikator', direction: 'long' },
+                    { id: 'rsi_mean_reversion', name: 'RSI Mean Reversion', category: 'Indikator', direction: 'long' },
+                ]);
+            }
+        };
+        fetchStrategies();
+    }, []);
 
     const runBacktest = async () => {
         if (!ticker.trim()) {
@@ -4644,9 +4660,21 @@ function BacktestTab() {
                     <div>
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
                         <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-                            {strategyOptions.map(s => (
-                                <option key={s.id} value={s.id}>{s.label}</option>
-                            ))}
+                            {(() => {
+                                const categories = {};
+                                strategyOptions.forEach(s => {
+                                    const cat = s.category || 'Sonstige';
+                                    if (!categories[cat]) categories[cat] = [];
+                                    categories[cat].push(s);
+                                });
+                                return Object.entries(categories).map(([cat, strats]) => (
+                                    <optgroup key={cat} label={cat}>
+                                        {strats.map(s => (
+                                            <option key={s.id} value={s.id}>{s.name} {s.direction === 'short' ? '(Short)' : ''}</option>
+                                        ))}
+                                    </optgroup>
+                                ));
+                            })()}
                         </select>
                     </div>
                     <div>
@@ -4664,7 +4692,9 @@ function BacktestTab() {
                         </button>
                     </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-1">{strategyOptions.find(s => s.id === strategy)?.desc || ''}</p>
+                {strategyOptions.find(s => s.id === strategy)?.direction === 'short' && (
+                    <p className="text-xs text-red-500 mt-1 font-semibold">Short-Strategie — profitiert von fallenden Kursen</p>
+                )}
             </div>
 
             {error && (
