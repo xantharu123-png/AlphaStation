@@ -911,7 +911,7 @@ Mehr erfahren ↓
                         {[
                             { svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444', name: 'Short Scanner', desc: 'Breakdown-Aktien, Earnings Misses, Downgrades automatisch finden' },
                             { svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6', name: 'Money Flow', desc: 'Institutionelle Käufe & Verkäufe in Echtzeit erkennen' },
-                            { svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#f59e0b', name: 'Early Movers', desc: 'Volume Spikes, Whale Accumulation, Micro-Cap Momentum' },
+                            { svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#10b981', name: 'Early Mover', desc: 'Phase 1/2/3 — Accumulation, Breakout & Risiko-Erkennung' },
                             { svg: 'M3 3H21V21H3ZM7 7V17M12 10V17M17 5V17', color: '#3b82f6', name: 'Kalender', desc: 'Earnings, IPOs, FDA Dates, Dividenden — alles im Blick' },
                             { svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316', name: 'BTC-Divergenz', desc: 'Korrelation zwischen Krypto und Tech-Stocks tracken' },
                             { svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale' },
@@ -1516,7 +1516,7 @@ function useSortable(data, defaultKey = null, defaultDesc = true) {
         } else {
             setSortKey(key);
             // V2.7: Numerische Spalten starten absteigend (beste zuerst), Text aufsteigend
-            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','EarlyScore','DegenScore','WhaleScore'];
+            const numericKeys = ['score','price','change_pct','rvol','volume','change_1d','chg_5d','pump_pct','phase','Price','Change24h','Change7d','VolMCapRatio','EarlyScore','DegenScore','WhaleScore'];
             setSortDesc(numericKeys.includes(key));
         }
     };
@@ -1568,7 +1568,7 @@ function SchedulerStatus({ status }) {
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Movers', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes' };
 
     return (
         <div className="flex items-center gap-2">
@@ -2731,7 +2731,7 @@ function App() {
         { id: 'bi-scanner', label: 'BI Scanner' },
         { id: 'biotech', label: 'Biotech' },
         { id: 'btc-divergenz', label: 'BTC-Divergenz' },
-        { id: 'early-movers', label: 'Early Movers' },
+        { id: 'early-movers', label: 'Early Mover' },
         { id: 'short-scanner', label: 'Short Scanner' },
         { id: 'money-flow', label: 'Money Flow' },
         { id: 'kalender', label: 'Kalender' },
@@ -2798,7 +2798,7 @@ function App() {
             groups: [
                 { title: null, items: [
                     { id: 'btc-divergenz', name: 'BTC-Divergenz', desc: 'Krypto vs Tech-Stock Korrelation', svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316' },
-                    { id: 'early-movers', name: 'Early Movers', desc: 'Whale Accumulation & Micro-Caps', svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#f59e0b' },
+                    { id: 'early-movers', name: 'Early Mover', desc: 'Phase 1/2/3 — Accumulation, Breakout & Risiko', svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#10b981' },
                     { id: 'new-listing', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale', svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444' },
                 ]},
             ]
@@ -3752,46 +3752,21 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 
 // Early Movers Tab
 function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [subTab, setSubTab] = useState('volume-spikes');
-    const [volumeSpikes, setVolumeSpikes] = useState([]);
-    const [microCaps, setMicroCaps] = useState([]);
-    const [whaleAcc, setWhaleAcc] = useState([]);
-    // recentlyListed entfernt — NLS deckt das ab
-    const [narratives, setNarratives] = useState({});
-    const [stats, setStats] = useState({});
+    const [coins, setCoins] = useState(scanCache.em_coins || []);
+    const [stats, setStats] = useState(scanCache.em_stats || null);
     const [isScanning, setIsScanning] = useState(false);
+    const [phaseFilter, setPhaseFilter] = useState(0); // 0=alle, 1/2/3=Phase
+    const { sorted, toggleSort, sortKey } = useSortable(coins, 'score');
     const pollTimeoutRef = useRef(null);
 
-    const { sorted: sortedSpikes, toggleSort: toggleSpikeSort } = useSortable(volumeSpikes, 'EarlyScore');
-    const { sorted: sortedMicro, toggleSort: toggleMicroSort } = useSortable(microCaps, 'DegenScore');
-    const { sorted: sortedWhale, toggleSort: toggleWhaleSort } = useSortable(whaleAcc, 'WhaleScore');
-
-    // Utility functions for formatting
     const formatPrice = (price) => {
         if (price === null || price === undefined) return '–';
         return price >= 1 ? `$${price.toFixed(2)}` : `$${price.toFixed(4)}`;
     };
 
-    const formatMCap = (mcap) => {
-        if (mcap === null || mcap === undefined) return '–';
-        if (mcap >= 1000000000) return `$${(mcap / 1000000000).toFixed(1)}B`;
-        if (mcap >= 1000000) return `$${(mcap / 1000000).toFixed(1)}M`;
-        return `$${mcap.toFixed(0)}`;
-    };
+    const phaseIcon = (p) => p === 1 ? '\u{1F7E2}' : p === 2 ? '\u{1F7E1}' : '\u{1F534}';
+    const riskBadge = (r) => r === 'HIGH' ? 'signal-bearish' : r === 'MEDIUM' ? 'signal-lightdiv' : 'signal-bullish';
 
-    const getScoreClass = (score) => {
-        if (!score) return '';
-        if (score >= 70) return 'bg-green-600 text-white';
-        if (score >= 40) return 'bg-yellow-600 text-white';
-        return 'bg-red-600 text-white';
-    };
-
-    const getPercentClass = (value) => {
-        if (!value) return '';
-        return value >= 0 ? 'color-positive' : 'color-negative';
-    };
-
-    // Cleanup polling on unmount
     useEffect(() => {
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
@@ -3804,11 +3779,13 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 if (response.ok) {
                     const data = await response.json();
                     const em = (data.data && data.data[0]) || {};
-                    setVolumeSpikes(em.volume_spikes || []);
-                    setMicroCaps(em.micro_caps || []);
-                    setWhaleAcc(em.whale_acc || []);
-                    setNarratives(em.narratives || {});
-                    setStats(em.stats || {});
+                    const items = em.coins || [];
+                    if (items.length > 0) {
+                        setCoins(items);
+                        setStats(em.stats || null);
+                        updateScanCache('em_coins', items);
+                        updateScanCache('em_stats', em.stats);
+                    }
                 }
             } catch (err) { console.error('Error fetching early movers:', err); }
         };
@@ -3820,35 +3797,26 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         let prevCachedAt = null;
         try {
             const preCheck = await fetch(`${API}/api/early-movers-results`);
-            if (preCheck.ok) {
-                const preData = await preCheck.json();
-                prevCachedAt = preData.cached_at || null;
-            }
+            if (preCheck.ok) { prevCachedAt = (await preCheck.json()).cached_at || null; }
         } catch(e) {}
         try {
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
             if (response.ok) {
-                if (window.addToast) window.addToast('Scan gestartet...', 'info');
+                if (window.addToast) window.addToast('Early Mover Scan gestartet...', 'info');
                 const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) {
-                        setIsScanning(false);
-                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
-                        return;
-                    }
+                    if (attempts > 12) { setIsScanning(false); return; }
                     try {
                         const res = await fetch(`${API}/api/early-movers-results`);
                         if (res.ok) {
                             const data = await res.json();
                             const em = (data.data && data.data[0]) || {};
-                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
-                            if (isNewData) {
-                                setVolumeSpikes(em.volume_spikes || []);
-                                setMicroCaps(em.micro_caps || []);
-                                setWhaleAcc(em.whale_acc || []);
-                                setNarratives(em.narratives || {});
-                                setStats(em.stats || {});
+                            if (data.cached_at && data.cached_at !== prevCachedAt) {
+                                const items = em.coins || [];
+                                setCoins(items); setStats(em.stats || null);
+                                updateScanCache('em_coins', items);
+                                updateScanCache('em_stats', em.stats);
                                 setIsScanning(false);
-                                if (window.addToast) window.addToast('Scan fertig!', 'success');
+                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Coins`, 'success');
                                 return;
                             }
                         }
@@ -3856,181 +3824,79 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
                 };
                 pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000);
-            } else {
-                setIsScanning(false);
-            }
+            } else { setIsScanning(false); }
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
             setIsScanning(false);
         }
     };
 
+    const filtered = phaseFilter > 0 ? sorted.filter(r => r.phase === phaseFilter) : sorted;
+
     return (
         <div className="space-y-6">
-            <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
-                <button onClick={() => setSubTab('volume-spikes')} className={`secondary-tab ${subTab === 'volume-spikes' ? 'active' : 'inactive'}`}>Volume Spikes</button>
-                <button onClick={() => setSubTab('micro-caps')} className={`secondary-tab ${subTab === 'micro-caps' ? 'active' : 'inactive'}`}>Micro-Caps</button>
-                <button onClick={() => setSubTab('whale-acc')} className={`secondary-tab ${subTab === 'whale-acc' ? 'active' : 'inactive'}`}>Whale Accumulation</button>
-                <button onClick={() => setSubTab('narratives')} className={`secondary-tab ${subTab === 'narratives' ? 'active' : 'inactive'}`}>Narratives</button>
-            </div>
-
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="early_movers" />
 
-            {/* Volume Spikes Tab */}
-            {subTab === 'volume-spikes' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedSpikes.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSpikeSort('Change1h')}>1h%</th>
-                                    <th className="text-right py-2 px-2">24h%</th>
-                                    <th className="text-right py-2 px-2">7d%</th>
-                                    <th className="text-right py-2 px-2">Vol/MCap%</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSpikeSort('EarlyScore')}>Score</th>
-                                    <th className="text-left py-2 px-2">Signal</th>
-                                    <th className="text-left py-2 px-2">Perp</th>
-                                    <th className="text-left py-2 px-2">Narrative</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedSpikes.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change1h)}`}>{item.Change1h?.toFixed(1) || '–'}%</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change24h)}`}>{item.Change24h?.toFixed(1) || '–'}%</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right">{item.VolMCapRatio?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.EarlyScore)}`}>{item.EarlyScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.IsTrending ? 'bg-purple-100 text-purple-800 font-semibold' : 'text-gray-500'}`}>{item.IsTrending ? 'TRENDING' : item.Narrative || '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
+            {/* Phase-Filter Buttons */}
+            <div className="flex gap-2 flex-wrap items-center">
+                <span className="text-sm text-gray-500 mr-2">Phase:</span>
+                {[{v:0,l:'Alle'},{v:1,l:'\u{1F7E2} Accumulation'},{v:2,l:'\u{1F7E1} Breakout'},{v:3,l:'\u{1F534} Überhitzt'}].map(f => (
+                    <button key={f.v} onClick={() => setPhaseFilter(f.v)}
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${phaseFilter === f.v ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100'}`}>
+                        {f.l}
+                        {f.v > 0 && stats ? ` (${f.v === 1 ? stats.phase_1_count : f.v === 2 ? stats.phase_2_count : stats.phase_3_count || 0})` : ''}
+                    </button>
+                ))}
+                {stats && <span className="text-xs text-gray-400 ml-auto">{stats.unified_count || 0} Coins total</span>}
+            </div>
 
-            {/* Micro-Caps Tab */}
-            {subTab === 'micro-caps' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedMicro.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2">MCap</th>
-                                    <th className="text-right py-2 px-2">7d%</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleMicroSort('DegenScore')}>DegenScore</th>
-                                    <th className="text-left py-2 px-2">Signal</th>
-                                    <th className="text-left py-2 px-2">Perp</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedMicro.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className="py-3 px-2 text-right">{formatMCap(item.MCap)}</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.Change7d)}`}>{item.Change7d?.toFixed(1) || '–'}%</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.DegenScore)}`}>{item.DegenScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{item.Signal || '–'}</td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
+            {/* Unified Phase Table */}
+            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                <table className="w-full text-sm">
+                    <thead className="border-b border-gray-200">
+                        <tr>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('phase')}>Phase{sortKey === 'phase' && ' \u2193'}</th>
+                            <th className="text-left py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Symbol')}>Symbol{sortKey === 'Symbol' && ' \u2193'}</th>
+                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Price')}>Preis{sortKey === 'Price' && ' \u2193'}</th>
+                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change24h')}>24h%{sortKey === 'Change24h' && ' \u2193'}</th>
+                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change7d')}>7d%{sortKey === 'Change7d' && ' \u2193'}</th>
+                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('VolMCapRatio')}>Vol/MCap{sortKey === 'VolMCapRatio' && ' \u2193'}</th>
+                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('score')}>Score{sortKey === 'score' && ' \u2193'}</th>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('risk_level')}>Risk{sortKey === 'risk_level' && ' \u2193'}</th>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('grade')}>Grade{sortKey === 'grade' && ' \u2193'}</th>
+                            <th className="text-left py-2 px-2">Signal</th>
+                            <th className="text-left py-2 px-2">Perp</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {filtered.map((item, idx) => (
+                            <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
+                                <td className="py-3 px-2 text-center" title={item.phase_label}>
+                                    <span className="text-lg">{phaseIcon(item.phase)}</span>
+                                    <span className="text-xs ml-1 text-gray-500">{item.phase}</span>
+                                </td>
+                                <td className="py-3 px-2">
+                                    <span className="font-semibold">{item.Symbol}</span>
+                                    {item.source && <span className="text-xs text-gray-400 ml-1">({item.source})</span>}
+                                </td>
+                                <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
+                                <td className={`py-3 px-2 text-right font-semibold ${(item.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change24h ? `${item.Change24h > 0 ? '+' : ''}${item.Change24h.toFixed(1)}%` : '\u2014'}</td>
+                                <td className={`py-3 px-2 text-right ${(item.Change7d||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change7d ? `${item.Change7d > 0 ? '+' : ''}${item.Change7d.toFixed(1)}%` : '\u2014'}</td>
+                                <td className={`py-3 px-2 text-right ${(item.VolMCapRatio||0) > 100 ? 'color-negative font-bold' : (item.VolMCapRatio||0) > 60 ? 'text-yellow-600' : ''}`}>{item.VolMCapRatio ? `${item.VolMCapRatio.toFixed(0)}%` : '\u2014'}</td>
+                                <td className="py-3 px-2 text-right">
+                                    <span className={`signal-badge ${item.score >= 70 ? 'signal-bullish' : item.score >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.score}</span>
+                                </td>
+                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${riskBadge(item.risk_level)}`}>{item.risk_level}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.grade === 'S' ? 'signal-bullish' : item.grade === 'A' ? 'signal-bullish' : item.grade === 'B' ? 'signal-lightdiv' : item.grade === 'C' ? 'signal-bearish' : 'signal-neutral'}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-sm text-gray-600 truncate max-w-xs" title={item.signal_text}>{item.signal_text || '\u2014'}</td>
+                                <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Keine Ergebnisse{phaseFilter > 0 ? ` für Phase ${phaseFilter}` : ''} — starte einen Scan</div>}
+            </div>
 
-            {/* Whale Accumulation Tab */}
-            {subTab === 'whale-acc' && (
-                <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                    {sortedWhale.length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <table className="w-full text-sm">
-                            <thead className="border-b border-gray-200">
-                                <tr>
-                                    <th className="text-left py-2 px-2">Symbol</th>
-                                    <th className="text-left py-2 px-2">Name</th>
-                                    <th className="text-right py-2 px-2">Preis</th>
-                                    <th className="text-right py-2 px-2">MCap</th>
-                                    <th className="text-right py-2 px-2">OI Ratio</th>
-                                    <th className="text-right py-2 px-2">Funding Rate</th>
-                                    <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleWhaleSort('WhaleScore')}>WhaleScore</th>
-                                    <th className="text-left py-2 px-2">Signals</th>
-                                    <th className="text-left py-2 px-2">Perp</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedWhale.map((item, idx) => (
-                                    <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
-                                        <td className="py-3 px-2 font-semibold">{item.Symbol}</td>
-                                        <td className="py-3 px-2 text-gray-700">{item.Name || '–'}</td>
-                                        <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
-                                        <td className="py-3 px-2 text-right">{formatMCap(item.MCap)}</td>
-                                        <td className="py-3 px-2 text-right">{item.OI_Ratio?.toFixed(2) || '–'}x</td>
-                                        <td className={`py-3 px-2 text-right ${getPercentClass(item.FundingRate * 100)}`}>{item.FundingRate ? (item.FundingRate * 100).toFixed(3) : '–'}%</td>
-                                        <td className="py-3 px-2 text-right"><span className={`px-2 py-1 rounded text-xs font-semibold ${getScoreClass(item.WhaleScore)}`}>{item.WhaleScore || '–'}</span></td>
-                                        <td className="py-3 px-2 text-sm">{Array.isArray(item.Signals) ? item.Signals.join(', ') : item.Signals || '–'}</td>
-                                        <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? 'Yes' : '–'}</span></td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            )}
-
-            {/* Narratives Tab */}
-            {subTab === 'narratives' && (
-                <div className="card border border-gray-200 p-6 rounded-lg">
-                    {Object.keys(narratives).length === 0 ? (
-                        <div className="text-center text-gray-500 py-8">Keine Daten vorhanden</div>
-                    ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {Object.entries(narratives).map(([name, data]) => (
-                                <div key={name} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                                    <h3 className="font-semibold text-lg mb-3">{name}</h3>
-                                    <div className="space-y-2 text-sm">
-                                        <div><span className="text-gray-600">7d Avg:</span> <span className={getPercentClass(data.avg_7d)}>{data.avg_7d?.toFixed(1) || '–'}%</span></div>
-                                        <div><span className="text-gray-600">24h Avg:</span> <span className={getPercentClass(data.avg_24h)}>{data.avg_24h?.toFixed(1) || '–'}%</span></div>
-                                        <div><span className="text-gray-600">Count:</span> <span className="font-semibold">{data.count || 0}</span></div>
-                                        {data.leaders && data.leaders.length > 0 && (
-                                            <div className="mt-3 pt-3 border-t border-gray-300">
-                                                <p className="text-gray-600 font-semibold mb-1">Leaders:</p>
-                                                <div className="space-y-1">
-                                                    {data.leaders.slice(0, 3).map((leader, idx) => (
-                                                        <div key={idx} className="text-xs text-gray-700">
-                                                            {typeof leader === 'string' ? leader : leader.Symbol || '–'}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            )}
         </div>
     );
 }

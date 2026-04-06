@@ -3617,8 +3617,53 @@ def fetch_multi_exchange_perps():
     return result
 
 
+def _classify_phase(change_24h, change_7d, vol_mcap_pct):
+    """Klassifiziert einen Coin in Phase 1 (Accumulation), 2 (Breakout) oder 3 (Überhitzt).
+
+    Basiert auf 24h-Change, 7d-Change und Vol/MCap-Ratio.
+    Phase 1: Preis stabil/leicht steigend, Volume auffällig → Smart Money kauft leise
+    Phase 2: Breakout bestätigt, Preis +5-20%, Volume hoch
+    Phase 3: Überhitzt, Preis >30% oder Vol/MCap extrem → DUMP-Gefahr
+    """
+    c24 = abs(change_24h or 0)
+    c7d = abs(change_7d or 0)
+    vm = vol_mcap_pct or 0
+
+    # Phase 3: Überhitzt
+    if c24 > 30 or (c24 > 20 and vm > 100) or c7d > 80 or vm > 150:
+        return 3, "Überhitzt", "#ef4444"
+    # Phase 2: Breakout
+    if c24 > 8 or (c24 > 5 and vm > 50) or (c7d > 30 and c24 > 3):
+        return 2, "Breakout", "#f59e0b"
+    # Phase 1: Accumulation
+    return 1, "Accumulation", "#10b981"
+
+
+def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase):
+    """Berechnet Risiko-Level basierend auf Marktdaten."""
+    c24 = abs(change_24h or 0)
+    vm = vol_mcap_pct or 0
+    fr = abs((funding_rate or 0) * 100)
+    reasons = []
+
+    if c24 > 25:
+        reasons.append(f"24h Change extrem: {change_24h:+.1f}%")
+    if vm > 120:
+        reasons.append(f"Vol/MCap extrem: {vm:.0f}%")
+    if fr > 0.1:
+        reasons.append(f"Funding Rate erhöht: {funding_rate*100:+.3f}%")
+    if (change_7d or 0) > 60:
+        reasons.append(f"7d Change extrem: {change_7d:+.1f}%")
+
+    if phase == 3 or len(reasons) >= 2:
+        return "HIGH", "#ef4444", reasons
+    elif len(reasons) >= 1 or phase == 2:
+        return "MEDIUM", "#f59e0b", reasons
+    return "LOW", "#10b981", reasons
+
+
 def fetch_early_movers(_prefetched_perps=None):
-    """Early Movers Scanner V3.0 — Multi-Exchange (Bitget + MEXC)
+    """Early Movers Scanner V4.0 — Phase-Klassifikation + Unified List
 
     4 strategies to find next 10x coins early:
     1. Volume Spike Detector: Vol/MCap anomalously high, price not yet exploded
@@ -3941,61 +3986,106 @@ def fetch_early_movers(_prefetched_perps=None):
     micro_caps.sort(key=lambda x: x.get("DegenScore", 0), reverse=True)
     whale_accumulations.sort(key=lambda x: x.get("WhaleScore", 0), reverse=True)
 
-    # Narrative aggregation
-    narrative_summary = {}
-    for narr, coins_list in narrative_coins.items():
-        if len(coins_list) < 2:
-            continue
-        avg_7d = sum(c.get("Change7d", 0) for c in coins_list) / len(coins_list)
-        avg_24h = sum(c.get("Change24h", 0) for c in coins_list) / len(coins_list)
-        total_vol = sum(c["Vol24h"] for c in coins_list)
-        total_mcap = sum(c.get("MCap", 0) for c in coins_list)
+    # ═══════════════════════════════════════════════════════════════════
+    # UNIFIED LIST: Alle 3 Strategien → eine Liste mit Phase-Klassifikation
+    # ═══════════════════════════════════════════════════════════════════
+    seen_symbols = {}  # Deduplizierung: Symbol → bester Eintrag
 
-        # BUG FIX: Laggards = Coins die deutlich unter dem Sektor-Durchschnitt liegen
-        # Bei avg_7d > 0: Coins die weniger als halb so viel gestiegen sind
-        # Bei avg_7d < 0: Coins die weniger gefallen sind als der Durchschnitt (= relativ stark)
-        if avg_7d > 2:
-            laggards = [c for c in coins_list if c.get("Change7d", 0) < avg_7d * 0.5 and c.get("Change7d", 0) > -10]
-        elif avg_7d < -2:
-            # Sektor fällt: "Laggards" = Coins die weniger fallen = Catch-Up Potential wenn Sektor dreht
-            laggards = [c for c in coins_list if c.get("Change7d", 0) > avg_7d * 0.5 and c.get("Change7d", 0) < 0]
-        else:
-            laggards = []
-        leaders = sorted(coins_list, key=lambda x: x["Change7d"], reverse=True)[:3]
+    def _add_to_unified(entries, source_name, score_key):
+        for entry in entries:
+            sym = entry.get("Symbol", "")
+            raw_score = entry.get(score_key, 0)
+            vm = entry.get("VolMCapRatio", 0)
+            c24 = entry.get("Change24h", 0)
+            c7d = entry.get("Change7d", 0)
+            fr = entry.get("FundingRate", 0)
 
-        # BTC-relative Sektor-Performance
-        avg_btc_relative = round(avg_7d - btc_7d, 2) if btc_7d else round(avg_7d, 2)
+            phase, phase_label, phase_color = _classify_phase(c24, c7d, vm)
+            risk_level, risk_color, risk_reasons = _calculate_risk(c24, c7d, vm, fr, phase)
 
-        narrative_summary[narr] = {
-            "avg_7d": round(avg_7d, 2),
-            "avg_24h": round(avg_24h, 2),
-            "avg_btc_relative": avg_btc_relative,
-            "total_vol": total_vol,
-            "total_mcap": total_mcap,
-            "count": len(coins_list),
-            "leaders": leaders,
-            "laggards": laggards[:5],
-            "coins": coins_list,
-        }
+            # Phase-Multiplier auf Score
+            if phase == 1:
+                score = min(100, int(raw_score * 1.2))
+            elif phase == 3:
+                score = min(50, int(raw_score * 0.5))
+            else:
+                score = raw_score
 
-    narrative_summary = dict(sorted(narrative_summary.items(), key=lambda x: x[1]["avg_7d"], reverse=True))
+            # Signal-Text basierend auf Phase
+            if phase == 1:
+                if score >= 70:
+                    signal_text = "Smart Money Accumulation — guter Einstieg"
+                elif score >= 40:
+                    signal_text = "Volume-Anomalie — beobachten"
+                else:
+                    signal_text = "Leichte Aktivität"
+            elif phase == 2:
+                if score >= 60:
+                    signal_text = "Breakout bestätigt — Momentum"
+                else:
+                    signal_text = "Ausbruch läuft — Vorsicht"
+            else:
+                if risk_level == "HIGH":
+                    signal_text = "DUMP GEFAHR — Finger weg!"
+                else:
+                    signal_text = "Überhitzt — nur für erfahrene Trader"
+
+            # Grade berechnen
+            if score >= 80:
+                grade, grade_label = "S", "Excellent"
+            elif score >= 60:
+                grade, grade_label = "A", "Stark"
+            elif score >= 40:
+                grade, grade_label = "B", "Solide"
+            elif score >= 25:
+                grade, grade_label = "C", "Schwach"
+            else:
+                grade, grade_label = "D", "Meiden"
+
+            unified_entry = dict(entry)
+            unified_entry.update({
+                "phase": phase,
+                "phase_label": phase_label,
+                "phase_color": phase_color,
+                "score": score,
+                "raw_score": raw_score,
+                "risk_level": risk_level,
+                "risk_color": risk_color,
+                "risk_reasons": risk_reasons,
+                "grade": grade,
+                "grade_label": grade_label,
+                "signal_text": signal_text,
+                "source": source_name,
+            })
+
+            # Dedup: Behalte den mit höherem Score
+            if sym not in seen_symbols or seen_symbols[sym]["score"] < score:
+                seen_symbols[sym] = unified_entry
+
+    _add_to_unified(volume_spikes, "Volume Spike", "EarlyScore")
+    _add_to_unified(micro_caps, "Micro-Cap", "DegenScore")
+    _add_to_unified(whale_accumulations, "Whale", "WhaleScore")
+
+    # Sortierung: Phase 1 zuerst, dann nach Score absteigend
+    unified = sorted(seen_symbols.values(), key=lambda x: (x["phase"], -x["score"]))
+
+    p1 = sum(1 for c in unified if c["phase"] == 1)
+    p2 = sum(1 for c in unified if c["phase"] == 2)
+    p3 = sum(1 for c in unified if c["phase"] == 3)
 
     stats = {
         "total_coins": len(all_coins),
-        "volume_spikes": len(volume_spikes),
-        "micro_caps": len(micro_caps),
-        "whale_acc": len(whale_accumulations),
-        "narratives": len(narrative_summary),
+        "unified_count": len(unified),
+        "phase_1_count": p1,
+        "phase_2_count": p2,
+        "phase_3_count": p3,
         "trending_coins": len(trending_ids),
         "btc_7d": btc_7d,
         "perps_total": len(perp_data),
     }
 
     return {
-        "volume_spikes": volume_spikes[:30],
-        "micro_caps": micro_caps[:30],
-        "whale_acc": whale_accumulations[:25],
-        "narratives": narrative_summary,
+        "coins": unified[:50],
         "stats": stats,
     }
 
@@ -4013,8 +4103,10 @@ def _early_movers_wrapper() -> None:
 
         # Save results
         save_cache_file(EARLY_MOVERS_CACHE, [result])
-        print(f"[Early Movers] Scan complete. Found {result['stats']['volume_spikes']} volume spikes, "
-              f"{result['stats']['micro_caps']} micro caps, {result['stats']['whale_acc']} whale positions")
+        s = result.get("stats", {})
+        print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
+              f"Phase 1: {s.get('phase_1_count', 0)}, Phase 2: {s.get('phase_2_count', 0)}, "
+              f"Phase 3: {s.get('phase_3_count', 0)}")
     except Exception as e:
         print(f"[Early Movers] Error: {e}")
 
