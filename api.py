@@ -5978,6 +5978,8 @@ def run_backtest(request: BacktestRequest):
     except Exception as e:
         print(f"[Warning] {e}")
 
+    return result
+
 
 @app.get("/api/backtest-results")
 def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma_crossover")):

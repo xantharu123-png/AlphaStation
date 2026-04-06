@@ -4574,12 +4574,18 @@ function WatchlistTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 // Backtest Tab
 function BacktestTab() {
     const [ticker, setTicker] = useState('');
-    const [strategy, setStrategy] = useState('sma-crossover');
+    const [strategy, setStrategy] = useState('sma_crossover');
     const [months, setMonths] = useState('6');
     const [isRunning, setIsRunning] = useState(false);
     const [results, setResults] = useState(null);
     const [trades, setTrades] = useState([]);
-    const [strategies] = useState(['SMA Crossover', 'RSI Mean Reversion']);
+    const [error, setError] = useState(null);
+
+    const strategyOptions = [
+        { id: 'sma_crossover', label: 'SMA Crossover (20/50)', desc: 'Kauft wenn SMA20 den SMA50 von unten kreuzt' },
+        { id: 'ema_crossover', label: 'EMA Crossover (9/21)', desc: 'Schnellere Signale mit EMA9/EMA21' },
+        { id: 'rsi_mean_reversion', label: 'RSI Mean Reversion', desc: 'Kauft bei RSI Oversold, verkauft bei Overbought' },
+    ];
 
     const runBacktest = async () => {
         if (!ticker.trim()) {
@@ -4588,8 +4594,9 @@ function BacktestTab() {
         }
 
         setIsRunning(true);
+        setError(null);
         try {
-            const response = await fetch(`${API}/api/backtest`, {
+            const response = await fetch(`${API}/api/run-backtest`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ticker: ticker.toUpperCase(), strategy, months: parseInt(months) })
@@ -4597,13 +4604,23 @@ function BacktestTab() {
 
             if (response.ok) {
                 const data = await response.json();
-                setResults(data.data || {});
-                setTrades(data.trades || []);
-                if (window.addToast) window.addToast('Backtest abgeschlossen', 'success');
+                if (data.error) {
+                    setError(data.error);
+                    setResults(null);
+                    setTrades([]);
+                    if (window.addToast) window.addToast(data.error, 'error');
+                } else {
+                    setResults(data);
+                    setTrades(data.trades || []);
+                    if (window.addToast) window.addToast(`Backtest: ${data.total_trades} Trades gefunden`, 'success');
+                }
             } else {
+                const errData = await response.json().catch(() => ({}));
+                setError(errData.detail || 'Backtest fehlgeschlagen');
                 if (window.addToast) window.addToast('Backtest fehlgeschlagen', 'error');
             }
         } catch (err) {
+            setError('Netzwerkfehler');
             if (window.addToast) window.addToast('Fehler beim Backtest', 'error');
         } finally {
             setIsRunning(false);
@@ -4613,91 +4630,120 @@ function BacktestTab() {
     return (
         <div className="space-y-6">
             <div className="card border border-gray-200 p-6 rounded-lg">
-                <div className="grid grid-cols-4 gap-4 mb-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
                     <div>
                         <label className="block text-sm font-semibold mb-2">Ticker</label>
                         <input
                             type="text"
                             value={ticker}
-                            onChange={(e) => setTicker(e.target.value)}
+                            onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                            onKeyDown={(e) => e.key === 'Enter' && runBacktest()}
                             placeholder="z.B. AAPL"
                         />
                     </div>
                     <div>
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
                         <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-                            {strategies.map((s, i) => (
-                                <option key={i} value={s.toLowerCase().replace(' ', '-')}>{s}</option>
+                            {strategyOptions.map(s => (
+                                <option key={s.id} value={s.id}>{s.label}</option>
                             ))}
                         </select>
                     </div>
                     <div>
-                        <label className="block text-sm font-semibold mb-2">Zeitraum (Monate)</label>
+                        <label className="block text-sm font-semibold mb-2">Zeitraum</label>
                         <select value={months} onChange={(e) => setMonths(e.target.value)}>
                             <option value="3">3 Monate</option>
                             <option value="6">6 Monate</option>
                             <option value="12">12 Monate</option>
+                            <option value="24">24 Monate</option>
                         </select>
                     </div>
                     <div className="flex items-end">
                         <button onClick={runBacktest} disabled={isRunning} className="button w-full">
-                            {isRunning ? 'Läuft...' : 'Ausführen'}
+                            {isRunning ? 'Läuft...' : 'Backtest starten'}
                         </button>
                     </div>
                 </div>
+                <p className="text-xs text-gray-500 mt-1">{strategyOptions.find(s => s.id === strategy)?.desc || ''}</p>
             </div>
 
-            {results && (
+            {error && (
+                <div className="card border border-red-200 bg-red-50 p-4 rounded-lg text-sm text-red-700">{error}</div>
+            )}
+
+            {results && !error && (
                 <>
-                    <div className="grid grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                         <div className="metric-card green">
-                            <div className="text-sm font-semibold text-gray-600">Gesamte Trades</div>
-                            <div className="text-2xl font-bold mt-2">{results.total_trades}</div>
+                            <div className="text-xs font-semibold text-gray-500">Trades</div>
+                            <div className="text-2xl font-bold mt-1">{results.total_trades}</div>
                         </div>
                         <div className="metric-card blue">
-                            <div className="text-sm font-semibold text-gray-600">Gewinnquote</div>
-                            <div className="text-2xl font-bold mt-2">{(results.win_rate * 100).toFixed(1)}%</div>
+                            <div className="text-xs font-semibold text-gray-500">Gewinnquote</div>
+                            <div className="text-2xl font-bold mt-1">{results.win_rate?.toFixed(1)}%</div>
                         </div>
                         <div className="metric-card orange">
-                            <div className="text-sm font-semibold text-gray-600">Ø PnL</div>
-                            <div className={`text-2xl font-bold mt-2 ${results.avg_pnl >= 0 ? 'color-positive' : 'color-negative'}`}>
-                                ${results.avg_pnl?.toFixed(2)}
+                            <div className="text-xs font-semibold text-gray-500">Ø PnL pro Trade</div>
+                            <div className={`text-2xl font-bold mt-1 ${results.avg_pnl >= 0 ? 'color-positive' : 'color-negative'}`}>
+                                {results.avg_pnl >= 0 ? '+' : ''}{results.avg_pnl?.toFixed(2)}%
                             </div>
                         </div>
                         <div className="metric-card purple">
-                            <div className="text-sm font-semibold text-gray-600">Max Drawdown</div>
-                            <div className="text-2xl font-bold mt-2 color-negative">{(results.max_drawdown * 100).toFixed(2)}%</div>
+                            <div className="text-xs font-semibold text-gray-500">Max Drawdown</div>
+                            <div className="text-2xl font-bold mt-1 color-negative">-{results.max_drawdown?.toFixed(2)}%</div>
+                        </div>
+                        <div className="metric-card" style={{ borderColor: results.total_return >= 0 ? '#10b981' : '#ef4444' }}>
+                            <div className="text-xs font-semibold text-gray-500">Gesamtrendite</div>
+                            <div className={`text-2xl font-bold mt-1 ${results.total_return >= 0 ? 'color-positive' : 'color-negative'}`}>
+                                {results.total_return >= 0 ? '+' : ''}{results.total_return?.toFixed(2)}%
+                            </div>
                         </div>
                     </div>
 
-                    <div className="metric-card" style={{ borderColor: '#10b981' }}>
-                        <div className="text-sm font-semibold text-gray-600">Gesamtrendite</div>
-                        <div className={`text-3xl font-bold mt-2 ${results.total_return >= 0 ? 'color-positive' : 'color-negative'}`}>
-                            {(results.total_return * 100).toFixed(2)}%
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="card border border-gray-200 p-3 rounded-lg text-center">
+                            <div className="text-xs text-gray-500">Bester Trade</div>
+                            <div className="text-lg font-bold color-positive mt-1">+{results.best_trade?.toFixed(2)}%</div>
+                        </div>
+                        <div className="card border border-gray-200 p-3 rounded-lg text-center">
+                            <div className="text-xs text-gray-500">Schlechtester Trade</div>
+                            <div className="text-lg font-bold color-negative mt-1">{results.worst_trade?.toFixed(2)}%</div>
+                        </div>
+                        <div className="card border border-gray-200 p-3 rounded-lg text-center">
+                            <div className="text-xs text-gray-500">Ø Gewinn</div>
+                            <div className="text-lg font-bold color-positive mt-1">+{results.avg_win?.toFixed(2)}%</div>
+                        </div>
+                        <div className="card border border-gray-200 p-3 rounded-lg text-center">
+                            <div className="text-xs text-gray-500">Ø Verlust</div>
+                            <div className="text-lg font-bold color-negative mt-1">{results.avg_loss?.toFixed(2)}%</div>
                         </div>
                     </div>
 
                     {trades.length > 0 && (
                         <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
-                            <h3 className="font-semibold mb-4">Trade Historie</h3>
+                            <h3 className="font-semibold mb-4">Trade Historie ({trades.length} Trades)</h3>
                             <table className="w-full text-sm">
                                 <thead className="border-b border-gray-200">
                                     <tr>
-                                        <th className="text-left py-2 px-2">Entry Datum</th>
+                                        <th className="text-left py-2 px-2">#</th>
+                                        <th className="text-left py-2 px-2">Entry</th>
                                         <th className="text-right py-2 px-2">Entry Preis</th>
-                                        <th className="text-left py-2 px-2">Exit Datum</th>
+                                        <th className="text-left py-2 px-2">Exit</th>
                                         <th className="text-right py-2 px-2">Exit Preis</th>
                                         <th className="text-right py-2 px-2">PnL%</th>
+                                        <th className="text-center py-2 px-2">Typ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {trades.map((trade, idx) => (
                                         <tr key={idx} className="table-row border-b border-gray-200">
+                                            <td className="py-3 px-2 text-gray-400">{idx + 1}</td>
                                             <td className="py-3 px-2">{trade.entry_date}</td>
                                             <td className="py-3 px-2 text-right">${trade.entry_price?.toFixed(2)}</td>
                                             <td className="py-3 px-2">{trade.exit_date}</td>
                                             <td className="py-3 px-2 text-right">${trade.exit_price?.toFixed(2)}</td>
-                                            <td className={`py-3 px-2 text-right ${trade.pnl_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{trade.pnl_pct?.toFixed(2)}%</td>
+                                            <td className={`py-3 px-2 text-right font-semibold ${trade.pnl_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{trade.pnl_pct >= 0 ? '+' : ''}{trade.pnl_pct?.toFixed(2)}%</td>
+                                            <td className="py-3 px-2 text-center text-xs">{trade.type || 'LONG'}</td>
                                         </tr>
                                     ))}
                                 </tbody>
