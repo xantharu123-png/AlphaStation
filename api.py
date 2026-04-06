@@ -2430,110 +2430,99 @@ def get_chart_data(
             except Exception as e:
                 print(f"S/R error: {e}")
 
-        # Diagonal Trendlines (als Teil von S/R)
-        if "sr" in overlay_list and len(ohlcv) >= 30:
+        # Diagonal Trendlines V2 — Minimum 3 Touches, extend bis zum letzten Bar
+        if "sr" in overlay_list and len(ohlcv) >= 40:
             try:
-                _tl_data = ohlcv[-min(200, len(ohlcv)):]
-                _tl_highs = [d["high"] for d in _tl_data]
-                _tl_lows = [d["low"] for d in _tl_data]
-                _tl_times = [d["time"] for d in _tl_data]
-                n = len(_tl_data)
+                _n = len(ohlcv)
+                _highs = [d["high"] for d in ohlcv]
+                _lows = [d["low"] for d in ohlcv]
+                _times = [d["time"] for d in ohlcv]
 
-                # Swing-Erkennung (window=5 für stabile Swings)
-                sw = max(5, n // 20)
-                s_highs = []  # [(index, price)]
-                s_lows = []
-                for i in range(sw, n - sw):
-                    if _tl_highs[i] >= max(_tl_highs[i-sw:i]) and _tl_highs[i] >= max(_tl_highs[i+1:i+sw+1]):
-                        if not s_highs or i - s_highs[-1][0] > sw:
-                            s_highs.append((i, _tl_highs[i]))
-                    if _tl_lows[i] <= min(_tl_lows[i-sw:i]) and _tl_lows[i] <= min(_tl_lows[i+1:i+sw+1]):
-                        if not s_lows or i - s_lows[-1][0] > sw:
-                            s_lows.append((i, _tl_lows[i]))
+                # ATR für Toleranz
+                _tr = [max(_highs[i] - _lows[i], abs(_highs[i] - ohlcv[i-1]["close"]), abs(_lows[i] - ohlcv[i-1]["close"])) for i in range(1, _n)]
+                _atr = sum(_tr[-14:]) / min(14, len(_tr)) if _tr else 1
+
+                # Swing-Erkennung (window proportional zur Datenmenge)
+                _sw = max(4, _n // 25)
+                _swing_highs = []
+                _swing_lows = []
+                for i in range(_sw, _n - _sw - 1):
+                    if _highs[i] >= max(_highs[max(0,i-_sw):i]) and _highs[i] >= max(_highs[i+1:min(_n, i+_sw+1)]):
+                        if not _swing_highs or i - _swing_highs[-1][0] >= _sw:
+                            _swing_highs.append((i, _highs[i]))
+                    if _lows[i] <= min(_lows[max(0,i-_sw):i]) and _lows[i] <= min(_lows[i+1:min(_n, i+_sw+1)]):
+                        if not _swing_lows or i - _swing_lows[-1][0] >= _sw:
+                            _swing_lows.append((i, _lows[i]))
 
                 trendlines = []
+                _tol = _atr * 0.4  # Toleranz: 40% vom ATR
 
-                # Support-Trendline: 2+ aufsteigende Swing-Lows verbinden
-                if len(s_lows) >= 2:
-                    best_support = None
-                    best_touches = 0
-                    for a in range(len(s_lows) - 1):
-                        for b in range(a + 1, len(s_lows)):
-                            i1, p1 = s_lows[a]
-                            i2, p2 = s_lows[b]
-                            if i2 - i1 < max(10, n // 10):
-                                continue
-                            # Steigung berechnen
-                            slope = (p2 - p1) / (i2 - i1)
-                            # Wie viele Swings berühren die Linie?
-                            _atr = sum(abs(_tl_highs[k] - _tl_lows[k]) for k in range(max(0,n-14), n)) / min(14, n)
-                            tol = _atr * 0.5
-                            touches = 0
-                            valid = True
-                            for idx, price in s_lows:
-                                expected = p1 + slope * (idx - i1)
-                                if abs(price - expected) < tol:
-                                    touches += 1
-                                elif price < expected - tol:
-                                    valid = False
-                                    break
-                            if valid and touches >= 2 and touches > best_touches:
-                                # Linie bis zum letzten Bar verlängern
-                                end_price = p1 + slope * (n - 1 - i1)
-                                best_support = {
-                                    "type": "support",
-                                    "points": [
-                                        {"time": _tl_times[i1], "price": round(p1, 2)},
-                                        {"time": _tl_times[min(n-1, i2 + (i2-i1)//2)], "price": round(p1 + slope * (min(n-1, i2 + (i2-i1)//2) - i1), 2)},
-                                    ],
-                                    "touches": touches,
-                                    "slope": "rising" if slope > 0 else "falling",
-                                }
-                                best_touches = touches
-                    if best_support:
-                        trendlines.append(best_support)
-
-                # Resistance-Trendline: 2+ absteigende Swing-Highs verbinden
-                if len(s_highs) >= 2:
-                    best_resistance = None
-                    best_touches = 0
-                    for a in range(len(s_highs) - 1):
-                        for b in range(a + 1, len(s_highs)):
-                            i1, p1 = s_highs[a]
-                            i2, p2 = s_highs[b]
-                            if i2 - i1 < max(10, n // 10):
+                def find_best_trendline(swings, check_above=False):
+                    """Findet die Linie mit den meisten Touches durch Swing-Punkte.
+                    check_above=True: Resistance (kein Preis darf signifikant ÜBER die Linie)
+                    check_above=False: Support (kein Preis darf signifikant UNTER die Linie)
+                    """
+                    best = None
+                    best_score = 0
+                    for a in range(len(swings)):
+                        for b in range(a + 1, len(swings)):
+                            i1, p1 = swings[a]
+                            i2, p2 = swings[b]
+                            if i2 <= i1 or i2 - i1 < max(10, _n // 8):
                                 continue
                             slope = (p2 - p1) / (i2 - i1)
-                            _atr = sum(abs(_tl_highs[k] - _tl_lows[k]) for k in range(max(0,n-14), n)) / min(14, n)
-                            tol = _atr * 0.5
+                            # Zähle Touches (Swings die die Linie berühren)
                             touches = 0
-                            valid = True
-                            for idx, price in s_highs:
+                            touch_indices = []
+                            violated = False
+                            for idx, price in swings:
                                 expected = p1 + slope * (idx - i1)
-                                if abs(price - expected) < tol:
+                                diff = price - expected
+                                if abs(diff) <= _tol:
                                     touches += 1
-                                elif price > expected + tol:
-                                    valid = False
+                                    touch_indices.append(idx)
+                                elif check_above and diff > _tol * 2:
+                                    # Preis weit ÜBER Resistance → ungültig
+                                    violated = True
                                     break
-                            if valid and touches >= 2 and touches > best_touches:
-                                end_price = p1 + slope * (n - 1 - i1)
-                                best_resistance = {
-                                    "type": "resistance",
+                                elif not check_above and diff < -_tol * 2:
+                                    # Preis weit UNTER Support → ungültig
+                                    violated = True
+                                    break
+                            if violated or touches < 3:
+                                continue
+                            # Score = touches × Spannweite
+                            span = max(touch_indices) - min(touch_indices)
+                            score = touches * span
+                            if score > best_score:
+                                best_score = score
+                                # Linie vom ersten Touch bis zum letzten Bar verlängern
+                                first_i = min(touch_indices)
+                                last_i = _n - 1
+                                best = {
                                     "points": [
-                                        {"time": _tl_times[i1], "price": round(p1, 2)},
-                                        {"time": _tl_times[min(n-1, i2 + (i2-i1)//2)], "price": round(p1 + slope * (min(n-1, i2 + (i2-i1)//2) - i1), 2)},
+                                        {"time": _times[first_i], "price": round(p1 + slope * (first_i - i1), 2)},
+                                        {"time": _times[last_i], "price": round(p1 + slope * (last_i - i1), 2)},
                                     ],
                                     "touches": touches,
-                                    "slope": "rising" if slope > 0 else "falling",
                                 }
-                                best_touches = touches
-                    if best_resistance:
-                        trendlines.append(best_resistance)
+                    return best
+
+                sup = find_best_trendline(_swing_lows, check_above=False)
+                if sup:
+                    sup["type"] = "support"
+                    trendlines.append(sup)
+
+                res = find_best_trendline(_swing_highs, check_above=True)
+                if res:
+                    res["type"] = "resistance"
+                    trendlines.append(res)
 
                 if trendlines:
                     result["trendlines"] = trendlines
             except Exception as e:
                 print(f"Trendline error: {e}")
+                import traceback; traceback.print_exc()
 
         # Volume Profile (VRVP)
         if "vrvp" in overlay_list and len(ohlcv) >= 10:
@@ -2624,9 +2613,14 @@ def get_chart_data(
 
                 # Chart patterns (Double Top/Bottom, H&S, Triangles, Wedges)
                 try:
-                    chart_pats = detect_chart_patterns(ohlcv, lookback=_tfc["lookback"])
+                    _lookback = min(_tfc["lookback"], len(ohlcv))
+                    chart_pats = detect_chart_patterns(ohlcv, lookback=_lookback)
                     if chart_pats:
-                        # Filtere Patterns mit zu wenig Bars-Abstand zwischen Schlüsselpunkten
+                        # CRITICAL: detect_chart_patterns Indizes sind relativ zu ohlcv[-lookback:]
+                        # Wir brauchen den Offset zum vollen ohlcv-Array
+                        _idx_offset = len(ohlcv) - _lookback
+
+                        # Filtere Patterns mit zu wenig Bars-Abstand
                         filtered = []
                         for cp in chart_pats:
                             dp = cp.get("draw_points", [])
@@ -2645,17 +2639,24 @@ def get_chart_data(
                         chart_pats = filtered[:3]
 
                         for cp in chart_pats:
+                            # detect_index ist relativ zum Slice → Offset addieren
                             idx = cp.get("detect_index")
-                            if idx is not None and 0 <= idx < len(ohlcv):
-                                cp["time"] = ohlcv[idx]["time"]
+                            if idx is not None:
+                                actual_idx = idx + _idx_offset
+                                if 0 <= actual_idx < len(ohlcv):
+                                    cp["time"] = ohlcv[actual_idx]["time"]
+                                else:
+                                    cp["time"] = ohlcv[-1]["time"]
                             elif ohlcv:
                                 cp["time"] = ohlcv[-1]["time"]
-                            # draw_points: Index → Time konvertieren
+                            # draw_points: Slice-Index + Offset → ohlcv-Index → Time
                             if cp.get("draw_points"):
                                 for dp in cp["draw_points"]:
                                     di = dp.get("index")
-                                    if di is not None and 0 <= di < len(ohlcv):
-                                        dp["time"] = ohlcv[di]["time"]
+                                    if di is not None:
+                                        actual_di = di + _idx_offset
+                                        if 0 <= actual_di < len(ohlcv):
+                                            dp["time"] = ohlcv[actual_di]["time"]
                         patterns_result["chart_patterns"] = chart_pats
                 except Exception as e:
                     print(f"Chart patterns error: {e}")
@@ -2664,21 +2665,7 @@ def get_chart_data(
                 # Pivots: NICHT im Chart anzeigen (nur Noise)
                 # Werden intern von Harmonics genutzt, aber nicht als Marker gerendert
 
-                # Order blocks
-                try:
-                    obs = detect_order_blocks(ohlcv)
-                    if obs:
-                        patterns_result["order_blocks"] = obs
-                except Exception as e:
-                    print(f"Order blocks error: {e}")
-
-                # Liquidity levels
-                try:
-                    liq = detect_liquidity_levels(ohlcv)
-                    if liq:
-                        patterns_result["liquidity"] = liq
-                except Exception as e:
-                    print(f"Liquidity error: {e}")
+                # Order blocks + Liquidity: Entfernt — zu viel Noise im Chart
 
                 # V2.5: Kohärenz-Filter — widersprüchliche bullish+bearish Patterns bereinigen
                 # Bestimme dominante Richtung aus Preis-Trend

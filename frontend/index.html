@@ -1680,6 +1680,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const chart = useRef(null);
     const candleSeries = useRef(null);
     const overlaySeriesRef = useRef([]);
+    const vrvpSubsRef = useRef([]);
     const savedVisibleRange = useRef(null);
     const prevOverlaysRef = useRef(null);
     const sidebarRef = useRef(null);
@@ -1984,14 +1985,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     if (tl.points && tl.points.length >= 2) {
                         const color = tl.type === 'support' ? '#10b981' : '#ef4444';
                         const tlLine = chart.current.addLineSeries({
-                            color, lineWidth: 2,
-                            lineStyle: LineStyle.Solid,
+                            color, lineWidth: 2, lineStyle: LineStyle.Solid,
                             lastValueVisible: false, priceLineVisible: false,
                             crosshairMarkerVisible: false,
-                            title: tl.type === 'support' ? 'Support TL' : 'Resistance TL',
                         });
-                        const pts = tl.points.map(p => ({ time: p.time, value: p.price }));
-                        tlLine.setData(pts);
+                        tlLine.setData(tl.points.map(p => ({ time: p.time, value: p.price })));
                         overlaySeriesRef.current.push(tlLine);
                     }
                 });
@@ -2063,9 +2061,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     };
 
                     drawVRVP();
-                    // Redraw on scroll/zoom
+                    // Redraw on scroll/zoom — store refs for cleanup
                     chart.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
                     chart.current.subscribeCrosshairMove(drawVRVP);
+                    vrvpSubsRef.current = [drawVRVP];
                 }
             }
 
@@ -2161,49 +2160,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 lineWidth: 2, lastValueVisible: false, priceLineVisible: false,
                                 title: h.pattern || 'Harmonic',
                             });
-                            const points = h.points.map(pt => ({ time: pt.time || pt.t, value: pt.price || pt.p })).filter(pt => pt.time && pt.value);
+                            const points = h.points.map(pt => ({ time: pt.time || pt.t, value: pt.price || pt.p })).filter(pt => pt.time && pt.value).sort((a, b) => a.time - b.time);
                             if (points.length > 0) hLine.setData(points);
                             overlaySeriesRef.current.push(hLine);
                         }
                     });
-                }
-
-                // Order block levels
-                if (chartData.patterns.order_blocks) {
-                    const obs = chartData.patterns.order_blocks;
-                    if (obs.nearest_bull_ob) {
-                        candleSeries.current.createPriceLine({
-                            price: obs.nearest_bull_ob.ob_high || obs.nearest_bull_ob.level,
-                            color: '#10b981', lineWidth: 2, lineStyle: LineStyle.Solid,
-                            axisLabelVisible: true, title: 'Bull OB',
-                        });
-                    }
-                    if (obs.nearest_bear_ob) {
-                        candleSeries.current.createPriceLine({
-                            price: obs.nearest_bear_ob.ob_low || obs.nearest_bear_ob.level,
-                            color: '#ef4444', lineWidth: 2, lineStyle: LineStyle.Solid,
-                            axisLabelVisible: true, title: 'Bear OB',
-                        });
-                    }
-                }
-
-                // Liquidity levels
-                if (chartData.patterns.liquidity) {
-                    const liq = chartData.patterns.liquidity;
-                    if (liq.nearest_buyside) {
-                        candleSeries.current.createPriceLine({
-                            price: liq.nearest_buyside.level,
-                            color: '#3b82f6', lineWidth: 1, lineStyle: LineStyle.Dashed,
-                            axisLabelVisible: true, title: 'Buy Liq',
-                        });
-                    }
-                    if (liq.nearest_sellside) {
-                        candleSeries.current.createPriceLine({
-                            price: liq.nearest_sellside.level,
-                            color: '#f59e0b', lineWidth: 1, lineStyle: LineStyle.Dashed,
-                            axisLabelVisible: true, title: 'Sell Liq',
-                        });
-                    }
                 }
 
                 // Sort markers by time and set them
@@ -2234,6 +2195,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             }
         } catch (err) { console.error('Chart error:', err); }
         return () => {
+            // VRVP event listener cleanup
+            if (vrvpSubsRef.current.length > 0 && chart.current) {
+                try {
+                    vrvpSubsRef.current.forEach(fn => {
+                        chart.current.timeScale().unsubscribeVisibleTimeRangeChange(fn);
+                        chart.current.unsubscribeCrosshairMove(fn);
+                    });
+                } catch(e) {}
+                vrvpSubsRef.current = [];
+            }
             if (chart.current) {
                 try {
                     savedVisibleRange.current = {
@@ -5639,6 +5610,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const chartRef = useRef(null);
     const candleSeriesRef = useRef(null);
     const overlaySeriesRef = useRef([]);
+    const vrvpSubsRef = useRef([]);
     const savedVisibleRange = useRef(null);
     const prevOverlaysRef = useRef(null);
 
@@ -5826,11 +5798,9 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     if (tl.points && tl.points.length >= 2) {
                         const color = tl.type === 'support' ? '#10b981' : '#ef4444';
                         const tlLine = chartRef.current.addLineSeries({
-                            color, lineWidth: 2,
-                            lineStyle: LineStyle.Solid,
+                            color, lineWidth: 2, lineStyle: LineStyle.Solid,
                             lastValueVisible: false, priceLineVisible: false,
                             crosshairMarkerVisible: false,
-                            title: tl.type === 'support' ? 'Support TL' : 'Resistance TL',
                         });
                         tlLine.setData(tl.points.map(p => ({ time: p.time, value: p.price })));
                         overlaySeriesRef.current.push(tlLine);
@@ -5890,8 +5860,10 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         });
                     };
                     drawVRVP();
+                    // Store refs for cleanup
                     chartRef.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
                     chartRef.current.subscribeCrosshairMove(drawVRVP);
+                    vrvpSubsRef.current = [drawVRVP];
                 }
             }
 
@@ -5979,31 +5951,11 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 lineWidth: 2, lastValueVisible: false, priceLineVisible: false,
                                 title: h.pattern || 'Harmonic',
                             });
-                            const points = h.points.map(pt => ({ time: pt.time || pt.t, value: pt.price || pt.p })).filter(pt => pt.time && pt.value);
+                            const points = h.points.map(pt => ({ time: pt.time || pt.t, value: pt.price || pt.p })).filter(pt => pt.time && pt.value).sort((a, b) => a.time - b.time);
                             if (points.length > 0) hLine.setData(points);
                             overlaySeriesRef.current.push(hLine);
                         }
                     });
-                }
-
-                if (chartData.patterns.order_blocks) {
-                    const obs = chartData.patterns.order_blocks;
-                    if (obs.nearest_bull_ob) {
-                        candleSeriesRef.current.createPriceLine({ price: obs.nearest_bull_ob.ob_high || obs.nearest_bull_ob.level, color: '#10b981', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'Bull OB' });
-                    }
-                    if (obs.nearest_bear_ob) {
-                        candleSeriesRef.current.createPriceLine({ price: obs.nearest_bear_ob.ob_low || obs.nearest_bear_ob.level, color: '#ef4444', lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'Bear OB' });
-                    }
-                }
-
-                if (chartData.patterns.liquidity) {
-                    const liq = chartData.patterns.liquidity;
-                    if (liq.nearest_buyside) {
-                        candleSeriesRef.current.createPriceLine({ price: liq.nearest_buyside.level, color: '#3b82f6', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Buy Liq' });
-                    }
-                    if (liq.nearest_sellside) {
-                        candleSeriesRef.current.createPriceLine({ price: liq.nearest_sellside.level, color: '#f59e0b', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Sell Liq' });
-                    }
                 }
 
                 if (markers.length > 0) {
@@ -6029,6 +5981,16 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
             }
         } catch (err) { console.error('Chart error:', err); }
         return () => {
+            // VRVP event listener cleanup
+            if (vrvpSubsRef.current.length > 0 && chartRef.current) {
+                try {
+                    vrvpSubsRef.current.forEach(fn => {
+                        chartRef.current.timeScale().unsubscribeVisibleTimeRangeChange(fn);
+                        chartRef.current.unsubscribeCrosshairMove(fn);
+                    });
+                } catch(e) {}
+                vrvpSubsRef.current = [];
+            }
             if (chartRef.current) {
                 try {
                     savedVisibleRange.current = {
