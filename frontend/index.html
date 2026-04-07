@@ -298,6 +298,7 @@
         .signal-meiden { background-color: rgba(220, 38, 38, 0.2); color: var(--danger); font-weight: 700; }
         .signal-abwarten { background-color: rgba(37, 99, 235, 0.2); color: var(--accent); }
         .signal-beobachten { background-color: rgba(217, 119, 6, 0.2); color: var(--warning); }
+        .signal-lightdiv { background-color: rgba(217, 119, 6, 0.2); color: var(--warning); }
         .signal-btc { background-color: rgba(107, 114, 128, 0.2); color: var(--text-muted); }
 
         .importance-high { background-color: rgba(220, 38, 38, 0.2); color: var(--danger); }
@@ -5134,8 +5135,8 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 
     const getExhaustionColor = (exhaustion) => {
         if (exhaustion >= 70) return 'signal-bullish';   // Hohe Exhaustion = gut für Short = grün
-        if (exhaustion >= 40) return 'signal-lightdiv';  // Mittel = neutral
-        return 'signal-bullish';
+        if (exhaustion >= 40) return 'signal-lightdiv';  // Mittel = gelb/orange
+        return 'signal-bearish';                         // Niedrig = Pump noch aktiv = rot
     };
 
     return (

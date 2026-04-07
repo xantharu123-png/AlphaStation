@@ -3861,13 +3861,13 @@ def fetch_early_movers(_prefetched_perps=None):
                             entry["RecencyScore"] = recency_score
                             entry["TrendingBonus"] = trending_score
                             if price_position >= 0.7 and change_1h > 3:
-                                entry["Signal"] = "Strong buy pressure + live pump!"
+                                entry["Signal"] = "Starker Kaufdruck + Live-Pump!"
                             elif price_position >= 0.7:
-                                entry["Signal"] = "Accumulation (price near high)"
+                                entry["Signal"] = "Akkumulation (Preis nahe Hoch)"
                             elif change_24h > 5:
                                 entry["Signal"] = "Volume + positive 24h"
                             else:
-                                entry["Signal"] = "Volume spike (watch)"
+                                entry["Signal"] = "Volume-Spike — beobachten"
                             volume_spikes.append(entry)
 
             # 2. MICRO-CAP MOMENTUM
@@ -3919,9 +3919,9 @@ def fetch_early_movers(_prefetched_perps=None):
 
                     entry = dict(base_entry)
                     entry["DegenScore"] = min(100, max(10, degen_score))
-                    entry["Signal"] = f"MicroCap +{change_7d:.0f}% 7d"
+                    entry["Signal"] = f"MicroCap +{change_7d:.0f}% (7T)"
                     if is_trending:
-                        entry["Signal"] += " TRENDING"
+                        entry["Signal"] += " 🔥 TRENDING"
                     micro_caps.append(entry)
 
             # 3. WHALE ACCUMULATION
@@ -3933,33 +3933,33 @@ def fetch_early_movers(_prefetched_perps=None):
 
                 if oi_ratio >= 3.0:
                     whale_score += 30
-                    signals.append(f"OI/Vol {oi_ratio:.1f}x (highly leveraged)")
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
                 elif oi_ratio >= 1.5:
                     whale_score += 20
-                    signals.append(f"OI/Vol {oi_ratio:.1f}x (positions building)")
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (Positionen im Aufbau)")
                 elif oi_ratio >= 0.8:
                     whale_score += 10
 
                 # Bonus für absolut hohe OI (echte Whale-Größe)
                 if perp_oi_usdt > 10_000_000:
                     whale_score += 10
-                    signals.append(f"OI ${perp_oi_usdt/1e6:.1f}M (significant)")
+                    signals.append(f"OI ${perp_oi_usdt/1e6:.1f}M (signifikant)")
                 elif perp_oi_usdt > 1_000_000:
                     whale_score += 5
 
                 fr_pct = funding_rate * 100
                 if fr_pct >= 0.05:
                     whale_score += 20
-                    signals.append(f"FR +{fr_pct:.3f}% (longs dominant)")
+                    signals.append(f"FR +{fr_pct:.3f}% (Longs dominieren)")
                 elif fr_pct >= 0.01:
                     whale_score += 10
                 elif fr_pct <= -0.03:
                     if change_24h > 3:
                         whale_score += 20
-                        signals.append(f"FR negative {fr_pct:.3f}% but +{change_24h:.1f}% → squeeze potential")
+                        signals.append(f"FR negativ {fr_pct:.3f}% aber +{change_24h:.1f}% → Squeeze-Potenzial")
                     elif change_1h > 1:
                         whale_score += 12
-                        signals.append(f"FR negative {fr_pct:.3f}% + 1h pump → watch")
+                        signals.append(f"FR negativ {fr_pct:.3f}% + 1h Pump → beobachten")
 
                 # BUG FIX: Whale = Akkumulation, Coin darf NICHT stark fallen
                 # Stabile/leicht steigende Coins = gut, fallende = schlecht
@@ -3974,7 +3974,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     whale_score += 5   # Leicht fallend, noch ok
                 else:
                     whale_score -= 10  # Stark fallend = OI sind Shorts, keine Whales
-                    signals.append(f"WARNUNG: Preis {change_7d:+.1f}% — OI wahrsch. Shorts")
+                    signals.append(f"WARNUNG: Preis {change_7d:+.1f}% — OI vermutlich Shorts")
 
                 if len(exchanges) >= 2:
                     whale_score += 10
@@ -3990,7 +3990,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     # BTC-Alpha für Whale: Coin hält sich besser als BTC = stärkeres Signal
                     if btc_relative_7d > 5:
                         entry["WhaleScore"] = min(100, entry["WhaleScore"] + 5)
-                        signals.append(f"Outperformt BTC um {btc_relative_7d:+.1f}%")
+                        signals.append(f"Outperformt BTC um {btc_relative_7d:+.1f}% (Alpha)")
                     whale_accumulations.append(entry)
 
             # 4. NARRATIVE TRACKER
@@ -4063,7 +4063,7 @@ def fetch_early_movers(_prefetched_perps=None):
             elif score >= 25:
                 grade, grade_label = "C", "Schwach"
             else:
-                grade, grade_label = "D", "Meiden"
+                grade, grade_label = "D", "Uninteressant"
 
             unified_entry = dict(entry)
             unified_entry.update({
