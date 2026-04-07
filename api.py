@@ -757,6 +757,239 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         traceback.print_exc()
 
 
+TURTLE_CACHE = "/tmp/turtle_scan_cache.json"
+
+def _turtle_scan_wrapper() -> None:
+    """Turtle Trading Live-Scanner: Findet Aktien die ihr 20-Tage-Hoch durchbrechen.
+    Original System 1 (Richard Dennis, 1983) — Donchian Channel Breakout."""
+    try:
+        print("[Turtle] Starte Turtle Breakout Scanner...")
+        results = []
+
+        # ── 1. Polygon Snapshot: Alle Aktien mit positivem Move holen ──
+        _all_tickers = []
+        for endpoint in ["gainers"]:
+            try:
+                url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250})
+                if resp.status_code == 200:
+                    _all_tickers.extend(resp.json().get("tickers", []))
+            except Exception:
+                pass
+
+        # Auch Full Snapshot falls wenig Gainers (AH/PM)
+        if len(_all_tickers) < 30:
+            try:
+                url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY})
+                if resp.status_code == 200:
+                    _all_tickers.extend(resp.json().get("tickers", []))
+            except Exception:
+                pass
+
+        # Deduplizieren
+        _seen = set()
+        _unique = []
+        for t in _all_tickers:
+            sym = t.get("ticker", "")
+            if sym not in _seen:
+                _seen.add(sym)
+                _unique.append(t)
+        _all_tickers = _unique
+
+        print(f"[Turtle] {len(_all_tickers)} Aktien im Snapshot")
+
+        # ── 2. Vorfilter: Preis $5+, Change > 0%, kein OTC ──
+        candidates = []
+        for t in _all_tickers:
+            ticker = t.get("ticker", "")
+            if not ticker or "." in ticker or len(ticker) > 5:
+                continue  # OTC / Warrants raus
+            day = t.get("day", {})
+            prev = t.get("prevDay", {})
+            price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+            prev_close = prev.get("c", 0)
+            if price < 5 or prev_close <= 0:
+                continue
+            change_pct = (price - prev_close) / prev_close * 100
+            if change_pct < 0.5:
+                continue  # Nur Aufwärtsbewegungen — Turtle ist Long-only
+            volume = day.get("v", 0)
+            if volume * price < 500000:
+                continue  # Mindest-Dollar-Volume $500k
+            candidates.append((ticker, t, price, prev_close, change_pct, volume))
+
+        print(f"[Turtle] {len(candidates)} Kandidaten nach Vorfilter")
+
+        # ── 3. Top 80 nach Change% sortieren, dann History holen ──
+        candidates.sort(key=lambda x: -x[4])
+        candidates = candidates[:80]
+
+        from datetime import timedelta
+        _today = datetime.now()
+        _from = (_today - timedelta(days=45)).strftime("%Y-%m-%d")
+        _to = _today.strftime("%Y-%m-%d")
+
+        for ticker, snap_data, price, prev_close, change_pct, volume in candidates:
+            try:
+                # 30 Tage Daily Bars holen (brauchen 21+ für Donchian 20)
+                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{_from}/{_to}"
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 35, "sort": "asc"})
+                if resp.status_code != 200:
+                    continue
+                bars = resp.json().get("results", [])
+                if len(bars) < 22:
+                    continue  # Brauchen mindestens 22 Bars (20 History + aktueller + 1 für ATR)
+
+                highs = [b.get("h", 0) for b in bars]
+                lows = [b.get("l", 0) for b in bars]
+                closes = [b.get("c", 0) for b in bars]
+                volumes = [b.get("v", 0) for b in bars]
+
+                # Letzter Bar = heute (oder letzter Handelstag)
+                i = len(bars) - 1
+
+                # ── Donchian Channel High (20 Tage OHNE aktuellen Tag) ──
+                dc_high_20 = max(highs[max(0, i - 20):i])
+                dc_low_10 = min(lows[max(0, i - 10):i])
+
+                # ── ATR(20) als EMA ──
+                atr = 0.0
+                for k in range(1, len(bars)):
+                    tr = max(
+                        highs[k] - lows[k],
+                        abs(highs[k] - closes[k - 1]),
+                        abs(lows[k] - closes[k - 1]),
+                    )
+                    if k == 1:
+                        atr = tr
+                    elif k <= 20:
+                        atr = ((k - 1) * atr + tr) / k  # Seed mit laufendem Avg
+                    else:
+                        atr = (19.0 * atr + tr) / 20.0  # EMA
+
+                # ── BREAKOUT CHECK: Close > 20-Day High ──
+                current_close = closes[i]
+                if current_close <= dc_high_20 or atr <= 0:
+                    continue  # Kein Breakout
+
+                # ── Turtle Levels berechnen ──
+                entry_price = dc_high_20  # Theoretischer Entry am Breakout-Level
+                stop_loss = entry_price - 2.0 * atr
+                exit_level = dc_low_10  # 10-Tage-Tief = Exit
+                risk_per_share = entry_price - stop_loss
+                reward_to_exit = current_close - entry_price
+
+                # Breakout-Stärke: Wie weit über dem 20-Day-High?
+                breakout_pct = (current_close - dc_high_20) / dc_high_20 * 100
+
+                # ── Scoring (0-100) ──
+                score = 0
+
+                # Breakout-Stärke (0-25): Frischer Breakout besser als überschossener
+                if breakout_pct < 1.0:
+                    score += 25  # Ideal: Gerade erst durchgebrochen
+                elif breakout_pct < 3.0:
+                    score += 20
+                elif breakout_pct < 5.0:
+                    score += 12
+                else:
+                    score += 5  # Zu weit weg — späte Entry
+
+                # Volume Confirmation (0-25)
+                avg_vol_20 = sum(volumes[max(0, i - 20):i]) / min(20, max(1, i))
+                rvol = volumes[i] / avg_vol_20 if avg_vol_20 > 0 else 1.0
+                if rvol >= 2.5:
+                    score += 25
+                elif rvol >= 1.5:
+                    score += 18
+                elif rvol >= 1.0:
+                    score += 10
+                else:
+                    score += 3
+
+                # Trend-Stärke (0-20): Aufwärtstrend über 20 Tage
+                if len(closes) >= 21:
+                    trend_pct = (closes[i] - closes[i - 20]) / closes[i - 20] * 100
+                    if trend_pct > 15:
+                        score += 20
+                    elif trend_pct > 8:
+                        score += 15
+                    elif trend_pct > 3:
+                        score += 10
+                    elif trend_pct > 0:
+                        score += 5
+
+                # ATR-Qualität (0-15): Nicht zu volatil, nicht zu eng
+                atr_pct = atr / current_close * 100
+                if 1.0 <= atr_pct <= 4.0:
+                    score += 15  # Sweet Spot
+                elif 0.5 <= atr_pct <= 6.0:
+                    score += 10
+                else:
+                    score += 3
+
+                # Risk/Reward (0-15)
+                if risk_per_share > 0:
+                    rr = reward_to_exit / risk_per_share if reward_to_exit > 0 else 0
+                    if rr >= 2.0:
+                        score += 15
+                    elif rr >= 1.0:
+                        score += 10
+                    elif rr >= 0.5:
+                        score += 5
+
+                score = min(100, score)
+
+                # Grade
+                if score >= 75:
+                    grade = "S"
+                elif score >= 60:
+                    grade = "A"
+                elif score >= 45:
+                    grade = "B"
+                elif score >= 30:
+                    grade = "C"
+                else:
+                    grade = "D"
+
+                results.append({
+                    "Ticker": ticker,
+                    "Preis": round(current_close, 2),
+                    "Change_Pct": round(change_pct, 2),
+                    "DC_High_20": round(dc_high_20, 2),
+                    "DC_Low_10": round(dc_low_10, 2),
+                    "Breakout_Pct": round(breakout_pct, 2),
+                    "ATR": round(atr, 2),
+                    "ATR_Pct": round(atr / current_close * 100, 2),
+                    "Entry": round(entry_price, 2),
+                    "Stop": round(stop_loss, 2),
+                    "Exit_Level": round(exit_level, 2),
+                    "Risk": round(risk_per_share, 2),
+                    "RVOL": round(rvol, 2),
+                    "Volume": volume,
+                    "Dollar_Volume": round(volume * current_close),
+                    "score": score,
+                    "grade": grade,
+                    "signal": f"Breakout +{breakout_pct:.1f}% über 20T-Hoch | Stop ${stop_loss:.2f} (2×ATR) | Exit ${exit_level:.2f} (10T-Tief)",
+                })
+
+            except Exception as e:
+                continue
+
+        # Sortieren: Score absteigend
+        results.sort(key=lambda x: -x["score"])
+        results = results[:50]
+
+        print(f"[Turtle] {len(results)} Breakout-Signale gefunden")
+        save_cache_file(TURTLE_CACHE, results)
+
+    except Exception as e:
+        print(f"[Turtle] Scanner Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def _bear_scan_wrapper() -> None:
     """Run bear scanner in background — finds inverse ETF opportunities and breakdown stocks."""
     try:
@@ -1202,6 +1435,7 @@ _scan_status = {
     "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
+    "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
 }
 _scan_lock = threading.Lock()
@@ -1223,6 +1457,7 @@ def _init_scan_status_from_cache():
         "new_listing": "/tmp/new_listing_scanner.json",
         "volume_spikes": "/tmp/volume_spikes_cache.json",
         "orb": "/tmp/orb_scan_results.json",
+        "turtle": "/tmp/turtle_scan_cache.json",
     }
     for scan_name, cache_path in _cache_map.items():
         if scan_name in _scan_status and os.path.exists(cache_path):
@@ -1312,6 +1547,7 @@ def _scheduler_loop():
         ("money_flow", _money_flow_wrapper),
         ("orb", _orb_scanner_wrapper),
         ("bear", _bear_scan_wrapper),  # V2.5: Bear ist light (~30 API-Calls), nicht heavy
+        ("turtle", _turtle_scan_wrapper),  # ~80 API-Calls (Snapshot + Bars)
     ]
     heavy_scans = [
         ("bi_long", lambda: _bi_background_scan_wrapper("long")),
@@ -1338,6 +1574,7 @@ def _scheduler_loop():
         "new_listing": "/tmp/new_listing_scanner.json",
         "volume_spikes": "/tmp/volume_spikes_cache.json",
         "orb": "/tmp/orb_scan_results.json",
+        "turtle": "/tmp/turtle_scan_cache.json",
     }
     last_run_times = {}
     for name, func in scan_tasks:
@@ -3157,6 +3394,13 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             "message": "Money Flow Scanner started",
             "strategy": request.strategy,
         }
+    elif "turtle" in strategy_lower:
+        _run_scan_safe("turtle", _turtle_scan_wrapper)
+        return {
+            "status": "started",
+            "message": "Turtle Breakout Scanner started",
+            "strategy": request.strategy,
+        }
     elif "listing" in strategy_lower:
         if HAS_NEW_LISTING_SCANNER:
             _run_scan_safe("new_listing", _new_listing_wrapper)
@@ -3223,6 +3467,8 @@ def get_scan_results(
             cache_file = MONEY_FLOW_CACHE
         elif "listing" in strategy_lower:
             cache_file = NEW_LISTING_CACHE
+        elif "turtle" in strategy_lower:
+            cache_file = TURTLE_CACHE
         else:
             # V2.2: Generische Strategie — versuche zuerst strategie-spezifischen Cache
             _strat_cache = _strategy_cache_path(strategy)
