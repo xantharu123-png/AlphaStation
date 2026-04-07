@@ -1766,6 +1766,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     // Fetch chart data — Exchange-Crypto nutzt exchange-chart, CoinGecko-Crypto nutzt crypto-chart, Stocks nutzen Polygon
     // V2.8: AbortController verhindert Race Conditions bei schnellem Timeframe-Wechsel
     useEffect(() => {
+        // Sofort alten Chart löschen → zeigt Loading-State
+        setChartData(null);
         const controller = new AbortController();
         const signal = controller.signal;
         const fetchChart = async () => {
@@ -1784,12 +1786,18 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 } else if (isCrypto) {
                     const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
                     // Auto-Retry bei CoinGecko Rate Limiting (max 3 Versuche)
+                    // Abort-aware sleep: bricht sofort ab wenn Ticker wechselt
+                    const abortableSleep = (ms) => new Promise((resolve) => {
+                        const timer = setTimeout(resolve, ms);
+                        signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+                    });
                     let cryptoSuccess = false;
                     for (let attempt = 0; attempt < 3; attempt++) {
                         if (signal.aborted) return;
                         if (attempt > 0) {
                             setChartData({ ticker, timeframe: '1D', candles: [], error: `Lade Chart... (Versuch ${attempt + 1}/3)` });
-                            await new Promise(r => setTimeout(r, 4000));  // 4s warten vor Retry
+                            await abortableSleep(4000);
+                            if (signal.aborted) return;
                         }
                         try {
                             const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`, { signal });
@@ -4861,6 +4869,7 @@ function StrategieGuideTab() {
         'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert mehrere Wochen Kurshistorie um echte Flaggen zu finden.',
         'Bear Flag': 'Das Gegenstück zur Bull Flag — nach einem starken Abverkauf konsolidiert die Aktie in einer engen Range. Oft ein Zeichen, dass der Abwärtstrend weitergehen wird. Nützlich für Short-Setups.',
         'Breakout Long': 'Findet Aktien, die gerade nach oben ausbrechen und ihren Tagesgewinn halten. Der Kurs schließt nahe dem Tageshoch — ein Zeichen, dass die Käufer die Kontrolle haben. Kann auch Multi-Day-Runner erkennen, die über mehrere Tage steigen.',
+        'Turtle Breakout': 'Die legendäre Turtle Trading Strategie von Richard Dennis (1983). Ein reines Trend-Following System: Wenn der Kurs das 20-Tage-Hoch durchbricht, wird Long eingegangen. Der Stop-Loss liegt 2× ATR (Average True Range) unter dem Einstieg und wird als Trailing-Stop nachgezogen. Exit wenn der Kurs unter das 10-Tage-Tief fällt. Einfach, mechanisch und profitabel in Trendmärkten. Dennis bewies damit, dass Trading erlernbar ist — seine "Turtles" (Anfänger) verdienten über $100M.',
         'Penny Rockets': 'Sucht günstige Aktien im Low-Price-Bereich, die plötzlich explodieren. Nur liquide Aktien werden angezeigt (Mindest-Handelsvolumen), um illiquide Fallen zu vermeiden. Hochriskant, aber potentiell sehr profitabel.',
         'Dip Buy': 'Findet qualitativ hochwertige Aktien im Rücksetzer, die NICHT in Panik verkauft werden. Wenn eine gute Aktie moderat fällt, aber das Handelsvolumen normal bleibt, ist das oft eine Kaufgelegenheit — kein Crash.',
         'Reversal Hunter': 'Sucht nach Wendepunkten: Aktien, die gestern stark gefallen sind und heute wieder Käufer anziehen. Der Scanner unterscheidet zwischen echten Reversals (im Abwärtstrend) und normalen Pullback-Bounces (im Aufwärtstrend).',
