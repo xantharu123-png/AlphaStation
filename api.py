@@ -4050,60 +4050,64 @@ def fetch_early_movers(_prefetched_perps=None):
                         else:
                             price_position = 0.5
 
-                        vol_score = min(35, vol_mcap_ratio / 2)
+                        # Volume Score: logarithmisch — extreme Vol/MCap bringt nicht mehr endlos Punkte
+                        # 30%→10, 50%→15, 100%→22, 200%→25 (max 25)
+                        import math
+                        vol_score = min(25, int(10 * math.log2(max(1, vol_mcap_ratio / 15))))
 
                         momentum_score = 0
                         if 10 < change_7d < 50:
-                            momentum_score = 20
+                            momentum_score = 18
                         elif change_7d > 50:
-                            momentum_score = 10
+                            momentum_score = 8   # Zu spät — überkauft
                         elif 0 < change_7d <= 10:
-                            momentum_score = 15
+                            momentum_score = 12
                         elif change_7d <= 0:
                             # 7d negativ aber 24h/1h pumpt = Reversal-Signal, moderater Score
                             if change_24h > 5 and change_1h > 1:
-                                momentum_score = 12  # vorher 18 (zu hoch für Abwärtstrend)
+                                momentum_score = 10
                             elif change_24h > 3:
-                                momentum_score = 7   # vorher 10
+                                momentum_score = 5
                             else:
                                 momentum_score = 0
 
                         freshness_score = 0
                         if change_24h > 0 and change_1h > 0:
-                            freshness_score = 15
+                            freshness_score = 12
                         elif change_24h > 0:
-                            freshness_score = 10
+                            freshness_score = 7
 
                         position_score = 0
                         if price_position >= 0.7:
-                            position_score = 10
+                            position_score = 8
                         elif price_position >= 0.5:
-                            position_score = 5
+                            position_score = 4
 
-                        perp_score = 10 if has_perp else 0
+                        perp_score = 7 if has_perp else 0
                         if len(exchanges) >= 2:
-                            perp_score += 5
+                            perp_score += 3
 
                         recency_score = 0
                         if change_1h > 5 and vol_mcap_ratio > 40:
-                            recency_score = 15
+                            recency_score = 12
                         elif change_1h > 2 and vol_mcap_ratio > 30:
-                            recency_score = 10
+                            recency_score = 8
                         elif change_1h > 0 and change_24h > 3:
-                            recency_score = 5
+                            recency_score = 4
 
-                        trending_score = 10 if is_trending else 0
+                        trending_score = 7 if is_trending else 0
 
                         # BTC-relative Alpha: Coin outperformt BTC = extra Punkte
                         btc_alpha_score = 0
                         if btc_relative_7d > 20:
-                            btc_alpha_score = 10
+                            btc_alpha_score = 8
                         elif btc_relative_7d > 10:
-                            btc_alpha_score = 7
+                            btc_alpha_score = 5
                         elif btc_relative_7d > 5:
-                            btc_alpha_score = 3
+                            btc_alpha_score = 2
 
                         total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score)
+                        # Max theoretisch: 25+18+12+8+10+12+7+8 = 100 — aber nur bei perfekten Werten
 
                         if total_score >= 30:
                             entry = dict(base_entry)
