@@ -1782,12 +1782,34 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     }
                 } else if (isCrypto) {
                     const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
-                    const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`, { signal });
-                    if (signal.aborted) return;
-                    if (res.ok) {
-                        setChartData(await res.json());
-                    } else {
-                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart nicht verfügbar' });
+                    // Auto-Retry bei CoinGecko Rate Limiting (max 3 Versuche)
+                    let cryptoSuccess = false;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        if (signal.aborted) return;
+                        if (attempt > 0) {
+                            setChartData({ ticker, timeframe: '1D', candles: [], error: `Lade Chart... (Versuch ${attempt + 1}/3)` });
+                            await new Promise(r => setTimeout(r, 4000));  // 4s warten vor Retry
+                        }
+                        try {
+                            const res = await fetch(`${API}/api/crypto-chart?coin_id=${coinId}&days=30`, { signal });
+                            if (signal.aborted) return;
+                            if (res.ok) {
+                                const chartJson = await res.json();
+                                if (chartJson.candles && chartJson.candles.length > 0) {
+                                    setChartData(chartJson);
+                                    cryptoSuccess = true;
+                                    break;
+                                }
+                                // Backend returned empty candles (rate_limited) — retry
+                                continue;
+                            }
+                        } catch (retryErr) {
+                            if (retryErr.name === 'AbortError') return;
+                            continue;
+                        }
+                    }
+                    if (!cryptoSuccess && !signal.aborted) {
+                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart vorübergehend nicht verfügbar — CoinGecko Rate Limit' });
                     }
                 } else {
                     const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
@@ -2351,7 +2373,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Chart */}
                 {chartData && chartData.candles && chartData.candles.length === 0 ? (
                     <div className="text-center py-8 text-gray-500 text-sm bg-gray-800 rounded-lg mb-4">
-                        {chartData.error || 'Keine Chart-Daten verfügbar'}
+                        {(chartData.error || '').includes('Versuch') ? (
+                            <div className="flex items-center justify-center gap-2">
+                                <div className="loading-spinner" style={{width:16,height:16,borderWidth:2}}></div>
+                                <span>{chartData.error}</span>
+                            </div>
+                        ) : (chartData.error || 'Keine Chart-Daten verfügbar')}
                     </div>
                 ) : !chartData ? (
                     <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>

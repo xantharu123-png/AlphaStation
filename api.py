@@ -2745,7 +2745,15 @@ def get_crypto_chart(
     try:
         bars = fetch_daily_candles_crypto(coin_id, days=min(days, 90))
         if not bars or len(bars) < 2:
-            raise HTTPException(status_code=404, detail=f"No chart data for '{coin_id}'")
+            # Leere Antwort statt 404 → Frontend kann "Retry" anbieten
+            return {
+                "ticker": coin_id,
+                "timeframe": "1D",
+                "candles": [],
+                "volume": [],
+                "ema": {},
+                "error": "rate_limited",
+            }
 
         # Convert to TradingView Lightweight Charts format
         candles = []

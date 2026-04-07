@@ -235,8 +235,33 @@ def fetch_daily_candles_crypto(coin_id, days=30):
         # CoinGecko market_chart gibt stündliche Daten für days <= 90
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         params = {"vs_currency": "usd", "days": min(days, 90)}
-        resp = rate_limited_get(url, params=params, timeout=15)
-        if resp.status_code != 200:
+
+        # Retry-Logik für CoinGecko Free API (Rate Limit ~10-30 calls/min)
+        resp = None
+        for _attempt in range(4):
+            _t.sleep(3 if _attempt > 0 else 0.5)  # 0.5s initial, 3s retry delay
+            try:
+                resp = rate_limited_get(url, params=params, timeout=15)
+            except Exception:
+                if _attempt < 3:
+                    continue
+                return []
+            if resp.status_code == 200:
+                break
+            elif resp.status_code == 429:
+                # Rate limited — warte länger vor Retry
+                _t.sleep(10 * (_attempt + 1))
+                continue
+            elif resp.status_code == 404:
+                # Coin existiert nicht auf CoinGecko
+                return []
+            else:
+                if _attempt < 3:
+                    _t.sleep(5)
+                    continue
+                return []
+
+        if resp is None or resp.status_code != 200:
             return []
 
         data = resp.json()
