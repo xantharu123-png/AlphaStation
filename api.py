@@ -4089,26 +4089,40 @@ def fetch_early_movers(_prefetched_perps=None):
     _add_to_unified(micro_caps, "Micro-Cap", "DegenScore")
     _add_to_unified(whale_accumulations, "Whale", "WhaleScore")
 
-    # Sortierung: Phase 1 zuerst, dann nach Score absteigend
-    unified = sorted(seen_symbols.values(), key=lambda x: (x["phase"], -x["score"]))
+    # Sortierung: Score absteigend — Coins aus ALLEN Phasen mischen
+    # (vorher: Phase 1 zuerst → bei 300+ Phase-1-Coins kamen Breakout/Überhitzt nie in Top 50)
+    all_unified = sorted(seen_symbols.values(), key=lambda x: -x["score"])
 
-    p1 = sum(1 for c in unified if c["phase"] == 1)
-    p2 = sum(1 for c in unified if c["phase"] == 2)
-    p3 = sum(1 for c in unified if c["phase"] == 3)
+    # Proportionale Auswahl: Jede Phase bekommt mindestens ihre Top-Coins
+    # damit Breakout und Überhitzt IMMER sichtbar sind
+    phase_1 = [c for c in all_unified if c["phase"] == 1]
+    phase_2 = [c for c in all_unified if c["phase"] == 2]
+    phase_3 = [c for c in all_unified if c["phase"] == 3]
+
+    MAX_DISPLAY = 80
+    # Phase 2 + 3 immer ALLE zeigen (sind selten und wichtig), Rest Phase 1
+    p2_coins = phase_2  # alle Breakouts
+    p3_coins = phase_3  # alle Überhitzten
+    p1_slots = max(0, MAX_DISPLAY - len(p2_coins) - len(p3_coins))
+    p1_coins = phase_1[:p1_slots]
+
+    # Zusammenfügen und nach Phase → Score sortieren
+    unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (x["phase"], -x["score"]))
 
     stats = {
         "total_coins": len(all_coins),
         "unified_count": len(unified),
-        "phase_1_count": p1,
-        "phase_2_count": p2,
-        "phase_3_count": p3,
+        "phase_1_count": len(p1_coins),
+        "phase_2_count": len(p2_coins),
+        "phase_3_count": len(p3_coins),
+        "total_found": len(all_unified),  # Gesamtzahl vor Limit
         "trending_coins": len(trending_ids),
         "btc_7d": btc_7d,
         "perps_total": len(perp_data),
     }
 
     return {
-        "coins": unified[:50],
+        "coins": unified,
         "stats": stats,
     }
 

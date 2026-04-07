@@ -3874,7 +3874,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         {f.v > 0 && stats ? ` (${f.v === 1 ? stats.phase_1_count : f.v === 2 ? stats.phase_2_count : stats.phase_3_count || 0})` : ''}
                     </button>
                 ))}
-                {stats && <span className="text-xs text-gray-400 ml-auto">{stats.unified_count || 0} Coins total</span>}
+                {stats && <span className="text-xs text-gray-400 ml-auto">{stats.unified_count || 0} Coins angezeigt{stats.total_found > stats.unified_count ? ` (${stats.total_found} gefunden)` : ''}</span>}
             </div>
 
             {/* Unified Phase Table */}
