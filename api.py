@@ -4038,8 +4038,8 @@ def fetch_early_movers(_prefetched_perps=None):
                 "BtcRelative7d": btc_relative_7d,
             }
 
-            # 1. VOLUME SPIKE DETECTOR
-            if mcap > 5_000_000 and vol_24h > 200_000:
+            # 1. VOLUME SPIKE DETECTOR (MCap >$10M, Vol >$500k — kleinere sind manipulierbar)
+            if mcap > 10_000_000 and vol_24h > 500_000:
                 if vol_mcap_ratio > 30 and change_7d < 60:
                     if change_24h < -8:
                         pass
@@ -4121,9 +4121,9 @@ def fetch_early_movers(_prefetched_perps=None):
                                 entry["Signal"] = "Volume-Spike — beobachten"
                             volume_spikes.append(entry)
 
-            # 2. MICRO-CAP MOMENTUM
-            _micro_vol_min = 750_000 if change_7d >= 20 else 500_000
-            if 1_000_000 <= mcap <= 50_000_000 and vol_24h > _micro_vol_min:
+            # 2. MICRO-CAP MOMENTUM (MCap $5M-$50M, Vol >$1M — unter $5M MCap manipulierbar)
+            _micro_vol_min = 1_500_000 if change_7d >= 20 else 1_000_000
+            if 5_000_000 <= mcap <= 50_000_000 and vol_24h > _micro_vol_min:
                 if change_7d > 5 and change_24h > -10:
                     degen_score = 0
                     if change_7d >= 100:
@@ -4140,9 +4140,9 @@ def fetch_early_movers(_prefetched_perps=None):
                     else:
                         degen_score += 5
 
-                    if mcap < 5_000_000:
+                    if mcap < 10_000_000:
                         degen_score += 25
-                    elif mcap < 15_000_000:
+                    elif mcap < 20_000_000:
                         degen_score += 20
                     else:
                         degen_score += 10
