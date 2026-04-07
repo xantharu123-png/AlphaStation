@@ -6027,6 +6027,95 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                         position = None
 
         # ══════════════════════════════════════════════════════════
+        # TURTLE TRADING (Richard Dennis, 1983)
+        # Donchian Channel Breakout + ATR-based Stop + Trail Exit
+        # ══════════════════════════════════════════════════════════
+
+        elif strategy == "turtle_breakout":
+            # ── Original Turtle System 1 (Richard Dennis, 1983) ──
+            # Donchian Channel Breakout + ATR(20) EMA + Previous-Breakout-Filter
+            donchian_entry = 20  # Entry: break above 20-day high
+            donchian_exit = 10   # Exit: break below 10-day low
+            atr_period = 20
+            atr_stop_mult = 2.0  # Stop-Loss = 2× N (ATR)
+
+            # ── Pre-compute ATR(20) als EMA (Original Turtle "N") ──
+            # N = ((19 × prev_N) + TR_today) / 20
+            atr_arr = [0.0] * len(closes)
+            for k in range(1, len(closes)):
+                tr = max(
+                    highs[k] - lows[k],
+                    abs(highs[k] - closes[k - 1]),
+                    abs(lows[k] - closes[k - 1]),
+                )
+                if k < atr_period:
+                    # Seed: simple average for first atr_period bars
+                    atr_arr[k] = tr
+                elif k == atr_period:
+                    seed_sum = sum(
+                        max(highs[j] - lows[j],
+                            abs(highs[j] - closes[j - 1]),
+                            abs(lows[j] - closes[j - 1]))
+                        for j in range(1, atr_period + 1)
+                    )
+                    atr_arr[k] = seed_sum / atr_period
+                else:
+                    # EMA smoothing: N = (19 × prev_N + TR) / 20
+                    atr_arr[k] = (19.0 * atr_arr[k - 1] + tr) / 20.0
+
+            # Track previous breakout outcome for System 1 filter
+            last_breakout_profitable = False
+
+            for i in range(donchian_entry + 1, len(closes)):
+                # Donchian Channel High (20-Tage) — ohne aktuellen Tag
+                dc_high = max(highs[i - donchian_entry:i])
+                # Donchian Channel Low (10-Tage) für Exit
+                dc_low_exit = min(lows[max(0, i - donchian_exit):i])
+
+                atr = atr_arr[i]
+
+                if position is None:
+                    # ENTRY: Close durchbricht 20-Tage-Hoch
+                    if closes[i] > dc_high and atr > 0:
+                        # System 1 Filter: Skip wenn letzter Breakout profitabel war
+                        if last_breakout_profitable:
+                            last_breakout_profitable = False  # Reset — nächster gilt wieder
+                            continue
+
+                        # Entry-Preis = Donchian-Breakout-Level (dc_high), nicht Close
+                        entry_price = dc_high
+                        stop_price = entry_price - atr_stop_mult * atr
+                        position = {
+                            "entry_date": dates[i],
+                            "entry_price": entry_price,
+                            "stop": stop_price,
+                            "entry_atr": atr,  # ATR zum Zeitpunkt des Einstiegs
+                        }
+                else:
+                    # EXIT-Bedingungen prüfen (Stop oder Donchian-Exit)
+                    stop_price = position["stop"]
+                    entry_atr = position["entry_atr"]
+
+                    # Stop-Loss getroffen (Intraday Low)
+                    if lows[i] <= stop_price:
+                        exit_price = stop_price  # Ausführung am Stop
+                        pnl = exit_price - position["entry_price"]
+                        last_breakout_profitable = (pnl > 0)
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], exit_price))
+                        position = None
+                    # Donchian Exit: Close unter 10-Tage-Tief
+                    elif closes[i] < dc_low_exit:
+                        pnl = closes[i] - position["entry_price"]
+                        last_breakout_profitable = (pnl > 0)
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
+                        position = None
+                    else:
+                        # Trailing Stop mit Entry-ATR (nicht aktuellem ATR)
+                        new_stop = closes[i] - atr_stop_mult * entry_atr
+                        if new_stop > position["stop"]:
+                            position["stop"] = new_stop
+
+        # ══════════════════════════════════════════════════════════
         # RULE-BASED STRATEGIES (from BACKTEST_STRATEGY_RULES)
         # ══════════════════════════════════════════════════════════
 
@@ -6186,6 +6275,7 @@ def list_backtest_strategies():
         {"id": "macd", "name": "MACD Crossover", "category": "Indikator", "direction": "long"},
         {"id": "bollinger_bands", "name": "Bollinger Bands", "category": "Indikator", "direction": "long"},
         {"id": "mean_reversion_sma", "name": "Mean Reversion (SMA50)", "category": "Indikator", "direction": "long"},
+        {"id": "turtle_breakout", "name": "Turtle Breakout (Donchian 20/10)", "category": "Indikator", "direction": "long"},
     ]
     rule_strats = []
     for name, rule in BACKTEST_RULES.items():
