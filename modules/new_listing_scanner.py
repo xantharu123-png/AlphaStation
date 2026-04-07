@@ -693,7 +693,16 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     if first_price <= 0 or current_price <= 0 or ath <= 0:
         return 0, ["[X] Ungültige Preisdaten"], {}
 
+    # Pump% = Höchster Punkt vs Startpreis
+    # CAVE: Bei älteren Coins (>48 Candles) ist first_price nicht der Listing-Preis
+    # sondern nur der Anfang des beobachteten Fensters.
+    # In dem Fall ist pump_pct weniger aussagekräftig.
     pump_pct = (ath - first_price) / first_price * 100
+    # Sanity Check: Wenn der Pump unrealistisch hoch ist UND der Coin schon
+    # stark unter ATH handelt, war der "Pump" nur normale Volatilität im Fenster
+    if n >= 48 and pump_pct > 0 and pump_pct < 20:
+        # Bei langem Fenster: kleine Swings sind kein echter Pump
+        pump_pct = max(0, pump_pct - 5)  # Konservativere Schätzung
     current_from_ath = (ath - current_price) / ath * 100 if ath > 0 else 0
     total_range = ath - atl if ath > atl else 0.0001
 
@@ -1663,7 +1672,7 @@ def run_new_listing_scanner():
 
     # ── Ergebnisse speichern ──
     results["duration_sec"] = round(time.time() - start_time, 1)
-    results["total_perps"] = len(all_perps) if 'all_perps' in dir() else 0
+    results["total_perps"] = len(all_perps) if 'all_perps' in locals() else 0
 
     try:
         RESULTS_FILE.write_text(json.dumps(results, indent=2, default=str))

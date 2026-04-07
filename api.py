@@ -4866,9 +4866,15 @@ def _new_listing_wrapper() -> None:
                     candles or [], ticker_data, orderbook
                 )
 
+                # BUG FIX: Coins ohne echten Pump rausfiltern
+                # pump_pct < 15% = normale Volatilität, kein Pump & Dump Pattern
+                _pump_raw = pump_data.get("pump_pct", 0) if pump_data else 0
+                if _pump_raw < 15:
+                    continue  # Kein relevanter Pump — nicht anzeigen
+
                 # Signal-Logik: SHORT wenn Exhaustion hoch (Dump-Phase), sonst WATCH
                 _exh = exhaustion_score or 0
-                _pump = pump_data.get("pump_pct", 0) if pump_data else 0
+                _pump = _pump_raw
                 _from_ath = pump_data.get("from_ath_pct", 0) if pump_data else 0
                 _funding = pump_data.get("funding_rate", 0) if pump_data else 0
                 _long_pct = pump_data.get("long_pct", 50) if pump_data else 50
