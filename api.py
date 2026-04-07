@@ -4119,17 +4119,22 @@ def fetch_early_movers(_prefetched_perps=None):
                         elif btc_relative_7d > 5:
                             btc_alpha_score = 2
 
-                        # Downtrend-Penalty: Coin der seit 14d/30d fällt bekommt Abzug
-                        # WAVES-Problem: Klarer Abwärtstrend, trotzdem hoher Score wegen Vol
+                        # Downtrend-Penalty: Coin im Abwärtstrend bekommt Abzug
+                        # WAVES: -10% auf 30d reicht für Penalty — Chart zeigt klaren Downtrend
                         trend_penalty = 0
                         if change_30d < -30:
-                            trend_penalty = 25  # Massiver Downtrend
+                            trend_penalty = 30  # Massiver Downtrend — fast raus
                         elif change_30d < -15:
-                            trend_penalty = 15
-                        elif change_14d < -20:
-                            trend_penalty = 15
-                        elif change_14d < -10:
-                            trend_penalty = 8
+                            trend_penalty = 20
+                        elif change_30d < -5:
+                            trend_penalty = 12  # Leichter Abwärtstrend
+                        if change_14d < -15:
+                            trend_penalty = max(trend_penalty, 20)
+                        elif change_14d < -5:
+                            trend_penalty = max(trend_penalty, 10)
+                        # Low-Price Coins (< $1) mit MCap < $100M = dünne Orderbücher
+                        if price < 1.0 and mcap < 100_000_000:
+                            trend_penalty += 8
 
                         total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score - trend_penalty)
                         # Max theoretisch: 25+18+12+8+10+12+7+8 = 100 — aber Downtrend zieht bis -25 ab
@@ -4199,12 +4204,17 @@ def fetch_early_movers(_prefetched_perps=None):
 
                     # Downtrend-Penalty: MicroCap im Abwärtstrend = Bagholding, nicht Momentum
                     if change_30d < -30:
-                        degen_score -= 25
+                        degen_score -= 30
                     elif change_30d < -15:
-                        degen_score -= 15
-                    elif change_14d < -20:
-                        degen_score -= 15
-                    elif change_14d < -10:
+                        degen_score -= 20
+                    elif change_30d < -5:
+                        degen_score -= 10
+                    if change_14d < -15:
+                        degen_score -= max(0, 15 - abs(degen_score - 100))  # Zusätzlich
+                    elif change_14d < -5:
+                        degen_score -= 8
+                    # Low-Price + Small MCap = dünnes Orderbuch
+                    if price < 1.0 and mcap < 100_000_000:
                         degen_score -= 8
 
                     # Nur Coins mit Score >= 20 aufnehmen (über-gestrafte rausfiltern)
@@ -4276,10 +4286,16 @@ def fetch_early_movers(_prefetched_perps=None):
 
                 # Downtrend-Penalty: Langfristiger Abwärtstrend = OI sind wahrscheinlich Shorts
                 if change_30d < -30:
-                    whale_score -= 20
+                    whale_score -= 25
                     signals.append(f"30d: {change_30d:+.0f}% — Langzeit-Downtrend")
                 elif change_30d < -15:
-                    whale_score -= 10
+                    whale_score -= 15
+                    signals.append(f"30d: {change_30d:+.0f}% — Abwärtstrend")
+                elif change_30d < -5:
+                    whale_score -= 8
+                # Low-Price = dünne Orderbücher
+                if price < 1.0 and mcap < 100_000_000:
+                    whale_score -= 8
 
                 # BUG FIX: Negativen Score abfangen (kann durch Malus passieren)
                 whale_score = max(0, whale_score)
