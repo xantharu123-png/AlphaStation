@@ -4049,7 +4049,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     signal_text = "Ausbruch läuft — Vorsicht"
             else:
                 if risk_level == "HIGH":
-                    signal_text = "DUMP GEFAHR — Finger weg!"
+                    signal_text = "DUMP GEFAHR — Short prüfen!"
                 else:
                     signal_text = "Überhitzt — nur für erfahrene Trader"
 
