@@ -3922,8 +3922,11 @@ def fetch_early_movers(_prefetched_perps=None):
                     if btc_relative_7d > 15:
                         degen_score += 5
 
+                    # Nur Coins mit Score >= 20 aufnehmen (über-gestrafte rausfiltern)
+                    if degen_score < 20:
+                        continue
                     entry = dict(base_entry)
-                    entry["DegenScore"] = min(100, max(10, degen_score))
+                    entry["DegenScore"] = min(100, degen_score)
                     entry["Signal"] = f"MicroCap +{change_7d:.0f}% (7T)"
                     if is_trending:
                         entry["Signal"] += " 🔥 TRENDING"
@@ -4418,7 +4421,7 @@ def _money_flow_wrapper() -> None:
                 chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
 
                 vol = bars[0].get("v", 0)
-                avg_vol = sum(b.get("v", 0) for b in bars[1:11]) / min(len(bars)-1, 10) if len(bars) > 1 else 1
+                avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(len(bars)-1, 20) if len(bars) > 1 else 1
                 rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
 
                 # Fix 3a: On-Balance Volume (OBV) Trend
@@ -5343,7 +5346,7 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
         elif avg_5d >= -5:
             factors["5D Strength"] = 5 + (avg_5d + 5) / 3 * 20
         else:
-            factors["5D Strength"] = max(0, 5 + avg_5d + 5)
+            factors["5D Strength"] = max(0, (avg_5d + 10) / 5 * 5)  # Linear 0 bei -10, 5 bei -5
         weights["5D Strength"] = 15
 
     # ── Factor 5: Nasdaq vs S&P Divergenz (Risk Appetite Proxy) — Weight 10 ──
