@@ -3647,13 +3647,13 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct):
     c7d = change_7d or 0
     vm = vol_mcap_pct or 0
 
-    # Negative Changes (Crashes) = Phase 1 (niedrig bewertet, nicht "Überhitzt")
-    # Nur POSITIVE Pumps triggern Phase 2/3
+    # Crashes (negative 24h) → immer Phase 1. Nur POSITIVE Pumps triggern Phase 2/3
+    # vm allein reicht NICHT — braucht positive Preisbewegung als Bestätigung
     if c24 < 0:
-        c24 = 0  # Crashes zählen nicht als Pump
+        return 1, "Accumulation", "#10b981"
 
-    # Phase 3: Überhitzt (nur bei starken POSITIVEN Moves)
-    if c24 > 30 or (c24 > 20 and vm > 100) or c7d > 80 or vm > 150:
+    # Phase 3: Überhitzt (starke POSITIVE Moves + Volume-Bestätigung)
+    if c24 > 30 or (c24 > 20 and vm > 100) or (c7d > 80 and c24 > 5) or (vm > 150 and c24 > 10):
         return 3, "Überhitzt", "#ef4444"
     # Phase 2: Breakout
     if c24 > 8 or (c24 > 5 and vm > 50) or (c7d > 30 and c24 > 3):
@@ -3678,7 +3678,11 @@ def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase):
     if abs(change_7d or 0) > 60:
         reasons.append(f"7d Change extrem: {change_7d:+.1f}%")
 
-    if phase == 3 or len(reasons) >= 2:
+    if phase == 3:
+        if not reasons:
+            reasons.append("Phase 3: Überhitzt — starker Pump, Korrektur wahrscheinlich")
+        return "HIGH", "#ef4444", reasons
+    if len(reasons) >= 2:
         return "HIGH", "#ef4444", reasons
     elif len(reasons) >= 1 or phase == 2:
         return "MEDIUM", "#f59e0b", reasons
@@ -3810,10 +3814,11 @@ def fetch_early_movers(_prefetched_perps=None):
                         elif 0 < change_7d <= 10:
                             momentum_score = 15
                         elif change_7d <= 0:
+                            # 7d negativ aber 24h/1h pumpt = Reversal-Signal, moderater Score
                             if change_24h > 5 and change_1h > 1:
-                                momentum_score = 18
+                                momentum_score = 12  # vorher 18 (zu hoch für Abwärtstrend)
                             elif change_24h > 3:
-                                momentum_score = 10
+                                momentum_score = 7   # vorher 10
                             else:
                                 momentum_score = 0
 
@@ -3939,6 +3944,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     signals.append(f"OI/Vol {oi_ratio:.1f}x (Positionen im Aufbau)")
                 elif oi_ratio >= 0.8:
                     whale_score += 10
+                    signals.append(f"OI/Vol {oi_ratio:.1f}x (moderat)")
 
                 # Bonus für absolut hohe OI (echte Whale-Größe)
                 if perp_oi_usdt > 10_000_000:
@@ -4026,11 +4032,12 @@ def fetch_early_movers(_prefetched_perps=None):
             phase, phase_label, phase_color = _classify_phase(c24, c7d, vm)
             risk_level, risk_color, risk_reasons = _calculate_risk(c24, c7d, vm, fr, phase)
 
-            # Phase-Multiplier auf Score
+            # Phase-Multiplier: leichter Boost für Phase 1, leichte Strafe für Phase 3
+            # Keine extremen Faktoren die Scores unvergleichbar machen
             if phase == 1:
-                score = min(100, int(raw_score * 1.2))
+                score = min(100, int(raw_score * 1.1))   # +10% (vorher 1.2)
             elif phase == 3:
-                score = min(50, int(raw_score * 0.5))
+                score = min(100, int(raw_score * 0.8))   # -20% (vorher 0.5 + Cap 50)
             else:
                 score = raw_score
 
@@ -4106,8 +4113,8 @@ def fetch_early_movers(_prefetched_perps=None):
     p1_slots = max(0, MAX_DISPLAY - len(p2_coins) - len(p3_coins))
     p1_coins = phase_1[:p1_slots]
 
-    # Zusammenfügen und nach Phase → Score sortieren
-    unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (x["phase"], -x["score"]))
+    # Zusammenfügen: Phase 2+3 zuerst (wichtiger), dann Phase 1, jeweils nach Score
+    unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (1 if x["phase"] in (2, 3) else 2, -x["score"]))
 
     stats = {
         "total_coins": len(all_coins),
@@ -4275,27 +4282,31 @@ def _btc_divergenz_wrapper() -> None:
                     z_score = 0.0
                     n = min(len(asset_returns), len(btc_returns_20d))
 
-                    if n >= 5:
+                    if n >= 10:  # Minimum 10 Tage für statistisch sinnvolle Werte
                         # Mean
                         mean_a = sum(asset_returns[:n]) / n
                         mean_b = sum(btc_returns_20d[:n]) / n
-                        # Covariance and variance
-                        cov = sum((asset_returns[i] - mean_a) * (btc_returns_20d[i] - mean_b) for i in range(n)) / n
-                        var_b = sum((btc_returns_20d[i] - mean_b) ** 2 for i in range(n)) / n
-                        var_a = sum((asset_returns[i] - mean_a) ** 2 for i in range(n)) / n
+                        # Sample Covariance und Variance (n-1 für unbiased)
+                        denom = max(n - 1, 1)
+                        cov = sum((asset_returns[i] - mean_a) * (btc_returns_20d[i] - mean_b) for i in range(n)) / denom
+                        var_b = sum((btc_returns_20d[i] - mean_b) ** 2 for i in range(n)) / denom
+                        var_a = sum((asset_returns[i] - mean_a) ** 2 for i in range(n)) / denom
                         std_a = var_a ** 0.5 if var_a > 0 else 1
                         std_b = var_b ** 0.5 if var_b > 0 else 1
 
                         beta = cov / var_b if var_b > 0 else 1.0
-                        correlation = cov / (std_a * std_b) if (std_a * std_b) > 0 else 0.0
+                        # Pearson Correlation: cov / (std_a * std_b) — korrekt mit sample stats
+                        correlation = max(-1.0, min(1.0, cov / (std_a * std_b) if (std_a * std_b) > 0 else 0.0))
 
                         # Expected 5D move based on beta
                         expected_5d = btc_data["change_5d"] * beta
                         actual_5d = r["change_5d"]
                         divergence = actual_5d - expected_5d
 
-                        # Z-score: how many std devs from expected
-                        z_score = divergence / max(std_a, 0.5)
+                        # Residual Std Dev: sqrt(var_asset + beta² * var_btc)
+                        residual_var = var_a + (beta ** 2) * var_b - 2 * beta * cov
+                        residual_std = max(residual_var ** 0.5 if residual_var > 0 else std_a, 0.5)
+                        z_score = divergence / residual_std
 
                     r["beta"] = round(beta, 2)
                     r["correlation"] = round(correlation, 2)
@@ -5579,7 +5590,7 @@ def _crash_monitor_wrapper() -> None:
             print(f"[Crash Monitor] Breadth raw: {up} up, {down} down, {unchanged} unchanged")
 
             total = up + down + unchanged
-            ratio = round(up / down, 2) if down > 0 else 0
+            ratio = round(up / down, 2) if down > 0 else (999.0 if up > 0 else 0)
             if total == 0:
                 breadth_signal = "MARKT GESCHLOSSEN"
             elif ratio > 1.5:
