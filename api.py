@@ -681,6 +681,19 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                     if _ag >= 5: _strat_score += 12
                     elif _ag >= 2: _strat_score += 15  # Sweet spot
                     elif _ag >= 1: _strat_score += 8
+                    # Downtrend-Penalty: Long-Strategie bei fallendem Vortag = schwächeres Signal
+                    # Für Bullish-Strategien: Vortag stark negativ = Downtrend-Warnung
+                    if "Change %" in filters:
+                        _cm, _ = filters["Change %"]
+                        if _cm >= 0:  # Bullish Strategie
+                            if vortag_pct < -5:
+                                _strat_score -= 15  # Starker Vortags-Drop = schwaches Setup
+                            elif vortag_pct < -2:
+                                _strat_score -= 8
+                            # Close-Position-Check: Close nahe Tagestief bei Long = schlecht
+                            if close_pos < 0.3 and change_pct > 0:
+                                _strat_score -= 10  # Eröffnet stark, faded — Distribution
+
                     # Grade
                     if _strat_score >= 75: _strat_grade = "S"
                     elif _strat_score >= 60: _strat_grade = "A"
@@ -4106,8 +4119,20 @@ def fetch_early_movers(_prefetched_perps=None):
                         elif btc_relative_7d > 5:
                             btc_alpha_score = 2
 
-                        total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score)
-                        # Max theoretisch: 25+18+12+8+10+12+7+8 = 100 — aber nur bei perfekten Werten
+                        # Downtrend-Penalty: Coin der seit 14d/30d fällt bekommt Abzug
+                        # WAVES-Problem: Klarer Abwärtstrend, trotzdem hoher Score wegen Vol
+                        trend_penalty = 0
+                        if change_30d < -30:
+                            trend_penalty = 25  # Massiver Downtrend
+                        elif change_30d < -15:
+                            trend_penalty = 15
+                        elif change_14d < -20:
+                            trend_penalty = 15
+                        elif change_14d < -10:
+                            trend_penalty = 8
+
+                        total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score - trend_penalty)
+                        # Max theoretisch: 25+18+12+8+10+12+7+8 = 100 — aber Downtrend zieht bis -25 ab
 
                         if total_score >= 30:
                             entry = dict(base_entry)
@@ -4171,6 +4196,16 @@ def fetch_early_movers(_prefetched_perps=None):
                     # BTC-Alpha Bonus
                     if btc_relative_7d > 15:
                         degen_score += 5
+
+                    # Downtrend-Penalty: MicroCap im Abwärtstrend = Bagholding, nicht Momentum
+                    if change_30d < -30:
+                        degen_score -= 25
+                    elif change_30d < -15:
+                        degen_score -= 15
+                    elif change_14d < -20:
+                        degen_score -= 15
+                    elif change_14d < -10:
+                        degen_score -= 8
 
                     # Nur Coins mit Score >= 20 aufnehmen (über-gestrafte rausfiltern)
                     if degen_score < 20:
@@ -4238,6 +4273,13 @@ def fetch_early_movers(_prefetched_perps=None):
                 if len(exchanges) >= 2:
                     whale_score += 10
                     signals.append(f"On {' + '.join(exchanges)}")
+
+                # Downtrend-Penalty: Langfristiger Abwärtstrend = OI sind wahrscheinlich Shorts
+                if change_30d < -30:
+                    whale_score -= 20
+                    signals.append(f"30d: {change_30d:+.0f}% — Langzeit-Downtrend")
+                elif change_30d < -15:
+                    whale_score -= 10
 
                 # BUG FIX: Negativen Score abfangen (kann durch Malus passieren)
                 whale_score = max(0, whale_score)
