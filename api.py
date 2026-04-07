@@ -4198,20 +4198,9 @@ def _btc_divergenz_wrapper() -> None:
     """Compare BTC vs correlated assets for divergence signals."""
     try:
         assets = [
-            # Crypto
+            # BTC nur als Referenz (wird NICHT in Ergebnisliste angezeigt)
             ("X:BTCUSD", "BTC", "Bitcoin"),
-            ("X:ETHUSD", "ETH", "Ethereum"),
-            ("X:SOLUSD", "SOL", "Solana"),
-            ("X:XRPUSD", "XRP", "Ripple"),
-            ("X:DOGEUSD", "DOGE", "Dogecoin"),
-            ("X:AVAXUSD", "AVAX", "Avalanche"),
-            ("X:LINKUSD", "LINK", "Chainlink"),
-            ("X:ADAUSD", "ADA", "Cardano"),
-            ("X:DOTUSD", "DOT", "Polkadot"),
-            ("X:MATICUSD", "MATIC", "Polygon"),
-            ("X:AAVEUSD", "AAVE", "Aave"),
-            ("X:UNIUSD", "UNI", "Uniswap"),
-            # BTC-korrelierte Aktien
+            # BTC-korrelierte Aktien — das ist was Trader interessiert
             ("MSTR", "MSTR", "MicroStrategy"),
             ("COIN", "COIN", "Coinbase"),
             ("MARA", "MARA", "Marathon Digital"),
@@ -4329,12 +4318,16 @@ def _btc_divergenz_wrapper() -> None:
                     r["z_score"] = 0
                     r["signal"] = "BTC"
 
-        # Remove _bars before saving to cache
+        # Remove _bars and filter out BTC reference before saving
+        final_results = []
         for r in results:
             if "_bars" in r:
                 del r["_bars"]
+            # BTC ist nur Referenz, nicht in Ergebnisliste anzeigen
+            if r["ticker"] != "X:BTCUSD":
+                final_results.append(r)
 
-        save_cache_file(BTC_DIVERGENZ_CACHE, results)
+        save_cache_file(BTC_DIVERGENZ_CACHE, final_results)
     except Exception as e:
         print(f"BTC divergenz error: {e}")
 
