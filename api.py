@@ -2559,6 +2559,12 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Chart Cache (In-Memory, TTL-basiert) ──
+# Vermeidet wiederholte API-Calls beim schnellen Wechseln zwischen Tickers
+_CHART_CACHE = {}  # key: "ticker:timeframe" → {"data": result, "ts": time.time()}
+_CHART_CACHE_TTL = {"5m": 30, "15m": 60, "1H": 120, "4H": 300, "1D": 600, "1W": 600}
+_CHART_CACHE_MAX = 100  # Max Einträge (LRU-artiges Cleanup)
+
 @app.get("/api/chart-data")
 def get_chart_data(
     ticker: str = Query(..., description="Ticker symbol"),
@@ -2567,6 +2573,14 @@ def get_chart_data(
 ):
     """Get OHLCV data with chart overlays for TradingView Lightweight Charts."""
     try:
+        # ── Chart Cache Check ──
+        _cache_key = f"{ticker}:{timeframe}"
+        _ttl = _CHART_CACHE_TTL.get(timeframe, 120)
+        if _cache_key in _CHART_CACHE:
+            _cached = _CHART_CACHE[_cache_key]
+            if time.time() - _cached["ts"] < _ttl:
+                return _cached["data"]
+
         # Fetch OHLCV bars for the requested timeframe
         ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe=timeframe, bars=300)
         if not ohlcv or len(ohlcv) < 5:
@@ -2978,6 +2992,14 @@ def get_chart_data(
         vol_data = [{"time": bar["time"], "value": bar.get("volume", 0), "color": "rgba(16,185,129,0.3)" if bar["close"] >= bar["open"] else "rgba(220,38,38,0.3)"} for bar in ohlcv]
         result["volume"] = vol_data
 
+        # ── Cache speichern ──
+        _CHART_CACHE[_cache_key] = {"data": result, "ts": time.time()}
+        # Cleanup wenn zu viele Einträge
+        if len(_CHART_CACHE) > _CHART_CACHE_MAX:
+            oldest = sorted(_CHART_CACHE.items(), key=lambda x: x[1]["ts"])[:20]
+            for k, _ in oldest:
+                _CHART_CACHE.pop(k, None)
+
         return result
 
     except HTTPException:
@@ -2986,6 +3008,10 @@ def get_chart_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Crypto Chart Cache ──
+_CRYPTO_CHART_CACHE = {}
+_CRYPTO_CHART_TTL = 120  # 2 Minuten (CoinGecko Rate Limits)
+
 @app.get("/api/crypto-chart")
 def get_crypto_chart(
     coin_id: str = Query(..., description="CoinGecko coin ID (e.g. bitcoin, based-one)"),
@@ -2993,6 +3019,13 @@ def get_crypto_chart(
 ):
     """Get OHLCV chart data for crypto coins via CoinGecko."""
     try:
+        # ── Cache Check ──
+        _cc_key = f"{coin_id}:{days}"
+        if _cc_key in _CRYPTO_CHART_CACHE:
+            _cached = _CRYPTO_CHART_CACHE[_cc_key]
+            if time.time() - _cached["ts"] < _CRYPTO_CHART_TTL:
+                return _cached["data"]
+
         bars = fetch_daily_candles_crypto(coin_id, days=min(days, 90))
         if not bars or len(bars) < 2:
             # Leere Antwort statt 404 → Frontend kann "Retry" anbieten
@@ -3042,13 +3075,20 @@ def get_crypto_chart(
                 except Exception:
                     pass
 
-        return {
+        _result = {
             "ticker": coin_id,
             "timeframe": "1D",
             "candles": candles,
             "volume": vol_data,
             "ema": ema_overlays,
         }
+        # ── Cache speichern ──
+        _CRYPTO_CHART_CACHE[_cc_key] = {"data": _result, "ts": time.time()}
+        if len(_CRYPTO_CHART_CACHE) > 80:
+            oldest = sorted(_CRYPTO_CHART_CACHE.items(), key=lambda x: x[1]["ts"])[:20]
+            for k, _ in oldest:
+                _CRYPTO_CHART_CACHE.pop(k, None)
+        return _result
     except HTTPException:
         raise
     except Exception as e:
@@ -3068,6 +3108,14 @@ def get_exchange_chart(
         raise HTTPException(status_code=501, detail="New listing scanner module not available")
 
     try:
+        # ── Cache Check ──
+        _ex_key = f"ex:{symbol}:{exchange}:{timeframe}"
+        _ex_ttl = 60 if timeframe in ("5m", "15m") else 120
+        if _ex_key in _CHART_CACHE:
+            _cached = _CHART_CACHE[_ex_key]
+            if time.time() - _cached["ts"] < _ex_ttl:
+                return _cached["data"]
+
         # Timeframe-Mapping von Frontend-Format
         tf_map = {"5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d", "1W": "1d"}
         tf = tf_map.get(timeframe, timeframe.lower())
@@ -3133,7 +3181,7 @@ def get_exchange_chart(
                 except Exception:
                     pass
 
-        return {
+        _result = {
             "ticker": symbol,
             "exchange": exchange,
             "timeframe": timeframe,
@@ -3141,6 +3189,15 @@ def get_exchange_chart(
             "volume": vol_data,
             "ema": ema_overlays,
         }
+
+        # ── Cache Save ──
+        _CHART_CACHE[_ex_key] = {"data": _result, "ts": time.time()}
+        if len(_CHART_CACHE) > 100:
+            _sorted = sorted(_CHART_CACHE.items(), key=lambda x: x[1]["ts"])
+            for _dk, _ in _sorted[:20]:
+                _CHART_CACHE.pop(_dk, None)
+
+        return _result
     except HTTPException:
         raise
     except Exception as e:
@@ -3899,25 +3956,28 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct):
 
     Basiert auf 24h-Change, 7d-Change und Vol/MCap-Ratio.
     Phase 1: Preis stabil/leicht steigend, Volume auffällig → Smart Money kauft leise
-    Phase 2: Breakout bestätigt, Preis +5-20%, Volume hoch
-    Phase 3: Überhitzt, Preis >30% oder Vol/MCap extrem → DUMP-Gefahr
+    Phase 2: Breakout bestätigt, Preis deutlich positiv + Volume
+    Phase 3: Überhitzt, extremer Pump → DUMP-Gefahr
     """
     c24 = change_24h or 0
     c7d = change_7d or 0
     vm = vol_mcap_pct or 0
 
-    # Crashes (negative 24h) → immer Phase 1. Nur POSITIVE Pumps triggern Phase 2/3
-    # vm allein reicht NICHT — braucht positive Preisbewegung als Bestätigung
-    if c24 < 0:
-        return 1, "Accumulation", "#10b981"
-
-    # Phase 3: Überhitzt (starke POSITIVE Moves + Volume-Bestätigung)
+    # Phase 3: Überhitzt (starke Moves — auch Pullbacks nach massivem 7d-Pump)
     if c24 > 30 or (c24 > 20 and vm > 100) or (c7d > 80 and c24 > 5) or (vm > 150 and c24 > 10):
         return 3, "Überhitzt", "#ef4444"
-    # Phase 2: Breakout
+    # 7d extrem positiv aber 24h leicht negativ = Pullback nach Pump, trotzdem Phase 3
+    if c7d > 60 and c24 > -5:
+        return 3, "Überhitzt", "#ef4444"
+
+    # Phase 2: Breakout (24h positiv ODER starker 7d-Trend mit kleinem Pullback)
     if c24 > 8 or (c24 > 5 and vm > 50) or (c7d > 30 and c24 > 3):
         return 2, "Breakout", "#f59e0b"
-    # Phase 1: Accumulation
+    # 7d stark positiv aber 24h leicht negativ = immer noch Breakout-Phase, nicht Accumulation
+    if c7d > 20 and c24 > -3:
+        return 2, "Breakout", "#f59e0b"
+
+    # Phase 1: Accumulation (stabil oder leicht steigend)
     return 1, "Accumulation", "#10b981"
 
 
@@ -3962,7 +4022,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
     Returns: dict with volume_spikes, micro_caps, whale_acc, narratives, stats
     """
-    all_coins = _fetch_coingecko_markets(pages=4)
+    all_coins = _fetch_coingecko_markets(pages=8)
     if not all_coins:
         return {"coins": [], "stats": {"error": "No data"}}
 
@@ -3991,7 +4051,6 @@ def fetch_early_movers(_prefetched_perps=None):
     volume_spikes = []
     micro_caps = []
     whale_accumulations = []
-    narrative_coins = {}
 
     for coin in all_coins:
         try:
@@ -4065,7 +4124,6 @@ def fetch_early_movers(_prefetched_perps=None):
 
                         # Volume Score: logarithmisch — extreme Vol/MCap bringt nicht mehr endlos Punkte
                         # 30%→10, 50%→15, 100%→22, 200%→25 (max 25)
-                        import math
                         vol_score = min(25, int(10 * math.log2(max(1, vol_mcap_ratio / 15))))
 
                         momentum_score = 0
@@ -4158,8 +4216,10 @@ def fetch_early_movers(_prefetched_perps=None):
             # 2. MICRO-CAP MOMENTUM (MCap $5M-$50M, Vol >$1M — unter $5M MCap manipulierbar)
             _micro_vol_min = 1_500_000 if change_7d >= 20 else 1_000_000
             if 5_000_000 <= mcap <= 50_000_000 and vol_24h > _micro_vol_min:
-                if change_7d > 5 and change_24h > -10:
+                if change_7d > 5 and change_24h > -5:  # War -10, zu locker für "Momentum"
                     degen_score = 0
+
+                    # 7d-Momentum (max 30)
                     if change_7d >= 100:
                         degen_score += 30
                     elif change_7d >= 50:
@@ -4167,6 +4227,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     else:
                         degen_score += 15
 
+                    # Vol/MCap (max 25)
                     if vol_mcap_ratio > 50:
                         degen_score += 25
                     elif vol_mcap_ratio > 20:
@@ -4174,25 +4235,31 @@ def fetch_early_movers(_prefetched_perps=None):
                     else:
                         degen_score += 5
 
+                    # MCap-Bonus: Kleiner = mehr Upside, aber KEIN Widerspruch zur Low-Price-Penalty
+                    # Low-Price-Penalty gilt nur für Coins <$1 (dünnes Orderbuch-Proxy)
+                    # MCap-Bonus gilt immer (Upside-Potenzial)
                     if mcap < 10_000_000:
-                        degen_score += 25
+                        degen_score += 15  # War 25 — reduziert: kleinste MCap ≠ automatisch bester Score
                     elif mcap < 20_000_000:
-                        degen_score += 20
+                        degen_score += 12
                     else:
-                        degen_score += 10
+                        degen_score += 8
 
                     if has_perp:
                         degen_score += 10
                     if len(exchanges) >= 2:
                         degen_score += 5
 
-                    if change_1h > 2:
-                        degen_score += 5
+                    # Frische Bestätigung: 24h UND 1h müssen positiv sein
+                    if change_1h > 2 and change_24h > 3:
+                        degen_score += 8
+                    elif change_1h > 0 and change_24h > 0:
+                        degen_score += 3
 
                     if is_trending:
-                        degen_score += 15
+                        degen_score += 12  # War 15 — Trending allein ist kein starkes Signal
 
-                    # BUG FIX: Extreme Pumps (>200% 7d) = wahrscheinlich zu spät, Abzug
+                    # Extreme Pumps (>200% 7d) = wahrscheinlich zu spät, Abzug
                     if change_7d > 200:
                         degen_score -= 15
                     elif change_7d > 150:
@@ -4202,7 +4269,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     if btc_relative_7d > 15:
                         degen_score += 5
 
-                    # Downtrend-Penalty: MicroCap im Abwärtstrend = Bagholding, nicht Momentum
+                    # Downtrend-Penalty: MicroCap im Abwärtstrend = Bagholding
                     if change_30d < -30:
                         degen_score -= 30
                     elif change_30d < -15:
@@ -4210,12 +4277,12 @@ def fetch_early_movers(_prefetched_perps=None):
                     elif change_30d < -5:
                         degen_score -= 10
                     if change_14d < -15:
-                        degen_score -= max(0, 15 - abs(degen_score - 100))  # Zusätzlich
+                        degen_score -= 15
                     elif change_14d < -5:
                         degen_score -= 8
-                    # Low-Price + Small MCap = dünnes Orderbuch
-                    if price < 1.0 and mcap < 100_000_000:
-                        degen_score -= 8
+                    # Low-Price = dünnes Orderbuch (unabhängig vom MCap-Bonus)
+                    if price < 1.0:
+                        degen_score -= 5
 
                     # Nur Coins mit Score >= 20 aufnehmen (über-gestrafte rausfiltern)
                     if degen_score < 20:
@@ -4234,36 +4301,55 @@ def fetch_early_movers(_prefetched_perps=None):
                 whale_score = 0
                 signals = []
 
-                if oi_ratio >= 3.0:
-                    whale_score += 30
-                    signals.append(f"OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
-                elif oi_ratio >= 1.5:
-                    whale_score += 20
-                    signals.append(f"OI/Vol {oi_ratio:.1f}x (Positionen im Aufbau)")
-                elif oi_ratio >= 0.8:
-                    whale_score += 10
-                    signals.append(f"OI/Vol {oi_ratio:.1f}x (moderat)")
+                # OI/Vol Ratio — NUR mit absolutem OI-Gate (sonst = Illiquidität)
+                # Mindestens $200k OI nötig damit der Ratio überhaupt Bedeutung hat
+                if perp_oi_usdt >= 200_000:
+                    if oi_ratio >= 3.0:
+                        whale_score += 25
+                        signals.append(f"OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
+                    elif oi_ratio >= 1.5:
+                        whale_score += 18
+                        signals.append(f"OI/Vol {oi_ratio:.1f}x (Positionen im Aufbau)")
+                    elif oi_ratio >= 0.8:
+                        whale_score += 10
+                        signals.append(f"OI/Vol {oi_ratio:.1f}x (moderat)")
+                else:
+                    # Niedriges OI — Ratio ignorieren, nur OI-Existenz minimal werten
+                    whale_score += 3
+                    signals.append(f"OI nur ${perp_oi_usdt/1e3:.0f}k — zu dünn für Whale-Signal")
 
                 # Bonus für absolut hohe OI (echte Whale-Größe)
                 if perp_oi_usdt > 10_000_000:
-                    whale_score += 10
-                    signals.append(f"OI ${perp_oi_usdt/1e6:.1f}M (signifikant)")
+                    whale_score += 12
+                    signals.append(f"OI ${perp_oi_usdt/1e6:.1f}M (Whale-Größe)")
+                elif perp_oi_usdt > 3_000_000:
+                    whale_score += 8
+                    signals.append(f"OI ${perp_oi_usdt/1e6:.1f}M (solide)")
                 elif perp_oi_usdt > 1_000_000:
-                    whale_score += 5
+                    whale_score += 4
 
                 fr_pct = funding_rate * 100
-                if fr_pct >= 0.05:
-                    whale_score += 20
-                    signals.append(f"FR +{fr_pct:.3f}% (Longs dominieren)")
-                elif fr_pct >= 0.01:
-                    whale_score += 10
+                # Whale-Akkumulation = Preis stabil/steigend TROTZ neutraler/negativer FR
+                # Hohe positive FR = Longs überfüllt = Liquidations-Risiko (BEARISH)
+                if fr_pct >= 0.08:
+                    whale_score -= 5  # Extrem overcrowded — Warnsignal
+                    signals.append(f"FR +{fr_pct:.3f}% — Longs überfüllt, Liquidations-Risiko!")
+                elif fr_pct >= 0.03:
+                    whale_score += 5   # Leicht bullish, aber vorsichtig
+                elif 0.0 <= fr_pct < 0.03:
+                    whale_score += 15  # Neutral-positiv = ideale Akkumulationszone
+                    signals.append(f"FR neutral {fr_pct:+.3f}% — stille Akkumulation")
                 elif fr_pct <= -0.03:
                     if change_24h > 3:
-                        whale_score += 20
-                        signals.append(f"FR negativ {fr_pct:.3f}% aber +{change_24h:.1f}% → Squeeze-Potenzial")
+                        whale_score += 25  # Shorts zahlen + Preis steigt = Squeeze
+                        signals.append(f"FR {fr_pct:.3f}% + Preis +{change_24h:.1f}% → Short-Squeeze!")
                     elif change_1h > 1:
-                        whale_score += 12
-                        signals.append(f"FR negativ {fr_pct:.3f}% + 1h Pump → beobachten")
+                        whale_score += 15
+                        signals.append(f"FR negativ {fr_pct:.3f}% + 1h Pump → Squeeze-Aufbau")
+                    else:
+                        whale_score += 5  # Negative FR allein = Shorts dominieren, abwarten
+                else:
+                    whale_score += 10  # Leicht negative FR = gesund
 
                 # BUG FIX: Whale = Akkumulation, Coin darf NICHT stark fallen
                 # Stabile/leicht steigende Coins = gut, fallende = schlecht
@@ -4274,11 +4360,14 @@ def fetch_early_movers(_prefetched_perps=None):
                     whale_score += 15  # Leicht steigend = gut
                 elif change_7d >= 30:
                     whale_score += 5   # Schon zu stark gepumpt
-                elif -15 <= change_7d < -5:
-                    whale_score += 5   # Leicht fallend, noch ok
+                elif -10 <= change_7d < -5:
+                    whale_score += 3   # Leicht fallend, noch ok aber vorsichtig
+                elif -15 <= change_7d < -10:
+                    whale_score -= 5   # Deutlich fallend, skeptisch
+                    signals.append(f"Preis {change_7d:+.1f}% — OI könnten Shorts sein")
                 else:
-                    whale_score -= 10  # Stark fallend = OI sind Shorts, keine Whales
-                    signals.append(f"WARNUNG: Preis {change_7d:+.1f}% — OI vermutlich Shorts")
+                    whale_score -= 20  # Stark fallend = OI sind Shorts, keine Whales
+                    signals.append(f"WARNUNG: Preis {change_7d:+.1f}% — OI sind wahrscheinlich Shorts!")
 
                 if len(exchanges) >= 2:
                     whale_score += 10
@@ -4309,12 +4398,6 @@ def fetch_early_movers(_prefetched_perps=None):
                         entry["WhaleScore"] = min(100, entry["WhaleScore"] + 5)
                         signals.append(f"Outperformt BTC um {btc_relative_7d:+.1f}% (Alpha)")
                     whale_accumulations.append(entry)
-
-            # 4. NARRATIVE TRACKER
-            if narrative and mcap > 10_000_000:
-                if narrative not in narrative_coins:
-                    narrative_coins[narrative] = []
-                narrative_coins[narrative].append(base_entry)
 
         except Exception as _coin_err:
             print(f"[Early Movers] Error processing {coin.get('symbol','?')}: {_coin_err}")
@@ -4399,13 +4482,32 @@ def fetch_early_movers(_prefetched_perps=None):
                 "source": source_name,
             })
 
-            # Dedup: Behalte den mit höherem Score
-            if sym not in seen_symbols or seen_symbols[sym]["score"] < score:
+            # Dedup: Behalte den mit höherem Score, aber merke ALLE Quellen
+            if sym not in seen_symbols:
+                unified_entry["sources"] = [source_name]
                 seen_symbols[sym] = unified_entry
+            else:
+                # Quelle hinzufügen (Multi-Signal = stärkere Konfluenz)
+                if source_name not in seen_symbols[sym].get("sources", []):
+                    seen_symbols[sym]["sources"].append(source_name)
+                if score > seen_symbols[sym]["score"]:
+                    _old_sources = seen_symbols[sym].get("sources", [])
+                    unified_entry["sources"] = _old_sources
+                    seen_symbols[sym] = unified_entry
 
     _add_to_unified(volume_spikes, "Volume Spike", "EarlyScore")
     _add_to_unified(micro_caps, "Micro-Cap", "DegenScore")
     _add_to_unified(whale_accumulations, "Whale", "WhaleScore")
+
+    # Konfluenz-Bonus: Coin in 2+ Strategien = stärkeres Signal
+    for sym, entry in seen_symbols.items():
+        n_sources = len(entry.get("sources", []))
+        if n_sources >= 3:
+            entry["score"] = min(100, entry["score"] + 10)
+            entry["signal_text"] += f" | KONFLUENZ: {', '.join(entry['sources'])}"
+        elif n_sources == 2:
+            entry["score"] = min(100, entry["score"] + 5)
+            entry["signal_text"] += f" | {', '.join(entry['sources'])}"
 
     # Sortierung: Score absteigend — Coins aus ALLEN Phasen mischen
     # (vorher: Phase 1 zuerst → bei 300+ Phase-1-Coins kamen Breakout/Überhitzt nie in Top 50)
@@ -4417,7 +4519,7 @@ def fetch_early_movers(_prefetched_perps=None):
     phase_2 = [c for c in all_unified if c["phase"] == 2]
     phase_3 = [c for c in all_unified if c["phase"] == 3]
 
-    MAX_DISPLAY = 80
+    MAX_DISPLAY = 120  # Mehr Coins analysiert (2000 statt 1000) → mehr Ergebnisse zeigen
     # Phase 2 + 3 immer ALLE zeigen (sind selten und wichtig), Rest Phase 1
     p2_coins = phase_2  # alle Breakouts
     p3_coins = phase_3  # alle Überhitzten
