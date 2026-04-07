@@ -2462,7 +2462,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Exhaustion Analyse</h4>
                     <div className="grid grid-cols-2 gap-2">
-                        <div><span className="text-gray-500">Exhaustion</span> <span className={`font-semibold px-2 py-0.5 rounded ${(scannerData.exhaustion_score||0) >= 70 ? 'bg-red-100 text-red-800' : (scannerData.exhaustion_score||0) >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'}`}>{scannerData.exhaustion_score?.toFixed(0) || '–'}/100</span></div>
+                        <div><span className="text-gray-500">Exhaustion</span> <span className={`font-semibold px-2 py-0.5 rounded ${(scannerData.exhaustion_score||0) >= 70 ? 'bg-green-100 text-green-800' : (scannerData.exhaustion_score||0) >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{scannerData.exhaustion_score?.toFixed(0) || '–'}/100</span></div>
                         <div><span className="text-gray-500">Signal</span> <span className={`font-semibold px-2 py-0.5 rounded ${scannerData.signal?.includes('SHORT') ? 'bg-red-100 text-red-800' : scannerData.signal === 'WATCH' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'}`}>{scannerData.signal || '–'}</span></div>
                         <div><span className="text-gray-500">Pump %</span> <span className={`font-semibold ${(scannerData.pump_pct||0) > 0 ? 'color-positive' : 'color-negative'}`}>{scannerData.pump_pct ? `+${scannerData.pump_pct}%` : '–'}</span></div>
                         <div><span className="text-gray-500">vom ATH %</span> <span className="font-semibold color-negative">{scannerData.from_ath_pct ? `-${scannerData.from_ath_pct}%` : '–'}</span></div>
@@ -5133,8 +5133,8 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     };
 
     const getExhaustionColor = (exhaustion) => {
-        if (exhaustion >= 70) return 'signal-bearish';
-        if (exhaustion >= 40) return 'signal-lightdiv';
+        if (exhaustion >= 70) return 'signal-bullish';   // Hohe Exhaustion = gut für Short = grün
+        if (exhaustion >= 40) return 'signal-lightdiv';  // Mittel = neutral
         return 'signal-bullish';
     };
 
