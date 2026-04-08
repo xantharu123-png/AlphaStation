@@ -6485,14 +6485,23 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 window = closes[i-period:i]
                 sma = sum(window) / period
                 std = (sum((x - sma)**2 for x in window) / period) ** 0.5
+                if std < 0.001:
+                    continue  # Keine Volatilität = kein Signal
                 upper = sma + 2 * std
                 lower = sma - 2 * std
                 if position is None:
+                    # Long: Preis unter Lower Band
                     if closes[i] <= lower:
-                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "long"}
+                    # Short: Preis über Upper Band
+                    elif closes[i] >= upper:
+                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "short"}
                 else:
-                    if closes[i] >= upper:
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
+                    if position["dir"] == "long" and closes[i] >= sma:
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "long"))
+                        position = None
+                    elif position["dir"] == "short" and closes[i] <= sma:
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "short"))
                         position = None
 
         elif strategy == "mean_reversion_sma":

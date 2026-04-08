@@ -2169,12 +2169,10 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price, catalyst_
         risk_score = max(0, risk_score - penalty)
         risk_details.append(f" {len(negative_flags)} negative Signale (−{penalty} Pts)")
 
-    # FIX 4: Binary Event Risk — if catalyst is borderline but fundamentals weak
-    # Catalyst pending (>0) but borderline (<15) + weak fundamentals = higher risk
-    if catalyst_score > 0 and catalyst_score < 15:
-        # Weak catalyst = higher risk of negative outcome
+    # Borderline Catalyst Risk — NUR wenn nicht schon durch negative Flags bestraft
+    if catalyst_score > 0 and catalyst_score < 15 and len(negative_flags) < 2:
         risk_score = max(0, risk_score - 3)
-        risk_details.append(" [!] Borderline Catalyst + Weak Fundamentals = Risiko")
+        risk_details.append(" [!] Borderline Catalyst = Risiko")
 
     return {"risk_score": min(15, risk_score), "risk_details": risk_details}
 
@@ -2431,7 +2429,9 @@ def _biotech_background_scan(poly_key):
                 _mcap_m = details.get("market_cap_millions", 0)
                 _stock_price = _tech_details.get("price", 0)
                 _penny_warning = ""
-                if _mcap_m < 50 or _stock_price < 1.0:
+                if _mcap_m < 50 and _stock_price < 2.0:
+                    _penny_warning = " PENNY"
+                elif _stock_price < 1.0:
                     _penny_warning = " PENNY"
                 elif _mcap_m < 100:
                     _penny_warning = " MICRO"

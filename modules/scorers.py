@@ -453,10 +453,9 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
         if has_volume_data and rvol and rvol > 5.0:
             selloff_pressure += 20  # Volume Climax nach Run = Top-Signal
 
-    # Candle zeigt Schwäche
+    # Candle zeigt Schwäche (NUR body_pct — Upper Wick wird bereits oben bei health direkt bestraft)
     if candle_analyzed:
-        if upper_wick_pct > 0.35:
-            selloff_pressure += 15  # Starke Ablehnung vom High
+        # upper_wick_pct wird NICHT hier geprüft → Doppel-Bestrafung vermeiden (Z.204-208 deckt das ab)
         if body_pct < 0.25:
             selloff_pressure += 10  # Kein Momentum mehr
 

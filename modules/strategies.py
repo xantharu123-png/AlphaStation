@@ -47,6 +47,14 @@ STRATEGIES = {
         "filters": {"Change %": (3.0, 200.0), "RVOL": (1.5, 50.0), "Close Position": (0.60, 1.0), "Preis": (2.0, 100000.0)},
         "logic": "Anstieg 3%+ mit RVOL >1.5 + Close nahe High. Bei MDR (Vortag >10%): RVOL-Filter entfällt"
     },
+    "Turtle Breakout": {
+        "description": "Richard Dennis Turtle Trading: Kurs durchbricht 20-Tage-Hoch (Donchian Channel)",
+        "filters": {"Preis": (5.0, 100000.0)},
+        "logic": "Close > 20-Tage-High = Long Entry. Stop 2x ATR. Exit bei 10-Tage-Low. Trend-Following System.",
+        "needs_history": True,
+        "history_days": 25,
+        "stocks_only": True
+    },
     # V2.7: "Breakdown Short" und "Breakout Short" entfernt — redundant mit BI Scanner Short + Bear Scanner
     "Penny Rockets": {
         "description": "Günstige Aktien mit explosivem Volumen (min $100k Volumen)",
@@ -903,6 +911,12 @@ BACKTEST_STRATEGY_RULES = {
         "tp2_rr": 2.0,
         "max_hold_days": 3,
         "min_price": 5.0
-    }
+    },
+    # ═══════════════════════════════════════════════════════════════
+    # TURTLE TRADING (Richard Dennis, 1983)
+    # Donchian Channel Breakout — Trend-Following System
+    # Entry: Close > 20-Day High → Long. Stop: 2× ATR(20). Exit: Close < 10-Day Low
+    # Nicht rule-based (braucht Donchian+ATR) → eigene Backtest-Logik in api.py
+    # ═══════════════════════════════════════════════════════════════
 }
     

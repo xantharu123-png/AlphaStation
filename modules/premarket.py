@@ -307,7 +307,8 @@ def evaluate_pm_setups(poly_key, date_str, setups_data):
                 if entry_hit and not stop_hit and not tp2_hit:
                     exit_price = day_close
                     if tp1_hit:
-                        exit_reason = "TP1+EOD"
+                        # TP1 wurde berührt, Exit aber bei Close (nicht bei TP1!)
+                        exit_reason = "EOD_TP1"  # Klarstellung: Exit=EOD, TP1 nur touched
                     else:
                         exit_reason = "EOD"
                 

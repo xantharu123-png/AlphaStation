@@ -1561,6 +1561,8 @@ def calculate_sr_from_historical(ohlc_data, current_price):
             drop_pct = (highs[i] - future_low) / highs[i] if highs[i] > 0 else 0
             
             # Proximity-Check: Ist das Level nah genug am aktuellen Preis?
+            if current_price <= 0:
+                continue
             distance_pct = abs(highs[i] - current_price) / current_price
             if distance_pct > max_distance_pct:
                 continue
@@ -1589,6 +1591,8 @@ def calculate_sr_from_historical(ohlc_data, current_price):
             future_high = max(highs[i+1:min(len(highs), i+20)]) if i+1 < len(highs) else highs[-1]
             rally_pct = (future_high - lows[i]) / lows[i] if lows[i] > 0 else 0
             
+            if current_price <= 0:
+                continue
             distance_pct = abs(lows[i] - current_price) / current_price
             if distance_pct > max_distance_pct:
                 continue
@@ -1878,7 +1882,7 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         
         for level in sorted_levels[1:]:
             cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
-            if abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
+            if cluster_avg > 0 and abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
                 current_cluster.append(level)
             else:
                 best = max(current_cluster, key=lambda x: x["strength"])
@@ -2573,7 +2577,7 @@ def calculate_breakout_timing(row_data, fib_info=None):
     
     Faktoren:
     1. Distanz vom Breakout (Change%) - wie weit ist der Move schon?
-    2. RSI - überkauft/überverkauft?
+    2. Momentum (Tages-Move als RSI-Proxy) - überdehnt?
     3. Fib Extension - über 127.2% / 161.8%?
     4. RVOL - Volumen-Bestätigung?
     5. ATR - ist der Move überdehnt vs. normale Volatilität?

@@ -2273,8 +2273,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
     const d = tickerData || {};
     const cd = scannerData || {};  // crypto data from Early Movers
-    const price = isExchangeCrypto ? (cd.price || 0) : isCrypto ? (cd.Price || 0) : (d.price || 0);
-    const change = isExchangeCrypto ? (cd.change_24h || 0) : isCrypto ? (cd.Change24h || 0) : (d.change_1d || 0);
+    const price = Number(isExchangeCrypto ? cd.price : isCrypto ? cd.Price : d.price) || 0;
+    const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : d.change_1d) || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
@@ -2593,7 +2593,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div><span className="text-gray-500">Support</span> <span className="font-semibold color-positive">${d.support_1}</span></div>
                         <div><span className="text-gray-500">Resistance</span> <span className="font-semibold color-negative">${d.resistance_1}</span></div>
                         <div><span className="text-gray-500">Pivot</span> <span className="font-semibold">${d.pivot}</span></div>
-                        <div><span className="text-gray-500">Range Pos</span> <span className="font-semibold">{d.range_position?.toFixed(0)}%</span></div>
+                        <div><span className="text-gray-500">Range Pos</span> <span className="font-semibold">{d.range_position != null ? d.range_position.toFixed(0) + '%' : '–'}</span></div>
                         <div><span className="text-gray-500">20D High</span> <span className="font-semibold">${d.high_20d}</span></div>
                         <div><span className="text-gray-500">20D Low</span> <span className="font-semibold">${d.low_20d}</span></div>
                     </div>
@@ -5297,7 +5297,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
-                                <td className="py-3 px-2 text-right">${(item.dollar_volume / 1000000).toFixed(2)}M</td>
+                                <td className="py-3 px-2 text-right">{item.dollar_volume ? `$${(item.dollar_volume / 1000000).toFixed(2)}M` : '–'}</td>
                             </tr>
                         ))}
                     </tbody>
@@ -5313,6 +5313,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     const [loading, setLoading] = useState(false);
     const [cacheAge, setCacheAge] = useState(null);
     const [subView, setSubView] = useState('breakouts');
+    const scanTimerRef = useRef(null);
 
     const loadResults = async () => {
         try {
@@ -5325,13 +5326,18 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
         } catch (e) { console.error('ORB load error:', e); }
     };
 
-    useEffect(() => { loadResults(); const iv = setInterval(loadResults, 30000); return () => clearInterval(iv); }, []);
+    useEffect(() => {
+        loadResults();
+        const iv = setInterval(loadResults, 30000);
+        return () => { clearInterval(iv); if (scanTimerRef.current) clearTimeout(scanTimerRef.current); };
+    }, []);
 
     const triggerScan = async () => {
         setLoading(true);
         try {
             await fetch(`${API}/api/orb-scan`, { method: 'POST' });
-            setTimeout(loadResults, 5000);
+            if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+            scanTimerRef.current = setTimeout(loadResults, 5000);
         } catch (e) { console.error(e); }
         setLoading(false);
     };
@@ -5475,7 +5481,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <span className={c.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{c.gap_pct > 0 ? '+' : ''}{c.gap_pct}%</span>
                             <span className={c.rvol >= 2 ? 'text-green-600 font-medium' : 'text-gray-500'}>{c.rvol}x</span>
                             <span className="text-gray-500">${c.current}</span>
-                            <span className="text-gray-400 text-xs">{(c.volume/1000000).toFixed(1)}M</span>
+                            <span className="text-gray-400 text-xs">{c.volume ? (c.volume/1000000).toFixed(1)+'M' : '–'}</span>
                         </div>
                     ))}
                 </div>
@@ -5491,6 +5497,7 @@ function AutoTraderTab() {
     const [actionLoading, setActionLoading] = useState(null);
     const [editConfig, setEditConfig] = useState(null);
     const [showLog, setShowLog] = useState(false);
+    const actionTimerRef = useRef(null);
 
     const fetchStatus = async () => {
         try {
@@ -5503,7 +5510,7 @@ function AutoTraderTab() {
     useEffect(() => {
         fetchStatus();
         const interval = setInterval(fetchStatus, 5000);
-        return () => clearInterval(interval);
+        return () => { clearInterval(interval); if (actionTimerRef.current) clearTimeout(actionTimerRef.current); };
     }, []);
 
     const doAction = async (endpoint, body = null) => {
@@ -5518,7 +5525,8 @@ function AutoTraderTab() {
             } else {
                 if (window.addToast) window.addToast(data.error || 'Fehler', 'error');
             }
-            setTimeout(fetchStatus, 500);
+            if (actionTimerRef.current) clearTimeout(actionTimerRef.current);
+            actionTimerRef.current = setTimeout(fetchStatus, 500);
         } catch (e) {
             if (window.addToast) window.addToast('Verbindungsfehler', 'error');
         }
@@ -6168,8 +6176,8 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     };
 
     const d = tickerData || {};
-    const price = d.price || 0;
-    const change = d.change_1d || 0;
+    const price = Number(d.price) || 0;
+    const change = Number(d.change_1d) || 0;
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
 
     return (
@@ -6538,14 +6546,18 @@ function AdminTab() {
     const [replyText, setReplyText] = useState({});
     const [searchTerm, setSearchTerm] = useState('');
     const [toast, setToast] = useState(null);
+    const toastTimerRef = useRef(null);
 
     const token = localStorage.getItem('as_token');
     const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
 
     const showToast = (msg, type = 'success') => {
         setToast({ msg, type });
-        setTimeout(() => setToast(null), 3000);
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => setToast(null), 3000);
     };
+
+    useEffect(() => { return () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }; }, []);
 
     // Fetch data based on active panel
     useEffect(() => {
