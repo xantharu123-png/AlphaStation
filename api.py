@@ -3971,47 +3971,53 @@ def fetch_multi_exchange_perps():
 def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
     """Klassifiziert einen Coin in Phase 1 (Accumulation), 2 (Breakout) oder 3 (Überhitzt).
 
-    BTC-RELATIV: Alpha = Coin-Performance minus BTC-Performance.
-    Wenn BTC +5% macht und Altcoin +15%, ist das Alpha nur +10% — nicht so extrem.
-    Aber +15% absolut ist trotzdem ein starker Pump und riskant.
+    MOVE-INTENSITY-ANSATZ (Volume/Price Divergence):
+    intensity = abs(c24) / normalized_volume
+    Misst wie stark der Preis sich RELATIV zum Volume bewegt hat.
 
-    Phase 1: Stabil/leicht steigend, Volume auffällig → Smart Money kauft leise
-    Phase 2: Breakout bestätigt, moderate Überperformance → möglicher Einstieg
-    Phase 3: Überhitzt, starker Pump → DUMP-Gefahr, NICHT kaufen
+    - Niedriges intensity (<3): Volume hoch aber Preis kaum bewegt → Smart Money akkumuliert leise
+    - Mittleres intensity (3-6): Preis und Volume im Gleichgewicht → bestätigter Breakout
+    - Hohes intensity (>6): Preis rast dem Volume davon → Überhitzt, Retail-FOMO
+
+    Zusätzlich: BTC-Alpha und absolute Schwellwerte als Sicherheitsnetz.
     """
     c24 = change_24h or 0
     c7d = change_7d or 0
     vm = vol_mcap_pct or 0
-    alpha_24h = c24 - (btc_24h or 0)  # BTC-relative Alpha
+    alpha = c24 - (btc_24h or 0)  # BTC-relative Alpha
+
+    # Move-Intensity: Preis-Bewegung normalisiert auf Volume-Anomalie
+    # vm/30 normalisiert (Scanner filtert auf vm>30, also norm_vol >= 1)
+    norm_vol = max(1, vm / 30)
+    intensity = abs(c24) / norm_vol
 
     # ═══ Phase 3: Überhitzt — NICHT kaufen, Korrektur kommt ═══
-    # Absolut: ≥12% in 24h = klar gepumpt (alter Wert 20% war viel zu hoch!)
+    # Absolut: ≥12% in 24h = klar gepumpt, egal was Volume sagt
     if c24 >= 12:
         return 3, "Überhitzt", "#ef4444"
-    # Alpha-basiert: ≥8% besser als BTC + positiver abs. Move = überhitzt
-    if alpha_24h >= 8 and c24 > 3:
+    # Intensity-basiert: Preis rast dem Volume davon (>6) + positiver Move
+    if intensity > 6 and c24 > 5:
         return 3, "Überhitzt", "#ef4444"
-    # 7d stark: ≥30% Wochenperformance + heute positiv = Pump läuft schon zu lang
+    # Alpha-basiert: ≥8% besser als BTC + positiver abs. Move
+    if alpha >= 8 and c24 > 3:
+        return 3, "Überhitzt", "#ef4444"
+    # 7d extrem: ≥30% Wochenperformance + heute positiv = Pump zu lang
     if c7d >= 30 and c24 > 0:
         return 3, "Überhitzt", "#ef4444"
-    # 7d extrem + Pullback = immer noch überhitzt (Dead Cat Bounce)
-    if c7d >= 40 and c24 > -5:
-        return 3, "Überhitzt", "#ef4444"
-    # Volume extrem + moderate Pump = FOMO-Phase
-    if vm >= 80 and c24 > 5:
-        return 3, "Überhitzt", "#ef4444"
 
-    # ═══ Phase 2: Breakout — NUR starke Tages-Moves ═══
-    # KEIN c7d-Check hier! Im Bullenmarkt hat jeder Coin c7d>20% → alles Phase 2
-    # Phase 2 = HEUTE starker bestätigter Move, nicht Weekly-Trend
-    if alpha_24h >= 6 and c24 > 5:
+    # ═══ Phase 2: Breakout — bestätigter Move ═══
+    # Intensity 3-6: Preis und Volume bewegen sich zusammen = gesunder Move
+    if intensity >= 3 and c24 > 4:
         return 2, "Breakout", "#f59e0b"
+    # Absolut: ≥8% in 24h = starker Move
     if c24 >= 8:
         return 2, "Breakout", "#f59e0b"
-    if c24 > 5 and vm >= 70:
+    # Alpha ≥5% + positiver Move = klare Überperformance
+    if alpha >= 5 and c24 > 3:
         return 2, "Breakout", "#f59e0b"
 
     # ═══ Phase 1: Accumulation — Smart Money kauft leise ═══
+    # Volume auffällig aber Preis kaum bewegt → bester Einstieg
     return 1, "Accumulation", "#10b981"
 
 
