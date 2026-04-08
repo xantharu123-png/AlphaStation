@@ -3347,7 +3347,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <td className="py-3 px-2 text-right">{item.rsi?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span></td>
                             </tr>
                         ))}
                     </tbody>
@@ -3483,7 +3483,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                     <tbody>
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'c').toLowerCase()}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span></td>
                                 <td className="py-3 px-2 font-semibold">
                                     {item.ticker}
                                     {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:item.mdr_tag.includes('CRASH') ? '#dc2626' : '#f97316',color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}

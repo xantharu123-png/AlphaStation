@@ -268,9 +268,9 @@ def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
         elif rvol >= 1.5:
             health += 5
             signals.append(f" Akzeptables Volume ({rvol:.1f}x)")
-        elif rvol >= 1.0:
-            health -= 5
-            warnings.append(f" Schwaches Volume ({rvol:.1f}x) — Breakout kaum unterstützt")
+        elif rvol >= 0.7:
+            # RVOL 0.7-1.5 = neutral/unterdurchschnittlich — kein Bonus, kein Penalty
+            pass
         else:
             health -= 15
             warnings.append(f" LOW VOLUME ({rvol:.1f}x) — Fakeout-Risiko HOCH!")

@@ -4427,10 +4427,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
             recent_lows = [l["price"] for l in swing_lows[-4:]]
             
             if len(recent_highs) >= 3 and len(recent_lows) >= 3:
-                high_trend = (recent_highs[-1] - recent_highs[0]) / recent_highs[0]
-                low_trend = (recent_lows[-1] - recent_lows[0]) / recent_lows[0]
-                high_range = (max(recent_highs) - min(recent_highs)) / max(recent_highs)
-                low_range = (max(recent_lows) - min(recent_lows)) / max(recent_lows)
+                high_trend = (recent_highs[-1] - recent_highs[0]) / recent_highs[0] if recent_highs[0] > 0 else 0
+                low_trend = (recent_lows[-1] - recent_lows[0]) / recent_lows[0] if recent_lows[0] > 0 else 0
+                max_high = max(recent_highs)
+                max_low = max(recent_lows)
+                high_range = (max_high - min(recent_highs)) / max_high if max_high > 0 else 0
+                low_range = (max_low - min(recent_lows)) / max_low if max_low > 0 else 0
                 
                 # ASCENDING TRIANGLE: Flat resistance + rising support
                 if high_range < 0.02 and low_trend > 0.02:
@@ -4611,7 +4613,11 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 low_slope = (recent_lows[-1] - recent_lows[0]) / len(recent_lows)
                 
                 _slope_sum = abs(high_slope) + abs(low_slope)
-                are_converging = abs(high_slope - low_slope) < _slope_sum / 2 if _slope_sum > 0 else False
+                # Converging logic: normalized slope difference should be small
+                # Using ratio instead of sum-based threshold for better robustness
+                are_converging = (
+                    abs(high_slope - low_slope) / (_slope_sum + 0.0001) < 0.4 if _slope_sum > 0 else False
+                )
                 
                 # RISING WEDGE (bearish)
                 if high_slope > 0 and low_slope > 0 and are_converging and low_slope > high_slope:

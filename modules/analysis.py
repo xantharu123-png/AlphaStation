@@ -1639,8 +1639,8 @@ def calculate_sr_from_historical(ohlc_data, current_price):
             for bin_idx, count in bins.items():
                 if count >= threshold:
                     zone_price = recent_low + (bin_idx + 0.5) * bin_size
-                    distance_pct = abs(zone_price - current_price) / current_price
-                    
+                    distance_pct = abs(zone_price - current_price) / current_price if current_price > 0 else 1
+
                     if distance_pct > max_distance_pct or distance_pct < 0.02:
                         continue
                     
@@ -1665,7 +1665,7 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     }
     
     for fib_name, fib_price in fib_levels_dict.items():
-        distance_pct = abs(fib_price - current_price) / current_price
+        distance_pct = abs(fib_price - current_price) / current_price if current_price > 0 else 1
         if distance_pct > max_distance_pct or distance_pct < 0.02:
             continue
         
@@ -1747,7 +1747,7 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     round_price = round(current_price / round_step) * round_step
     for offset in [-3, -2, -1, 1, 2, 3]:
         rp = round_price + offset * round_step
-        distance_pct = abs(rp - current_price) / current_price
+        distance_pct = abs(rp - current_price) / current_price if current_price > 0 else 1
         if distance_pct > max_distance_pct or distance_pct < 0.02:
             continue
         
@@ -1767,8 +1767,8 @@ def calculate_sr_from_historical(ohlc_data, current_price):
         prev_close = closes[i-1]
         curr_high = highs[i]
         curr_low = lows[i]
-        
-        distance_pct = abs(prev_close - current_price) / current_price
+
+        distance_pct = abs(prev_close - current_price) / current_price if current_price > 0 else 1
         if distance_pct > max_distance_pct:
             continue
         

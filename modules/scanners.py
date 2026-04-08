@@ -2118,15 +2118,15 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price, catalyst_
     elif 200 <= market_cap_m < 500:
         risk_score += 4
         risk_details.append(" Small Cap — hohes Catalyst-Upside")
+    elif 100 <= market_cap_m < 200:
+        risk_score += 2
+        risk_details.append(" Micro Cap — hohes Risiko, hohes Upside")
     elif 10000 < market_cap_m <= 50000:
         risk_score += 3
         risk_details.append(" Large Cap — solide aber weniger Upside")
     elif market_cap_m > 50000:
         risk_score += 1
         risk_details.append(" Mega Cap — Catalyst bewegt Kurs kaum")
-    elif 100 <= market_cap_m < 200:
-        risk_score += 2
-        risk_details.append(" Micro Cap — hohes Risiko, hohes Upside")
     else:
         risk_score += 0
         risk_details.append(" Nano Cap — sehr hohes Risiko")

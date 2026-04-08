@@ -4002,17 +4002,18 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
         return 3, "Überhitzt", "#ef4444"
 
     # ═══ Phase 2: Breakout — möglicher Einstieg ═══
-    # Alpha-basiert: ≥3% besser als BTC + absolut positiv
-    if alpha_24h >= 3 and c24 > 2:
+    # STRENG: Phase 2 = bestätigter Breakout, nicht jeder kleine Move
+    # Alpha-basiert: ≥5% besser als BTC + deutlich positiv
+    if alpha_24h >= 5 and c24 > 4:
         return 2, "Breakout", "#f59e0b"
-    # Absolut: ≥5% in 24h (moderater aber bestätigter Move)
-    if c24 >= 5:
+    # Absolut: ≥8% in 24h (starker Move, nicht jeder +5%)
+    if c24 >= 8:
         return 2, "Breakout", "#f59e0b"
-    # 7d Trend: ≥15% Woche + heute positiv = Trend bestätigt
-    if c7d >= 15 and c24 > 0:
+    # 7d Trend: ≥20% Woche + heute klar positiv
+    if c7d >= 20 and c24 > 1:
         return 2, "Breakout", "#f59e0b"
-    # Volume-Push mit moderatem Preis (vm>50 statt 30 — sonst ist ALLES Phase 2)
-    if c24 > 2 and vm >= 50:
+    # Volume-Push: NUR bei deutlichem Move + extremem Volume
+    if c24 > 4 and vm >= 60:
         return 2, "Breakout", "#f59e0b"
 
     # ═══ Phase 1: Accumulation — Smart Money kauft leise ═══
@@ -6495,12 +6496,12 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 if position is None:
                     # Long: Preis unter Lower Band
                     if closes[i] <= lower:
-                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "long"}
+                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "long", "bar_idx": i}
                     # Short: Preis über Upper Band
                     elif closes[i] >= upper:
-                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "short"}
+                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "short", "bar_idx": i}
                 else:
-                    bars_held = i - next((j for j in range(len(dates)) if dates[j] == position["entry_date"]), i)
+                    bars_held = i - position.get("bar_idx", i)
                     if position["dir"] == "long" and closes[i] >= sma:
                         trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "long"))
                         position = None
