@@ -3951,55 +3951,80 @@ def fetch_multi_exchange_perps():
     return result
 
 
-def _classify_phase(change_24h, change_7d, vol_mcap_pct):
+def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
     """Klassifiziert einen Coin in Phase 1 (Accumulation), 2 (Breakout) oder 3 (Überhitzt).
 
-    Basiert auf 24h-Change, 7d-Change und Vol/MCap-Ratio.
-    Phase 1: Preis stabil/leicht steigend, Volume auffällig → Smart Money kauft leise
-    Phase 2: Breakout bestätigt, Preis deutlich positiv + Volume
-    Phase 3: Überhitzt, extremer Pump → DUMP-Gefahr
+    BTC-RELATIV: Alpha = Coin-Performance minus BTC-Performance.
+    Wenn BTC +5% macht und Altcoin +15%, ist das Alpha nur +10% — nicht so extrem.
+    Aber +15% absolut ist trotzdem ein starker Pump und riskant.
+
+    Phase 1: Stabil/leicht steigend, Volume auffällig → Smart Money kauft leise
+    Phase 2: Breakout bestätigt, moderate Überperformance
+    Phase 3: Überhitzt, starker Pump → DUMP-Gefahr, NICHT kaufen
     """
     c24 = change_24h or 0
     c7d = change_7d or 0
     vm = vol_mcap_pct or 0
+    alpha_24h = c24 - (btc_24h or 0)  # BTC-relative Alpha
 
-    # Phase 3: Überhitzt (starke Moves — auch Pullbacks nach massivem 7d-Pump)
-    if c24 > 30 or (c24 > 20 and vm > 100) or (c7d > 80 and c24 > 5) or (vm > 150 and c24 > 10):
+    # ═══ Phase 3: Überhitzt ═══
+    # Absolut: >20% in 24h ist IMMER überhitzt (egal was BTC macht)
+    if c24 > 20:
         return 3, "Überhitzt", "#ef4444"
-    # 7d extrem positiv aber 24h leicht negativ = Pullback nach Pump, trotzdem Phase 3
-    if c7d > 60 and c24 > -5:
+    # Alpha-basiert: >12% Alpha + positiver absoluter Move = klar überhitzt
+    if alpha_24h > 12 and c24 > 5:
+        return 3, "Überhitzt", "#ef4444"
+    # 7d extrem: >40% Wochenperformance + heute noch positiv = überhitzt
+    if c7d > 40 and c24 > 0:
+        return 3, "Überhitzt", "#ef4444"
+    # 7d sehr stark + Pullback = immer noch überhitzt (Korrektur läuft)
+    if c7d > 50 and c24 > -5:
+        return 3, "Überhitzt", "#ef4444"
+    # Volume extrem + Pump = überhitzt
+    if vm > 100 and c24 > 10:
         return 3, "Überhitzt", "#ef4444"
 
-    # Phase 2: Breakout (24h positiv ODER starker 7d-Trend mit kleinem Pullback)
-    if c24 > 8 or (c24 > 5 and vm > 50) or (c7d > 30 and c24 > 3):
+    # ═══ Phase 2: Breakout ═══
+    # Alpha-basiert: >4% besser als BTC + absolut positiv
+    if alpha_24h > 4 and c24 > 3:
         return 2, "Breakout", "#f59e0b"
-    # 7d stark positiv aber 24h leicht negativ = immer noch Breakout-Phase, nicht Accumulation
-    if c7d > 20 and c24 > -3:
+    # Absolut: >8% in 24h (auch wenn BTC auch stark)
+    if c24 > 8:
+        return 2, "Breakout", "#f59e0b"
+    # 7d Trend stark + heute positiv
+    if c7d > 20 and c24 > 0:
+        return 2, "Breakout", "#f59e0b"
+    # Volume-Push mit moderatem Preis
+    if c24 > 3 and vm > 30:
         return 2, "Breakout", "#f59e0b"
 
-    # Phase 1: Accumulation (stabil oder leicht steigend)
+    # ═══ Phase 1: Accumulation ═══
     return 1, "Accumulation", "#10b981"
 
 
 def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase):
     """Berechnet Risiko-Level basierend auf Marktdaten."""
     c24 = abs(change_24h or 0)
+    c7d_raw = change_7d or 0
     vm = vol_mcap_pct or 0
     fr = abs((funding_rate or 0) * 100)
     reasons = []
 
-    if c24 > 25:
-        reasons.append(f"24h Change extrem: {change_24h:+.1f}%")
-    if vm > 120:
-        reasons.append(f"Vol/MCap extrem: {vm:.0f}%")
-    if fr > 0.1:
-        reasons.append(f"Funding Rate erhöht: {funding_rate*100:+.3f}%")
-    if abs(change_7d or 0) > 60:
-        reasons.append(f"7d Change extrem: {change_7d:+.1f}%")
+    # Verschärfte Schwellen — Trader brauchen ehrliche Warnungen
+    if c24 > 15:
+        reasons.append(f"24h Change stark: {change_24h:+.1f}% — Einstieg riskant")
+    if c24 > 10:
+        reasons.append(f"24h Change erhöht: {change_24h:+.1f}%")
+    if vm > 60:
+        reasons.append(f"Vol/MCap hoch: {vm:.0f}% — mögliche Euphorie")
+    if fr > 0.05:
+        reasons.append(f"Funding Rate erhöht: {funding_rate*100:+.3f}% — Longs crowded")
+    if abs(c7d_raw) > 30:
+        reasons.append(f"7d Change extrem: {c7d_raw:+.1f}%")
 
     if phase == 3:
         if not reasons:
-            reasons.append("Phase 3: Überhitzt — starker Pump, Korrektur wahrscheinlich")
+            reasons.append("Überhitzt — Korrektur wahrscheinlich, NICHT kaufen")
         return "HIGH", "#ef4444", reasons
     if len(reasons) >= 2:
         return "HIGH", "#ef4444", reasons
@@ -4142,11 +4167,14 @@ def fetch_early_movers(_prefetched_perps=None):
                             else:
                                 momentum_score = 0
 
+                        # Freshness: Leicht positive 24h = gut. Aber STARKE 24h = zu spät!
                         freshness_score = 0
-                        if change_24h > 0 and change_1h > 0:
-                            freshness_score = 12
-                        elif change_24h > 0:
+                        if 0 < change_24h <= 8 and change_1h > 0:
+                            freshness_score = 12  # Ideal: leicht positiv, gerade erst los
+                        elif 0 < change_24h <= 8:
                             freshness_score = 7
+                        elif change_24h > 8:
+                            freshness_score = 3   # Schon stark gepumpt — weniger frisch
 
                         position_score = 0
                         if price_position >= 0.7:
@@ -4168,7 +4196,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
                         trending_score = 7 if is_trending else 0
 
-                        # BTC-relative Alpha: Coin outperformt BTC = extra Punkte
+                        # BTC-relative Alpha
                         btc_alpha_score = 0
                         if btc_relative_7d > 20:
                             btc_alpha_score = 8
@@ -4177,25 +4205,34 @@ def fetch_early_movers(_prefetched_perps=None):
                         elif btc_relative_7d > 5:
                             btc_alpha_score = 2
 
-                        # Downtrend-Penalty: Coin im Abwärtstrend bekommt Abzug
-                        # WAVES: -10% auf 30d reicht für Penalty — Chart zeigt klaren Downtrend
+                        # ── PENALTY-SYSTEM ──
                         trend_penalty = 0
+
+                        # 1) Downtrend-Penalty
                         if change_30d < -30:
-                            trend_penalty = 30  # Massiver Downtrend — fast raus
+                            trend_penalty = 30
                         elif change_30d < -15:
                             trend_penalty = 20
                         elif change_30d < -5:
-                            trend_penalty = 12  # Leichter Abwärtstrend
+                            trend_penalty = 12
                         if change_14d < -15:
                             trend_penalty = max(trend_penalty, 20)
                         elif change_14d < -5:
                             trend_penalty = max(trend_penalty, 10)
-                        # Low-Price Coins (< $1) mit MCap < $100M = dünne Orderbücher
+
+                        # 2) PUMP-Penalty: Schon stark gepumpt = Einstieg zu spät
+                        # Das ist der KERN-FIX: Ein Coin der +20% gemacht hat, ist kein "Early" Mover mehr
+                        if change_24h > 15:
+                            trend_penalty += 20  # Stark überhitzt
+                        elif change_24h > 10:
+                            trend_penalty += 10  # Schon gut gelaufen
+
+                        # 3) Low-Price Orderbuch-Penalty
                         if price < 1.0 and mcap < 100_000_000:
                             trend_penalty += 8
 
                         total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score - trend_penalty)
-                        # Max theoretisch: 25+18+12+8+10+12+7+8 = 100 — aber Downtrend zieht bis -25 ab
+                        # Theorie-Max: 25+18+12+8+10+12+7+8 = 100 — Penalties ziehen stark ab
 
                         if total_score >= 30:
                             entry = dict(base_entry)
@@ -4414,6 +4451,13 @@ def fetch_early_movers(_prefetched_perps=None):
     # ═══════════════════════════════════════════════════════════════════
     seen_symbols = {}  # Deduplizierung: Symbol → bester Eintrag
 
+    # BTC 24h Change für Alpha-Berechnung in Phase-Klassifikation
+    btc_24h = 0
+    for c in all_coins:
+        if c.get("id") == "bitcoin":
+            btc_24h = c.get("price_change_percentage_24h") or 0
+            break
+
     def _add_to_unified(entries, source_name, score_key):
         for entry in entries:
             sym = entry.get("Symbol", "")
@@ -4423,19 +4467,19 @@ def fetch_early_movers(_prefetched_perps=None):
             c7d = entry.get("Change7d", 0)
             fr = entry.get("FundingRate", 0)
 
-            phase, phase_label, phase_color = _classify_phase(c24, c7d, vm)
+            phase, phase_label, phase_color = _classify_phase(c24, c7d, vm, btc_24h)
             risk_level, risk_color, risk_reasons = _calculate_risk(c24, c7d, vm, fr, phase)
 
-            # Phase-Multiplier: leichter Boost für Phase 1, leichte Strafe für Phase 3
-            # Keine extremen Faktoren die Scores unvergleichbar machen
+            # Phase-Multiplier: Phase 3 = deutliche Strafe, Phase 1 = leichter Boost
             if phase == 1:
-                score = min(100, int(raw_score * 1.1))   # +10% (vorher 1.2)
+                score = min(100, int(raw_score * 1.05))  # +5% — konservativ
             elif phase == 3:
-                score = min(100, int(raw_score * 0.8))   # -20% (vorher 0.5 + Cap 50)
+                score = min(100, int(raw_score * 0.6))   # -40% — überhitzt = NICHT kaufen
             else:
                 score = raw_score
 
-            # Signal-Text basierend auf Phase
+            # Signal-Text basierend auf Phase — ehrlich und direkt
+            alpha = c24 - btc_24h
             if phase == 1:
                 if score >= 70:
                     signal_text = "Smart Money Accumulation — guter Einstieg"
@@ -4444,15 +4488,16 @@ def fetch_early_movers(_prefetched_perps=None):
                 else:
                     signal_text = "Leichte Aktivität"
             elif phase == 2:
-                if score >= 60:
-                    signal_text = "Breakout bestätigt — Momentum"
+                if c24 > 12:
+                    signal_text = f"Starker Breakout +{c24:.0f}% — Einstieg riskant"
+                elif score >= 60:
+                    signal_text = "Breakout bestätigt — Momentum, enger Stop"
                 else:
                     signal_text = "Ausbruch läuft — Vorsicht"
             else:
-                if risk_level == "HIGH":
-                    signal_text = "DUMP GEFAHR — Short prüfen!"
-                else:
-                    signal_text = "Überhitzt — nur für erfahrene Trader"
+                signal_text = f"ÜBERHITZT +{c24:.0f}%/24h — NICHT kaufen, Korrektur kommt"
+                if c7d > 40:
+                    signal_text = f"ÜBERHITZT +{c7d:.0f}%/7d — Gewinnmitnahmen wahrscheinlich"
 
             # Grade berechnen
             if score >= 80:
