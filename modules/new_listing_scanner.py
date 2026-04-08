@@ -1105,9 +1105,10 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     # ═══════════════════════════════════════════════════════════════════════
     # GESAMT-SCORE (max 155 Punkte → normalisiert auf 0-100)
     # ═══════════════════════════════════════════════════════════════════════
-    # Komponenten: 20+20+15+15+15+10+10+15+15+10+10+10 = 165 max (mit Bonus)
-    # Normalisieren auf 0-100 für einheitliche Schwellenwerte
-    max_possible = 165
+    # Komponenten: 20+20+15+15+15+10+10+15+15+10+10+10(btc_div) = 165 theoretisch
+    # Spread+Depth ist min(10, pts) → max 10. Echtes Max variiert mit Daten.
+    # Nutze 160 als Basis (nicht alle Komponenten liefern gleichzeitig Max)
+    max_possible = 160
     normalized = int(round(score / max_possible * 100))
 
     pump_data["raw_score"] = score

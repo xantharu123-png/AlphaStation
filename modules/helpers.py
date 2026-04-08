@@ -174,14 +174,14 @@ def format_vi_for_display(vi_result, current_price):
         "VI_FillRate": stats["fill_rate"],
     }
     
-    if nb:
+    if nb and current_price > 0:
         dist_pct = round((current_price - nb["zone_high"]) / current_price * 100, 2)
         display["Bull_VI"] = f"${nb['zone_low']:.2f}-${nb['zone_high']:.2f}"
         display["Bull_VI_Dist"] = f"{dist_pct:.1f}%"
         display["Bull_VI_Type"] = nb["type"]
         display["Bull_VI_Str"] = nb["strength"]
     
-    if nbr:
+    if nbr and current_price > 0:
         dist_pct = round((nbr["zone_low"] - current_price) / current_price * 100, 2)
         display["Bear_VI"] = f"${nbr['zone_low']:.2f}-${nbr['zone_high']:.2f}"
         display["Bear_VI_Dist"] = f"{dist_pct:.1f}%"
@@ -202,7 +202,7 @@ def cluster_nearby_levels(levels, tolerance_pct=0.03):
 
     for level in sorted_levels[1:]:
         cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
-        if abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
+        if cluster_avg > 0 and abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
             current_cluster.append(level)
         else:
             # Finalisiere Cluster - behalte stärkstes Level

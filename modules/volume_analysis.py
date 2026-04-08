@@ -10,7 +10,7 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
     """
     Berechnet Volume Profile aus historischen OHLCV Daten.
     """
-    if not ohlcv_data or len(ohlcv_data) < 5:
+    if not ohlcv_data or len(ohlcv_data) < 20:  # Mind. 20 Bars für sinnvolles Profile
         return None
     
     try:

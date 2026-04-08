@@ -4610,7 +4610,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 high_slope = (recent_highs[-1] - recent_highs[0]) / len(recent_highs)
                 low_slope = (recent_lows[-1] - recent_lows[0]) / len(recent_lows)
                 
-                are_converging = abs(high_slope - low_slope) < abs(high_slope + low_slope) / 2 if (high_slope + low_slope) != 0 else False
+                _slope_sum = abs(high_slope) + abs(low_slope)
+                are_converging = abs(high_slope - low_slope) < _slope_sum / 2 if _slope_sum > 0 else False
                 
                 # RISING WEDGE (bearish)
                 if high_slope > 0 and low_slope > 0 and are_converging and low_slope > high_slope:

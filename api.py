@@ -1198,8 +1198,8 @@ def _bear_scan_wrapper() -> None:
                                         ma50 = sum(b.get("c", 0) for b in bars[1:51]) / 50
                                         ma50_dist = round((price - ma50) / ma50 * 100, 2) if ma50 > 0 else 0
                                     else:
-                                        ma50 = ma20
-                                        ma50_dist = ma20_dist
+                                        ma50 = None  # Nicht genug Daten — NICHT mit ma20 gleichsetzen
+                                        ma50_dist = 0
 
                                     avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
                                     rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
@@ -1255,13 +1255,15 @@ def _bear_scan_wrapper() -> None:
                         else:
                             score_details.append(f"Weit über MA20 ({ma20_dist:+.1f}%) — Vorsicht")
 
-                        # 4. MA50 Trend (0-15)
-                        if ma50_dist < -10:
-                            score += 15
-                        elif ma50_dist < -5:
-                            score += 10
-                        elif ma50_dist < 0:
-                            score += 5
+                        # 4. MA50 Trend (0-15) — nur wenn genug Daten (>=51 Bars)
+                        if ma50 is not None:
+                            if ma50_dist < -10:
+                                score += 15
+                            elif ma50_dist < -5:
+                                score += 10
+                            elif ma50_dist < 0:
+                                score += 5
+                        # Kein Score wenn ma50 nicht berechenbar (zu wenig History)
 
                         # 5. Dollar Volume Quality (0-10)
                         if dollar_vol >= 10_000_000:
@@ -6331,16 +6333,17 @@ def _backtest_stats(trades, ticker, strategy, months):
     avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
     best_trade = round(max(t["pnl_pct"] for t in trades), 2)
     worst_trade = round(min(t["pnl_pct"] for t in trades), 2)
+    # Max Drawdown als % des Equity-Peaks (nicht in Prozentpunkten)
     max_dd = 0
-    peak = 0
-    equity = 0
+    peak = 100  # Start-Equity = 100%
+    equity = 100
     for t in trades:
-        equity += t["pnl_pct"]
+        equity *= (1 + t["pnl_pct"] / 100)  # Compound
         if equity > peak:
             peak = equity
-        dd = peak - equity
-        if dd > max_dd:
-            max_dd = dd
+        dd_pct = ((peak - equity) / peak) * 100 if peak > 0 else 0
+        if dd_pct > max_dd:
+            max_dd = dd_pct
     return {
         "ticker": ticker, "strategy": strategy, "months": months,
         "total_trades": total_trades, "win_rate": win_rate, "avg_pnl": avg_pnl,
@@ -6352,15 +6355,18 @@ def _backtest_stats(trades, ticker, strategy, months):
 
 
 def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"):
-    """Create a trade record with PnL calculation."""
+    """Create a trade record with PnL calculation inkl. Trading-Fees.
+    Fees: 0.1% pro Seite (Entry + Exit) = 0.2% Roundtrip — typisch für Broker."""
+    FEE_PCT = 0.1  # 0.1% pro Trade (Entry + Exit = 0.2% total)
     if direction == "short":
-        pnl = ((entry_price - exit_price) / entry_price) * 100
+        pnl_raw = ((entry_price - exit_price) / entry_price) * 100
     else:
-        pnl = ((exit_price - entry_price) / entry_price) * 100
+        pnl_raw = ((exit_price - entry_price) / entry_price) * 100
+    pnl = pnl_raw - (2 * FEE_PCT)  # Entry + Exit Fee abziehen
     return {
         "entry_date": entry_date, "entry_price": round(entry_price, 2),
         "exit_date": exit_date, "exit_price": round(exit_price, 2),
-        "pnl_pct": round(pnl, 2), "type": direction.upper(),
+        "pnl_pct": round(pnl, 2), "pnl_raw": round(pnl_raw, 2), "type": direction.upper(),
     }
 
 
