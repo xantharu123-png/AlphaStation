@@ -4001,19 +4001,14 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
     if vm >= 80 and c24 > 5:
         return 3, "Überhitzt", "#ef4444"
 
-    # ═══ Phase 2: Breakout — möglicher Einstieg ═══
-    # STRENG: Phase 2 = bestätigter Breakout, nicht jeder kleine Move
-    # Alpha-basiert: ≥5% besser als BTC + deutlich positiv
-    if alpha_24h >= 5 and c24 > 4:
+    # ═══ Phase 2: Breakout — NUR starke Tages-Moves ═══
+    # KEIN c7d-Check hier! Im Bullenmarkt hat jeder Coin c7d>20% → alles Phase 2
+    # Phase 2 = HEUTE starker bestätigter Move, nicht Weekly-Trend
+    if alpha_24h >= 6 and c24 > 5:
         return 2, "Breakout", "#f59e0b"
-    # Absolut: ≥8% in 24h (starker Move, nicht jeder +5%)
     if c24 >= 8:
         return 2, "Breakout", "#f59e0b"
-    # 7d Trend: ≥20% Woche + heute klar positiv
-    if c7d >= 20 and c24 > 1:
-        return 2, "Breakout", "#f59e0b"
-    # Volume-Push: NUR bei deutlichem Move + extremem Volume
-    if c24 > 4 and vm >= 60:
+    if c24 > 5 and vm >= 70:
         return 2, "Breakout", "#f59e0b"
 
     # ═══ Phase 1: Accumulation — Smart Money kauft leise ═══
