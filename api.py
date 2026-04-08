@@ -4324,16 +4324,19 @@ def fetch_early_movers(_prefetched_perps=None):
                         degen_score += 5
 
                     # Downtrend-Penalty: MicroCap im Abwärtstrend = Bagholding
+                    # max() statt Stacking — konsistent mit Volume Spike Scanner
+                    dt_penalty = 0
                     if change_30d < -30:
-                        degen_score -= 30
+                        dt_penalty = 30
                     elif change_30d < -15:
-                        degen_score -= 20
+                        dt_penalty = 20
                     elif change_30d < -5:
-                        degen_score -= 10
+                        dt_penalty = 10
                     if change_14d < -15:
-                        degen_score -= 15
+                        dt_penalty = max(dt_penalty, 15)
                     elif change_14d < -5:
-                        degen_score -= 8
+                        dt_penalty = max(dt_penalty, 8)
+                    degen_score -= dt_penalty
                     # Low-Price = dünnes Orderbuch (unabhängig vom MCap-Bonus)
                     if price < 1.0:
                         degen_score -= 5
@@ -6497,11 +6500,16 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     elif closes[i] >= upper:
                         position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "short"}
                 else:
+                    bars_held = i - next((j for j in range(len(dates)) if dates[j] == position["entry_date"]), i)
                     if position["dir"] == "long" and closes[i] >= sma:
                         trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "long"))
                         position = None
                     elif position["dir"] == "short" and closes[i] <= sma:
                         trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "short"))
+                        position = None
+                    elif bars_held >= 20:
+                        # Max-Hold Timeout: verhindert infinite holding in Trends
+                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], position["dir"]))
                         position = None
 
         elif strategy == "mean_reversion_sma":

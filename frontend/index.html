@@ -2481,8 +2481,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Short-Indikatoren</h4>
                     <div className="grid grid-cols-2 gap-2">
-                        <div><span className="text-gray-500">Funding Rate</span> <span className={`font-semibold ${(scannerData.funding_rate||0) > 0.05 ? 'color-negative' : (scannerData.funding_rate||0) > 0 ? 'text-yellow-600' : ''}`}>{scannerData.funding_rate ? `${scannerData.funding_rate.toFixed(3)}%` : '–'}</span></div>
-                        <div><span className="text-gray-500">Long %</span> <span className={`font-semibold ${(scannerData.long_pct||50) > 65 ? 'color-negative' : ''}`}>{scannerData.long_pct ? `${scannerData.long_pct.toFixed(0)}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Funding Rate</span> <span className={`font-semibold ${(scannerData.funding_rate||0) > 0.05 ? 'color-negative' : (scannerData.funding_rate||0) > 0 ? 'text-yellow-600' : ''}`}>{scannerData.funding_rate != null ? `${scannerData.funding_rate.toFixed(3)}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Long %</span> <span className={`font-semibold ${(scannerData.long_pct||50) > 65 ? 'color-negative' : ''}`}>{scannerData.long_pct != null ? `${scannerData.long_pct.toFixed(0)}%` : '–'}</span></div>
                         <div><span className="text-gray-500">Red Candles</span> <span className={`font-semibold ${(scannerData.red_streak||0) >= 4 ? 'color-negative' : ''}`}>{scannerData.red_streak || '–'}</span></div>
                         <div><span className="text-gray-500">Vol Ratio</span> <span className="font-semibold">{scannerData.vol_ratio || '–'}x</span></div>
                         <div><span className="text-gray-500">BTC Divergenz</span> <span className={`font-semibold ${(scannerData.btc_divergence||0) < -5 ? 'color-negative' : ''}`}>{scannerData.btc_divergence ? `${scannerData.btc_divergence > 0 ? '+' : ''}${scannerData.btc_divergence}%` : '–'}</span></div>
@@ -4043,8 +4043,8 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             {sortedBreakdown.map((item, idx) => {
                                 const gradeColors = { S: 'bg-purple-100 text-purple-800', A: 'bg-green-100 text-green-800', B: 'bg-blue-100 text-blue-800', C: 'bg-yellow-100 text-yellow-800', D: 'bg-gray-100 text-gray-500' };
                                 const gc = gradeColors[item.grade] || gradeColors.D;
-                                const dv = item.dollar_volume || (item.volume * item.price);
-                                const dvStr = dv >= 1e6 ? (dv / 1e6).toFixed(1) + 'M' : dv >= 1e3 ? (dv / 1e3).toFixed(0) + 'K' : dv?.toFixed(0);
+                                const dv = item.dollar_volume || ((item.volume || 0) * (item.price || 0));
+                                const dvStr = dv >= 1e6 ? (dv / 1e6).toFixed(1) + 'M' : dv >= 1e3 ? (dv / 1e3).toFixed(0) + 'K' : dv > 0 ? dv.toFixed(0) : '–';
                                 return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)} title={item.score_details || ''}>
                                     <td className="py-3 px-1"><span className={`px-2 py-0.5 rounded text-xs font-bold ${gc}`}>{item.grade || '–'}</span></td>
@@ -5519,6 +5519,7 @@ function AutoTraderTab() {
             const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
             if (body) opts.body = JSON.stringify(body);
             const res = await fetch(`${API}/api/autotrader/${endpoint}`, opts);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             if (data.ok) {
                 if (window.addToast) window.addToast(data.message || 'Erfolgreich', 'success');
