@@ -544,7 +544,9 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
         gap_min, gap_max = filters.get("Gap %", (-999, 999))
         vortag_min, vortag_max = filters.get("Vortag %", (-999, 999))
-        min_dollar_vol = strat.get("min_dollar_volume", 0)
+        # Mindest-Dollar-Volume: Strategie-spezifisch ODER global $200k
+        # Ohne das rutschen illiquide Penny Stocks durch
+        min_dollar_vol = strat.get("min_dollar_volume", 200_000)
         _has_gap_filter = "Gap %" in filters
         _has_vortag_filter = "Vortag %" in filters
 
@@ -610,8 +612,13 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         continue
 
                     volume = day.get("v", 0)
-                    prev_vol = prev.get("v", 1)
-                    rvol = round(volume / prev_vol, 2) if prev_vol > 0 else 0
+                    prev_vol = prev.get("v", 0)
+                    # RVOL: prev_vol muss realistisch sein (>1000 Shares), sonst = 1.0
+                    if prev_vol > 1000:
+                        rvol = round(volume / prev_vol, 2)
+                        rvol = min(rvol, 50.0)  # Cap bei 50x — darüber = Datenfehler
+                    else:
+                        rvol = 1.0  # Kein zuverlässiger Vergleich → neutral
                     dollar_vol = volume * price
 
                     # Close Position (wo im Tagesrange: 0=Low, 1=High)
@@ -676,11 +683,11 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                     if dollar_vol >= 10_000_000: _strat_score += 15
                     elif dollar_vol >= 5_000_000: _strat_score += 10
                     elif dollar_vol >= 1_000_000: _strat_score += 6
-                    # Gap-Qualität (0-15)
+                    # Gap-Qualität (0-15) — größeres Gap = stärkeres Signal
                     _ag = abs(gap_pct)
-                    if _ag >= 5: _strat_score += 12
-                    elif _ag >= 2: _strat_score += 15  # Sweet spot
-                    elif _ag >= 1: _strat_score += 8
+                    if _ag >= 5: _strat_score += 15  # Starkes Gap
+                    elif _ag >= 2: _strat_score += 12  # Solides Gap
+                    elif _ag >= 1: _strat_score += 6   # Minimales Gap
                     # Downtrend-Penalty: Long-Strategie bei fallendem Vortag = schwächeres Signal
                     # Für Bullish-Strategien: Vortag stark negativ = Downtrend-Warnung
                     if "Change %" in filters:
@@ -694,9 +701,12 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             if close_pos < 0.3 and change_pct > 0:
                                 _strat_score -= 10  # Eröffnet stark, faded — Distribution
 
-                    # Grade
-                    if _strat_score >= 75: _strat_grade = "S"
-                    elif _strat_score >= 60: _strat_grade = "A"
+                    # Score Cap
+                    _strat_score = min(100, _strat_score)
+
+                    # Grade (verschärft — konsistent mit Krypto-Scanner)
+                    if _strat_score >= 80: _strat_grade = "S"
+                    elif _strat_score >= 65: _strat_grade = "A"
                     elif _strat_score >= 45: _strat_grade = "B"
                     elif _strat_score >= 30: _strat_grade = "C"
                     else: _strat_grade = "D"
@@ -720,9 +730,10 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         else:
                             _mdr_label = "MDR"
                             _strat_score += 5
-                        # Re-grade nach Bonus
-                        if _strat_score >= 75: _strat_grade = "S"
-                        elif _strat_score >= 60: _strat_grade = "A"
+                        # Re-grade nach MDR Bonus (mit Cap)
+                        _strat_score = min(100, _strat_score)
+                        if _strat_score >= 80: _strat_grade = "S"
+                        elif _strat_score >= 65: _strat_grade = "A"
                         elif _strat_score >= 45: _strat_grade = "B"
                         elif _strat_score >= 30: _strat_grade = "C"
                         else: _strat_grade = "D"
@@ -754,8 +765,8 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                 except Exception:
                     continue
 
-        # Sortieren nach |Change%| absteigend
-        results.sort(key=lambda x: abs(x.get("Change_Pct", 0)), reverse=True)
+        # Sortieren nach SCORE absteigend (nicht Change% — Score ist die Gesamtbewertung)
+        results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         results = results[:50]
 
         # V2.2: Separate Cache-Datei pro Strategie + Fallback auf generischen Cache
@@ -942,15 +953,19 @@ def _turtle_scan_wrapper() -> None:
                 else:
                     score += 3
 
-                # Risk/Reward (0-15)
+                # Entry-Qualität (0-15): Frischer Breakout = bester Entry
+                # Je NÄHER am Breakout-Level, desto besser das R/R-Potenzial
                 if risk_per_share > 0:
-                    rr = reward_to_exit / risk_per_share if reward_to_exit > 0 else 0
-                    if rr >= 2.0:
-                        score += 15
-                    elif rr >= 1.0:
-                        score += 10
-                    elif rr >= 0.5:
-                        score += 5
+                    # Wie weit über Entry sind wir schon? (0% = perfekt, >10% = zu spät)
+                    overshoot = (current_close - entry_price) / entry_price * 100
+                    if overshoot < 1.0:
+                        score += 15  # Ideal: Gerade erst durchgebrochen
+                    elif overshoot < 3.0:
+                        score += 12  # Noch gut
+                    elif overshoot < 5.0:
+                        score += 7   # Moderat überschossen
+                    else:
+                        score += 2   # Zu weit — Entry riskant
 
                 score = min(100, score)
 
