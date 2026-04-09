@@ -828,8 +828,11 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     is_penny_illiquid = (avg_volume < 500000 and close < 5)
     # V3: Smart-Money-Signale brauchen Mindest-Liquidität um aussagekräftig zu sein
     # Bei <100K avg Volume ist OBV/ADX/Institutional Accumulation pures Rauschen
-    # sm_eligible = True wenn genug Volume für Smart-Money-Erkennung
-    sm_eligible = avg_volume >= 100_000 or crypto_mode
+    # V3.1: RVOL-Check — auch bei hohem avg Volume: wenn RVOL < 1.0 ist AKTUELL
+    # kein Smart Money aktiv. IHS hat 1.1M avg vol aber RVOL 0.7x = tot.
+    _recent_vol = sum(volumes[-5:]) / max(1, min(5, len(volumes))) if len(volumes) >= 5 else avg_volume
+    _rvol_current = _recent_vol / max(1, avg_volume)
+    sm_eligible = (avg_volume >= 100_000 and _rvol_current >= 0.8) or crypto_mode
 
     if len(daily_ranges) >= 15 and not is_penny_illiquid:
         # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage (sensitiver als Halbierung)
