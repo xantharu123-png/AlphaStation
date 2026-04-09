@@ -394,7 +394,19 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # Fixes: #1 Phase-2 Logik, #2 Risk-Calc, #3 Stop-Weite,
             #        #4 Same-Day Entry, #5-8 HIGH Issues
             # ============================================
-            atr_5 = sum((b["high"] - b["low"]) for b in window[-5:]) / 5
+            # Calculate True Range for last 5 bars
+            tr_values = []
+            for i, b in enumerate(window[-5:]):
+                high = b["high"]
+                low = b["low"]
+                if i == 0:
+                    # First bar: use simple range
+                    tr = high - low
+                else:
+                    prev_close = window[-5 + i - 1]["close"]
+                    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                tr_values.append(tr)
+            atr_5 = sum(tr_values) / len(tr_values)
             breakout_threshold = atr_5 * 0.25  # ATR-basiert statt fixer 0.5% (#20)
 
             # Stop ATR×1.2 für alle Grades (bewährt — NICHT ändern!)
@@ -678,9 +690,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 trade_result["is_winner"] = False
             else:
                 if direction == "long":
-                    pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100
+                    pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
                 else:
-                    pnl_pct = ((actual_entry - exit_price) / actual_entry) * 100
+                    pnl_pct = ((actual_entry - exit_price) / actual_entry) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
 
                 r_multiple = round(pnl_pct / (risk / actual_entry * 100), 2) if risk > 0 else 0
 
@@ -744,6 +756,17 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         }
 
     filled_trades = [t for t in all_trades if t.get("outcome") != "NO_FILL"]
+
+    # Calculate Max Drawdown from equity curve
+    equity = 10000
+    peak = equity
+    max_dd = 0
+    for trade in filled_trades:
+        equity *= (1 + trade["pnl_pct"] / 100)
+        peak = max(peak, equity)
+        dd = ((peak - equity) / peak) * 100 if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+
     summary = {
         "total_signals": signals_found,
         "total_filled": len(filled_trades),
@@ -751,6 +774,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         "win_rate": round(sum(1 for t in filled_trades if t["is_winner"]) / len(filled_trades) * 100, 1) if filled_trades else 0,
         "avg_pnl": round(sum(t["pnl_pct"] for t in filled_trades) / len(filled_trades), 2) if filled_trades else 0,
         "total_pnl": round(sum(t["pnl_pct"] for t in filled_trades), 2) if filled_trades else 0,
+        "max_drawdown": round(max_dd, 2),
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "n_midcap": len(sorted_midcap),
@@ -942,7 +966,19 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 grade = "C"
 
             # === ATR für Stop/Target Berechnung ===
-            atr_10 = sum((b["high"] - b["low"]) for b in window[-10:]) / 10
+            # Calculate True Range for last 10 bars
+            tr_values = []
+            for i, b in enumerate(window[-10:]):
+                high = b["high"]
+                low = b["low"]
+                if i == 0:
+                    # First bar: use simple range
+                    tr = high - low
+                else:
+                    prev_close = window[-10 + i - 1]["close"]
+                    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                tr_values.append(tr)
+            atr_10 = sum(tr_values) / len(tr_values)
             if atr_10 <= 0:
                 continue
 
@@ -1072,7 +1108,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 trade_result["r_multiple"] = 0
                 trade_result["is_winner"] = False
             else:
-                pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100
+                pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
                 r_multiple = (exit_price - actual_entry) / risk if risk > 0 else 0
                 r_multiple = max(r_multiple, -2.0)  # Cap bei -2R (Gap-through)
 
@@ -1133,6 +1169,17 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         }
 
     filled_trades = [t for t in all_trades if t.get("outcome") != "NO_FILL"]
+
+    # Calculate Max Drawdown from equity curve
+    equity = 10000
+    peak = equity
+    max_dd = 0
+    for trade in filled_trades:
+        equity *= (1 + trade["pnl_pct"] / 100)
+        peak = max(peak, equity)
+        dd = ((peak - equity) / peak) * 100 if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+
     summary = {
         "total_signals": signals_found,
         "total_filled": len(filled_trades),
@@ -1140,6 +1187,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         "win_rate": round(sum(1 for t in filled_trades if t["is_winner"]) / len(filled_trades) * 100, 1) if filled_trades else 0,
         "avg_pnl": round(sum(t["pnl_pct"] for t in filled_trades) / len(filled_trades), 2) if filled_trades else 0,
         "total_pnl": round(sum(t["pnl_pct"] for t in filled_trades), 2) if filled_trades else 0,
+        "max_drawdown": round(max_dd, 2),
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "n_biotech_universe": len(biotech_set),
@@ -1289,10 +1337,10 @@ def simulate_trade(bars, signal_idx, strategy):
     
     # === P&L BERECHNEN ===
     if direction == "long":
-        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
         r_multiple = (exit_price - entry_price) / risk if risk > 0 else 0
     else:
-        pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+        pnl_pct = ((entry_price - exit_price) / entry_price) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
         r_multiple = (entry_price - exit_price) / risk if risk > 0 else 0
     
     # Cap R-Multiple: Max -2R bei Gap-Through (realistischer Slippage)

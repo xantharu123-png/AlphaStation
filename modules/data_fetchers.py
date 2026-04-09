@@ -929,13 +929,16 @@ def _get_bpiq_catalysts(ticker):
     }
 
 
-def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_score, risk_score, news_momentum_score, rvol=0):
+def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_score, risk_score, news_momentum_score, rvol=0, rvol_direction=True):
     """
     Berechnet den finalen Biotech Catalyst Score (0-100).
 
     Bonus: Catalyst + Volume Confirmation = stärkeres Signal.
     Wenn ein Catalyst gefunden wird UND das Volumen ungewöhnlich hoch ist,
     ist das Signal deutlich stärker (Smart Money bestätigt die News).
+
+    rvol_direction: True = UP day (accumulation), False = DOWN day (distribution)
+                    Only apply full RVOL bonus on UP days; reduce to 20% on DOWN days.
     """
     # Weighted: Catalyst is primary driver (2x weight)
     # FIX 3: Updated for new catalyst cap of 45
@@ -944,13 +947,20 @@ def _calculate_biotech_catalyst_score(catalyst_score, pipeline_score, technical_
     total = min(100, int(total * 100 / 160))
 
     # Catalyst-Volume Confirmation Bonus (max 10 Extra-Punkte)
+    # FIX 1: Apply RVOL bonus based on direction (up=full, down=20%)
     if catalyst_score > 0 and rvol >= 1.5:
         if rvol >= 3.0:
-            total = min(100, total + 10)  # Extrem: Catalyst + 3x Volume = Hot
+            bonus = 10  # Extrem: Catalyst + 3x Volume = Hot
         elif rvol >= 2.0:
-            total = min(100, total + 7)   # Stark: Catalyst + 2x Volume
+            bonus = 7   # Stark: Catalyst + 2x Volume
         else:
-            total = min(100, total + 4)   # Moderat: Catalyst + 1.5x Volume
+            bonus = 4   # Moderat: Catalyst + 1.5x Volume
+
+        # Apply bonus based on direction
+        if rvol_direction:
+            total = min(100, total + bonus)  # UP day: full bonus
+        else:
+            total = min(100, total + int(bonus * 0.2))  # DOWN day: 20% of bonus
 
     # V68: Finaler Cap NACH allen Boni — kein Score über 100
     # Readout-Bonus wird VOR dem Cap addiert (nicht danach)

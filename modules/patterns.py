@@ -1081,8 +1081,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
     # ===================================================================
     # SIGNAL 6: RANGE BOUNDARY TESTS — max 10 Punkte
-    # Mehrfache Tests der Grenze = Widerstand wird schwaecher
-    # FIX 3: Add volume confirmation for breakout attempts
+    # Mehrfache Tests der Grenze = Widerstand wird schwaecher (Wyckoff Logic)
+    # FIX (BUG 1): 4+ boundary tests WITHOUT volume increase = EXHAUSTION (reduced score)
+    # Multiple resistance tests + DECLINING volume = weak breakout (max 3pts)
+    # Multiple resistance tests + INCREASING volume = accumulation (max 10pts)
     # ===================================================================
     if range_days >= 5:
         range_high = max(highs[-range_days:])
@@ -1096,40 +1098,45 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             upper_tests = sum(1 for h in highs[-range_days:] if h >= threshold_upper)
             lower_tests = sum(1 for l in lows[-range_days:] if l <= threshold_lower)
 
-            # FIX 3: Calculate relative volume (RVOL) on latest bar for breakout confirmation
-            avg_vol = sum(volumes[-range_days:]) / range_days if volumes[-range_days:] else 1
-            latest_vol = volumes[-1] if volumes else 0
-            rvol_latest = latest_vol / avg_vol if avg_vol > 0 else 0
+            # FIX (BUG 1): Check volume TREND over test period (accumulation vs exhaustion)
+            # Compare avg volume of last 5 bars vs last 15 bars
+            vol_last_5 = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else sum(volumes) / len(volumes)
+            vol_last_15 = sum(volumes[-15:]) / 15 if len(volumes) >= 15 else sum(volumes) / len(volumes)
+            vol_trend_ratio = vol_last_5 / vol_last_15 if vol_last_15 > 0 else 0
+            volume_increasing = vol_trend_ratio > 1.2  # Volume is rising (accumulation)
 
             if direction == "long" and upper_tests >= 4:
-                # Only score breakout if volume confirms (rvol >= 1.5)
-                if rvol_latest >= 1.5:
+                if volume_increasing:
+                    # Multiple tests + RISING volume = accumulation at resistance (full score)
                     score += 10
-                    details.append(f" {upper_tests}x Resistance getestet + Volume Confirmation (RVOL {rvol_latest:.2f}x)")
+                    details.append(f" {upper_tests}x Resistance + STEIGENDE Volumen (Wyckoff Acc): {vol_trend_ratio:.2f}x")
                 else:
-                    score += 3  # Weak breakout without volume
-                    details.append(f" {upper_tests}x Resistance getestet aber schwaches Volume (RVOL {rvol_latest:.2f}x)")
-            elif direction == "long" and upper_tests >= 3:
-                if rvol_latest >= 1.5:
-                    score += 5
-                    details.append(f" {upper_tests}x Resistance getestet + Volume (RVOL {rvol_latest:.2f}x)")
-                else:
-                    score += 2
-                    details.append(f" {upper_tests}x Resistance getestet ohne Volume (RVOL {rvol_latest:.2f}x)")
-            elif direction == "short" and lower_tests >= 4:
-                if rvol_latest >= 1.5:
-                    score += 10
-                    details.append(f" {lower_tests}x Support getestet + Volume Confirmation (RVOL {rvol_latest:.2f}x)")
-                else:
+                    # Multiple tests + DECLINING volume = exhaustion (reduced score)
                     score += 3
-                    details.append(f" {lower_tests}x Support getestet aber schwaches Volume (RVOL {rvol_latest:.2f}x)")
-            elif direction == "short" and lower_tests >= 3:
-                if rvol_latest >= 1.5:
+                    details.append(f" {upper_tests}x Resistance OHNE Volumen-Steigerung (Wyckoff Exhaust): {vol_trend_ratio:.2f}x")
+            elif direction == "long" and upper_tests >= 3:
+                if volume_increasing:
                     score += 5
-                    details.append(f" {lower_tests}x Support getestet + Volume (RVOL {rvol_latest:.2f}x)")
+                    details.append(f" {upper_tests}x Resistance + steigende Volumen: {vol_trend_ratio:.2f}x")
                 else:
                     score += 2
-                    details.append(f" {lower_tests}x Support getestet ohne Volume (RVOL {rvol_latest:.2f}x)")
+                    details.append(f" {upper_tests}x Resistance ohne Volumen-Boost: {vol_trend_ratio:.2f}x")
+            elif direction == "short" and lower_tests >= 4:
+                if volume_increasing:
+                    # Multiple tests + RISING volume = distribution at support (full score)
+                    score += 10
+                    details.append(f" {lower_tests}x Support + STEIGENDE Volumen (Wyckoff Dist): {vol_trend_ratio:.2f}x")
+                else:
+                    # Multiple tests + DECLINING volume = exhaustion (reduced score)
+                    score += 3
+                    details.append(f" {lower_tests}x Support OHNE Volumen-Steigerung (Wyckoff Exhaust): {vol_trend_ratio:.2f}x")
+            elif direction == "short" and lower_tests >= 3:
+                if volume_increasing:
+                    score += 5
+                    details.append(f" {lower_tests}x Support + steigende Volumen: {vol_trend_ratio:.2f}x")
+                else:
+                    score += 2
+                    details.append(f" {lower_tests}x Support ohne Volumen-Boost: {vol_trend_ratio:.2f}x")
             else:
                 details.append(f" Wenig Boundary-Tests (Upper: {upper_tests}, Lower: {lower_tests})")
         else:
@@ -1248,6 +1255,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # SIGNAL 10: HIGHER LOWS / LOWER HIGHS IN RANGE — max 10 Punkte
     # Zeigt welche Seite die Kontrolle gewinnt
+    # FIX (BUG 2): Random walk produces ~50% higher lows. Raise threshold from 65% to 75%.
+    # 75% = full 10pts (statistically significant vs chance)
+    # 65% = intermediate 5pts (only marginally above random)
     # ===================================================================
     if range_days >= 6:
         recent_lows = lows[-range_days:]
@@ -1267,17 +1277,23 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 lower_highs += 1
         lh_pct = lower_highs / max(1, len(recent_highs) - 1)
 
-        if direction == "long" and hl_pct >= 0.65:
+        if direction == "long" and hl_pct >= 0.75:
             score += 10
-            details.append(f" Higher Lows: {hl_pct:.0%} der Tage = Bullen kontrollieren")
+            details.append(f" Higher Lows STARK: {hl_pct:.0%} der Tage = Bullen dominieren")
+        elif direction == "long" and hl_pct >= 0.65:
+            score += 5
+            details.append(f" Higher Lows: {hl_pct:.0%} der Tage (marginal ueber Zufall)")
         elif direction == "long" and hl_pct >= 0.50:
-            score += 5
+            score += 2
             details.append(f" Tendenz Higher Lows: {hl_pct:.0%}")
-        elif direction == "short" and lh_pct >= 0.65:
+        elif direction == "short" and lh_pct >= 0.75:
             score += 10
-            details.append(f" Lower Highs: {lh_pct:.0%} der Tage = Baeren kontrollieren")
-        elif direction == "short" and lh_pct >= 0.50:
+            details.append(f" Lower Highs STARK: {lh_pct:.0%} der Tage = Baeren dominieren")
+        elif direction == "short" and lh_pct >= 0.65:
             score += 5
+            details.append(f" Lower Highs: {lh_pct:.0%} der Tage (marginal ueber Zufall)")
+        elif direction == "short" and lh_pct >= 0.50:
+            score += 2
             details.append(f" Tendenz Lower Highs: {lh_pct:.0%}")
         else:
             details.append(f" Keine klare Struktur (HL: {hl_pct:.0%}, LH: {lh_pct:.0%})")

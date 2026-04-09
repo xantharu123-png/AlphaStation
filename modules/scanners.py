@@ -1650,8 +1650,10 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                 "url": article.get("article_url", ""),
             })
 
-        # V69: Time-Decay — alte Katalysatoren sind weniger relevant
-        # FDA-Event von 2022 soll NICHT denselben Score haben wie einer von gestern
+        # V3: Aggressiverer Time-Decay — FDA-Events sind am Event-Tag relevant,
+        # danach schnell eingepreist. ONCY FDA Event vom 17.02. (52 Tage alt) mit
+        # 85% Score ist Unsinn — der Markt hat das längst verarbeitet.
+        # Neue Kurve: 7d=100%, 14d=75%, 30d=50%, 60d=25%, 90d=10%, >90d=5%
         from datetime import datetime as _dt_cls, timedelta as _td_cls
         _today = _dt_cls.utcnow().date()
         for cat in catalysts:
@@ -1660,15 +1662,17 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                 try:
                     _cat_date = _dt_cls.strptime(_cat_date_str[:10], "%Y-%m-%d").date()
                     _days_old = (_today - _cat_date).days
-                    if _days_old > 365:
-                        cat["score"] = int(cat["score"] * 0.05)  # > 1 Jahr: 5% (nicht komplett 0)
-                    elif _days_old > 180:
-                        cat["score"] = int(cat["score"] * 0.25)  # > 6 Monate: 25%
-                    elif _days_old > 90:
-                        cat["score"] = int(cat["score"] * 0.55)  # > 3 Monate: 55%
+                    if _days_old > 90:
+                        cat["score"] = int(cat["score"] * 0.05)  # > 3 Monate: 5%
+                    elif _days_old > 60:
+                        cat["score"] = int(cat["score"] * 0.10)  # > 2 Monate: 10%
                     elif _days_old > 30:
-                        cat["score"] = int(cat["score"] * 0.85)  # > 1 Monat: 85%
-                    # <= 30 Tage: voller Score (100%)
+                        cat["score"] = int(cat["score"] * 0.25)  # > 1 Monat: 25%
+                    elif _days_old > 14:
+                        cat["score"] = int(cat["score"] * 0.50)  # > 2 Wochen: 50%
+                    elif _days_old > 7:
+                        cat["score"] = int(cat["score"] * 0.75)  # > 1 Woche: 75%
+                    # <= 7 Tage: voller Score (100%)
                     cat["days_old"] = _days_old
                 except (ValueError, TypeError):
                     # Datum nicht parsebar → konservativ: halber Score
@@ -1706,15 +1710,18 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                 except (ValueError, TypeError):
                     nf_age_days = 0
 
+            # V3: Gleicher aggressiver Decay wie positive Catalysts
             decay = 1.0
-            if nf_age_days > 365:
-                decay = 0.05  # FIX 1: Changed from 0.0 to 0.05
-            elif nf_age_days > 180:
-                decay = 0.25  # FIX 1: Changed from 0.10 to 0.25
-            elif nf_age_days > 90:
-                decay = 0.55  # FIX 1: Changed from 0.40 to 0.55
+            if nf_age_days > 90:
+                decay = 0.05
+            elif nf_age_days > 60:
+                decay = 0.10
             elif nf_age_days > 30:
-                decay = 0.85  # FIX 1: Changed from 0.75 to 0.85
+                decay = 0.25
+            elif nf_age_days > 14:
+                decay = 0.50
+            elif nf_age_days > 7:
+                decay = 0.75
             catalyst_score += int(nf["penalty"] * decay)
 
         # FIX 3: Catalyst Cap Increase from 30 to 45
@@ -1956,6 +1963,8 @@ def _biotech_technical_score(poly_key, ticker):
         # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
         rvol = last_vol / max(1, avg_vol_20)
         details["RVOL"] = round(rvol, 2)
+        # FIX 1: Track RVOL direction for bonus calculation
+        details["rvol_up_day"] = closes[-1] > closes[-2] if len(closes) >= 2 else True
         if rvol >= 3.0:
             # FIX 2: Check direction — high volume on UP day = accumulation, DOWN day = distribution
             if closes[-1] > closes[-2]:  # High volume on UP day = accumulation
@@ -1967,8 +1976,13 @@ def _biotech_technical_score(poly_key, ticker):
         elif rvol >= 1.5:
             tech_score += 3  # FIX 2: Moderate volume (was 2 for 1.5-2.0, now unified)
             details["vol_signal"] = " Erhöhtes Volumen"
-        else:
+        elif rvol >= 0.5:
             details["vol_signal"] = " Normal"
+        else:
+            # V3: RVOL < 0.5x = praktisch kein Volumen → Penalty
+            # Wenn niemand handelt, ist der Catalyst eingepreist oder irrelevant
+            tech_score -= 3
+            details["vol_signal"] = " Sehr niedriges Volumen"
 
         # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
         if len(volumes) >= 20:
@@ -2011,7 +2025,10 @@ def _biotech_technical_score(poly_key, ticker):
             else:
                 details["consolidation"] = " Weit gespreizt"
 
-        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts, kein Abzug)
+        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts)
+        # V3: Abwärtstrend bekommt jetzt PENALTY statt 0. Begründung:
+        # Long-Grade bei klarem Downtrend (BCRX unter allen EMAs) ist irreführend.
+        # Ein Trader der "Grade B LONG" sieht, erwartet einen Aufwärtstrend.
         if len(closes) >= 50:
             sma20 = sum(closes[-20:]) / 20
             sma50 = sum(closes[-50:]) / 50
@@ -2022,6 +2039,7 @@ def _biotech_technical_score(poly_key, ticker):
                 tech_score += 1
                 details["trend"] = " Seitwärts"
             else:
+                tech_score -= 3  # V3: Abwärtstrend bestraft den Score
                 details["trend"] = " Abwärtstrend"
 
         # ── CHART HEALTH (separate Metrik, beeinflusst Score NICHT) ──
@@ -2033,7 +2051,7 @@ def _biotech_technical_score(poly_key, ticker):
         # A) Drawdown vom 90d-High
         drawdown_pct = 0
         if range_90d > 0:
-            drawdown_pct = (high_90d - current_price) / high_90d * 100
+            drawdown_pct = (high_90d - current_price) / max(0.01, high_90d) * 100
             details["drawdown%"] = round(drawdown_pct, 1)
             if drawdown_pct >= 30:
                 chart_health -= 4
@@ -2158,6 +2176,8 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price, catalyst_
     elif price >= 2:
         risk_score += 1
     else:
+        # FIX 2: Penny stock penalty
+        risk_score -= 2
         risk_details.append(" Penny Stock (<$2)")
 
     # Float Size (max 3 pts) — Low Float = explosive Moves bei Catalyst
@@ -2377,13 +2397,16 @@ def _biotech_background_scan(poly_key):
 
                 # G) Final Score (mit RVOL für Catalyst-Volume Confirmation)
                 _rvol_val = tech_data.get("details", {}).get("RVOL", 0)
+                # FIX 1: Pass RVOL direction for accurate bonus calculation
+                _rvol_up = tech_data.get("details", {}).get("rvol_up_day", True)
                 total_score = _calculate_biotech_catalyst_score(
                     catalyst_score=catalyst_score,
                     pipeline_score=trial_data["pipeline_score"],
                     technical_score=tech_data["technical_score"],
                     risk_score=risk_data["risk_score"],
                     news_momentum_score=momentum_score,
-                    rvol=_rvol_val
+                    rvol=_rvol_val,
+                    rvol_direction=_rvol_up
                 )
 
                 # H) Readout-Bonus: Überfällige/nahende Trial-Readouts boosten den Score
