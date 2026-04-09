@@ -826,6 +826,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     avg_volume = sum(volumes) / len(volumes) if volumes else 0
     close = closes[-1] if closes else 0
     is_penny_illiquid = (avg_volume < 500000 and close < 5)
+    # V3: Smart-Money-Signale brauchen Mindest-Liquidität um aussagekräftig zu sein
+    # Bei <100K avg Volume ist OBV/ADX/Institutional Accumulation pures Rauschen
+    # sm_eligible = True wenn genug Volume für Smart-Money-Erkennung
+    sm_eligible = avg_volume >= 100_000 or crypto_mode
 
     if len(daily_ranges) >= 15 and not is_penny_illiquid:
         # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage (sensitiver als Halbierung)
@@ -1732,8 +1736,15 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
     # Smart Money Sub-Score: Inline-Counter sm_fires/sm_hits werden direkt
     # bei jedem BOOSTED-Signal inkrementiert (Signale 3,7,8,11,15,17)
-    smart_money_fires = sm_fires # Treffer (max bei Boosted-Signal)
-    smart_money_hits = sm_hits   # + Treffer (aktiv bei Boosted-Signal)
+    # V3: Bei zu wenig Volume (avg <100K) sind SM-Signale Rauschen → auf 0 setzen
+    # Score bleibt erhalten (Signale sind trotzdem mathematisch korrekt),
+    # aber sm_fires/sm_hits = 0 → kein Grade A/B möglich für illiquide Aktien
+    if sm_eligible:
+        smart_money_fires = sm_fires
+        smart_money_hits = sm_hits
+    else:
+        smart_money_fires = 0
+        smart_money_hits = 0
 
     # Grade System V2.5 — Score + Smart Money kombiniert
     # Höhere Grades brauchen BEIDES: hohen Score UND Smart Money Signale
@@ -1775,13 +1786,15 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             grade = "D"  # SCHWACH
 
-    # Threshold: Proportional skaliert für max_score 188
-    # Original: 85/200 = 42.5% → 80/188 für Long
-    # Original: 80/200 = 40.0% → 75/188 für Short
+    # Threshold: V3 gesenkt — mit den CUT-Signalen (max 27 weniger wert)
+    # und SM-Volume-Guard gibt es weniger erreichbare Punkte für normale Aktien.
+    # Alter Threshold 80 war 42.5% von 188, aber effektiv ~50% der realistischen Punkte.
+    # Neu: 65 Long (34.5%), 60 Short (31.9%) — lässt mehr Grade C/D Watchlist-Kandidaten durch.
+    # Qualitätskontrolle kommt über Grading (A/B brauchen SM-Fires), nicht über Threshold.
     if crypto_mode:
         threshold = 45 if direction == "long" else 40
     else:
-        threshold = 80 if direction == "long" else 75
+        threshold = 65 if direction == "long" else 60
     is_valid = score >= threshold
 
     # Cap score at max_score to prevent overflow

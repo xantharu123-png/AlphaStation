@@ -1114,6 +1114,19 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 continue
 
             try:
+                # ── Already-Broke-Out Filter: Aktie hat heute schon >15% gemacht → kein "Imminent" mehr ──
+                # Breakout IMMINENT = BEVOR der Breakout passiert, nicht NACHDEM er schon +30% gemacht hat
+                # Für Long: Wenn die letzte Kerze schon >15% ist, ist der Breakout vorbei
+                # Für Short: Wenn die letzte Kerze schon <-15% ist (Crash schon passiert)
+                _last_bar = all_bars[-1]
+                _prev_close = all_bars[-2]["close"] if len(all_bars) >= 2 else _last_bar["open"]
+                if _prev_close > 0:
+                    _today_change_pct = ((_last_bar["close"] - _prev_close) / _prev_close) * 100
+                    if direction == "long" and _today_change_pct > 15:
+                        continue  # Schon explodiert — zu spät für "Imminent"
+                    if direction == "short" and _today_change_pct < -15:
+                        continue  # Schon gecrasht — zu spät
+
                 # Analyse
                 result = analyze_breakout_imminent(bars, direction=direction)
                 if len(result) == 8:
