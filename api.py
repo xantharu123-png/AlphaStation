@@ -4241,9 +4241,9 @@ def fetch_early_movers(_prefetched_perps=None):
 
                         # 2) PUMP-Penalty: Schon stark gepumpt = Einstieg zu spät
                         # Das ist der KERN-FIX: Ein Coin der +20% gemacht hat, ist kein "Early" Mover mehr
-                        if change_24h > 15:
-                            trend_penalty += 20  # Stark überhitzt
-                        elif change_24h > 10:
+                        if change_24h >= 15:
+                            trend_penalty += 20  # Stark überhitzt (>= statt > — exakt 15% ist auch Pump)
+                        elif change_24h >= 10:
                             trend_penalty += 10  # Schon gut gelaufen
 
                         # 3) Low-Price Orderbuch-Penalty
@@ -4253,7 +4253,9 @@ def fetch_early_movers(_prefetched_perps=None):
                         total_score = int(vol_score + momentum_score + freshness_score + position_score + perp_score + recency_score + trending_score + btc_alpha_score - trend_penalty)
                         # Theorie-Max: 25+18+12+8+10+12+7+8 = 100 — Penalties ziehen stark ab
 
-                        if total_score >= 30:
+                        # V3.2: Phase 3 (Überhitzt) NICHT empfehlen + Threshold von 30 auf 40
+                        # Phase 3 sagt "NICHT kaufen" aber Score war hoch genug → widersprüchlich
+                        if total_score >= 40 and phase != 3:
                             entry = dict(base_entry)
                             entry["EarlyScore"] = min(100, total_score)
                             entry["PricePosition"] = round(price_position, 2)

@@ -826,13 +826,12 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     avg_volume = sum(volumes) / len(volumes) if volumes else 0
     close = closes[-1] if closes else 0
     is_penny_illiquid = (avg_volume < 500000 and close < 5)
-    # V3: Smart-Money-Signale brauchen Mindest-Liquidität um aussagekräftig zu sein
+    # V3.2: Smart-Money-Signale brauchen Mindest-Liquidität
     # Bei <100K avg Volume ist OBV/ADX/Institutional Accumulation pures Rauschen
-    # V3.1: RVOL-Check — auch bei hohem avg Volume: wenn RVOL < 1.0 ist AKTUELL
-    # kein Smart Money aktiv. IHS hat 1.1M avg vol aber RVOL 0.7x = tot.
-    _recent_vol = sum(volumes[-5:]) / max(1, min(5, len(volumes))) if len(volumes) >= 5 else avg_volume
-    _rvol_current = _recent_vol / max(1, avg_volume)
-    sm_eligible = (avg_volume >= 100_000 and _rvol_current >= 0.8) or crypto_mode
+    # RVOL-Check NICHT hier — Volume Dry-Up (RVOL 0.7) ist das Wyckoff-Setup VOR Breakouts.
+    # Stattdessen: sm_eligible nur über avg_volume. RVOL-Prüfung kommt beim Grading
+    # (IHS wird über price_flat + kein Score trotzdem nicht Grade A)
+    sm_eligible = avg_volume >= 100_000 or crypto_mode
 
     if len(daily_ranges) >= 15 and not is_penny_illiquid:
         # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage (sensitiver als Halbierung)
@@ -1316,7 +1315,12 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 recovery_days += 1
 
         # V68: Resilience auf [0, 1] begrenzen — verhindert Inflation bei wenigen Down-Days
-        resilience = min(1.0, recovery_days / max(1, negative_days))
+        # V3.2: 0 Down-Days = perfekte Resilience (1.0), nicht 0%
+        # Eine Aktie die 30 Tage nur steigt ist maximal resilient
+        if negative_days == 0:
+            resilience = 1.0
+        else:
+            resilience = min(1.0, recovery_days / negative_days)
 
         if direction == "long" and resilience > 0.7:
             score += 14; sm_fires += 1; sm_hits += 1
