@@ -237,27 +237,28 @@ def fetch_daily_candles_crypto(coin_id, days=30):
         params = {"vs_currency": "usd", "days": min(days, 90)}
 
         # Retry-Logik für CoinGecko Free API (Rate Limit ~10-30 calls/min)
+        # V2: Schnellere Retries — Frontend hat eigene Retry-Schleife, Backend muss schnell antworten
         resp = None
-        for _attempt in range(4):
-            _t.sleep(3 if _attempt > 0 else 0.5)  # 0.5s initial, 3s retry delay
+        for _attempt in range(2):  # Max 2 Versuche (war 4 — Frontend retried zusätzlich)
+            if _attempt > 0:
+                _t.sleep(1.5)  # Kurzer Retry-Delay (war 3s)
             try:
-                resp = rate_limited_get(url, params=params, timeout=15)
+                resp = rate_limited_get(url, params=params, timeout=10)  # Timeout 10s (war 15s)
             except Exception:
-                if _attempt < 3:
+                if _attempt < 1:
                     continue
                 return []
             if resp.status_code == 200:
                 break
             elif resp.status_code == 429:
-                # Rate limited — warte länger vor Retry
-                _t.sleep(10 * (_attempt + 1))
+                # Rate limited — kurz warten, Frontend retried nochmal
+                _t.sleep(3)  # Fix 3s (war 10-30s eskalierend!)
                 continue
             elif resp.status_code == 404:
                 # Coin existiert nicht auf CoinGecko
                 return []
             else:
-                if _attempt < 3:
-                    _t.sleep(5)
+                if _attempt < 1:
                     continue
                 return []
 
