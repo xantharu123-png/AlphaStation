@@ -953,9 +953,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     results = data.get("results", [])
                     for r in results:
                         t = r.get("ticker", "")
-                        if t and t not in seen:
-                            seen.add(t)
-                            candidates.append(t)
+                        if not t or t in seen:
+                            continue
+                        # ── Vorfilter: Schrott-Ticker aussortieren ──
+                        # >5 Zeichen oder "." = Warrants, Units, Preferred Shares (ADAMH, AACQW, BRK.A)
+                        if len(t) > 5 or "." in t:
+                            continue
+                        seen.add(t)
+                        candidates.append(t)
                     next_url = data.get("next_url")
                     if next_url:
                         next_url = f"{next_url}&apiKey={poly_key}"
