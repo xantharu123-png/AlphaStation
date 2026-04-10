@@ -1809,15 +1809,15 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             grade = "D"  # SCHWACH
 
-    # Threshold: V3 gesenkt — mit den CUT-Signalen (max 27 weniger wert)
-    # und SM-Volume-Guard gibt es weniger erreichbare Punkte für normale Aktien.
-    # Alter Threshold 80 war 42.5% von 188, aber effektiv ~50% der realistischen Punkte.
-    # Neu: 65 Long (34.5%), 60 Short (31.9%) — lässt mehr Grade C/D Watchlist-Kandidaten durch.
-    # Qualitätskontrolle kommt über Grading (A/B brauchen SM-Fires), nicht über Threshold.
+    # Threshold: V4 — nach kumulativen Audit-Korrekturen (Wyckoff-Boundary, Signal8-Reduktion,
+    # Higher-Lows-Threshold, RSI/Stoch-Dedup, OBV-Neutral-Fix) sind ~28 Punkte weniger erreichbar.
+    # Alter Threshold 65/60 war VOR diesen Fixes kalibriert → ergab NULL Resultate.
+    # Neu: 50 Long (26.6%), 45 Short (23.9%) — realistisch für post-Audit Scores.
+    # Qualitätskontrolle: Grading (A/B brauchen SM-Fires) + Score-Bucket Tracking.
     if crypto_mode:
-        threshold = 45 if direction == "long" else 40
+        threshold = 40 if direction == "long" else 35
     else:
-        threshold = 65 if direction == "long" else 60
+        threshold = 50 if direction == "long" else 45
     is_valid = score >= threshold
 
     # Cap score at max_score to prevent overflow

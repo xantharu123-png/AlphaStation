@@ -956,8 +956,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         if not t or t in seen:
                             continue
                         # ── Vorfilter: Schrott-Ticker aussortieren ──
-                        # >5 Zeichen oder "." = Warrants, Units, Preferred Shares (ADAMH, AACQW, BRK.A)
-                        if len(t) > 5 or "." in t:
+                        # >4 Zeichen oder "." = Warrants, Units, Preferred, Bonds
+                        # Suffixe: W=Warrant, U=Unit, R=Rights, H=When-Issued (ADAMH)
+                        # Ausnahmen: bekannte 5-Buchstaben-Aktien werden NICHT gefiltert
+                        # weil wir type=CS abfragen — aber Sonder-Suffixe trotzdem raus
+                        if "." in t:
+                            continue
+                        if len(t) >= 5 and t[-1] in ("W", "U", "R", "H"):
+                            continue  # ADAMH, AACQW, etc.
+                        if len(t) > 5:
                             continue
                         seen.add(t)
                         candidates.append(t)
@@ -977,9 +984,17 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         if resp.status_code == 200:
                             for t in resp.json().get("tickers", []):
                                 ticker = t.get("ticker", "")
-                                if ticker and ticker not in seen:
-                                    seen.add(ticker)
-                                    candidates.append(ticker)
+                                if not ticker or ticker in seen:
+                                    continue
+                                # Gleicher Vorfilter wie Universe
+                                if "." in ticker:
+                                    continue
+                                if len(ticker) >= 5 and ticker[-1] in ("W", "U", "R", "H"):
+                                    continue
+                                if len(ticker) > 5:
+                                    continue
+                                seen.add(ticker)
+                                candidates.append(ticker)
                     except Exception:
                         pass
 
