@@ -2273,8 +2273,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
     const d = tickerData || {};
     const cd = scannerData || {};  // crypto data from Early Movers
-    const price = Number(isExchangeCrypto ? cd.price : isCrypto ? cd.Price : d.price) || 0;
-    const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : d.change_1d) || 0;
+    // V4: Header-Preis aus Chart-Daten aktualisieren (damit Header und letzte Kerze IMMER übereinstimmen)
+    // Vorher: ticker-detail und chart-data hatten verschiedene Cache-Zeiten → Preis-Diskrepanz
+    const _chartLastCandle = chartData?.candles?.length > 0 ? chartData.candles[chartData.candles.length - 1] : null;
+    const _chartPrice = _chartLastCandle ? _chartLastCandle.close : null;
+    const _chartPrevClose = chartData?.candles?.length > 1 ? chartData.candles[chartData.candles.length - 2].close : null;
+    const _chartChange = (_chartPrice && _chartPrevClose && _chartPrevClose > 0) ? ((_chartPrice - _chartPrevClose) / _chartPrevClose * 100) : null;
+    const price = Number(isExchangeCrypto ? cd.price : isCrypto ? cd.Price : (_chartPrice || d.price)) || 0;
+    const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : (_chartChange != null ? _chartChange : d.change_1d)) || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';

@@ -2579,7 +2579,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
 # ── Chart Cache (In-Memory, TTL-basiert) ──
 # Vermeidet wiederholte API-Calls beim schnellen Wechseln zwischen Tickers
 _CHART_CACHE = {}  # key: "ticker:timeframe" → {"data": result, "ts": time.time()}
-_CHART_CACHE_TTL = {"5m": 30, "15m": 60, "1H": 120, "4H": 300, "1D": 600, "1W": 600}
+_CHART_CACHE_TTL = {"5m": 30, "15m": 60, "1H": 120, "4H": 300, "1D": 90, "1W": 300}
 _CHART_CACHE_MAX = 100  # Max Einträge (LRU-artiges Cleanup)
 
 @app.get("/api/chart-data")
