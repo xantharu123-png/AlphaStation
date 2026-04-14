@@ -626,7 +626,10 @@ def get_ticker_news(poly_key, ticker, limit=3):
     
     try:
         url = f"https://api.polygon.io/v2/reference/news"
-        resp = rate_limited_get(url, params={"ticker": ticker, "limit": limit, "apiKey": poly_key}, timeout=5).json()
+        _resp = rate_limited_get(url, params={"ticker": ticker, "limit": limit, "apiKey": poly_key}, timeout=5)
+        if _resp.status_code != 200:
+            return [], []
+        resp = _resp.json()
         results = resp.get("results", [])
         
         news_items = []
@@ -678,7 +681,10 @@ def get_ticker_details(poly_key, ticker):
     """
     try:
         url = f"https://api.polygon.io/v3/reference/tickers/{ticker}"
-        resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=5).json()
+        _resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=5)
+        if _resp.status_code != 200:
+            return {"shares_outstanding": 0, "market_cap": 0, "float_category": "unknown"}
+        resp = _resp.json()
         results = resp.get("results", {})
         
         shares_out = results.get("share_class_shares_outstanding", 0) or results.get("weighted_shares_outstanding", 0)

@@ -1038,7 +1038,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                    top_score=top_score, avg_score=avg_sc,
                                    detail=f" Manuell gestoppt bei {checked}/{total}")
                 if results:
-                    results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)
+                    results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)
                     _bi_cache_save(results, direction)
                 _bi_clear_stop(direction)
                 return
@@ -1176,9 +1176,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
                     candidate["above_sma20_pct"] = round(_above_sma20_pct, 1)
 
-                # Range berechnen
-                range_high = max(b["high"] for b in bars[-15:])
-                range_low = min(b["low"] for b in bars[-15:])
+                # Range berechnen — IMMER auf all_bars basieren (konsistentes 15-Tage-Fenster)
+                _range_bars = all_bars[-15:]
+                range_high = max(b["high"] for b in _range_bars)
+                range_low = min(b["low"] for b in _range_bars)
                 range_size = range_high - range_low
                 range_pct = (range_size / range_low * 100) if range_low > 0 else 0
 
@@ -1186,7 +1187,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     range_fail += 1
                     continue
 
-                avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in bars[-10:] if b["close"] > 0) / min(10, len(bars))
+                _atr_bars = all_bars[-10:]
+                avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in _atr_bars if b["close"] > 0) / max(1, len(_atr_bars))
                 if avg_daily_range < 0.3:
                     atr_fail += 1
                     continue

@@ -2905,7 +2905,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         
         # Volume-Filter: Impulse-Kerze muss mindestens durchschnittliches Volume haben
         impulse_vol = c_curr.get("volume", 0)
-        if avg_vol > 0 and impulse_vol < avg_vol * 1.0:
+        if avg_vol > 0 and impulse_vol < avg_vol * 0.8:
             continue  # Kein institutionelles Interesse
         vol_ratio = impulse_vol / avg_vol if avg_vol > 0 else 1
         
@@ -2970,7 +2970,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         
         # Volume der Impulse-Kerze (Kerze 2)
         impulse_vol = c2.get("volume", 0)
-        if avg_vol > 0 and impulse_vol < avg_vol * 1.0:
+        if avg_vol > 0 and impulse_vol < avg_vol * 0.8:
             continue
         vol_ratio = impulse_vol / avg_vol if avg_vol > 0 else 1
         
