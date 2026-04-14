@@ -1812,12 +1812,13 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # Threshold: V4 — nach kumulativen Audit-Korrekturen (Wyckoff-Boundary, Signal8-Reduktion,
     # Higher-Lows-Threshold, RSI/Stoch-Dedup, OBV-Neutral-Fix) sind ~28 Punkte weniger erreichbar.
     # Alter Threshold 65/60 war VOR diesen Fixes kalibriert → ergab NULL Resultate.
-    # Neu: 50 Long (26.6%), 45 Short (23.9%) — realistisch für post-Audit Scores.
+    # Neu: 45 Long (23.9%), 40 Short (21.3%) — kalibriert für 50+ Ergebnisse.
+    # Eine marginale Breakout-Aktie erzielt ~50 Punkte nach Audit-Korrekturen.
     # Qualitätskontrolle: Grading (A/B brauchen SM-Fires) + Score-Bucket Tracking.
     if crypto_mode:
-        threshold = 40 if direction == "long" else 35
+        threshold = 35 if direction == "long" else 30
     else:
-        threshold = 50 if direction == "long" else 45
+        threshold = 45 if direction == "long" else 40
     is_valid = score >= threshold
 
     # Cap score at max_score to prevent overflow

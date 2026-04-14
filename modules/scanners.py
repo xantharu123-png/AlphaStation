@@ -1416,7 +1416,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _bi_cache_save(results, direction=direction)
 
         avg_sc = round(score_sum / max(1, score_count))
-        _thr = 80 if direction == "long" else 75
+        _thr = 45 if direction == "long" else 40  # V4: Angepasst an post-Audit Scores
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
         pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
                     f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold {_thr}) → "
