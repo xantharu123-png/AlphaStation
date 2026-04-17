@@ -95,7 +95,11 @@ FDA_CATALYST_KEYWORDS = {
 BIOTECH_NEGATIVE_CATALYSTS = {
     "clinical hold": -25,
     "fda rejection": -30,
-    "complete response": -20,
+    # V4 AUDIT FIX (Biotech-Audit V3): "complete response" ohne "letter" ist in
+    # Trial-Kontext eine POSITIVE Remission (CR = beste Outcome-Kategorie).
+    # Nur "complete response letter" bzw. "crl" bezeichnet eine FDA-Ablehnung.
+    "complete response letter": -20,
+    "crl issued": -20,
     "trial failure": -25,
     "missed endpoint": -25,
     "adverse events": -15,
@@ -2445,22 +2449,60 @@ def _biotech_background_scan(poly_key):
                 else:
                     total_score = min(100, total_score)
 
+                # ── V4 AUDIT FIX (Biotech-Audit V3): Chart-Health-Penalty ──
+                # chart_health wurde bisher NUR als Anzeige-Label genutzt und hatte
+                # NULL Einfluss auf total_score. Konsequenz: Biotech-Aktien mit 4/10
+                # Chart (aktiver Abverkauf) kamen als Grade B/C durch, nur weil der
+                # Catalyst-Score hoch war. Für Breakout-Trading ist ein kaputter Chart
+                # aber ein echtes Problem — der Entry wird schlecht, Stop weit weg.
+                _tech_details_for_penalty = tech_data.get("details", {})
+                _chart_health_val = _tech_details_for_penalty.get("chart_health", 10)
+                if _chart_health_val <= 4:
+                    total_score = max(0, total_score - 15)  # Kritisch = harter Abzug
+                elif _chart_health_val <= 6:
+                    total_score = max(0, total_score - 8)   # Schwach = spürbarer Abzug
+
+                # ── V4 AUDIT FIX: Recent-Bearish Hard-Gate für Biotech ──
+                # Analog zum BI-Scanner V2: Wenn die letzten 2 Candles bearish sind UND
+                # ein ausgeprägter Drawdown läuft (>8% unter 5-Bar-High), ist das kein
+                # "pre-catalyst-accumulation"-Setup sondern aktiver Abverkauf — egal wie
+                # gut der Catalyst historisch aussah. Nutzt candle_analysis/drawdown
+                # die das tech_score bereits berechnet hat.
+                _candle_info = _tech_details_for_penalty.get("candle_analysis", {})
+                _candle_trend = _tech_details_for_penalty.get("candle_trend", "")
+                _bearish_patterns = [
+                    p for p in _tech_details_for_penalty.get("candle_patterns", [])
+                    if p.get("type") == "bearish"
+                ]
+                _recent_action = _tech_details_for_penalty.get("recent_action", "")
+                # Harte Bearish-Signale: Downtrend + bearish Pattern + 4+/5 rote Tage
+                if ("4/5 rote Tage" in _recent_action or "5/5 rote Tage" in _recent_action) and _bearish_patterns:
+                    total_score = max(0, total_score - 10)
+
                 # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
+                # V4 AUDIT: min_required angehoben, weil Grade C vorher = min_required
+                # was jede valide Zeile automatisch zu "C" machte. Jetzt Abstand Grade-C
+                # zu min_required = 10 Punkte, Grade C braucht zusätzliches Catalyst- oder Tech-Signal.
                 # READOUT-OVERRIDE: Wenn ein Readout überfällig/imminent ist, senke den Threshold
                 _has_readout = len(trial_data.get("catalyst_readouts", [])) > 0
                 if catalyst_score > 0 or _has_readout:
-                    min_required = 20  # Mit Catalyst oder Readout: normaler Threshold
+                    min_required = 35  # Mit Catalyst oder Readout: solides Threshold (war: 20)
                 else:
-                    min_required = 35  # Ohne Catalyst: nur rein wenn Momentum+Technik stark
+                    min_required = 45  # Ohne Catalyst: nur rein wenn Momentum+Technik wirklich stark (war: 35)
                 if total_score < min_required:
                     continue
 
-                # Grade
+                # Grade — V4 AUDIT: Thresholds enger, Grade C braucht echtes Signal
+                # Vorher: C=35 = min_required → jede valide Zeile war automatisch C.
+                # Jetzt: C=45+catalyst_signal, B=62+, A=75 (unverändert).
+                _tech_score_val = tech_data.get("technical_score", 0)
+                _has_tech_signal = _tech_score_val >= 8  # Starkes Tech-Signal (Volume + Trend)
+                _has_cat_signal = catalyst_score > 0 or _has_readout
                 if total_score >= 75:
                     grade = "A"
-                elif total_score >= 55:
+                elif total_score >= 62:
                     grade = "B"
-                elif total_score >= 35:
+                elif total_score >= 45 and (_has_cat_signal or _has_tech_signal):
                     grade = "C"
                 else:
                     grade = "D"
