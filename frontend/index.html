@@ -2132,12 +2132,18 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 const _viewDir = (d.confluence?.direction || '').toUpperCase();
 
                 // Chart pattern markers + Linien-Zeichnung
+                // V4: Marker-Dedup — nur 1 Marker pro Kerze (höchste Priorität gewinnt)
+                // Ohne Dedup stapeln sich Bullish OB + Buyside Liq + H&S etc. auf gleicher Kerze
                 if (chartData.patterns.chart_patterns) {
-                    chartData.patterns.chart_patterns
+                    const _usedTimes = new Set();
+                    const _sevOrder = {'high': 0, 'medium': 1, 'low': 2};
+                    const _sorted = [...chartData.patterns.chart_patterns]
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
-                        .forEach(p => {
+                        .sort((a, b) => (_sevOrder[a.severity] || 2) - (_sevOrder[b.severity] || 2));
+                    _sorted.forEach(p => {
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
-                        if (markerTime) {
+                        if (markerTime && !_usedTimes.has(markerTime)) {
+                            _usedTimes.add(markerTime);
                             markers.push({
                                 time: markerTime,
                                 position: p.type === 'bullish' ? 'belowBar' : 'aboveBar',
@@ -6033,11 +6039,16 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 // V4.0: Pivot-Marker entfernt (nur Noise)
 
                 if (chartData.patterns.chart_patterns) {
-                    chartData.patterns.chart_patterns
+                    // V4: Marker-Dedup — nur 1 Marker pro Kerze (höchste Priorität gewinnt)
+                    const _usedTimes2 = new Set();
+                    const _sevOrder2 = {'high': 0, 'medium': 1, 'low': 2};
+                    const _sorted2 = [...chartData.patterns.chart_patterns]
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
-                        .forEach(p => {
+                        .sort((a, b) => (_sevOrder2[a.severity] || 2) - (_sevOrder2[b.severity] || 2));
+                    _sorted2.forEach(p => {
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
-                        if (markerTime) {
+                        if (markerTime && !_usedTimes2.has(markerTime)) {
+                            _usedTimes2.add(markerTime);
                             markers.push({
                                 time: markerTime,
                                 position: p.type === 'bullish' ? 'belowBar' : 'aboveBar',
