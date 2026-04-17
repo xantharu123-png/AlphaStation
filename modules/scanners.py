@@ -563,9 +563,19 @@ def autotrader_scan_once(poly_key, config=None):
             tp1_price = round(range_high + range_size * tp1_mult, 2)
             tp2_price = round(range_high + range_size * tp2_mult, 2)
 
+            # HIGH-1 FIX (Audit V1): Chase-Guard.
+            # Wenn Kurs bereits >2% ueber Entry liegt, sind wir zu spaet dran —
+            # LMT BUY wuerde entweder sofort als Market-Order fuellen (Chase) oder
+            # auf unwahrscheinlichen Pullback warten. Signal droppen.
+            current_price_check = window[-1]["close"]
+            if current_price_check > entry_price * 1.02:
+                continue
+
             risk = abs(entry_price - stop_price)
-            reward = abs(tp1_price - entry_price)
-            rr = round(reward / risk, 2) if risk > 0 else 0
+            # HIGH-2 FIX (Audit V1): R:R gewichtet berechnen (50% TP1 + 50% TP2),
+            # statt nur TP1. Reflektiert den tatsaechlichen Blended-Exit der Bracket-Order.
+            reward_blended = 0.5 * abs(tp1_price - entry_price) + 0.5 * abs(tp2_price - entry_price)
+            rr = round(reward_blended / risk, 2) if risk > 0 else 0
 
             if rr < config.get("min_rr", 2.0):
                 continue

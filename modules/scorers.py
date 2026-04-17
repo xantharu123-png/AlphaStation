@@ -1226,8 +1226,10 @@ def calculate_setup_score(change_pct, rvol, close_pos, upper_wick_pct, lower_wic
         # Falsche Richtung: 0 Punkte
 
         # Extension-Penalty auf Momentum (Chase-Schutz)
+        # MEDIUM-2 FIX (Audit V1): momentum_pts ist immer >= 0, min(x, 0) == 0 ist aequivalent.
+        # Vereinfacht fuer Lesbarkeit. Semantik unveraendert.
         if abs_change >= 20:
-            momentum_pts = min(momentum_pts, 0)
+            momentum_pts = 0
         elif abs_change >= 15:
             momentum_pts = min(momentum_pts, 3)
         elif abs_change > 10:
