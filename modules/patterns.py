@@ -1798,14 +1798,20 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         # Proportional skaliert für max_score 188 (statt 200):
         # 120/200 = 60% → 113/188, 105/200 = 52.5% → 99/188, 90/200 = 45% → 85/188
         # SM-Anforderungen: Original-Werte beibehalten (diese sind score-unabhängig)
-        if score >= 113 and smart_money_fires >= 4:
-            grade = "S"  # ELITE — Top 60% Score + 4 Boosted fires
-        elif score >= 99 and smart_money_fires >= 3:
-            grade = "A"  # STARK — Top 52.5% Score + 3 Boosted fires
-        elif score >= 85 and smart_money_hits >= 2:
-            grade = "B"  # SOLIDE — Top 45% Score + 2 SM hits (Original!)
-        elif score >= 75:
-            grade = "C"  # WATCHLIST — Score 75+
+        #
+        # V3.3: Nach Audit-Korrekturen sind ~28 Punkte weniger erreichbar (siehe is_valid
+        # Threshold-Kommentar unten: 65 → 45 long). Die Grade-Schwellen wurden bisher NICHT
+        # mitangepasst → kein Setup erreichte Grade B mehr (85 Punkte praktisch unerreichbar).
+        # Fix: Grade-Thresholds um dieselben -28 Punkte nach unten skaliert.
+        # S: 113→85, A: 99→71, B: 85→57, C: 75→47. SM-Anforderungen unverändert.
+        if score >= 85 and smart_money_fires >= 4:
+            grade = "S"  # ELITE — Top Score + 4 Boosted fires
+        elif score >= 71 and smart_money_fires >= 3:
+            grade = "A"  # STARK — Score + 3 Boosted fires
+        elif score >= 57 and smart_money_hits >= 2:
+            grade = "B"  # SOLIDE — Score + 2 SM hits
+        elif score >= 47:
+            grade = "C"  # WATCHLIST — Score 47+
         else:
             grade = "D"  # SCHWACH
 
@@ -1820,6 +1826,29 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         threshold = 45 if direction == "long" else 40
     is_valid = score >= threshold
+
+    # V3.3: Pump-Detection — blockiert "already broken out" Setups
+    # Problem: Flache 29 Bars + 1 Bar Pump (+40%) triggert Volume-Void (+10) + Resilience
+    # (+14 weil 0 down days) und kommt auf Score 48 > Threshold 45 → faelschlich is_valid.
+    # Fachlich: Pump auf letzter Kerze OHNE vorherige Konsolidierung = schon gelaufen, kein Setup.
+    # Regel: wenn letzte Kerze signifikant bewegt (>8%) UND deutlich ueber Vorlauf-Volatilitaet
+    # (>5x StdDev der vorherigen bar-to-bar moves) → is_valid=False, egal was der Score sagt.
+    if is_valid and len(closes) >= 10 and direction == "long":
+        last_move_pct = abs(closes[-1] - closes[-2]) / max(1e-9, closes[-2]) * 100
+        prev_moves = [
+            abs(closes[i] - closes[i-1]) / max(1e-9, closes[i-1]) * 100
+            for i in range(1, len(closes) - 1)
+        ]
+        if prev_moves:
+            n_prev = len(prev_moves)
+            mean_prev = sum(prev_moves) / n_prev
+            var_prev = sum((x - mean_prev) ** 2 for x in prev_moves) / n_prev
+            std_prev = math.sqrt(var_prev)
+            if last_move_pct > 8 and last_move_pct > 5 * max(0.1, std_prev):
+                is_valid = False
+                details.append(
+                    f" Pump erkannt: letzte Kerze +{last_move_pct:.1f}% ({last_move_pct/max(0.1,std_prev):.1f}x StdDev) → kein Setup"
+                )
 
     # Cap score at max_score to prevent overflow
     score = min(score, max_score)
