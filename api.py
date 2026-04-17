@@ -637,9 +637,18 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
 
                     # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
                     # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
-                    # V3.4: Erweitert — auch extreme Tages-Moves (>30%) oder
-                    # Kombination aus starkem Vortag + starkem Heute erkennen
-                    _is_mdr = (vortag_pct > 10 and change_pct > 5) or (change_pct > 30 and close_pos > 0.6)
+                    # V4 FIX (2026-04-17): Label-Trennung. Vorher hat der OR-Zweig
+                    # "(change_pct>30 and close_pos>0.6)" jeden Day-1-Extrem-Move als
+                    # MDR gelabelt — auch wenn Vortag 0% oder negativ war (echte
+                    # Beispiele aus Live-Cache: BBGI Vortag=-2%, MAAS Vortag=-4%).
+                    # Day-1-Blowouts sind KEINE Multi-Day-Runner und brauchen ein
+                    # eigenes Label, damit der Trader sie unterscheiden kann.
+                    _is_true_mdr = vortag_pct > 10 and change_pct > 5
+                    _is_day1_blowout = (change_pct > 30 and close_pos > 0.6) and not _is_true_mdr
+                    # _is_mdr steuert den RVOL-Bypass — beide Klassen duerfen bypassen
+                    # (Day-1-Blowouts haben in der Praxis ohnehin RVOL>=1.5, aber
+                    # Konsistenz-halber gleiche Filter-Regel).
+                    _is_mdr = _is_true_mdr or _is_day1_blowout
 
                     # Filter anwenden
                     if not (change_min <= change_pct <= change_max):
@@ -711,9 +720,9 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                     elif _strat_score >= 30: _strat_grade = "C"
                     else: _strat_grade = "D"
 
-                    # V3.2: MDR-Tag für Multi-Day Runner
+                    # V3.2 / V4: MDR-Tag und Day-1-Blowout-Tag getrennt
                     _mdr_label = None
-                    if _is_mdr:
+                    if _is_true_mdr:
                         # V3.3: Distribution-Check — sinkende RVOL + Fading = Crash-Risiko
                         _mdr_fading = rvol < 0.8 and close_pos < 0.5  # RVOL sinkt + Preis faded
                         _mdr_exhaustion = rvol < 0.5  # Volume kollabiert = Käufer weg
@@ -732,6 +741,24 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             _strat_score += 5
                         # Re-grade nach MDR Bonus (mit Cap)
                         _strat_score = min(100, _strat_score)
+                        if _strat_score >= 80: _strat_grade = "S"
+                        elif _strat_score >= 65: _strat_grade = "A"
+                        elif _strat_score >= 45: _strat_grade = "B"
+                        elif _strat_score >= 30: _strat_grade = "C"
+                        else: _strat_grade = "D"
+                    elif _is_day1_blowout:
+                        # V4 FIX: Day-1-Extrem-Move — explosiver Single-Day-Move, kein MDR.
+                        # Kein pauschaler Bonus (Vortag 0% oder negativ => kein Trend-Support),
+                        # aber auch kein Malus wenn Volumen/Preis stark sind.
+                        _blowout_fading = rvol < 1.0 and close_pos < 0.5
+                        if _blowout_fading:
+                            _mdr_label = "BLOWOUT FADING"
+                            _strat_score -= 8  # Kracher der kippt ist das riskanteste
+                        else:
+                            _mdr_label = "BLOWOUT"
+                            # Kein Bonus — Base-Score (Change/RVOL/ClosePos) reicht aus
+                        # Re-grade (falls Malus gezogen)
+                        _strat_score = max(0, min(100, _strat_score))
                         if _strat_score >= 80: _strat_grade = "S"
                         elif _strat_score >= 65: _strat_grade = "A"
                         elif _strat_score >= 45: _strat_grade = "B"
