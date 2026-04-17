@@ -1804,14 +1804,17 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         # mitangepasst → kein Setup erreichte Grade B mehr (85 Punkte praktisch unerreichbar).
         # Fix: Grade-Thresholds um dieselben -28 Punkte nach unten skaliert.
         # S: 113→85, A: 99→71, B: 85→57, C: 75→47. SM-Anforderungen unverändert.
+        # V4 AUDIT FIX (BI-Audit V2): Grade C war zu nah an is_valid-Threshold (47 vs. 45).
+        # Jedes valide Setup wurde automatisch Grade C ohne SM-Bestaetigung. Neu:
+        # C braucht mindestens 1 SM-hit UND 10 Punkte Abstand zum is_valid-Threshold.
         if score >= 85 and smart_money_fires >= 4:
             grade = "S"  # ELITE — Top Score + 4 Boosted fires
         elif score >= 71 and smart_money_fires >= 3:
             grade = "A"  # STARK — Score + 3 Boosted fires
         elif score >= 57 and smart_money_hits >= 2:
             grade = "B"  # SOLIDE — Score + 2 SM hits
-        elif score >= 47:
-            grade = "C"  # WATCHLIST — Score 47+
+        elif score >= 55 and smart_money_hits >= 1:
+            grade = "C"  # WATCHLIST — Score 55+ UND mind. 1 SM hit
         else:
             grade = "D"  # SCHWACH
 
@@ -1848,6 +1851,62 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 is_valid = False
                 details.append(
                     f" Pump erkannt: letzte Kerze +{last_move_pct:.1f}% ({last_move_pct/max(0.1,std_prev):.1f}x StdDev) → kein Setup"
+                )
+
+    # V4 AUDIT FIX (BI-Audit V2): Range-Breakdown-Filter fuer LONG.
+    # Symptom: 25 Bars schoene Konsolidierung + 2 Bars stark bearish mit close unter Range-Low
+    # kam als Grade B durch (score=59). Historische Signale (OBV, Close-Clustering, Compression)
+    # summieren sich, aber der aktuelle Breakdown wird nicht als Hard-Gate gewertet.
+    # Regel: Wenn current_close UNTER dem 20-Bar-Low der VORHERIGEN Periode (ohne letzte 2 Bars)
+    # liegt, ist das Setup objektiv gebrochen — kein imminent breakout, sondern aktiver Breakdown.
+    if is_valid and direction == "long" and len(bars) >= 15:
+        # Nimm die vorherigen Bars (ohne die letzten 2) und bestimme deren Low-Cluster
+        prior_bars = bars[-20:-2] if len(bars) >= 20 else bars[:-2]
+        if len(prior_bars) >= 5:
+            prior_low = min(b["low"] for b in prior_bars)
+            current_close = closes[-1]
+            # Toleranz 1%: echter Breakdown, nicht Mikrofluktuation
+            if current_close < prior_low * 0.99:
+                is_valid = False
+                details.append(
+                    f" Range-Breakdown: Close ${current_close:.2f} unter Prior-Low ${prior_low:.2f} → Setup gebrochen"
+                )
+
+    # V4 AUDIT FIX (BI-Audit V2): Recent-Direction-Filter fuer LONG.
+    # Ein Breakout ist NICHT imminent, wenn die letzten 2 Kerzen bearish sind (close<open)
+    # UND der aktuelle Close signifikant unter dem 5-Bar-High liegt.
+    # Historische Signale koennen trotzdem stark sein (Dry-Up, Compression), aber die
+    # aktuelle Mikrostruktur zeigt Verkaufsdruck → zumindest nicht "imminent".
+    if is_valid and direction == "long" and len(bars) >= 7:
+        last_bar = bars[-1]
+        second_last = bars[-2]
+        both_bearish = (last_bar["close"] < last_bar["open"]
+                        and second_last["close"] < second_last["open"])
+        if both_bearish:
+            recent_high = max(b["high"] for b in bars[-5:])
+            # Close muss deutlich unter recent High liegen (mehr als 2%)
+            if recent_high > 0 and (closes[-1] / recent_high) < 0.98:
+                is_valid = False
+                details.append(
+                    f" Recent-Bearish: letzte 2 Kerzen rot, Close ${closes[-1]:.2f} "
+                    f"< 98% von 5-Bar-High ${recent_high:.2f} → nicht imminent"
+                )
+
+    # V4 AUDIT FIX (BI-Audit V2): Analog fuer SHORT.
+    # Short-Setup ist nicht imminent, wenn die letzten 2 Kerzen bullish sind UND
+    # current_close signifikant ueber dem 5-Bar-Low liegt.
+    if is_valid and direction == "short" and len(bars) >= 7:
+        last_bar = bars[-1]
+        second_last = bars[-2]
+        both_bullish = (last_bar["close"] > last_bar["open"]
+                        and second_last["close"] > second_last["open"])
+        if both_bullish:
+            recent_low = min(b["low"] for b in bars[-5:])
+            if recent_low > 0 and (closes[-1] / recent_low) > 1.02:
+                is_valid = False
+                details.append(
+                    f" Recent-Bullish: letzte 2 Kerzen gruen, Close ${closes[-1]:.2f} "
+                    f"> 102% von 5-Bar-Low ${recent_low:.2f} → Short nicht imminent"
                 )
 
     # Cap score at max_score to prevent overflow
