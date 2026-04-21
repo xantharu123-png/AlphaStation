@@ -28,8 +28,7 @@ from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signa
 
 # AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
 try:
-    from modules.brokers import ib_is_connected, ib_calc_shares, _get_ib_state, ib_get_contract
-    from ib_insync import Order
+    from modules.brokers import ib_is_connected, ib_calc_shares, _get_ib_state, ib_get_contract, Order
 except ImportError:
     def ib_is_connected(): return False
     def ib_calc_shares(*a, **kw): return 0

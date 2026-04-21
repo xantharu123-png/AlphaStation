@@ -442,8 +442,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # FIX #2: Risk mit realistischem Entry berechnen (Mitte der Retest-Zone)
             est_entry = (retest_zone_upper + retest_zone_lower) / 2
             risk = abs(est_entry - stop_price)
-            reward = abs(tp1_price - est_entry)
-            rr = round(reward / risk, 2) if risk > 0 else 0
+            reward_blended = 0.5 * abs(tp1_price - est_entry) + 0.5 * abs(tp2_price - est_entry)
+            rr = round(reward_blended / risk, 2) if risk > 0 else 0
 
             if rr < 2.0:  # FIX #5: Min 2.0:1 R:R (realistischer mit weiterem Stop)
                 continue

@@ -4,14 +4,14 @@ Broker Module — Interactive Brokers Integration (V69.9)
 IB-Verbindung, Kontraktverwaltung und Order-Submission.
 Benötigt ib_insync (optional).
 """
-import streamlit as st
+import threading
 from datetime import datetime
 
 
 def _debug_log(msg, error=None):
     """Minimaler Debug-Logger für Broker-Modul."""
     if error:
-        st.session_state.setdefault("_broker_errors", []).append(f"{msg}: {error}")
+        _IB_STATE.setdefault("errors", []).append(f"{msg}: {error}")
 
 
 
@@ -21,56 +21,80 @@ try:
     IB_INSYNC_AVAILABLE = True
 except ImportError:
     IB_INSYNC_AVAILABLE = False
+    IB = Stock = Future = Forex = Crypto = LimitOrder = StopOrder = Order = None
+
+
+_IB_STATE_LOCK = threading.RLock()
+_IB_STATE = {
+    "ib": None,
+    "connected": False,
+    "error": None,
+    "connect_time": None,
+    "errors": [],
+}
 
 
 def _get_ib_state():
-    """Cached IB connection state — survives Streamlit reruns."""
-    return {"ib": None, "connected": False, "error": None, "connect_time": None}
+    """Cached IB connection state shared across the server process."""
+    return _IB_STATE
 
 
 def ib_connect(host="127.0.0.1", port=7497, client_id=1):
     """Connect to TWS. Returns True on success."""
     if not IB_INSYNC_AVAILABLE:
         return False
-    state = _get_ib_state()
-    # Already connected?
-    if state["connected"] and state["ib"]:
+    with _IB_STATE_LOCK:
+        state = _get_ib_state()
+        # Already connected?
+        if state["connected"] and state["ib"]:
+            try:
+                if state["ib"].isConnected():
+                    return True
+            except Exception:
+                pass
+
+        # Clean up stale client before reconnecting
+        if state["ib"]:
+            try:
+                state["ib"].disconnect()
+            except Exception:
+                pass
+
+        # New connection
         try:
-            state["ib"].isConnected()
-            if state["ib"].isConnected():
-                return True
-        except Exception:
-            pass
-    # New connection
-    try:
-        ib = IB()
-        ib.connect(host, port, clientId=client_id, timeout=5)
-        state["ib"] = ib
-        state["connected"] = True
-        state["error"] = None
-        state["connect_time"] = datetime.now()
-        return True
-    except ConnectionRefusedError:
-        state["connected"] = False
-        state["error"] = "TWS nicht gestartet! Starte TWS/IB Gateway zuerst."
-        return False
-    except Exception as e:
-        state["connected"] = False
-        state["error"] = str(e)[:100]
-        return False
+            ib = IB()
+            ib.connect(host, port, clientId=client_id, timeout=5)
+            state["ib"] = ib
+            state["connected"] = True
+            state["error"] = None
+            state["connect_time"] = datetime.now()
+            return True
+        except ConnectionRefusedError:
+            state["ib"] = None
+            state["connected"] = False
+            state["error"] = "TWS nicht gestartet! Starte TWS/IB Gateway zuerst."
+            return False
+        except Exception as e:
+            state["ib"] = None
+            state["connected"] = False
+            state["error"] = str(e)[:100]
+            _debug_log("IB connect failed", e)
+            return False
 
 
 def ib_disconnect():
     """Gracefully disconnect from TWS."""
-    state = _get_ib_state()
-    if state["ib"]:
-        try:
-            state["ib"].disconnect()
-        except Exception:
-            pass
-    state["ib"] = None
-    state["connected"] = False
-    state["error"] = None
+    with _IB_STATE_LOCK:
+        state = _get_ib_state()
+        if state["ib"]:
+            try:
+                state["ib"].disconnect()
+            except Exception:
+                pass
+        state["ib"] = None
+        state["connected"] = False
+        state["error"] = None
+        state["connect_time"] = None
 
 
 def ib_is_connected():
@@ -79,9 +103,16 @@ def ib_is_connected():
     if not state["connected"] or not state["ib"]:
         return False
     try:
-        return state["ib"].isConnected()
+        is_connected = state["ib"].isConnected()
+        state["connected"] = bool(is_connected)
+        if not is_connected:
+            state["ib"] = None
+            state["connect_time"] = None
+        return is_connected
     except Exception:
         state["connected"] = False
+        state["ib"] = None
+        state["connect_time"] = None
         return False
 
 

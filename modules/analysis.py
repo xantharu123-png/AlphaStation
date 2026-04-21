@@ -2738,24 +2738,49 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     factors = []
     score = 0
     
-    change_pct = abs(row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0)
-    rvol = row_data.get("RVOL", 1) or 1
-    atr_pct = row_data.get("ATR%", 2.5) or 2.5
-    price = row_data.get("Preis", 0) or row_data.get("Price", 0) or 0
-    prev_close = row_data.get("Prev Close", 0) or row_data.get("PrevClose", 0) or 0
+    def _num(*keys, default=0):
+        for key in keys:
+            value = row_data.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                if isinstance(value, str):
+                    value = value.replace("%", "").replace(",", "").strip()
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return default
+
+    day_change_pct = _num("Chg%", "Change %", default=0)
+    rvol = _num("RVOL", default=1) or 1
+    atr_pct = _num("ATR%", default=2.5) or 2.5
+    gap_pct = _num("gap_pct", "Gap%", "Gap %", "Gap_Pct", "GapPct", default=None)
+
+    if gap_pct is None:
+        day_open = _num("Open", "open", default=0)
+        prev_close = _num("Prev Close", "PrevClose", "prev_close", default=0)
+        if day_open > 0 and prev_close > 0:
+            gap_pct = ((day_open - prev_close) / prev_close) * 100
+        else:
+            gap_pct = day_change_pct
+
+    abs_gap_pct = abs(gap_pct)
+    follow_through_pct = day_change_pct - gap_pct
+    gap_display = f"{gap_pct:+.1f}%"
+    change_pct = abs_gap_pct
     
     # 1. GAP SIZE - Optimal 3-8%
-    if 3 <= change_pct <= 8:
-        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Optimale Größe"})
+    if 3 <= abs_gap_pct <= 8:
+        factors.append({"name": "Gap Size", "value": gap_display, "ok": True, "detail": "Optimale Größe"})
         score += 1
     elif 1 <= change_pct < 3:
-        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Klein aber OK"})
+        factors.append({"name": "Gap Size", "value": gap_display, "ok": True, "detail": "Klein aber OK"})
         score += 0.5
     elif 8 < change_pct <= 15:
-        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": True, "detail": "Groß - Vorsicht"})
+        factors.append({"name": "Gap Size", "value": gap_display, "ok": True, "detail": "Groß - Vorsicht"})
         score += 0.5
     else:
-        factors.append({"name": "Gap Size", "value": f"{change_pct:.1f}%", "ok": False, "detail": "Zu klein/groß"})
+        factors.append({"name": "Gap Size", "value": gap_display, "ok": False, "detail": "Zu klein/groß"})
     
     # 2. RVOL als Proxy für PM Volume
     if rvol >= 2.0:
@@ -2800,13 +2825,13 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     # 5. MOMENTUM BESTÄTIGUNG (basierend auf Change-Richtung vs Gap)
     # Wenn Gap Up und Change positiv = Momentum hält
     if is_gap_up:
-        if change_pct > 0:
+        if day_change_pct >= gap_pct:
             factors.append({"name": "Momentum", "value": "Hält", "ok": True, "detail": "Gap hält über Open"})
             score += 1
         else:
             factors.append({"name": "Momentum", "value": "Schwächt", "ok": False, "detail": "Gap füllt sich"})
     else:
-        if change_pct < 0:
+        if day_change_pct <= gap_pct:
             factors.append({"name": "Momentum", "value": "Hält", "ok": True, "detail": "Gap hält unter Open"})
             score += 1
         else:
@@ -2814,7 +2839,7 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     
     # 6. OPENING RANGE CONTEXT
     # Schätze basierend auf Change und RVOL
-    if rvol >= 1.5 and change_pct >= 2:
+    if rvol >= 1.5 and ((follow_through_pct >= 0.5) if is_gap_up else (follow_through_pct <= -0.5)):
         factors.append({"name": "OR Break", "value": "Wahrscheinlich", "ok": True, "detail": "Starker Start"})
         score += 1
     elif rvol >= 1.0:

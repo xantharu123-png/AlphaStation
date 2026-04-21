@@ -26,6 +26,7 @@ import time
 import re
 import smtplib
 import threading
+from copy import deepcopy
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -73,7 +74,13 @@ from modules.scanners import (
     autotrader_background_loop,
 )
 from modules.helpers import get_current_trading_session
-from modules.data_fetchers import rate_limited_get, fetch_ohlcv_for_chart, fetch_grouped_daily, fetch_daily_candles_crypto
+from modules.data_fetchers import (
+    rate_limited_get,
+    fetch_ohlcv_for_chart,
+    fetch_grouped_daily,
+    fetch_daily_candles_crypto,
+    fetch_multi_day_data,
+)
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
@@ -87,11 +94,12 @@ except ImportError:
 
 # Import real S/R calculation
 try:
-    from modules.analysis import calculate_sr_from_historical
+    from modules.analysis import calculate_sr_from_historical, analyze_multi_day_pattern
     HAS_REAL_SR = True
 except ImportError:
     HAS_REAL_SR = False
     print("[Warning] analysis module not fully loaded - using simple S/R")
+    analyze_multi_day_pattern = None
 
 # Import new listing scanner
 try:
@@ -139,6 +147,247 @@ def _load_strategies():
 STRATEGIES, CRYPTO_STRATEGIES, FUTURES_STRATEGIES, FOREX_STRATEGIES, INTERNATIONAL_STRATEGIES, BACKTEST_RULES = _load_strategies()
 print(f"[Init] Strategies loaded: {len(STRATEGIES)} Stock, {len(CRYPTO_STRATEGIES)} Crypto, {len(FUTURES_STRATEGIES)} Futures, {len(FOREX_STRATEGIES)} Forex, {len(INTERNATIONAL_STRATEGIES)} International, {len(BACKTEST_RULES)} Backtest Rules")
 
+STOCK_STRATEGY_ORDER = [
+    "Momentum Breakout Long",
+    "Gap Momentum Long",
+    "Gap Momentum Short",
+    "Turtle Breakout",
+    "Bull Flag",
+    "Bear Flag",
+    "Compression Breakout",
+    "Trend Reversal",
+    "MA Bounce Long",
+    "MA Bounce Short",
+    "Wyckoff Accumulation",
+    "Wyckoff Distribution",
+]
+
+STOCK_STRATEGY_ALIASES = {
+    "Breakout Long": "Momentum Breakout Long",
+    "Early Momentum": "Momentum Breakout Long",
+    "Whale Watch": "Momentum Breakout Long",
+    "Volume Surge": "Momentum Breakout Long",
+    "Earnings Mover Long": "Gap Momentum Long",
+    "Gap Up": "Gap Momentum Long",
+    "Gap Up (High Vol)": "Gap Momentum Long",
+    "Earnings Mover Short": "Gap Momentum Short",
+    "Gap Down": "Gap Momentum Short",
+    "Gap Down (High Vol)": "Gap Momentum Short",
+    "Whale Watch Short ": "Gap Momentum Short",
+    "Consolidation ": "Compression Breakout",
+    "Consolidation Breakout ": "Compression Breakout",
+    "Tight Range ": "Compression Breakout",
+    "Reversal Hunter": "Trend Reversal",
+    "Reversal Setup ": "Trend Reversal",
+    "SMA 50 Bounce Long ": "MA Bounce Long",
+    "SMA 200 Bounce Long ": "MA Bounce Long",
+    "EMA 21 Bounce (Swing) ": "MA Bounce Long",
+    "SMA 50 Bounce Short ": "MA Bounce Short",
+    "SMA 200 Bounce Short ": "MA Bounce Short",
+    "Wyckoff Accumulation ⬆": "Wyckoff Accumulation",
+    "Wyckoff Distribution ⬇": "Wyckoff Distribution",
+}
+
+STOCK_STRATEGY_HIDDEN = {
+    "Penny Rockets",
+    "Dip Buy",
+    "Volume Void Long ⬆",
+    "Volume Void Short ⬇",
+    "Harmonic Bullish ⬆",
+    "Harmonic Bearish ⬇",
+    "High Volume Churn ",
+    "Insider Buying",
+    "Insider Selling",
+}
+
+STOCK_STRATEGY_REMOVED_FROM_MENU = {
+    "Harmonic All Patterns ",
+    "Long Wick Up",
+    "Long Wick Down",
+}
+
+
+def _clone_stock_strategy(
+    base_name: str,
+    *,
+    filters: Optional[Dict[str, Any]] = None,
+    merged_from: Optional[List[str]] = None,
+    display_group: Optional[str] = None,
+    **overrides: Any,
+) -> Dict[str, Any]:
+    """Create a public-facing stock strategy config without mutating the base template."""
+    strategy = deepcopy(STRATEGIES.get(base_name, {}))
+    if filters is not None:
+        merged_filters = dict(strategy.get("filters", {}))
+        merged_filters.update(filters)
+        strategy["filters"] = merged_filters
+    strategy.update(overrides)
+    if merged_from:
+        strategy["merged_from"] = list(merged_from)
+    if display_group:
+        strategy["display_group"] = display_group
+    return strategy
+
+
+def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
+    """Expose a tighter stock menu while keeping old names as backend-compatible aliases."""
+    public_strategies = {
+        "Momentum Breakout Long": _clone_stock_strategy(
+            "Breakout Long",
+            filters={
+                "Change %": (3.0, 200.0),
+                "RVOL": (1.8, 100.0),
+                "Close Position": (0.62, 1.0),
+                "Preis": (5.0, 100000.0),
+            },
+            description="Konsolidierter Momentum-Scanner für Breakout-, Early- und Whale-Setups.",
+            logic="Breakout + Trendhaltigkeit + sauberes Volumenprofil = priorisierter Momentum-Kandidat.",
+            min_dollar_volume=750000,
+            merged_from=["Breakout Long", "Early Momentum", "Whale Watch", "Volume Surge"],
+            display_group="Momentum",
+        ),
+        "Gap Momentum Long": _clone_stock_strategy(
+            "Earnings Mover Long",
+            filters={
+                "Gap %": (3.0, 100.0),
+                "Change %": (2.0, 200.0),
+                "RVOL": (1.5, 100.0),
+                "Close Position": (0.55, 1.0),
+                "Preis": (5.0, 100000.0),
+            },
+            description="Gap-Up + News-/Momentum-Scanner mit Fokus auf haltbare Long-Gaps.",
+            logic="Gap + Volumen + Halt oberhalb des Opens = Gap-and-go Priorität.",
+            min_dollar_volume=1000000,
+            merged_from=["Earnings Mover Long", "Gap Up", "Gap Up (High Vol)"],
+            display_group="Gap",
+        ),
+        "Gap Momentum Short": _clone_stock_strategy(
+            "Earnings Mover Short",
+            filters={
+                "Gap %": (-100.0, -3.0),
+                "Change %": (-200.0, -2.0),
+                "RVOL": (1.5, 100.0),
+                "Close Position": (0.0, 0.45),
+                "Preis": (5.0, 100000.0),
+            },
+            description="Gap-Down + News-/Momentum-Scanner für Continuation-Shorts.",
+            logic="Großer negativer Gap + schwacher Intraday-Halt = priorisierter Short-Kandidat.",
+            min_dollar_volume=1000000,
+            merged_from=["Earnings Mover Short", "Gap Down", "Gap Down (High Vol)", "Whale Watch Short"],
+            display_group="Gap",
+        ),
+        "Turtle Breakout": _clone_stock_strategy(
+            "Turtle Breakout",
+            description="Trendfolgesetup nach klassischem Donchian-Breakout.",
+            merged_from=["Turtle Breakout"],
+            display_group="Momentum",
+        ),
+        "Bull Flag": _clone_stock_strategy(
+            "Bull Flag",
+            description="Mehrtägige Bull Flag mit echter Pullback-Validierung.",
+            merged_from=["Bull Flag"],
+            display_group="Pullback",
+        ),
+        "Bear Flag": _clone_stock_strategy(
+            "Bear Flag",
+            description="Mehrtägige Bear Flag für strukturierte Short-Fortsetzungen.",
+            merged_from=["Bear Flag"],
+            display_group="Pullback",
+        ),
+        "Compression Breakout": _clone_stock_strategy(
+            "Consolidation Breakout ",
+            filters={
+                "Change %": (1.2, 50.0),
+                "Vortag %": (-3.0, 3.0),
+                "RVOL": (1.3, 50.0),
+            },
+            description="Komprimierte Mehrtagesrange mit bestätigtem Ausbruch.",
+            logic="Enger Aufbau + steigendes Interesse + Breakout-Tag = strukturierter Long-Kandidat.",
+            merged_from=["Consolidation", "Consolidation Breakout", "Tight Range"],
+            display_group="Structure",
+        ),
+        "Trend Reversal": _clone_stock_strategy(
+            "Reversal Setup ",
+            filters={
+                "Change %": (1.5, 15.0),
+                "Vortag %": (-10.0, -2.0),
+                "RVOL": (1.2, 12.0),
+            },
+            description="Mehrtägige Trend-Umkehr nach kontrolliertem Abverkauf.",
+            logic="Downtrend + Reversal-Tag + Volumenbestätigung = Long-Reversal mit Struktur.",
+            merged_from=["Reversal Hunter", "Reversal Setup"],
+            display_group="Structure",
+        ),
+        "MA Bounce Long": _clone_stock_strategy(
+            "SMA 50 Bounce Long ",
+            filters={"Preis": (5.0, 1000.0), "Change %": (-6.0, 3.0)},
+            description="Pullback an EMA21, SMA50 oder SMA200 im Aufwärtstrend.",
+            logic="Trendstütze + kontrollierter Pullback + Halt oberhalb des Moving Averages = Long-Bounce.",
+            min_dollar_volume=1000000,
+            needs_ma=True,
+            ma_profiles=[
+                {"ma_type": "EMA", "ma_period": 21, "ma_approach": "from_above", "ma_distance_max": 2.0},
+                {"ma_type": "SMA", "ma_period": 50, "ma_approach": "from_above", "ma_distance_max": 3.0},
+                {"ma_type": "SMA", "ma_period": 200, "ma_approach": "from_above", "ma_distance_max": 3.0},
+            ],
+            merged_from=["SMA 50 Bounce Long", "SMA 200 Bounce Long", "EMA 21 Bounce (Swing)"],
+            display_group="Pullback",
+        ),
+        "MA Bounce Short": _clone_stock_strategy(
+            "SMA 50 Bounce Short ",
+            filters={"Preis": (5.0, 1000.0), "Change %": (-3.0, 6.0)},
+            description="Bounce in fallende SMA50/SMA200-Zonen für strukturierte Shorts.",
+            logic="Widerstand am fallenden Durchschnitt + schwacher Close = Short-Rejection.",
+            min_dollar_volume=1000000,
+            needs_ma=True,
+            ma_profiles=[
+                {"ma_type": "SMA", "ma_period": 50, "ma_approach": "from_below", "ma_distance_max": 3.0},
+                {"ma_type": "SMA", "ma_period": 200, "ma_approach": "from_below", "ma_distance_max": 3.0},
+            ],
+            merged_from=["SMA 50 Bounce Short", "SMA 200 Bounce Short"],
+            display_group="Pullback",
+        ),
+        "Wyckoff Accumulation": _clone_stock_strategy(
+            "Wyckoff Accumulation ⬆",
+            description="Wyckoff-Akkumulation mit Mehrtagesstruktur und Smart-Money-Kontext.",
+            merged_from=["Wyckoff Accumulation ⬆"],
+            display_group="Smart Money",
+        ),
+        "Wyckoff Distribution": _clone_stock_strategy(
+            "Wyckoff Distribution ⬇",
+            description="Wyckoff-Distribution für schleichende Schwäche vor dem Breakdown.",
+            merged_from=["Wyckoff Distribution ⬇"],
+            display_group="Smart Money",
+        ),
+    }
+
+    for name, config in public_strategies.items():
+        config["canonical_name"] = name
+        STRATEGIES[name] = config
+
+    return public_strategies
+
+
+PUBLIC_STOCK_STRATEGIES = _register_public_stock_strategies()
+
+
+def _normalize_strategy_key(strategy_name: str) -> str:
+    return re.sub(r"\s+", " ", str(strategy_name or "")).strip().lower()
+
+
+def _build_stock_strategy_lookup() -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for name in STRATEGIES.keys():
+        lookup[_normalize_strategy_key(name)] = name
+    for alias, canonical in STOCK_STRATEGY_ALIASES.items():
+        lookup[_normalize_strategy_key(alias)] = canonical
+    for canonical in PUBLIC_STOCK_STRATEGIES.keys():
+        lookup[_normalize_strategy_key(canonical)] = canonical
+    return lookup
+
+
+STOCK_STRATEGY_LOOKUP = _build_stock_strategy_lookup()
+
 INVERSE_ETFS = {
     "SQQQ": ("3x Short Nasdaq", "QQQ"), "SPXS": ("3x Short S&P 500", "SPY"),
     "SDOW": ("3x Short Dow", "DIA"), "SH": ("1x Short S&P 500", "SPY"),
@@ -167,7 +416,8 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 
 def _strategy_cache_path(strategy_name: str) -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
-    safe_name = strategy_name.lower().replace(" ", "_").replace("/", "_")
+    safe_name = re.sub(r"[^a-z0-9_]+", "_", strategy_name.lower().replace(" ", "_").replace("/", "_"))
+    safe_name = re.sub(r"_+", "_", safe_name).strip("_") or "strategy"
     return f"/tmp/strategy_{safe_name}_cache.json"
 
 
@@ -498,6 +748,584 @@ def get_strategies_for_market(market_type: str) -> Dict[str, Any]:
     return strategies_map.get(market_type, STRATEGIES)
 
 
+def get_public_strategies_for_market(market_type: str, include_hidden: bool = False) -> Dict[str, Any]:
+    """Return the curated strategy menu that should be visible in the UI."""
+    strategies = get_strategies_for_market(market_type)
+    if market_type != "stocks":
+        return strategies
+
+    public_strategies = {
+        name: deepcopy(STRATEGIES[name])
+        for name in STOCK_STRATEGY_ORDER
+        if name in STRATEGIES
+    }
+
+    if include_hidden:
+        for name in sorted(STOCK_STRATEGY_HIDDEN):
+            if name in STRATEGIES:
+                public_strategies[name] = deepcopy(STRATEGIES[name])
+
+    return public_strategies
+
+
+def resolve_strategy_name(strategy_name: str, market_type: str = "stocks") -> str:
+    """Map legacy/duplicate stock strategy names onto the curated canonical set."""
+    if market_type != "stocks":
+        return strategy_name
+    return STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(strategy_name), strategy_name)
+
+
+def _get_ma_profiles(strat: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return one or more normalized MA profiles for bounce strategies."""
+    profiles = strat.get("ma_profiles")
+    if profiles:
+        normalized_profiles = []
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            normalized_profiles.append({
+                "ma_type": str(profile.get("ma_type", "SMA") or "SMA").upper(),
+                "ma_period": int(profile.get("ma_period", 50) or 50),
+                "ma_approach": str(profile.get("ma_approach", "from_above") or "from_above"),
+                "ma_distance_max": float(profile.get("ma_distance_max", 3.0) or 3.0),
+            })
+        if normalized_profiles:
+            return normalized_profiles
+
+    return [{
+        "ma_type": str(strat.get("ma_type", "SMA") or "SMA").upper(),
+        "ma_period": int(strat.get("ma_period", 50) or 50),
+        "ma_approach": str(strat.get("ma_approach", "from_above") or "from_above"),
+        "ma_distance_max": float(strat.get("ma_distance_max", 3.0) or 3.0),
+    }]
+
+
+def _get_max_ma_period(strat: Dict[str, Any]) -> int:
+    """Highest lookback needed for merged MA bounce strategies."""
+    periods = [profile.get("ma_period", 50) for profile in _get_ma_profiles(strat)]
+    return max(int(period or 50) for period in periods) if periods else 50
+
+
+def _strategy_score_to_grade(score: float) -> str:
+    """Shared grade ladder for generic strategy scans."""
+    if score >= 80:
+        return "S"
+    if score >= 65:
+        return "A"
+    if score >= 45:
+        return "B"
+    if score >= 30:
+        return "C"
+    return "D"
+
+
+def _calc_sma_series(values: List[float], period: int) -> List[Optional[float]]:
+    """Simple moving average series aligned to the input length."""
+    result: List[Optional[float]] = [None] * len(values)
+    if period <= 0 or len(values) < period:
+        return result
+    window_sum = sum(values[:period])
+    result[period - 1] = window_sum / period
+    for idx in range(period, len(values)):
+        window_sum += values[idx] - values[idx - period]
+        result[idx] = window_sum / period
+    return result
+
+
+def _fetch_strategy_daily_history(
+    ticker: str,
+    min_days: int,
+    history_cache: Dict[str, List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Fetch daily bars once per ticker for strategy validation."""
+    cache_key = f"{ticker}:{min_days}"
+    if cache_key in history_cache:
+        return history_cache[cache_key]
+
+    daily_bars: List[Dict[str, Any]] = []
+
+    # Cheap path for short lookbacks.
+    if min_days <= 60:
+        try:
+            daily_bars = fetch_multi_day_data(ticker, POLYGON_KEY, days=max(min_days + 8, min_days))
+        except Exception:
+            daily_bars = []
+
+    if not daily_bars or len(daily_bars) < min_days:
+        try:
+            ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe="1D", bars=max(min_days + 30, 120))
+        except Exception:
+            ohlcv = None
+        if ohlcv:
+            daily_bars = []
+            for bar in ohlcv:
+                try:
+                    daily_bars.append({
+                        "date": datetime.fromtimestamp(bar["time"]).strftime("%Y-%m-%d") if bar.get("time") else "",
+                        "open": float(bar.get("open", bar.get("close", 0)) or 0),
+                        "high": float(bar.get("high", bar.get("close", 0)) or 0),
+                        "low": float(bar.get("low", bar.get("close", 0)) or 0),
+                        "close": float(bar.get("close", 0) or 0),
+                        "volume": float(bar.get("volume", 0) or 0),
+                    })
+                except Exception:
+                    continue
+
+    history_cache[cache_key] = daily_bars
+    return daily_bars
+
+
+def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Validate multi-day pattern strategies with real daily history."""
+    if analyze_multi_day_pattern is None:
+        return None
+
+    history_days = int(strat.get("history_days", 20) or 20)
+    daily_bars = candidate.get("_daily_bars", [])
+    if len(daily_bars) < history_days:
+        return None
+
+    pattern_type = str(strat.get("pattern_type", "consolidation") or "consolidation")
+    pattern_window = daily_bars[-history_days:]
+    is_valid, pattern_score, details = analyze_multi_day_pattern(pattern_window, pattern_type)
+    if not is_valid:
+        return None
+
+    quality_floor = {
+        "consolidation": 45,
+        "bull_flag": 45,
+        "bear_flag": 45,
+        "consolidation_breakout": 55,
+        "churn": 55,
+        "wyckoff_accumulation": 60,
+        "wyckoff_distribution": 60,
+        "reversal_setup": 50,
+    }.get(pattern_type, 50)
+    if pattern_score < quality_floor:
+        return None
+
+    base_score = float(candidate.get("base_score", candidate.get("score", 0)) or 0)
+    liquidity_floor = max(int(strat.get("min_dollar_volume", 200_000) or 0), 500_000)
+    if float(candidate.get("Dollar_Volume", 0) or 0) < liquidity_floor:
+        return None
+
+    final_score = round(min(100, base_score * 0.4 + float(pattern_score) * 0.6))
+    enriched = dict(candidate)
+    enriched.update({
+        "pattern_type": pattern_type,
+        "pattern_score": round(float(pattern_score), 1),
+        "pattern_details": details[:4],
+        "history_days": history_days,
+        "score": final_score,
+        "grade": _strategy_score_to_grade(final_score),
+    })
+    return enriched
+
+
+def _apply_void_strategy_filter(
+    candidate: Dict[str, Any],
+    strat: Dict[str, Any],
+    strategy_name: str,
+) -> Optional[Dict[str, Any]]:
+    """Validate volume-void setups with profile-aware direction checks."""
+    daily_bars = candidate.get("_daily_bars", [])
+    if len(daily_bars) < 40:
+        return None
+
+    liquidity_floor = max(int(strat.get("min_dollar_volume", 200_000) or 0), 750_000)
+    if float(candidate.get("Dollar_Volume", 0) or 0) < liquidity_floor:
+        return None
+
+    profile = calculate_volume_profile(daily_bars[-90:], num_bins=24)
+    if not profile:
+        return None
+
+    price = float(candidate.get("price", candidate.get("Preis", 0)) or 0)
+    if price <= 0:
+        return None
+
+    voids = find_volume_voids(price, profile, min_void_size_pct=0.8)
+    if not voids:
+        return None
+
+    is_long = "short" not in strategy_name.lower() and "⬇" not in strategy_name
+    relevant = voids.get("nearest_void_above") if is_long else voids.get("nearest_void_below")
+    if not relevant:
+        return None
+
+    if is_long:
+        distance_pct = ((relevant.get("low", price) - price) / price) * 100 if price > 0 else 99
+    else:
+        distance_pct = ((price - relevant.get("high", price)) / price) * 100 if price > 0 else 99
+    if distance_pct < 0 or distance_pct > 8:
+        return None
+
+    size_pct = float(relevant.get("size_pct", 0) or 0)
+    directional_voids = voids.get("voids_above", []) if is_long else voids.get("voids_below", [])
+    close_pos = float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)) or 0.5)
+
+    void_score = 0.0
+    if distance_pct <= 1.5:
+        void_score += 35
+    elif distance_pct <= 3:
+        void_score += 25
+    elif distance_pct <= 6:
+        void_score += 15
+    else:
+        void_score += 5
+
+    if size_pct >= 4:
+        void_score += 25
+    elif size_pct >= 2:
+        void_score += 18
+    elif size_pct >= 1:
+        void_score += 10
+
+    if len(directional_voids) >= 2:
+        void_score += 15
+    elif directional_voids:
+        void_score += 8
+
+    poc = float(voids.get("poc", 0) or 0)
+    if poc > 0:
+        if is_long and price <= poc * 1.02:
+            void_score += 15
+        elif (not is_long) and price >= poc * 0.98:
+            void_score += 15
+        else:
+            void_score += 5
+
+    if is_long and close_pos >= 0.35:
+        void_score += 10
+    elif (not is_long) and close_pos <= 0.65:
+        void_score += 10
+
+    if void_score < 55:
+        return None
+
+    base_score = float(candidate.get("base_score", candidate.get("score", 0)) or 0)
+    final_score = round(min(100, base_score * 0.35 + void_score * 0.65))
+
+    target_price = relevant.get("high") if is_long else relevant.get("low")
+    enriched = dict(candidate)
+    enriched.update({
+        "VoidSize%": round(size_pct, 2),
+        "VoidDist%": round(distance_pct, 2),
+        "VoidsAbove": len(voids.get("voids_above", [])),
+        "VoidsBelow": len(voids.get("voids_below", [])),
+        "void_score": round(void_score, 1),
+        "void_target": round(float(target_price or 0), 2) if target_price else None,
+        "poc": round(poc, 2) if poc else None,
+        "vah": round(float(voids.get("vah", 0) or 0), 2) if voids.get("vah") else None,
+        "val": round(float(voids.get("val", 0) or 0), 2) if voids.get("val") else None,
+        "score": final_score,
+        "grade": _strategy_score_to_grade(final_score),
+    })
+    return enriched
+
+
+def _apply_harmonic_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Keep only harmonic setups that are still actionable near the entry zone."""
+    if not HAS_PATTERNS:
+        return None
+
+    daily_bars = candidate.get("_daily_bars", [])
+    if len(daily_bars) < 60:
+        return None
+
+    liquidity_floor = max(int(strat.get("min_dollar_volume", 200_000) or 0), 1_000_000)
+    if float(candidate.get("Dollar_Volume", 0) or 0) < liquidity_floor:
+        return None
+
+    patterns = find_harmonic_for_chart(daily_bars[-220:])
+    if not patterns:
+        return None
+
+    direction_filter = str(strat.get("harmonic_direction", "ALL") or "ALL").upper()
+    if direction_filter != "ALL":
+        patterns = [pat for pat in patterns if str(pat.get("direction", "")).upper() == direction_filter]
+    if not patterns:
+        return None
+
+    price = float(candidate.get("price", candidate.get("Preis", 0)) or 0)
+    if price <= 0:
+        return None
+
+    best_pattern = None
+    best_rank = -999.0
+    for pattern in patterns:
+        trade = pattern.get("trade", {}) or {}
+        entry = float(trade.get("entry", price) or price)
+        rr_ratio = float(trade.get("risk_reward", 0) or 0)
+        success_rate = float(pattern.get("success_rate", 0) or 0)
+        harmonic_score = float(pattern.get("score", 0) or 0)
+        distance_pct = abs(entry - price) / price * 100 if price > 0 else 99
+        rank = harmonic_score * 0.6 + success_rate * 0.25 + min(rr_ratio, 4.0) * 5 - max(0.0, distance_pct - 4.0) * 3
+        if rank > best_rank:
+            best_rank = rank
+            best_pattern = pattern
+
+    if not best_pattern:
+        return None
+
+    trade = best_pattern.get("trade", {}) or {}
+    entry = float(trade.get("entry", price) or price)
+    distance_pct = abs(entry - price) / price * 100 if price > 0 else 99
+    rr_ratio = float(trade.get("risk_reward", 0) or 0)
+    harmonic_score = float(best_pattern.get("score", 0) or 0)
+    success_rate = float(best_pattern.get("success_rate", 0) or 0)
+
+    if harmonic_score < 65 or rr_ratio < 1.8 or distance_pct > 10:
+        return None
+
+    composite_score = harmonic_score * 0.7 + success_rate * 0.3
+    if rr_ratio >= 2.5:
+        composite_score += 8
+    if distance_pct <= 3:
+        composite_score += 8
+    elif distance_pct <= 5:
+        composite_score += 4
+    composite_score = min(100, composite_score)
+
+    base_score = float(candidate.get("base_score", candidate.get("score", 0)) or 0)
+    final_score = round(min(100, base_score * 0.25 + composite_score * 0.75))
+
+    enriched = dict(candidate)
+    enriched.update({
+        "harmonic_pattern": best_pattern.get("pattern"),
+        "harmonic_direction": best_pattern.get("direction"),
+        "harmonic_score": round(composite_score, 1),
+        "harmonic_matches": best_pattern.get("matches"),
+        "harmonic_success_rate": round(success_rate, 1),
+        "entry": round(entry, 2),
+        "stop_loss": round(float(trade.get("stop_loss", 0) or 0), 2) if trade.get("stop_loss") else None,
+        "tp1": round(float(trade.get("tp1", 0) or 0), 2) if trade.get("tp1") else None,
+        "tp2": round(float(trade.get("tp2", 0) or 0), 2) if trade.get("tp2") else None,
+        "risk_reward": round(rr_ratio, 2),
+        "entry_distance_pct": round(distance_pct, 2),
+        "score": final_score,
+        "grade": _strategy_score_to_grade(final_score),
+    })
+    return enriched
+
+
+def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Validate MA bounce setups with trend, structure and pullback quality."""
+    daily_bars = candidate.get("_daily_bars", [])
+    ma_profiles = _get_ma_profiles(strat)
+    max_period = _get_max_ma_period(strat)
+    if len(daily_bars) < max_period + 10:
+        return None
+
+    liquidity_floor = max(int(strat.get("min_dollar_volume", 200_000) or 0), 1_000_000)
+    if float(candidate.get("Dollar_Volume", 0) or 0) < liquidity_floor:
+        return None
+
+    closes = [float(bar.get("close", 0) or 0) for bar in daily_bars]
+    price = float(candidate.get("price", candidate.get("Preis", 0)) or 0)
+    if price <= 0:
+        return None
+
+    change_pct = float(candidate.get("change_pct", candidate.get("Change_Pct", 0)) or 0)
+    close_pos = float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)) or 0.5)
+    rvol = float(candidate.get("RVOL", candidate.get("rvol", 1)) or 1)
+    base_score = float(candidate.get("base_score", candidate.get("score", 0)) or 0)
+    best_match: Optional[Dict[str, Any]] = None
+
+    for profile in ma_profiles:
+        ma_type = profile["ma_type"]
+        ma_period = profile["ma_period"]
+        ma_series = calculate_ema_series(closes, ma_period) if ma_type == "EMA" else _calc_sma_series(closes, ma_period)
+        if not ma_series or ma_series[-1] is None:
+            continue
+
+        current_ma = ma_series[-1]
+        prev_ma = next((val for val in reversed(ma_series[:-1]) if val is not None), None)
+        if current_ma is None or prev_ma is None or current_ma <= 0 or prev_ma <= 0:
+            continue
+
+        distance_signed = ((price - current_ma) / current_ma) * 100
+        distance_abs = abs(distance_signed)
+        max_distance = profile["ma_distance_max"]
+        ma_slope_pct = ((current_ma - prev_ma) / prev_ma) * 100
+
+        recent_pairs = [
+            (float(close), ma_val)
+            for close, ma_val in zip(closes[-6:], ma_series[-6:])
+            if ma_val is not None and ma_val > 0
+        ]
+        if len(recent_pairs) < 4:
+            continue
+
+        approach = profile["ma_approach"]
+        is_long = approach == "from_above"
+        prior_distances = [abs((close - ma_val) / ma_val) * 100 for close, ma_val in recent_pairs[:-1]]
+        prior_avg_distance = sum(prior_distances) / len(prior_distances) if prior_distances else max_distance + 1
+        above_count = sum(1 for close, ma_val in recent_pairs[:-1] if close >= ma_val)
+        below_count = sum(1 for close, ma_val in recent_pairs[:-1] if close <= ma_val)
+
+        if is_long:
+            if distance_signed < 0 or distance_signed > max_distance:
+                continue
+            if ma_slope_pct <= 0.05:
+                continue
+            if above_count < max(2, len(recent_pairs) - 2):
+                continue
+            if distance_abs > prior_avg_distance + 0.75:
+                continue
+            if change_pct < -4 or close_pos < 0.20:
+                continue
+        else:
+            if distance_signed > 0 or abs(distance_signed) > max_distance:
+                continue
+            if ma_slope_pct >= -0.05:
+                continue
+            if below_count < max(2, len(recent_pairs) - 2):
+                continue
+            if distance_abs > prior_avg_distance + 0.75:
+                continue
+            if change_pct > 4 or close_pos > 0.80:
+                continue
+
+        ma_score = 0.0
+        if distance_abs <= 0.5:
+            ma_score += 30
+        elif distance_abs <= 1.0:
+            ma_score += 25
+        elif distance_abs <= 2.0:
+            ma_score += 18
+        else:
+            ma_score += 10
+
+        if (is_long and ma_slope_pct >= 1.0) or ((not is_long) and ma_slope_pct <= -1.0):
+            ma_score += 25
+        else:
+            ma_score += 18
+
+        if (is_long and above_count >= 4) or ((not is_long) and below_count >= 4):
+            ma_score += 20
+        elif (is_long and above_count >= 3) or ((not is_long) and below_count >= 3):
+            ma_score += 14
+
+        if 0.8 <= rvol <= 3.5:
+            ma_score += 10
+        elif rvol >= 0.6:
+            ma_score += 6
+
+        if (is_long and close_pos >= 0.50) or ((not is_long) and close_pos <= 0.50):
+            ma_score += 15
+        else:
+            ma_score += 5
+
+        if ma_score < 60:
+            continue
+
+        final_score = round(min(100, base_score * 0.4 + ma_score * 0.6))
+        match = {
+            "ma_label": f"{ma_type} {ma_period}",
+            "ma_value": round(float(current_ma), 2),
+            "distance_abs": round(distance_abs, 2),
+            "distance_signed": round(distance_signed, 2),
+            "ma_slope_pct": round(ma_slope_pct, 2),
+            "ma_score": round(ma_score, 1),
+            "score": final_score,
+        }
+        if best_match is None or match["score"] > best_match["score"] or (
+            match["score"] == best_match["score"] and match["ma_score"] > best_match["ma_score"]
+        ):
+            best_match = match
+
+    if not best_match:
+        return None
+
+    enriched = dict(candidate)
+    enriched.update({
+        "ma_type": best_match["ma_label"],
+        "ma_value": best_match["ma_value"],
+        "MA_Distance%": best_match["distance_abs"],
+        "ma_distance_signed_pct": best_match["distance_signed"],
+        "ma_slope_pct": best_match["ma_slope_pct"],
+        "ma_score": best_match["ma_score"],
+        "score": best_match["score"],
+        "grade": _strategy_score_to_grade(best_match["score"]),
+    })
+    return enriched
+
+
+def _apply_special_strategy_post_filter(
+    candidates: List[Dict[str, Any]],
+    strat: Dict[str, Any],
+    strategy_name: str,
+) -> List[Dict[str, Any]]:
+    """Upgrade strategy scans from pure snapshot filters to setup validation."""
+    if not any(
+        strat.get(flag)
+        for flag in ("needs_history", "needs_volume_profile", "needs_harmonic", "needs_ma")
+    ):
+        return candidates
+
+    if strat.get("needs_history") and analyze_multi_day_pattern is None:
+        print(f"[Strategy Scan] {strategy_name}: analysis helper missing, returning no results")
+        return []
+    if strat.get("needs_harmonic") and not HAS_PATTERNS:
+        print(f"[Strategy Scan] {strategy_name}: patterns helper missing, returning no results")
+        return []
+
+    history_cache: Dict[str, List[Dict[str, Any]]] = {}
+    candidate_limit = 150
+    if strat.get("needs_harmonic"):
+        candidate_limit = 80
+    elif strat.get("needs_ma"):
+        candidate_limit = 120
+    elif strat.get("needs_volume_profile"):
+        candidate_limit = 120
+
+    min_history = max(int(strat.get("history_days", 0) or 0), 20)
+    if strat.get("needs_volume_profile"):
+        min_history = max(min_history, 90)
+    if strat.get("needs_harmonic"):
+        min_history = max(min_history, 220)
+    if strat.get("needs_ma"):
+        min_history = max(min_history, _get_max_ma_period(strat) + 12)
+
+    filtered: List[Dict[str, Any]] = []
+    for candidate in candidates[:candidate_limit]:
+        ticker = candidate.get("ticker") or candidate.get("Ticker")
+        if not ticker:
+            continue
+
+        daily_bars = _fetch_strategy_daily_history(str(ticker), min_history, history_cache)
+        if len(daily_bars) < min_history:
+            continue
+
+        enriched = dict(candidate)
+        enriched["_daily_bars"] = daily_bars
+
+        if strat.get("needs_history"):
+            enriched = _apply_pattern_strategy_filter(enriched, strat)
+            if not enriched:
+                continue
+        if strat.get("needs_volume_profile"):
+            enriched = _apply_void_strategy_filter(enriched, strat, strategy_name)
+            if not enriched:
+                continue
+        if strat.get("needs_harmonic"):
+            enriched = _apply_harmonic_strategy_filter(enriched, strat)
+            if not enriched:
+                continue
+        if strat.get("needs_ma"):
+            enriched = _apply_ma_strategy_filter(enriched, strat)
+            if not enriched:
+                continue
+
+        enriched.pop("_daily_bars", None)
+        filtered.append(enriched)
+
+    filtered.sort(key=lambda x: (-float(x.get("score", 0) or 0), -float(x.get("Dollar_Volume", 0) or 0), -abs(float(x.get("Change_Pct", 0) or 0))))
+    print(f"[Strategy Scan] {strategy_name}: {len(filtered)}/{min(len(candidates), candidate_limit)} Kandidaten nach Spezial-Check")
+    return filtered
+
+
 def _bi_background_scan_wrapper(direction: str) -> None:
     """Wrapper to run _bi_background_scan in background without candidates pre-load."""
     try:
@@ -714,11 +1542,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                     _strat_score = min(100, _strat_score)
 
                     # Grade (verschärft — konsistent mit Krypto-Scanner)
-                    if _strat_score >= 80: _strat_grade = "S"
-                    elif _strat_score >= 65: _strat_grade = "A"
-                    elif _strat_score >= 45: _strat_grade = "B"
-                    elif _strat_score >= 30: _strat_grade = "C"
-                    else: _strat_grade = "D"
+                    _strat_grade = _strategy_score_to_grade(_strat_score)
 
                     # V3.2 / V4: MDR-Tag und Day-1-Blowout-Tag getrennt
                     _mdr_label = None
@@ -741,11 +1565,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             _strat_score += 5
                         # Re-grade nach MDR Bonus (mit Cap)
                         _strat_score = min(100, _strat_score)
-                        if _strat_score >= 80: _strat_grade = "S"
-                        elif _strat_score >= 65: _strat_grade = "A"
-                        elif _strat_score >= 45: _strat_grade = "B"
-                        elif _strat_score >= 30: _strat_grade = "C"
-                        else: _strat_grade = "D"
+                        _strat_grade = _strategy_score_to_grade(_strat_score)
                     elif _is_day1_blowout:
                         # V4 FIX: Day-1-Extrem-Move — explosiver Single-Day-Move, kein MDR.
                         # Kein pauschaler Bonus (Vortag 0% oder negativ => kein Trend-Support),
@@ -759,11 +1579,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             # Kein Bonus — Base-Score (Change/RVOL/ClosePos) reicht aus
                         # Re-grade (falls Malus gezogen)
                         _strat_score = max(0, min(100, _strat_score))
-                        if _strat_score >= 80: _strat_grade = "S"
-                        elif _strat_score >= 65: _strat_grade = "A"
-                        elif _strat_score >= 45: _strat_grade = "B"
-                        elif _strat_score >= 30: _strat_grade = "C"
-                        else: _strat_grade = "D"
+                        _strat_grade = _strategy_score_to_grade(_strat_score)
 
                     results.append({
                         "Ticker": ticker,
@@ -785,6 +1601,8 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         "Gap_Pct": round(gap_pct, 2),
                         "gap_pct": round(gap_pct, 2),
                         "Vortag_Pct": round(vortag_pct, 2),
+                        "base_score": _strat_score,
+                        "base_grade": _strat_grade,
                         "score": _strat_score,
                         "grade": _strat_grade,
                         "mdr_tag": _mdr_label,
@@ -794,6 +1612,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
 
         # Sortieren nach SCORE absteigend (nicht Change% — Score ist die Gesamtbewertung)
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
+        results = _apply_special_strategy_post_filter(results, strat, strategy_name)
         results = results[:50]
 
         # V2.2: Separate Cache-Datei pro Strategie + Fallback auf generischen Cache
@@ -3405,13 +4224,14 @@ Kurz und praezise, keine langen Erklaerungen."""}],
 @app.get("/api/strategies", response_model=StrategiesResponse)
 def list_strategies(market_type: str = Query("stocks", description="Market type: stocks, crypto, futures, forex")):
     """List all strategies for a given market type. Strips internal fields for public API."""
-    strategies = get_strategies_for_market(market_type)
+    strategies = get_public_strategies_for_market(market_type)
 
     # Strip internal calculation details — users should not see filters, logic, thresholds
     # NO description — contains internal details; frontend has its own guide texts
     _safe_keys = {"stocks_only", "needs_history", "needs_harmonic",
                   "needs_volume_profile", "needs_ma", "ma_type", "ma_period",
-                  "best_time", "best_pairs", "harmonic_direction"}
+                  "best_time", "best_pairs", "harmonic_direction",
+                  "display_group", "merged_from", "canonical_name"}
     safe_strategies = {}
     for name, config in strategies.items():
         safe_strategies[name] = {k: v for k, v in config.items() if k in _safe_keys}
@@ -3433,50 +4253,51 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
 
     # Validate strategy
+    resolved_strategy = resolve_strategy_name(request.strategy, request.market_type)
     strategies = get_strategies_for_market(request.market_type)
-    if request.strategy not in strategies:
+    if resolved_strategy not in strategies:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown strategy '{request.strategy}' for market '{request.market_type}'"
         )
 
     # Route to correct scanner based on strategy
-    strategy_lower = request.strategy.lower()
+    strategy_lower = resolved_strategy.lower()
 
     if "bi_long" in strategy_lower:
         _run_scan_safe("bi_long", lambda: _bi_background_scan_wrapper("long"))
         return {
             "status": "started",
             "message": "BI Scanner (Long) started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "bi_short" in strategy_lower:
         _run_scan_safe("bi_short", lambda: _bi_background_scan_wrapper("short"))
         return {
             "status": "started",
             "message": "BI Scanner (Short) started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "biotech" in strategy_lower:
         _run_scan_safe("biotech", _biotech_scan_wrapper)
         return {
             "status": "started",
             "message": "Biotech Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "early" in strategy_lower or "movers" in strategy_lower:
         _run_scan_safe("early_movers", _early_movers_wrapper)
         return {
             "status": "started",
             "message": "Early Movers Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "volume" in strategy_lower or "spike" in strategy_lower:
         _run_scan_safe("volume_spikes", _volume_spikes_wrapper)
         return {
             "status": "started",
             "message": "Volume Spikes Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif strategy_lower in ("bear", "bear scanner", "bear scan"):
         # V2.6b: Nur explizit "bear" — nicht mehr jedes "short" abfangen
@@ -3485,35 +4306,35 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         return {
             "status": "started",
             "message": "Bear Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "crash" in strategy_lower:
         _run_scan_safe("crash_monitor", _crash_monitor_wrapper)
         return {
             "status": "started",
             "message": "Crash Monitor started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "btc" in strategy_lower or "divergenz" in strategy_lower:
         _run_scan_safe("btc_divergenz", _btc_divergenz_wrapper)
         return {
             "status": "started",
             "message": "BTC Divergenz Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "money" in strategy_lower or "flow" in strategy_lower:
         _run_scan_safe("money_flow", _money_flow_wrapper)
         return {
             "status": "started",
             "message": "Money Flow Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "turtle" in strategy_lower:
         _run_scan_safe("turtle", _turtle_scan_wrapper)
         return {
             "status": "started",
             "message": "Turtle Breakout Scanner started",
-            "strategy": request.strategy,
+            "strategy": resolved_strategy,
         }
     elif "listing" in strategy_lower:
         if HAS_NEW_LISTING_SCANNER:
@@ -3521,14 +4342,14 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             return {
                 "status": "started",
                 "message": "New Listing Scanner started",
-                "strategy": request.strategy,
+                "strategy": resolved_strategy,
             }
         else:
             raise HTTPException(status_code=400, detail="New Listing Scanner not available")
     else:
         # Generische Strategie (PM Losers, PM Gainers, AH, Whale Watch, etc.)
         # Nutzt Polygon Snapshot + Filter aus strategies.py
-        _strat_name = request.strategy
+        _strat_name = resolved_strategy
         # V2.2: Separate scan-locks pro Strategie statt ein einziger "strategy_scan"
         _safe_key = f"strat_{_strat_name.lower().replace(' ', '_')}"
         if _safe_key not in _scan_status:
@@ -3537,8 +4358,9 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         _run_scan_safe(_safe_key, lambda: _strategy_scan_wrapper(_strat_name))
         return {
             "status": "started",
-            "message": f"Strategie-Scan gestartet: {request.strategy}",
-            "strategy": request.strategy,
+            "message": f"Strategie-Scan gestartet: {resolved_strategy}",
+            "strategy": resolved_strategy,
+            "requested_strategy": request.strategy,
         }
 
 
@@ -3558,7 +4380,8 @@ def get_scan_results(
     normalize_map = None
 
     if strategy:
-        strategy_lower = strategy.lower()
+        resolved_strategy = resolve_strategy_name(strategy, "stocks")
+        strategy_lower = resolved_strategy.lower()
         if "bi_long" in strategy_lower:
             cache_file = BI_CACHE_LONG
             normalize_map = _BI_KEY_MAP
@@ -3567,7 +4390,7 @@ def get_scan_results(
             normalize_map = _BI_KEY_MAP
         elif "biotech" in strategy_lower:
             cache_file = BIOTECH_CACHE
-        elif "bear" in strategy_lower or "short" in strategy_lower:
+        elif strategy_lower in ("bear", "bear scanner", "bear scan"):
             cache_file = BEAR_CACHE
         elif "early" in strategy_lower or "movers" in strategy_lower:
             cache_file = EARLY_MOVERS_CACHE
@@ -3585,7 +4408,7 @@ def get_scan_results(
             cache_file = TURTLE_CACHE
         else:
             # V2.2: Generische Strategie — versuche zuerst strategie-spezifischen Cache
-            _strat_cache = _strategy_cache_path(strategy)
+            _strat_cache = _strategy_cache_path(resolved_strategy)
             if os.path.exists(_strat_cache):
                 cache_file = _strat_cache
             else:

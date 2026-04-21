@@ -358,6 +358,162 @@
         .secondary-tab { padding: 8px 16px; }
         .secondary-tab.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
         .secondary-tab.inactive { color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; }
+
+        .mobile-nav-toggle,
+        .mobile-nav-backdrop,
+        .mobile-nav-sheet,
+        .mobile-only { display: none; }
+        .desktop-only { }
+        .main-shell { max-width: 100%; padding: 24px; }
+        .strategy-select-card,
+        .scanner-results-card,
+        .guide-search-card { border-radius: 16px; }
+        .guide-tabs { overflow-x: auto; scrollbar-width: none; }
+        .guide-tabs::-webkit-scrollbar { display: none; }
+
+        .mobile-nav-toggle {
+            align-items: center;
+            justify-content: center;
+            width: 42px;
+            height: 42px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: transform 0.2s, border-color 0.2s, background-color 0.2s;
+        }
+        .mobile-nav-toggle:hover { transform: translateY(-1px); border-color: var(--accent); }
+
+        .mobile-nav-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.44);
+            backdrop-filter: blur(3px);
+            -webkit-backdrop-filter: blur(3px);
+            z-index: 130;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.18s ease;
+        }
+        .mobile-nav-backdrop.open {
+            display: block;
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .mobile-nav-sheet {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: min(92vw, 380px);
+            height: 100vh;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            box-shadow: 0 18px 50px rgba(0,0,0,0.22);
+            z-index: 131;
+            transform: translateX(-105%);
+            transition: transform 0.2s ease;
+            overflow-y: auto;
+        }
+        .mobile-nav-sheet.open {
+            display: block;
+            transform: translateX(0);
+        }
+        .mobile-nav-header {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 18px 18px 14px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+        }
+        .mobile-nav-section {
+            padding: 14px 14px 6px;
+        }
+        .mobile-nav-section + .mobile-nav-section {
+            border-top: 1px solid var(--border-color);
+        }
+        .mobile-nav-title {
+            font-size: 11px;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin: 0 0 10px;
+            font-weight: 700;
+        }
+        .mobile-nav-item {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border: 1px solid transparent;
+            background: transparent;
+            border-radius: 14px;
+            padding: 12px;
+            text-align: left;
+            cursor: pointer;
+            transition: background-color 0.15s, border-color 0.15s;
+            color: var(--text-primary);
+            font-family: inherit;
+        }
+        .mobile-nav-item + .mobile-nav-item { margin-top: 6px; }
+        .mobile-nav-item.active {
+            background: rgba(59, 130, 246, 0.08);
+            border-color: rgba(59, 130, 246, 0.18);
+        }
+        .mobile-nav-item-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .mobile-nav-item-name {
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .mobile-nav-item-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+            line-height: 1.35;
+        }
+
+        @media (max-width: 960px) {
+            .mega-nav { display: none; }
+            .desktop-only { display: none !important; }
+            .mobile-only { display: flex !important; }
+            .mobile-nav-toggle { display: inline-flex; }
+            .main-shell { padding: 16px 12px 88px; }
+            .detail-sidebar,
+            .detail-sidebar.sidebar-normal,
+            .detail-sidebar.sidebar-wide,
+            .detail-sidebar.sidebar-full {
+                width: 100vw !important;
+                max-width: 100vw !important;
+            }
+            .detail-sidebar-content { padding: 16px; }
+            .sidebar-resize-handle { display: none; }
+            .detail-sidebar .grid.grid-cols-2 { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
+            .detail-sidebar .grid.grid-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+            .strategy-select-card,
+            .scanner-results-card,
+            .guide-search-card { padding: 16px !important; }
+        }
+
+        @media (max-width: 640px) {
+            .main-shell { padding: 12px 10px 80px; }
+            .detail-sidebar .grid.grid-cols-3 { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
+            .secondary-tab { padding: 10px 14px; white-space: nowrap; }
+        }
     </style>
 </head>
 <body>
@@ -2709,6 +2865,7 @@ function App() {
     const [showPricing, setShowPricing] = useState(false);
     const [showAccount, setShowAccount] = useState(false);
     const [showUserMenu, setShowUserMenu] = useState(false);
+    const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
     // ── Auth ──
     const { user, limits, loading: authLoading, login, register, logout, getToken, checkAuth } = useAuth();
@@ -2773,6 +2930,15 @@ function App() {
             document.documentElement.removeAttribute('data-theme');
         }
     }, [darkMode]);
+
+    useEffect(() => {
+        if (mobileNavOpen) {
+            document.body.style.overflow = 'hidden';
+        } else {
+            document.body.style.overflow = '';
+        }
+        return () => { document.body.style.overflow = ''; };
+    }, [mobileNavOpen]);
 
     const allTabs = [
         { id: 'scanner', label: 'Aktien' },
@@ -2903,6 +3069,10 @@ function App() {
         return () => document.removeEventListener('click', handler);
     }, [showUserMenu]);
 
+    useEffect(() => {
+        setMobileNavOpen(false);
+    }, [activeTab, showPricing, showAccount]);
+
     // Check if sidebar detail is allowed
     const canUseSidebar = limits?.has_sidebar_detail !== false;
 
@@ -3031,23 +3201,36 @@ function App() {
                 <div style={{ maxWidth: '100%', padding: '12px 24px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         {/* Logo */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
-                            onClick={() => { setShowPricing(false); setShowAccount(false); }}>
-                            <div style={{
-                                width: 34, height: 34, borderRadius: 9,
-                                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                fontWeight: 800, fontSize: 15, color: '#fff',
-                            }}>A</div>
-                            <span style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-0.5px', color: darkMode ? '#f1f5f9' : '#1a1a2e' }}>
-                                Alpha Station
-                            </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            {!showPricing && !showAccount && (
+                                <button
+                                    className="mobile-nav-toggle"
+                                    onClick={() => setMobileNavOpen(true)}
+                                    aria-label="Navigation öffnen"
+                                >
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                        <path d="M4 7h16M4 12h16M4 17h16"></path>
+                                    </svg>
+                                </button>
+                            )}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
+                                onClick={() => { setShowPricing(false); setShowAccount(false); }}>
+                                <div style={{
+                                    width: 34, height: 34, borderRadius: 9,
+                                    background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    fontWeight: 800, fontSize: 15, color: '#fff',
+                                }}>A</div>
+                                <span style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-0.5px', color: darkMode ? '#f1f5f9' : '#1a1a2e' }}>
+                                    Alpha Station
+                                </span>
+                            </div>
                         </div>
 
                         {/* Right side controls */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <SchedulerStatus status={schedulerStatus} />
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <div className="desktop-only"><SchedulerStatus status={schedulerStatus} /></div>
+                            <div className="desktop-only" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                 <span className={`status-dot ${serverStatus ? 'status-online' : 'status-offline'}`}></span>
                                 <span style={{ fontSize: 12, color: menuTextMuted }}>{serverStatus ? 'Online' : 'Offline'}</span>
                             </div>
@@ -3067,8 +3250,8 @@ function App() {
                                     <span style={{ width: 28, height: 28, borderRadius: '50%', background: planColor, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 12, color: '#fff' }}>
                                         {(user.name || user.email || '?')[0].toUpperCase()}
                                     </span>
-                                    <span style={{ fontWeight: 500 }}>{user.name || user.email?.split('@')[0]}</span>
-                                    <span style={{ background: planColor, color: '#fff', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, textTransform: 'uppercase' }}>{user.plan}</span>
+                                    <span className="desktop-only" style={{ fontWeight: 500 }}>{user.name || user.email?.split('@')[0]}</span>
+                                    <span className="desktop-only" style={{ background: planColor, color: '#fff', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, textTransform: 'uppercase' }}>{user.plan}</span>
                                 </button>
 
                                 {showUserMenu && (
@@ -3156,6 +3339,59 @@ function App() {
                 </div>
             </div>
 
+            {!showPricing && !showAccount && (
+                <>
+                    <div className={`mobile-nav-backdrop${mobileNavOpen ? ' open' : ''}`} onClick={() => setMobileNavOpen(false)}></div>
+                    <div className={`mobile-nav-sheet${mobileNavOpen ? ' open' : ''}`}>
+                        <div className="mobile-nav-header">
+                            <div>
+                                <div style={{ fontSize: 16, fontWeight: 800 }}>Alpha Station</div>
+                                <div style={{ fontSize: 12, color: menuTextMuted }}>{user?.email}</div>
+                            </div>
+                            <button className="mobile-nav-toggle" onClick={() => setMobileNavOpen(false)} aria-label="Navigation schließen">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                    <path d="M6 6l12 12M18 6l-12 12"></path>
+                                </svg>
+                            </button>
+                        </div>
+                        {filteredMegaCategories.map(cat => (
+                            <div key={cat.label} className="mobile-nav-section">
+                                <div className="mobile-nav-title">{cat.label}</div>
+                                {cat.groups.flatMap(group => group.items).map(item => (
+                                    <button
+                                        key={item.id}
+                                        className={`mobile-nav-item${activeTab === item.id ? ' active' : ''}`}
+                                        onClick={() => { setActiveTab(item.id); setMobileNavOpen(false); }}
+                                    >
+                                        <div className="mobile-nav-item-icon" style={{ background: item.color + '18' }}>
+                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={item.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={item.svg} /></svg>
+                                        </div>
+                                        <div>
+                                            <div className="mobile-nav-item-name">{item.name}</div>
+                                            <div className="mobile-nav-item-desc">{item.desc}</div>
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+                        ))}
+                        {isAdmin && (
+                            <div className="mobile-nav-section">
+                                <div className="mobile-nav-title">Admin</div>
+                                <button className={`mobile-nav-item${activeTab === 'admin' ? ' active' : ''}`} onClick={() => { setActiveTab('admin'); setMobileNavOpen(false); }}>
+                                    <div className="mobile-nav-item-icon" style={{ background: 'rgba(245, 158, 11, 0.12)' }}>
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l7 4v5c0 5-3.5 8-7 9-3.5-1-7-4-7-9V7l7-4z"></path></svg>
+                                    </div>
+                                    <div>
+                                        <div className="mobile-nav-item-name">Admin</div>
+                                        <div className="mobile-nav-item-desc">Systemstatus und interne Tools</div>
+                                    </div>
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </>
+            )}
+
             {/* Pricing Page */}
             {showPricing && (
                 <PricingPage currentPlan={user.plan} getToken={getToken} />
@@ -3168,7 +3404,7 @@ function App() {
 
             {/* Main Content — only visible when not on pricing/account pages */}
             {!showPricing && !showAccount && (
-                <div className="max-w-full px-6 py-6">
+                <div className="main-shell">
                     {activeTab === 'scanner' && <ScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'biotech' && <BiotechTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
@@ -3210,11 +3446,26 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
     const pollTimeoutRef = useRef(null);
+    const groupedStrategies = useMemo(() => {
+        const entries = Object.entries(strategies?.strategies || {});
+        return entries.reduce((acc, [name, config]) => {
+            const group = config?.display_group || 'Strategien';
+            if (!acc[group]) acc[group] = [];
+            acc[group].push([name, config]);
+            return acc;
+        }, {});
+    }, [strategies]);
 
     // Cleanup polling on unmount
     useEffect(() => {
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
+
+    useEffect(() => {
+        if (strategy && strategies?.strategies && !strategies.strategies[strategy]) {
+            setStrategy('');
+        }
+    }, [strategy, strategies]);
 
     // Always load latest results from server on mount
     useEffect(() => {
@@ -3309,14 +3560,18 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
     return (
         <div className="space-y-6">
-            <div className="card border border-gray-200 p-6 rounded-lg">
-                <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="card border border-gray-200 p-6 rounded-lg strategy-select-card">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
                         <select value={strategy} onChange={(e) => setStrategy(e.target.value)} className="w-full">
                             <option value="">Wählen Sie eine Strategie...</option>
-                            {strategies?.strategies && Object.keys(strategies.strategies).map(s => (
-                                <option key={s} value={s}>{s}</option>
+                            {Object.entries(groupedStrategies).map(([group, items]) => (
+                                <optgroup key={group} label={group}>
+                                    {items.map(([name]) => (
+                                        <option key={name} value={name}>{name}</option>
+                                    ))}
+                                </optgroup>
                             ))}
                         </select>
                     </div>
@@ -3334,7 +3589,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
 
-            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto scanner-results-card">
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
@@ -4876,6 +5131,15 @@ function StrategieGuideTab() {
 
     // User-freundliche Guide-Texte — erklären WAS die Strategie macht & WANN nützlich
     const guideTexts = {
+        'Momentum Breakout Long': 'Bündelt klassische Breakout-, Early-Momentum- und Whale-Signale in einen saubereren Momentum-Scanner. Gesucht werden liquide Aktien, die steigen, ihr Intraday-Momentum halten und das mit echtem Volumen bestätigen.',
+        'Gap Momentum Long': 'Fokussiert auf starke Gap-Ups nach News, Earnings oder anderen Katalysatoren. Das Setup ist nur dann interessant, wenn der Gap nicht sofort abverkauft wird, sondern der Preis über dem Open stabil bleibt.',
+        'Gap Momentum Short': 'Das Short-Pendant für negative Gaps. Der Scanner priorisiert Aktien, die schwach eröffnen, keinen echten Bounce schaffen und mit Volumen weiter unter Druck bleiben.',
+        'Compression Breakout': 'Findet Aktien, die sich über mehrere Tage komprimiert haben und jetzt aus enger Struktur ausbrechen. Das ist kein reiner Tagesfilter mehr, sondern ein strukturorientiertes Aufbau-Setup.',
+        'Trend Reversal': 'Sucht kontrollierte Bodenbildung nach einem mehrtägigen Abverkauf. Interessant ist nicht jeder grüne Tag, sondern nur Reversals mit Struktur, Volumen und klarer Veränderung im Verhalten.',
+        'MA Bounce Long': 'Fasst Pullbacks an EMA 21, SMA 50 und SMA 200 zusammen. Ein gutes Long-Setup liegt vor, wenn der Trend intakt ist, der Preis kontrolliert zurücksetzt und genau an einer starken Durchschnittslinie wieder Käufer findet.',
+        'MA Bounce Short': 'Scant Rejections an fallenden SMA-Zonen. Das Setup ist besonders nützlich, wenn eine schwache Aktie zurück an einen Widerstands-MA läuft und dort wieder abgewiesen wird.',
+        'Wyckoff Accumulation': 'Zeigt Trading Ranges, in denen vermutlich Smart Money Stück für Stück akkumuliert. Der Fokus liegt auf Struktur, Volumenverhalten und versteckter Stärke vor dem eigentlichen Ausbruch.',
+        'Wyckoff Distribution': 'Das Gegenstück zur Akkumulation: Schwäche baut sich schleichend in einer Range auf, bevor der sichtbare Breakdown startet. Gut geeignet, um trügerisch stabile Charts früh skeptisch zu bewerten.',
         // === AKTIEN ===
         'Volume Surge': 'Erkennt Aktien, bei denen plötzlich viel mehr gehandelt wird als üblich UND sich der Preis gleichzeitig bewegt. Wenn beides zusammenkommt, steckt oft echtes Interesse dahinter — nicht nur zufälliges Rauschen. Besonders nützlich um früh in einen Move einzusteigen.',
         'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert mehrere Wochen Kurshistorie um echte Flaggen zu finden.',
@@ -4965,7 +5229,7 @@ function StrategieGuideTab() {
 
     const getDirectionBadge = (name, strat) => {
         const n = name.toLowerCase();
-        if (strat?.harmonic_direction === 'LONG' || n.includes('long') || n.includes('bull') || n.includes('bounce long') || n.includes('breakout long') || n.includes('dip buy') || n.includes('reversal hunter') || n.includes('accumulation') || n.includes('gap up') || n.includes('momentum') && !n.includes('short') && !n.includes('bear') && !n.includes('down')) {
+        if (strat?.harmonic_direction === 'LONG' || n.includes('long') || n.includes('bull') || n.includes('bounce long') || n.includes('breakout') || n.includes('dip buy') || n.includes('reversal hunter') || n.includes('trend reversal') || n.includes('accumulation') || n.includes('gap up') || n.includes('momentum') && !n.includes('short') && !n.includes('bear') && !n.includes('down')) {
             return { label: 'LONG', color: '#10b981' };
         }
         if (strat?.harmonic_direction === 'SHORT' || n.includes('short') || n.includes('bear') || n.includes('breakdown') || n.includes('gap down') || n.includes('fade') || n.includes('distribution')) {
@@ -4979,7 +5243,7 @@ function StrategieGuideTab() {
 
     return (
         <div className="space-y-6">
-            <div className="card border border-gray-200 p-4 rounded-lg flex items-center gap-3">
+            <div className="card border border-gray-200 p-4 rounded-lg flex items-center gap-3 guide-search-card">
                 <svg className="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                 <input
                     type="text"
@@ -4991,7 +5255,7 @@ function StrategieGuideTab() {
                 {searchTerm && <button onClick={() => setSearchTerm('')} className="text-gray-400 hover:text-gray-600 text-lg">\u00d7</button>}
             </div>
 
-            <div className="flex gap-2 border-b border-gray-200 flex-wrap">
+            <div className="guide-tabs flex gap-2 border-b border-gray-200 flex-nowrap md:flex-wrap pb-2">
                 {marketTypes.map(market => (
                     <button
                         key={market.id}
@@ -5024,13 +5288,17 @@ function StrategieGuideTab() {
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <h3 className="font-semibold text-sm">{name}</h3>
                                             <span className="text-xs font-bold px-2 py-0.5 rounded" style={{background: dir.color + '20', color: dir.color}}>{dir.label}</span>
+                                            {strat.display_group && <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{strat.display_group}</span>}
                                             {strat.stocks_only && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">Nur Aktien</span>}
                                             {strat.needs_history && <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">Multi-Day</span>}
                                             {strat.needs_harmonic && <span className="text-xs px-1.5 py-0.5 rounded bg-orange-50 text-orange-600">Harmonic</span>}
                                             {strat.needs_volume_profile && <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-50 text-cyan-600">Volume Profile</span>}
-                                            {strat.needs_ma && <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{strat.ma_type} {strat.ma_period}</span>}
+                                            {strat.needs_ma && <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{strat.ma_type && strat.ma_period ? `${strat.ma_type} ${strat.ma_period}` : 'MA Bounce'}</span>}
                                         </div>
                                         <p className="text-xs text-gray-500 mt-1 truncate">{guide ? guide.substring(0, 80) + '...' : '\u2014'}</p>
+                                        {Array.isArray(strat.merged_from) && strat.merged_from.length > 0 && (
+                                            <p className="text-xs text-gray-400 mt-1 truncate">Vereint: {strat.merged_from.join(', ')}</p>
+                                        )}
                                     </div>
                                     <span className="text-lg text-gray-400 flex-shrink-0">{isExpanded ? '\u2212' : '+'}</span>
                                 </div>
