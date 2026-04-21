@@ -367,9 +367,36 @@
         .main-shell { max-width: 100%; padding: 24px; }
         .strategy-select-card,
         .scanner-results-card,
-        .guide-search-card { border-radius: 16px; }
+        .guide-search-card,
+        .scan-control-card { border-radius: 16px; }
         .guide-tabs { overflow-x: auto; scrollbar-width: none; }
         .guide-tabs::-webkit-scrollbar { display: none; }
+        .scanner-mobile-card {
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            padding: 14px;
+        }
+        .scanner-mobile-card + .scanner-mobile-card {
+            margin-top: 10px;
+        }
+        .scanner-mobile-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px 14px;
+            margin-top: 12px;
+        }
+        .scanner-mobile-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .scanner-mobile-value {
+            font-size: 14px;
+            font-weight: 700;
+            margin-top: 2px;
+        }
 
         .mobile-nav-toggle {
             align-items: center;
@@ -506,13 +533,15 @@
             .detail-sidebar .grid.grid-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
             .strategy-select-card,
             .scanner-results-card,
-            .guide-search-card { padding: 16px !important; }
+            .guide-search-card,
+            .scan-control-card { padding: 16px !important; }
         }
 
         @media (max-width: 640px) {
             .main-shell { padding: 12px 10px 80px; }
             .detail-sidebar .grid.grid-cols-3 { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
             .secondary-tab { padding: 10px 14px; white-space: nowrap; }
+            .scanner-mobile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
     </style>
 </head>
@@ -1774,10 +1803,10 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     const anyScanning = isScanning || schedulerRunning;
 
     return (
-        <div className="card border border-gray-200 p-4 rounded-lg">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                    <button onClick={onScan} disabled={anyScanning} className="button" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+        <div className="card border border-gray-200 p-4 rounded-lg scan-control-card">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
+                    <button onClick={onScan} disabled={anyScanning} className="button w-full sm:w-auto" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                         {anyScanning ? (
                             <>
                                 <span className="loading-spinner"></span>
@@ -1787,7 +1816,8 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                             'Scan starten'
                         )}
                     </button>
-                    {displayLast && <div className="text-sm text-gray-500">Letzter: {displayLast}</div>}
+                    <div className="flex flex-col gap-1 text-sm text-gray-500 sm:flex-row sm:items-center sm:gap-4">
+                        {displayLast && <div>Letzter: {displayLast}</div>}
                     {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
                 </div>
             </div>
@@ -3589,7 +3619,50 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
 
-            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto scanner-results-card">
+            <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
+                <div className="md:hidden">
+                    {sorted.length === 0 ? (
+                        <div className="text-sm text-gray-500 text-center py-6">Noch keine Scanner-Ergebnisse vorhanden.</div>
+                    ) : (
+                        sorted.map((item, idx) => (
+                            <button key={idx} className="scanner-mobile-card w-full text-left" onClick={() => onSelectTicker(item.ticker)}>
+                                <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <div className="text-base font-bold">{item.ticker}</div>
+                                            <span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span>
+                                            {item.mdr_tag && <span style={{fontSize:10,padding:'2px 6px',borderRadius:999,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
+                                        </div>
+                                        <div className="text-xs text-gray-500 mt-1">Tap für Detailansicht</div>
+                                    </div>
+                                    <div className="text-right">
+                                        <div className="text-lg font-bold">{item.score?.toFixed(1) || '–'}</div>
+                                        <div className="text-xs text-gray-500">Score</div>
+                                    </div>
+                                </div>
+                                <div className="scanner-mobile-grid">
+                                    <div>
+                                        <div className="scanner-mobile-label">Preis</div>
+                                        <div className="scanner-mobile-value">${item.price?.toFixed(2) || '–'}</div>
+                                    </div>
+                                    <div>
+                                        <div className="scanner-mobile-label">Änderung</div>
+                                        <div className={`scanner-mobile-value ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct != null ? `${item.change_pct.toFixed(2)}%` : '–'}</div>
+                                    </div>
+                                    <div>
+                                        <div className="scanner-mobile-label">RSI</div>
+                                        <div className="scanner-mobile-value">{item.rsi?.toFixed(1) || '–'}</div>
+                                    </div>
+                                    <div>
+                                        <div className="scanner-mobile-label">RVOL</div>
+                                        <div className="scanner-mobile-value">{item.rvol?.toFixed(2) || '–'}</div>
+                                    </div>
+                                </div>
+                            </button>
+                        ))
+                    )}
+                </div>
+                <div className="hidden md:block overflow-x-auto">
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
@@ -3619,6 +3692,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         ))}
                     </tbody>
                 </table>
+                </div>
             </div>
         </div>
     );
