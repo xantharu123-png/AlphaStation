@@ -2468,30 +2468,30 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     // V4: Header-Preis aus Chart-Daten aktualisieren (damit Header und letzte Kerze IMMER übereinstimmen)
     // Vorher: ticker-detail und chart-data hatten verschiedene Cache-Zeiten → Preis-Diskrepanz
     const _chartLastCandle = chartData?.candles?.length > 0 ? chartData.candles[chartData.candles.length - 1] : null;
-    const _chartPrice = _chartLastCandle ? _chartLastCandle.close : null;
-    const _chartPrevClose = chartData?.candles?.length > 1 ? chartData.candles[chartData.candles.length - 2].close : null;
-    const _chartChange = (_chartPrice && _chartPrevClose && _chartPrevClose > 0) ? ((_chartPrice - _chartPrevClose) / _chartPrevClose * 100) : null;
-    const _detailPrice = Number(d.price);
-    const _hasDetailPrice = Number.isFinite(_detailPrice) && _detailPrice > 0;
-    const _hasChartPrice = Number.isFinite(_chartPrice) && _chartPrice > 0;
-    const _stockPriceMismatch = (!isCrypto && !isExchangeCrypto && _hasDetailPrice && _hasChartPrice)
+    const _chartPrice = _chartLastCandle ? Number(_chartLastCandle.close) : 0;
+    const _chartPrevClose = chartData?.candles?.length > 1 ? Number(chartData.candles[chartData.candles.length - 2].close) : 0;
+    const _chartChange = (_chartPrice > 0 && _chartPrevClose > 0) ? ((_chartPrice - _chartPrevClose) / _chartPrevClose * 100) : null;
+    const _detailPrice = Number(d.price) || 0;
+    const _stockPriceMismatch = (!isCrypto && !isExchangeCrypto && _detailPrice > 0 && _chartPrice > 0)
         ? (Math.max(_detailPrice, _chartPrice) / Math.min(_detailPrice, _chartPrice))
         : 1;
     const _preferDetailPrice = _stockPriceMismatch >= 1.8;
-    const price = Number(
-        isExchangeCrypto
-            ? cd.price
-            : isCrypto
-                ? cd.Price
-                : (_preferDetailPrice ? d.price : (_chartPrice || d.price))
-    ) || 0;
-    const change = Number(
-        isExchangeCrypto
-            ? cd.change_24h
-            : isCrypto
-                ? cd.Change24h
-                : (_preferDetailPrice ? d.change_1d : (_chartChange != null ? _chartChange : d.change_1d))
-    ) || 0;
+
+    let price = 0;
+    let change = 0;
+    if (isExchangeCrypto) {
+        price = Number(cd.price) || 0;
+        change = Number(cd.change_24h) || 0;
+    } else if (isCrypto) {
+        price = Number(cd.Price) || 0;
+        change = Number(cd.Change24h) || 0;
+    } else if (_preferDetailPrice) {
+        price = _detailPrice;
+        change = Number(d.change_1d) || 0;
+    } else {
+        price = _chartPrice || _detailPrice;
+        change = _chartChange != null ? _chartChange : (Number(d.change_1d) || 0);
+    }
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
@@ -2529,11 +2529,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <p className="text-2xl font-bold mt-1">
                             ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
-                        {_preferDetailPrice && (
-                            <div className="text-xs text-amber-600 mt-1">
-                                Header nutzt Livepreis, weil der Chartkurs stark abweicht.
-                            </div>
-                        )}
                     </div>
                     <div className="flex gap-2 items-center">
                         <button onClick={cycleMode} className="sidebar-mode-btn" title={`Modus: ${modeLabel}`}>
