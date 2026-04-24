@@ -1821,7 +1821,8 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                     </button>
                     <div className="flex flex-col gap-1 text-sm text-gray-500 sm:flex-row sm:items-center sm:gap-4">
                         {displayLast && <div>Letzter: {displayLast}</div>}
-                    {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
+                        {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
+                    </div>
                 </div>
             </div>
             {anyScanning && (() => {
