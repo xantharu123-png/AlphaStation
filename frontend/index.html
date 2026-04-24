@@ -21,56 +21,58 @@
     <!-- TradingView Lightweight Charts -->
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 
-    <!-- ═══ Anti-Copy / Anti-Inspect Protection ═══ -->
     <script>
-    (function(){
-        // 1. Block right-click context menu
-        document.addEventListener('contextmenu', function(e){ e.preventDefault(); return false; });
+    (function() {
+        function showBootError(message) {
+            const msg = String(message || 'Unbekannter Frontend-Fehler');
+            if (document.getElementById('boot-error-overlay')) return;
+            const overlay = document.createElement('div');
+            overlay.id = 'boot-error-overlay';
+            overlay.style.position = 'fixed';
+            overlay.style.inset = '0';
+            overlay.style.zIndex = '99999';
+            overlay.style.background = '#0f172a';
+            overlay.style.color = '#f8fafc';
+            overlay.style.padding = '32px';
+            overlay.style.fontFamily = 'Inter, sans-serif';
+            overlay.innerHTML =
+                '<div style=\"max-width:900px;margin:0 auto;display:flex;min-height:100vh;align-items:center;\">' +
+                    '<div>' +
+                        '<div style=\"font-size:28px;font-weight:800;margin-bottom:12px;\">Alpha Station konnte nicht geladen werden</div>' +
+                        '<div style=\"font-size:15px;line-height:1.7;color:#cbd5e1;margin-bottom:18px;\">Die Seite ist nicht absichtlich leer. Unten steht die konkrete Browser-Fehlermeldung.</div>' +
+                        '<pre style=\"white-space:pre-wrap;word-break:break-word;background:#111827;border:1px solid rgba(148,163,184,0.25);border-radius:14px;padding:18px;font-size:13px;line-height:1.6;color:#fda4af;\">' + msg + '</pre>' +
+                    '</div>' +
+                '</div>';
+            document.addEventListener('DOMContentLoaded', function appendOverlay() {
+                if (!document.body.contains(overlay)) document.body.appendChild(overlay);
+            }, { once: true });
+            if (document.body) document.body.appendChild(overlay);
+        }
 
-        // 2. Block keyboard shortcuts (F12, Ctrl+U, Ctrl+S, Ctrl+Shift+I/J/C, Ctrl+P)
-        document.addEventListener('keydown', function(e){
-            // F12
-            if(e.key === 'F12') { e.preventDefault(); return false; }
-            // Ctrl+U (View Source)
-            if(e.ctrlKey && e.key === 'u') { e.preventDefault(); return false; }
-            // Ctrl+S (Save Page)
-            if(e.ctrlKey && e.key === 's') { e.preventDefault(); return false; }
-            // Ctrl+P (Print)
-            if(e.ctrlKey && e.key === 'p') { e.preventDefault(); return false; }
-            // Ctrl+Shift+I (DevTools)
-            if(e.ctrlKey && e.shiftKey && e.key === 'I') { e.preventDefault(); return false; }
-            // Ctrl+Shift+J (Console)
-            if(e.ctrlKey && e.shiftKey && e.key === 'J') { e.preventDefault(); return false; }
-            // Ctrl+Shift+C (Element Picker)
-            if(e.ctrlKey && e.shiftKey && e.key === 'C') { e.preventDefault(); return false; }
-            // Ctrl+Shift+K (Firefox Console)
-            if(e.ctrlKey && e.shiftKey && e.key === 'K') { e.preventDefault(); return false; }
+        window.addEventListener('error', function(event) {
+            showBootError(event && (event.message || (event.error && event.error.stack) || event.error));
         });
 
-        // 3. Block drag & drop of images/content
-        document.addEventListener('dragstart', function(e){ e.preventDefault(); return false; });
+        window.addEventListener('unhandledrejection', function(event) {
+            const reason = event ? event.reason : null;
+            showBootError((reason && (reason.stack || reason.message)) || reason || 'Unhandled promise rejection');
+        });
 
-        // 4. DevTools detection — debugger loop + size detection
-        var _devtoolsOpen = false;
-        var _el = new Image();
-        Object.defineProperty(_el, 'id', { get: function(){ _devtoolsOpen = true; }});
-        setInterval(function(){
-            _devtoolsOpen = false;
-            console.dir(_el);
-            if(_devtoolsOpen){
-                document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0a0f1e;color:#ef4444;font-family:Inter,sans-serif;font-size:24px;font-weight:700;text-align:center;padding:40px;">Developer Tools sind nicht erlaubt.<br>Bitte schliesse die DevTools um fortzufahren.</div>';
-            }
-        }, 1500);
-
-        // 5. Detect window size anomaly (DevTools docked changes inner size)
-        var _checkResize = function(){
-            var widthThreshold = window.outerWidth - window.innerWidth > 160;
-            var heightThreshold = window.outerHeight - window.innerHeight > 160;
-            if(widthThreshold || heightThreshold){
-                document.title = 'Alpha Station — DevTools erkannt';
-            }
-        };
-        window.addEventListener('resize', _checkResize);
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                const root = document.getElementById('root');
+                if (root && root.children.length === 0) {
+                    const missing = [];
+                    if (!window.React) missing.push('React fehlt');
+                    if (!window.ReactDOM) missing.push('ReactDOM fehlt');
+                    if (!window.Babel) missing.push('Babel fehlt');
+                    const info = missing.length > 0
+                        ? 'Fehlende Runtime: ' + missing.join(', ')
+                        : 'Die Runtime ist geladen, aber die App hat nichts in #root gerendert.';
+                    showBootError(info);
+                }
+            }, 2500);
+        });
     })();
     </script>
 
