@@ -48,6 +48,7 @@
             }, { once: true });
             if (document.body) document.body.appendChild(overlay);
         }
+        window.showBootError = showBootError;
 
         window.addEventListener('error', function(event) {
             showBootError(event && (event.message || (event.error && event.error.stack) || event.error));
@@ -551,7 +552,7 @@
 
 <div id="root"></div>
 
-<script type="text/babel">
+<script type="text/plain" id="app-source">
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const API_PORT = new URLSearchParams(window.location.search).get('api_port') || '8000';
 const API = window.location.protocol + '//' + window.location.hostname + ':' + API_PORT;
@@ -7379,6 +7380,33 @@ function AdminTab() {
 // Render App
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
+</script>
+<script>
+(function() {
+    const sourceEl = document.getElementById('app-source');
+    if (!sourceEl) {
+        if (window.showBootError) window.showBootError('App-Quellcode (#app-source) wurde nicht gefunden.');
+        return;
+    }
+    if (!window.Babel) {
+        if (window.showBootError) window.showBootError('Babel Runtime konnte nicht geladen werden.');
+        return;
+    }
+    try {
+        const compiled = Babel.transform(sourceEl.textContent, {
+            presets: ['react'],
+            sourceType: 'script',
+        }).code;
+        (0, eval)(compiled);
+    } catch (err) {
+        const details = [
+            err && err.message ? err.message : String(err),
+            err && err.codeFrame ? err.codeFrame : '',
+            err && err.stack ? err.stack : '',
+        ].filter(Boolean).join('\n\n');
+        if (window.showBootError) window.showBootError(details);
+    }
+})();
 </script>
 
 </body>
