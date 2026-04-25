@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="alpha-build" content="after-6fba25f">
     <title>Alpha Station - Trading Scanner</title>
 
     <!-- Google Fonts -->
@@ -25,6 +26,8 @@
     (function() {
         function showBootError(message) {
             const msg = String(message || 'Unbekannter Frontend-Fehler');
+            const buildMeta = document.querySelector('meta[name="alpha-build"]');
+            const buildLabel = buildMeta ? buildMeta.getAttribute('content') : 'unknown';
             if (document.getElementById('boot-error-overlay')) return;
             const overlay = document.createElement('div');
             overlay.id = 'boot-error-overlay';
@@ -39,6 +42,7 @@
                 '<div style=\"max-width:900px;margin:0 auto;display:flex;min-height:100vh;align-items:center;\">' +
                     '<div>' +
                         '<div style=\"font-size:28px;font-weight:800;margin-bottom:12px;\">Alpha Station konnte nicht geladen werden</div>' +
+                        '<div style=\"font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin-bottom:12px;\">Build ' + buildLabel + '</div>' +
                         '<div style=\"font-size:15px;line-height:1.7;color:#cbd5e1;margin-bottom:18px;\">Die Seite ist nicht absichtlich leer. Unten steht die konkrete Browser-Fehlermeldung.</div>' +
                         '<pre style=\"white-space:pre-wrap;word-break:break-word;background:#111827;border:1px solid rgba(148,163,184,0.25);border-radius:14px;padding:18px;font-size:13px;line-height:1.6;color:#fda4af;\">' + msg + '</pre>' +
                     '</div>' +
