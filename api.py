@@ -2581,8 +2581,12 @@ async def serve_frontend():
     """Serve the React frontend."""
     frontend_path = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
     if os.path.exists(frontend_path):
-        with open(frontend_path, "r") as f:
-            return HTMLResponse(content=f.read())
+        with open(frontend_path, "r", encoding="utf-8") as f:
+            response = HTMLResponse(content=f.read())
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
     return HTMLResponse(content="<h1>Alpha Station</h1><p>Frontend not found</p>", status_code=404)
 
 
