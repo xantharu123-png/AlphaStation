@@ -1158,10 +1158,10 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
             timeframe = "1H"
         
         mult, span, days_back, max_bars = tf_map[timeframe]
-        # Intraday-Charts sollten den real gehandelten Preis zeigen.
-        # Bei Split-/Reverse-Split-Tickern koennen adjustierte Intraday-Bars
-        # stark vom Live-/Scanner-Preis abweichen und die Sidebar verfälschen.
-        adjusted = "false" if timeframe in ("5m", "15m", "1H", "4H") else "true"
+        # Keep all chart timeframes on Polygon's adjusted price scale.
+        # The scanner/snapshot endpoints expose the current split-adjusted price;
+        # unadjusted intraday bars can show stale pre-split levels on names like FFAI.
+        adjusted = "true"
         
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")

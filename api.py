@@ -2926,7 +2926,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
     """Get detailed price data for a single ticker (30 days, key metrics)."""
     try:
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
-        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc"})
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc", "adjusted": "true"})
         if resp.status_code != 200:
             raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
         bars = resp.json().get("results", [])
