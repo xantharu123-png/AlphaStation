@@ -2574,12 +2574,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "frontend")
+_VENDOR_DIR = os.path.join(_FRONTEND_DIR, "vendor")
+if os.path.isdir(_VENDOR_DIR):
+    app.mount("/vendor", StaticFiles(directory=_VENDOR_DIR), name="vendor")
+
 
 # ── Serve Frontend (index.html) ──
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     """Serve the React frontend."""
-    frontend_path = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
+    frontend_path = os.path.join(_FRONTEND_DIR, "index.html")
     if os.path.exists(frontend_path):
         with open(frontend_path, "r", encoding="utf-8") as f:
             response = HTMLResponse(content=f.read())
