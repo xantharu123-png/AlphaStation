@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="alpha-build" content="after-6fba25f">
+    <meta name="alpha-build" content="after-fe8855c">
     <title>Alpha Station - Trading Scanner</title>
 
     <!-- Google Fonts -->
@@ -7388,29 +7388,69 @@ root.render(<App />);
 </script>
 <script>
 (function() {
+    function loadRuntimeScript(src) {
+        return new Promise(function(resolve, reject) {
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = false;
+            script.crossOrigin = 'anonymous';
+            script.onload = resolve;
+            script.onerror = function() { reject(new Error('Script konnte nicht geladen werden: ' + src)); };
+            document.head.appendChild(script);
+        });
+    }
+
+    async function ensureRuntime() {
+        const fallbacks = [
+            { check: function() { return window.React; }, src: 'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js', name: 'React' },
+            { check: function() { return window.ReactDOM; }, src: 'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js', name: 'ReactDOM' },
+            { check: function() { return window.Babel; }, src: 'https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js', name: 'Babel' },
+        ];
+
+        for (const runtime of fallbacks) {
+            if (runtime.check()) continue;
+            try {
+                await loadRuntimeScript(runtime.src);
+            } catch (err) {
+                // The final check below reports anything still unavailable.
+            }
+        }
+
+        return fallbacks
+            .filter(function(runtime) { return !runtime.check(); })
+            .map(function(runtime) { return runtime.name; })
+            .filter(function(name, index, arr) { return arr.indexOf(name) === index; });
+    }
+
     const sourceEl = document.getElementById('app-source');
     if (!sourceEl) {
         if (window.showBootError) window.showBootError('App-Quellcode (#app-source) wurde nicht gefunden.');
         return;
     }
-    if (!window.Babel) {
-        if (window.showBootError) window.showBootError('Babel Runtime konnte nicht geladen werden.');
-        return;
-    }
-    try {
-        const compiled = Babel.transform(sourceEl.textContent, {
-            presets: ['react'],
-            sourceType: 'script',
-        }).code;
-        (0, eval)(compiled);
-    } catch (err) {
-        const details = [
-            err && err.message ? err.message : String(err),
-            err && err.codeFrame ? err.codeFrame : '',
-            err && err.stack ? err.stack : '',
-        ].filter(Boolean).join('\n\n');
-        if (window.showBootError) window.showBootError(details);
-    }
+
+    ensureRuntime().then(function(missing) {
+        if (missing.length > 0) {
+            if (window.showBootError) window.showBootError('Runtime konnte nicht geladen werden: ' + missing.join(', '));
+            return;
+        }
+
+        try {
+            const compiled = Babel.transform(sourceEl.textContent, {
+                presets: ['react'],
+                sourceType: 'script',
+            }).code;
+            (0, eval)(compiled);
+        } catch (err) {
+            const details = [
+                err && err.message ? err.message : String(err),
+                err && err.codeFrame ? err.codeFrame : '',
+                err && err.stack ? err.stack : '',
+            ].filter(Boolean).join('\n\n');
+            if (window.showBootError) window.showBootError(details);
+        }
+    }).catch(function(err) {
+        if (window.showBootError) window.showBootError(err && (err.stack || err.message) || err || 'Runtime konnte nicht geladen werden.');
+    });
 })();
 </script>
 
