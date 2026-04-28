@@ -405,6 +405,24 @@ INVERSE_ETFS = {
     "UVXY": ("1.5x Long VIX", "VIX"), "VIXY": ("1x Long VIX", "VIX"),
 }
 
+NON_STOCK_ETP_TICKERS = {
+    "IREX", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ", "NVDL", "NVDQ", "NVDU", "NVDD",
+    "CONL", "GGLL", "GGLS", "AAPU", "AAPD", "AMZU", "AMZD", "METU", "METD",
+    "SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU", "SPXL", "SPXS", "LABU", "LABD",
+    "TECL", "TECS", "FNGU", "FNGD", "BOIL", "KOLD", "GUSH", "DRIP", "NUGT", "DUST",
+    "JNUG", "JDST", "YINN", "YANG", "UVXY", "VIXY", "VXX", "BITO", "BITI",
+}
+
+NON_STOCK_ETP_KEYWORDS = {
+    " ETF", "ETN", "ETP", " FUND", "2X", "3X", "LEVERAGED", "INVERSE",
+    "ULTRA", "ULTRAPRO", "BULL", "BEAR", "DAILY TARGET", "TRADR", "T-REX",
+    "DIREXION", "PROSHARES", "GRANITESHARES", "YIELDMAX", "ROUNDHILL", "DEFIANCE",
+    "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES",
+}
+
+ORB_ALLOWED_POLYGON_TYPES = {"CS", "ADRC", "ADRP"}
+_ORB_REFERENCE_CACHE: Dict[str, tuple[bool, str]] = {}
+
 
 # ── Configuration & Constants ──
 API_VERSION = "1.0.0"
@@ -424,6 +442,57 @@ def _strategy_cache_path(strategy_name: str) -> str:
     safe_name = re.sub(r"[^a-z0-9_]+", "_", strategy_name.lower().replace(" ", "_").replace("/", "_"))
     safe_name = re.sub(r"_+", "_", safe_name).strip("_") or "strategy"
     return f"/tmp/strategy_{safe_name}_cache.json"
+
+
+def _looks_like_non_stock_etp_symbol(ticker: str) -> Optional[str]:
+    """Cheap symbol-level guard for products that should never be in stock ORB."""
+    tk = str(ticker or "").upper().strip()
+    if not tk:
+        return "empty ticker"
+    if tk in NON_STOCK_ETP_TICKERS or tk in INVERSE_ETFS:
+        return "known ETF/ETP ticker"
+    if len(tk) >= 4 and tk[-1] in ("X", "Q") and tk[-2] in ("X", "Q", "S"):
+        return "leveraged ETF ticker pattern"
+    return None
+
+
+def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
+    """Use Polygon reference data to keep ORB focused on common stocks/ADRs."""
+    tk = str(ticker or "").upper().strip()
+    cheap_reason = _looks_like_non_stock_etp_symbol(tk)
+    if cheap_reason:
+        return False, cheap_reason
+    if tk in _ORB_REFERENCE_CACHE:
+        return _ORB_REFERENCE_CACHE[tk]
+    if not POLYGON_KEY:
+        return True, "no polygon key for reference check"
+
+    try:
+        url = f"https://api.polygon.io/v3/reference/tickers/{tk}"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY}, timeout=8)
+        if resp.status_code != 200:
+            result = (True, f"reference HTTP {resp.status_code}")
+            _ORB_REFERENCE_CACHE[tk] = result
+            return result
+
+        details = resp.json().get("results", {}) or {}
+        asset_type = str(details.get("type", "") or "").upper()
+        name = str(details.get("name", "") or "").upper()
+        market = str(details.get("market", "") or "").lower()
+
+        if asset_type and asset_type not in ORB_ALLOWED_POLYGON_TYPES:
+            result = (False, f"type={asset_type}")
+        elif any(keyword in f" {name}" for keyword in NON_STOCK_ETP_KEYWORDS):
+            result = (False, "ETF/ETP keyword")
+        elif market and market != "stocks":
+            result = (False, f"market={market}")
+        else:
+            result = (True, asset_type or "reference ok")
+    except Exception as e:
+        result = (True, f"reference error: {e}")
+
+    _ORB_REFERENCE_CACHE[tk] = result
+    return result
 
 
 # ── Email Alert System ──
@@ -6418,7 +6487,11 @@ def _orb_scanner_wrapper() -> None:
         # ── Kandidaten filtern ──
         candidates = []
         for ticker, prev in prev_data.items():
+            ticker = str(ticker or "").upper().strip()
             if len(ticker) > 5 or "." in ticker:
+                continue
+            non_stock_reason = _looks_like_non_stock_etp_symbol(ticker)
+            if non_stock_reason:
                 continue
             prev_close = prev.get("c", 0)
             if prev_close < 5 or prev_close > 2000:
@@ -6454,7 +6527,19 @@ def _orb_scanner_wrapper() -> None:
             })
 
         candidates.sort(key=lambda x: abs(x["gap_pct"]) * 0.5 + min(x["rvol"], 5) * 0.3 + min(abs(x["prev_atr_pct"]), 5) * 0.2, reverse=True)
-        candidates = candidates[:50]
+        stock_candidates = []
+        non_stock_excluded = []
+        for cand in candidates[:120]:
+            is_stock, reason = _is_orb_common_stock_candidate(cand["ticker"])
+            if is_stock:
+                cand["asset_check"] = reason
+                stock_candidates.append(cand)
+            else:
+                non_stock_excluded.append({"ticker": cand["ticker"], "reason": reason})
+                print(f"[ORB] Exclude non-stock {cand['ticker']}: {reason}")
+            if len(stock_candidates) >= 50:
+                break
+        candidates = stock_candidates
 
         # ── 5-Min Candles für Breakout Detection ──
         market_open_ms = int(now_et.replace(hour=9, minute=30, second=0, microsecond=0).timestamp() * 1000)
@@ -6463,7 +6548,7 @@ def _orb_scanner_wrapper() -> None:
         failed_breakouts = []
 
         # V3.0 Debug-Counters: Wo gehen Kandidaten verloren?
-        _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0}
+        _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0, "non_stock": len(non_stock_excluded)}
 
         for cand in candidates:
             t = cand["ticker"]
@@ -6773,6 +6858,7 @@ def _orb_scanner_wrapper() -> None:
                 "scanned": len(prev_data), "candidates": len(candidates),
                 "breakouts": len(breakouts), "failed": len(failed_breakouts),
                 "debug": _dbg,
+                "excluded_non_stocks": non_stock_excluded[:25],
             },
             "or_phase": "active", "market_time": now_et.strftime("%H:%M ET"),
         }
