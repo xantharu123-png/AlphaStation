@@ -84,6 +84,11 @@ from modules.data_fetchers import (
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
+try:
+    from modules.scorers import calculate_setup_score as calculate_stock_setup_score
+except ImportError:
+    calculate_stock_setup_score = None
+
 # Import pattern detection
 try:
     from modules.patterns import find_harmonic_for_chart, detect_chart_patterns, find_pivots, detect_order_blocks, detect_liquidity_levels
@@ -819,6 +824,250 @@ def _strategy_score_to_grade(score: float) -> str:
     return "D"
 
 
+def _clamp_float(value: Any, low: float, high: float, default: float = 0.0) -> float:
+    """Clamp numeric values from API payloads without letting NaN/None leak into scoring."""
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        val = default
+    if math.isnan(val) or math.isinf(val):
+        val = default
+    return max(low, min(high, val))
+
+
+def _infer_strategy_direction(strategy_name: str, filters: Dict[str, Any]) -> str:
+    """Infer whether a stock strategy should reward long or short price action."""
+    name = _normalize_strategy_key(strategy_name)
+    bearish_tokens = ("short", "down", "bear", "breakdown", "distribution", "selling")
+    if any(token in name for token in bearish_tokens):
+        return "short"
+
+    change_bounds = filters.get("Change %")
+    if isinstance(change_bounds, (list, tuple)) and len(change_bounds) >= 2:
+        if float(change_bounds[1]) <= 0:
+            return "short"
+
+    gap_bounds = filters.get("Gap %")
+    if isinstance(gap_bounds, (list, tuple)) and len(gap_bounds) >= 2:
+        if float(gap_bounds[1]) <= 0:
+            return "short"
+
+    close_bounds = filters.get("Close Position")
+    if isinstance(close_bounds, (list, tuple)) and len(close_bounds) >= 2:
+        if float(close_bounds[1]) <= 0.5:
+            return "short"
+
+    return "long"
+
+
+def _candle_wicks_pct(open_price: float, high: float, low: float, close: float) -> tuple[float, float]:
+    """Return upper/lower wick percentages on a 0-100 scale for setup scoring."""
+    total_range = max(0.0, high - low)
+    if total_range <= 0:
+        return 0.0, 0.0
+    body_top = max(open_price, close)
+    body_bottom = min(open_price, close)
+    upper_wick_pct = max(0.0, high - body_top) / total_range * 100
+    lower_wick_pct = max(0.0, body_bottom - low) / total_range * 100
+    return upper_wick_pct, lower_wick_pct
+
+
+def _snapshot_atr_pct(day: Dict[str, Any], prev: Dict[str, Any], price: float) -> float:
+    """Use yesterday's range as conservative ATR proxy, falling back to current range."""
+    prev_close = float(prev.get("c") or 0)
+    prev_high = float(prev.get("h") or 0)
+    prev_low = float(prev.get("l") or 0)
+    if prev_close > 0 and prev_high > prev_low:
+        return max(0.1, (prev_high - prev_low) / prev_close * 100)
+
+    day_high = float(day.get("h") or 0)
+    day_low = float(day.get("l") or 0)
+    ref_price = price or float(day.get("c") or 0)
+    if ref_price > 0 and day_high > day_low:
+        return max(0.1, (day_high - day_low) / ref_price * 100)
+    return 2.5
+
+
+def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]]:
+    """Fetch a broad stock universe, with top movers only as a supplement."""
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    def _add_tickers(tickers: List[Dict[str, Any]], source: str) -> None:
+        for item in tickers or []:
+            ticker = str(item.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            existing = merged.get(ticker)
+            if existing:
+                existing.update(item)
+                sources = set(existing.get("_sources", []))
+                sources.add(source)
+                existing["_sources"] = sorted(sources)
+            else:
+                cloned = dict(item)
+                cloned["_sources"] = [source]
+                merged[ticker] = cloned
+
+    try:
+        full_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+        full_resp = rate_limited_get(full_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+        if full_resp.status_code == 200:
+            _add_tickers(full_resp.json().get("tickers", []), "full")
+        else:
+            print(f"[Strategy Scan] full snapshot API error: {full_resp.status_code}")
+    except Exception as e:
+        print(f"[Strategy Scan] full snapshot error: {e}")
+
+    for endpoint in ("gainers", "losers"):
+        try:
+            url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250}, timeout=15)
+            if resp.status_code != 200:
+                print(f"[Strategy Scan] {endpoint} API error: {resp.status_code}")
+                continue
+            _add_tickers(resp.json().get("tickers", []), endpoint)
+        except Exception as e:
+            print(f"[Strategy Scan] {endpoint} error: {e}")
+
+    print(f"[Strategy Scan] {strategy_name}: Snapshot universe {len(merged)} Ticker")
+    return list(merged.values())
+
+
+def _score_strategy_candidate(
+    *,
+    strategy_name: str,
+    filters: Dict[str, Any],
+    change_pct: float,
+    rvol: float,
+    close_pos: float,
+    dollar_vol: float,
+    gap_pct: float,
+    vortag_pct: float,
+    price: float,
+    day_open: float,
+    day_high: float,
+    day_low: float,
+    prev_atr_pct: float,
+) -> tuple[int, Dict[str, Any]]:
+    """Blend fast snapshot scoring with the richer ATR/wick setup scorer."""
+    direction = _infer_strategy_direction(strategy_name, filters)
+    abs_change = abs(change_pct)
+    atr_pct = max(prev_atr_pct or 0, 0.1)
+    extension_ratio = abs_change / atr_pct if atr_pct > 0 else 0
+    upper_wick_pct, lower_wick_pct = _candle_wicks_pct(day_open, day_high, day_low, price)
+
+    score = 0
+
+    # Timing: reward meaningful but not overextended moves.
+    if abs_change < 0.5:
+        score += 2
+    elif extension_ratio <= 2.0 and abs_change <= 8:
+        score += 28
+    elif extension_ratio <= 3.0 and abs_change <= 12:
+        score += 20
+    elif extension_ratio <= 4.0 and abs_change <= 18:
+        score += 10
+    else:
+        score += 2
+
+    if rvol >= 3.0:
+        score += 22
+    elif rvol >= 2.0:
+        score += 16
+    elif rvol >= 1.5:
+        score += 10
+    elif rvol >= 1.0:
+        score += 5
+
+    if direction == "long":
+        if close_pos >= 0.8:
+            score += 14
+        elif close_pos >= 0.6:
+            score += 9
+        if upper_wick_pct > 45:
+            score -= 10
+        elif upper_wick_pct > 30:
+            score -= 5
+    else:
+        if close_pos <= 0.2:
+            score += 14
+        elif close_pos <= 0.4:
+            score += 9
+        if lower_wick_pct > 45:
+            score -= 10
+        elif lower_wick_pct > 30:
+            score -= 5
+
+    if dollar_vol >= 10_000_000:
+        score += 14
+    elif dollar_vol >= 5_000_000:
+        score += 9
+    elif dollar_vol >= 1_000_000:
+        score += 5
+
+    if "Gap %" in filters:
+        gap_aligned = (direction == "long" and gap_pct > 0) or (direction == "short" and gap_pct < 0)
+        abs_gap = abs(gap_pct)
+        if gap_aligned and 2 <= abs_gap <= 8:
+            score += 14
+        elif gap_aligned and abs_gap > 8:
+            score += 8
+        elif gap_aligned and abs_gap >= 1:
+            score += 5
+        elif abs_gap >= 2:
+            score -= 8
+
+    if direction == "long":
+        if vortag_pct < -5:
+            score -= 12
+        elif vortag_pct < -2:
+            score -= 6
+        if close_pos < 0.3 and change_pct > 0:
+            score -= 8
+    else:
+        if vortag_pct > 5:
+            score -= 12
+        elif vortag_pct > 2:
+            score -= 6
+        if close_pos > 0.7 and change_pct < 0:
+            score -= 8
+
+    setup_score = None
+    if calculate_stock_setup_score is not None:
+        try:
+            setup_score = calculate_stock_setup_score(
+                change_pct=change_pct,
+                rvol=rvol,
+                close_pos=close_pos,
+                upper_wick_pct=upper_wick_pct,
+                lower_wick_pct=lower_wick_pct,
+                vortag_pct=vortag_pct,
+                atr_pct=atr_pct,
+                dollar_volume=dollar_vol,
+                price=price,
+                direction=direction,
+            )
+            score = round(score * 0.35 + float(setup_score) * 0.65)
+        except Exception as e:
+            print(f"[Strategy Scan] setup scorer failed: {e}")
+
+    # Hard cap late chase/blowout entries unless the richer score still says it is elite.
+    if extension_ratio > 4.0 or abs_change >= 20:
+        score = min(score, 74)
+    if extension_ratio > 5.0 or abs_change >= 35:
+        score = min(score, 64)
+
+    meta = {
+        "direction": direction,
+        "setup_score": round(float(setup_score), 1) if setup_score is not None else None,
+        "atr_pct": round(atr_pct, 2),
+        "extension_atr": round(extension_ratio, 2),
+        "upper_wick_pct": round(upper_wick_pct, 1),
+        "lower_wick_pct": round(lower_wick_pct, 1),
+    }
+    return int(_clamp_float(score, 0, 100)), meta
+
+
 def _calc_sma_series(values: List[float], period: int) -> List[Optional[float]]:
     """Simple moving average series aligned to the input length."""
     result: List[Optional[float]] = [None] * len(values)
@@ -868,7 +1117,8 @@ def _fetch_strategy_daily_history(
                         "close": float(bar.get("close", 0) or 0),
                         "volume": float(bar.get("volume", 0) or 0),
                     })
-                except Exception:
+                except Exception as item_err:
+                    print(f"[Strategy Scan] history parse skip {ticker}: {item_err}")
                     continue
 
     history_cache[cache_key] = daily_bars
@@ -1272,13 +1522,13 @@ def _apply_special_strategy_post_filter(
         return []
 
     history_cache: Dict[str, List[Dict[str, Any]]] = {}
-    candidate_limit = 150
+    candidate_limit = 220
     if strat.get("needs_harmonic"):
-        candidate_limit = 80
+        candidate_limit = 120
     elif strat.get("needs_ma"):
-        candidate_limit = 120
+        candidate_limit = 180
     elif strat.get("needs_volume_profile"):
-        candidate_limit = 120
+        candidate_limit = 160
 
     min_history = max(int(strat.get("history_days", 0) or 0), 20)
     if strat.get("needs_volume_profile"):
@@ -1380,61 +1630,34 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
 
         print(f"[Strategy Scan] {strategy_name}: Change {change_min}..{change_max}%, Preis ${price_min}..${price_max}")
 
-        # Polygon Snapshot: Gainers + Losers
-        # V3.4: AH/PM Fallback — wenn Gainers/Losers leer, Full Snapshot mit lastTrade
+        # Full Snapshot zuerst: ruhige Struktur-Setups (MA Bounce, Flags,
+        # Wyckoff, Compression) entstehen oft NICHT in den Top-Gainern/Losern.
         results = []
-        _all_snapshot_tickers = []
-        _strat_extended = False
-        for endpoint in ["gainers", "losers"]:
-            try:
-                url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250}, timeout=15)
-                if resp.status_code != 200:
-                    print(f"[Strategy Scan] {endpoint} API error: {resp.status_code}")
-                    continue
-                _all_snapshot_tickers.extend(resp.json().get("tickers", []))
-            except Exception as e:
-                print(f"[Strategy Scan] {endpoint} error: {e}")
-
-        # AH/PM Fallback: Wenn wenig Ergebnisse → Full Snapshot
-        if len(_all_snapshot_tickers) < 20:
-            print(f"[Strategy Scan] Nur {len(_all_snapshot_tickers)} Ticker — Extended Hours Modus")
-            _strat_extended = True
-            try:
-                _full_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-                _full_resp = rate_limited_get(_full_url, params={"apiKey": POLYGON_KEY}, timeout=30)
-                if _full_resp.status_code == 200:
-                    _full_all = _full_resp.json().get("tickers", [])
-                    # Filtere auf Ticker mit lastTrade und signifikantem AH Move
-                    for _ft in _full_all:
-                        _lt_p = _ft.get("lastTrade", {}).get("p", 0)
-                        _day_c = _ft.get("day", {}).get("c", 0)
-                        if _lt_p and _day_c and _day_c > 0:
-                            _ah_chg = abs((_lt_p - _day_c) / _day_c * 100)
-                            if _ah_chg >= 3:  # Min 3% AH Move
-                                _ft["_ext_price"] = _lt_p
-                                _ft["_ext_change"] = (_lt_p - _day_c) / _day_c * 100
-                                _all_snapshot_tickers.append(_ft)
-                    print(f"[Strategy Scan] Extended: {len(_all_snapshot_tickers)} Ticker total")
-            except Exception as _ext_err:
-                print(f"[Strategy Scan] Extended fetch failed: {_ext_err}")
+        _all_snapshot_tickers = _fetch_strategy_snapshot_universe(strategy_name)
+        session_name, _session_label = get_current_trading_session()
+        _use_extended_prices = session_name in ("Pre-Market", "After-Hours")
 
         for t in _all_snapshot_tickers:
                 try:
-                    ticker = t.get("ticker", "")
-                    day = t.get("day", {})
-                    prev = t.get("prevDay", {})
-                    if not ticker or not prev.get("c"):
+                    ticker = str(t.get("ticker", "")).upper().strip()
+                    day = t.get("day", {}) or {}
+                    prev = t.get("prevDay", {}) or {}
+                    if not ticker or "." in ticker or "/" in ticker or not prev.get("c"):
                         continue
 
-                    # V3.4: Extended Hours → AH/PM Preis nutzen
-                    if _strat_extended and t.get("_ext_price"):
-                        price = t["_ext_price"]
-                        prev_close = day.get("c", 0) or prev.get("c", 0)
-                        change_pct = t.get("_ext_change", 0)
+                    prev_close_regular = float(prev.get("c", 0) or 0)
+                    day_close = float(day.get("c", 0) or 0)
+                    last_price = float((t.get("lastTrade", {}) or {}).get("p", 0) or 0)
+                    regular_price = day_close or last_price
+                    use_ext_price = _use_extended_prices and last_price > 0 and day_close > 0
+
+                    if use_ext_price:
+                        price = last_price
+                        prev_close = day_close
+                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
                     else:
-                        price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                        prev_close = prev.get("c", 0)
+                        price = regular_price
+                        prev_close = prev_close_regular
                         change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
                     if not price or not prev_close:
                         continue
@@ -1449,19 +1672,21 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         rvol = 1.0  # Kein zuverlässiger Vergleich → neutral
                     dollar_vol = volume * price
 
-                    # Close Position (wo im Tagesrange: 0=Low, 1=High)
-                    day_high = day.get("h", price)
-                    day_low = day.get("l", price)
-                    day_open = day.get("o", prev_close)
+                    # Close Position: Extended-Preise in die Range einbeziehen und clampen.
+                    day_high = max(float(day.get("h", price) or price), price)
+                    day_low = min(float(day.get("l", price) or price), price)
+                    day_open = float(day.get("o", prev_close) or prev_close)
                     day_range = day_high - day_low
-                    close_pos = (price - day_low) / day_range if day_range > 0 else 0.5
+                    close_pos = _clamp_float((price - day_low) / day_range if day_range > 0 else 0.5, 0.0, 1.0, 0.5)
 
-                    # V2.2: Gap % = Open vs Previous Close
-                    gap_pct = ((day_open - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                    # Regular: Open vs Prev Close. PM/AH: lastTrade vs regular close.
+                    regular_gap_pct = ((day_open - prev_close_regular) / prev_close_regular * 100) if prev_close_regular > 0 else 0
+                    gap_pct = change_pct if use_ext_price else regular_gap_pct
 
                     # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
-                    prev_open = prev.get("o", prev_close)
-                    vortag_pct = ((prev_close - prev_open) / prev_open * 100) if prev_open > 0 else 0
+                    prev_open = prev.get("o", prev_close_regular)
+                    vortag_pct = ((prev_close_regular - prev_open) / prev_open * 100) if prev_open > 0 else 0
+                    prev_atr_pct = _snapshot_atr_pct(day, prev, price)
 
                     # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
                     # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
@@ -1494,52 +1719,22 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                     if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
                         continue
 
-                    # V2.2: Scoring für Strategie-Ergebnisse
-                    _strat_score = 0
-                    # Change-Stärke (0-30)
-                    _ac = abs(change_pct)
-                    if _ac >= 10: _strat_score += 30
-                    elif _ac >= 5: _strat_score += 20
-                    elif _ac >= 3: _strat_score += 12
-                    else: _strat_score += 5
-                    # RVOL (0-25)
-                    if rvol >= 3.0: _strat_score += 25
-                    elif rvol >= 2.0: _strat_score += 18
-                    elif rvol >= 1.5: _strat_score += 12
-                    elif rvol >= 1.0: _strat_score += 6
-                    # Close Position (0-15)
-                    if "Change %" in filters:
-                        _cm, _ = filters["Change %"]
-                        if _cm >= 0:  # Bullish: Close near High = gut
-                            if close_pos >= 0.8: _strat_score += 15
-                            elif close_pos >= 0.6: _strat_score += 10
-                        else:  # Bearish: Close near Low = gut
-                            if close_pos <= 0.2: _strat_score += 15
-                            elif close_pos <= 0.4: _strat_score += 10
-                    # Dollar Volume (0-15)
-                    if dollar_vol >= 10_000_000: _strat_score += 15
-                    elif dollar_vol >= 5_000_000: _strat_score += 10
-                    elif dollar_vol >= 1_000_000: _strat_score += 6
-                    # Gap-Qualität (0-15) — größeres Gap = stärkeres Signal
-                    _ag = abs(gap_pct)
-                    if _ag >= 5: _strat_score += 15  # Starkes Gap
-                    elif _ag >= 2: _strat_score += 12  # Solides Gap
-                    elif _ag >= 1: _strat_score += 6   # Minimales Gap
-                    # Downtrend-Penalty: Long-Strategie bei fallendem Vortag = schwächeres Signal
-                    # Für Bullish-Strategien: Vortag stark negativ = Downtrend-Warnung
-                    if "Change %" in filters:
-                        _cm, _ = filters["Change %"]
-                        if _cm >= 0:  # Bullish Strategie
-                            if vortag_pct < -5:
-                                _strat_score -= 15  # Starker Vortags-Drop = schwaches Setup
-                            elif vortag_pct < -2:
-                                _strat_score -= 8
-                            # Close-Position-Check: Close nahe Tagestief bei Long = schlecht
-                            if close_pos < 0.3 and change_pct > 0:
-                                _strat_score -= 10  # Eröffnet stark, faded — Distribution
-
-                    # Score Cap
-                    _strat_score = min(100, _strat_score)
+                    # Scoring: ATR-/Wick-aware statt "je groesser der Move desto besser".
+                    _strat_score, _score_meta = _score_strategy_candidate(
+                        strategy_name=strategy_name,
+                        filters=filters,
+                        change_pct=change_pct,
+                        rvol=rvol,
+                        close_pos=close_pos,
+                        dollar_vol=dollar_vol,
+                        gap_pct=gap_pct,
+                        vortag_pct=vortag_pct,
+                        price=price,
+                        day_open=day_open,
+                        day_high=day_high,
+                        day_low=day_low,
+                        prev_atr_pct=prev_atr_pct,
+                    )
 
                     # Grade (verschärft — konsistent mit Krypto-Scanner)
                     _strat_grade = _strategy_score_to_grade(_strat_score)
@@ -1564,7 +1759,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                             _mdr_label = "MDR"
                             _strat_score += 5
                         # Re-grade nach MDR Bonus (mit Cap)
-                        _strat_score = min(100, _strat_score)
+                        _strat_score = max(0, min(100, _strat_score))
                         _strat_grade = _strategy_score_to_grade(_strat_score)
                     elif _is_day1_blowout:
                         # V4 FIX: Day-1-Extrem-Move — explosiver Single-Day-Move, kein MDR.
@@ -1601,13 +1796,22 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         "Gap_Pct": round(gap_pct, 2),
                         "gap_pct": round(gap_pct, 2),
                         "Vortag_Pct": round(vortag_pct, 2),
+                        "ATR_Pct": _score_meta.get("atr_pct"),
+                        "Extension_ATR": _score_meta.get("extension_atr"),
+                        "Setup_Score": _score_meta.get("setup_score"),
+                        "Upper_Wick_Pct": _score_meta.get("upper_wick_pct"),
+                        "Lower_Wick_Pct": _score_meta.get("lower_wick_pct"),
+                        "Signal_Direction": _score_meta.get("direction"),
+                        "Extended_Hours": use_ext_price,
+                        "Regular_Gap_Pct": round(regular_gap_pct, 2),
                         "base_score": _strat_score,
                         "base_grade": _strat_grade,
                         "score": _strat_score,
                         "grade": _strat_grade,
                         "mdr_tag": _mdr_label,
                     })
-                except Exception:
+                except Exception as item_err:
+                    print(f"[Strategy Scan] {strategy_name}: skip {t.get('ticker', '?')} ({item_err})")
                     continue
 
         # Sortieren nach SCORE absteigend (nicht Change% — Score ist die Gesamtbewertung)
@@ -6138,19 +6342,22 @@ def _orb_scanner_wrapper() -> None:
         print(f"[ORB] Scanner V2 gestartet ({now_et.strftime('%H:%M')} ET)...")
 
         today_str = now_et.strftime("%Y-%m-%d")
-        yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
-        if weekday == 0:
-            yesterday = (now_et - timedelta(days=3)).strftime("%Y-%m-%d")
 
-        prev_data = fetch_grouped_daily(POLYGON_KEY, yesterday)
-        if not prev_data:
-            day_before = (now_et - timedelta(days=2)).strftime("%Y-%m-%d")
-            if weekday == 0:
-                day_before = (now_et - timedelta(days=4)).strftime("%Y-%m-%d")
-            prev_data = fetch_grouped_daily(POLYGON_KEY, day_before)
+        prev_data = None
+        prev_trade_date = None
+        for lookback in range(1, 9):
+            candidate_day = now_et - timedelta(days=lookback)
+            if candidate_day.weekday() >= 5:
+                continue
+            candidate_str = candidate_day.strftime("%Y-%m-%d")
+            prev_data = fetch_grouped_daily(POLYGON_KEY, candidate_str)
+            if prev_data:
+                prev_trade_date = candidate_str
+                break
         if not prev_data:
             print("[ORB] Keine Vortages-Daten")
             return
+        print(f"[ORB] Referenz-Tag: {prev_trade_date}")
 
         # V2.8: Snapshot API statt fetch_grouped_daily für heutige Daten
         # fetch_grouped_daily liefert während Handelszeit KEINE Daten (nur nach Börsenschluss)
@@ -6386,21 +6593,29 @@ def _orb_scanner_wrapper() -> None:
                 print(f"[ORB DBG] {t} BREAKOUT {breakout_dir}: price={current_price:.2f} OR=[{or_low:.2f}-{or_high:.2f}] above={bars_above} below={bars_below} vol_confirmed={breakout_confirmed}")
 
                 # ── Entry / Stop / Target Levels ──
+                # Tactical ORB stop near OR midpoint gives a realistic tradeable R:R.
+                # The opposite side of the OR remains the "hard invalidation" reference.
                 if breakout_dir == "LONG":
                     entry = round(or_high + or_size * 0.02, 2)   # Knapp über OR High
-                    stop = round(or_low - or_size * 0.10, 2)     # Unter OR Low
+                    stop = round(or_mid - or_size * 0.05, 2)
+                    invalidation_stop = round(or_low - or_size * 0.10, 2)
                     target1 = round(or_high + or_size * 1.0, 2)  # 1x OR Size
                     target2 = round(or_high + or_size * 1.5, 2)  # 1.5x OR Size
                     risk = entry - stop
-                    reward = target1 - entry
+                    reward_blended = 0.5 * (target1 - entry) + 0.5 * (target2 - entry)
+                    distance_to_entry_r = (current_price - entry) / risk if risk > 0 else 0
+                    late_to_tp1 = current_price >= target1
                 else:
                     entry = round(or_low - or_size * 0.02, 2)
-                    stop = round(or_high + or_size * 0.10, 2)
+                    stop = round(or_mid + or_size * 0.05, 2)
+                    invalidation_stop = round(or_high + or_size * 0.10, 2)
                     target1 = round(or_low - or_size * 1.0, 2)
                     target2 = round(or_low - or_size * 1.5, 2)
                     risk = stop - entry
-                    reward = entry - target1
-                rr_ratio = round(reward / risk, 2) if risk > 0 else 0
+                    reward_blended = 0.5 * (entry - target1) + 0.5 * (entry - target2)
+                    distance_to_entry_r = (entry - current_price) / risk if risk > 0 else 0
+                    late_to_tp1 = current_price <= target1
+                rr_ratio = round(reward_blended / risk, 2) if risk > 0 else 0
 
                 # V2.8: R:R nur Info-Spalte, kein Hard-Filter mehr
 
@@ -6442,17 +6657,22 @@ def _orb_scanner_wrapper() -> None:
                 else:
                     score += 5
 
-                # 3. Gap Quality (0-15 Punkte)
-                _gap = abs(cand["gap_pct"])
-                if 2.0 <= _gap <= 5.0:
+                # 3. Gap Quality (0-15 Punkte) — Richtung muss zum Breakout passen.
+                _gap_raw = cand["gap_pct"]
+                _gap = abs(_gap_raw)
+                _gap_aligned = (breakout_dir == "LONG" and _gap_raw >= 0) or (breakout_dir == "SHORT" and _gap_raw <= 0)
+                if _gap_aligned and 2.0 <= _gap <= 5.0:
                     score += 15  # Sweet Spot
                     score_details.append(f"Gap {cand['gap_pct']:+.1f}% ✓")
-                elif _gap > 5.0:
+                elif _gap_aligned and _gap > 5.0:
                     score += 8   # Zu groß, höheres Reversal-Risiko
                     score_details.append(f"Gap {cand['gap_pct']:+.1f}% (weit)")
-                elif _gap >= 1.5:
+                elif _gap_aligned and _gap >= 1.5:
                     score += 10
                     score_details.append(f"Gap {cand['gap_pct']:+.1f}%")
+                elif _gap >= 1.5:
+                    score += 4
+                    score_details.append(f"Counter-Gap {cand['gap_pct']:+.1f}%")
                 else:
                     score += 5
 
@@ -6499,6 +6719,17 @@ def _orb_scanner_wrapper() -> None:
                 elif hold_pct >= 0.6:
                     score += 3
 
+                # No top-grade without live volume confirmation; no chase after TP1.
+                if not breakout_confirmed:
+                    score = min(score, 64)
+                    score_details.append("Cap: Vol unconfirmed")
+                if late_to_tp1:
+                    score = min(score, 54)
+                    score_details.append("Late: TP1 already reached")
+                elif distance_to_entry_r > 0.75:
+                    score = min(score, 69)
+                    score_details.append(f"Late: {distance_to_entry_r:.1f}R from entry")
+
                 # ── Grading ──
                 if score >= 85:
                     grade = "S"
@@ -6516,14 +6747,19 @@ def _orb_scanner_wrapper() -> None:
                     "vwap": round(vwap, 2), "direction": breakout_dir,
                     "current_price": round(current_price, 2),
                     "entry": entry, "stop": stop,
+                    "invalidation_stop": invalidation_stop,
                     "target1": target1, "target2": target2,
                     "rr_ratio": rr_ratio,
+                    "rr_model": "50/50 TP1/TP2",
+                    "distance_to_entry_r": round(distance_to_entry_r, 2),
+                    "late_to_tp1": late_to_tp1,
                     "vol_confirmed": breakout_confirmed,
                     "vwap_aligned": vwap_aligned,
                     "score": score, "grade": grade,
                     "score_details": " | ".join(score_details),
                 })
-            except Exception:
+            except Exception as orb_item_err:
+                print(f"[ORB] Skip {t}: {orb_item_err}")
                 continue
 
         # Sortiere nach Score

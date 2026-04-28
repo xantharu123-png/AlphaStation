@@ -1256,8 +1256,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["TP2"] = round(range_low - range_size * 0.618, 2)  # TP2 = unter Range
 
                 risk = abs(candidate["Entry"] - candidate["StopLoss"])
-                reward = abs(candidate["TP1"] - candidate["Entry"])
-                candidate["RiskReward"] = round(reward / risk, 1) if risk > 0 else 0
+                reward_blended = (
+                    0.5 * abs(candidate["TP1"] - candidate["Entry"])
+                    + 0.5 * abs(candidate["TP2"] - candidate["Entry"])
+                )
+                candidate["RiskReward"] = round(reward_blended / risk, 1) if risk > 0 else 0
                 candidate["RangeHigh"] = round(range_high, 2)
                 candidate["RangeLow"] = round(range_low, 2)
 
