@@ -422,6 +422,11 @@ NON_STOCK_ETP_KEYWORDS = {
 
 ORB_ALLOWED_POLYGON_TYPES = {"CS", "ADRC", "ADRP"}
 _ORB_REFERENCE_CACHE: Dict[str, tuple[bool, str]] = {}
+_ORB_ATR_CACHE: Dict[str, float] = {}
+
+ORB_START_MINUTE = 9 * 60 + 45
+ORB_PRIMARY_END_MINUTE = 11 * 60
+ORB_SCAN_END_MINUTE = 16 * 60
 
 
 # ── Configuration & Constants ──
@@ -471,7 +476,7 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
         url = f"https://api.polygon.io/v3/reference/tickers/{tk}"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY}, timeout=8)
         if resp.status_code != 200:
-            result = (True, f"reference HTTP {resp.status_code}")
+            result = (False, f"reference unavailable HTTP {resp.status_code}")
             _ORB_REFERENCE_CACHE[tk] = result
             return result
 
@@ -489,10 +494,66 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
         else:
             result = (True, asset_type or "reference ok")
     except Exception as e:
-        result = (True, f"reference error: {e}")
+        result = (False, f"reference error: {e}")
 
     _ORB_REFERENCE_CACHE[tk] = result
     return result
+
+
+# ── ORB risk helpers ──
+def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, periods: int = 14) -> tuple[float, str]:
+    """Return a real daily ATR percentage for ORB sizing, with a safe fallback."""
+    tk = str(ticker or "").upper().strip()
+    try:
+        fallback = float(fallback_pct or 0)
+    except Exception:
+        fallback = 0.0
+    if not tk or not POLYGON_KEY:
+        return fallback, "prev_day_range"
+
+    cache_key = f"{tk}:{as_of_et.strftime('%Y-%m-%d')}:{periods}"
+    if cache_key in _ORB_ATR_CACHE:
+        return _ORB_ATR_CACHE[cache_key], "atr14_cached"
+
+    try:
+        end_day = (as_of_et - timedelta(days=1)).strftime("%Y-%m-%d")
+        start_day = (as_of_et - timedelta(days=35)).strftime("%Y-%m-%d")
+        url = f"https://api.polygon.io/v2/aggs/ticker/{tk}/range/1/day/{start_day}/{end_day}"
+        resp = rate_limited_get(url, params={
+            "apiKey": POLYGON_KEY,
+            "adjusted": "true",
+            "sort": "asc",
+            "limit": 80,
+        }, timeout=8)
+        if resp.status_code != 200:
+            return fallback, f"prev_day_range_http_{resp.status_code}"
+
+        bars = resp.json().get("results", []) or []
+        bars = [b for b in bars if b.get("h", 0) > 0 and b.get("l", 0) > 0 and b.get("c", 0) > 0]
+        if len(bars) < 6:
+            return fallback, "prev_day_range_short_history"
+
+        true_ranges = []
+        prev_close = None
+        for bar in bars:
+            high = float(bar.get("h", 0))
+            low = float(bar.get("l", 0))
+            close = float(bar.get("c", 0))
+            if prev_close is not None:
+                true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+            prev_close = close
+
+        true_ranges = true_ranges[-periods:]
+        ref_close = float(bars[-1].get("c", 0))
+        if not true_ranges or ref_close <= 0:
+            return fallback, "prev_day_range_no_atr"
+
+        atr_pct = (sum(true_ranges) / len(true_ranges)) / ref_close * 100
+        atr_pct = round(max(0.0, atr_pct), 4)
+        _ORB_ATR_CACHE[cache_key] = atr_pct
+        return atr_pct, f"atr{len(true_ranges)}"
+    except Exception as e:
+        return fallback, f"prev_day_range_error:{e}"
 
 
 # ── Email Alert System ──
@@ -6397,18 +6458,22 @@ def _orb_scanner_wrapper() -> None:
         time_val = hour * 60 + minute
         weekday = now_et.weekday()
 
-        # ORB-Fenster: 9:45-16:00 ET, Mo-Fr (erweitert bis Market Close für Scans nach Fenster)
-        # Automatischer Scheduler läuft nur 9:45-11:00, aber manueller Scan erlaubt bis 16:00
-        if weekday >= 5 or time_val < 585 or time_val >= 960:
+        # Prime ORB: 9:45-11:00 ET. Manual late review is allowed until close,
+        # but late results are capped and labelled because the classic edge decays.
+        if weekday >= 5 or time_val < ORB_START_MINUTE or time_val >= ORB_SCAN_END_MINUTE:
             print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {'Mo-Fr' if weekday < 5 else 'Wochenende'}) — übersprungen")
             # Trotzdem Cache mit Phase-Info speichern, damit Frontend Feedback gibt
-            _phase = "weekend" if weekday >= 5 else "pre_open" if time_val < 585 else "expired"
+            _phase = "weekend" if weekday >= 5 else "pre_open" if time_val < ORB_START_MINUTE else "expired"
             save_cache_file(ORB_CACHE, [{"breakouts": [], "failed_breakouts": [], "candidates": [],
                 "stats": {"scanned": 0, "candidates": 0, "breakouts": 0, "failed": 0},
                 "or_phase": _phase, "market_time": now_et.strftime("%H:%M ET")}])
             return
 
-        print(f"[ORB] Scanner V2 gestartet ({now_et.strftime('%H:%M')} ET)...")
+        is_late_orb_session = time_val > ORB_PRIMARY_END_MINUTE
+        orb_phase = "late_review" if is_late_orb_session else "active"
+        session_quality = "late_review" if is_late_orb_session else "prime"
+
+        print(f"[ORB] Scanner V2 gestartet ({now_et.strftime('%H:%M')} ET, {session_quality})...")
 
         today_str = now_et.strftime("%Y-%m-%d")
 
@@ -6439,7 +6504,7 @@ def _orb_scanner_wrapper() -> None:
             )
             if snap_resp.status_code == 200:
                 for t in snap_resp.json().get("tickers", []):
-                    sym = t.get("ticker", "")
+                    sym = str(t.get("ticker", "") or "").upper().strip()
                     day = t.get("day", {}) or {}
                     lt = t.get("lastTrade", {}) or {}
                     if day.get("o"):
@@ -6569,17 +6634,18 @@ def _orb_scanner_wrapper() -> None:
 
                 # ── Opening Range bestimmen (9:30-9:45 = erste 3 5-Min Candles) ──
                 or_bars = [b for b in bars if b.get("t", 0) < or_end_ms]
-                if not or_bars or len(or_bars) < 2:
+                if not or_bars or len(or_bars) < 3:
                     _dbg["no_or"] += 1
                     continue
                 or_high = max(b.get("h", 0) for b in or_bars)
                 or_low = min(b.get("l", 999999) for b in or_bars)
                 or_size = or_high - or_low
                 or_size_pct = (or_size / or_low * 100) if or_low > 0 else 0
+                atr_pct, atr_model = _fetch_orb_atr_pct(t, now_et, cand.get("prev_atr_pct", 0))
 
                 # ── OR-Size vs ATR Check ──
                 # OR > 2x ATR = zu volatil für ORB (schlechtes R:R, Mark Fisher Regel)
-                prev_atr_dollar = cand["prev_close"] * cand["prev_atr_pct"] / 100
+                prev_atr_dollar = cand["prev_close"] * atr_pct / 100
                 if prev_atr_dollar > 0 and or_size > prev_atr_dollar * 2.0:
                     _dbg["or_wide"] += 1
                     continue
@@ -6609,6 +6675,8 @@ def _orb_scanner_wrapper() -> None:
                 breakout_confirmed = False
                 breakout_bar_vol = 0
                 or_mid = (or_high + or_low) / 2
+                breakout_state = "in_range"
+                volume_scope = "none"
 
                 # Zähle Bars über/unter OR
                 bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
@@ -6618,23 +6686,23 @@ def _orb_scanner_wrapper() -> None:
                 # ── Schritt 1: Aktueller Preis bestimmt Richtung ──
                 if current_price > or_high:
                     breakout_dir = "LONG"
+                    breakout_state = "active_breakout"
                 elif current_price < or_low:
                     breakout_dir = "SHORT"
-                elif bars_above >= 2 and current_price >= or_mid:
-                    # Preis in OR, aber war mehrfach drüber → Retest-Breakout
-                    breakout_dir = "LONG"
-                elif bars_below >= 2 and current_price <= or_mid:
-                    breakout_dir = "SHORT"
+                    breakout_state = "active_breakout"
 
                 # ── Schritt 2: Volume Confirmation — gab es einen Bar mit Volume? ──
                 if breakout_dir:
-                    for b in post_or:
-                        bv = b.get("v", 0)
+                    recent_relevant_bars = []
+                    for b in post_or[-3:]:
                         bc = b.get("c", 0)
                         if breakout_dir == "LONG" and bc > or_high:
-                            breakout_bar_vol = max(breakout_bar_vol, bv)
+                            recent_relevant_bars.append(b)
                         elif breakout_dir == "SHORT" and bc < or_low:
-                            breakout_bar_vol = max(breakout_bar_vol, bv)
+                            recent_relevant_bars.append(b)
+                    if recent_relevant_bars:
+                        breakout_bar_vol = recent_relevant_bars[-1].get("v", 0)
+                        volume_scope = "latest_3_post_or"
                     if or_avg_vol > 0 and breakout_bar_vol >= or_avg_vol * 0.8:
                         breakout_confirmed = True
 
@@ -6701,6 +6769,29 @@ def _orb_scanner_wrapper() -> None:
                     distance_to_entry_r = (entry - current_price) / risk if risk > 0 else 0
                     late_to_tp1 = current_price <= target1
                 rr_ratio = round(reward_blended / risk, 2) if risk > 0 else 0
+                if breakout_dir == "LONG":
+                    live_entry = max(float(current_price), float(entry))
+                    live_risk = live_entry - stop
+                    live_reward_blended = 0.5 * (target1 - live_entry) + 0.5 * (target2 - live_entry)
+                else:
+                    live_entry = min(float(current_price), float(entry))
+                    live_risk = stop - live_entry
+                    live_reward_blended = 0.5 * (live_entry - target1) + 0.5 * (live_entry - target2)
+                live_rr_ratio = round(max(0, live_reward_blended) / live_risk, 2) if live_risk > 0 else 0
+                rr_for_score = min(rr_ratio, live_rr_ratio) if live_rr_ratio > 0 else 0
+
+                if late_to_tp1 or distance_to_entry_r >= 1.0 or live_rr_ratio < 1.0:
+                    entry_quality = "CHASE"
+                    entry_quality_score = 25
+                elif distance_to_entry_r > 0.75 or live_rr_ratio < 1.5:
+                    entry_quality = "LATE"
+                    entry_quality_score = 45
+                elif distance_to_entry_r > 0.35 or live_rr_ratio < 2.0:
+                    entry_quality = "EXTENDED"
+                    entry_quality_score = 70
+                else:
+                    entry_quality = "GOOD"
+                    entry_quality_score = 90
 
                 # V2.8: R:R nur Info-Spalte, kein Hard-Filter mehr
 
@@ -6782,15 +6873,15 @@ def _orb_scanner_wrapper() -> None:
                     score_details.append("VWAP ✗")
 
                 # 6. R:R Ratio (0-10 Punkte)
-                if rr_ratio >= 2.5:
+                if rr_for_score >= 2.5:
                     score += 10
-                    score_details.append(f"R:R {rr_ratio:.1f} ✓✓")
-                elif rr_ratio >= 2.0:
+                    score_details.append(f"Live R:R {live_rr_ratio:.1f} ✓✓")
+                elif rr_for_score >= 2.0:
                     score += 8
-                    score_details.append(f"R:R {rr_ratio:.1f} ✓")
-                elif rr_ratio >= 1.5:
+                    score_details.append(f"Live R:R {live_rr_ratio:.1f} ✓")
+                elif rr_for_score >= 1.5:
                     score += 6
-                    score_details.append(f"R:R {rr_ratio:.1f}")
+                    score_details.append(f"Live R:R {live_rr_ratio:.1f}")
                 else:
                     score += 3
 
@@ -6814,6 +6905,20 @@ def _orb_scanner_wrapper() -> None:
                 elif distance_to_entry_r > 0.75:
                     score = min(score, 69)
                     score_details.append(f"Late: {distance_to_entry_r:.1f}R from entry")
+                if entry_quality == "CHASE":
+                    score = min(score, 49)
+                    score_details.append("Entry CHASE")
+                elif entry_quality == "LATE":
+                    score = min(score, 62)
+                    score_details.append("Entry LATE")
+                elif entry_quality == "EXTENDED":
+                    score = min(score, 76)
+                    score_details.append("Entry EXTENDED")
+                else:
+                    score_details.append("Entry GOOD")
+                if is_late_orb_session:
+                    score = min(score, 54 if time_val >= 12 * 60 else 69)
+                    score_details.append("Late-session ORB cap")
 
                 # ── Grading ──
                 if score >= 85:
@@ -6829,16 +6934,23 @@ def _orb_scanner_wrapper() -> None:
                     **cand,
                     "or_high": round(or_high, 2), "or_low": round(or_low, 2),
                     "or_size_pct": round(or_size_pct, 2),
+                    "atr_pct": round(atr_pct, 2),
+                    "atr_model": atr_model,
                     "vwap": round(vwap, 2), "direction": breakout_dir,
+                    "breakout_state": breakout_state,
                     "current_price": round(current_price, 2),
-                    "entry": entry, "stop": stop,
+                    "entry": entry, "live_entry": round(live_entry, 2), "stop": stop,
                     "invalidation_stop": invalidation_stop,
                     "target1": target1, "target2": target2,
                     "rr_ratio": rr_ratio,
+                    "live_rr_ratio": live_rr_ratio,
                     "rr_model": "50/50 TP1/TP2",
                     "distance_to_entry_r": round(distance_to_entry_r, 2),
+                    "entry_quality": entry_quality,
+                    "entry_quality_score": entry_quality_score,
                     "late_to_tp1": late_to_tp1,
                     "vol_confirmed": breakout_confirmed,
+                    "volume_scope": volume_scope,
                     "vwap_aligned": vwap_aligned,
                     "score": score, "grade": grade,
                     "score_details": " | ".join(score_details),
@@ -6860,7 +6972,9 @@ def _orb_scanner_wrapper() -> None:
                 "debug": _dbg,
                 "excluded_non_stocks": non_stock_excluded[:25],
             },
-            "or_phase": "active", "market_time": now_et.strftime("%H:%M ET"),
+            "or_phase": orb_phase,
+            "session_quality": session_quality,
+            "market_time": now_et.strftime("%H:%M ET"),
         }
         save_cache_file(ORB_CACHE, [result])
         print(f"[ORB] V3.0 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")

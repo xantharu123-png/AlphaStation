@@ -5719,7 +5719,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 <div className="flex justify-between items-center mb-3">
                     <div>
                         <h2 className="text-lg font-bold">ORB Scanner V2</h2>
-                        <p className="text-xs text-gray-500">Opening Range Breakout — Mo-Fr 9:45-11:00 ET | Mark Fisher ACD + Crabel</p>
+                        <p className="text-xs text-gray-500">Opening Range Breakout | Prime 9:45-11:00 ET, Late Review bis 16:00 ET | Mark Fisher ACD + Crabel</p>
                     </div>
                     <div className="flex items-center gap-3">
                         <span className="text-xs text-gray-400">Cache: {formatAge(cacheAge)}</span>
@@ -5736,6 +5736,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <span className="text-green-600 font-medium">Breakouts: {stats.breakouts}</span>
                             <span className="text-red-500">Failed: {stats.failed || 0}</span>
                             <span className="text-gray-400">{results?.market_time || ''}</span>
+                            {results?.session_quality === 'late_review' && <span className="text-orange-500 font-medium">Late Review</span>}
                         </div>
                         {stats.debug && (
                             <div className="flex gap-3 text-[10px] text-gray-600 font-mono">
@@ -5745,6 +5746,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 {stats.debug.no_or > 0 && <span>NoOR:{stats.debug.no_or}</span>}
                                 {stats.debug.or_wide > 0 && <span>ORweit:{stats.debug.or_wide}</span>}
                                 {stats.debug.or_narrow > 0 && <span>OReng:{stats.debug.or_narrow}</span>}
+                                {stats.debug.non_stock > 0 && <span>NonStock:{stats.debug.non_stock}</span>}
                                 <span className="text-yellow-500">InRange:{stats.debug.in_range}</span>
                                 <span className="text-orange-400">Failed:{stats.debug.failed}</span>
                                 <span className="text-green-400">Passed:{stats.debug.passed}</span>
@@ -5777,24 +5779,32 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                     <span className="ml-2 text-sm">{dirEmoji(b.direction)} {b.direction}</span>
                                     {b.vol_confirmed && <span className="ml-1 text-xs text-green-600">🔊 Vol✓</span>}
                                     {b.vwap_aligned && <span className="ml-1 text-xs text-blue-500">VWAP✓</span>}
+                                    {b.entry_quality && <span className={`ml-1 text-xs px-1.5 py-0.5 rounded ${b.entry_quality === 'GOOD' ? 'bg-green-100 text-green-700' : b.entry_quality === 'EXTENDED' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>Entry {b.entry_quality}</span>}
+                                    {b.late_to_tp1 && <span className="ml-1 text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">TP1 hit</span>}
                                 </div>
                                 <div className="text-right">
                                     <div className="font-bold">${b.current_price}</div>
                                     <div className="text-xs text-gray-500">Score: {b.score}/100</div>
+                                    <div className="text-xs text-gray-500">Live R:R: {b.live_rr_ratio != null ? b.live_rr_ratio : b.rr_ratio}</div>
                                 </div>
                             </div>
-                            <div className="mt-2 grid grid-cols-4 gap-2 text-xs text-gray-600">
+                            <div className="mt-2 grid grid-cols-2 md:grid-cols-6 gap-2 text-xs text-gray-600">
                                 <div>Gap: <span className={b.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{b.gap_pct > 0 ? '+' : ''}{b.gap_pct}%</span></div>
                                 <div>RVOL: <span className={b.rvol >= 2 ? 'text-green-600 font-medium' : ''}>{b.rvol}x</span></div>
                                 <div>OR: {b.or_size_pct}%</div>
-                                <div>R:R: <span className={b.rr_ratio >= 2 ? 'text-green-600 font-medium' : ''}>{b.rr_ratio}</span></div>
+                                <div>ATR: {b.atr_pct || b.prev_atr_pct}%</div>
+                                <div>Live R:R: <span className={(b.live_rr_ratio || 0) >= 2 ? 'text-green-600 font-medium' : (b.live_rr_ratio || 0) < 1.5 ? 'text-red-500' : ''}>{b.live_rr_ratio != null ? b.live_rr_ratio : b.rr_ratio}</span></div>
+                                <div>Dist: {b.distance_to_entry_r != null ? `${b.distance_to_entry_r}R` : '0R'}</div>
                             </div>
-                            <div className="mt-1 flex gap-3 text-xs">
+                            <div className="mt-1 flex flex-wrap gap-3 text-xs">
                                 <span className="text-green-700">Entry: ${b.entry}</span>
-                                <span className="text-red-500">Stop: ${b.stop}</span>
+                                <span className="text-green-600">Live: ${b.live_entry || b.current_price}</span>
+                                <span className="text-red-500">Tactical Stop: ${b.stop}</span>
+                                {b.invalidation_stop && <span className="text-red-700">Invalidation: ${b.invalidation_stop}</span>}
                                 <span className="text-blue-600">T1: ${b.target1}</span>
                                 <span className="text-blue-400">T2: ${b.target2}</span>
                             </div>
+                            <div className="mt-1 text-xs text-gray-500">Trigger R:R: {b.rr_ratio} | Model: {b.rr_model || '50/50 TP1/TP2'} | Asset: {b.asset_check || 'checked'}</div>
                             <div className="mt-1 text-xs text-gray-400">{b.score_details}</div>
                         </div>
                     ))}
@@ -5803,7 +5813,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             {subView === 'breakouts' && breakouts.length === 0 && (
                 <div className="card p-6 text-center text-gray-400">
                     <p className="text-lg mb-1">Keine Breakouts</p>
-                    <p className="text-xs">{results?.or_phase === 'expired' ? 'ORB-Fenster abgelaufen — nächster Scan morgen 9:45 ET' : results?.or_phase === 'weekend' ? 'Wochenende — ORB Scanner Mo-Fr 9:45-11:00 ET' : results?.or_phase === 'pre_open' ? 'Pre-Market — ORB Scanner startet 9:45 ET' : `ORB Scanner aktiv Mo-Fr 9:45-11:00 ET (${results?.market_time || ''})`}</p>
+                    <p className="text-xs">{results?.or_phase === 'expired' ? 'ORB-Fenster abgelaufen — nächster Scan morgen 9:45 ET' : results?.or_phase === 'weekend' ? 'Wochenende — ORB Scanner Mo-Fr 9:45-11:00 ET' : results?.or_phase === 'pre_open' ? 'Pre-Market — ORB Scanner startet 9:45 ET' : results?.or_phase === 'late_review' ? `Late Review aktiv — klassische ORB-Edge reduziert (${results?.market_time || ''})` : `ORB Prime aktiv Mo-Fr 9:45-11:00 ET (${results?.market_time || ''})`}</p>
                 </div>
             )}
 
