@@ -661,7 +661,7 @@ def detect_new_listings():
 # PUMP EXHAUSTION SCORING (7 Komponenten, 0-100)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calculate_listing_exhaustion(candles, ticker, book=None):
+def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=None, is_new_listing=True):
     """
     Berechnet Pump-Exhaustion Score speziell für neue Listings.
 
@@ -715,6 +715,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
         "from_ath_pct": round(current_from_ath, 1),
         "candle_count": n,
         "hours_tracked": n,  # 1h Candles
+        "listing_age_hours": round(listing_age_hours, 1) if listing_age_hours is not None else None,
     }
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1039,22 +1040,26 @@ def calculate_listing_exhaustion(candles, ticker, book=None):
     #     24-72h: ideales Short-Fenster (Hype vorbei, Dump beginnt)
     #     >72h: späte Phase (Dump läuft oder schon durch)
     # ═══════════════════════════════════════════════════════════════════════
-    hours = pump_data.get("hours_tracked", n)
-    if hours >= 24 and hours <= 72:
-        pts = 10  # Sweet Spot: Hype ist vorbei, Dump-Phase
-    elif hours >= 12 and hours < 24:
-        pts = 7   # Noch in der Transition
-    elif hours >= 6 and hours < 12:
-        pts = 4   # Noch recht früh aber möglich
-    elif hours > 72 and hours <= 168:
-        pts = 5   # Spät aber noch relevant (1-7 Tage)
-    elif hours > 168:
-        pts = 2   # Sehr spät (>7 Tage)
+    if is_new_listing:
+        hours = listing_age_hours if listing_age_hours is not None else pump_data.get("hours_tracked", n)
+        if hours >= 24 and hours <= 72:
+            pts = 10  # Sweet Spot: Hype ist vorbei, Dump-Phase
+        elif hours >= 12 and hours < 24:
+            pts = 7   # Noch in der Transition
+        elif hours >= 6 and hours < 12:
+            pts = 4   # Noch recht früh aber möglich
+        elif hours > 72 and hours <= 168:
+            pts = 5   # Spät aber noch relevant (1-7 Tage)
+        elif hours > 168:
+            pts = 2   # Sehr spät (>7 Tage)
+        else:
+            pts = 0   # Zu früh (<6h)
+        score += pts
+        pump_data["listing_age_hours"] = round(hours, 1)
+        details.append(f"⏱️ Listing Alter: {hours:.1f}h → {pts}/10 ({'Sweet Spot!' if 24 <= hours <= 72 else 'Zu früh' if hours < 6 else 'Spät' if hours > 72 else ''})")
     else:
-        pts = 0   # Zu früh (<6h)
-    score += pts
-    pump_data["listing_age_hours"] = hours
-    details.append(f"⏱️ Listing Alter: {hours}h → {pts}/10 ({'Sweet Spot!' if 24 <= hours <= 72 else 'Zu früh' if hours < 6 else 'Spät' if hours > 72 else ''})")
+        pump_data["listing_age_hours"] = None
+        details.append("⏱️ Listing Alter: aktiver Pump, kein New-Listing-Altersbonus")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 12. BTC KORRELATION (0-10)
@@ -1203,14 +1208,22 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     tp1 = ath * (1 - CONFIG["tp1_from_ath_pct"] / 100)
     tp2 = ath * (1 - CONFIG["tp2_from_ath_pct"] / 100)
 
-    risk = abs(stop - entry)
-    reward1 = abs(entry - tp1)
-    reward2 = abs(entry - tp2)
+    risk = max(0, stop - entry)
+    reward1 = max(0, entry - tp1)
+    reward2 = max(0, entry - tp2)
     rr1 = round(reward1 / risk, 2) if risk > 0 else 0
     rr2 = round(reward2 / risk, 2) if risk > 0 else 0
+    tp1_missed = tp1 >= entry
+    tp2_missed = tp2 >= entry
 
     # ── Timing Score ──
-    if exh_score >= CONFIG["exh_short_entry"] and safety_ok:
+    if tp2_missed:
+        timing = "[X] ZU SPÄT — TP-Zonen bereits verpasst"
+        timing_quality = 0
+    elif tp1_missed:
+        timing = "[~] TP1 verpasst — nur noch Extended-Dump möglich"
+        timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
+    elif exh_score >= CONFIG["exh_short_entry"] and safety_ok:
         timing = "[-] JETZT SHORTEN"
         timing_quality = 5
     elif exh_score >= CONFIG["exh_short_entry"] and not safety_ok:
@@ -1249,6 +1262,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "tp2": round(tp2, 6),
         "rr1": rr1,
         "rr2": rr2,
+        "rr_effective": rr1 if not tp1_missed else rr2,
+        "tp1_missed": tp1_missed,
+        "tp2_missed": tp2_missed,
         "risk_pct": round((stop - entry) / entry * 100, 2),
         "exh_score": exh_score,
         "timing": timing,
@@ -1284,14 +1300,22 @@ def save_monitoring_list(monitoring):
     MONITORING_FILE.write_text(json.dumps(monitoring, indent=2, default=str))
 
 
-def add_to_monitoring(symbol, exchange="crypto.com"):
+def add_to_monitoring(symbol, exchange="crypto.com", listing_ts_ms=None, source="new_listing"):
     """Fügt ein neues Listing zur Überwachung hinzu."""
     monitoring = load_monitoring_list()
     if symbol not in monitoring:
+        listing_time = None
+        if listing_ts_ms:
+            try:
+                listing_time = datetime.fromtimestamp(int(listing_ts_ms) / 1000, tz=timezone.utc).isoformat()
+            except Exception:
+                listing_time = None
         monitoring[symbol] = {
             "symbol": symbol,
             "exchange": exchange,
             "detected_at": datetime.now(timezone.utc).isoformat(),
+            "listing_time": listing_time,
+            "source": source,
             "status": "monitoring",  # monitoring | signal | expired
             "last_exh_score": 0,
             "peak_exh_score": 0,
@@ -1485,7 +1509,7 @@ def detect_active_pumps(all_perps):
     for pump in detected_pumps[:15]:
         sym = pump["symbol"]
         if sym not in already_monitored:
-            add_to_monitoring(sym, pump["exchange"])
+            add_to_monitoring(sym, pump["exchange"], source="pump_detection")
             # Markiere als pump-detected (nicht new-listing)
             monitoring = load_monitoring_list()
             if sym in monitoring:
@@ -1540,7 +1564,8 @@ def run_new_listing_scanner():
         new_listings, all_perps = detect_new_listings()
         for nl in new_listings:
             results["new_listings_detected"].append(nl["symbol"])
-            add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"))
+            listing_ts = nl.get("onboard_date") or nl.get("create_time") or nl.get("launch_time")
+            add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"), listing_ts_ms=listing_ts, source="new_listing")
 
         # ── Phase 1b: Aktive Pumps erkennen (NEUER Erkennungsweg) ──
         try:
@@ -1561,7 +1586,7 @@ def run_new_listing_scanner():
         monitoring = cleanup_monitoring(monitoring)
 
         active = {k: v for k, v in monitoring.items()
-                  if v.get("status") == "monitoring"}
+                  if v.get("status") in ("monitoring", "waiting_for_history")}
 
         log.info(f"🔥 P&D: {len(active)} Coins in Überwachung, "
                  f"{len(new_listings)} neue Listings, "
@@ -1589,10 +1614,24 @@ def run_new_listing_scanner():
                     log.info(f"⏳ NLS: {symbol} — nur {len(candles) if candles else 0} Candles, warte auf History")
                     mon_data["status"] = "waiting_for_history"
                     continue
+                if mon_data.get("status") == "waiting_for_history":
+                    mon_data["status"] = "monitoring"
+
+                listing_age_hours = None
+                source = mon_data.get("source", "new_listing")
+                if source != "pump_detection":
+                    age_basis = mon_data.get("listing_time") or mon_data.get("detected_at")
+                    try:
+                        age_dt = datetime.fromisoformat(str(age_basis).replace("Z", "+00:00"))
+                        listing_age_hours = max(0, (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600)
+                    except Exception:
+                        listing_age_hours = None
 
                 # Exhaustion Score berechnen
                 exh_score, exh_details, pump_data = calculate_listing_exhaustion(
-                    candles, ticker, book
+                    candles, ticker, book,
+                    listing_age_hours=listing_age_hours,
+                    is_new_listing=(source != "pump_detection"),
                 )
 
                 # Safety prüfen

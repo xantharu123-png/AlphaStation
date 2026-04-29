@@ -3536,7 +3536,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 const dir = stratLower.includes('short') ? 'short' : 'long';
                 preUrl = `${API}/api/scan-results?direction=${dir}`;
             } else {
-                preUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}`;
+                preUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}&market_type=${encodeURIComponent(marketType)}`;
             }
             const preCheck = await fetch(preUrl);
             if (preCheck.ok) {
@@ -3565,7 +3565,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             const dir = stratLower.includes('short') ? 'short' : 'long';
                             pollUrl = `${API}/api/scan-results?direction=${dir}`;
                         } else {
-                            pollUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}`;
+                            pollUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}&market_type=${encodeURIComponent(marketType)}`;
                         }
                         const res = await fetch(pollUrl);
                         if (res.ok) {
@@ -3633,7 +3633,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         <div className="text-sm text-gray-500 text-center py-6">Noch keine Scanner-Ergebnisse vorhanden.</div>
                     ) : (
                         sorted.map((item, idx) => (
-                            <button key={idx} className="scanner-mobile-card w-full text-left" onClick={() => onSelectTicker(item.ticker)}>
+                            <button key={idx} className="scanner-mobile-card w-full text-left" onClick={() => marketType === 'crypto' ? onSelectTicker({ticker: item.ticker, isCrypto: true, ...item}) : onSelectTicker(item.ticker)}>
                                 <div className="flex items-start justify-between gap-3">
                                     <div>
                                         <div className="flex items-center gap-2 flex-wrap">
@@ -3685,7 +3685,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                     </thead>
                     <tbody>
                         {sorted.map((item, idx) => (
-                            <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                            <tr key={idx} className="table-row border-b border-gray-200" onClick={() => marketType === 'crypto' ? onSelectTicker({ticker: item.ticker, isCrypto: true, ...item}) : onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">
                                     {item.ticker}
                                     {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
@@ -4234,6 +4234,11 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 ))}
                 {stats && <span className="text-xs text-gray-400 ml-auto">{stats.unified_count || 0} Coins angezeigt{stats.total_found > stats.unified_count ? ` (${stats.total_found} gefunden)` : ''}</span>}
             </div>
+            {stats?.data_warning && (
+                <div className="text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2">
+                    Datenhinweis: {stats.data_warning}
+                </div>
+            )}
 
             {/* Unified Phase Table */}
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">

@@ -114,6 +114,8 @@ try:
         fetch_ticker_for,
         fetch_candles_for,
         fetch_cryptocom_orderbook,
+        run_new_listing_scanner,
+        seed_instrument_cache,
     )
     HAS_NEW_LISTING_SCANNER = True
 except ImportError:
@@ -442,10 +444,13 @@ BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 
-def _strategy_cache_path(strategy_name: str) -> str:
+def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
     safe_name = re.sub(r"[^a-z0-9_]+", "_", strategy_name.lower().replace(" ", "_").replace("/", "_"))
     safe_name = re.sub(r"_+", "_", safe_name).strip("_") or "strategy"
+    market_prefix = re.sub(r"[^a-z0-9_]+", "_", (market_type or "stocks").lower()).strip("_")
+    if market_prefix and market_prefix != "stocks":
+        return f"/tmp/{market_prefix}_strategy_{safe_name}_cache.json"
     return f"/tmp/strategy_{safe_name}_cache.json"
 
 
@@ -1739,8 +1744,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
     """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
     Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
     try:
-        all_strategies = {**STRATEGIES, **CRYPTO_STRATEGIES}
-        strat = all_strategies.get(strategy_name)
+        strat = STRATEGIES.get(strategy_name)
         if not strat:
             print(f"[Strategy Scan] Strategie '{strategy_name}' nicht gefunden")
             return
@@ -1957,6 +1961,156 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
 
     except Exception as e:
         print(f"[Strategy Scan] Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
+    """CoinGecko-basierter Scanner fuer generische Crypto-Strategien."""
+    try:
+        strat = CRYPTO_STRATEGIES.get(strategy_name)
+        if not strat:
+            print(f"[Crypto Strategy] Strategie '{strategy_name}' nicht gefunden")
+            return
+
+        filters = strat.get("filters", {})
+        change_min, change_max = filters.get("Change %", (-999, 999))
+        price_min, price_max = filters.get("Preis", (0, 999999999))
+        rvol_min, rvol_max = filters.get("RVOL", (0, 999))
+        close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
+        mcap_min, mcap_max = filters.get("MarketCap", (0, 10**15))
+        trend_min, trend_max = filters.get("Vortag %", (-999, 999))
+
+        coins = _fetch_coingecko_markets(pages=8)
+        results = []
+        btc_7d = 0.0
+        for coin in coins:
+            if coin.get("id") == "bitcoin":
+                btc_7d = coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0
+                break
+
+        for coin in coins:
+            try:
+                cid = str(coin.get("id", "") or "")
+                symbol = str(coin.get("symbol", "") or "").upper()
+                name = str(coin.get("name", "") or "")
+                price = float(coin.get("current_price") or 0)
+                if not symbol or price <= 0:
+                    continue
+                if symbol in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "WBTC", "WETH", "STETH", "RETH"):
+                    continue
+
+                mcap = float(coin.get("market_cap") or 0)
+                vol_24h = float(coin.get("total_volume") or 0)
+                change_24h = float(coin.get("price_change_percentage_24h") or 0)
+                change_7d = float(coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0)
+                high_24h = float(coin.get("high_24h") or price)
+                low_24h = float(coin.get("low_24h") or price)
+                range_24h = high_24h - low_24h
+                close_pos = _clamp_float((price - low_24h) / range_24h if range_24h > 0 else 0.5, 0.0, 1.0, 0.5)
+
+                vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0.0
+                crypto_rvol = vol_mcap_ratio / 10.0  # 15% Vol/MCap ~= 1.5 crypto volume intensity
+                trend_daily = change_7d / 7.0
+
+                if not (change_min <= change_24h <= change_max):
+                    continue
+                if not (price_min <= price <= price_max):
+                    continue
+                if "MarketCap" in filters and not (mcap_min <= mcap <= mcap_max):
+                    continue
+                if "RVOL" in filters and not (rvol_min <= crypto_rvol <= rvol_max):
+                    continue
+                if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                    continue
+                if "Vortag %" in filters and not (trend_min <= trend_daily <= trend_max):
+                    continue
+
+                score = 35
+                # Fresh but not chased beats raw FOMO.
+                if 0 < change_24h <= 8:
+                    score += 16
+                elif 8 < change_24h <= 15:
+                    score += 8
+                elif change_24h > 20:
+                    score -= 12
+                elif change_24h < -10:
+                    score -= 8
+
+                if 15 <= vol_mcap_ratio <= 80:
+                    score += 18
+                elif 5 <= vol_mcap_ratio < 15:
+                    score += 8
+                elif vol_mcap_ratio > 150:
+                    score -= 10
+
+                if close_pos >= 0.75:
+                    score += 12
+                elif close_pos >= 0.55:
+                    score += 6
+                elif close_pos <= 0.25 and change_24h > 0:
+                    score -= 8
+
+                btc_alpha_7d = change_7d - btc_7d if btc_7d else change_7d
+                if btc_alpha_7d > 10:
+                    score += 10
+                elif btc_alpha_7d > 3:
+                    score += 5
+                elif btc_alpha_7d < -15:
+                    score -= 12
+
+                # Strategy-specific quality nudges.
+                key = _normalize_strategy_key(strategy_name)
+                if "low_cap" in key or "rocket" in key:
+                    if 5_000_000 <= mcap <= 500_000_000 and vol_24h >= 500_000:
+                        score += 12
+                    if mcap < 5_000_000:
+                        score -= 18
+                if "accumulation" in key:
+                    if abs(change_24h) <= 2 and 12 <= vol_mcap_ratio <= 30:
+                        score += 15
+                    if abs(change_24h) > 5:
+                        score -= 12
+                if "bear" in key or "dip" in key or "reversal" in key:
+                    if change_24h < 0:
+                        score += 8
+
+                score = max(0, min(100, int(round(score))))
+                grade = _strategy_score_to_grade(score)
+                results.append({
+                    "Ticker": symbol,
+                    "ticker": symbol,
+                    "Name": name,
+                    "ID": cid,
+                    "Preis": round(price, 6),
+                    "price": round(price, 6),
+                    "Change_Pct": round(change_24h, 2),
+                    "change_pct": round(change_24h, 2),
+                    "Change7d": round(change_7d, 2),
+                    "Volume": vol_24h,
+                    "volume": vol_24h,
+                    "MarketCap": round(mcap),
+                    "VolMCapRatio": round(vol_mcap_ratio, 2),
+                    "RVOL": round(crypto_rvol, 2),
+                    "rvol": round(crypto_rvol, 2),
+                    "Close_Position": round(close_pos, 2),
+                    "BtcRelative7d": round(btc_alpha_7d, 2),
+                    "score": score,
+                    "grade": grade,
+                    "isCrypto": True,
+                    "data_source": "CoinGecko markets",
+                    "volume_model": "RVOL = Vol/MCap/10",
+                })
+            except Exception as item_err:
+                print(f"[Crypto Strategy] skip {coin.get('symbol', '?')} ({item_err})")
+
+        results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("change_pct", 0))))
+        results = results[:80]
+        _strat_cache = _strategy_cache_path(strategy_name, "crypto")
+        save_cache_file(_strat_cache, results)
+        print(f"[Crypto Strategy] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
+    except Exception as e:
+        print(f"[Crypto Strategy] Fehler: {e}")
         import traceback
         traceback.print_exc()
 
@@ -4592,7 +4746,7 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     Run main scanner with specified strategy and market type.
     Routes to correct scanner based on strategy parameter.
     """
-    if not POLYGON_KEY:
+    if request.market_type != "crypto" and not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
 
     # Validate strategy
@@ -4606,6 +4760,21 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 
     # Route to correct scanner based on strategy
     strategy_lower = resolved_strategy.lower()
+
+    if request.market_type == "crypto":
+        _strat_name = resolved_strategy
+        _safe_key = f"crypto_strat_{_strat_name.lower().replace(' ', '_')}"
+        if _safe_key not in _scan_status:
+            with _scan_lock:
+                _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
+        _run_scan_safe(_safe_key, lambda: _crypto_strategy_scan_wrapper(_strat_name))
+        return {
+            "status": "started",
+            "message": f"Crypto-Strategie-Scan gestartet: {resolved_strategy}",
+            "strategy": resolved_strategy,
+            "requested_strategy": request.strategy,
+            "market_type": request.market_type,
+        }
 
     if "bi_long" in strategy_lower:
         _run_scan_safe("bi_long", lambda: _bi_background_scan_wrapper("long"))
@@ -4710,7 +4879,8 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 @app.get("/api/scan-results", response_model=ScanResultsResponse)
 def get_scan_results(
     strategy: str = Query(None, description="Strategy name (e.g., bi_long, biotech, bear)"),
-    direction: str = Query(None, description="Backward compat: long or short (only for BI scanner)")
+    direction: str = Query(None, description="Backward compat: long or short (only for BI scanner)"),
+    market_type: str = Query("stocks", description="Market type for generic strategy caches")
 ):
     """Get cached scan results for specified strategy.
 
@@ -4723,9 +4893,11 @@ def get_scan_results(
     normalize_map = None
 
     if strategy:
-        resolved_strategy = resolve_strategy_name(strategy, "stocks")
+        resolved_strategy = resolve_strategy_name(strategy, market_type)
         strategy_lower = resolved_strategy.lower()
-        if "bi_long" in strategy_lower:
+        if market_type == "crypto":
+            cache_file = _strategy_cache_path(resolved_strategy, "crypto")
+        elif "bi_long" in strategy_lower:
             cache_file = BI_CACHE_LONG
             normalize_map = _BI_KEY_MAP
         elif "bi_short" in strategy_lower:
@@ -4751,8 +4923,10 @@ def get_scan_results(
             cache_file = TURTLE_CACHE
         else:
             # V2.2: Generische Strategie — versuche zuerst strategie-spezifischen Cache
-            _strat_cache = _strategy_cache_path(resolved_strategy)
+            _strat_cache = _strategy_cache_path(resolved_strategy, market_type)
             if os.path.exists(_strat_cache):
+                cache_file = _strat_cache
+            elif market_type != "stocks":
                 cache_file = _strat_cache
             else:
                 cache_file = STRATEGY_SCAN_CACHE  # Fallback
@@ -4922,6 +5096,7 @@ def get_biotech_results():
 
 # ── Early Movers (Crypto Scanner) ──
 EARLY_MOVERS_CACHE = "/tmp/early_movers_cache.json"
+_CG_MARKETS_STATUS = {"source": "unknown", "partial": False, "warning": None}
 
 CRYPTO_NARRATIVES = {
     # AI / ML
@@ -4968,19 +5143,31 @@ CRYPTO_NARRATIVES = {
 def _fetch_coingecko_markets(pages=4):
     """Fetch CoinGecko markets API with 2 min file cache to reduce rate limiting."""
     _CG_CACHE = "/tmp/coingecko_markets_cache.json"
+
+    def _load_cached(max_age_seconds: Optional[int] = None):
+        try:
+            if not os.path.exists(_CG_CACHE):
+                return []
+            age = time.time() - os.path.getmtime(_CG_CACHE)
+            if max_age_seconds is not None and age > max_age_seconds:
+                return []
+            with open(_CG_CACHE, "r") as _f:
+                _cached = json.load(_f)
+            _coins = _cached.get("coins", [])
+            return _coins if isinstance(_coins, list) else []
+        except Exception:
+            return []
+
     try:
-        if os.path.exists(_CG_CACHE):
-            _cg_age = time.time() - os.path.getmtime(_CG_CACHE)
-            if _cg_age < 120:  # < 2 min old
-                with open(_CG_CACHE, "r") as _f:
-                    _cached = json.load(_f)
-                    _coins = _cached.get("coins", [])
-                    if _coins:
-                        return _coins
+        _coins = _load_cached(max_age_seconds=120)
+        if _coins:
+            _CG_MARKETS_STATUS.update({"source": "fresh_cache", "partial": False, "warning": None})
+            return _coins
     except Exception:
         pass
 
     all_coins = []
+    incomplete_reason = None
     for page_num in range(1, pages + 1):
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -5013,24 +5200,50 @@ def _fetch_coingecko_markets(pages=4):
                     continue
                 break
         if resp and resp.status_code == 429:
+            incomplete_reason = "CoinGecko rate limit"
+            break
+        if not resp or resp.status_code != 200:
+            incomplete_reason = f"CoinGecko HTTP {getattr(resp, 'status_code', 'error')}"
             break
         try:
-            page_coins = resp.json() if resp and resp.status_code == 200 else []
+            page_coins = resp.json()
         except Exception:
             page_coins = []
         if not isinstance(page_coins, list) or not page_coins:
+            incomplete_reason = "CoinGecko returned empty page"
             break
         all_coins.extend(page_coins)
         if page_num < pages:
             time.sleep(3.0)
 
-    # Save to cache
+    expected_min = pages * 250
+    is_complete = not incomplete_reason and len(all_coins) >= expected_min
+
+    # Save only complete scans. A partial page must not poison the cache.
     try:
-        with open(_CG_CACHE, "w") as _f:
-            json.dump({"coins": all_coins}, _f)
+        if is_complete and all_coins:
+            with open(_CG_CACHE, "w") as _f:
+                json.dump({"coins": all_coins, "cached_at": datetime.now().isoformat(), "pages": pages}, _f)
     except Exception:
         pass
 
+    if not is_complete:
+        stale = _load_cached(max_age_seconds=3600)
+        if stale:
+            _CG_MARKETS_STATUS.update({
+                "source": "stale_cache_after_error",
+                "partial": False,
+                "warning": f"{incomplete_reason or 'CoinGecko incomplete'} — nutze letzten vollständigen Cache",
+            })
+            return stale
+        _CG_MARKETS_STATUS.update({
+            "source": "partial_live",
+            "partial": True,
+            "warning": f"{incomplete_reason or 'CoinGecko incomplete'} — Live-Daten sind unvollständig",
+        })
+        return all_coins
+
+    _CG_MARKETS_STATUS.update({"source": "fresh_live", "partial": False, "warning": None})
     return all_coins
 
 
@@ -5801,6 +6014,9 @@ def fetch_early_movers(_prefetched_perps=None):
         "trending_coins": len(trending_ids),
         "btc_7d": btc_7d,
         "perps_total": len(perp_data),
+        "data_source": _CG_MARKETS_STATUS.get("source"),
+        "data_warning": _CG_MARKETS_STATUS.get("warning"),
+        "partial_data": _CG_MARKETS_STATUS.get("partial", False),
     }
 
     return {
@@ -5899,9 +6115,6 @@ def _btc_divergenz_wrapper() -> None:
             ("BITO", "BITO", "ProShares BTC Strategy"),
         ]
         results = []
-        btc_data = None
-
-        btc_bars_raw = []
 
         for sym, short, name in assets:
             try:
@@ -5912,103 +6125,122 @@ def _btc_divergenz_wrapper() -> None:
                 bars = resp.json().get("results", [])
                 if len(bars) < 2:
                     continue
-                close = bars[0]["c"]
-                prev = bars[1]["c"]
-                chg_1d = ((close - prev) / prev) * 100
-                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
-                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
 
-                entry = {"ticker": sym, "symbol": short, "name": name,
-                         "price": round(close, 2), "change_1d": round(chg_1d, 2),
-                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2),
-                         "_bars": bars}
+                bars_by_date = {}
+                for b in bars:
+                    if not b.get("t") or not b.get("c"):
+                        continue
+                    d = datetime.utcfromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d")
+                    bars_by_date[d] = b
+                if len(bars_by_date) < 2:
+                    continue
 
-                if sym == "X:BTCUSD":
-                    btc_data = entry
-                    btc_bars_raw = bars
+                dates_desc = sorted(bars_by_date.keys(), reverse=True)
+                close = bars_by_date[dates_desc[0]]["c"]
+
+                entry = {
+                    "ticker": sym,
+                    "symbol": short,
+                    "name": name,
+                    "price": round(close, 2),
+                    "change_1d": 0,
+                    "change_5d": 0,
+                    "change_20d": 0,
+                    "_bars_by_date": bars_by_date,
+                }
                 results.append(entry)
             except Exception as e:
                 print(f"[Warning] {e}")
                 continue
 
-        # Calculate divergence vs BTC — PROFESSIONAL: Beta-adjusted Z-Score
+        btc_data = next((r for r in results if r["ticker"] == "X:BTCUSD"), None)
+
+        def _change_for_dates(series: Dict[str, Dict[str, Any]], dates_desc: List[str], lookback: int) -> float:
+            if len(dates_desc) <= lookback:
+                return 0.0
+            now_close = series[dates_desc[0]].get("c", 0)
+            old_close = series[dates_desc[lookback]].get("c", 0)
+            return ((now_close - old_close) / old_close * 100) if old_close else 0.0
+
+        def _aligned_returns(asset_series: Dict[str, Dict[str, Any]], btc_series: Dict[str, Dict[str, Any]], max_pairs: int = 20):
+            common = sorted(set(asset_series.keys()) & set(btc_series.keys()), reverse=True)
+            asset_returns, btc_returns = [], []
+            for i in range(min(max_pairs, len(common) - 1)):
+                d0, d1 = common[i], common[i + 1]
+                a_prev = asset_series[d1].get("c", 0)
+                b_prev = btc_series[d1].get("c", 0)
+                if a_prev > 0 and b_prev > 0:
+                    asset_returns.append((asset_series[d0]["c"] - a_prev) / a_prev * 100)
+                    btc_returns.append((btc_series[d0]["c"] - b_prev) / b_prev * 100)
+            return asset_returns, btc_returns, common
+
+        # Calculate divergence vs BTC on matched market dates only.
         if btc_data:
-            # Get all 20d returns for beta/correlation calculation
-            btc_returns_20d = []
-            for i in range(min(19, len(btc_bars_raw)-1)):
-                if btc_bars_raw[i+1]["c"] > 0:
-                    btc_returns_20d.append((btc_bars_raw[i]["c"] - btc_bars_raw[i+1]["c"]) / btc_bars_raw[i+1]["c"] * 100)
+            btc_series = btc_data.get("_bars_by_date", {})
+            for r in results:
+                series = r.get("_bars_by_date", {})
+                _, _, common_dates = _aligned_returns(series, btc_series, max_pairs=20)
+                if len(common_dates) >= 2:
+                    r["change_1d"] = round(_change_for_dates(series, common_dates, 1), 2)
+                    r["change_5d"] = round(_change_for_dates(series, common_dates, min(5, len(common_dates) - 1)), 2)
+                    r["change_20d"] = round(_change_for_dates(series, common_dates, min(20, len(common_dates) - 1)), 2)
+
+            btc_data["div_1d"] = 0
+            btc_data["div_5d"] = 0
+            btc_data["beta"] = 1.0
+            btc_data["correlation"] = 1.0
+            btc_data["z_score"] = 0
+            btc_data["signal"] = "BTC"
 
             for r in results:
-                if r["ticker"] != "X:BTCUSD":
-                    r["div_1d"] = round(r["change_1d"] - btc_data["change_1d"], 2)
-                    r["div_5d"] = round(r["change_5d"] - btc_data["change_5d"], 2)
+                if r["ticker"] == "X:BTCUSD":
+                    continue
+                asset_returns, btc_returns, common_dates = _aligned_returns(r.get("_bars_by_date", {}), btc_series, max_pairs=20)
+                btc_change_1d = _change_for_dates(btc_series, common_dates, 1) if len(common_dates) >= 2 else 0
+                btc_change_5d = _change_for_dates(btc_series, common_dates, min(5, len(common_dates) - 1)) if len(common_dates) >= 2 else 0
+                r["div_1d"] = round(r.get("change_1d", 0) - btc_change_1d, 2)
+                r["div_5d"] = round(r.get("change_5d", 0) - btc_change_5d, 2)
 
-                    # Beta + Correlation calculation from stored bars
-                    asset_bars = r.get("_bars", [])
-                    asset_returns = []
-                    for i in range(min(19, len(asset_bars)-1)):
-                        if asset_bars[i+1]["c"] > 0:
-                            asset_returns.append((asset_bars[i]["c"] - asset_bars[i+1]["c"]) / asset_bars[i+1]["c"] * 100)
+                beta = 1.0
+                correlation = 0.0
+                z_score = 0.0
+                n = min(len(asset_returns), len(btc_returns))
+                if n >= 10:
+                    mean_a = sum(asset_returns[:n]) / n
+                    mean_b = sum(btc_returns[:n]) / n
+                    denom = max(n - 1, 1)
+                    cov = sum((asset_returns[i] - mean_a) * (btc_returns[i] - mean_b) for i in range(n)) / denom
+                    var_b = sum((btc_returns[i] - mean_b) ** 2 for i in range(n)) / denom
+                    var_a = sum((asset_returns[i] - mean_a) ** 2 for i in range(n)) / denom
+                    std_a = var_a ** 0.5 if var_a > 0 else 1
+                    std_b = var_b ** 0.5 if var_b > 0 else 1
+                    beta = cov / var_b if var_b > 0 else 1.0
+                    correlation = max(-1.0, min(1.0, cov / (std_a * std_b) if (std_a * std_b) > 0 else 0.0))
+                    expected_5d = btc_change_5d * beta
+                    divergence = r.get("change_5d", 0) - expected_5d
+                    residual_var = var_a + (beta ** 2) * var_b - 2 * beta * cov
+                    residual_std = max(residual_var ** 0.5 if residual_var > 0 else std_a, 0.5)
+                    z_score = divergence / residual_std
 
-                    # Calculate beta and correlation
-                    beta = 1.0
-                    correlation = 0.0
-                    z_score = 0.0
-                    n = min(len(asset_returns), len(btc_returns_20d))
+                r["beta"] = round(beta, 2)
+                r["correlation"] = round(correlation, 2)
+                r["z_score"] = round(z_score, 2)
+                r["aligned_days"] = len(common_dates)
 
-                    if n >= 10:  # Minimum 10 Tage für statistisch sinnvolle Werte
-                        # Mean
-                        mean_a = sum(asset_returns[:n]) / n
-                        mean_b = sum(btc_returns_20d[:n]) / n
-                        # Sample Covariance und Variance (n-1 für unbiased)
-                        denom = max(n - 1, 1)
-                        cov = sum((asset_returns[i] - mean_a) * (btc_returns_20d[i] - mean_b) for i in range(n)) / denom
-                        var_b = sum((btc_returns_20d[i] - mean_b) ** 2 for i in range(n)) / denom
-                        var_a = sum((asset_returns[i] - mean_a) ** 2 for i in range(n)) / denom
-                        std_a = var_a ** 0.5 if var_a > 0 else 1
-                        std_b = var_b ** 0.5 if var_b > 0 else 1
-
-                        beta = cov / var_b if var_b > 0 else 1.0
-                        # Pearson Correlation: cov / (std_a * std_b) — korrekt mit sample stats
-                        correlation = max(-1.0, min(1.0, cov / (std_a * std_b) if (std_a * std_b) > 0 else 0.0))
-
-                        # Expected 5D move based on beta
-                        expected_5d = btc_data["change_5d"] * beta
-                        actual_5d = r["change_5d"]
-                        divergence = actual_5d - expected_5d
-
-                        # Residual Std Dev: sqrt(var_asset + beta² * var_btc)
-                        residual_var = var_a + (beta ** 2) * var_b - 2 * beta * cov
-                        residual_std = max(residual_var ** 0.5 if residual_var > 0 else std_a, 0.5)
-                        z_score = divergence / residual_std
-
-                    r["beta"] = round(beta, 2)
-                    r["correlation"] = round(correlation, 2)
-                    r["z_score"] = round(z_score, 2)
-
-                    # Signal based on z-score + correlation strength
-                    if z_score > 1.5 and correlation > 0.5:
-                        r["signal"] = "KAUFEN"
-                    elif z_score < -1.5 and correlation > 0.5:
-                        r["signal"] = "MEIDEN"
-                    elif abs(z_score) < 0.5:
-                        r["signal"] = "ABWARTEN"
-                    else:
-                        r["signal"] = "BEOBACHTEN"
+                if z_score > 1.5 and correlation > 0.5:
+                    r["signal"] = "KAUFEN"
+                elif z_score < -1.5 and correlation > 0.5:
+                    r["signal"] = "MEIDEN"
+                elif abs(z_score) < 0.5:
+                    r["signal"] = "ABWARTEN"
                 else:
-                    r["div_1d"] = 0
-                    r["div_5d"] = 0
-                    r["beta"] = 1.0
-                    r["correlation"] = 1.0
-                    r["z_score"] = 0
-                    r["signal"] = "BTC"
+                    r["signal"] = "BEOBACHTEN"
 
-        # Remove _bars and filter out BTC reference before saving
+        # Remove internal bars and filter out BTC reference before saving
         final_results = []
         for r in results:
-            if "_bars" in r:
-                del r["_bars"]
+            if "_bars_by_date" in r:
+                del r["_bars_by_date"]
             # BTC ist nur Referenz, nicht in Ergebnisliste anzeigen
             if r["ticker"] != "X:BTCUSD":
                 final_results.append(r)
@@ -6177,129 +6409,112 @@ def get_money_flow():
 # ── New Listing Scanner ──
 NEW_LISTING_CACHE = "/tmp/new_listing_scanner.json"
 
+def _display_crypto_contract_symbol(symbol: str) -> str:
+    """Clean exchange contract suffixes without eating real ticker letters."""
+    display = str(symbol or "").strip().upper()
+    for suffix in ("USD-PERP", "USDT-PERP", "_USDT", "-USDT", "USDT", "_PERP", "-PERP", "USD"):
+        if display.endswith(suffix) and len(display) > len(suffix):
+            display = display[:-len(suffix)]
+            break
+    return display or str(symbol or "").strip().upper()
+
+
+def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert rich module results to the flat table shape used by the FastAPI UI."""
+    flat = []
+
+    def _append_signal(entry: Dict[str, Any], bucket: str) -> None:
+        sig = entry.get("signal", {}) or {}
+        pump = sig.get("pump_data", {}) or {}
+        raw_symbol = entry.get("symbol") or sig.get("symbol") or ""
+        display_symbol = _display_crypto_contract_symbol(raw_symbol)
+        timing = sig.get("timing", "")
+        if bucket == "signals":
+            signal_label = "SHORT" if "SHORT" in timing.upper() else timing or "SHORT"
+        elif bucket == "watchlist":
+            signal_label = "WATCH"
+        else:
+            signal_label = sig.get("grade", "MONITOR")
+
+        flat.append({
+            "symbol": display_symbol,
+            "exchange": entry.get("exchange", ""),
+            "contract": raw_symbol,
+            "price": pump.get("current_price", sig.get("entry", 0)),
+            "change_24h": entry.get("change_24h", 0),
+            "volume_24h": pump.get("volume_usd_24h", 0),
+            "pump_pct": pump.get("pump_pct", 0),
+            "from_ath_pct": pump.get("from_ath_pct", 0),
+            "exhaustion_score": sig.get("exh_score", 0),
+            "exhaustion_details": sig.get("exh_details", []),
+            "signal": signal_label,
+            "confirmations": 0,
+            "listing_date": entry.get("detected_at", ""),
+            "hours_tracked": pump.get("hours_tracked", 0),
+            "listing_age_hours": pump.get("listing_age_hours"),
+            "vol_ratio": pump.get("vol_ratio", 0),
+            "funding_rate": pump.get("funding_rate", 0),
+            "long_pct": pump.get("long_pct", 0),
+            "red_streak": pump.get("red_streak", 0),
+            "btc_divergence": pump.get("btc_divergence", 0),
+            "rr1": sig.get("rr1", 0),
+            "rr2": sig.get("rr2", 0),
+            "rr_effective": sig.get("rr_effective", sig.get("rr1", 0)),
+            "tp1_missed": sig.get("tp1_missed", False),
+            "tp2_missed": sig.get("tp2_missed", False),
+            "grade": sig.get("grade", ""),
+            "safety_ok": sig.get("safety_ok", False),
+            "safety_warnings": sig.get("safety_warnings", []),
+            "source": bucket,
+            "raw_score": pump.get("raw_score", sig.get("exh_score", 0)),
+        })
+
+    for bucket in ("signals", "watchlist"):
+        for entry in payload.get(bucket, []) or []:
+            if isinstance(entry, dict):
+                _append_signal(entry, bucket)
+
+    for item in payload.get("monitoring", []) or []:
+        if not isinstance(item, dict):
+            continue
+        raw_symbol = item.get("symbol", "")
+        flat.append({
+            "symbol": _display_crypto_contract_symbol(raw_symbol),
+            "exchange": item.get("exchange", ""),
+            "contract": raw_symbol,
+            "price": item.get("price", 0),
+            "pump_pct": item.get("pump_pct", 0),
+            "from_ath_pct": item.get("from_ath_pct", 0),
+            "exhaustion_score": item.get("exh_score", 0),
+            "signal": item.get("timing", "MONITOR"),
+            "funding_rate": item.get("funding_rate", 0),
+            "grade": item.get("grade", ""),
+            "hours_tracked": item.get("hours_tracked", 0),
+            "vol_ratio": item.get("volume_ratio", 0),
+            "safety_ok": item.get("safety_ok", False),
+            "source": "monitoring",
+        })
+
+    flat.sort(key=lambda r: (
+        0 if str(r.get("signal", "")).startswith("SHORT") else 1,
+        -float(r.get("exhaustion_score") or 0),
+        -float(r.get("pump_pct") or 0),
+    ))
+    return flat
+
+
 def _new_listing_wrapper() -> None:
-    """Detect new listings and calculate exhaustion scores."""
+    """Run the full Pump & Dump scanner pipeline and cache flat UI results."""
     if not HAS_NEW_LISTING_SCANNER:
         print("[New Listing] Module not available")
         return
 
     try:
-        Path("/opt/tradingbot/data_cache").mkdir(parents=True, exist_ok=True)
-
-        # Detect new listings
-        new_listings, all_perps = detect_new_listings()
-        if not new_listings:
-            print("[New Listing] No new listings detected")
-            save_cache_file(NEW_LISTING_CACHE, [])
-            return
-
-        results = []
-        for listing in new_listings[:20]:  # Limit to 20
-            try:
-                # listing can be a dict or string — normalize
-                if isinstance(listing, str):
-                    symbol = listing
-                    exchange = "crypto.com"
-                else:
-                    symbol = listing.get("symbol", "")
-                    exchange = listing.get("exchange", "crypto.com")
-
-                if not symbol:
-                    continue
-
-                # Display symbol: clean for UI (remove exchange suffixes)
-                display_symbol = symbol.replace("_USDT", "").replace("USDT", "").replace("_PERP", "").replace("-PERP", "").rstrip("USD")
-                if not display_symbol:
-                    display_symbol = symbol
-
-                # Use ORIGINAL symbol for API calls — each exchange needs its own format!
-                # MEXC: AAVE_USDT, Bitget: AAVEUSDT, Crypto.com: AAVEUSD-PERP
-                ticker_data = fetch_ticker_for(symbol, exchange)
-                if not ticker_data:
-                    print(f"[New Listing] No ticker for {symbol} ({exchange}), skipping")
-                    continue
-
-                # Fetch candles with original symbol
-                candles = fetch_candles_for(symbol, exchange)
-
-                # Fetch orderbook (only crypto.com, use original symbol)
-                orderbook = fetch_cryptocom_orderbook(symbol) if exchange == "crypto.com" else None
-
-                # Calculate exhaustion — ticker_data statt symbol (Dict mit bid/ask/volume)
-                exhaustion_score, exhaustion_details, pump_data = calculate_listing_exhaustion(
-                    candles or [], ticker_data, orderbook
-                )
-
-                # BUG FIX: Coins ohne echten Pump rausfiltern
-                # pump_pct < 15% = normale Volatilität, kein Pump & Dump Pattern
-                _pump_raw = pump_data.get("pump_pct", 0) if pump_data else 0
-                if _pump_raw < 15:
-                    continue  # Kein relevanter Pump — nicht anzeigen
-
-                # Signal-Logik: SHORT wenn Exhaustion hoch (Dump-Phase), sonst WATCH
-                _exh = exhaustion_score or 0
-                _pump = _pump_raw
-                _from_ath = pump_data.get("from_ath_pct", 0) if pump_data else 0
-                _funding = pump_data.get("funding_rate", 0) if pump_data else 0
-                _long_pct = pump_data.get("long_pct", 50) if pump_data else 50
-                _red_streak = pump_data.get("red_streak", 0) if pump_data else 0
-
-                # Konfidenz-Zähler: wie viele unabhängige Signale bestätigen den Short?
-                _confirmations = 0
-                if _from_ath > 10: _confirmations += 1
-                if _funding > 0.05: _confirmations += 1     # Hohe Funding
-                if _long_pct > 65: _confirmations += 1       # Longs überladen
-                if _red_streak >= 4: _confirmations += 1     # Distribution aktiv
-                if pump_data and pump_data.get("btc_divergence", 0) < -5: _confirmations += 1  # BTC Divergenz
-
-                if _exh >= 75 and _confirmations >= 3:
-                    _signal = "SHORT ⚡"  # High Confidence: 3+ Bestätigungen
-                elif _exh >= 70 and _from_ath > 10:
-                    _signal = "SHORT"
-                elif _exh >= 50 and _from_ath > 5:
-                    _signal = "SHORT (Watch)"
-                elif _exh >= 40:
-                    _signal = "WATCH"
-                else:
-                    _signal = "ZU FRÜH"
-
-                # Listing-Datum aus Exchange-Timestamps
-                _listing_ts = None
-                if isinstance(listing, dict):
-                    for ts_key in ["onboard_date", "create_time", "launch_time"]:
-                        ts_val = listing.get(ts_key, 0)
-                        if ts_val and ts_val > 0:
-                            _listing_ts = datetime.fromtimestamp(ts_val / 1000).strftime("%Y-%m-%d %H:%M")
-                            break
-
-                results.append({
-                    "symbol": display_symbol,
-                    "exchange": exchange,
-                    "contract": symbol,
-                    "price": ticker_data.get("price", 0),
-                    "change_24h": ticker_data.get("change_24h", 0),
-                    "volume_24h": ticker_data.get("volume_usd_24h", ticker_data.get("volume_24h", 0)),
-                    "pump_pct": round(_pump, 1),
-                    "from_ath_pct": round(_from_ath, 1),
-                    "exhaustion_score": _exh,
-                    "exhaustion_details": exhaustion_details,
-                    "signal": _signal,
-                    "confirmations": _confirmations,
-                    "listing_date": _listing_ts,
-                    "hours_tracked": pump_data.get("hours_tracked", 0) if pump_data else 0,
-                    "vol_ratio": round(pump_data.get("vol_ratio", 0), 2) if pump_data else 0,
-                    "funding_rate": round(_funding, 4) if _funding else 0,
-                    "long_pct": round(_long_pct, 1),
-                    "red_streak": _red_streak,
-                    "btc_divergence": round(pump_data.get("btc_divergence", 0), 1) if pump_data else 0,
-                    "raw_score": pump_data.get("raw_score", 0) if pump_data else 0,
-                })
-            except Exception as e:
-                print(f"[New Listing] Error processing {listing if isinstance(listing, str) else listing.get('symbol', 'unknown')}: {e}")
-                continue
-
+        seed_instrument_cache()
+        payload = run_new_listing_scanner()
+        results = _flatten_new_listing_pipeline_results(payload if isinstance(payload, dict) else {})
         save_cache_file(NEW_LISTING_CACHE, results)
-        print(f"[New Listing] Processed {len(results)} new listings")
+        print(f"[New Listing] Full pipeline processed {len(results)} UI rows")
     except Exception as e:
         print(f"New listing wrapper error: {e}")
 

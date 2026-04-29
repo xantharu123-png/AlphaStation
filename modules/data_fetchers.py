@@ -232,66 +232,87 @@ def fetch_daily_candles_crypto(coin_id, days=30):
         return cached["data"]
 
     try:
-        # CoinGecko market_chart gibt stündliche Daten für days <= 90
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-        params = {"vs_currency": "usd", "days": min(days, 90)}
-
-        # Retry-Logik für CoinGecko Free API (Rate Limit ~10-30 calls/min)
-        # V2: Schnellere Retries — Frontend hat eigene Retry-Schleife, Backend muss schnell antworten
-        resp = None
-        for _attempt in range(2):  # Max 2 Versuche (war 4 — Frontend retried zusätzlich)
-            if _attempt > 0:
-                _t.sleep(1.5)  # Kurzer Retry-Delay (war 3s)
-            try:
-                resp = rate_limited_get(url, params=params, timeout=10)  # Timeout 10s (war 15s)
-            except Exception:
-                if _attempt < 1:
-                    continue
-                return []
-            if resp.status_code == 200:
-                break
-            elif resp.status_code == 429:
-                # Rate limited — kurz warten, Frontend retried nochmal
-                _t.sleep(3)  # Fix 3s (war 10-30s eskalierend!)
-                continue
-            elif resp.status_code == 404:
-                # Coin existiert nicht auf CoinGecko
-                return []
-            else:
-                if _attempt < 1:
-                    continue
-                return []
-
-        if resp is None or resp.status_code != 200:
-            return []
-
-        data = resp.json()
-        prices = data.get("prices", [])
-        volumes = data.get("total_volumes", [])
-
-        if not prices or len(prices) < 24:
-            return []
-
-        # Stündliche Daten zu Daily OHLCV aggregieren
         from datetime import datetime as _dt
-        # Build volume lookup by timestamp for safe alignment
-        _vol_map = {}
-        for v_entry in (volumes or []):
-            if isinstance(v_entry, (list, tuple)) and len(v_entry) > 1:
-                _vol_map[v_entry[0]] = v_entry[1]
-        daily = {}
-        for i, (ts, p) in enumerate(prices):
-            day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
-            vol = _vol_map.get(ts, 0)
-            if day_key not in daily:
-                daily[day_key] = {"o": p, "h": p, "l": p, "c": p, "v": vol, "t": ts}
-            else:
-                daily[day_key]["h"] = max(daily[day_key]["h"], p)
-                daily[day_key]["l"] = min(daily[day_key]["l"], p)
-                daily[day_key]["c"] = p
-                daily[day_key]["v"] += vol
 
-        bars = [daily[k] for k in sorted(daily.keys())]
+        requested_days = max(1, min(int(days or 30), 365))
+        allowed_ohlc_days = [1, 7, 14, 30, 90, 180, 365]
+        ohlc_days = next((d for d in allowed_ohlc_days if d >= requested_days), 365)
+
+        def _fetch_json(url, params):
+            resp = None
+            for _attempt in range(2):
+                if _attempt > 0:
+                    _t.sleep(1.5)
+                try:
+                    resp = rate_limited_get(url, params=params, timeout=10)
+                except Exception:
+                    if _attempt < 1:
+                        continue
+                    return None
+                if resp.status_code == 200:
+                    try:
+                        return resp.json()
+                    except Exception:
+                        return None
+                if resp.status_code == 429:
+                    _t.sleep(3)
+                    continue
+                if resp.status_code == 404:
+                    return None
+            return None
+
+        # OHLC liefert echte Daily/Open-High-Low-Close-Werte. Volumen kommt separat
+        # aus market_chart und wird pro Tag konservativ als letzter 24h-Volume-Snapshot
+        # genutzt, nicht als Summe stündlicher Snapshots.
+        ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+        ohlc_data = _fetch_json(ohlc_url, {"vs_currency": "usd", "days": ohlc_days})
+
+        market_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+        market_data = _fetch_json(market_url, {"vs_currency": "usd", "days": min(requested_days, 90)})
+        volumes = (market_data or {}).get("total_volumes", [])
+
+        daily_volume = {}
+        for entry in volumes or []:
+            if isinstance(entry, (list, tuple)) and len(entry) > 1:
+                day_key = _dt.utcfromtimestamp(entry[0] / 1000).strftime("%Y-%m-%d")
+                daily_volume[day_key] = float(entry[1] or 0)
+
+        bars = []
+        if isinstance(ohlc_data, list) and ohlc_data:
+            for c in ohlc_data:
+                if not isinstance(c, (list, tuple)) or len(c) < 5:
+                    continue
+                ts = int(c[0])
+                day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                bars.append({
+                    "t": ts,
+                    "o": float(c[1]),
+                    "h": float(c[2]),
+                    "l": float(c[3]),
+                    "c": float(c[4]),
+                    "v": daily_volume.get(day_key, 0),
+                    "volume_is_estimate": True,
+                })
+        else:
+            # Fallback: nur wenn OHLC nicht verfügbar ist. Hier weiter synthetische
+            # Kerzen, aber ohne Volumen-Summenfehler.
+            prices = (market_data or {}).get("prices", [])
+            if not prices or len(prices) < 2:
+                return []
+            daily = {}
+            for ts, p in prices:
+                day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                if day_key not in daily:
+                    daily[day_key] = {"o": p, "h": p, "l": p, "c": p, "v": daily_volume.get(day_key, 0), "t": ts, "synthetic_ohlc": True}
+                else:
+                    daily[day_key]["h"] = max(daily[day_key]["h"], p)
+                    daily[day_key]["l"] = min(daily[day_key]["l"], p)
+                    daily[day_key]["c"] = p
+            bars = [daily[k] for k in sorted(daily.keys())]
+
+        if requested_days and len(bars) > requested_days + 2:
+            bars = bars[-(requested_days + 2):]
+
         _CANDLE_ANALYSIS_CACHE[cache_key] = {"data": bars, "ts": _t.time()}
         return bars
     except Exception:
