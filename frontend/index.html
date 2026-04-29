@@ -4555,6 +4555,7 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 // Kalender Tab
 function KalenderTab() {
     const [events, setEvents] = useState([]);
+    const [calendarMeta, setCalendarMeta] = useState(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -4564,6 +4565,7 @@ function KalenderTab() {
                 if (response.ok) {
                     const data = await response.json();
                     setEvents(data.events || []);
+                    setCalendarMeta({ source: data.source, note: data.note, timestamp: data.timestamp });
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -4587,10 +4589,21 @@ function KalenderTab() {
         if (i === 'low') return 'Niedrig';
         return imp || '–';
     };
+    const formatEventDate = (dateStr) => {
+        if (!dateStr) return '–';
+        const [y, m, d] = dateStr.split('-').map(Number);
+        return new Date(y, (m || 1) - 1, d || 1).toLocaleDateString('de-DE', {weekday:'short', day:'2-digit', month:'short', year:'numeric'});
+    };
+    const todayIso = new Date().toISOString().slice(0, 10);
 
     return (
         <div className="space-y-6">
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                {calendarMeta?.note && (
+                    <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        Wichtig: FED/FOMC-Termine sind offizielle Federal-Reserve-Daten. Andere Makro-Termine sind aktuell als geschätzt markiert.
+                    </div>
+                )}
                 {loading ? (
                     <div className="flex justify-center py-8"><div className="loading-spinner"></div></div>
                 ) : (
@@ -4598,22 +4611,38 @@ function KalenderTab() {
                         <thead className="border-b border-gray-200">
                             <tr>
                                 <th className="text-left py-2 px-2">Datum</th>
+                                <th className="text-left py-2 px-2">Uhrzeit</th>
                                 <th className="text-left py-2 px-2">Event</th>
                                 <th className="text-center py-2 px-2">Wichtigkeit</th>
                                 <th className="text-center py-2 px-2">Impact</th>
+                                <th className="text-left py-2 px-2">Quelle</th>
                                 <th className="text-left py-2 px-2">Beschreibung</th>
                             </tr>
                         </thead>
                         <tbody>
                             {events.length === 0 && (
-                                <tr><td colSpan="5" className="py-6 text-center text-gray-400">Keine Events gefunden</td></tr>
+                                <tr><td colSpan="7" className="py-6 text-center text-gray-400">Keine Events gefunden</td></tr>
                             )}
                             {events.map((event, idx) => (
-                                <tr key={idx} className="table-row border-b border-gray-200">
-                                    <td className="py-3 px-2 font-semibold whitespace-nowrap">{new Date(event.date).toLocaleDateString('de-DE', {weekday:'short', day:'2-digit', month:'short', year:'numeric'})}</td>
+                                <tr key={idx} className={`table-row border-b border-gray-200 ${event.date === todayIso ? 'bg-amber-50' : ''}`}>
+                                    <td className="py-3 px-2 font-semibold whitespace-nowrap">
+                                        {formatEventDate(event.date)}
+                                        {event.date === todayIso && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-amber-200 text-amber-900">Heute</span>}
+                                    </td>
+                                    <td className="py-3 px-2 whitespace-nowrap">
+                                        <div className="font-semibold">{event.time_local || '–'}</div>
+                                        {event.time_et && <div className="text-xs text-gray-400">{event.time_et}</div>}
+                                    </td>
                                     <td className="py-3 px-2 font-medium">{event.event}</td>
                                     <td className="py-3 px-2 text-center"><span className={`signal-badge ${getImportanceClass(event.importance)}`}>{getImportanceLabel(event.importance)}</span></td>
                                     <td className="py-3 px-2 text-center text-xs">{event.impact || '–'}</td>
+                                    <td className="py-3 px-2 text-xs">
+                                        {event.source_url ? (
+                                            <a href={event.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">{event.estimated ? 'Geschätzt' : event.source}</a>
+                                        ) : (
+                                            <span className={event.estimated ? 'text-amber-700 font-semibold' : 'text-gray-600'}>{event.estimated ? 'Geschätzt' : (event.source || '–')}</span>
+                                        )}
+                                    </td>
                                     <td className="py-3 px-2 text-gray-600">{event.description}</td>
                                 </tr>
                             ))}

@@ -7641,46 +7641,104 @@ def _calculate_next_occurrence(month: int, day: int) -> str:
     return next_date.isoformat()
 
 
+def _event_time_fields(date_str: str, hour_et: int, minute_et: int = 0) -> Dict[str, Any]:
+    """Return ET and local Zurich time labels for a known US macro release time."""
+    try:
+        from datetime import date as _date, datetime as _dt, time as _dt_time
+        from zoneinfo import ZoneInfo
+        d = _date.fromisoformat(date_str)
+        dt_et = _dt.combine(d, _dt_time(hour_et, minute_et), tzinfo=ZoneInfo("America/New_York"))
+        dt_local = dt_et.astimezone(ZoneInfo("Europe/Zurich"))
+        return {
+            "time_et": dt_et.strftime("%I:%M %p ET").lstrip("0"),
+            "time_local": dt_local.strftime("%H:%M Zürich"),
+            "datetime_et": dt_et.isoformat(),
+            "datetime_local": dt_local.isoformat(),
+        }
+    except Exception:
+        return {"time_et": None, "time_local": None, "datetime_et": None, "datetime_local": None}
+
+
+def _add_event(events: List[Dict[str, Any]], *, date_str: str, event: str, importance: str,
+               description: str, impact: str, source: str, source_url: str = "",
+               estimated: bool = False, hour_et: Optional[int] = None,
+               minute_et: int = 0, category: str = "macro") -> None:
+    item = {
+        "date": date_str,
+        "event": event,
+        "importance": importance,
+        "description": description,
+        "impact": impact,
+        "source": source,
+        "source_url": source_url,
+        "estimated": estimated,
+        "category": category,
+    }
+    if hour_et is not None:
+        item.update(_event_time_fields(date_str, hour_et, minute_et))
+    events.append(item)
+
+
 @app.get("/api/kalender")
 def get_economic_calendar():
-    """Get upcoming economic events and important dates.
-
-    NOTE: This is a placeholder implementation with hardcoded events and estimated dates.
-    For production use, integrate with a real economic calendar API (e.g., investing.com, tradingeconomics.com).
-    """
+    """Get upcoming economic events and important dates."""
     try:
         from datetime import date, timedelta
         events = []
 
-        # Major recurring events (simplified - hardcoded with dynamic dates)
-        # In production, would fetch from economic calendar API
-
-        fomc_day = 14  # Approximate
-        fomc_months = [1, 3, 5, 6, 7, 9, 11, 12]  # 8 FOMC meetings per year
-        for month in fomc_months:
-            try:
-                next_date = _calculate_next_occurrence(month, fomc_day)
-                events.append({
-                    "date": next_date,
-                    "event": "FOMC Meeting",
-                    "importance": "high",
-                    "description": "Federal Reserve Interest Rate Decision",
-                    "impact": "Sehr Hoch"
-                })
-            except Exception as e:
-                print(f"[Warning] {e}")
+        # Official FOMC decision dates from the Federal Reserve calendar.
+        # Decision/statement: 2:00 p.m. ET. Press conference: 2:30 p.m. ET.
+        fomc_source = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+        fomc_calendar_source = "https://www.federalreserve.gov/newsevents/2026-04.htm"
+        fomc_decisions = [
+            ("2026-01-28", False), ("2026-03-18", True), ("2026-04-29", False),
+            ("2026-06-17", True), ("2026-07-29", False), ("2026-09-16", True),
+            ("2026-10-28", False), ("2026-12-09", True),
+            ("2027-01-27", False), ("2027-03-17", True), ("2027-04-28", False),
+            ("2027-06-09", True), ("2027-07-28", False), ("2027-09-15", True),
+            ("2027-10-27", False), ("2027-12-08", True),
+        ]
+        for decision_date, has_sep in fomc_decisions:
+            desc = "Federal Reserve Interest Rate Decision"
+            if has_sep:
+                desc += " + Summary of Economic Projections"
+            _add_event(
+                events,
+                date_str=decision_date,
+                event="FED Zinsentscheid USA" + (" (SEP)" if has_sep else ""),
+                importance="high",
+                description=desc,
+                impact="Sehr Hoch",
+                source="Federal Reserve",
+                source_url=fomc_calendar_source if decision_date == "2026-04-29" else fomc_source,
+                estimated=False,
+                hour_et=14,
+                minute_et=0,
+                category="central_bank",
+            )
+            _add_event(
+                events,
+                date_str=decision_date,
+                event="FOMC Pressekonferenz",
+                importance="high",
+                description="Federal Reserve Chair press conference after rate decision",
+                impact="Sehr Hoch",
+                source="Federal Reserve",
+                source_url=fomc_calendar_source if decision_date == "2026-04-29" else fomc_source,
+                estimated=False,
+                hour_et=14,
+                minute_et=30,
+                category="central_bank",
+            )
 
         # CPI (released ~12th of each month)
         for month in range(1, 13):
             try:
                 next_cpi = _calculate_next_occurrence(month, 12)
-                events.append({
-                    "date": next_cpi,
-                    "event": "CPI (Verbraucherpreisindex)",
-                    "importance": "high",
-                    "description": "US Consumer Price Index YoY",
-                    "impact": "Sehr Hoch"
-                })
+                _add_event(events, date_str=next_cpi, event="CPI (Verbraucherpreisindex)",
+                           importance="high", description="US Consumer Price Index YoY (geschätzt)",
+                           impact="Sehr Hoch", source="Estimated schedule", estimated=True,
+                           hour_et=8, minute_et=30)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7688,13 +7746,10 @@ def get_economic_calendar():
         for month in range(1, 13):
             try:
                 next_nfp = _calculate_next_occurrence(month, 5)
-                events.append({
-                    "date": next_nfp,
-                    "event": "NFP (Non-Farm Payroll)",
-                    "importance": "high",
-                    "description": "US Employment Report",
-                    "impact": "Sehr Hoch"
-                })
+                _add_event(events, date_str=next_nfp, event="NFP (Non-Farm Payroll)",
+                           importance="high", description="US Employment Report (geschätzt)",
+                           impact="Sehr Hoch", source="Estimated schedule", estimated=True,
+                           hour_et=8, minute_et=30)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7702,13 +7757,10 @@ def get_economic_calendar():
         for month in [3, 6, 9, 12]:
             try:
                 next_gdp = _calculate_next_occurrence(month, 28)
-                events.append({
-                    "date": next_gdp,
-                    "event": "GDP",
-                    "importance": "high",
-                    "description": "Gross Domestic Product Report",
-                    "impact": "Sehr Hoch"
-                })
+                _add_event(events, date_str=next_gdp, event="GDP",
+                           importance="high", description="Gross Domestic Product Report (geschätzt)",
+                           impact="Sehr Hoch", source="Estimated schedule", estimated=True,
+                           hour_et=8, minute_et=30)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7716,13 +7768,10 @@ def get_economic_calendar():
         for month in earnings_months:
             try:
                 next_earnings = _calculate_next_occurrence(month, 15)
-                events.append({
-                    "date": next_earnings,
-                    "event": "Earnings Season",
-                    "importance": "high",
-                    "description": "Corporate Earnings Reports",
-                    "impact": "Hoch"
-                })
+                _add_event(events, date_str=next_earnings, event="Earnings Season",
+                           importance="high", description="Corporate Earnings Reports (ungefährer Start)",
+                           impact="Hoch", source="Estimated schedule", estimated=True,
+                           category="earnings")
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7730,13 +7779,10 @@ def get_economic_calendar():
         for month in range(1, 13):
             try:
                 next_ppi = _calculate_next_occurrence(month, 15)
-                events.append({
-                    "date": next_ppi,
-                    "event": "PPI (Erzeugerpreisindex)",
-                    "importance": "medium",
-                    "description": "US Producer Price Index MoM",
-                    "impact": "Hoch"
-                })
+                _add_event(events, date_str=next_ppi, event="PPI (Erzeugerpreisindex)",
+                           importance="medium", description="US Producer Price Index MoM (geschätzt)",
+                           impact="Hoch", source="Estimated schedule", estimated=True,
+                           hour_et=8, minute_et=30)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7744,13 +7790,10 @@ def get_economic_calendar():
         for month in range(1, 13):
             try:
                 next_retail = _calculate_next_occurrence(month, 16)
-                events.append({
-                    "date": next_retail,
-                    "event": "Retail Sales (Einzelhandelsumsätze)",
-                    "importance": "medium",
-                    "description": "US Monthly Retail Sales Report",
-                    "impact": "Hoch"
-                })
+                _add_event(events, date_str=next_retail, event="Retail Sales (Einzelhandelsumsätze)",
+                           importance="medium", description="US Monthly Retail Sales Report (geschätzt)",
+                           impact="Hoch", source="Estimated schedule", estimated=True,
+                           hour_et=8, minute_et=30)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7758,13 +7801,10 @@ def get_economic_calendar():
         for month in range(1, 13):
             try:
                 next_ism = _calculate_next_occurrence(month, 1)
-                events.append({
-                    "date": next_ism,
-                    "event": "ISM Manufacturing PMI",
-                    "importance": "medium",
-                    "description": "Institute for Supply Management Manufacturing Index",
-                    "impact": "Hoch"
-                })
+                _add_event(events, date_str=next_ism, event="ISM Manufacturing PMI",
+                           importance="medium", description="Institute for Supply Management Manufacturing Index (geschätzt)",
+                           impact="Hoch", source="Estimated schedule", estimated=True,
+                           hour_et=10, minute_et=0)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -7777,13 +7817,11 @@ def get_economic_calendar():
                 days_until_thursday = 7
             for i in range(4):  # Next 4 Thursdays
                 next_thursday = today_dt + timedelta(days=days_until_thursday + i * 7)
-                events.append({
-                    "date": next_thursday.isoformat(),
-                    "event": "Erstanträge Arbeitslosenhilfe",
-                    "importance": "medium",
-                    "description": "Initial Jobless Claims (wöchentlich)",
-                    "impact": "Mittel"
-                })
+                _add_event(events, date_str=next_thursday.isoformat(),
+                           event="Erstanträge Arbeitslosenhilfe",
+                           importance="medium", description="Initial Jobless Claims (wöchentlich, geschätzt)",
+                           impact="Mittel", source="Estimated schedule", estimated=True,
+                           hour_et=8, minute_et=30)
         except Exception as e:
             print(f"[Warning] {e}")
 
@@ -7797,10 +7835,10 @@ def get_economic_calendar():
 
         return {
             "status": "success",
-            "source": "estimated",
+            "source": "official_fomc_plus_estimated_macro",
             "events": events,
             "timestamp": datetime.now().isoformat(),
-            "note": "Simplified calendar - dates are approximate for recurring events"
+            "note": "FOMC/FED dates are official Federal Reserve dates. Other macro dates are estimated placeholders until a live calendar API is integrated."
         }
     except Exception as e:
         return {
