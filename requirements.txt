@@ -7,3 +7,4 @@ pandas
 PyJWT
 stripe
 ib_insync
+pytest

@@ -6,21 +6,44 @@ from modules.new_listing_scanner import generate_short_signal
 ROOT = Path(__file__).parent
 
 
-def test_calendar_uses_official_macro_sources_for_may_july_2026():
+def test_calendar_uses_official_macro_sources_for_full_2026_core_calendar():
     api_source = (ROOT / "api.py").read_text(encoding="utf-8")
 
     assert '@app.get("/api/system-health")' in api_source
+    assert '@app.get("/api/risk-policy")' in api_source
     assert "official_macro_calendar_with_marked_estimates" in api_source
     assert "2026-04-29" in api_source
     assert "2026-05-08" in api_source
     assert "2026-05-12" in api_source
     assert "2026-05-13" in api_source
     assert "2026-05-14" in api_source
+    assert "2026-09-04" in api_source
+    assert "2026-09-11" in api_source
+    assert "2026-09-16" in api_source
+    assert "2026-12-04" in api_source
+    assert "2026-12-10" in api_source
+    assert "2026-12-15" in api_source
+    assert "2026-12-16" in api_source
+    assert "2026-12-23" in api_source
     assert "https://www.bls.gov/schedule/news_release/empsit.htm" in api_source
     assert "https://www.bls.gov/schedule/news_release/cpi.htm" in api_source
     assert "https://www.bls.gov/schedule/news_release/ppi.htm" in api_source
     assert "https://www.bea.gov/news/schedule" in api_source
     assert "https://www.census.gov/retail/release_schedule.html" in api_source
+    assert "for month in []:" in api_source
+
+
+def test_scanner_quality_and_safe_deploy_are_present():
+    api_source = (ROOT / "api.py").read_text(encoding="utf-8")
+    deploy_script = (ROOT / "deploy" / "safe_deploy.sh").read_text(encoding="utf-8")
+
+    assert "def _decorate_scan_results" in api_source
+    assert '"why_in"' in api_source
+    assert '"exclusion_policy"' in api_source
+    assert "RISK_POLICY" in api_source
+    assert "python3 -m py_compile" in deploy_script
+    assert "/api/system-health" in deploy_script
+    assert "systemctl restart" in deploy_script
 
 
 def test_gitignore_keeps_generated_runtime_files_out_of_commits():

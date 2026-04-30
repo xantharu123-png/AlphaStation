@@ -763,6 +763,10 @@ class ScanResultsResponse(BaseModel):
     data: List[Dict[str, Any]]
     cached_at: Optional[str] = None
     cache_age_seconds: Optional[int] = None
+    data_source: Optional[str] = None
+    data_quality: Optional[Dict[str, Any]] = None
+    warnings: Optional[List[str]] = None
+    exclusion_policy: Optional[List[str]] = None
 
 
 # ── Utility Functions ──
@@ -808,6 +812,142 @@ def _normalize_keys(results: list, key_map: dict) -> list:
             new_item[new_key] = v
         normalized.append(new_item)
     return normalized
+
+
+SCAN_DATA_SOURCES = {
+    "strategy_scan": "Polygon snapshots + strategy engine",
+    "bi_long": "Polygon snapshots + BI scanner",
+    "bi_short": "Polygon snapshots + BI scanner",
+    "bear": "Polygon gainers/losers + bearish scanner",
+    "biotech": "Polygon + biotech catalyst scanner",
+    "early_movers": "CoinGecko markets + exchange perp feeds",
+    "crash_monitor": "Polygon indices/VIX + market breadth",
+    "btc_divergenz": "Polygon BTC/crypto-equity daily bars",
+    "money_flow": "Polygon sector ETF bars",
+    "new_listing": "Exchange PERP listings + orderbook/safety checks",
+    "volume_spikes": "Polygon gainers/losers snapshots",
+    "orb": "Polygon intraday bars + official market hours",
+    "turtle": "Polygon daily bars + Turtle breakout logic",
+}
+
+SCAN_EXCLUSION_POLICIES = {
+    "common": [
+        "No trade when price/volume data is missing or stale.",
+        "No trade when R:R is below strategy minimum or target is already missed.",
+        "No trade when liquidity/spread/volume quality is not sufficient.",
+    ],
+    "orb": [
+        "Exclude non-common-stock products, ETFs/ETPs and incomplete opening ranges.",
+        "Downgrade or reject chased breakouts far from OR entry.",
+        "Require current breakout state and recent volume confirmation.",
+    ],
+    "early_movers": [
+        "Flag partial CoinGecko scans and rate-limit fallbacks.",
+        "Separate early accumulation, breakout and overheated/chased phase.",
+    ],
+    "new_listing": [
+        "Reject missed TP zones and unsafe liquidity/orderbook conditions.",
+        "Keep waiting_for_history listings eligible for later re-check.",
+    ],
+}
+
+RISK_POLICY = {
+    "max_loss_per_trade_pct": 1.0,
+    "max_loss_per_day_pct": 3.0,
+    "preferred_min_rr": 1.5,
+    "hard_min_rr": 1.0,
+    "min_rvol": 0.7,
+    "max_spread_pct_stocks": 2.0,
+    "max_spread_pct_crypto": 2.5,
+    "block_chased_after_tp1": True,
+    "warn_near_high_impact_event_min": 45,
+    "policy_note": "Defensive guardrails; not a profit guarantee.",
+}
+
+
+def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    interval = _scan_status.get(scanner_name, {}).get("interval_min")
+    stale_after = (interval * 60 * 2) if interval else None
+    stale = bool(cache_age_seconds is not None and stale_after and cache_age_seconds > stale_after)
+    warnings = []
+    if cache_age_seconds is None:
+        warnings.append("Cache-Zeit unbekannt")
+    elif stale:
+        warnings.append(f"Cache alt: {cache_age_seconds}s")
+    if not results:
+        warnings.append("Keine Treffer im Cache")
+    return {
+        "scanner": scanner_name,
+        "data_source": SCAN_DATA_SOURCES.get(scanner_name, "Scanner cache"),
+        "cache_age_seconds": cache_age_seconds,
+        "cache_status": "unknown" if cache_age_seconds is None else ("stale" if stale else "fresh"),
+        "result_count": len(results),
+        "warnings": warnings,
+        "exclusion_policy": SCAN_EXCLUSION_POLICIES["common"] + SCAN_EXCLUSION_POLICIES.get(scanner_name, []),
+    }
+
+
+def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
+    """Add consistent signal explanations and risk warnings to scanner rows."""
+    decorated = []
+    for raw in results or []:
+        if not isinstance(raw, dict):
+            decorated.append(raw)
+            continue
+        item = dict(raw)
+        why = []
+        warnings = []
+
+        score = item.get("score", item.get("Score", item.get("BI_Score", item.get("exhaustion_score", item.get("fear_score")))))
+        grade = item.get("grade", item.get("Grade", item.get("BI_Grade")))
+        direction = item.get("direction", item.get("Direction", item.get("signal", item.get("Signal"))))
+        rvol = item.get("rvol", item.get("RVOL"))
+        rr = item.get("risk_reward", item.get("RiskReward", item.get("rr_effective", item.get("rr1"))))
+        source = item.get("source") or item.get("data_source") or SCAN_DATA_SOURCES.get(scanner_name, "Scanner cache")
+
+        if grade:
+            why.append(f"Grade {grade}")
+        if score is not None:
+            why.append(f"Score {score}")
+        if direction:
+            why.append(f"Signal/Richtung: {direction}")
+        if rvol is not None:
+            why.append(f"RVOL {rvol}")
+            try:
+                if float(rvol) < 0.7:
+                    warnings.append("RVOL niedrig - Signal vorsichtig behandeln")
+            except Exception:
+                pass
+        if rr is not None:
+            why.append(f"R:R {rr}")
+            try:
+                if float(rr) < 1.5:
+                    warnings.append("R:R unter defensivem Mindestbereich")
+            except Exception:
+                pass
+        if item.get("tp1_missed"):
+            warnings.append("TP1 bereits verpasst")
+        if item.get("tp2_missed"):
+            warnings.append("TP-Zonen bereits verpasst - No-Trade-Kandidat")
+        if item.get("partial_data") or item.get("data_warning"):
+            warnings.append(str(item.get("data_warning") or "Unvollstaendige Daten"))
+        if cache_age_seconds is None:
+            warnings.append("Cache-Alter unbekannt")
+
+        item["_quality"] = {
+            "why_in": why or ["Scanner-Regeln erfuellt, aber keine Detailgruende geliefert"],
+            "warnings": warnings,
+            "data_source": source,
+            "data_age_seconds": cache_age_seconds,
+            "exclusion_reasons": [],
+            "risk_policy": {
+                "min_rr_preferred": RISK_POLICY["preferred_min_rr"],
+                "min_rvol_preferred": RISK_POLICY["min_rvol"],
+                "chased_targets_blocked": True,
+            },
+        }
+        decorated.append(item)
+    return decorated
 
 
 def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
@@ -3383,6 +3523,7 @@ def _build_system_health() -> Dict[str, Any]:
             "estimated_event_families": ["Earnings Season", "ISM Manufacturing PMI", "Initial Jobless Claims"],
             "quality": "official_core_macro_marked_estimates_remaining",
         },
+        "risk_policy": RISK_POLICY,
         "warnings": warnings,
         "critical": critical,
     }
@@ -3392,6 +3533,12 @@ def _build_system_health() -> Dict[str, Any]:
 def get_system_health():
     """Detailed system health for UI/admin checks."""
     return _build_system_health()
+
+
+@app.get("/api/risk-policy")
+def get_risk_policy():
+    """Central risk guardrails used by scanner quality explanations."""
+    return {"status": "success", "risk_policy": RISK_POLICY, "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/api/debug-keys")
@@ -5062,12 +5209,36 @@ def get_scan_results(
         except Exception as e:
             print(f"[Warning] {e}")
 
+    scanner_name = "strategy_scan"
+    if direction:
+        scanner_name = f"bi_{direction}"
+    elif strategy:
+        sl = str(strategy).lower()
+        if "short" in sl and "bi" in sl:
+            scanner_name = "bi_short"
+        elif "long" in sl and "bi" in sl:
+            scanner_name = "bi_long"
+        elif "biotech" in sl:
+            scanner_name = "biotech"
+        elif "bear" in sl:
+            scanner_name = "bear"
+        elif "orb" in sl:
+            scanner_name = "orb"
+        elif "crypto" in market_type:
+            scanner_name = "early_movers"
+    results = _decorate_scan_results(results, scanner_name, cache_age)
+    quality = _scan_quality_payload(scanner_name, cache_age, results)
+
     return ScanResultsResponse(
         status="success",
         count=len(results),
         data=results,
         cached_at=cached_at,
         cache_age_seconds=cache_age,
+        data_source=quality["data_source"],
+        data_quality=quality,
+        warnings=quality["warnings"],
+        exclusion_policy=quality["exclusion_policy"],
     )
 
 
@@ -5121,12 +5292,19 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         except Exception as e:
             print(f"[Warning] {e}")
 
+    scanner_name = f"bi_{direction}"
+    results = _decorate_scan_results(results, scanner_name, cache_age)
+    quality = _scan_quality_payload(scanner_name, cache_age, results)
     return ScanResultsResponse(
         status="success",
         count=len(results),
         data=results,
         cached_at=cached_at,
         cache_age_seconds=cache_age,
+        data_source=quality["data_source"],
+        data_quality=quality,
+        warnings=quality["warnings"],
+        exclusion_policy=quality["exclusion_policy"],
     )
 
 
@@ -5157,12 +5335,18 @@ def get_bear_results():
         except Exception as e:
             print(f"[Warning] {e}")
 
+    results = _decorate_scan_results(results, "bear", cache_age)
+    quality = _scan_quality_payload("bear", cache_age, results)
     return ScanResultsResponse(
         status="success",
         count=len(results),
         data=results,
         cached_at=cached_at,
         cache_age_seconds=cache_age,
+        data_source=quality["data_source"],
+        data_quality=quality,
+        warnings=quality["warnings"],
+        exclusion_policy=quality["exclusion_policy"],
     )
 
 
@@ -5194,12 +5378,18 @@ def get_biotech_results():
         except Exception as e:
             print(f"[Warning] {e}")
 
+    results = _decorate_scan_results(results, "biotech", cache_age)
+    quality = _scan_quality_payload("biotech", cache_age, results)
     return ScanResultsResponse(
         status="success",
         count=len(results),
         data=results,
         cached_at=cached_at,
         cache_age_seconds=cache_age,
+        data_source=quality["data_source"],
+        data_quality=quality,
+        warnings=quality["warnings"],
+        exclusion_policy=quality["exclusion_policy"],
     )
 
 
@@ -6170,7 +6360,9 @@ def get_early_movers():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    decorated = _decorate_scan_results(results, "early_movers", cache_age)
+    quality = _scan_quality_payload("early_movers", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── Crash Monitor (VIX + Market Breadth) + Fear Score ──
@@ -6195,7 +6387,9 @@ def get_crash_monitor():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    decorated = _decorate_scan_results(results, "crash_monitor", cache_age)
+    quality = _scan_quality_payload("crash_monitor", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── BTC Divergenz ──
@@ -6376,7 +6570,9 @@ def get_btc_divergenz():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    decorated = _decorate_scan_results(results, "btc_divergenz", cache_age)
+    quality = _scan_quality_payload("btc_divergenz", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── Money Flow (Sector Performance) ──
@@ -6512,7 +6708,9 @@ def get_money_flow():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] Error calculating cache age: {e}")
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    decorated = _decorate_scan_results(results, "money_flow", cache_age)
+    quality = _scan_quality_payload("money_flow", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── New Listing Scanner ──
@@ -6653,7 +6851,9 @@ def get_new_listing_results():
         "exchanges_monitored": len(set(r.get("exchange", "") for r in results)) if results else 0,
         "active_signals": len([r for r in results if r.get("signal", "").startswith("SHORT")]) if results else 0,
     }
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age, "stats": stats}
+    decorated = _decorate_scan_results(results, "new_listing", cache_age)
+    quality = _scan_quality_payload("new_listing", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "stats": stats, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── Volume Spikes Scanner ──
@@ -6754,7 +6954,9 @@ def get_volume_spikes():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    decorated = _decorate_scan_results(results, "volume_spikes", cache_age)
+    quality = _scan_quality_payload("volume_spikes", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── ORB Scanner (Opening Range Breakout) ──
@@ -7353,7 +7555,9 @@ def get_orb_results():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception:
             pass
-    return {"status": "success", "data": results, "cached_at": cached_at, "cache_age_seconds": cache_age}
+    decorated = _decorate_scan_results(results, "orb", cache_age)
+    quality = _scan_quality_payload("orb", cache_age, decorated)
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── Fear & Greed Score (CNN-kompatibel, 0-100) ──
@@ -7846,18 +8050,30 @@ def get_economic_calendar():
             ("2026-06-10", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for May 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
             ("2026-07-14", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for June 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
             ("2026-08-12", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for July 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-09-11", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for August 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-10-14", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for September 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-11-10", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for October 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-12-10", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for November 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
 
             # BLS Employment Situation / NFP
             ("2026-05-08", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for April 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
             ("2026-06-05", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for May 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
             ("2026-07-02", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for June 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
             ("2026-08-07", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for July 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-09-04", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for August 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-10-02", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for September 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-11-06", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for October 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-12-04", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for November 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
 
             # BLS PPI
             ("2026-05-13", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for April 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
             ("2026-06-11", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for May 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
             ("2026-07-15", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for June 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
             ("2026-08-13", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for July 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-09-10", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for August 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-10-15", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for September 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-11-13", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for October 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-12-15", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for November 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
 
             # BEA GDP / PCE
             ("2026-04-30", "GDP (Advance Estimate)", "high", "US GDP Advance Estimate, Q1 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
@@ -7868,12 +8084,26 @@ def get_economic_calendar():
             ("2026-06-25", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for May 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
             ("2026-07-30", "GDP (Advance Estimate)", "high", "US GDP Advance Estimate, Q2 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
             ("2026-07-30", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for June 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-08-26", "GDP (Second Estimate)", "high", "US GDP Second Estimate and Corporate Profits, Q2 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-08-26", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for July 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-09-30", "GDP (Third Estimate)", "high", "US GDP Third Estimate, Q2 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-09-30", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for August 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-10-29", "GDP (Advance Estimate)", "high", "US GDP Advance Estimate, Q3 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-10-29", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for September 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-11-25", "GDP (Second Estimate)", "high", "US GDP Second Estimate and Corporate Profits, Q3 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-11-25", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for October 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-12-23", "GDP (Third Estimate)", "high", "US GDP Third Estimate, Q3 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-12-23", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for November 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
 
             # Census Retail Sales / Advance Economic Indicators
             ("2026-05-14", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for April 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
             ("2026-06-17", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for May 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
             ("2026-07-16", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for June 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
             ("2026-08-14", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for July 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-09-16", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for August 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-10-15", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for September 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-11-17", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for October 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-12-16", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for November 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
             ("2026-05-29", "Advance Economic Indicators", "medium", "US Advance Economic Indicators Report for April 2026", "Hoch", "Census", "https://www.census.gov/econ/indicators/release_schedule.html", 8, 30, "macro"),
             ("2026-06-26", "Advance Economic Indicators", "medium", "US Advance Economic Indicators Report for May 2026", "Hoch", "Census", "https://www.census.gov/econ/indicators/release_schedule.html", 8, 30, "macro"),
             ("2026-07-28", "Advance Economic Indicators", "medium", "US Advance Economic Indicators Report for June 2026", "Hoch", "Census", "https://www.census.gov/econ/indicators/release_schedule.html", 8, 30, "macro"),
@@ -7894,8 +8124,8 @@ def get_economic_calendar():
                 category=category,
             )
 
-        # CPI (released ~12th of each month)
-        for month in range(1, 13):
+        # Core macro releases above come from official source schedules.
+        for month in []:
             try:
                 next_cpi = _calculate_next_occurrence(month, 12)
                 _add_event(events, date_str=next_cpi, event="CPI (Verbraucherpreisindex)",
@@ -7905,8 +8135,8 @@ def get_economic_calendar():
             except Exception as e:
                 print(f"[Warning] {e}")
 
-        # NFP (1st Friday of each month, approx. 3rd-7th)
-        for month in range(1, 13):
+        # NFP official dates are in official_macro_events.
+        for month in []:
             try:
                 next_nfp = _calculate_next_occurrence(month, 5)
                 _add_event(events, date_str=next_nfp, event="NFP (Non-Farm Payroll)",
@@ -7916,8 +8146,8 @@ def get_economic_calendar():
             except Exception as e:
                 print(f"[Warning] {e}")
 
-        # GDP (end of each quarter)
-        for month in [3, 6, 9, 12]:
+        # GDP/PCE official dates are in official_macro_events.
+        for month in []:
             try:
                 next_gdp = _calculate_next_occurrence(month, 28)
                 _add_event(events, date_str=next_gdp, event="GDP",
@@ -7938,8 +8168,8 @@ def get_economic_calendar():
             except Exception as e:
                 print(f"[Warning] {e}")
 
-        # PPI (Producer Price Index - ~15th of each month)
-        for month in range(1, 13):
+        # PPI official dates are in official_macro_events.
+        for month in []:
             try:
                 next_ppi = _calculate_next_occurrence(month, 15)
                 _add_event(events, date_str=next_ppi, event="PPI (Erzeugerpreisindex)",
@@ -7949,8 +8179,8 @@ def get_economic_calendar():
             except Exception as e:
                 print(f"[Warning] {e}")
 
-        # Retail Sales (~15th of each month)
-        for month in range(1, 13):
+        # Retail Sales official dates are in official_macro_events.
+        for month in []:
             try:
                 next_retail = _calculate_next_occurrence(month, 16)
                 _add_event(events, date_str=next_retail, event="Retail Sales (Einzelhandelsumsätze)",
