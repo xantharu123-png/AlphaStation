@@ -27,6 +27,29 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
 
 
+def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "bear.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "inverse_etfs": [
+                {"ticker": "LABD", "name": "3x Short Biotech", "signal": "STARK", "rvol": 0.6}
+            ],
+            "breakdown_stocks": [
+                {"ticker": "REAL", "grade": "A", "score": 70, "rvol": 1.1, "price": 12}
+            ],
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("bear", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 1
+    assert audit["alertable_preview"][0]["ticker"] == "REAL"
+    assert all(item["ticker"] != "LABD" for item in audit["alertable_preview"])
+
+
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0

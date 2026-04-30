@@ -846,11 +846,6 @@ def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> L
         for container in rows:
             if isinstance(container, dict):
                 flat.extend([r for r in container.get("breakdown_stocks", []) or [] if isinstance(r, dict)])
-                for etf in container.get("inverse_etfs", []) or []:
-                    if isinstance(etf, dict):
-                        item = dict(etf)
-                        item["grade"] = "A" if item.get("signal") == "STARK" else ""
-                        flat.append(item)
         return flat
     return [r for r in rows if isinstance(r, dict)]
 
@@ -3420,23 +3415,9 @@ def _bear_scan_wrapper() -> None:
             save_cache_file(BEAR_CACHE, [result])
             print(f"[Bear] Saved {len(result.get('inverse_etfs',[]))} ETFs, {len(result.get('breakdown_stocks',[]))} breakdowns")
             # V2.2: Bear Alert — vollständige Infos pro Signal
-            _etf_rows = []
             _bd_rows = []
-            for etf in result.get("inverse_etfs", []):
-                if isinstance(etf, dict) and etf.get("signal") == "STARK":
-                    _name = etf.get("name", etf.get("underlying", ""))[:30]
-                    _chg5 = etf.get("change_5d", 0)
-                    _chg1 = etf.get("change_1d", 0)
-                    _rvol = etf.get("rvol", 0)
-                    _etf_rows.append(
-                        f"<tr><td style='padding:4px 8px;font-weight:bold'>{etf.get('ticker','?')}</td>"
-                        f"<td style='padding:4px 8px'>{_name}</td>"
-                        f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{_chg1:+.1f}%</td>"
-                        f"<td style='padding:4px 8px;text-align:right;font-weight:bold;color:#dc2626'>{_chg5:+.1f}%</td>"
-                        f"<td style='padding:4px 8px;text-align:right'>{_rvol:.1f}x</td></tr>"
-                    )
             for bd in result.get("breakdown_stocks", []):
-                if isinstance(bd, dict) and bd.get("score", 0) >= 50:
+                if isinstance(bd, dict) and bd.get("grade") in ("S", "A") and bd.get("score", 0) >= 55:
                     _gr = bd.get("grade", "?")
                     _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
                     _bd_rows.append(
@@ -3498,31 +3479,16 @@ def _bear_scan_wrapper() -> None:
                     print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
 
             # V2.6b: Bear Summary Email — 1x pro Tag, nur wenn Grade S/A Signale dabei
-            _bd_strong = [r for r in _bd_rows if True]  # already filtered above
-            _total_signals = len(_etf_rows) + len(_bd_rows)
-            _has_strong_signal = len(_etf_rows) > 0 or _total_signals >= 3
-            if _total_signals > 0 and _has_strong_signal:
+            _total_signals = len(_bd_rows)
+            if _total_signals > 0:
                 _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
                     _EMAIL_COOLDOWN[_bear_ck] = time.time()
-                    _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Signale</p>"
-                    _etf_html = ""
-                    if _etf_rows:
-                        _etf_html = (
-                            "<h3 style='color:#dc2626;margin-top:16px'>Inverse ETFs (Signal STARK)</h3>"
-                            "<table style='border-collapse:collapse;width:100%;font-size:13px'>"
-                            "<tr style='background:#fef2f2;border-bottom:1px solid #ddd'>"
-                            "<th style='padding:6px 8px;text-align:left'>Ticker</th>"
-                            "<th style='padding:6px 8px;text-align:left'>Name</th>"
-                            "<th style='padding:6px 8px;text-align:right'>1T%</th>"
-                            "<th style='padding:6px 8px;text-align:right'>5T%</th>"
-                            "<th style='padding:6px 8px;text-align:right'>RVOL</th></tr>"
-                            + "".join(_etf_rows) + "</table>"
-                        )
+                    _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Aktien-Shorts</p>"
                     _bd_html = ""
                     if _bd_rows:
                         _bd_html = (
-                            "<h3 style='color:#dc2626;margin-top:16px'>Short-Kandidaten (Score 50+)</h3>"
+                            "<h3 style='color:#dc2626;margin-top:16px'>Short-Kandidaten (Grade S/A)</h3>"
                             "<table style='border-collapse:collapse;width:100%;font-size:13px'>"
                             "<tr style='background:#fef2f2;border-bottom:1px solid #ddd'>"
                             "<th style='padding:6px 8px;text-align:left'>Grd</th>"
@@ -3536,9 +3502,9 @@ def _bear_scan_wrapper() -> None:
                         )
                     _bear_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
                     <h2 style="color:#dc2626">Bear Scanner Alert</h2>
-                    {_ts}{_etf_html}{_bd_html}
+                    {_ts}{_bd_html}
                     </body></html>'''
-                    _send_email_alert(f"Bear Alert: {_total_signals} Signale", _bear_body)
+                    _send_email_alert(f"Bear Alert: {_total_signals} Aktien-Shorts", _bear_body)
         else:
             print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
