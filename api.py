@@ -2802,28 +2802,73 @@ _scan_status = {
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
 }
+SCAN_CACHE_MAP = {
+    "bi_long": "/tmp/bi_cache_long.json",
+    "bi_short": "/tmp/bi_cache_short.json",
+    "bear": "/tmp/bear_scanner_cache.json",
+    "biotech": "/tmp/alpha_biotech_cache.json",
+    "early_movers": "/tmp/early_movers_cache.json",
+    "crash_monitor": "/tmp/crash_monitor_cache.json",
+    "btc_divergenz": "/tmp/btc_divergenz_cache.json",
+    "money_flow": "/tmp/money_flow_cache.json",
+    "new_listing": "/tmp/new_listing_scanner.json",
+    "volume_spikes": "/tmp/volume_spikes_cache.json",
+    "orb": "/tmp/orb_scan_results.json",
+    "turtle": "/tmp/turtle_scan_cache.json",
+}
 _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
+
+
+def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose whether a scanner cache is fresh enough for the UI."""
+    cache_path = SCAN_CACHE_MAP.get(scan_name)
+    if not cache_path:
+        return {
+            "cache_file": None,
+            "cache_exists": False,
+            "cache_age_seconds": None,
+            "cache_stale": None,
+            "cache_health": "not_tracked",
+        }
+
+    cache_file = os.path.basename(cache_path)
+    if not os.path.exists(cache_path):
+        return {
+            "cache_file": cache_file,
+            "cache_exists": False,
+            "cache_age_seconds": None,
+            "cache_stale": True,
+            "cache_health": "missing",
+        }
+
+    try:
+        age_seconds = int(max(0, time.time() - os.path.getmtime(cache_path)))
+        interval_seconds = max(60, int(scan_state.get("interval_min", 0) or 0) * 60)
+        stale_after = max(interval_seconds * 2, interval_seconds + 15 * 60)
+        stale = age_seconds > stale_after
+        return {
+            "cache_file": cache_file,
+            "cache_exists": True,
+            "cache_age_seconds": age_seconds,
+            "cache_stale": stale,
+            "cache_health": "stale" if stale else "ok",
+        }
+    except Exception as exc:
+        return {
+            "cache_file": cache_file,
+            "cache_exists": True,
+            "cache_age_seconds": None,
+            "cache_stale": True,
+            "cache_health": "error",
+            "cache_error": str(exc),
+        }
 
 # Initialize last_run from cache files on startup (survives restarts)
 def _init_scan_status_from_cache():
     """Read cache file timestamps to populate last_run on startup."""
     import os
-    _cache_map = {
-        "bi_long": "/tmp/bi_cache_long.json",
-        "bi_short": "/tmp/bi_cache_short.json",
-        "bear": "/tmp/bear_scanner_cache.json",
-        "biotech": "/tmp/alpha_biotech_cache.json",
-        "early_movers": "/tmp/early_movers_cache.json",
-        "crash_monitor": "/tmp/crash_monitor_cache.json",
-        "btc_divergenz": "/tmp/btc_divergenz_cache.json",
-        "money_flow": "/tmp/money_flow_cache.json",
-        "new_listing": "/tmp/new_listing_scanner.json",
-        "volume_spikes": "/tmp/volume_spikes_cache.json",
-        "orb": "/tmp/orb_scan_results.json",
-        "turtle": "/tmp/turtle_scan_cache.json",
-    }
-    for scan_name, cache_path in _cache_map.items():
+    for scan_name, cache_path in SCAN_CACHE_MAP.items():
         if scan_name in _scan_status and os.path.exists(cache_path):
             try:
                 with open(cache_path, "r") as f:
@@ -2926,26 +2971,12 @@ def _scheduler_loop():
     _heavy_names = {name for name, _ in heavy_scans}
 
     # ── Smart Startup: Nur Scans starten die keinen frischen Cache haben ──
-    _cache_map = {
-        "bi_long": "/tmp/bi_cache_long.json",
-        "bi_short": "/tmp/bi_cache_short.json",
-        "bear": "/tmp/bear_scanner_cache.json",
-        "biotech": "/tmp/alpha_biotech_cache.json",
-        "early_movers": "/tmp/early_movers_cache.json",
-        "crash_monitor": "/tmp/crash_monitor_cache.json",
-        "btc_divergenz": "/tmp/btc_divergenz_cache.json",
-        "money_flow": "/tmp/money_flow_cache.json",
-        "new_listing": "/tmp/new_listing_scanner.json",
-        "volume_spikes": "/tmp/volume_spikes_cache.json",
-        "orb": "/tmp/orb_scan_results.json",
-        "turtle": "/tmp/turtle_scan_cache.json",
-    }
     last_run_times = {}
     for name, func in scan_tasks:
         if not _scheduler_running:
             break
         interval_sec = _scan_status[name]["interval_min"] * 60
-        cache_file = _cache_map.get(name)
+        cache_file = SCAN_CACHE_MAP.get(name)
         cache_age = None
         if cache_file and os.path.exists(cache_file):
             cache_age = time.time() - os.path.getmtime(cache_file)
@@ -3344,12 +3375,18 @@ def get_scan_status():
     """Get status of all background scans (running, last_run, next_run) + progress."""
     with _scan_lock:
         scans_copy = {}
+        health_counts = {"ok": 0, "stale": 0, "missing": 0, "error": 0, "not_tracked": 0}
         for name, status in _scan_status.items():
+            cache_health = _scan_cache_health(name, status)
+            health_counts[cache_health.get("cache_health", "not_tracked")] = (
+                health_counts.get(cache_health.get("cache_health", "not_tracked"), 0) + 1
+            )
             scans_copy[name] = {
                 "running": status["running"],
                 "last_run": status["last_run"],
                 "next_run": status["next_run"],
                 "interval_min": status["interval_min"],
+                **cache_health,
             }
             # Add runtime info for running scans
             if status["running"] and status.get("_started_at"):
@@ -3375,6 +3412,7 @@ def get_scan_status():
     return {
         "scheduler_running": _scheduler_running,
         "scans": scans_copy,
+        "health_counts": health_counts,
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -7651,7 +7689,7 @@ def _event_time_fields(date_str: str, hour_et: int, minute_et: int = 0) -> Dict[
         dt_local = dt_et.astimezone(ZoneInfo("Europe/Zurich"))
         return {
             "time_et": dt_et.strftime("%I:%M %p ET").lstrip("0"),
-            "time_local": dt_local.strftime("%H:%M Zürich"),
+            "time_local": dt_local.strftime("%H:%M Zurich"),
             "datetime_et": dt_et.isoformat(),
             "datetime_local": dt_local.isoformat(),
         }
@@ -7729,6 +7767,60 @@ def get_economic_calendar():
                 hour_et=14,
                 minute_et=30,
                 category="central_bank",
+            )
+
+        official_macro_events = [
+            # BLS CPI
+            ("2026-05-12", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for April 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-06-10", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for May 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-07-14", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for June 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+            ("2026-08-12", "CPI (Verbraucherpreisindex)", "high", "US Consumer Price Index for July 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/cpi.htm", 8, 30, "inflation"),
+
+            # BLS Employment Situation / NFP
+            ("2026-05-08", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for April 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-06-05", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for May 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-07-02", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for June 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+            ("2026-08-07", "NFP (Non-Farm Payroll)", "high", "US Employment Situation for July 2026", "Sehr Hoch", "BLS", "https://www.bls.gov/schedule/news_release/empsit.htm", 8, 30, "labor"),
+
+            # BLS PPI
+            ("2026-05-13", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for April 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-06-11", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for May 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-07-15", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for June 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+            ("2026-08-13", "PPI (Erzeugerpreisindex)", "medium", "US Producer Price Index for July 2026", "Hoch", "BLS", "https://www.bls.gov/schedule/news_release/ppi.htm", 8, 30, "inflation"),
+
+            # BEA GDP / PCE
+            ("2026-04-30", "GDP (Advance Estimate)", "high", "US GDP Advance Estimate, Q1 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-04-30", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for March 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-05-28", "GDP (Second Estimate)", "high", "US GDP Second Estimate and Corporate Profits, Q1 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-05-28", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for April 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-06-25", "GDP (Third Estimate)", "high", "US GDP Third Estimate, Q1 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-06-25", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for May 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+            ("2026-07-30", "GDP (Advance Estimate)", "high", "US GDP Advance Estimate, Q2 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "growth"),
+            ("2026-07-30", "PCE / Personal Income and Outlays", "high", "US Personal Income and Outlays for June 2026", "Sehr Hoch", "BEA", "https://www.bea.gov/news/schedule", 8, 30, "inflation"),
+
+            # Census Retail Sales / Advance Economic Indicators
+            ("2026-05-14", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for April 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-06-17", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for May 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-07-16", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for June 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-08-14", "Retail Sales (Einzelhandelsumsaetze)", "medium", "US Advance Monthly Retail Trade Report for July 2026", "Hoch", "Census", "https://www.census.gov/retail/release_schedule.html", 8, 30, "consumer"),
+            ("2026-05-29", "Advance Economic Indicators", "medium", "US Advance Economic Indicators Report for April 2026", "Hoch", "Census", "https://www.census.gov/econ/indicators/release_schedule.html", 8, 30, "macro"),
+            ("2026-06-26", "Advance Economic Indicators", "medium", "US Advance Economic Indicators Report for May 2026", "Hoch", "Census", "https://www.census.gov/econ/indicators/release_schedule.html", 8, 30, "macro"),
+            ("2026-07-28", "Advance Economic Indicators", "medium", "US Advance Economic Indicators Report for June 2026", "Hoch", "Census", "https://www.census.gov/econ/indicators/release_schedule.html", 8, 30, "macro"),
+        ]
+        for date_str, event_name, importance, description, impact, source, source_url, hour, minute, category in official_macro_events:
+            _add_event(
+                events,
+                date_str=date_str,
+                event=event_name,
+                importance=importance,
+                description=description,
+                impact=impact,
+                source=source,
+                source_url=source_url,
+                estimated=False,
+                hour_et=hour,
+                minute_et=minute,
+                category=category,
             )
 
         # CPI (released ~12th of each month)
@@ -7825,20 +7917,34 @@ def get_economic_calendar():
         except Exception as e:
             print(f"[Warning] {e}")
 
-        # Filter: only future events within 90 days
+        # Official source schedules replace the old estimated placeholders for
+        # these market-moving releases.
+        official_event_prefixes = ("CPI", "NFP", "GDP", "PPI", "Retail Sales")
+        events = [
+            e for e in events
+            if not (e.get("estimated") and str(e.get("event", "")).startswith(official_event_prefixes))
+        ]
+
+        # Filter: only future events within 120 days
         today_str = date.today().isoformat()
-        max_date = (date.today() + timedelta(days=90)).isoformat()
+        max_date = (date.today() + timedelta(days=120)).isoformat()
         events = [e for e in events if today_str <= e["date"] <= max_date]
 
         # Sort by date
         events.sort(key=lambda x: x["date"])
 
+        official_count = sum(1 for e in events if not e.get("estimated"))
+        estimated_count = sum(1 for e in events if e.get("estimated"))
+
         return {
             "status": "success",
-            "source": "official_fomc_plus_estimated_macro",
+            "source": "official_macro_calendar_with_marked_estimates",
             "events": events,
+            "official_count": official_count,
+            "estimated_count": estimated_count,
+            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census"],
             "timestamp": datetime.now().isoformat(),
-            "note": "FOMC/FED dates are official Federal Reserve dates. Other macro dates are estimated placeholders until a live calendar API is integrated."
+            "note": "FOMC/FED, CPI, NFP, PPI, GDP/PCE, Retail Sales and Census Advance Economic Indicators use official 2026 source schedules. Earnings, ISM and weekly claims remain marked estimates."
         }
     except Exception as e:
         return {

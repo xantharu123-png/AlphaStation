@@ -1751,8 +1751,18 @@ function getScanTiming(schedulerStatus, scanKey) {
     };
 }
 
-// SchedulerStatus Component
-function SchedulerStatus({ status }) {
+function formatCacheAge(seconds) {
+    if (seconds === null || seconds === undefined) return 'kein Cache';
+    if (seconds < 60) return `${seconds}s alt`;
+    const mins = Math.floor(seconds / 60);
+    if (mins < 60) return `${mins} min alt`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 48) return `${hours}h alt`;
+    return `${Math.floor(hours / 24)} Tage alt`;
+}
+
+// Legacy scheduler status kept as a fallback reference; the enhanced component below is used.
+function SchedulerStatusLegacy({ status }) {
     const [showDetails, setShowDetails] = useState(false);
 
     if (!status) return null;
@@ -1797,6 +1807,62 @@ function SchedulerStatus({ status }) {
     );
 }
 
+function SchedulerStatus({ status }) {
+    const [showDetails, setShowDetails] = useState(false);
+
+    if (!status) return null;
+
+    const scanEntries = status.scans ? Object.entries(status.scans) : [];
+    const activeCount = scanEntries.length;
+    const runningCount = scanEntries.filter(([_, s]) => s.running).length;
+    const staleCount = scanEntries.filter(([_, s]) => ['stale', 'missing', 'error'].includes(s.cache_health)).length;
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
+    const healthLabels = {
+        ok: ['OK', 'text-green-600'],
+        stale: ['Alt', 'text-amber-600'],
+        missing: ['Kein Cache', 'text-red-600'],
+        error: ['Fehler', 'text-red-600'],
+        not_tracked: ['Manuell', 'text-gray-500']
+    };
+
+    return (
+        <div className="flex items-center gap-2">
+            <div className="relative">
+                <button
+                    onClick={() => setShowDetails(!showDetails)}
+                    className={`flex items-center gap-2 text-sm px-3 py-1 rounded ${staleCount > 0 ? 'bg-amber-100 text-amber-800 hover:bg-amber-200' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+                >
+                    <span>{runningCount > 0 ? '...' : '*'}</span>
+                    <span>Auto-Scans: {activeCount}{runningCount > 0 ? ` (${runningCount} aktiv)` : ''}{staleCount > 0 ? `, ${staleCount} pruefen` : ''}</span>
+                </button>
+
+                {showDetails && (
+                    <div className="absolute top-full right-0 mt-2 bg-white border border-gray-200 rounded shadow-lg z-50 p-4" style={{minWidth: '360px'}}>
+                        <div className="text-sm font-semibold mb-3">
+                            Scan-Scheduler {status.scheduler_running ? '(laeuft)' : '(gestoppt)'}
+                        </div>
+                        {scanEntries.map(([key, scan]) => {
+                            const [label, cls] = healthLabels[scan.cache_health] || healthLabels.not_tracked;
+                            return (
+                                <div key={key} className="text-xs border-b border-gray-100 pb-2 mb-2 last:border-0 last:mb-0">
+                                    <div className="flex justify-between gap-3">
+                                        <span className="font-medium">{scanNames[key] || key}</span>
+                                        <span className={scan.running ? 'text-orange-500 font-semibold' : cls}>
+                                            {scan.running ? 'laeuft' : label}
+                                        </span>
+                                    </div>
+                                    <div className="text-gray-500 mt-1">Letzter: {getRelativeTime(scan.last_run)} | Naechster: {getRelativeTime(scan.next_run, true)}</div>
+                                    <div className="text-gray-400 mt-0.5">Cache: {formatCacheAge(scan.cache_age_seconds)} | Intervall: {scan.interval_min} min</div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 // ScanControl Component
 function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null }) {
     // Auto-derive lastScan/nextScan from schedulerStatus if scanKey provided
@@ -1807,6 +1873,7 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     // Check if scheduler is currently running this scan in the background
     const schedulerRunning = scanKey && schedulerStatus?.scans?.[scanKey]?.running;
     const runningSinceSec = schedulerRunning ? (schedulerStatus.scans[scanKey].running_since_sec || 0) : 0;
+    const scanHealth = scanKey ? schedulerStatus?.scans?.[scanKey] : null;
     const anyScanning = isScanning || schedulerRunning;
 
     return (
@@ -1855,6 +1922,11 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                 </div>
                 );
             })()}
+            {scanHealth && ['stale', 'missing', 'error'].includes(scanHealth.cache_health) && !anyScanning && (
+                <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    Cache-Hinweis: {scanHealth.cache_health === 'missing' ? 'Noch kein Cache vorhanden' : `Daten ${formatCacheAge(scanHealth.cache_age_seconds)}`} - manueller Scan empfohlen.
+                </div>
+            )}
         </div>
     );
 }
@@ -4565,7 +4637,7 @@ function KalenderTab() {
                 if (response.ok) {
                     const data = await response.json();
                     setEvents(data.events || []);
-                    setCalendarMeta({ source: data.source, note: data.note, timestamp: data.timestamp });
+                    setCalendarMeta({ source: data.source, note: data.note, timestamp: data.timestamp, official_count: data.official_count, estimated_count: data.estimated_count, official_sources: data.official_sources || [] });
                 }
             } catch (err) {
                 console.error('Error:', err);
@@ -4600,8 +4672,13 @@ function KalenderTab() {
         <div className="space-y-6">
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 {calendarMeta?.note && (
+                    <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">
+                        Kalender-Qualitaet: {calendarMeta.official_count || 0} offizielle Termine ({(calendarMeta.official_sources || []).join(', ') || 'n/a'}), {calendarMeta.estimated_count || 0} markierte Schaetzungen.
+                    </div>
+                )}
+                {calendarMeta?.note && (
                     <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                        Wichtig: FED/FOMC-Termine sind offizielle Federal-Reserve-Daten. Andere Makro-Termine sind aktuell als geschätzt markiert.
+                        Wichtig: FED/FOMC, CPI, NFP, PPI, GDP/PCE und Retail Sales kommen aus offiziellen 2026-Quellen. Nur Earnings, ISM und Jobless Claims bleiben als geschaetzt markiert.
                     </div>
                 )}
                 {loading ? (

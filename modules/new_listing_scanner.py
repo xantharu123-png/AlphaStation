@@ -1215,6 +1215,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     rr2 = round(reward2 / risk, 2) if risk > 0 else 0
     tp1_missed = tp1 >= entry
     tp2_missed = tp2 >= entry
+    rr_effective = 0 if tp2_missed else (rr2 if tp1_missed else rr1)
 
     # ── Timing Score ──
     if tp2_missed:
@@ -1237,13 +1238,16 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         timing_quality = 0
 
     # ── Grading ──
-    if exh_score >= 80 and rr1 >= 2.0 and safety_ok:
+    if tp2_missed:
+        grade = "D"
+        grade_label = "[X] D â€” NO TRADE"
+    elif exh_score >= 80 and rr_effective >= 2.0 and safety_ok and not tp1_missed:
         grade = "S"
         grade_label = " S — ELITE SHORT"
-    elif exh_score >= 65 and rr1 >= 1.5 and safety_ok:
+    elif exh_score >= 65 and rr_effective >= 1.5 and safety_ok:
         grade = "A"
         grade_label = " A — STRONG SHORT"
-    elif exh_score >= 50 and rr1 >= 1.0:
+    elif exh_score >= 50 and rr_effective >= 1.0:
         grade = "B"
         grade_label = " B — MODERATE"
     elif exh_score >= 40:
@@ -1262,7 +1266,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "tp2": round(tp2, 6),
         "rr1": rr1,
         "rr2": rr2,
-        "rr_effective": rr1 if not tp1_missed else rr2,
+        "rr_effective": rr_effective,
         "tp1_missed": tp1_missed,
         "tp2_missed": tp2_missed,
         "risk_pct": round((stop - entry) / entry * 100, 2),
