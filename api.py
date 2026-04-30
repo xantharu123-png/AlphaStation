@@ -90,6 +90,7 @@ except ImportError:
     calculate_stock_setup_score = None
 
 from modules.trade_health import calculate_trade_health
+from modules.market_context import analyze_headlines, build_event_risk, build_market_context
 
 # Import pattern detection
 try:
@@ -901,6 +902,7 @@ SCAN_DATA_SOURCES = {
     "biotech": "Polygon + biotech catalyst scanner",
     "early_movers": "CoinGecko markets + exchange perp feeds",
     "crash_monitor": "Polygon indices/VIX + market breadth",
+    "market_context": "Crash/Fear cache + Polygon news + economic calendar",
     "btc_divergenz": "Polygon BTC/crypto-equity daily bars",
     "money_flow": "Polygon sector ETF bars",
     "new_listing": "Exchange PERP listings + orderbook/safety checks",
@@ -927,6 +929,10 @@ SCAN_EXCLUSION_POLICIES = {
     "new_listing": [
         "Reject missed TP zones and unsafe liquidity/orderbook conditions.",
         "Keep waiting_for_history listings eligible for later re-check.",
+    ],
+    "market_context": [
+        "Market weather is context only; it adjusts aggressiveness, not standalone buy/sell signals.",
+        "High headline/event risk means smaller size, stronger confirmation and no market chasing.",
     ],
 }
 
@@ -963,18 +969,20 @@ def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], r
         "result_count": len(results),
         "warnings": warnings,
         "exclusion_policy": SCAN_EXCLUSION_POLICIES["common"] + SCAN_EXCLUSION_POLICIES.get(scanner_name, []),
+        "market_context": _get_market_context_snapshot().get("summary"),
     }
 
 
-def _attach_trade_health(item: Dict[str, Any], scanner_name: str) -> Dict[str, Any]:
+def _attach_trade_health(item: Dict[str, Any], scanner_name: str, market_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Attach the central execution-quality payload to one scanner row."""
-    health = calculate_trade_health(item, scanner_name=scanner_name)
+    health = calculate_trade_health(item, scanner_name=scanner_name, market_context=market_context)
     item["trade_health"] = health
     item["trade_health_score"] = health.get("health_score")
     item["trade_decision"] = health.get("decision")
     item["trade_decision_label"] = health.get("decision_label")
     item["fakeout_risk"] = health.get("fakeout_risk")
     item["chase_risk"] = health.get("chase_risk")
+    item["market_context"] = (market_context or {}).get("summary") if market_context else None
     item.setdefault("entry_quality", health.get("entry_quality"))
     item.setdefault("entry_quality_score", health.get("entry_quality_score"))
     return health
@@ -983,6 +991,7 @@ def _attach_trade_health(item: Dict[str, Any], scanner_name: str) -> Dict[str, A
 def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
     """Add consistent signal explanations and risk warnings to scanner rows."""
     decorated = []
+    market_context = _get_market_context_snapshot()
     for raw in results or []:
         if not isinstance(raw, dict):
             decorated.append(raw)
@@ -1027,7 +1036,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         if cache_age_seconds is None:
             warnings.append("Cache-Alter unbekannt")
 
-        health = _attach_trade_health(item, scanner_name)
+        health = _attach_trade_health(item, scanner_name, market_context)
         why.append(f"Trade Health: {health.get('decision_label')} ({health.get('health_score')}/100)")
         why.append(f"Fakeout-Risiko: {health.get('fakeout_risk')} | Chase-Risiko: {health.get('chase_risk')}")
         warnings.extend(health.get("warnings") or [])
@@ -1044,6 +1053,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
                 "min_rvol_preferred": RISK_POLICY["min_rvol"],
                 "chased_targets_blocked": True,
             },
+            "market_context": market_context.get("summary"),
         }
         decorated.append(item)
     return decorated
@@ -3046,6 +3056,7 @@ _scan_status = {
     "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 240},
     "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "market_context": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
     "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
@@ -3061,6 +3072,7 @@ SCAN_CACHE_MAP = {
     "biotech": "/tmp/alpha_biotech_cache.json",
     "early_movers": "/tmp/early_movers_cache.json",
     "crash_monitor": "/tmp/crash_monitor_cache.json",
+    "market_context": "/tmp/market_context_cache.json",
     "btc_divergenz": "/tmp/btc_divergenz_cache.json",
     "money_flow": "/tmp/money_flow_cache.json",
     "new_listing": "/tmp/new_listing_scanner.json",
@@ -3203,6 +3215,7 @@ def _scheduler_loop():
     light_scans = [
         ("early_movers", _early_movers_wrapper),
         ("crash_monitor", _crash_monitor_wrapper),
+        ("market_context", _market_context_wrapper),
         ("btc_divergenz", _btc_divergenz_wrapper),
         ("volume_spikes", _volume_spikes_wrapper),
         ("money_flow", _money_flow_wrapper),
@@ -3637,6 +3650,7 @@ def _build_system_health() -> Dict[str, Any]:
             "quality": "official_core_macro_plus_2026_exchange_hours_marked_estimates_remaining",
         },
         "risk_policy": RISK_POLICY,
+        "market_context": _get_market_context_snapshot().get("summary"),
         "warnings": warnings,
         "critical": critical,
     }
@@ -8696,6 +8710,118 @@ def get_economic_calendar():
             "message": str(e),
             "timestamp": datetime.now().isoformat()
         }
+
+
+# ── Market Context / Headline Risk ──
+MARKET_CONTEXT_CACHE = "/tmp/market_context_cache.json"
+
+
+def _cache_age_seconds(cached_at: Optional[str]) -> Optional[int]:
+    if not cached_at:
+        return None
+    try:
+        return int(max(0, (datetime.now() - datetime.fromisoformat(cached_at)).total_seconds()))
+    except Exception:
+        return None
+
+
+def _calendar_event_risk_snapshot() -> Dict[str, Any]:
+    try:
+        calendar = get_economic_calendar()
+        if isinstance(calendar, dict) and calendar.get("status") == "success":
+            return build_event_risk(calendar.get("events", []))
+    except Exception as exc:
+        return {"score": 0, "level": "LOW", "upcoming_events": [], "error": str(exc)}
+    return {"score": 0, "level": "LOW", "upcoming_events": []}
+
+
+def _load_crash_context_snapshot() -> Dict[str, Any]:
+    try:
+        crash_results, _ = load_cache_file(CRASH_MONITOR_CACHE)
+        if crash_results and isinstance(crash_results[0], dict):
+            if crash_results[0].get("status") != "error":
+                return crash_results[0]
+    except Exception:
+        pass
+    return {}
+
+
+def _fetch_polygon_market_headlines(limit: int = 50) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    if not POLYGON_KEY:
+        return [], "POLYGON_KEY fehlt"
+    try:
+        resp = rate_limited_get(
+            "https://api.polygon.io/v2/reference/news",
+            params={
+                "apiKey": POLYGON_KEY,
+                "limit": limit,
+                "sort": "published_utc",
+                "order": "desc",
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return [], f"Polygon news HTTP {resp.status_code}"
+        payload = resp.json()
+        return payload.get("results", []) or [], None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _market_context_wrapper() -> None:
+    """Build market weather from cached market internals, scheduled events and headlines."""
+    headlines, headline_error = _fetch_polygon_market_headlines()
+    headline_risk = analyze_headlines(headlines)
+    if headline_error:
+        headline_risk["error"] = headline_error
+    event_risk = _calendar_event_risk_snapshot()
+    crash_data = _load_crash_context_snapshot()
+    context = build_market_context(crash_data, headline_risk, event_risk)
+    context["source"] = {
+        "market_internals": "crash_monitor_cache",
+        "headlines": "Polygon news",
+        "events": "Alpha Station economic calendar",
+    }
+    context["headline_count"] = len(headlines)
+    save_cache_file(MARKET_CONTEXT_CACHE, [context])
+    print(f"[Market Context] {context.get('regime')} / {context.get('trade_mode')} risk={context.get('overall_risk_score')} headlines={len(headlines)}")
+
+
+def _get_market_context_snapshot() -> Dict[str, Any]:
+    """Cheap cache-only market context for scanner decoration."""
+    try:
+        cached, cached_at = load_cache_file(MARKET_CONTEXT_CACHE)
+        if cached and isinstance(cached[0], dict):
+            context = dict(cached[0])
+            context["cache_age_seconds"] = _cache_age_seconds(cached_at)
+            return context
+    except Exception:
+        pass
+
+    headline_risk = analyze_headlines([])
+    event_risk = _calendar_event_risk_snapshot()
+    context = build_market_context(_load_crash_context_snapshot(), headline_risk, event_risk)
+    context["cache_age_seconds"] = None
+    context["warnings"] = list(context.get("warnings", [])) + ["Market-Context-Cache fehlt; nutze Crash/Kalender-Fallback ohne Live-News"]
+    return context
+
+
+@app.post("/api/market-context-scan")
+def trigger_market_context_scan():
+    _run_scan_safe("market_context", _market_context_wrapper)
+    return {"status": "started", "message": "Market context scan started"}
+
+
+@app.get("/api/market-context")
+def get_market_context():
+    context = _get_market_context_snapshot()
+    stale = context.get("cache_age_seconds") is not None and context.get("cache_age_seconds") > 45 * 60
+    return {
+        "status": "success",
+        "data": context,
+        "cache_age_seconds": context.get("cache_age_seconds"),
+        "warnings": (context.get("warnings") or []) + (["Market context cache stale"] if stale else []),
+    }
 
 
 # ── Backtest Engine ──

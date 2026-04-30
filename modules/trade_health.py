@@ -212,7 +212,11 @@ def _decision_label(decision: str) -> str:
     }.get(decision, decision)
 
 
-def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -> Dict[str, Any]:
+def calculate_trade_health(
+    row: Dict[str, Any],
+    scanner_name: str = "scanner",
+    market_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Return a normalized execution-quality payload for any scanner row."""
     row = row or {}
     warnings: List[str] = []
@@ -407,6 +411,39 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
         entry_score = min(entry_score, 78)
         warnings.append("Keine vollstaendigen Entry/Stop-Level - erst Trigger abwarten")
 
+    context_summary = {}
+    if market_context:
+        context_summary = market_context.get("summary") or market_context
+        regime = str(context_summary.get("regime") or market_context.get("regime") or "NEUTRAL").upper()
+        trade_mode = str(context_summary.get("trade_mode") or market_context.get("trade_mode") or "SELECTIVE").upper()
+        headline_level = str(context_summary.get("headline_level") or "").upper()
+        event_level = str(context_summary.get("event_level") or "").upper()
+        context_penalty = 0
+        if trade_mode == "PROTECT_CAPITAL" or regime == "PANIC":
+            context_penalty = 22
+            warnings.append("Market Weather PANIC: Kapital schuetzen, nur absolute A+ Retests")
+        elif trade_mode == "DEFENSIVE" or regime == "RISK_OFF":
+            context_penalty = 13
+            warnings.append("Market Weather Risk-Off: Longs nur defensiv/Retest, keine FOMO Entries")
+        elif trade_mode == "SELECTIVE" or regime == "NEUTRAL":
+            context_penalty = 5
+        if headline_level in {"HIGH", "EXTREME"}:
+            context_penalty += 8
+            warnings.append("Headline-Risiko hoch - politische News koennen Kerzen drehen")
+        if event_level in {"HIGH", "EXTREME"}:
+            context_penalty += 8
+            warnings.append("Event-Risiko hoch - Makro/FED-Spike moeglich")
+
+        if context_penalty:
+            if direction == "LONG":
+                entry_score -= context_penalty
+                fakeout_score -= max(4, int(context_penalty * 0.7))
+            elif regime in {"RISK_OFF", "PANIC"}:
+                fakeout_score -= max(3, int(context_penalty * 0.35))
+                positives.append("Risk-Off kann Short-Setups unterstuetzen, aber trotzdem nicht chasen")
+            else:
+                entry_score -= max(2, int(context_penalty * 0.5))
+
     entry_score = max(0, min(100, int(round(entry_score))))
     fakeout_score = max(0, min(100, int(round(fakeout_score))))
     liquidity_score = max(0, min(100, int(round(liquidity_score))))
@@ -465,6 +502,14 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
         "exclusion_reasons": list(dict.fromkeys(exclusion_reasons))[:6],
         "tactical_reasons": list(dict.fromkeys(tactical_reasons))[:6],
         "continuation_watch": strong_continuation,
+        "market_context": {
+            "regime": context_summary.get("regime"),
+            "trade_mode": context_summary.get("trade_mode"),
+            "overall_risk_score": context_summary.get("overall_risk_score"),
+            "size_multiplier": context_summary.get("size_multiplier"),
+            "headline_level": context_summary.get("headline_level"),
+            "event_level": context_summary.get("event_level"),
+        } if context_summary else None,
         "metrics": {
             "current_price": current,
             "entry": entry,

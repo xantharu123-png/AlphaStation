@@ -1799,6 +1799,42 @@ function SystemHealthBadge({ health, online }) {
     );
 }
 
+function MarketWeatherBadge({ market }) {
+    const [open, setOpen] = useState(false);
+    if (!market) return null;
+    const regime = market.regime || 'NEUTRAL';
+    const risk = market.overall_risk_score ?? 50;
+    const tone = regime === 'RISK_ON'
+        ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+        : (regime === 'PANIC' || regime === 'RISK_OFF'
+            ? 'bg-red-100 text-red-700 hover:bg-red-200'
+            : 'bg-amber-100 text-amber-800 hover:bg-amber-200');
+    return (
+        <div className="relative">
+            <button onClick={() => setOpen(!open)} className={`flex items-center gap-2 text-sm px-3 py-1 rounded ${tone}`}>
+                <span>Market</span>
+                <span className="font-semibold">{regime}</span>
+            </button>
+            {open && (
+                <div className="absolute top-full right-0 mt-2 bg-white border border-gray-200 rounded shadow-lg z-50 p-4 text-xs" style={{minWidth: '330px'}}>
+                    <div className="text-sm font-semibold mb-2">Market Weather</div>
+                    <div className="grid grid-cols-2 gap-2 text-gray-700">
+                        <div>Regime: <span className="font-semibold">{regime}</span></div>
+                        <div>Risk: <span className="font-semibold">{risk}/100</span></div>
+                        <div>Mode: <span className="font-semibold">{market.trade_mode || '-'}</span></div>
+                        <div>Size: <span className="font-semibold">{market.size_multiplier != null ? `${Math.round(market.size_multiplier * 100)}%` : '-'}</span></div>
+                        <div>Headline: <span className="font-semibold">{market.headline_level || 'LOW'}</span></div>
+                        <div>Event: <span className="font-semibold">{market.event_level || 'LOW'}</span></div>
+                        <div>Fear: <span className="font-semibold">{market.fear_score ?? '-'}</span></div>
+                        <div>VIX: <span className="font-semibold">{market.vix ?? '-'}</span></div>
+                    </div>
+                    <div className="text-gray-500 mt-3">Nutzen: Scanner bleiben technische Signale; Marktwetter steuert Aggressivitaet, Size und Chase-Regeln.</div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 // Legacy scheduler status kept as a fallback reference; the enhanced component below is used.
 function SchedulerStatusLegacy({ status }) {
     const [showDetails, setShowDetails] = useState(false);
@@ -1809,7 +1845,7 @@ function SchedulerStatusLegacy({ status }) {
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes' };
 
     return (
         <div className="flex items-center gap-2">
@@ -1854,7 +1890,7 @@ function SchedulerStatus({ status }) {
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
     const staleCount = scanEntries.filter(([_, s]) => ['stale', 'missing', 'error'].includes(s.cache_health)).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crash_monitor: 'Crash Monitor', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
     const healthLabels = {
         ok: ['OK', 'text-green-600'],
         stale: ['Alt', 'text-amber-600'],
@@ -2585,6 +2621,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const cd = scannerData || {};  // crypto data from Early Movers
     const quality = cd._quality || d._quality || null;
     const tradeHealth = cd.trade_health || d.trade_health || null;
+    const marketContext = cd.market_context || d.market_context || tradeHealth?.market_context || quality?.market_context || null;
     const tradeHealthTone = !tradeHealth ? '' :
         tradeHealth.decision === 'TRADEABLE' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' :
         tradeHealth.decision === 'NO_TRADE' ? 'border-red-200 bg-red-50 text-red-900' :
@@ -2666,6 +2703,25 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div className="text-xs text-gray-500 mt-1">{d.bi_scanner.grade_label}</div>
                     )}
                 </div>
+
+                {marketContext && (
+                    <div className="border border-slate-200 bg-slate-900 text-slate-50 p-3 rounded-lg mb-3 text-xs">
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                            <h4 className="font-semibold text-sm">Market Weather</h4>
+                            <span className={`font-bold ${marketContext.regime === 'RISK_ON' ? 'text-emerald-300' : marketContext.regime === 'NEUTRAL' ? 'text-amber-300' : 'text-red-300'}`}>
+                                {marketContext.regime || 'NEUTRAL'}
+                            </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                            <div><div className="text-slate-400">Mode</div><div className="font-semibold">{marketContext.trade_mode || '-'}</div></div>
+                            <div><div className="text-slate-400">Risk</div><div className="font-semibold">{marketContext.overall_risk_score != null ? `${marketContext.overall_risk_score}/100` : '-'}</div></div>
+                            <div><div className="text-slate-400">Size</div><div className="font-semibold">{marketContext.size_multiplier != null ? `${Math.round(marketContext.size_multiplier * 100)}%` : '-'}</div></div>
+                        </div>
+                        <div className="mt-2 text-slate-300">
+                            Headline: <span className="font-semibold">{marketContext.headline_level || 'LOW'}</span> | Event: <span className="font-semibold">{marketContext.event_level || 'LOW'}</span> | Fear: <span className="font-semibold">{marketContext.fear_score ?? '-'}</span>
+                        </div>
+                    </div>
+                )}
 
                 {tradeHealth && (
                     <div className={`border p-3 rounded-lg mb-3 text-xs ${tradeHealthTone}`}>
@@ -3462,6 +3518,7 @@ function App() {
 
                         {/* Right side controls */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <div className="desktop-only"><MarketWeatherBadge market={systemHealth?.market_context} /></div>
                             <div className="desktop-only"><SystemHealthBadge health={systemHealth} online={serverStatus} /></div>
                             <div className="desktop-only"><SchedulerStatus status={schedulerStatus} /></div>
                             <div className="desktop-only" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
