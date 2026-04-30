@@ -507,6 +507,81 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
     return result
 
 
+COMMON_STOCK_UNIVERSE_CACHE = "/tmp/polygon_common_stock_universe.json"
+_COMMON_STOCK_UNIVERSE_MEM: Dict[str, Any] = {"loaded_at": 0, "tickers": None, "source": "not_loaded"}
+
+
+def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optional[set[str]], str]:
+    """Return active common-stock/ADR tickers for breadth filtering without per-symbol reference calls."""
+    now_ts = time.time()
+    mem_tickers = _COMMON_STOCK_UNIVERSE_MEM.get("tickers")
+    if mem_tickers is not None and now_ts - float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0) < max_age_seconds:
+        return set(mem_tickers), str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+
+    try:
+        if os.path.exists(COMMON_STOCK_UNIVERSE_CACHE):
+            with open(COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            cached_at = float(cached.get("cached_at", 0) or 0)
+            cached_tickers = set(cached.get("tickers", []) or [])
+            if cached_tickers and now_ts - cached_at < max_age_seconds:
+                _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(cached_tickers), "source": "file_cache"})
+                return cached_tickers, "file_cache"
+    except Exception as cache_err:
+        print(f"[Common Stock Universe] cache read error: {cache_err}")
+
+    if not POLYGON_KEY:
+        return None, "missing_polygon_key"
+
+    tickers: set[str] = set()
+    try:
+        for asset_type in sorted(ORB_ALLOWED_POLYGON_TYPES):
+            url = "https://api.polygon.io/v3/reference/tickers"
+            params = {
+                "apiKey": POLYGON_KEY,
+                "market": "stocks",
+                "active": "true",
+                "type": asset_type,
+                "limit": 1000,
+                "sort": "ticker",
+                "order": "asc",
+            }
+            pages = 0
+            while url and pages < 20:
+                resp = rate_limited_get(url, params=params, timeout=20)
+                if resp.status_code != 200:
+                    print(f"[Common Stock Universe] {asset_type} HTTP {resp.status_code}")
+                    break
+                payload = resp.json()
+                for item in payload.get("results", []) or []:
+                    tk = str(item.get("ticker", "") or "").upper().strip()
+                    market = str(item.get("market", "") or "").lower()
+                    item_type = str(item.get("type", "") or "").upper()
+                    name = str(item.get("name", "") or "").upper()
+                    if not tk or market != "stocks" or item_type not in ORB_ALLOWED_POLYGON_TYPES:
+                        continue
+                    if _looks_like_non_stock_etp_symbol(tk) or any(keyword in f" {name}" for keyword in NON_STOCK_ETP_KEYWORDS):
+                        continue
+                    tickers.add(tk)
+                next_url = payload.get("next_url")
+                url = next_url if next_url else None
+                params = {"apiKey": POLYGON_KEY} if next_url else {}
+                pages += 1
+
+        if tickers:
+            try:
+                with open(COMMON_STOCK_UNIVERSE_CACHE, "w", encoding="utf-8") as f:
+                    json.dump({"cached_at": now_ts, "tickers": sorted(tickers)}, f)
+            except Exception as write_err:
+                print(f"[Common Stock Universe] cache write error: {write_err}")
+            _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(tickers), "source": "polygon_reference"})
+            return tickers, "polygon_reference"
+    except Exception as e:
+        print(f"[Common Stock Universe] fetch error: {e}")
+
+    return None, "unavailable"
+
+
 # ── ORB risk helpers ──
 def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, periods: int = 14) -> tuple[float, str]:
     """Return a real daily ATR percentage for ORB sizing, with a safe fallback."""
@@ -3520,10 +3595,10 @@ def _build_system_health() -> Dict[str, Any]:
         },
         "scans": scan_health,
         "calendar": {
-            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
-            "official_event_families": ["FOMC/FED", "CPI", "NFP", "PPI", "GDP/PCE", "Retail Sales", "Advance Economic Indicators"],
+            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "ISM", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
+            "official_event_families": ["FOMC/FED", "CPI", "NFP", "PPI", "GDP/PCE", "Retail Sales", "Advance Economic Indicators", "ISM PMI"],
             "exchange_calendars": ["NYSE/Nasdaq", "LSE", "Xetra/Frankfurt", "Tokyo", "Hong Kong"],
-            "estimated_event_families": ["Earnings Season", "ISM Manufacturing PMI", "Initial Jobless Claims"],
+            "estimated_event_families": ["Earnings Season", "Initial Jobless Claims"],
             "quality": "official_core_macro_plus_2026_exchange_hours_marked_estimates_remaining",
         },
         "risk_policy": RISK_POLICY,
@@ -6390,6 +6465,19 @@ def get_crash_monitor():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
+    if results and isinstance(results[0], dict) and results[0].get("status") == "error":
+        quality = _scan_quality_payload("crash_monitor", cache_age, results)
+        warnings = list(quality.get("warnings", []))
+        warnings.append(results[0].get("message") or "Crash monitor scan failed")
+        return {
+            "status": "error",
+            "data": results,
+            "cached_at": cached_at,
+            "cache_age_seconds": cache_age,
+            "data_quality": quality,
+            "warnings": warnings,
+            "exclusion_policy": quality["exclusion_policy"],
+        }
     decorated = _decorate_scan_results(results, "crash_monitor", cache_age)
     quality = _scan_quality_payload("crash_monitor", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
@@ -7869,8 +7957,10 @@ def _crash_monitor_wrapper() -> None:
             up = 0
             down = 0
             unchanged = 0
+            excluded_non_common = 0
             gainers_chgs = []
             losers_chgs = []
+            common_stock_universe, common_stock_source = _load_common_stock_universe()
 
             snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
             try:
@@ -7885,6 +7975,17 @@ def _crash_monitor_wrapper() -> None:
                 print(f"[Crash Monitor] Full snapshot: {len(all_tickers)} tickers received")
                 for t in all_tickers:
                     try:
+                        ticker = str(t.get("ticker", "") or "").upper().strip()
+                        if not ticker:
+                            continue
+                        if common_stock_universe is not None:
+                            if ticker not in common_stock_universe:
+                                excluded_non_common += 1
+                                continue
+                        elif _looks_like_non_stock_etp_symbol(ticker):
+                            excluded_non_common += 1
+                            continue
+
                         tod = t.get("todaysChangePerc", 0)
                         if not isinstance(tod, (int, float)):
                             continue
@@ -7923,8 +8024,12 @@ def _crash_monitor_wrapper() -> None:
                 "market_open": total > 0,
                 "gainers_avg_chg": gainers_avg_chg,
                 "losers_avg_chg": losers_avg_chg,
+                "common_stock_filtered": True,
+                "common_stock_source": common_stock_source,
+                "common_stock_universe_count": len(common_stock_universe) if common_stock_universe is not None else None,
+                "excluded_non_common": excluded_non_common,
             }
-            print(f"[Crash Monitor] Breadth: {up} up, {down} down, ratio={ratio}, signal={breadth_signal}")
+            print(f"[Crash Monitor] Breadth: {up} up, {down} down, ratio={ratio}, signal={breadth_signal}, excluded={excluded_non_common}, source={common_stock_source}")
         except Exception as e:
             print(f"[Warning] Market breadth error: {e}")
 
@@ -7944,6 +8049,17 @@ def _crash_monitor_wrapper() -> None:
         print(f"Crash monitor error: {e}")
         import traceback
         traceback.print_exc()
+        save_cache_file(CRASH_MONITOR_CACHE, [{
+            "status": "error",
+            "error": str(e),
+            "message": "Crash monitor scan failed; stale data must not be treated as a fresh success.",
+            "timestamp": datetime.now().isoformat(),
+            "vix": {},
+            "indices": [],
+            "breadth": {},
+            "fear_score": 0,
+            "fear_level": "ERROR",
+        }])
 
 
 # ── Kalender (Economic Calendar) ──
@@ -8436,38 +8552,50 @@ def get_economic_calendar():
                 category=category,
             )
 
-        # Core macro releases above come from official source schedules.
-        for month in []:
-            try:
-                next_cpi = _calculate_next_occurrence(month, 12)
-                _add_event(events, date_str=next_cpi, event="CPI (Verbraucherpreisindex)",
-                           importance="high", description="US Consumer Price Index YoY (geschätzt)",
-                           impact="Sehr Hoch", source="Estimated schedule", estimated=True,
-                           hour_et=8, minute_et=30)
-            except Exception as e:
-                print(f"[Warning] {e}")
-
-        # NFP official dates are in official_macro_events.
-        for month in []:
-            try:
-                next_nfp = _calculate_next_occurrence(month, 5)
-                _add_event(events, date_str=next_nfp, event="NFP (Non-Farm Payroll)",
-                           importance="high", description="US Employment Report (geschätzt)",
-                           impact="Sehr Hoch", source="Estimated schedule", estimated=True,
-                           hour_et=8, minute_et=30)
-            except Exception as e:
-                print(f"[Warning] {e}")
-
-        # GDP/PCE official dates are in official_macro_events.
-        for month in []:
-            try:
-                next_gdp = _calculate_next_occurrence(month, 28)
-                _add_event(events, date_str=next_gdp, event="GDP",
-                           importance="high", description="Gross Domestic Product Report (geschätzt)",
-                           impact="Sehr Hoch", source="Estimated schedule", estimated=True,
-                           hour_et=8, minute_et=30)
-            except Exception as e:
-                print(f"[Warning] {e}")
+        ism_source = "https://www.ismworld.org/supply-management-news-and-reports/reports/rob-report-calendar/"
+        official_ism_events = [
+            ("2026-01-05", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-02-02", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-03-02", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-04-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-05-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-06-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-07-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-08-03", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-09-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-10-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-11-02", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-12-01", "ISM Manufacturing PMI", "ISM Manufacturing PMI Report release", "business_survey"),
+            ("2026-01-07", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-02-04", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-03-04", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-04-06", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-05-05", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-06-03", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-07-06", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-08-05", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-09-03", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-10-05", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-11-04", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-12-03", "ISM Services PMI", "ISM Services PMI Report release", "business_survey"),
+            ("2026-05-15", "ISM Supply Chain Planning Forecast", "ISM semiannual supply chain planning forecast", "macro"),
+            ("2026-12-16", "ISM Supply Chain Planning Forecast", "ISM semiannual supply chain planning forecast", "macro"),
+        ]
+        for date_str, event_name, description, category in official_ism_events:
+            _add_event(
+                events,
+                date_str=date_str,
+                event=event_name,
+                importance="medium",
+                description=description,
+                impact="Hoch",
+                source="ISM",
+                source_url=ism_source,
+                estimated=False,
+                hour_et=10,
+                minute_et=0,
+                category=category,
+            )
 
         earnings_months = [4, 7, 10, 1]  # Q1, Q2, Q3, Q4
         for month in earnings_months:
@@ -8477,39 +8605,6 @@ def get_economic_calendar():
                            importance="high", description="Corporate Earnings Reports (ungefährer Start)",
                            impact="Hoch", source="Estimated schedule", estimated=True,
                            category="earnings")
-            except Exception as e:
-                print(f"[Warning] {e}")
-
-        # PPI official dates are in official_macro_events.
-        for month in []:
-            try:
-                next_ppi = _calculate_next_occurrence(month, 15)
-                _add_event(events, date_str=next_ppi, event="PPI (Erzeugerpreisindex)",
-                           importance="medium", description="US Producer Price Index MoM (geschätzt)",
-                           impact="Hoch", source="Estimated schedule", estimated=True,
-                           hour_et=8, minute_et=30)
-            except Exception as e:
-                print(f"[Warning] {e}")
-
-        # Retail Sales official dates are in official_macro_events.
-        for month in []:
-            try:
-                next_retail = _calculate_next_occurrence(month, 16)
-                _add_event(events, date_str=next_retail, event="Retail Sales (Einzelhandelsumsätze)",
-                           importance="medium", description="US Monthly Retail Sales Report (geschätzt)",
-                           impact="Hoch", source="Estimated schedule", estimated=True,
-                           hour_et=8, minute_et=30)
-            except Exception as e:
-                print(f"[Warning] {e}")
-
-        # ISM Manufacturing PMI (1st business day of each month)
-        for month in range(1, 13):
-            try:
-                next_ism = _calculate_next_occurrence(month, 1)
-                _add_event(events, date_str=next_ism, event="ISM Manufacturing PMI",
-                           importance="medium", description="Institute for Supply Management Manufacturing Index (geschätzt)",
-                           impact="Hoch", source="Estimated schedule", estimated=True,
-                           hour_et=10, minute_et=0)
             except Exception as e:
                 print(f"[Warning] {e}")
 
@@ -8556,9 +8651,9 @@ def get_economic_calendar():
             "exchanges": _build_exchange_calendar_status(),
             "official_count": official_count,
             "estimated_count": estimated_count,
-            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
+            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "ISM", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
             "timestamp": datetime.now().isoformat(),
-            "note": "FOMC/FED, CPI, NFP, PPI, GDP/PCE, Retail Sales and Census Advance Economic Indicators use official 2026 source schedules. Exchange hours/holidays cover NYSE/Nasdaq, LSE, Xetra, Tokyo and Hong Kong for 2026. Earnings, ISM and weekly claims remain marked estimates."
+            "note": "FOMC/FED, CPI, NFP, PPI, GDP/PCE, Retail Sales, Census Advance Economic Indicators and ISM PMI use official 2026 source schedules. Exchange hours/holidays cover NYSE/Nasdaq, LSE, Xetra, Tokyo and Hong Kong for 2026. Earnings and weekly claims remain marked estimates."
         }
     except Exception as e:
         return {

@@ -30,7 +30,24 @@ def test_calendar_uses_official_macro_sources_for_full_2026_core_calendar():
     assert "https://www.bls.gov/schedule/news_release/ppi.htm" in api_source
     assert "https://www.bea.gov/news/schedule" in api_source
     assert "https://www.census.gov/retail/release_schedule.html" in api_source
-    assert "for month in []:" in api_source
+    assert "https://www.ismworld.org/supply-management-news-and-reports/reports/rob-report-calendar/" in api_source
+    assert "2026-08-03" in api_source
+    assert "2026-12-03" in api_source
+    assert "for month in []:" not in api_source
+
+
+def test_crash_monitor_claims_match_backend_factors():
+    api_source = (ROOT / "api.py").read_text(encoding="utf-8")
+    frontend_source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+
+    assert "_load_common_stock_universe" in api_source
+    assert '"common_stock_filtered": True' in api_source
+    assert '"status": "error"' in api_source
+    assert "stale data must not be treated as a fresh success" in api_source
+    assert "Put/Call Ratio" not in frontend_source
+    assert "VIX Termstruktur" not in frontend_source
+    assert "Sektor-Divergenzen" not in frontend_source
+    assert "Common-Stock-Marktbreite" in frontend_source
 
 
 def test_calendar_includes_major_exchange_hours_and_holiday_status():
