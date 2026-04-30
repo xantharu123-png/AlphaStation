@@ -642,23 +642,51 @@ def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, per
 
 
 # ── Email Alert System ──
+_EMAIL_CONFIG_KEYS = (
+    "GMAIL_USER",
+    "GMAIL_APP_PASSWORD",
+    "ALERT_EMAIL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_SSL_PORT",
+)
+
+
+def _parse_kv_file(path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                values[key.strip()] = val.strip().strip('"').strip("'")
+    except Exception as exc:
+        print(f"[Config] Could not read {path}: {exc}")
+    return values
+
+
 def _load_secrets():
-    """Liest .streamlit/secrets.toml"""
+    """Load config from secrets files, .env and process env without letting partial files shadow Gmail config."""
     secrets = {}
     paths = [
-        Path(__file__).parent / ".streamlit" / "secrets.toml",
         Path.home() / ".streamlit" / "secrets.toml",
+        Path(__file__).parent / ".streamlit" / "secrets.toml",
+        Path(__file__).parent / ".env",
     ]
     for sp in paths:
         if sp.exists():
-            with open(sp, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        key, val = line.split("=", 1)
-                        secrets[key.strip()] = val.strip().strip('"')
-            if secrets:
-                break
+            secrets.update(_parse_kv_file(sp))
+    for key in (
+        "POLYGON_KEY",
+        "BPIQ_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "FINNHUB_KEY",
+        *_EMAIL_CONFIG_KEYS,
+    ):
+        if os.environ.get(key):
+            secrets[key] = os.environ[key]
     return secrets
 
 _SECRETS = _load_secrets()
@@ -673,25 +701,54 @@ _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 
 print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
-print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (secrets.toml fehlt)'}")
+print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
 
 
-def _send_email_alert(subject, body_html):
+def _email_alert_status() -> Dict[str, Any]:
+    gmail_user = _SECRETS.get("GMAIL_USER", "")
+    gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
+    alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
+    startup_remaining = max(0, int(_EMAIL_STARTUP_DELAY - (time.time() - _EMAIL_STARTUP_TIME)))
+    return {
+        "configured": bool(gmail_user and gmail_pass),
+        "sender_configured": bool(gmail_user),
+        "app_password_configured": bool(gmail_pass),
+        "recipient_configured": bool(alert_to),
+        "recipient_count": len([addr for addr in str(alert_to).split(",") if addr.strip()]),
+        "startup_cooldown_remaining_seconds": startup_remaining,
+        "cooldown_entries": len(_EMAIL_COOLDOWN),
+        "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
+        "optional_keys": ["ALERT_EMAIL"],
+        "config_sources_checked": [
+            str(Path.home() / ".streamlit" / "secrets.toml"),
+            str(Path(__file__).parent / ".streamlit" / "secrets.toml"),
+            str(Path(__file__).parent / ".env"),
+            "process environment",
+        ],
+    }
+
+
+def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False):
     """Sendet E-Mail Alert via Gmail SMTP."""
     # V2.6b: Nach Restart 5 Min warten (alte Cache-Daten erzeugen Phantom-Alerts)
-    if time.time() - _EMAIL_STARTUP_TIME < _EMAIL_STARTUP_DELAY:
+    if not bypass_startup_cooldown and time.time() - _EMAIL_STARTUP_TIME < _EMAIL_STARTUP_DELAY:
         print(f"[Alert] SKIP (Startup-Cooldown): {subject}")
         return False
     gmail_user = _SECRETS.get("GMAIL_USER", "")
     gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
     alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
     if not gmail_user or not gmail_pass:
+        print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
+        return False
+    recipients = [addr.strip() for addr in str(alert_to).split(",") if addr.strip()]
+    if not recipients:
+        print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         return False
     for attempt in range(3):
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = f"TradingBot Alert <{gmail_user}>"
-            msg["To"] = alert_to
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
             plain = re.sub(r"<[^>]+>", "", body_html.replace("<br>", "\n").replace("</tr>", "\n"))
             msg.attach(MIMEText(plain, "plain", "utf-8"))
@@ -703,12 +760,12 @@ def _send_email_alert(subject, body_html):
                 server.starttls()
                 server.ehlo()
                 server.login(gmail_user, gmail_pass)
-                server.sendmail(gmail_user, alert_to.split(","), msg.as_string())
+                server.sendmail(gmail_user, recipients, msg.as_string())
                 server.quit()
             except Exception:
                 with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
                     server.login(gmail_user, gmail_pass)
-                    server.sendmail(gmail_user, alert_to.split(","), msg.as_string())
+                    server.sendmail(gmail_user, recipients, msg.as_string())
             print(f"[Alert] Email gesendet: {subject}")
             return True
         except Exception as e:
@@ -3788,11 +3845,14 @@ def _build_system_health() -> Dict[str, Any]:
         "BPIQ_API_KEY": bool(BPIQ_API_KEY),
         "ANTHROPIC_API_KEY": bool(ANTHROPIC_API_KEY),
     }
+    email_alerts = _email_alert_status()
 
     warnings = []
     critical = []
     if not api_keys["POLYGON_KEY"]:
         critical.append("POLYGON_KEY fehlt - Aktien-/ORB-/Marktdaten koennen nicht sauber laufen")
+    if not email_alerts["configured"]:
+        warnings.append("Email-Alerts sind nicht konfiguriert - GMAIL_USER/GMAIL_APP_PASSWORD fehlen")
     if not _scheduler_running:
         warnings.append("Background-Scheduler ist nicht aktiv")
     if stale_or_missing:
@@ -3804,6 +3864,7 @@ def _build_system_health() -> Dict[str, Any]:
         "version": API_VERSION,
         "timestamp": datetime.now().isoformat(),
         "api_keys_configured": api_keys,
+        "email_alerts": email_alerts,
         "scheduler": {
             "running": _scheduler_running,
             "total_scans": len(_scan_status),
@@ -3832,6 +3893,16 @@ def get_system_health():
     return _build_system_health()
 
 
+@app.get("/api/email-alert-status")
+def get_email_alert_status():
+    """Safe email-alert diagnostics without exposing credentials."""
+    return {
+        "status": "ok",
+        "email_alerts": _email_alert_status(),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 @app.get("/api/risk-policy")
 def get_risk_policy():
     """Central risk guardrails used by scanner quality explanations."""
@@ -3858,8 +3929,12 @@ def debug_keys():
 @app.post("/api/test-email")
 def test_email_alert():
     """Test-Endpoint: Sendet eine Test-Mail um Email-Alerts zu verifizieren."""
-    if not _SECRETS.get("GMAIL_USER"):
-        raise HTTPException(status_code=500, detail="secrets.toml nicht gefunden oder GMAIL_USER fehlt")
+    status = _email_alert_status()
+    if not status["configured"]:
+        raise HTTPException(status_code=500, detail={
+            "message": "Email Alerts nicht konfiguriert",
+            "status": status,
+        })
     success = _send_email_alert(
         "✅ TradingBot Test — Email Alerts funktionieren!",
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
@@ -3867,7 +3942,8 @@ def test_email_alert():
         <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
         <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A</b> (BI + Biotech), <b>Bear (2x/Tag bei starken Signalen)</b>, <b>Crash Flash (≥-15%)</b>, <b>ORB Breakouts</b> (Grade S/A).</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
-        </body></html>'''
+        </body></html>''',
+        bypass_startup_cooldown=True,
     )
     if success:
         return {"status": "ok", "message": "Test-Email gesendet!"}

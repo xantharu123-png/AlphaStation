@@ -113,23 +113,51 @@ def _clear_scan_cache(scanner_name):
             pass
 
 # ── API Keys aus secrets.toml laden ──
+_EMAIL_CONFIG_KEYS = (
+    "GMAIL_USER",
+    "GMAIL_APP_PASSWORD",
+    "ALERT_EMAIL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_SSL_PORT",
+)
+
+
+def _parse_kv_file(path: Path) -> dict:
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                values[key.strip()] = val.strip().strip('"').strip("'")
+    except Exception as exc:
+        log.warning(f"Config konnte nicht gelesen werden ({path}): {exc}")
+    return values
+
+
 def _load_secrets():
-    """Liest .streamlit/secrets.toml oder ~/.streamlit/secrets.toml"""
+    """Load config from secrets files, .env and process env; partial files do not shadow Gmail config."""
     secrets = {}
     paths = [
-        BASE_DIR / ".streamlit" / "secrets.toml",
         Path.home() / ".streamlit" / "secrets.toml",
+        BASE_DIR / ".streamlit" / "secrets.toml",
+        BASE_DIR / ".env",
     ]
     for secrets_path in paths:
         if secrets_path.exists():
-            with open(secrets_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        key, val = line.split("=", 1)
-                        secrets[key.strip()] = val.strip().strip('"')
-            if secrets:
-                break
+            secrets.update(_parse_kv_file(secrets_path))
+    for key in (
+        "POLYGON_KEY",
+        "BPIQ_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "FINNHUB_KEY",
+        *_EMAIL_CONFIG_KEYS,
+    ):
+        if os.environ.get(key):
+            secrets[key] = os.environ[key]
     return secrets
 
 
@@ -153,9 +181,13 @@ def _send_email_alert(subject, body_html, secrets):
     gmail_user = secrets.get("GMAIL_USER", "")
     gmail_pass = secrets.get("GMAIL_APP_PASSWORD", "")
     alert_to = secrets.get("ALERT_EMAIL", gmail_user)  # Default: an sich selbst
+    recipients = [addr.strip() for addr in str(alert_to).split(",") if addr.strip()]
 
     if not gmail_user or not gmail_pass:
         log.warning("⚠️ E-Mail Alert: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt in secrets.toml")
+        return False
+    if not recipients:
+        log.warning("E-Mail Alert: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         return False
 
     # B-03: Retry logic with exponential backoff
@@ -164,7 +196,7 @@ def _send_email_alert(subject, body_html, secrets):
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = f"TradingBot Alert <{gmail_user}>"
-            msg["To"] = alert_to
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
 
             # Plain-Text Fallback
@@ -176,7 +208,7 @@ def _send_email_alert(subject, body_html, secrets):
 
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
                 server.login(gmail_user, gmail_pass)
-                server.sendmail(gmail_user, alert_to.split(","), msg.as_string())
+                server.sendmail(gmail_user, recipients, msg.as_string())
 
             log.info(f"📧 E-Mail Alert gesendet: {subject}")
             return True
@@ -2102,6 +2134,7 @@ def run_service():
         return
 
     PID_FILE.write_text(str(os.getpid()))
+    log.info(f"Email alerts: {'AKTIV' if secrets.get('GMAIL_USER') and secrets.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
     log.info(f"🚀 Background Service V2 gestartet (PID: {os.getpid()})")
     _update_status("_service", "running", f"PID {os.getpid()}")
 
@@ -2335,4 +2368,3 @@ def run_once():
     except Exception as e:
         print(f"   ❌ Strategien: {e}")
 
- 
