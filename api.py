@@ -703,6 +703,12 @@ _EMAIL_SEND_LOG: List[Dict[str, Any]] = []
 _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
+_EMAIL_BLOCKED_ETF_TICKERS = {
+    "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
+    "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
+    "KOLD", "BOIL", "DRIP", "GUSH", "JDST", "JNUG", "NUGT", "DUST", "YANG", "YINN",
+    "SVXY", "VXX", "TVIX", "BITI", "BITO", "LABU",
+}
 
 print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
@@ -741,6 +747,22 @@ def _record_email_event(subject: str, status: str, reason: str = "") -> None:
     })
     if len(_EMAIL_SEND_LOG) > 50:
         del _EMAIL_SEND_LOG[:-50]
+
+
+def _email_has_blocked_etf_content(subject: str, body_html: str) -> bool:
+    """Hard guard: this app mails trade candidates, not ETF/ETP hedge watchlists."""
+    content = f"{subject or ''} {body_html or ''}".upper()
+    if any(marker in content for marker in (
+        "INVERSE ETF",
+        "INVERSE ETFS",
+        "LEVERAGED ETF",
+        "LEVERAGED ETFS",
+        "3X SHORT",
+        "2X SHORT",
+    )):
+        return True
+    tokens = set(re.findall(r"\b[A-Z]{2,6}\b", content))
+    return bool(tokens & _EMAIL_BLOCKED_ETF_TICKERS)
 
 
 def _alert_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -883,6 +905,10 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
 
 def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False):
     """Sendet E-Mail Alert via Gmail SMTP."""
+    if _email_has_blocked_etf_content(subject, body_html):
+        print(f"[Alert] SKIP (ETF/ETP-Inhalt blockiert): {subject}")
+        _record_email_event(subject, "skipped", "blocked_etf_content")
+        return False
     # V2.6b: Nach Restart 5 Min warten (alte Cache-Daten erzeugen Phantom-Alerts)
     if not bypass_startup_cooldown and time.time() - _EMAIL_STARTUP_TIME < _EMAIL_STARTUP_DELAY:
         print(f"[Alert] SKIP (Startup-Cooldown): {subject}")

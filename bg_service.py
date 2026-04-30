@@ -29,6 +29,7 @@ import logging
 import threading
 import traceback
 import smtplib
+import re
 import atexit
 import fcntl
 import tempfile
@@ -164,6 +165,28 @@ def _load_secrets():
 # ── E-Mail Alert System ──
 _EMAIL_COOLDOWN = {}  # Verhindert Spam: {ticker: last_sent_ts}
 _EMAIL_COOLDOWN_SEC = 3600 * 4  # 4 Stunden Cooldown pro Ticker
+_EMAIL_BLOCKED_ETF_TICKERS = {
+    "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
+    "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
+    "KOLD", "BOIL", "DRIP", "GUSH", "JDST", "JNUG", "NUGT", "DUST", "YANG", "YINN",
+    "SVXY", "VXX", "TVIX", "BITI", "BITO", "LABU",
+}
+
+
+def _email_has_blocked_etf_content(subject, body_html):
+    """Hard guard: email alerts should contain stock/crypto setups, not ETF/ETP watchlists."""
+    content = f"{subject or ''} {body_html or ''}".upper()
+    if any(marker in content for marker in (
+        "INVERSE ETF",
+        "INVERSE ETFS",
+        "LEVERAGED ETF",
+        "LEVERAGED ETFS",
+        "3X SHORT",
+        "2X SHORT",
+    )):
+        return True
+    tokens = set(re.findall(r"\b[A-Z]{2,6}\b", content))
+    return bool(tokens & _EMAIL_BLOCKED_ETF_TICKERS)
 
 
 def _cleanup_email_cooldown():
@@ -178,6 +201,9 @@ def _cleanup_email_cooldown():
 
 def _send_email_alert(subject, body_html, secrets):
     """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml"""
+    if _email_has_blocked_etf_content(subject, body_html):
+        log.warning(f"E-Mail Alert blockiert (ETF/ETP-Inhalt): {subject}")
+        return False
     gmail_user = secrets.get("GMAIL_USER", "")
     gmail_pass = secrets.get("GMAIL_APP_PASSWORD", "")
     alert_to = secrets.get("ALERT_EMAIL", gmail_user)  # Default: an sich selbst

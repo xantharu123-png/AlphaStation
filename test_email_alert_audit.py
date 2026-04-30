@@ -50,6 +50,31 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
     assert all(item["ticker"] != "LABD" for item in audit["alertable_preview"])
 
 
+def test_email_sender_blocks_inverse_etf_content():
+    api._EMAIL_SEND_LOG.clear()
+
+    blocked = api._send_email_alert(
+        "Bear Alert",
+        "<h3>Inverse ETFs (Signal STARK)</h3><td>LABD</td><td>3x Short Biotech</td>",
+        bypass_startup_cooldown=True,
+    )
+
+    assert blocked is False
+    assert api._EMAIL_SEND_LOG[-1]["status"] == "skipped"
+    assert api._EMAIL_SEND_LOG[-1]["reason"] == "blocked_etf_content"
+
+
+def test_email_etf_guard_allows_stock_setups():
+    assert api._email_has_blocked_etf_content(
+        "Bear Alert: 1 Aktien-Short",
+        "<td>REAL</td><td>Grade A</td><td>RVOL 1.2x</td>",
+    ) is False
+    assert api._email_has_blocked_etf_content(
+        "Momentum Breakout",
+        "<td>AMPL</td><td>Amplitude Inc.</td><td>Grade A</td>",
+    ) is False
+
+
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0
