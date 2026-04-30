@@ -205,6 +205,7 @@ def _decision_label(decision: str) -> str:
     return {
         "TRADEABLE": "Tradeable",
         "WAIT_FOR_RETEST": "Auf Retest warten",
+        "WAIT_FOR_CONTINUATION": "Momentum-Fortsetzung beobachten",
         "WAIT_FOR_TRIGGER": "Setup gut, Trigger fehlt",
         "WATCH_ONLY": "Nur Watchlist",
         "NO_TRADE": "No Trade",
@@ -217,6 +218,7 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
     warnings: List[str] = []
     positives: List[str] = []
     exclusion_reasons: List[str] = []
+    tactical_reasons: List[str] = []
 
     current = _to_float(_first(row, ["current_price", "price", "Preis", "Price", "close", "Close"]))
     entry = _to_float(_first(row, ["entry", "Entry", "live_entry", "trigger_entry"]))
@@ -228,6 +230,9 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
     distance_r = _distance_to_entry_r(row, current, entry, risk, direction)
     live_rr = _live_rr(row, current, entry, stop, tp1, tp2, direction)
     tp1_missed, tp2_missed = _target_missed(row, current, direction, tp1, tp2)
+    vol_confirmed_bool: Optional[bool] = None
+    vwap_aligned_bool: Optional[bool] = None
+    close_strength = False
 
     entry_score = 100
     fakeout_score = 100
@@ -248,15 +253,16 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
 
     if tp2_missed:
         entry_score -= 55
-        exclusion_reasons.append("TP2 bereits erreicht - kein frischer Entry")
+        tactical_reasons.append("TP2 bereits erreicht - kein frischer Entry")
     elif tp1_missed:
         entry_score -= 38
         warnings.append("TP1 bereits erreicht - Chase/FOMO-Risiko")
+        tactical_reasons.append("TP1 bereits erreicht - nur Continuation/Retest handeln")
 
     if distance_r is not None:
         if distance_r >= 1.0:
             entry_score -= 38
-            exclusion_reasons.append(f"Preis ist {distance_r:.2f}R vom Entry entfernt")
+            tactical_reasons.append(f"Preis ist {distance_r:.2f}R vom Entry entfernt")
         elif distance_r >= 0.75:
             entry_score -= 28
             warnings.append(f"Preis ist {distance_r:.2f}R vom Entry entfernt")
@@ -269,7 +275,7 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
     if live_rr is not None:
         if live_rr < HARD_MIN_RR:
             entry_score -= 32
-            exclusion_reasons.append(f"Live R:R nur {live_rr:.2f}")
+            tactical_reasons.append(f"Live R:R nur {live_rr:.2f}")
         elif live_rr < PREFERRED_MIN_RR:
             entry_score -= 16
             warnings.append(f"Live R:R {live_rr:.2f} unter Wunschbereich")
@@ -292,7 +298,8 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
 
     vol_confirmed_raw = _first(row, ["vol_confirmed", "volume_confirmed", "breakout_confirmed"])
     if vol_confirmed_raw is not None:
-        if _to_bool(vol_confirmed_raw):
+        vol_confirmed_bool = _to_bool(vol_confirmed_raw)
+        if vol_confirmed_bool:
             positives.append("Breakout-Volumen bestaetigt")
         else:
             fakeout_score -= 25
@@ -300,7 +307,8 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
 
     vwap_aligned_raw = _first(row, ["vwap_aligned", "above_vwap", "vwap_ok"])
     if vwap_aligned_raw is not None:
-        if _to_bool(vwap_aligned_raw):
+        vwap_aligned_bool = _to_bool(vwap_aligned_raw)
+        if vwap_aligned_bool:
             positives.append("VWAP alignment passt")
         else:
             fakeout_score -= 16
@@ -316,6 +324,7 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
                 fakeout_score -= 12
                 warnings.append("Close nicht stark nahe High")
             elif close_pos >= 0.75:
+                close_strength = True
                 positives.append("Close stark nahe High")
         else:
             if close_pos > 0.55:
@@ -325,6 +334,7 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
                 fakeout_score -= 12
                 warnings.append("Short-Close nicht stark nahe Low")
             elif close_pos <= 0.25:
+                close_strength = True
                 positives.append("Close stark nahe Low")
 
     upper_wick_pct = _to_float(_first(row, ["upper_wick_pct", "UpperWickPct"]))
@@ -406,7 +416,24 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
     fakeout_risk = _risk_band(fakeout_score)
     liquidity_risk = _risk_band(liquidity_score)
 
-    if exclusion_reasons or health_score < 50 or chase_risk == "CRITICAL" or fakeout_risk == "CRITICAL":
+    strong_continuation = bool(
+        tactical_reasons
+        and not tp2_missed
+        and close_strength
+        and (rvol is not None and rvol >= 2.0)
+        and vol_confirmed_bool is not False
+        and vwap_aligned_bool is not False
+        and fakeout_score >= 70
+        and liquidity_score >= 65
+    )
+    if strong_continuation:
+        positives.append("Starke Momentum-Fortsetzung: nicht market chasen, Retest/Flag/VWAP-Hold abwarten")
+
+    if exclusion_reasons:
+        decision = "NO_TRADE"
+    elif strong_continuation:
+        decision = "WAIT_FOR_CONTINUATION"
+    elif tactical_reasons or health_score < 50 or chase_risk == "CRITICAL" or fakeout_risk == "CRITICAL":
         decision = "NO_TRADE"
     elif not has_levels and health_score >= 65:
         decision = "WAIT_FOR_TRIGGER"
@@ -433,9 +460,11 @@ def calculate_trade_health(row: Dict[str, Any], scanner_name: str = "scanner") -
         "liquidity_risk": liquidity_risk,
         "liquidity_score": liquidity_score,
         "direction": direction,
-        "warnings": list(dict.fromkeys(warnings))[:8],
+        "warnings": list(dict.fromkeys(warnings + tactical_reasons))[:8],
         "positives": list(dict.fromkeys(positives))[:6],
         "exclusion_reasons": list(dict.fromkeys(exclusion_reasons))[:6],
+        "tactical_reasons": list(dict.fromkeys(tactical_reasons))[:6],
+        "continuation_watch": strong_continuation,
         "metrics": {
             "current_price": current,
             "entry": entry,

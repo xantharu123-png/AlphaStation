@@ -50,6 +50,31 @@ def test_chased_long_after_tp1_is_no_trade():
     assert any("TP1" in warning for warning in health["warnings"])
 
 
+def test_strong_momentum_after_tp1_waits_for_continuation_instead_of_no_trade():
+    row = {
+        "ticker": "TREND",
+        "direction": "LONG",
+        "current_price": 11.20,
+        "entry": 10.00,
+        "stop": 9.50,
+        "target1": 11.00,
+        "target2": 12.80,
+        "rvol": 3.4,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.88,
+        "dollar_volume": 25_000_000,
+    }
+
+    health = calculate_trade_health(row, "orb")
+
+    assert health["decision"] == "WAIT_FOR_CONTINUATION"
+    assert health["continuation_watch"] is True
+    assert health["entry_quality"] == "CHASE"
+    assert not health["exclusion_reasons"]
+    assert health["tactical_reasons"]
+
+
 def test_live_rr_recomputes_instead_of_trusting_planned_rr():
     row = {
         "ticker": "LATE",
