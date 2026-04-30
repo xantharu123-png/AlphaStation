@@ -3323,6 +3323,77 @@ def get_health():
         },
     )
 
+
+def _build_system_health() -> Dict[str, Any]:
+    """Build a trader-facing health summary without triggering expensive scans."""
+    with _scan_lock:
+        scan_health = {}
+        health_counts = {"ok": 0, "stale": 0, "missing": 0, "error": 0, "not_tracked": 0}
+        running_scans = []
+        stale_or_missing = []
+
+        for name, status in _scan_status.items():
+            cache = _scan_cache_health(name, status)
+            health_key = cache.get("cache_health", "not_tracked")
+            health_counts[health_key] = health_counts.get(health_key, 0) + 1
+            if status.get("running"):
+                running_scans.append(name)
+            if health_key in ("stale", "missing", "error"):
+                stale_or_missing.append(name)
+            scan_health[name] = {
+                "running": status.get("running", False),
+                "last_run": status.get("last_run"),
+                "next_run": status.get("next_run"),
+                "interval_min": status.get("interval_min"),
+                **cache,
+            }
+
+    api_keys = {
+        "POLYGON_KEY": bool(POLYGON_KEY),
+        "BPIQ_API_KEY": bool(BPIQ_API_KEY),
+        "ANTHROPIC_API_KEY": bool(ANTHROPIC_API_KEY),
+    }
+
+    warnings = []
+    critical = []
+    if not api_keys["POLYGON_KEY"]:
+        critical.append("POLYGON_KEY fehlt - Aktien-/ORB-/Marktdaten koennen nicht sauber laufen")
+    if not _scheduler_running:
+        warnings.append("Background-Scheduler ist nicht aktiv")
+    if stale_or_missing:
+        warnings.append(f"{len(stale_or_missing)} Scanner-Caches sind alt, fehlen oder haben Fehler")
+
+    overall = "critical" if critical else ("warning" if warnings else "healthy")
+    return {
+        "status": overall,
+        "version": API_VERSION,
+        "timestamp": datetime.now().isoformat(),
+        "api_keys_configured": api_keys,
+        "scheduler": {
+            "running": _scheduler_running,
+            "total_scans": len(_scan_status),
+            "running_scans": running_scans,
+            "stale_or_missing_scans": stale_or_missing,
+            "health_counts": health_counts,
+        },
+        "scans": scan_health,
+        "calendar": {
+            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census"],
+            "official_event_families": ["FOMC/FED", "CPI", "NFP", "PPI", "GDP/PCE", "Retail Sales", "Advance Economic Indicators"],
+            "estimated_event_families": ["Earnings Season", "ISM Manufacturing PMI", "Initial Jobless Claims"],
+            "quality": "official_core_macro_marked_estimates_remaining",
+        },
+        "warnings": warnings,
+        "critical": critical,
+    }
+
+
+@app.get("/api/system-health")
+def get_system_health():
+    """Detailed system health for UI/admin checks."""
+    return _build_system_health()
+
+
 @app.get("/api/debug-keys")
 def debug_keys():
     """Temp debug: zeigt ob secrets.toml geladen wird."""

@@ -9,6 +9,7 @@ ROOT = Path(__file__).parent
 def test_calendar_uses_official_macro_sources_for_may_july_2026():
     api_source = (ROOT / "api.py").read_text(encoding="utf-8")
 
+    assert '@app.get("/api/system-health")' in api_source
     assert "official_macro_calendar_with_marked_estimates" in api_source
     assert "2026-04-29" in api_source
     assert "2026-05-08" in api_source
@@ -20,6 +21,15 @@ def test_calendar_uses_official_macro_sources_for_may_july_2026():
     assert "https://www.bls.gov/schedule/news_release/ppi.htm" in api_source
     assert "https://www.bea.gov/news/schedule" in api_source
     assert "https://www.census.gov/retail/release_schedule.html" in api_source
+
+
+def test_gitignore_keeps_generated_runtime_files_out_of_commits():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="ascii")
+
+    assert "__pycache__/" in gitignore
+    assert "*.pyc" in gitignore
+    assert "chrome-debug-profile*/" in gitignore
+    assert "tmp_*.html" in gitignore
 
 
 def test_short_signal_does_not_reward_a_missed_tp1_as_elite_entry():
