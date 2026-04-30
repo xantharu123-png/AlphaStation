@@ -1232,6 +1232,165 @@ def _clamp_float(value: Any, low: float, high: float, default: float = 0.0) -> f
     return max(low, min(high, val))
 
 
+def _round_trade_price(price: float) -> float:
+    if price >= 1:
+        return round(price, 2)
+    if price >= 0.1:
+        return round(price, 3)
+    return round(price, 5)
+
+
+def _build_structured_trade_setup(
+    direction: str,
+    entry: float,
+    atr: Optional[float],
+    support_1: Optional[float],
+    resistance_1: Optional[float],
+    high_20d: Optional[float],
+    low_20d: Optional[float],
+    range_pos: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build realistic sidebar trade levels using structure, ATR and minimum R multiples."""
+    try:
+        side = str(direction or "").upper()
+        entry = float(entry or 0)
+    except (TypeError, ValueError):
+        return None
+    if side not in ("LONG", "SHORT") or entry <= 0:
+        return None
+
+    atr_value = float(atr or 0)
+    if atr_value <= 0:
+        atr_value = entry * 0.03
+
+    min_risk = max(entry * 0.025, atr_value * 0.75)
+    buffer = max(entry * 0.003, atr_value * 0.10)
+    warnings: List[str] = []
+    notes: List[str] = []
+
+    support = float(support_1 or 0)
+    resistance = float(resistance_1 or 0)
+    hi20 = float(high_20d or 0)
+    lo20 = float(low_20d or 0)
+    range_size = hi20 - lo20 if hi20 > lo20 else 0.0
+
+    if side == "LONG":
+        raw_stop = support - buffer if 0 < support < entry else entry - max(atr_value * 1.2, entry * 0.03)
+        stop = min(raw_stop, entry - min_risk)
+        risk = entry - stop
+        if risk <= 0:
+            return None
+
+        candidates: List[tuple[float, str]] = []
+        if resistance > entry:
+            candidates.append((resistance, "R1"))
+        if hi20 > entry:
+            candidates.append((hi20, "20D High"))
+        if range_size > 0:
+            candidates.extend([
+                (hi20 + range_size * 0.272, "127% range extension"),
+                (hi20 + range_size * 0.382, "138% range extension"),
+                (hi20 + range_size * 0.618, "161% range extension"),
+            ])
+        candidates.extend([
+            (entry + atr_value * 2.0, "2 ATR"),
+            (entry + atr_value * 3.5, "3.5 ATR"),
+            (entry + risk * 1.5, "1.5R minimum"),
+            (entry + risk * 2.5, "2.5R minimum"),
+        ])
+
+        near_barriers = [
+            label for price, label in candidates
+            if price > entry and (price - entry) < risk * 1.25
+        ]
+        if near_barriers:
+            warnings.append(f"Nahe Resistance ({', '.join(dict.fromkeys(near_barriers))}) - TP nicht zu eng setzen")
+
+        min_tp1 = entry + max(risk * 1.5, atr_value * 1.25, entry * 0.04)
+        min_tp2 = entry + max(risk * 2.5, atr_value * 2.5, entry * 0.07)
+        if range_size > 0 and hi20 > entry and (hi20 - entry) < risk * 1.25:
+            min_tp1 = max(min_tp1, hi20 + range_size * 0.272)
+            min_tp2 = max(min_tp2, hi20 + range_size * 0.618)
+        valid = sorted({round(price, 6): label for price, label in candidates if price > entry}.items())
+        tp1 = next((price for price, _ in valid if price >= min_tp1), min_tp1)
+        tp2 = next((price for price, _ in valid if price >= min_tp2 and price > tp1 + risk * 0.25), min_tp2)
+        if tp2 <= tp1:
+            tp2 = tp1 + max(risk, atr_value, entry * 0.03)
+    else:
+        raw_stop = resistance + buffer if resistance > entry else entry + max(atr_value * 1.2, entry * 0.03)
+        stop = max(raw_stop, entry + min_risk)
+        risk = stop - entry
+        if risk <= 0:
+            return None
+
+        candidates = []
+        if support > 0 and support < entry:
+            candidates.append((support, "S1"))
+        if lo20 > 0 and lo20 < entry:
+            candidates.append((lo20, "20D Low"))
+        if range_size > 0:
+            candidates.extend([
+                (lo20 - range_size * 0.272, "127% range extension"),
+                (lo20 - range_size * 0.382, "138% range extension"),
+                (lo20 - range_size * 0.618, "161% range extension"),
+            ])
+        candidates.extend([
+            (entry - atr_value * 2.0, "2 ATR"),
+            (entry - atr_value * 3.5, "3.5 ATR"),
+            (entry - risk * 1.5, "1.5R minimum"),
+            (entry - risk * 2.5, "2.5R minimum"),
+        ])
+
+        near_barriers = [
+            label for price, label in candidates
+            if price < entry and (entry - price) < risk * 1.25
+        ]
+        if near_barriers:
+            warnings.append(f"Nahe Support-Zone ({', '.join(dict.fromkeys(near_barriers))}) - TP nicht zu eng setzen")
+
+        min_tp1 = entry - max(risk * 1.5, atr_value * 1.25, entry * 0.04)
+        min_tp2 = entry - max(risk * 2.5, atr_value * 2.5, entry * 0.07)
+        if range_size > 0 and 0 < lo20 < entry and (entry - lo20) < risk * 1.25:
+            min_tp1 = min(min_tp1, lo20 - range_size * 0.272)
+            min_tp2 = min(min_tp2, lo20 - range_size * 0.618)
+        valid = sorted({round(price, 6): label for price, label in candidates if 0 < price < entry}.items(), reverse=True)
+        tp1 = next((price for price, _ in valid if price <= min_tp1), min_tp1)
+        tp2 = next((price for price, _ in valid if price <= min_tp2 and price < tp1 - risk * 0.25), min_tp2)
+        if tp2 >= tp1:
+            tp2 = max(0.01, tp1 - max(risk, atr_value, entry * 0.03))
+
+    reward1 = abs(tp1 - entry)
+    reward2 = abs(tp2 - entry)
+    rr_tp1 = reward1 / risk if risk > 0 else 0
+    rr_tp2 = reward2 / risk if risk > 0 else 0
+    blended_rr = (rr_tp1 + rr_tp2) / 2 if rr_tp2 > 0 else rr_tp1
+
+    if range_pos is not None:
+        try:
+            rp = float(range_pos)
+            if side == "LONG" and rp >= 70:
+                notes.append("Entry ist hoch in der 20D-Range; ideal ist Breakout/Retest statt Blind-Chase")
+            elif side == "SHORT" and rp <= 30:
+                notes.append("Entry ist tief in der 20D-Range; ideal ist Breakdown/Retest statt Blind-Chase")
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "entry": _round_trade_price(entry),
+        "stop": _round_trade_price(stop),
+        "tp1": _round_trade_price(tp1),
+        "tp2": _round_trade_price(tp2),
+        "rr": round(blended_rr, 2),
+        "rr_tp1": round(rr_tp1, 2),
+        "rr_tp2": round(rr_tp2, 2),
+        "risk": _round_trade_price(risk),
+        "model": "ATR + Struktur + min. 1.5R/2.5R",
+        "warnings": warnings,
+        "notes": notes,
+        "direction": side,
+    }
+
+
 def _infer_strategy_direction(strategy_name: str, filters: Dict[str, Any]) -> str:
     """Infer whether a stock strategy should reward long or short price action."""
     name = _normalize_strategy_key(strategy_name)
@@ -4115,35 +4274,13 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         trade_setup = None
         if signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
             if confluence_direction == "LONG":
-                entry = round(close, 2)
-                atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
-                _sup = support_1 if (support_1 and support_1 > 0) else (close * 0.97)
-                stop = round(max(_sup, close - atr_stop), 2)
-                risk = entry - stop
-                if risk > 0:
-                    tp1 = round(entry + risk, 2)
-                    tp2 = round(entry + risk * 1.618, 2)
-                    trade_setup = {
-                        "entry": entry, "stop": stop,
-                        "tp1": tp1, "tp2": tp2,
-                        "rr": round((tp1 - entry) / risk, 2),
-                        "direction": "LONG"
-                    }
+                trade_setup = _build_structured_trade_setup(
+                    "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                )
             else:  # SHORT
-                entry = round(close, 2)
-                atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
-                _res = resist_1 if (resist_1 and resist_1 > 0) else (close * 1.03)
-                stop = round(min(_res, close + atr_stop), 2)
-                risk = stop - entry
-                if risk > 0:
-                    tp1 = round(entry - risk, 2)
-                    tp2 = round(entry - risk * 1.618, 2)
-                    trade_setup = {
-                        "entry": entry, "stop": stop,
-                        "tp1": tp1, "tp2": tp2,
-                        "rr": round((entry - tp1) / risk, 2),
-                        "direction": "SHORT"
-                    }
+                trade_setup = _build_structured_trade_setup(
+                    "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                )
 
         # 10. Candlestick data for chart (last 60 bars, reversed to chronological, with EMA overlays)
         candles = []
@@ -4237,35 +4374,13 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             # V3.1: Trade Setup generieren falls BI Scanner keins hat aber Grade S/A/B
             elif not trade_setup and signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
                 if confluence_direction == "LONG":
-                    _entry = round(close, 2)
-                    _atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
-                    _sup = support_1 if (support_1 and support_1 > 0) else (close * 0.97)
-                    _stop = round(max(_sup, close - _atr_stop), 2)
-                    _risk = _entry - _stop
-                    if _risk > 0:
-                        _tp1 = round(_entry + _risk, 2)
-                        _tp2 = round(_entry + _risk * 1.618, 2)
-                        trade_setup = {
-                            "entry": _entry, "stop": _stop,
-                            "tp1": _tp1, "tp2": _tp2,
-                            "rr": round((_tp1 - _entry) / _risk, 2),
-                            "direction": "LONG"
-                        }
+                    trade_setup = _build_structured_trade_setup(
+                        "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                    )
                 else:  # SHORT
-                    _entry = round(close, 2)
-                    _atr_stop = atr * 2 if (atr and atr > 0) else (close * 0.03)
-                    _res = resist_1 if (resist_1 and resist_1 > 0) else (close * 1.03)
-                    _stop = round(min(_res, close + _atr_stop), 2)
-                    _risk = _stop - _entry
-                    if _risk > 0:
-                        _tp1 = round(_entry - _risk, 2)
-                        _tp2 = round(_entry - _risk * 1.618, 2)
-                        trade_setup = {
-                            "entry": _entry, "stop": _stop,
-                            "tp1": _tp1, "tp2": _tp2,
-                            "rr": round((_entry - _tp1) / _risk, 2),
-                            "direction": "SHORT"
-                        }
+                    trade_setup = _build_structured_trade_setup(
+                        "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                    )
 
         # V3.2: Extension-Score — wie weit ist Preis von MA20/VWAP entfernt
         ext_ma20 = round((close - ma20) / ma20 * 100, 1) if (ma20 and ma20 > 0) else None

@@ -3100,7 +3100,26 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <div><span className="text-gray-500">TP1</span> <span className="font-semibold color-positive">${d.trade_setup.tp1}</span></div>
                             <div><span className="text-gray-500">TP2</span> <span className="font-semibold color-positive">${d.trade_setup.tp2}</span></div>
                             <div><span className="text-gray-500">R:R</span> <span className="font-semibold">{d.trade_setup.rr}x</span></div>
+                            {d.trade_setup.risk != null && <div><span className="text-gray-500">Risk</span> <span className="font-semibold">${d.trade_setup.risk}</span></div>}
                         </div>
+                        {(d.trade_setup.rr_tp1 || d.trade_setup.rr_tp2 || d.trade_setup.model) && (
+                            <div className="mt-2 text-gray-600">
+                                {d.trade_setup.model && <div>Modell: <span className="font-semibold">{d.trade_setup.model}</span></div>}
+                                {(d.trade_setup.rr_tp1 || d.trade_setup.rr_tp2) && (
+                                    <div>TP-R: <span className="font-semibold">TP1 {d.trade_setup.rr_tp1 || '-'}R / TP2 {d.trade_setup.rr_tp2 || '-'}R</span></div>
+                                )}
+                            </div>
+                        )}
+                        {d.trade_setup.warnings && d.trade_setup.warnings.length > 0 && (
+                            <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-800">
+                                {d.trade_setup.warnings.slice(0, 3).join(' | ')}
+                            </div>
+                        )}
+                        {d.trade_setup.notes && d.trade_setup.notes.length > 0 && (
+                            <div className="mt-2 text-gray-600">
+                                {d.trade_setup.notes.slice(0, 3).join(' | ')}
+                            </div>
+                        )}
                     </div>
                 )}
 
