@@ -26,7 +26,7 @@
 | N1 | News Request ohne timeout | ✅ Hat `timeout=10` + `rate_limited_get` |
 | N5 | Debug-Output in Production | ✅ Hinter `debug_mode` Flag + UX-Label |
 | N7 | Watchlist nicht persistent | ✅ JSON-Persistenz (`/tmp/alpha_station_watchlist.json`) |
-| M4 | Claude AI Prompt zu wenig Daten | ✅ +Vortag%, Gap%, ATR%, Vol-Regime, Dollar Vol, MA-Distanz, Strategie |
+| M4 | AI Prompt zu wenig Daten | ✅ +Vortag%, Gap%, ATR%, Vol-Regime, Dollar Vol, MA-Distanz, Strategie |
 | M12 | Error handling | ✅ `_debug_log()` Helper + alle `as e:` |
 | — | Version-Bump | ✅ V67.3 → V67.4 + FILTER_VERSION "67.4" |
 

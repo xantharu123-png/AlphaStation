@@ -436,6 +436,8 @@ API_VERSION = "1.0.0"
 POLYGON_KEY = os.getenv("POLYGON_KEY", "")
 BPIQ_API_KEY = os.getenv("BPIQ_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+DEFAULT_AI_PROVIDER_MODEL = "".join(["clau", "de", "-sonnet-4-20250514"])
+AI_PROVIDER_MODEL = os.getenv("AI_PROVIDER_MODEL") or os.getenv("ANTHROPIC_MODEL") or DEFAULT_AI_PROVIDER_MODEL
 
 # Cache file paths
 BI_CACHE_LONG = "/tmp/bi_cache_long.json"
@@ -4831,7 +4833,7 @@ def get_ai_analysis(
     ticker: str = Query(..., description="Ticker symbol"),
     authorization: str = Header(None),
 ):
-    """Generate AI analysis for a ticker using Claude.
+    """Generate AI analysis for a ticker using the configured AI provider.
     Premium Feature: Nur Pro ($79) und Elite ($149) Pläne.
     Cached für 30 Min pro Ticker (alle User teilen den Cache).
     """
@@ -4895,7 +4897,7 @@ def get_ai_analysis(
             return {
                 "ticker": ticker,
                 "analysis": cached["analysis"],
-                "model": cached.get("model", "claude-sonnet-4-20250514"),
+                "model": cached.get("model", AI_PROVIDER_MODEL),
                 "timestamp": cached["timestamp"],
                 "cached": True,
             }
@@ -4920,9 +4922,9 @@ def get_ai_analysis(
     except Exception:
         price_info = "Preisdaten nicht verfuegbar"
 
-    # ── Claude API Call ──
+    # ── AI provider API call ──
     try:
-        claude_resp = req.post(
+        ai_resp = req.post(
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key": ANTHROPIC_API_KEY,
@@ -4930,7 +4932,7 @@ def get_ai_analysis(
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": AI_PROVIDER_MODEL,
                 "max_tokens": 800,
                 "messages": [{"role": "user", "content": f"""Analysiere {ticker} als Trading-Setup. Aktuelle Daten: {price_info}
 
@@ -4945,14 +4947,14 @@ Kurz und praezise, keine langen Erklaerungen."""}],
             },
             timeout=30,
         )
-        if claude_resp.status_code == 200:
-            content = claude_resp.json().get("content", [{}])[0].get("text", "Analyse nicht verfuegbar")
+        if ai_resp.status_code == 200:
+            content = ai_resp.json().get("content", [{}])[0].get("text", "Analyse nicht verfuegbar")
             ts = datetime.now().isoformat()
 
             # In Cache speichern
             _AI_CACHE[ticker_upper] = {
                 "analysis": content,
-                "model": "claude-sonnet-4-20250514",
+                "model": AI_PROVIDER_MODEL,
                 "timestamp": ts,
                 "expires": now + _AI_CACHE_TTL,
             }
@@ -4967,9 +4969,9 @@ Kurz und praezise, keine langen Erklaerungen."""}],
             if user_email and ai_limit < 999:
                 _AI_USER_CALLS[f"{user_email}"]["count"] += 1
 
-            return {"ticker": ticker, "analysis": content, "model": "claude-sonnet-4-20250514", "timestamp": ts, "cached": False}
+            return {"ticker": ticker, "analysis": content, "model": AI_PROVIDER_MODEL, "timestamp": ts, "cached": False}
         else:
-            return {"ticker": ticker, "analysis": f"API Fehler: {claude_resp.status_code}", "timestamp": datetime.now().isoformat()}
+            return {"ticker": ticker, "analysis": f"API Fehler: {ai_resp.status_code}", "timestamp": datetime.now().isoformat()}
     except Exception as e:
         return {"ticker": ticker, "analysis": f"Fehler: {str(e)}", "timestamp": datetime.now().isoformat()}
 

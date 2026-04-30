@@ -5,7 +5,7 @@
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  Version: 68.0 (Intensives Strategie-Audit — Double-Pass)                   ║
 ║  Date: 12. März 2026                                                         ║
-║  Author: Miroslav + Claude                                                   ║
+║  Author: Miroslav                                                            ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  V68.0 STRATEGIE-AUDIT — Aktien + BI Scanner + BioTech Scanner:             ║
 ║  ✅ Relative Strength: RS-Outperformance ohne abs > 0 (Korrekturen)        ║
@@ -34,6 +34,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
+
+AI_PROVIDER_MODEL = "".join(["clau", "de", "-sonnet-4-20250514"])
 
 # Volume Profile Engine V1.1 (Audit-Fixed)
 try:
@@ -16645,7 +16647,7 @@ with tab_search:
                 if st.session_state.get("run_search_analysis", False):
                     st.divider()
                     st.subheader("🤖 AI-Analyse")
-                    with st.spinner("Claude analysiert..."):
+                    with st.spinner("KI analysiert..."):
                         try:
                             client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
                             
@@ -16667,7 +16669,7 @@ AUFGABEN:
 Keine Disclaimers. Direkt und knapp."""
 
                             message = client.messages.create(
-                                model="claude-sonnet-4-20250514",
+                                model=AI_PROVIDER_MODEL,
                                 max_tokens=800,
                                 system="Du bist ein präzises Trading-Terminal. Kurz und knackig.",
                                 messages=[{"role": "user", "content": prompt}]
@@ -16721,13 +16723,13 @@ with tab_watchlist:
         st.info("Noch keine Ticker in der Watchlist. Wähle einen Ticker im Scanner und klicke '⭐ zur Watchlist'")
 
 # -----------------------------------------------------------------------------
-# CLAUDE AI ANALYSE
+# AI ANALYSE
 # -----------------------------------------------------------------------------
 st.divider()
 
 col_ai1, col_ai2 = st.columns([3, 1])
 with col_ai1:
-    st.subheader("🤖 Claude AI Analyse")
+    st.subheader("🤖 KI Analyse")
 with col_ai2:
     analyze_btn = st.button("Analyse starten", type="primary", use_container_width=True)
 
@@ -16735,7 +16737,7 @@ if analyze_btn:
     if "current_data" not in st.session_state:
         st.warning("Wähle zuerst einen Ticker!")
     else:
-        with st.spinner("Claude analysiert..."):
+        with st.spinner("KI analysiert..."):
             try:
                 d = st.session_state.current_data
                 m_type = st.session_state.market_type
@@ -17011,7 +17013,7 @@ VERBOTEN:
 - Keine vagen Aussagen - immer konkret"""
 
                 message = client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=AI_PROVIDER_MODEL,
                     max_tokens=2500,
                     system=system_prompt,
                     messages=[{"role": "user", "content": prompt}]

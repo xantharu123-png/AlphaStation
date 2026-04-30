@@ -1,7 +1,9 @@
 .streamlit/secrets.toml
 __pycache__/
 *.pyc
-audit_fix.patch
+*.patch
+*.local_backup
+backup_before_refactor/
 chrome-debug-profile*/
 http.err
 http.out

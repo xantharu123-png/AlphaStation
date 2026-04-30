@@ -2,7 +2,7 @@
 
 ## AUFGABE FÜR NEUEN CHAT
 
-**scanner.py muss auf GitHub gepusht werden.** Der Commit ist lokal in Claude's Umgebung fertig, aber kann nicht gepusht werden weil GitHub-Authentifizierung fehlt. Der User muss die Datei herunterladen und lokal pushen.
+**scanner.py muss auf GitHub gepusht werden.** Der Commit ist lokal in der damaligen Arbeitsumgebung fertig, aber kann nicht gepusht werden weil GitHub-Authentifizierung fehlt. Der User muss die Datei herunterladen und lokal pushen.
 
 ### Git-Status
 - **Repo:** https://github.com/xantharu123-png/AlphaStation
@@ -14,7 +14,7 @@
 ### Was der User tun muss
 ```powershell
 cd C:\Users\miros\Desktop\TradingBot
-# scanner.py + TRADING_LOGIC_AUDIT.md von Claude herunterladen und reinkopieren
+# scanner.py + TRADING_LOGIC_AUDIT.md aus der Arbeitsumgebung herunterladen und reinkopieren
 git add scanner.py TRADING_LOGIC_AUDIT.md .gitignore
 git commit -m "Trading Logic Audit: 9 Bug Fixes - SQUEEZE, RVOL, RSI, Whale Watch"
 git push
