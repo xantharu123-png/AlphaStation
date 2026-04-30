@@ -89,6 +89,8 @@ try:
 except ImportError:
     calculate_stock_setup_score = None
 
+from modules.trade_health import calculate_trade_health
+
 # Import pattern detection
 try:
     from modules.patterns import find_harmonic_for_chart, detect_chart_patterns, find_pivots, detect_order_blocks, detect_liquidity_levels
@@ -964,6 +966,20 @@ def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], r
     }
 
 
+def _attach_trade_health(item: Dict[str, Any], scanner_name: str) -> Dict[str, Any]:
+    """Attach the central execution-quality payload to one scanner row."""
+    health = calculate_trade_health(item, scanner_name=scanner_name)
+    item["trade_health"] = health
+    item["trade_health_score"] = health.get("health_score")
+    item["trade_decision"] = health.get("decision")
+    item["trade_decision_label"] = health.get("decision_label")
+    item["fakeout_risk"] = health.get("fakeout_risk")
+    item["chase_risk"] = health.get("chase_risk")
+    item.setdefault("entry_quality", health.get("entry_quality"))
+    item.setdefault("entry_quality_score", health.get("entry_quality_score"))
+    return health
+
+
 def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
     """Add consistent signal explanations and risk warnings to scanner rows."""
     decorated = []
@@ -1011,12 +1027,18 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         if cache_age_seconds is None:
             warnings.append("Cache-Alter unbekannt")
 
+        health = _attach_trade_health(item, scanner_name)
+        why.append(f"Trade Health: {health.get('decision_label')} ({health.get('health_score')}/100)")
+        why.append(f"Fakeout-Risiko: {health.get('fakeout_risk')} | Chase-Risiko: {health.get('chase_risk')}")
+        warnings.extend(health.get("warnings") or [])
+        exclusion_reasons = health.get("exclusion_reasons") or []
+
         item["_quality"] = {
             "why_in": why or ["Scanner-Regeln erfuellt, aber keine Detailgruende geliefert"],
-            "warnings": warnings,
+            "warnings": list(dict.fromkeys(warnings)),
             "data_source": source,
             "data_age_seconds": cache_age_seconds,
-            "exclusion_reasons": [],
+            "exclusion_reasons": exclusion_reasons,
             "risk_policy": {
                 "min_rr_preferred": RISK_POLICY["preferred_min_rr"],
                 "min_rvol_preferred": RISK_POLICY["min_rvol"],
@@ -1024,6 +1046,19 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
             },
         }
         decorated.append(item)
+    return decorated
+
+
+def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
+    """Decorate ORB container rows and the nested breakout/candidate rows."""
+    decorated = _decorate_scan_results(results, "orb", cache_age_seconds)
+    for payload in decorated:
+        if not isinstance(payload, dict):
+            continue
+        for list_key in ("breakouts", "failed_breakouts", "candidates"):
+            rows = payload.get(list_key)
+            if isinstance(rows, list):
+                payload[list_key] = _decorate_scan_results(rows, "orb", cache_age_seconds)
     return decorated
 
 
@@ -7646,7 +7681,7 @@ def get_orb_results():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception:
             pass
-    decorated = _decorate_scan_results(results, "orb", cache_age)
+    decorated = _decorate_orb_results(results, cache_age)
     quality = _scan_quality_payload("orb", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 

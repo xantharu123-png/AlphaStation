@@ -5,6 +5,7 @@ IB-Verbindung, Kontraktverwaltung und Order-Submission.
 Benötigt ib_insync (optional).
 """
 import threading
+import asyncio
 from datetime import datetime
 
 
@@ -17,10 +18,16 @@ def _debug_log(msg, error=None):
 
 # Check if ib_insync is available
 try:
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     from ib_insync import IB, Stock, Future, Forex, Crypto, LimitOrder, StopOrder, Order
     IB_INSYNC_AVAILABLE = True
-except ImportError:
+    IB_IMPORT_ERROR = None
+except Exception as _ib_import_err:
     IB_INSYNC_AVAILABLE = False
+    IB_IMPORT_ERROR = str(_ib_import_err)
     IB = Stock = Future = Forex = Crypto = LimitOrder = StopOrder = Order = None
 
 
@@ -28,7 +35,7 @@ _IB_STATE_LOCK = threading.RLock()
 _IB_STATE = {
     "ib": None,
     "connected": False,
-    "error": None,
+    "error": IB_IMPORT_ERROR,
     "connect_time": None,
     "errors": [],
 }

@@ -19,6 +19,9 @@ def test(name, score, lo, hi, details=""):
     print(f"  {'✅' if ok else '❌'} {name}: {score}/100  [{lo}-{hi}] {details}")
     passed += ok; failed += (not ok)
 
+# Helper fuer die scriptartige Score-Suite, kein pytest-Test mit Fixtures.
+test.__test__ = False
+
 def rank(name, a, b):
     global passed, failed
     ok = a > b
