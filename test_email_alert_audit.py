@@ -1,0 +1,74 @@
+import json
+from datetime import datetime
+
+import api
+
+
+def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "alerts.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [
+            {"ticker": "AAA", "grade": "A", "score": 72, "rvol": 1.2, "price": 10},
+            {"ticker": "BBB", "grade": "B", "score": 62, "rvol": 3.0, "price": 20},
+            {"ticker": "CCC", "grade": "S", "score": 90, "rvol": 0.2, "price": 30},
+        ],
+    }))
+
+    audit = api._build_alert_audit_for_cache("stock_strategy", str(cache_file))
+
+    assert audit["rows_checked"] == 3
+    assert audit["alertable_now_count"] == 1
+    assert audit["grade_counts"]["A"] == 1
+    assert audit["grade_counts"]["B"] == 1
+    assert audit["grade_counts"]["S"] == 1
+    assert audit["suppression_counts"]["grade_below_alert_threshold"] == 1
+    assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
+
+
+def test_alert_classifier_respects_cooldown():
+    api._EMAIL_COOLDOWN.clear()
+    now = 1_000_000.0
+    row = {"ticker": "ORB1", "grade": "A", "score": 80, "price": 12}
+
+    first = api._classify_alert_candidate("orb", row, now)
+    assert first["alertable_now"] is True
+
+    api._EMAIL_COOLDOWN[first["cooldown_key"]] = now
+    second = api._classify_alert_candidate("orb", row, now + 60)
+    assert second["alertable_now"] is False
+    assert "cooldown_active" in second["suppression_reasons"]
+
+
+def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    payload = {
+        "signals": [
+            {
+                "symbol": "WLDUSDT",
+                "exchange": "mexc",
+                "signal": {
+                    "grade": "A",
+                    "timing": "[-] JETZT SHORTEN",
+                    "entry": 1.2,
+                    "stop_loss": 1.5,
+                    "tp1": 0.9,
+                    "tp2": 0.7,
+                    "rr_effective": 1.5,
+                    "exh_score": 70,
+                },
+            },
+            {"symbol": "LOWUSDT", "exchange": "mexc", "signal": {"grade": "B", "timing": "WATCH"}},
+        ]
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert len(sent) == 1
+    assert "Pump & Dump" in sent[0][0]
+    assert "WLD" in sent[0][1]
+    assert "LOW" not in sent[0][1]

@@ -699,6 +699,10 @@ _EMAIL_COOLDOWN = {}
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
 _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach Restart
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
+_EMAIL_SEND_LOG: List[Dict[str, Any]] = []
+_ALERT_TOP_GRADES = {"S", "A", "A+"}
+_ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
+_ALERT_MIN_RVOL = 0.7
 
 print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
@@ -728,21 +732,178 @@ def _email_alert_status() -> Dict[str, Any]:
     }
 
 
+def _record_email_event(subject: str, status: str, reason: str = "") -> None:
+    _EMAIL_SEND_LOG.append({
+        "timestamp": datetime.now().isoformat(),
+        "subject": subject,
+        "status": status,
+        "reason": reason,
+    })
+    if len(_EMAIL_SEND_LOG) > 50:
+        del _EMAIL_SEND_LOG[:-50]
+
+
+def _alert_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(val) or math.isinf(val):
+        return default
+    return val
+
+
+def _extract_alert_grade(row: Dict[str, Any]) -> str:
+    for key in ("BI_Grade", "Grade", "grade", "rating", "ExhGrade", "base_grade"):
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip().upper()
+    return ""
+
+
+def _extract_alert_score(row: Dict[str, Any]) -> Any:
+    for key in ("BI_Score", "Score", "score", "Alpha", "Setup_Score", "exhaustion_score", "raw_score", "SellProb"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return 0
+
+
+def _extract_alert_rvol(row: Dict[str, Any]) -> Optional[float]:
+    for key in ("RVOL", "rvol", "relative_volume"):
+        if key in row:
+            return _alert_float(row.get(key))
+    return None
+
+
+def _extract_alert_ticker(row: Dict[str, Any]) -> str:
+    for key in ("ticker", "Ticker", "symbol", "Symbol", "contract"):
+        value = row.get(key)
+        if value:
+            return str(value).strip().upper()
+    return ""
+
+
+def _extract_alert_price(row: Dict[str, Any]) -> Any:
+    for key in ("Preis", "price", "current", "current_price", "entry"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return 0
+
+
+def _alert_cooldown_remaining(key: str, now: Optional[float] = None) -> int:
+    now = now or time.time()
+    last = _EMAIL_COOLDOWN.get(key)
+    if not last:
+        return 0
+    return max(0, int(_EMAIL_COOLDOWN_SEC - (now - last)))
+
+
+def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    now = now or time.time()
+    ticker = _extract_alert_ticker(row)
+    grade = _extract_alert_grade(row)
+    rvol = _extract_alert_rvol(row)
+    reasons = []
+
+    if not ticker:
+        reasons.append("missing_ticker")
+    if grade not in _ALERT_TOP_GRADES:
+        reasons.append("grade_below_alert_threshold")
+    if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and (rvol is None or rvol < _ALERT_MIN_RVOL):
+        reasons.append("rvol_below_alert_threshold")
+
+    cooldown_key = f"{scanner_name}_{ticker}" if ticker else ""
+    cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
+    if cooldown_remaining > 0:
+        reasons.append("cooldown_active")
+
+    return {
+        "ticker": ticker,
+        "grade": grade,
+        "score": _extract_alert_score(row),
+        "price": _extract_alert_price(row),
+        "rvol": rvol,
+        "cooldown_key": cooldown_key,
+        "cooldown_remaining_seconds": cooldown_remaining,
+        "alertable_now": not reasons,
+        "suppression_reasons": reasons,
+    }
+
+
+def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> List[Dict[str, Any]]:
+    rows, _ = load_cache_file(cache_file, max_age_hours=24)
+    if scanner_name == "orb":
+        flat = []
+        for container in rows:
+            if isinstance(container, dict):
+                for key in ("breakouts", "failed_breakouts", "candidates"):
+                    flat.extend([r for r in container.get(key, []) or [] if isinstance(r, dict)])
+        return flat
+    if scanner_name == "bear":
+        flat = []
+        for container in rows:
+            if isinstance(container, dict):
+                flat.extend([r for r in container.get("breakdown_stocks", []) or [] if isinstance(r, dict)])
+                for etf in container.get("inverse_etfs", []) or []:
+                    if isinstance(etf, dict):
+                        item = dict(etf)
+                        item["grade"] = "A" if item.get("signal") == "STARK" else ""
+                        flat.append(item)
+        return flat
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str, Any]:
+    rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file)
+    now = time.time()
+    grade_counts: Dict[str, int] = {}
+    reason_counts: Dict[str, int] = {}
+    alertable = []
+    for row in rows:
+        state = _classify_alert_candidate(scanner_name, row, now)
+        grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
+        if state["alertable_now"]:
+            alertable.append(state)
+        for reason in state["suppression_reasons"]:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+    cache_age = None
+    if os.path.exists(cache_file):
+        cache_age = int(max(0, time.time() - os.path.getmtime(cache_file)))
+
+    return {
+        "scanner": scanner_name,
+        "cache_file": os.path.basename(cache_file),
+        "cache_exists": os.path.exists(cache_file),
+        "cache_age_seconds": cache_age,
+        "rows_checked": len(rows),
+        "grade_counts": grade_counts,
+        "alertable_now_count": len(alertable),
+        "alertable_preview": alertable[:10],
+        "suppression_counts": reason_counts,
+    }
+
+
 def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False):
     """Sendet E-Mail Alert via Gmail SMTP."""
     # V2.6b: Nach Restart 5 Min warten (alte Cache-Daten erzeugen Phantom-Alerts)
     if not bypass_startup_cooldown and time.time() - _EMAIL_STARTUP_TIME < _EMAIL_STARTUP_DELAY:
         print(f"[Alert] SKIP (Startup-Cooldown): {subject}")
+        _record_email_event(subject, "skipped", "startup_cooldown")
         return False
     gmail_user = _SECRETS.get("GMAIL_USER", "")
     gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
     alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
     if not gmail_user or not gmail_pass:
         print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
+        _record_email_event(subject, "skipped", "missing_gmail_config")
         return False
     recipients = [addr.strip() for addr in str(alert_to).split(",") if addr.strip()]
     if not recipients:
         print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
+        _record_email_event(subject, "skipped", "missing_recipient")
         return False
     for attempt in range(3):
         try:
@@ -767,12 +928,14 @@ def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False)
                     server.login(gmail_user, gmail_pass)
                     server.sendmail(gmail_user, recipients, msg.as_string())
             print(f"[Alert] Email gesendet: {subject}")
+            _record_email_event(subject, "sent")
             return True
         except Exception as e:
             if attempt < 2:
                 time.sleep(2 ** attempt)
             else:
                 print(f"[Alert] Email FEHLER nach 3 Versuchen: {e}")
+                _record_email_event(subject, "error", str(e))
                 return False
 
 
@@ -794,18 +957,23 @@ def _check_and_alert(scanner_name, cache_file):
         print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
         # V2.6: Grade-Schwellen VERSCHÄRFT — nur noch hochkarätige Setups
         # BI: S/A (kein B mehr!), Biotech: A (hat kein S)
-        _alert_grades = {"S", "A", "A+"}
         alerts = []
+        suppressed: Dict[str, int] = {}
+        _alert_grades = _ALERT_TOP_GRADES
         for r in results:
             if not isinstance(r, dict):
                 continue
-            ticker = r.get("ticker", r.get("Ticker", r.get("symbol", "")))
-            grade = r.get("BI_Grade", r.get("Grade", r.get("grade", r.get("rating", ""))))
-            score = r.get("BI_Score", r.get("Score", r.get("score", r.get("Alpha", 0))))
-            _rvol_raw = r.get("RVOL", r.get("rvol", None))
-            _rvol_check = _rvol_raw if _rvol_raw is not None else 0
+            state = _classify_alert_candidate(scanner_name, r, now)
+            ticker = state["ticker"]
+            grade = state["grade"]
+            score = state["score"]
+            _rvol_check = state["rvol"] if state["rvol"] is not None else 0
+            if not state["alertable_now"]:
+                for reason in state["suppression_reasons"]:
+                    suppressed[reason] = suppressed.get(reason, 0) + 1
+                continue
             # RVOL Guard: Grade S/A braucht min RVOL 0.7 — Sicherheitsnetz
-            if grade in ("S", "A", "A+") and _rvol_check < 0.7:
+            if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and grade in ("S", "A", "A+") and _rvol_check < 0.7:
                 grade = "B"  # Downgrade — kein Alert
             if grade not in _alert_grades:
                 continue
@@ -819,8 +987,8 @@ def _check_and_alert(scanner_name, cache_file):
                            "rvol": r.get("RVOL", r.get("rvol", 0))})
         if not alerts:
             # Log warum keine Alerts
-            all_grades = [r.get("BI_Grade", r.get("Grade", "?")) for r in results if isinstance(r, dict)]
-            print(f"[Alert] {scanner_name}: Keine alertbaren Grades. Vorhandene Grades: {dict((g, all_grades.count(g)) for g in set(all_grades))}")
+            all_grades = [_extract_alert_grade(r) or "?" for r in results if isinstance(r, dict)]
+            print(f"[Alert] {scanner_name}: Keine alertbaren Grades. Vorhandene Grades: {dict((g, all_grades.count(g)) for g in set(all_grades))}; suppressed={suppressed}")
             return
         labels = {"bi_long": "BI Scanner LONG", "bi_short": "BI Scanner SHORT",
                   "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
@@ -852,6 +1020,121 @@ def _check_and_alert(scanner_name, cache_file):
     except Exception as e:
         import traceback
         print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
+
+
+def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
+    """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
+    if not results:
+        return
+    scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
+    now = time.time()
+    alerts = []
+    for row in results[:25]:
+        if not isinstance(row, dict):
+            continue
+        state = _classify_alert_candidate(scanner_key, row, now)
+        if not state["alertable_now"]:
+            continue
+        _EMAIL_COOLDOWN[state["cooldown_key"]] = now
+        alerts.append({
+            "ticker": state["ticker"],
+            "grade": state["grade"],
+            "score": state["score"],
+            "price": state["price"],
+            "rvol": _alert_float(state["rvol"], 0) or 0,
+            "change_pct": _alert_float(row.get("Change_Pct", row.get("change_pct", row.get("Change%", 0))), 0) or 0,
+            "strategy": strategy_name,
+            "market_type": market_type,
+        })
+
+    if not alerts:
+        return
+
+    rows = ""
+    for a in alerts[:10]:
+        rows += (
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["price"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td></tr>'
+        )
+    label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie"
+    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+    <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} S/A Setup(s)</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
+    <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
+    <th style="padding:8px;text-align:left">Score</th><th style="padding:8px;text-align:left">Preis</th>
+    <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th></tr>
+    {rows}</table>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur Grade S/A/A+; 8h Cooldown pro Ticker.</p>
+    </body></html>'''
+    _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
+
+
+def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
+    """Mail S/A active Pump-&-Dump short signals from the FastAPI pipeline."""
+    signals = payload.get("signals", []) if isinstance(payload, dict) else []
+    if not signals:
+        return
+    now = time.time()
+    alerts = []
+    for entry in signals:
+        if not isinstance(entry, dict):
+            continue
+        sig = entry.get("signal", {}) or {}
+        grade = str(sig.get("grade", "")).upper()
+        if grade not in _ALERT_TOP_GRADES:
+            continue
+        symbol = _display_crypto_contract_symbol(entry.get("symbol") or sig.get("symbol") or "")
+        cooldown_key = f"new_listing_{symbol}"
+        if _alert_cooldown_remaining(cooldown_key, now) > 0:
+            continue
+        _EMAIL_COOLDOWN[cooldown_key] = now
+        alerts.append({
+            "symbol": symbol,
+            "exchange": entry.get("exchange", ""),
+            "grade": grade,
+            "timing": sig.get("timing", ""),
+            "entry": sig.get("entry", 0),
+            "stop": sig.get("stop_loss", sig.get("stop", 0)),
+            "tp1": sig.get("tp1", 0),
+            "tp2": sig.get("tp2", 0),
+            "rr": sig.get("rr_effective", sig.get("rr1", 0)),
+            "exh_score": sig.get("exh_score", 0),
+        })
+    if not alerts:
+        return
+
+    rows = ""
+    for a in alerts[:10]:
+        rows += (
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["symbol"]}</b></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["exchange"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["timing"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["entry"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["tp1"]} / ${a["tp2"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R</td></tr>'
+        )
+    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
+    <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} aktive S/A Signale</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
+    <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
+    <th style="padding:8px;text-align:left">Timing</th><th style="padding:8px;text-align:left">Entry</th>
+    <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
+    <th style="padding:8px;text-align:left">R</th></tr>
+    {rows}</table>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur aktive Signale, nicht Watchlist; 8h Cooldown pro Coin.</p>
+    </body></html>'''
+    _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -2436,6 +2719,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         save_cache_file(_strat_cache, results)
         save_cache_file(STRATEGY_SCAN_CACHE, results)  # Fallback für alte Clients
         print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer → {_strat_cache}")
+        _send_strategy_scan_alerts(strategy_name, results, "stocks")
 
     except Exception as e:
         print(f"[Strategy Scan] Fehler: {e}")
@@ -2587,6 +2871,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         _strat_cache = _strategy_cache_path(strategy_name, "crypto")
         save_cache_file(_strat_cache, results)
         print(f"[Crypto Strategy] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
+        _send_strategy_scan_alerts(strategy_name, results, "crypto")
     except Exception as e:
         print(f"[Crypto Strategy] Fehler: {e}")
         import traceback
@@ -3903,6 +4188,48 @@ def get_email_alert_status():
     }
 
 
+@app.get("/api/email-alert-audit")
+def get_email_alert_audit():
+    """Show which scanner results are currently email-alert eligible."""
+    cache_targets = {
+        "bi_long": BI_CACHE_LONG,
+        "bi_short": BI_CACHE_SHORT,
+        "biotech": BIOTECH_CACHE,
+        "bear": BEAR_CACHE,
+        "orb": ORB_CACHE,
+        "new_listing": NEW_LISTING_CACHE,
+        "volume_spikes": VOLUME_SPIKES_CACHE,
+        "strategy_scan": STRATEGY_SCAN_CACHE,
+    }
+    scanners = {}
+    for name, path in cache_targets.items():
+        try:
+            scanners[name] = _build_alert_audit_for_cache(name, path)
+        except Exception as exc:
+            scanners[name] = {"scanner": name, "error": str(exc), "cache_file": os.path.basename(path)}
+
+    return {
+        "status": "ok",
+        "email_alerts": _email_alert_status(),
+        "policy": {
+            "top_grades": sorted(_ALERT_TOP_GRADES),
+            "cooldown_seconds": _EMAIL_COOLDOWN_SEC,
+            "startup_delay_seconds": _EMAIL_STARTUP_DELAY,
+            "rvol_guard_scanners": sorted(_ALERT_RVOL_GUARD_SCANNERS),
+            "min_rvol": _ALERT_MIN_RVOL,
+            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email.",
+        },
+        "coverage": {
+            "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing"],
+            "manual_scan_alerts": ["stock_strategy", "crypto_strategy"],
+            "informational_no_trade_email": ["early_movers", "btc_divergenz", "money_flow", "crash_monitor"],
+        },
+        "scanners": scanners,
+        "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 @app.get("/api/risk-policy")
 def get_risk_policy():
     """Central risk guardrails used by scanner quality explanations."""
@@ -3940,7 +4267,7 @@ def test_email_alert():
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
         <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
         <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
-        <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A</b> (BI + Biotech), <b>Bear (2x/Tag bei starken Signalen)</b>, <b>Crash Flash (≥-15%)</b>, <b>ORB Breakouts</b> (Grade S/A).</p>
+        <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A/A+</b> (BI + Biotech), <b>Bear/Crash</b>, <b>ORB Breakouts</b>, <b>Pump-&-Dump SHORT</b> und manuellen Aktien-/Crypto-Strategie-Scans mit Top-Grade.</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>''',
         bypass_startup_cooldown=True,
@@ -7161,6 +7488,7 @@ def _new_listing_wrapper() -> None:
     try:
         seed_instrument_cache()
         payload = run_new_listing_scanner()
+        _send_new_listing_pipeline_alerts(payload if isinstance(payload, dict) else {})
         results = _flatten_new_listing_pipeline_results(payload if isinstance(payload, dict) else {})
         save_cache_file(NEW_LISTING_CACHE, results)
         print(f"[New Listing] Full pipeline processed {len(results)} UI rows")
@@ -7850,6 +8178,14 @@ def _orb_scanner_wrapper() -> None:
 
         # ── Alert bei Grade S/A Breakouts ──
         alert_breakouts = [b for b in breakouts if b.get("grade") in ("S", "A")]
+        _alert_now = time.time()
+        _fresh_alert_breakouts = []
+        for _b in alert_breakouts:
+            _state = _classify_alert_candidate("orb", _b, _alert_now)
+            if _state["alertable_now"]:
+                _EMAIL_COOLDOWN[_state["cooldown_key"]] = _alert_now
+                _fresh_alert_breakouts.append(_b)
+        alert_breakouts = _fresh_alert_breakouts
         if alert_breakouts:
             rows = ""
             for b in alert_breakouts:
