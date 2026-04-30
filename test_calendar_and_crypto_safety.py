@@ -33,6 +33,23 @@ def test_calendar_uses_official_macro_sources_for_full_2026_core_calendar():
     assert "for month in []:" in api_source
 
 
+def test_calendar_includes_major_exchange_hours_and_holiday_status():
+    api_source = (ROOT / "api.py").read_text(encoding="utf-8")
+    frontend_source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+
+    assert "EXCHANGE_CALENDARS_2026" in api_source
+    assert '"exchanges": _build_exchange_calendar_status()' in api_source
+    assert "NYSE / Nasdaq" in api_source
+    assert "London Stock Exchange" in api_source
+    assert "Xetra / Frankfurt" in api_source
+    assert "Tokyo Stock Exchange" in api_source
+    assert "Hong Kong Exchange" in api_source
+    assert "2026-11-27" in api_source
+    assert "2026-09-22" in api_source
+    assert "Boersenzeiten & Feiertage" in frontend_source
+    assert "Naechster Feiertag" in frontend_source
+
+
 def test_scanner_quality_and_safe_deploy_are_present():
     api_source = (ROOT / "api.py").read_text(encoding="utf-8")
     deploy_script = (ROOT / "deploy" / "safe_deploy.sh").read_text(encoding="utf-8")

@@ -4704,6 +4704,7 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 // Kalender Tab
 function KalenderTab() {
     const [events, setEvents] = useState([]);
+    const [exchanges, setExchanges] = useState([]);
     const [calendarMeta, setCalendarMeta] = useState(null);
     const [loading, setLoading] = useState(true);
 
@@ -4714,6 +4715,7 @@ function KalenderTab() {
                 if (response.ok) {
                     const data = await response.json();
                     setEvents(data.events || []);
+                    setExchanges(data.exchanges || []);
                     setCalendarMeta({ source: data.source, note: data.note, timestamp: data.timestamp, official_count: data.official_count, estimated_count: data.estimated_count, official_sources: data.official_sources || [] });
                 }
             } catch (err) {
@@ -4738,6 +4740,12 @@ function KalenderTab() {
         if (i === 'low') return 'Niedrig';
         return imp || '–';
     };
+    const getExchangeStatusStyle = (status) => {
+        if (status === 'open') return { bg: '#dcfce7', color: '#047857', border: '#86efac' };
+        if (status === 'break') return { bg: '#fef3c7', color: '#92400e', border: '#fcd34d' };
+        if (status === 'holiday') return { bg: '#fee2e2', color: '#b91c1c', border: '#fca5a5' };
+        return { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' };
+    };
     const formatEventDate = (dateStr) => {
         if (!dateStr) return '–';
         const [y, m, d] = dateStr.split('-').map(Number);
@@ -4747,6 +4755,71 @@ function KalenderTab() {
 
     return (
         <div className="space-y-6">
+            <div className="card border border-gray-200 p-6 rounded-lg">
+                <div className="flex items-start justify-between gap-4 mb-4 flex-wrap">
+                    <div>
+                        <h3 className="text-lg font-bold text-gray-900">Boersenzeiten & Feiertage</h3>
+                        <p className="text-sm text-gray-500">Top-5 Maerkte mit lokaler Zeit, Zuerich-Zeit und Feiertagsstatus.</p>
+                    </div>
+                    <span className="text-xs px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">Live-Zeitcheck</span>
+                </div>
+                {loading ? (
+                    <div className="flex justify-center py-5"><div className="loading-spinner"></div></div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+                        {exchanges.map((exchange) => {
+                            const style = getExchangeStatusStyle(exchange.status);
+                            return (
+                                <div key={exchange.code} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                                    <div className="flex items-start justify-between gap-2 mb-3">
+                                        <div>
+                                            <div className="text-sm font-bold text-gray-900">{exchange.name}</div>
+                                            <div className="text-xs text-gray-500">{exchange.country} · {exchange.currency}</div>
+                                        </div>
+                                        <span style={{background: style.bg, color: style.color, borderColor: style.border}} className="text-xs font-bold px-2 py-1 rounded-full border">
+                                            {exchange.status_label}
+                                        </span>
+                                    </div>
+                                    <div className="space-y-2 text-xs text-gray-600">
+                                        <div>
+                                            <div className="font-semibold text-gray-800">Handelszeit lokal</div>
+                                            <div>{exchange.regular_hours_local}</div>
+                                        </div>
+                                        <div>
+                                            <div className="font-semibold text-gray-800">In Zuerich</div>
+                                            <div>{exchange.regular_hours_zurich}</div>
+                                        </div>
+                                        {exchange.special_hours && (
+                                            <div className="rounded-lg bg-amber-50 border border-amber-100 px-2 py-1 text-amber-800 font-semibold">
+                                                {exchange.special_hours}
+                                            </div>
+                                        )}
+                                        {exchange.is_open ? (
+                                            <div className="rounded-lg bg-green-50 border border-green-100 px-2 py-1 text-green-800">
+                                                Offen bis {exchange.next_close_zurich || exchange.next_close_local}
+                                            </div>
+                                        ) : (
+                                            <div className="rounded-lg bg-gray-50 border border-gray-100 px-2 py-1 text-gray-700">
+                                                {exchange.closed_reason || 'Geschlossen'}{exchange.next_open_zurich ? ` · Naechste Oeffnung: ${exchange.next_open_zurich}` : ''}
+                                            </div>
+                                        )}
+                                        {exchange.next_holiday && (
+                                            <div>
+                                                <span className="font-semibold text-gray-800">Naechster Feiertag:</span> {formatEventDate(exchange.next_holiday.date)} · {exchange.next_holiday.name}
+                                            </div>
+                                        )}
+                                        <div className="pt-1">
+                                            <a href={exchange.holiday_source_url || exchange.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+                                                Quelle: {exchange.source}
+                                            </a>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 {calendarMeta?.note && (
                     <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800">

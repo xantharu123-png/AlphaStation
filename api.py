@@ -3520,10 +3520,11 @@ def _build_system_health() -> Dict[str, Any]:
         },
         "scans": scan_health,
         "calendar": {
-            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census"],
+            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
             "official_event_families": ["FOMC/FED", "CPI", "NFP", "PPI", "GDP/PCE", "Retail Sales", "Advance Economic Indicators"],
+            "exchange_calendars": ["NYSE/Nasdaq", "LSE", "Xetra/Frankfurt", "Tokyo", "Hong Kong"],
             "estimated_event_families": ["Earnings Season", "ISM Manufacturing PMI", "Initial Jobless Claims"],
-            "quality": "official_core_macro_marked_estimates_remaining",
+            "quality": "official_core_macro_plus_2026_exchange_hours_marked_estimates_remaining",
         },
         "risk_policy": RISK_POLICY,
         "warnings": warnings,
@@ -7994,6 +7995,315 @@ def _add_event(events: List[Dict[str, Any]], *, date_str: str, event: str, impor
     events.append(item)
 
 
+EXCHANGE_CALENDARS_2026 = [
+    {
+        "code": "US",
+        "name": "NYSE / Nasdaq",
+        "country": "USA",
+        "timezone": "America/New_York",
+        "city_label": "New York",
+        "currency": "USD",
+        "segments": [("09:30", "16:00")],
+        "source": "NYSE / Nasdaq",
+        "source_url": "https://www.nyse.com/markets/hours-calendars",
+        "holiday_source_url": "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
+        "holidays": {
+            "2026-01-01": "New Year's Day",
+            "2026-01-19": "Martin Luther King Jr. Day",
+            "2026-02-16": "Washington's Birthday / Presidents Day",
+            "2026-04-03": "Good Friday",
+            "2026-05-25": "Memorial Day",
+            "2026-06-19": "Juneteenth National Independence Day",
+            "2026-07-03": "Independence Day observed",
+            "2026-09-07": "Labor Day",
+            "2026-11-26": "Thanksgiving Day",
+            "2026-12-25": "Christmas Day",
+        },
+        "early_closes": {
+            "2026-07-02": {"name": "Early close before Independence Day", "close": "13:00"},
+            "2026-11-27": {"name": "Early close after Thanksgiving", "close": "13:00"},
+            "2026-12-24": {"name": "Christmas Eve early close", "close": "13:00"},
+        },
+    },
+    {
+        "code": "LSE",
+        "name": "London Stock Exchange",
+        "country": "UK",
+        "timezone": "Europe/London",
+        "city_label": "London",
+        "currency": "GBP",
+        "segments": [("08:00", "16:30")],
+        "source": "LSE",
+        "source_url": "https://www.londonstockexchange.com/",
+        "holiday_source_url": "https://www.londonstockexchange.com/",
+        "holidays": {
+            "2026-01-01": "New Year's Day",
+            "2026-04-03": "Good Friday",
+            "2026-04-06": "Easter Monday",
+            "2026-05-04": "Early May Bank Holiday",
+            "2026-05-25": "Spring Bank Holiday",
+            "2026-08-31": "Summer Bank Holiday",
+            "2026-12-25": "Christmas Day",
+            "2026-12-28": "Boxing Day substitute",
+        },
+        "early_closes": {
+            "2026-12-24": {"name": "Christmas Eve early close", "close": "12:30"},
+            "2026-12-31": {"name": "New Year's Eve early close", "close": "12:30"},
+        },
+    },
+    {
+        "code": "XETRA",
+        "name": "Xetra / Frankfurt",
+        "country": "Deutschland",
+        "timezone": "Europe/Berlin",
+        "city_label": "Frankfurt",
+        "currency": "EUR",
+        "segments": [("09:00", "17:30")],
+        "source": "Deutsche Boerse",
+        "source_url": "https://www.xetra.com/xetra-en/newsroom/trading-calendar",
+        "holiday_source_url": "https://www.xetra.com/xetra-en/newsroom/trading-calendar",
+        "holidays": {
+            "2026-01-01": "Neujahr",
+            "2026-04-03": "Karfreitag",
+            "2026-04-06": "Ostermontag",
+            "2026-05-01": "Tag der Arbeit",
+            "2026-12-24": "Heiligabend",
+            "2026-12-25": "1. Weihnachtstag",
+            "2026-12-31": "Silvester",
+        },
+        "early_closes": {},
+    },
+    {
+        "code": "TSE",
+        "name": "Tokyo Stock Exchange",
+        "country": "Japan",
+        "timezone": "Asia/Tokyo",
+        "city_label": "Tokyo",
+        "currency": "JPY",
+        "segments": [("09:00", "11:30"), ("12:30", "15:30")],
+        "source": "JPX",
+        "source_url": "https://www.jpx.co.jp/english/corporate/about-jpx/calendar/",
+        "holiday_source_url": "https://www.jpx.co.jp/english/corporate/about-jpx/calendar/",
+        "holidays": {
+            "2026-01-01": "New Year's Day",
+            "2026-01-02": "Market Holiday",
+            "2026-01-03": "Market Holiday",
+            "2026-01-12": "Coming of Age Day",
+            "2026-02-11": "National Foundation Day",
+            "2026-02-23": "Emperor's Birthday",
+            "2026-03-20": "Vernal Equinox",
+            "2026-04-29": "Showa Day",
+            "2026-05-03": "Constitution Memorial Day",
+            "2026-05-04": "Greenery Day",
+            "2026-05-05": "Children's Day",
+            "2026-05-06": "Constitution Memorial Day observed",
+            "2026-07-20": "Marine Day",
+            "2026-08-11": "Mountain Day",
+            "2026-09-21": "Respect for the Aged Day",
+            "2026-09-22": "National holiday",
+            "2026-09-23": "Autumnal Equinox",
+            "2026-10-12": "Sports Day",
+            "2026-11-03": "Culture Day",
+            "2026-11-23": "Labor Thanksgiving Day",
+            "2026-12-31": "Market Holiday",
+        },
+        "early_closes": {},
+    },
+    {
+        "code": "HKEX",
+        "name": "Hong Kong Exchange",
+        "country": "Hongkong",
+        "timezone": "Asia/Hong_Kong",
+        "city_label": "Hong Kong",
+        "currency": "HKD",
+        "segments": [("09:30", "12:00"), ("13:00", "16:00")],
+        "source": "HKEX",
+        "source_url": "https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Calendar-and-Trading-Hours?sc_lang=en",
+        "holiday_source_url": "https://www.hkex.com.hk/-/media/HKEX-Market/Services/Market-Data-Services/Infrastructure/Index-Feed-Calendar-2026-%28English-%2C-a-%2C-Chinese%29.pdf",
+        "holidays": {
+            "2026-01-01": "The first day of January",
+            "2026-02-17": "Lunar New Year's Day",
+            "2026-02-18": "The second day of Lunar New Year",
+            "2026-02-19": "The third day of Lunar New Year",
+            "2026-04-03": "Good Friday",
+            "2026-04-06": "The day following Ching Ming Festival",
+            "2026-04-07": "The day following Easter Monday",
+            "2026-05-01": "Labour Day",
+            "2026-05-25": "The day following the Birthday of the Buddha",
+            "2026-06-19": "Tuen Ng Festival",
+            "2026-07-01": "HKSAR Establishment Day",
+            "2026-10-01": "National Day",
+            "2026-10-19": "The day following Chung Yeung Festival",
+            "2026-12-25": "Christmas Day",
+        },
+        "early_closes": {},
+    },
+]
+
+
+def _exchange_minutes(hhmm: str) -> int:
+    hour, minute = [int(part) for part in hhmm.split(":")]
+    return hour * 60 + minute
+
+
+def _exchange_dt(local_date, hhmm: str, tz):
+    from datetime import datetime as _dt, time as _dt_time
+    hour, minute = [int(part) for part in hhmm.split(":")]
+    return _dt.combine(local_date, _dt_time(hour, minute), tzinfo=tz)
+
+
+def _exchange_segments_for_day(exchange: Dict[str, Any], date_str: str) -> List[tuple[str, str]]:
+    segments = list(exchange.get("segments") or [])
+    early = (exchange.get("early_closes") or {}).get(date_str)
+    if not early:
+        return segments
+
+    early_close = early.get("close")
+    if not early_close:
+        return segments
+
+    early_minutes = _exchange_minutes(early_close)
+    adjusted = []
+    for start, end in segments:
+        if _exchange_minutes(start) < early_minutes:
+            adjusted.append((start, early_close if _exchange_minutes(end) > early_minutes else end))
+    return adjusted
+
+
+def _is_exchange_trading_day(exchange: Dict[str, Any], local_date) -> bool:
+    return local_date.weekday() < 5 and local_date.isoformat() not in (exchange.get("holidays") or {})
+
+
+def _next_exchange_session(exchange: Dict[str, Any], start_date):
+    from datetime import timedelta as _timedelta
+    probe = start_date
+    for _ in range(370):
+        if _is_exchange_trading_day(exchange, probe):
+            segments = _exchange_segments_for_day(exchange, probe.isoformat())
+            if segments:
+                return probe, segments[0][0]
+        probe += _timedelta(days=1)
+    return None, None
+
+
+def _format_exchange_dt(dt_obj, city_label: str) -> str:
+    return f"{dt_obj.strftime('%d.%m. %H:%M')} {city_label}"
+
+
+def _build_exchange_calendar_status(now_utc=None) -> List[Dict[str, Any]]:
+    from datetime import datetime as _dt, timezone as _timezone, timedelta as _timedelta
+    from zoneinfo import ZoneInfo
+
+    if now_utc is None:
+        now_utc = _dt.now(_timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=_timezone.utc)
+
+    zurich_tz = ZoneInfo("Europe/Zurich")
+    result = []
+
+    for exchange in EXCHANGE_CALENDARS_2026:
+        tz = ZoneInfo(exchange["timezone"])
+        now_local = now_utc.astimezone(tz)
+        local_date = now_local.date()
+        date_str = local_date.isoformat()
+        holidays = exchange.get("holidays") or {}
+        early = (exchange.get("early_closes") or {}).get(date_str)
+        segments = _exchange_segments_for_day(exchange, date_str)
+        now_minutes = now_local.hour * 60 + now_local.minute
+
+        status = "closed"
+        status_label = "Geschlossen"
+        closed_reason = "Ausserhalb der Handelszeit"
+        next_open_dt = None
+        next_close_dt = None
+
+        if date_str in holidays:
+            status = "holiday"
+            closed_reason = f"Feiertag: {holidays[date_str]}"
+            next_date, next_open = _next_exchange_session(exchange, local_date + _timedelta(days=1))
+            if next_date and next_open:
+                next_open_dt = _exchange_dt(next_date, next_open, tz)
+        elif local_date.weekday() >= 5:
+            closed_reason = "Wochenende"
+            next_date, next_open = _next_exchange_session(exchange, local_date + _timedelta(days=1))
+            if next_date and next_open:
+                next_open_dt = _exchange_dt(next_date, next_open, tz)
+        else:
+            for start, end in segments:
+                start_min = _exchange_minutes(start)
+                end_min = _exchange_minutes(end)
+                if start_min <= now_minutes < end_min:
+                    status = "open"
+                    status_label = "Offen"
+                    closed_reason = ""
+                    next_close_dt = _exchange_dt(local_date, end, tz)
+                    break
+
+            if status != "open":
+                future_segments = [seg for seg in segments if _exchange_minutes(seg[0]) > now_minutes]
+                past_segments = [seg for seg in segments if _exchange_minutes(seg[1]) <= now_minutes]
+                if future_segments:
+                    next_open_dt = _exchange_dt(local_date, future_segments[0][0], tz)
+                    if past_segments:
+                        status = "break"
+                        status_label = "Pause"
+                        closed_reason = "Mittagspause"
+                    else:
+                        closed_reason = "Noch nicht geoeffnet"
+                else:
+                    next_date, next_open = _next_exchange_session(exchange, local_date + _timedelta(days=1))
+                    if next_date and next_open:
+                        next_open_dt = _exchange_dt(next_date, next_open, tz)
+                    closed_reason = "Handelstag beendet"
+
+        next_holiday = None
+        for holiday_date, holiday_name in sorted(holidays.items()):
+            if holiday_date >= date_str:
+                next_holiday = {"date": holiday_date, "name": holiday_name}
+                break
+
+        def _segments_label(target_tz, label):
+            labels = []
+            for start, end in segments:
+                start_dt = _exchange_dt(local_date, start, tz).astimezone(target_tz)
+                end_dt = _exchange_dt(local_date, end, tz).astimezone(target_tz)
+                labels.append(f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}")
+            return f"{' / '.join(labels)} {label}" if labels else "geschlossen"
+
+        next_open_zurich = next_open_dt.astimezone(zurich_tz) if next_open_dt else None
+        next_close_zurich = next_close_dt.astimezone(zurich_tz) if next_close_dt else None
+
+        result.append({
+            "code": exchange["code"],
+            "name": exchange["name"],
+            "country": exchange["country"],
+            "currency": exchange["currency"],
+            "timezone": exchange["timezone"],
+            "city_label": exchange["city_label"],
+            "market_date": date_str,
+            "status": status,
+            "status_label": status_label,
+            "is_open": status == "open",
+            "closed_reason": closed_reason,
+            "holiday_today": holidays.get(date_str),
+            "special_hours": early.get("name") if early else None,
+            "regular_hours_local": _segments_label(tz, exchange["city_label"]),
+            "regular_hours_zurich": _segments_label(zurich_tz, "Zuerich"),
+            "now_local": now_local.strftime("%H:%M"),
+            "next_open_local": _format_exchange_dt(next_open_dt, exchange["city_label"]) if next_open_dt else None,
+            "next_open_zurich": _format_exchange_dt(next_open_zurich, "Zuerich") if next_open_zurich else None,
+            "next_close_local": _format_exchange_dt(next_close_dt, exchange["city_label"]) if next_close_dt else None,
+            "next_close_zurich": _format_exchange_dt(next_close_zurich, "Zuerich") if next_close_zurich else None,
+            "next_holiday": next_holiday,
+            "source": exchange["source"],
+            "source_url": exchange["source_url"],
+            "holiday_source_url": exchange["holiday_source_url"],
+        })
+
+    return result
+
+
 @app.get("/api/kalender")
 def get_economic_calendar():
     """Get upcoming economic events and important dates."""
@@ -8243,11 +8553,12 @@ def get_economic_calendar():
             "status": "success",
             "source": "official_macro_calendar_with_marked_estimates",
             "events": events,
+            "exchanges": _build_exchange_calendar_status(),
             "official_count": official_count,
             "estimated_count": estimated_count,
-            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census"],
+            "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
             "timestamp": datetime.now().isoformat(),
-            "note": "FOMC/FED, CPI, NFP, PPI, GDP/PCE, Retail Sales and Census Advance Economic Indicators use official 2026 source schedules. Earnings, ISM and weekly claims remain marked estimates."
+            "note": "FOMC/FED, CPI, NFP, PPI, GDP/PCE, Retail Sales and Census Advance Economic Indicators use official 2026 source schedules. Exchange hours/holidays cover NYSE/Nasdaq, LSE, Xetra, Tokyo and Hong Kong for 2026. Earnings, ISM and weekly claims remain marked estimates."
         }
     except Exception as e:
         return {
