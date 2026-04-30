@@ -1058,6 +1058,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
             # candidate can be a string (ticker name) or dict with "Ticker" key
             ticker = candidate if isinstance(candidate, str) else candidate.get("Ticker", candidate.get("ticker", ""))
+            if not ticker:
+                continue
+            if isinstance(candidate, str):
+                candidate = {"Ticker": ticker, "ticker": ticker}
+            else:
+                candidate = dict(candidate)
 
             # OHLCV laden — Short braucht 300 Tage für SMA200 Bonus-Signale
             try:
@@ -1209,9 +1215,6 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — WATCH", "D": "D — SCHWACH"}
                 grade_label = grade_map.get(grade, grade)
 
-                # Convert string candidate to dict for storing results
-                if isinstance(candidate, str):
-                    candidate = {"Ticker": candidate, "ticker": candidate}
                 candidate["Alpha"] = bi_score
                 candidate["BI_Score"] = bi_score
                 candidate["BI_MaxScore"] = max_score
