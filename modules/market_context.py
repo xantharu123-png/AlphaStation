@@ -6,7 +6,8 @@ market weather so scanners can adjust aggressiveness, sizing and chase rules.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -104,6 +105,33 @@ def _risk_level(score: float) -> str:
     return "LOW"
 
 
+def _keyword_matches(text: str, keyword: str) -> bool:
+    """Match a keyword or phrase on token boundaries, not inside other words."""
+    keyword = str(keyword or "").strip().lower()
+    if not keyword:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(keyword) + r"(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
+def missing_headline_risk(error: str = "Headline data unavailable") -> Dict[str, Any]:
+    """Defensive unknown state when headline data cannot be trusted."""
+    now_utc = datetime.now(timezone.utc)
+    return {
+        "score": 35,
+        "level": "UNKNOWN",
+        "data_status": "error",
+        "error": error,
+        "headline_count": 0,
+        "matched_count": 0,
+        "categories": {},
+        "top_headlines": [],
+        "calming_score": 0,
+        "source": "Polygon news headline keyword risk",
+        "timestamp": now_utc.isoformat(),
+    }
+
+
 def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[datetime] = None) -> Dict[str, Any]:
     """Score market-moving political/macro headline risk from recent headlines."""
     now_utc = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -123,11 +151,11 @@ def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[dat
         recency = _recency_weight(published, now_utc)
         matched_categories = []
 
-        if any(keyword in text for keyword in CALMING_KEYWORDS):
+        if any(_keyword_matches(text, keyword) for keyword in CALMING_KEYWORDS):
             calming_score += 8 * recency
 
         for category, cfg in HEADLINE_CATEGORIES.items():
-            if any(keyword in text for keyword in cfg["keywords"]):
+            if any(_keyword_matches(text, keyword) for keyword in cfg["keywords"]):
                 points = cfg["weight"] * recency
                 category_scores[category] += points
                 matched_categories.append(category)
@@ -154,6 +182,7 @@ def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[dat
         "level": _risk_level(score),
         "headline_count": headline_count,
         "matched_count": len(matched),
+        "data_status": "ok",
         "categories": active_categories,
         "top_headlines": matched[:8],
         "calming_score": int(round(calming_score)),
@@ -208,6 +237,7 @@ def build_event_risk(events: Iterable[Dict[str, Any]], now_utc: Optional[datetim
     return {
         "score": score,
         "level": _risk_level(score),
+        "data_status": "ok",
         "upcoming_events": sorted(upcoming, key=lambda e: e.get("hours_until", 999))[:6],
         "timestamp": now_utc.isoformat(),
     }
@@ -248,7 +278,10 @@ def build_market_context(
         market_risk -= 8
     market_risk = max(0.0, min(100.0, market_risk))
 
+    headline_status = str(headline_risk.get("data_status", "ok")).lower()
     headline_score = _to_float(headline_risk.get("score"), 0)
+    if headline_status not in {"ok", "fresh"}:
+        headline_score = max(headline_score, 35)
     event_score = _to_float(event_risk.get("score"), 0)
     overall_risk = int(round(market_risk * 0.50 + headline_score * 0.30 + event_score * 0.20))
 
@@ -269,7 +302,14 @@ def build_market_context(
         trade_mode = "AGGRESSIVE_SELECTIVE"
         size_multiplier = 1.00
 
+    if headline_status not in {"ok", "fresh"} and regime == "RISK_ON":
+        regime = "NEUTRAL"
+        trade_mode = "SELECTIVE"
+        size_multiplier = 0.75
+
     warnings = []
+    if headline_status not in {"ok", "fresh"}:
+        warnings.append("Headline-Daten unbekannt/fehlerhaft: defensiver Modus statt blind Risk-On.")
     if headline_score >= 50:
         warnings.append("Headline-/Politikrisiko hoch: keine FOMO-Market-Entries.")
     if event_score >= 50:
@@ -301,7 +341,9 @@ def build_market_context(
             "overall_risk_score": overall_risk,
             "size_multiplier": size_multiplier,
             "headline_level": headline_risk.get("level", "LOW"),
+            "headline_status": headline_risk.get("data_status", "ok"),
             "event_level": event_risk.get("level", "LOW"),
+            "event_status": event_risk.get("data_status", "ok"),
             "fear_score": int(round(fear_score)),
             "vix": vix or None,
         },

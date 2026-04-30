@@ -430,6 +430,9 @@ def calculate_trade_health(
         if headline_level in {"HIGH", "EXTREME"}:
             context_penalty += 8
             warnings.append("Headline-Risiko hoch - politische News koennen Kerzen drehen")
+        elif headline_level in {"UNKNOWN", "STALE"}:
+            context_penalty += 5
+            warnings.append("Headline-Risiko unbekannt - defensiver handeln")
         if event_level in {"HIGH", "EXTREME"}:
             context_penalty += 8
             warnings.append("Event-Risiko hoch - Makro/FED-Spike moeglich")

@@ -90,7 +90,7 @@ except ImportError:
     calculate_stock_setup_score = None
 
 from modules.trade_health import calculate_trade_health
-from modules.market_context import analyze_headlines, build_event_risk, build_market_context
+from modules.market_context import analyze_headlines, build_event_risk, build_market_context, missing_headline_risk
 
 # Import pattern detection
 try:
@@ -3258,6 +3258,14 @@ def _scheduler_loop():
             # Kein Cache oder zu alt → scannen
             age_str = f"{int(cache_age)}s alt" if cache_age else "kein Cache"
             print(f"[Scheduler] Initial scan: {name} ({age_str})")
+            if name == "market_context" and _scan_status.get("crash_monitor", {}).get("running"):
+                print("[Scheduler] market_context wartet kurz auf crash_monitor...")
+                _wait_start = time.time()
+                while _scan_status.get("crash_monitor", {}).get("running") and _scheduler_running:
+                    if time.time() - _wait_start > 120:
+                        print("[Scheduler] market_context: crash_monitor wartet zu lange, nutze letzten Cache")
+                        break
+                    time.sleep(3)
             _run_scan_safe(name, func)
             last_run_times[name] = time.time()
             with _scan_lock:
@@ -3307,6 +3315,9 @@ def _scheduler_loop():
                     is_running = False  # Erlaubt sofortigen Neustart
 
             if elapsed >= interval_sec and not is_running:
+                if name == "market_context" and _scan_status.get("crash_monitor", {}).get("running"):
+                    print("[Scheduler] market_context skip: crash_monitor laeuft gerade")
+                    continue
                 # V2.2: Schwere Scans nicht starten wenn ein anderer schwerer läuft
                 if name in _heavy_names:
                     _other_heavy_running = False
@@ -8714,6 +8725,7 @@ def get_economic_calendar():
 
 # ── Market Context / Headline Risk ──
 MARKET_CONTEXT_CACHE = "/tmp/market_context_cache.json"
+MARKET_CONTEXT_MAX_AGE_SECONDS = 45 * 60
 
 
 def _cache_age_seconds(cached_at: Optional[str]) -> Optional[int]:
@@ -8771,9 +8783,10 @@ def _fetch_polygon_market_headlines(limit: int = 50) -> tuple[List[Dict[str, Any
 def _market_context_wrapper() -> None:
     """Build market weather from cached market internals, scheduled events and headlines."""
     headlines, headline_error = _fetch_polygon_market_headlines()
-    headline_risk = analyze_headlines(headlines)
     if headline_error:
-        headline_risk["error"] = headline_error
+        headline_risk = missing_headline_risk(headline_error)
+    else:
+        headline_risk = analyze_headlines(headlines)
     event_risk = _calendar_event_risk_snapshot()
     crash_data = _load_crash_context_snapshot()
     context = build_market_context(crash_data, headline_risk, event_risk)
@@ -8793,12 +8806,23 @@ def _get_market_context_snapshot() -> Dict[str, Any]:
         cached, cached_at = load_cache_file(MARKET_CONTEXT_CACHE)
         if cached and isinstance(cached[0], dict):
             context = dict(cached[0])
-            context["cache_age_seconds"] = _cache_age_seconds(cached_at)
-            return context
+            cache_age = _cache_age_seconds(cached_at)
+            if cache_age is not None and cache_age <= MARKET_CONTEXT_MAX_AGE_SECONDS:
+                context["cache_age_seconds"] = cache_age
+                context["cache_status"] = "fresh"
+                return context
+            stale_msg = f"Market-Context-Cache stale ({cache_age}s alt)" if cache_age is not None else "Market-Context-Cache timestamp unbekannt"
+            headline_risk = missing_headline_risk(stale_msg)
+            event_risk = _calendar_event_risk_snapshot()
+            fallback = build_market_context(_load_crash_context_snapshot(), headline_risk, event_risk)
+            fallback["cache_age_seconds"] = cache_age
+            fallback["cache_status"] = "stale"
+            fallback["warnings"] = list(fallback.get("warnings", [])) + [stale_msg]
+            return fallback
     except Exception:
         pass
 
-    headline_risk = analyze_headlines([])
+    headline_risk = missing_headline_risk("Market-Context-Cache fehlt; Live-News nicht verfuegbar")
     event_risk = _calendar_event_risk_snapshot()
     context = build_market_context(_load_crash_context_snapshot(), headline_risk, event_risk)
     context["cache_age_seconds"] = None
@@ -8815,7 +8839,9 @@ def trigger_market_context_scan():
 @app.get("/api/market-context")
 def get_market_context():
     context = _get_market_context_snapshot()
-    stale = context.get("cache_age_seconds") is not None and context.get("cache_age_seconds") > 45 * 60
+    stale = context.get("cache_status") == "stale" or (
+        context.get("cache_age_seconds") is not None and context.get("cache_age_seconds") > MARKET_CONTEXT_MAX_AGE_SECONDS
+    )
     return {
         "status": "success",
         "data": context,
