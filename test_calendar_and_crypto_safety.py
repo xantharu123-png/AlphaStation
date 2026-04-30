@@ -75,7 +75,10 @@ def test_scanner_quality_and_safe_deploy_are_present():
     assert '"why_in"' in api_source
     assert '"exclusion_policy"' in api_source
     assert "RISK_POLICY" in api_source
-    assert "python3 -m py_compile" in deploy_script
+    assert '"$PYTHON" -m py_compile' in deploy_script
+    assert "python3 -m venv" in deploy_script
+    assert '"$PYTHON" -m pip install -r requirements.txt' in deploy_script
+    assert '"$PYTHON" -m pytest' in deploy_script
     assert "/api/system-health" in deploy_script
     assert "systemctl restart" in deploy_script
 

@@ -5,8 +5,24 @@ APP_DIR="${APP_DIR:-/home/tradingbot/app}"
 BRANCH="${BRANCH:-main}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/system-health}"
 SERVICES="${SERVICES:-tradingbot-api tradingbot-bg tradingbot-frontend}"
+VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
 
 cd "$APP_DIR"
+
+if [ -x "$VENV_DIR/bin/python" ]; then
+  PYTHON="$VENV_DIR/bin/python"
+elif [ -d "$VENV_DIR" ] && [ ! -x "$VENV_DIR/bin/python" ]; then
+  echo "[deploy] Existing venv at $VENV_DIR looks incomplete; recreating it."
+  rm -rf "$VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+  PYTHON="$VENV_DIR/bin/python"
+else
+  echo "[deploy] Creating Python venv at $VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+  PYTHON="$VENV_DIR/bin/python"
+fi
+
+echo "[deploy] Python runtime: $PYTHON"
 
 old_rev="$(git rev-parse --short HEAD)"
 echo "[deploy] Current revision: $old_rev"
@@ -21,14 +37,20 @@ else
   git pull --ff-only origin "$BRANCH"
 fi
 
-echo "[deploy] Compile check..."
-python3 -m py_compile api.py modules/new_listing_scanner.py modules/data_fetchers.py modules/scanners.py modules/scorers.py
+if [ -f requirements.txt ]; then
+  echo "[deploy] Installing/updating Python dependencies in venv..."
+  "$PYTHON" -m pip install --upgrade pip >/tmp/tradingbot-pip-upgrade.log
+  "$PYTHON" -m pip install -r requirements.txt >/tmp/tradingbot-pip-install.log
+fi
 
-if command -v pytest >/dev/null 2>&1; then
+echo "[deploy] Compile check..."
+"$PYTHON" -m py_compile api.py modules/new_listing_scanner.py modules/data_fetchers.py modules/scanners.py modules/scorers.py
+
+if "$PYTHON" -m pytest --version >/dev/null 2>&1; then
   echo "[deploy] Pytest smoke checks..."
-  python3 -m pytest test_calendar_and_crypto_safety.py test_trading_logic.py -q
+  "$PYTHON" -m pytest test_calendar_and_crypto_safety.py test_trading_logic.py -q
 else
-  echo "[deploy] pytest not installed; skipping pytest smoke checks."
+  echo "[deploy] pytest not available in venv; skipping pytest smoke checks."
 fi
 
 echo "[deploy] Restarting services: $SERVICES"
