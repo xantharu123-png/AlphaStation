@@ -2277,7 +2277,11 @@ def _alert_nls_signals(results, secrets):
         timing = str(sig.get("timing", ""))
         timing_quality = _safe_float(sig.get("timing_quality"), 0)
         rr_effective = _safe_float(sig.get("rr_effective", sig.get("rr1", 0)), 0)
+        risk_pct = _safe_float(sig.get("risk_pct"), 999)
         safety_ok = bool(sig.get("safety_ok", False))
+        confirmation_ok = bool(sig.get("confirmation_ok", False))
+        continuation_risk = bool(sig.get("continuation_risk", False))
+        signal_quality = str(sig.get("signal_quality", "") or "").lower()
         tp_missed = bool(sig.get("tp1_missed", False) or sig.get("tp2_missed", False))
         reasons = []
 
@@ -2291,6 +2295,14 @@ def _alert_nls_signals(results, secrets):
             reasons.append("target_already_missed")
         if rr_effective < _NLS_MIN_ALERT_RR:
             reasons.append("rr_below_alert_threshold")
+        if not confirmation_ok:
+            reasons.append("turn_not_confirmed")
+        if continuation_risk:
+            reasons.append("pump_continuation_risk")
+        if risk_pct > 35:
+            reasons.append("risk_too_wide")
+        if signal_quality and signal_quality != "tradeable":
+            reasons.append("not_tradeable_signal_quality")
 
         cooldown_key = f"new_listing_{symbol}"
         if cooldown_key in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[cooldown_key] < _EMAIL_COOLDOWN_SEC:
@@ -2350,7 +2362,7 @@ def _alert_nls_signals(results, secrets):
         {rows}
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
-        Nur aktive SHORT-now Signale: Timing-Quality >=4, Safety OK, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol.
+        Nur aktive SHORT-now Signale: Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol.
     </p>
     </body></html>
     """

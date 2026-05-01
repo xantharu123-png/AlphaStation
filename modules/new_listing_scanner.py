@@ -74,6 +74,21 @@ CONFIG = {
     "max_leverage": 10,                 # Max empfohlener Hebel
 }
 
+# Deep-audit guardrails: the original thresholds were too permissive for live
+# P&D shorts. These overrides keep small/illiquid pumps visible in monitoring,
+# but block them from active "short now" signals.
+CONFIG.update({
+    "min_volume_24h_usd": 500_000,
+    "max_spread_pct": 1.2,
+    "min_book_depth_usd": 10_000,
+    "max_ticker_age_sec": 15 * 60,
+    "max_candle_age_sec": 2 * 3600,
+    "max_leverage": 3,
+    "min_short_rr": 1.5,
+    "max_signal_risk_pct": 35.0,
+    "min_from_ath_for_short_pct": 3.0,
+})
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # EXCHANGE API LAYER
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,6 +115,78 @@ def _api_get(url, params=None, timeout=15):
 
 
 # ── Crypto.com Exchange API ──────────────────────────────────────────────────
+
+def _to_float(value, default=0.0):
+    """Safe float conversion for noisy exchange payloads."""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_epoch_seconds(ts):
+    """Normalize exchange timestamps in seconds or milliseconds to seconds."""
+    try:
+        ts_float = float(ts)
+    except (TypeError, ValueError):
+        return 0
+    if ts_float > 10_000_000_000:
+        ts_float /= 1000
+    return int(ts_float)
+
+
+def _data_age_seconds(ts):
+    ts_sec = _normalize_epoch_seconds(ts)
+    if ts_sec <= 0:
+        return None
+    return max(0, int(time.time()) - ts_sec)
+
+
+def _parse_book_side(side):
+    parsed = []
+    for row in side or []:
+        try:
+            if isinstance(row, dict):
+                price = _to_float(row.get("price") or row.get("p"))
+                qty = _to_float(row.get("quantity") or row.get("qty") or row.get("q"))
+            else:
+                price = _to_float(row[0])
+                qty = _to_float(row[1])
+            if price > 0 and qty > 0:
+                parsed.append((price, qty))
+        except Exception:
+            continue
+    return parsed
+
+
+def _monitor_key(symbol, exchange):
+    return f"{str(exchange or 'crypto.com').lower()}:{symbol}"
+
+
+def _is_tradeable_short_signal(signal):
+    if not isinstance(signal, dict):
+        return False
+    try:
+        rr_effective = float(signal.get("rr_effective", 0) or 0)
+        risk_pct = float(signal.get("risk_pct", 999) or 999)
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        signal.get("direction") == "SHORT"
+        and signal.get("timing_quality", 0) >= 4
+        and signal.get("grade") in ("S", "A", "A+")
+        and signal.get("safety_ok") is True
+        and signal.get("confirmation_ok") is True
+        and not signal.get("continuation_risk")
+        and not signal.get("tp1_missed")
+        and not signal.get("tp2_missed")
+        and rr_effective >= CONFIG["min_short_rr"]
+        and risk_pct <= CONFIG["max_signal_risk_pct"]
+    )
+
 
 CRYPTOCOM_BASE = "https://api.crypto.com/exchange/v1/public"
 
@@ -197,6 +284,42 @@ def fetch_cryptocom_orderbook(instrument_name, depth=10):
 
 
 # ── MEXC Futures API (Frühwarnung — listet am schnellsten, 755 Perps) ────────
+
+def fetch_mexc_orderbook(symbol, depth=20):
+    """MEXC Futures order book normalized to bids/asks tuples."""
+    data = _api_get(f"{MEXC_FUTURES_BASE}/depth/{symbol}", {"limit": depth})
+    if not data or not data.get("success"):
+        return None
+    book = data.get("data", {})
+    bids = _parse_book_side(book.get("bids") or book.get("Bids"))
+    asks = _parse_book_side(book.get("asks") or book.get("Asks"))
+    return {"bids": bids[:depth], "asks": asks[:depth]} if bids and asks else None
+
+
+def fetch_binance_orderbook(symbol, depth=20):
+    """Binance Futures order book normalized to bids/asks tuples."""
+    data = _api_get(f"{BINANCE_FUTURES_BASE}/depth", {"symbol": symbol, "limit": depth})
+    if not data:
+        return None
+    bids = _parse_book_side(data.get("bids"))
+    asks = _parse_book_side(data.get("asks"))
+    return {"bids": bids[:depth], "asks": asks[:depth]} if bids and asks else None
+
+
+def fetch_bitget_orderbook(symbol, depth=20):
+    """Bitget Futures order book normalized to bids/asks tuples."""
+    data = _api_get(f"{BITGET_BASE}/market/orderbook", {
+        "productType": "USDT-FUTURES",
+        "symbol": symbol,
+        "limit": str(depth),
+    })
+    if not data or data.get("code") not in (None, "00000"):
+        return None
+    book = data.get("data", {})
+    bids = _parse_book_side(book.get("bids"))
+    asks = _parse_book_side(book.get("asks"))
+    return {"bids": bids[:depth], "asks": asks[:depth]} if bids and asks else None
+
 
 MEXC_FUTURES_BASE = "https://contract.mexc.com/api/v1/contract"
 
@@ -514,6 +637,18 @@ def fetch_candles_for(symbol, exchange, timeframe="1h", count=50):
 # ═══════════════════════════════════════════════════════════════════════════════
 # LISTING DETECTION (Multi-Exchange Cache-Diff)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_orderbook_for(symbol, exchange, depth=20):
+    """Holt ein echtes Orderbook fuer Safety/Spread-Checks."""
+    if exchange == "mexc":
+        return fetch_mexc_orderbook(symbol, depth)
+    elif exchange == "bitget":
+        return fetch_bitget_orderbook(symbol, depth)
+    elif exchange == "binance":
+        return fetch_binance_orderbook(symbol, depth)
+    else:
+        return fetch_cryptocom_orderbook(symbol, depth)
+
 
 def detect_new_listings():
     """
@@ -1136,16 +1271,49 @@ def check_safety(ticker, book, candles):
     warnings = []
     is_safe = True
 
+    if not ticker:
+        return False, ["[!] Kein frischer Ticker - kein Live-Short-Signal"]
+
+    ticker_age = _data_age_seconds(ticker.get("timestamp"))
+    if ticker_age is None:
+        warnings.append("[!] Ticker ohne Timestamp - Datenalter unbekannt")
+        is_safe = False
+    elif ticker_age > CONFIG["max_ticker_age_sec"]:
+        warnings.append(f"[!] Ticker stale: {ticker_age}s alt (max {CONFIG['max_ticker_age_sec']}s)")
+        is_safe = False
+
+    if candles:
+        candle_age = _data_age_seconds(candles[-1].get("timestamp"))
+        if candle_age is None:
+            warnings.append("[!] Letzte Candle ohne Timestamp - Datenalter unbekannt")
+            is_safe = False
+        elif candle_age > CONFIG["max_candle_age_sec"]:
+            warnings.append(f"[!] Candle stale: {candle_age}s alt (max {CONFIG['max_candle_age_sec']}s)")
+            is_safe = False
+    else:
+        warnings.append("[!] Keine Candles - kein Setup")
+        is_safe = False
+
+    bid = _to_float(ticker.get("bid"))
+    ask = _to_float(ticker.get("ask"))
+    if bid <= 0 or ask <= 0 or ask < bid:
+        warnings.append("[!] Kein belastbarer Bid/Ask - Spread unbekannt")
+        is_safe = False
+
+    if not book:
+        warnings.append("[!] Kein Orderbook - Liquiditaet nicht verifizierbar")
+        is_safe = False
+
     # 1. Volume Minimum
-    vol_24h = ticker.get("volume_usd_24h", 0) if ticker else 0
+    vol_24h = _to_float(ticker.get("volume_usd_24h"))
     if vol_24h < CONFIG["min_volume_24h_usd"]:
         warnings.append(f"[!] Volume zu niedrig: ${vol_24h:,.0f} (min ${CONFIG['min_volume_24h_usd']:,})")
         is_safe = False
 
     # 2. Spread Maximum
-    if ticker and ticker.get("bid") and ticker.get("ask"):
-        mid = (ticker["bid"] + ticker["ask"]) / 2
-        spread = (ticker["ask"] - ticker["bid"]) / mid * 100 if mid > 0 else 99
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / 2
+        spread = (ask - bid) / mid * 100 if mid > 0 else 99
         if spread > CONFIG["max_spread_pct"]:
             warnings.append(f"[!] Spread zu weit: {spread:.2f}% (max {CONFIG['max_spread_pct']}%)")
             is_safe = False
@@ -1161,8 +1329,8 @@ def check_safety(ticker, book, candles):
 
     # 4. Candle-Anomalie: Keine Trades in letzter Stunde = tot
     if candles and len(candles) >= 2:
-        last_vol = candles[-1].get("volume_usd", 0)
-        prev_vol = candles[-2].get("volume_usd", 0)
+        last_vol = _to_float(candles[-1].get("volume_usd"))
+        prev_vol = _to_float(candles[-2].get("volume_usd"))
         if last_vol == 0 and prev_vol == 0:
             warnings.append("[!] Kein Volume in letzten 2 Stunden — Coin möglicherweise tot")
             is_safe = False
@@ -1171,8 +1339,10 @@ def check_safety(ticker, book, candles):
     if candles and len(candles) >= 3:
         recent_drop = 0
         for i in range(-3, 0):
-            if candles[i]["open"] > 0:
-                drop = (candles[i]["close"] - candles[i]["open"]) / candles[i]["open"] * 100
+            candle_open = _to_float(candles[i].get("open"))
+            candle_close = _to_float(candles[i].get("close"))
+            if candle_open > 0:
+                drop = (candle_close - candle_open) / candle_open * 100
                 recent_drop += drop
         if recent_drop < -30:
             warnings.append(f"[!!] Möglicher Rug Pull: {recent_drop:.0f}% in 3 Stunden!")
@@ -1216,6 +1386,42 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     tp1_missed = tp1 >= entry
     tp2_missed = tp2 >= entry
     rr_effective = 0 if tp2_missed else (rr2 if tp1_missed else rr1)
+    risk_pct = round((stop - entry) / entry * 100, 2) if entry > 0 else 999
+
+    from_ath = _to_float(pump_data.get("from_ath_pct"))
+    pump_pct = _to_float(pump_data.get("pump_pct"))
+    momentum_recent = _to_float(pump_data.get("momentum_recent"))
+    current_red_streak = int(_to_float(pump_data.get("current_red_streak")))
+    avg_upper_wick = _to_float(pump_data.get("avg_upper_wick_pct"))
+
+    first_crack_ok = from_ath >= CONFIG["min_from_ath_for_short_pct"]
+    turn_confirmed = first_crack_ok and (
+        momentum_recent <= 0
+        or current_red_streak >= 1
+        or avg_upper_wick >= 20
+    )
+    continuation_risk = (
+        not first_crack_ok
+        or (momentum_recent > 0.5 and current_red_streak == 0 and avg_upper_wick < 20)
+    )
+    rr_ok = rr_effective >= CONFIG["min_short_rr"]
+    risk_ok = risk_pct <= CONFIG["max_signal_risk_pct"]
+
+    risk_flags = []
+    if pump_pct < CONFIG["min_pump_pct"]:
+        risk_flags.append("pump_too_small")
+    if not first_crack_ok:
+        risk_flags.append("no_first_crack")
+    if continuation_risk:
+        risk_flags.append("continuation_risk")
+    if not turn_confirmed:
+        risk_flags.append("turn_not_confirmed")
+    if not rr_ok:
+        risk_flags.append("rr_too_low")
+    if not risk_ok:
+        risk_flags.append("risk_too_wide")
+    if not safety_ok:
+        risk_flags.append("safety_failed")
 
     # ── Timing Score ──
     if tp2_missed:
@@ -1224,9 +1430,18 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif tp1_missed:
         timing = "[~] TP1 verpasst — nur noch Extended-Dump möglich"
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
-    elif exh_score >= CONFIG["exh_short_entry"] and safety_ok:
+    elif exh_score >= CONFIG["exh_short_entry"] and safety_ok and turn_confirmed and rr_ok and risk_ok and pump_pct >= CONFIG["min_pump_pct"]:
         timing = "[-] JETZT SHORTEN"
         timing_quality = 5
+    elif exh_score >= CONFIG["exh_short_entry"] and continuation_risk:
+        timing = "[~] WATCH - Pump laeuft noch, erst Crack/Rejection abwarten"
+        timing_quality = 2
+    elif exh_score >= CONFIG["exh_short_entry"] and (not rr_ok or not risk_ok):
+        timing = "[~] WATCH - R:R/Risiko noch nicht sauber"
+        timing_quality = 2
+    elif exh_score >= CONFIG["exh_short_entry"] and not turn_confirmed:
+        timing = "[~] WATCH - Umkehr noch nicht bestaetigt"
+        timing_quality = 2
     elif exh_score >= CONFIG["exh_short_entry"] and not safety_ok:
         timing = "[~] SIGNAL aber Liquiditäts-Risiko"
         timing_quality = 3
@@ -1241,10 +1456,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     if tp2_missed:
         grade = "D"
         grade_label = "[X] D â€” NO TRADE"
-    elif exh_score >= 80 and rr_effective >= 2.0 and safety_ok and not tp1_missed:
+    elif exh_score >= 80 and rr_effective >= 2.0 and safety_ok and turn_confirmed and risk_ok and not continuation_risk and not tp1_missed:
         grade = "S"
         grade_label = " S — ELITE SHORT"
-    elif exh_score >= 65 and rr_effective >= 1.5 and safety_ok:
+    elif exh_score >= 65 and rr_effective >= 1.5 and safety_ok and turn_confirmed and risk_ok and not continuation_risk:
         grade = "A"
         grade_label = " A — STRONG SHORT"
     elif exh_score >= 50 and rr_effective >= 1.0:
@@ -1269,12 +1484,28 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "rr_effective": rr_effective,
         "tp1_missed": tp1_missed,
         "tp2_missed": tp2_missed,
-        "risk_pct": round((stop - entry) / entry * 100, 2),
+        "risk_pct": risk_pct,
         "exh_score": exh_score,
         "timing": timing,
         "timing_quality": timing_quality,
         "grade": grade,
         "grade_label": grade_label,
+        "confirmation_ok": turn_confirmed,
+        "continuation_risk": continuation_risk,
+        "first_crack_ok": first_crack_ok,
+        "risk_flags": risk_flags,
+        "signal_quality": "tradeable" if _is_tradeable_short_signal({
+            "direction": "SHORT",
+            "timing_quality": timing_quality,
+            "grade": grade,
+            "safety_ok": safety_ok,
+            "confirmation_ok": turn_confirmed,
+            "continuation_risk": continuation_risk,
+            "tp1_missed": tp1_missed,
+            "tp2_missed": tp2_missed,
+            "rr_effective": rr_effective,
+            "risk_pct": risk_pct,
+        }) else "watch_or_blocked",
         "safety_ok": safety_ok,
         "safety_warnings": safety_warnings,
         "pump_data": pump_data,
@@ -1307,14 +1538,20 @@ def save_monitoring_list(monitoring):
 def add_to_monitoring(symbol, exchange="crypto.com", listing_ts_ms=None, source="new_listing"):
     """Fügt ein neues Listing zur Überwachung hinzu."""
     monitoring = load_monitoring_list()
-    if symbol not in monitoring:
+    key = _monitor_key(symbol, exchange)
+    if symbol in monitoring and key not in monitoring:
+        monitoring[key] = monitoring.pop(symbol)
+        monitoring[key]["symbol"] = symbol
+        monitoring[key]["exchange"] = exchange
+        save_monitoring_list(monitoring)
+    if key not in monitoring:
         listing_time = None
         if listing_ts_ms:
             try:
                 listing_time = datetime.fromtimestamp(int(listing_ts_ms) / 1000, tz=timezone.utc).isoformat()
             except Exception:
                 listing_time = None
-        monitoring[symbol] = {
+        monitoring[key] = {
             "symbol": symbol,
             "exchange": exchange,
             "detected_at": datetime.now(timezone.utc).isoformat(),
@@ -1467,9 +1704,11 @@ def detect_active_pumps(all_perps):
         fr = ticker["funding_rate"]
         fr_pct = fr * 100
         sym = ticker["symbol"]
+        exchange = ticker["exchange"]
+        monitor_key = _monitor_key(sym, exchange)
 
         # Skip wenn schon überwacht
-        if sym in already_monitored:
+        if monitor_key in already_monitored or sym in already_monitored:
             continue
 
         # === PUMP-KRITERIEN ===
@@ -1479,9 +1718,10 @@ def detect_active_pumps(all_perps):
         if change > 25:
             pump_reasons.append(f"24h +{change:.0f}% (extremer Pump)")
 
-        # Kriterium 2: Starker Pump + negative Funding (Smart Money shortet)
-        if change > 15 and fr_pct < -0.05:
-            pump_reasons.append(f"24h +{change:.0f}% + FR {fr_pct:.3f}% (Shorts bauen auf)")
+        # Kriterium 2: Starker Pump + positive Funding = ueberhitzte Longs.
+        # Negative Funding ist fuer Shorts eher Squeeze-Risiko, kein Trigger.
+        if change > 15 and fr_pct > 0.05:
+            pump_reasons.append(f"24h +{change:.0f}% + FR {fr_pct:.3f}% (Longs ueberhitzt)")
 
         # Kriterium 3: Starker Pump + extremes Volume
         if change > 15 and volume > 50_000_000:
@@ -1501,6 +1741,7 @@ def detect_active_pumps(all_perps):
             "change_24h": change,
             "volume_usd_24h": volume,
             "funding_rate": fr,
+            "negative_funding_squeeze_risk": fr_pct < -0.05,
             "price": ticker["price"],
             "source": "pump_detection",
         })
@@ -1512,14 +1753,16 @@ def detect_active_pumps(all_perps):
     added = 0
     for pump in detected_pumps[:15]:
         sym = pump["symbol"]
-        if sym not in already_monitored:
+        key = _monitor_key(sym, pump["exchange"])
+        if key not in already_monitored and sym not in already_monitored:
             add_to_monitoring(sym, pump["exchange"], source="pump_detection")
             # Markiere als pump-detected (nicht new-listing)
             monitoring = load_monitoring_list()
-            if sym in monitoring:
-                monitoring[sym]["source"] = "pump_detection"
-                monitoring[sym]["pump_reasons"] = pump["pump_reasons"]
-                monitoring[sym]["change_24h_detected"] = pump["change_24h"]
+            if key in monitoring:
+                monitoring[key]["source"] = "pump_detection"
+                monitoring[key]["pump_reasons"] = pump["pump_reasons"]
+                monitoring[key]["change_24h_detected"] = pump["change_24h"]
+                monitoring[key]["negative_funding_squeeze_risk"] = pump.get("negative_funding_squeeze_risk", False)
                 save_monitoring_list(monitoring)
             added += 1
             log.info(f"🔥 PUMP DETECTED: {sym} auf {pump['exchange']} — "
@@ -1597,9 +1840,10 @@ def run_new_listing_scanner():
                  f"{len(results.get('pumps_detected', []))} Pumps erkannt, "
                  f"{len(all_perps)} PERP-Instrumente total")
 
-        for symbol, mon_data in active.items():
+        for mon_key, mon_data in active.items():
             try:
                 time.sleep(0.5)  # Rate Limiting
+                symbol = mon_data.get("symbol") or str(mon_key).split(":", 1)[-1]
                 exchange = mon_data.get("exchange", "crypto.com")
 
                 # Daten holen (Multi-Exchange Adapter)
@@ -1611,7 +1855,10 @@ def run_new_listing_scanner():
                 time.sleep(0.3)
 
                 # Orderbook nur für Crypto.com (MEXC/Bitget haben kein öffentliches Depth-API)
-                book = fetch_cryptocom_orderbook(symbol, 10) if exchange == "crypto.com" else None
+                book = fetch_orderbook_for(symbol, exchange, 20)
+                if book and book.get("bids") and book.get("asks"):
+                    ticker["bid"] = book["bids"][0][0]
+                    ticker["ask"] = book["asks"][0][0]
 
                 # Candle-Mindestanzahl prüfen
                 if not candles or len(candles) < 3:
@@ -1646,6 +1893,9 @@ def run_new_listing_scanner():
                 mon_data["peak_exh_score"] = max(mon_data.get("peak_exh_score", 0), exh_score)
                 mon_data["last_check"] = datetime.now(timezone.utc).isoformat()
                 mon_data["pump_pct"] = pump_data.get("pump_pct", 0)
+                mon_data["from_ath_pct"] = pump_data.get("from_ath_pct", 0)
+                mon_data["safety_ok"] = safety_ok
+                mon_data["safety_warnings"] = safety_warnings[:5]
 
                 # ── Already-Dumped Filter ──
                 # Wenn Preis schon >40% unter ATH ist, shorten wir NICHT (falling knife)
@@ -1682,12 +1932,19 @@ def run_new_listing_scanner():
                     "signal": signal,
                 }
 
-                if signal["timing_quality"] >= 4:
+                mon_data["rr_effective"] = signal.get("rr_effective", 0)
+                mon_data["risk_pct"] = signal.get("risk_pct", 0)
+                mon_data["confirmation_ok"] = signal.get("confirmation_ok", False)
+                mon_data["continuation_risk"] = signal.get("continuation_risk", False)
+                mon_data["signal_quality"] = signal.get("signal_quality", "watch_or_blocked")
+                mon_data["risk_flags"] = signal.get("risk_flags", [])
+
+                if _is_tradeable_short_signal(signal):
                     results["signals"].append(entry)
                     mon_data["status"] = "signal"
                     log.info(f"[-] NLS SHORT SIGNAL: {symbol} — ExhScore {exh_score}, "
                              f"Pump {pump_data.get('pump_pct', 0):.0f}%, "
-                             f"RR {signal['rr1']:.1f}x, Grade {signal['grade']}")
+                             f"RR {signal['rr_effective']:.1f}x, Grade {signal['grade']}")
                 elif signal["timing_quality"] >= 2:
                     results["watchlist"].append(entry)
 
@@ -1698,8 +1955,17 @@ def run_new_listing_scanner():
                     "from_ath_pct": pump_data.get("from_ath_pct", 0),
                     "volume_ratio": pump_data.get("vol_ratio", 0),
                     "safety_ok": safety_ok,
+                    "safety_warnings": safety_warnings[:5],
                     "grade": signal.get("grade", "?"),
                     "timing": signal.get("timing", "?"),
+                    "rr_effective": signal.get("rr_effective", 0),
+                    "risk_pct": signal.get("risk_pct", 0),
+                    "confirmation_ok": signal.get("confirmation_ok", False),
+                    "continuation_risk": signal.get("continuation_risk", False),
+                    "signal_quality": signal.get("signal_quality", "watch_or_blocked"),
+                    "risk_flags": signal.get("risk_flags", []),
+                    "exchange": exchange,
+                    "source": mon_data.get("source", "new_listing"),
                     "hours_tracked": pump_data.get("hours_tracked", 0),
                 })
 

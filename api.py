@@ -940,6 +940,10 @@ def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "safety_ok": bool(nested.get("safety_ok", row.get("safety_ok", False))),
         "tp1_missed": bool(nested.get("tp1_missed", row.get("tp1_missed", False))),
         "tp2_missed": bool(nested.get("tp2_missed", row.get("tp2_missed", False))),
+        "confirmation_ok": bool(nested.get("confirmation_ok", row.get("confirmation_ok", False))),
+        "continuation_risk": bool(nested.get("continuation_risk", row.get("continuation_risk", False))),
+        "risk_pct": _alert_float(nested.get("risk_pct", row.get("risk_pct")), 999) or 999,
+        "signal_quality": str(nested.get("signal_quality", row.get("signal_quality", "")) or "").lower(),
         "source": str(row.get("source", "") or "").lower(),
     }
 
@@ -959,6 +963,14 @@ def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("target_already_missed")
     if fields["rr_effective"] < _NEW_LISTING_MIN_ALERT_RR:
         reasons.append("rr_below_alert_threshold")
+    if not fields["confirmation_ok"]:
+        reasons.append("turn_not_confirmed")
+    if fields["continuation_risk"]:
+        reasons.append("pump_continuation_risk")
+    if fields["risk_pct"] > 35:
+        reasons.append("risk_too_wide")
+    if fields["signal_quality"] and fields["signal_quality"] != "tradeable":
+        reasons.append("not_tradeable_signal_quality")
     return reasons
 
 
@@ -1341,7 +1353,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
     <th style="padding:8px;text-align:left">R</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte SHORT-now Signale: Timing-Quality >=4, Safety OK, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; 8h Cooldown pro Coin.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte SHORT-now Signale: Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; 8h Cooldown pro Coin.</p>
     </body></html>'''
     sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
     if sent:
@@ -7684,6 +7696,11 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "grade": sig.get("grade", ""),
             "safety_ok": sig.get("safety_ok", False),
             "safety_warnings": sig.get("safety_warnings", []),
+            "risk_pct": sig.get("risk_pct", 0),
+            "confirmation_ok": sig.get("confirmation_ok", False),
+            "continuation_risk": sig.get("continuation_risk", False),
+            "signal_quality": sig.get("signal_quality", ""),
+            "risk_flags": sig.get("risk_flags", []),
             "source": bucket,
             "raw_score": pump.get("raw_score", sig.get("exh_score", 0)),
         })
@@ -7711,6 +7728,13 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "hours_tracked": item.get("hours_tracked", 0),
             "vol_ratio": item.get("volume_ratio", 0),
             "safety_ok": item.get("safety_ok", False),
+            "safety_warnings": item.get("safety_warnings", []),
+            "rr_effective": item.get("rr_effective", 0),
+            "risk_pct": item.get("risk_pct", 0),
+            "confirmation_ok": item.get("confirmation_ok", False),
+            "continuation_risk": item.get("continuation_risk", False),
+            "signal_quality": item.get("signal_quality", ""),
+            "risk_flags": item.get("risk_flags", []),
             "source": "monitoring",
         })
 
