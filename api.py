@@ -706,6 +706,8 @@ _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
 _NEW_LISTING_MIN_ALERT_RR = 1.5
+_BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
+_BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -825,6 +827,21 @@ def _email_dedupe_remaining(key: str, ttl_seconds: int, now: Optional[float] = N
     if last is None:
         return 0
     return int(max(0, ttl_seconds - (now - last)))
+
+
+def _bearish_stock_alert_key(ticker: str) -> str:
+    return f"bearish_stock_{str(ticker or '').strip().upper()}"
+
+
+def _bearish_stock_alert_remaining(ticker: str, now: Optional[float] = None) -> int:
+    if not ticker:
+        return 0
+    return _email_dedupe_remaining(_bearish_stock_alert_key(ticker), _BEARISH_STOCK_ALERT_DEDUPE_SEC, now)
+
+
+def _mark_bearish_stock_alert(ticker: str, now: Optional[float] = None) -> None:
+    if ticker:
+        _email_dedupe_mark(_bearish_stock_alert_key(ticker), now=now)
 
 
 def _email_dedupe_mark(key: str, now: Optional[float] = None) -> None:
@@ -981,6 +998,9 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     dedupe_remaining = _email_dedupe_remaining(cooldown_key, _EMAIL_COOLDOWN_SEC, now) if cooldown_key else 0
     if dedupe_remaining > 0:
         reasons.append("persistent_dedupe_active")
+    bearish_remaining = _bearish_stock_alert_remaining(ticker, now) if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS else 0
+    if bearish_remaining > 0:
+        reasons.append("bearish_ticker_already_alerted")
 
     return {
         "ticker": ticker,
@@ -991,6 +1011,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "cooldown_key": cooldown_key,
         "cooldown_remaining_seconds": cooldown_remaining,
         "persistent_dedupe_remaining_seconds": dedupe_remaining,
+        "bearish_dedupe_remaining_seconds": bearish_remaining,
         "alertable_now": not reasons,
         "suppression_reasons": reasons,
     }
@@ -1150,11 +1171,11 @@ def _check_and_alert(scanner_name, cache_file):
             ck = f"{scanner_name}_{ticker}"
             if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
                 continue
-            _EMAIL_COOLDOWN[ck] = now
             alerts.append({"ticker": ticker, "grade": grade, "score": score,
                            "price": r.get("Preis", r.get("price", r.get("current", 0))),
                            "direction": r.get("BI_Direction", r.get("direction", "")),
-                           "rvol": r.get("RVOL", r.get("rvol", 0))})
+                           "rvol": r.get("RVOL", r.get("rvol", 0)),
+                           "cooldown_key": ck})
         if not alerts:
             # Log warum keine Alerts
             all_grades = [_extract_alert_grade(r) or "?" for r in results if isinstance(r, dict)]
@@ -1186,7 +1207,12 @@ def _check_and_alert(scanner_name, cache_file):
         <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
         print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
-        _send_email_alert(subject, body)
+        sent = _send_email_alert(subject, body)
+        if sent:
+            for alert in alerts:
+                _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+                if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS:
+                    _mark_bearish_stock_alert(alert["ticker"], now=now)
     except Exception as e:
         import traceback
         print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
@@ -3624,6 +3650,7 @@ def _bear_scan_wrapper() -> None:
             # V2.6b: Crash-Flash — EINE Sammel-Mail pro Tag, nur Grade S/A, keine ETFs/ETPs
             _ETF_KEYWORDS = {"etf", "etp", "leveraged", "inverse", "ultra", "proshares", "direxion", "amplify", "graniteshares"}
             _crash_stocks = []
+            _crash_level_tickers = set()
             for bd in result.get("breakdown_stocks", []):
                 if not isinstance(bd, dict):
                     continue
@@ -3638,6 +3665,7 @@ def _bear_scan_wrapper() -> None:
                 _cs_tk_up = _cs_ticker.upper()
                 if len(_cs_tk_up) >= 4 and _cs_tk_up[-1] in ("X", "Q", "S") and _cs_tk_up[-2] in ("X", "Q", "S"):
                     continue  # SOXS, SQQQ, SPXS, UVXY etc.
+                _crash_level_tickers.add(_cs_tk_up)
                 _crash_stocks.append(bd)
 
             if _crash_stocks:
@@ -3687,14 +3715,35 @@ def _bear_scan_wrapper() -> None:
                         _EMAIL_COOLDOWN[_crash_ck] = time.time()
                         for _dedupe_key in _crash_dedupe_keys:
                             _email_dedupe_mark(_dedupe_key)
+                        for _cs in _crash_stocks:
+                            _mark_bearish_stock_alert(_cs.get("ticker", ""), now=time.time())
                         print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
 
             # V2.6b: Bear Summary Email — 1x pro Tag, nur wenn Grade S/A Signale dabei
+            _bd_rows = []
+            _bear_summary_tickers = []
+            for bd in result.get("breakdown_stocks", []):
+                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < 55:
+                    continue
+                _ticker_up = str(bd.get("ticker", "")).upper()
+                if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:
+                    continue
+                _gr = bd.get("grade", "?")
+                _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
+                _bear_summary_tickers.append(_ticker_up)
+                _bd_rows.append(
+                    f"<tr><td style='padding:4px 8px;font-weight:bold;color:{_gc}'>{_gr}</td>"
+                    f"<td style='padding:4px 8px;font-weight:bold'>{bd.get('ticker','?')}</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>${bd.get('price',0):.2f}</td>"
+                    f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{bd.get('change_pct',0):.1f}%</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>{bd.get('rvol',0):.1f}x</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
+                    f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
+                )
             _total_signals = len(_bd_rows)
             if _total_signals > 0:
                 _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
-                    _EMAIL_COOLDOWN[_bear_ck] = time.time()
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Aktien-Shorts</p>"
                     _bd_html = ""
                     if _bd_rows:
@@ -3716,6 +3765,10 @@ def _bear_scan_wrapper() -> None:
                     {_ts}{_bd_html}
                     </body></html>'''
                     _send_email_alert(f"Bear Alert: {_total_signals} Aktien-Shorts", _bear_body)
+                    if _EMAIL_SEND_LOG and _EMAIL_SEND_LOG[-1].get("status") == "sent":
+                        _EMAIL_COOLDOWN[_bear_ck] = time.time()
+                        for _ticker in _bear_summary_tickers:
+                            _mark_bearish_stock_alert(_ticker, now=time.time())
         else:
             print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
@@ -4366,6 +4419,7 @@ def get_email_alert_status():
             "Keine neuen S/A/A+ Setups in den aktuellen Scanner-Caches.",
             "Startup-Cooldown nach Restart ist noch aktiv.",
             "Ticker ist im 8h Alert-Cooldown oder Crash-Dedupe 36h aktiv.",
+            "Short-Ticker wurde bereits bearish gemeldet; Crash hat Vorrang vor Bear/BI-Short.",
             "Mail wurde wegen ETF/ETP-Inhalt geblockt.",
             "Pump-&-Dump: kein aktives SHORT-now Signal mit Safety OK, unverpassten Targets und R:R >= 1.5.",
             "Gmail SMTP/Test-Mail ist fehlgeschlagen.",
@@ -4404,7 +4458,8 @@ def get_email_alert_audit():
             "rvol_guard_scanners": sorted(_ALERT_RVOL_GUARD_SCANNERS),
             "min_rvol": _ALERT_MIN_RVOL,
             "new_listing_min_rr": _NEW_LISTING_MIN_ALERT_RR,
-            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Pump-&-Dump mails require active SHORT-now timing, Safety OK, unmissed targets and minimum R:R.",
+            "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
+            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require active SHORT-now timing, Safety OK, unmissed targets and minimum R:R.",
         },
         "coverage": {
             "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing"],

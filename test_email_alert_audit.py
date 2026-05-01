@@ -115,6 +115,22 @@ def test_alert_classifier_respects_cooldown():
     assert "cooldown_active" in second["suppression_reasons"]
 
 
+def test_bearish_dedupe_suppresses_duplicate_short_alerts(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    now = 1_000_000.0
+    row = {"Ticker": "DUP", "BI_Grade": "A", "BI_Score": 100, "RVOL": 1.4, "Preis": 12}
+
+    api._mark_bearish_stock_alert("DUP", now=now)
+
+    short_state = api._classify_alert_candidate("bi_short", row, now + 60)
+    long_state = api._classify_alert_candidate("bi_long", row, now + 60)
+
+    assert short_state["alertable_now"] is False
+    assert "bearish_ticker_already_alerted" in short_state["suppression_reasons"]
+    assert long_state["alertable_now"] is True
+
+
 def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []

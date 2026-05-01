@@ -169,6 +169,7 @@ _EMAIL_COOLDOWN_SEC = 3600 * 8  # 8 Stunden Cooldown pro Ticker, wie im API-Mail
 _EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
 _NLS_MIN_ALERT_RR = 1.5
+_BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -254,6 +255,30 @@ def _email_dedupe_active(key, ttl_seconds, now=None):
     dedupe = _load_email_dedupe(now=now)
     last = dedupe.get(key)
     return last is not None and now - last < ttl_seconds
+
+
+def _email_dedupe_remaining(key, ttl_seconds, now=None):
+    now = now or time.time()
+    dedupe = _load_email_dedupe(now=now)
+    last = dedupe.get(key)
+    if last is None:
+        return 0
+    return int(max(0, ttl_seconds - (now - last)))
+
+
+def _bearish_stock_alert_key(ticker):
+    return f"bearish_stock_{str(ticker or '').strip().upper()}"
+
+
+def _bearish_stock_alert_active(ticker, now=None):
+    if not ticker:
+        return False
+    return _email_dedupe_remaining(_bearish_stock_alert_key(ticker), _BEARISH_STOCK_ALERT_DEDUPE_SEC, now) > 0
+
+
+def _mark_bearish_stock_alert(ticker, now=None):
+    if ticker:
+        _email_dedupe_mark(_bearish_stock_alert_key(ticker), now=now)
 
 
 def _email_dedupe_mark(key, now=None):
@@ -371,6 +396,9 @@ def _check_and_alert_scan_results(scanner_name, secrets):
             is_top_grade = grade in ("S", "A", "A+")
             if not is_top_grade:
                 continue
+            if scanner_name == "bi_short" and _bearish_stock_alert_active(ticker, now=now):
+                log.debug(f"BI short alert suppressed by bearish ticker dedupe: {ticker}")
+                continue
 
             # Cooldown: Nicht denselben Ticker nochmal innerhalb 4h
             cooldown_key = f"{scanner_name}_{ticker}"
@@ -378,7 +406,6 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 if now - _EMAIL_COOLDOWN[cooldown_key] < _EMAIL_COOLDOWN_SEC:
                     continue
 
-            _EMAIL_COOLDOWN[cooldown_key] = now
             alerts.append({
                 "ticker": ticker,
                 "grade": grade,
@@ -387,6 +414,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "direction": r.get("direction", direction if scanner_name.startswith("bi_") else ""),
                 "name": r.get("Name", r.get("name", "")),
                 "rvol": r.get("RVOL", r.get("rvol", 0)),
+                "cooldown_key": cooldown_key,
             })
 
         if not alerts:
@@ -439,7 +467,12 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         </p>
         </body></html>"""
 
-        _send_email_alert(subject, body_html, secrets)
+        sent = _send_email_alert(subject, body_html, secrets)
+        if sent:
+            for alert in alerts:
+                _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+                if scanner_name == "bi_short":
+                    _mark_bearish_stock_alert(alert["ticker"], now=now)
 
     except Exception as e:
         log.error(f"⚠️ Alert-Check {scanner_name}: {e}")
@@ -1136,6 +1169,8 @@ def _run_bear_scanner(poly_key, secrets):
                     _EMAIL_COOLDOWN[_crash_ck] = now
                     for dedupe_key in crash_dedupe_keys:
                         _email_dedupe_mark(dedupe_key)
+                    for cs in crash_stocks:
+                        _mark_bearish_stock_alert(cs.get("ticker", ""), now=now)
                     log.info(f"  CRASH ALERT sent: {[c['ticker'] for c in crash_stocks]}")
 
     except Exception as e:
