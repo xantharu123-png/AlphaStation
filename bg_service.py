@@ -2566,6 +2566,9 @@ def _alert_nls_signals(results, secrets):
             "grade": grade,
             "grade_label": sig.get("grade_label", grade),
             "timing": timing,
+            "setup": sig.get("setup_type", ""),
+            "stop_model": sig.get("stop_model", ""),
+            "micro_score": _safe_float((sig.get("pump_data", {}) or {}).get("micro_score"), 0),
             "entry": _safe_float(sig.get("entry"), 0),
             "stop": _safe_float(sig.get("stop_loss", sig.get("stop", 0)), 0),
             "tp1": _safe_float(sig.get("tp1"), 0),
@@ -2584,11 +2587,11 @@ def _alert_nls_signals(results, secrets):
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{a['symbol']}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{a['exchange']}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{a['grade_label']}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{a['timing']}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['setup'] or a['timing']}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">${a['entry']:.4f}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">${a['stop']:.4f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${a['stop']:.4f}<br><span style="color:#999;font-size:11px">{a['stop_model']}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee">${a['tp1']:.4f} / ${a['tp2']:.4f}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{a['rr_effective']:.1f}R</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['rr_effective']:.1f}R<br><span style="color:#999;font-size:11px">Micro {a['micro_score']:.0f}</span></td>
         </tr>"""
 
     body_html = f"""

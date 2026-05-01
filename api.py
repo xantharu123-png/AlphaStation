@@ -4071,7 +4071,7 @@ _scan_status = {
     "market_context": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
-    "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 120},
+    "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},

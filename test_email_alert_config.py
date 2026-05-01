@@ -26,3 +26,7 @@ def test_email_status_never_exposes_credentials(monkeypatch):
     assert status["recipient_count"] == 2
     assert "secret-app-password" not in str(status)
     assert "sender@example.com" not in str(status)
+
+
+def test_pump_dump_scheduler_uses_intraday_execution_cadence():
+    assert api._scan_status["new_listing"]["interval_min"] <= 15
