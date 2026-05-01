@@ -188,6 +188,119 @@ def _safe_float(value, default=0.0):
     return val
 
 
+def _extract_bear_short_fields(row):
+    return {
+        "change_pct": _safe_float(row.get("change_pct", row.get("Change%")), None),
+        "close_pos": _safe_float(row.get("close_pos", row.get("Close Position")), None),
+        "open_to_current_pct": _safe_float(row.get("open_to_current_pct", row.get("intraday_change_pct")), None),
+        "latest_bar_change_pct": _safe_float(row.get("latest_bar_change_pct"), None),
+        "latest_bar_close_pos": _safe_float(row.get("latest_bar_close_pos"), None),
+        "rvol": _safe_float(row.get("rvol", row.get("RVOL")), None),
+        "score": _safe_float(row.get("score", row.get("Score")), None),
+    }
+
+
+def _bear_short_rule_reasons(row):
+    fields = _extract_bear_short_fields(row)
+    reasons = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    latest_bar_change = fields["latest_bar_change_pct"]
+    latest_bar_close_pos = fields["latest_bar_close_pos"]
+    rvol = fields["rvol"]
+
+    if change is None:
+        reasons.append("missing_current_drop")
+    elif change > -3:
+        reasons.append("not_down_enough_for_breakdown")
+    elif change <= -12:
+        reasons.append("drop_too_extended_no_chase")
+    if open_to_current is not None and open_to_current > 0.2:
+        reasons.append("current_candle_green_reclaim")
+    if close_pos is not None and close_pos > 0.45:
+        reasons.append("not_closing_near_low")
+    if (
+        latest_bar_change is not None
+        and latest_bar_close_pos is not None
+        and latest_bar_change > 0.15
+        and latest_bar_close_pos > 0.55
+    ):
+        reasons.append("latest_5m_green_reclaim")
+    if rvol is not None and rvol < 1.0:
+        reasons.append("rvol_below_bear_threshold")
+    return reasons
+
+
+def _bear_entry_quality(row):
+    reasons = _bear_short_rule_reasons(row)
+    if not reasons:
+        return "TRADEABLE"
+    if "drop_too_extended_no_chase" in reasons:
+        return "NO_CHASE"
+    if "current_candle_green_reclaim" in reasons:
+        return "RECLAIM_WATCH"
+    return "WATCH"
+
+
+def _bear_crash_alert_ok(row):
+    fields = _extract_bear_short_fields(row)
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    if change is None or change > -10 or change <= -30:
+        return False
+    if open_to_current is not None and open_to_current > 0.2:
+        return False
+    if close_pos is not None and close_pos > 0.35:
+        return False
+    latest_bar_change = fields["latest_bar_change_pct"]
+    latest_bar_close_pos = fields["latest_bar_close_pos"]
+    if (
+        latest_bar_change is not None
+        and latest_bar_close_pos is not None
+        and latest_bar_change > 0.15
+        and latest_bar_close_pos > 0.55
+    ):
+        return False
+    return True
+
+
+def _fetch_bear_latest_intraday_state(ticker, poly_key):
+    """Fetch the latest 5m candle so Bear mails do not chase into a live bounce."""
+    if not ticker or not poly_key:
+        return {}
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        except Exception:
+            today_et = datetime.utcnow().strftime("%Y-%m-%d")
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/5/minute/{today_et}/{today_et}"
+        resp = rate_limited_get(url, params={"apiKey": poly_key, "adjusted": "true", "sort": "desc", "limit": 3}, timeout=10)
+        if resp.status_code != 200:
+            return {}
+        bars = resp.json().get("results", [])
+        if not bars:
+            return {}
+        bar = bars[0]
+        open_ = bar.get("o", 0) or 0
+        high = bar.get("h", 0) or 0
+        low = bar.get("l", 0) or 0
+        close = bar.get("c", 0) or 0
+        if not open_ or not close:
+            return {}
+        change_pct = ((close - open_) / open_) * 100
+        close_pos = ((close - low) / (high - low)) if high > low else 0.5
+        return {
+            "latest_bar_change_pct": round(change_pct, 2),
+            "latest_bar_close_pos": round(close_pos, 3),
+            "latest_bar_timestamp": bar.get("t"),
+        }
+    except Exception:
+        return {}
+
+
 def _display_crypto_contract_symbol(symbol):
     display = str(symbol or "").strip().upper()
     for suffix in ("USD-PERP", "USDT-PERP", "_USDT", "-USDT", "USDT", "_PERP", "-PERP", "USD"):
@@ -1027,6 +1140,11 @@ def _run_bear_scanner(poly_key, secrets):
                 chg_pct = ((price - prev_close) / prev_close) * 100
                 if chg_pct > -3:
                     continue
+                day_open = day.get("o", 0) or prev_close
+                day_high = day.get("h", 0) or max(price, day_open)
+                day_low = day.get("l", 0) or min(price, day_open)
+                open_to_current_pct = ((price - day_open) / day_open * 100) if day_open else None
+                close_pos = ((price - day_low) / (day_high - day_low)) if day_high > day_low else 0.5
 
                 ticker_sym = t.get("ticker", "")
                 _tk_up = ticker_sym.upper()
@@ -1093,12 +1211,21 @@ def _run_bear_scanner(poly_key, secrets):
                 elif score >= 35: grade = "C"
                 else: grade = "D"
 
-                losers.append({
+                bear_row = {
                     "ticker": ticker_sym, "price": round(price, 2),
                     "change_pct": round(chg_pct, 2), "volume": vol,
                     "dollar_volume": round(dollar_vol, 0), "rvol": rvol,
                     "ma20_dist": ma20_dist, "score": score, "grade": grade,
-                })
+                    "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
+                    "close_pos": round(close_pos, 3),
+                }
+                if score >= 55:
+                    bear_row.update(_fetch_bear_latest_intraday_state(ticker_sym, poly_key))
+                bear_row["short_block_reasons"] = _bear_short_rule_reasons(bear_row)
+                bear_row["entry_quality"] = _bear_entry_quality(bear_row)
+                bear_row["alertable_short"] = not bear_row["short_block_reasons"]
+                bear_row["crash_alert_ok"] = _bear_crash_alert_ok(bear_row)
+                losers.append(bear_row)
             except Exception:
                 continue
 
@@ -1118,9 +1245,15 @@ def _run_bear_scanner(poly_key, secrets):
         log.info(f"  {len(top_losers)} Crash-Kandidaten (Top: {top_losers[0]['ticker'] if top_losers else '–'} {top_losers[0]['score'] if top_losers else 0})")
         _update_status("bear_scan", "done", f"{len(top_losers)} Kandidaten")
 
-        # Crash Alert: Grade S/A + Drop >= -10%
+        # Crash Alert: only while the current candle is still pressing lows.
         now = time.time()
-        crash_stocks = [l for l in top_losers if l["grade"] in ("S", "A") and l["change_pct"] <= -10 and l["score"] >= 60]
+        crash_stocks = [
+            l for l in top_losers
+            if l["grade"] in ("S", "A")
+            and l["change_pct"] <= -10
+            and l["score"] >= 60
+            and _bear_crash_alert_ok(l)
+        ]
         if crash_stocks:
             crash_date = datetime.now().strftime('%Y%m%d')
             fresh_crash_stocks = []

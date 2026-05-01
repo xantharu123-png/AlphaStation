@@ -974,6 +974,126 @@ def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+def _extract_bear_short_fields(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """Fields used to decide whether a bear row is still a tradeable short entry."""
+    return {
+        "change_pct": _alert_float(row.get("change_pct", row.get("Change%", row.get("todaysChangePerc")))),
+        "close_pos": _alert_float(row.get("close_pos", row.get("Close Position"))),
+        "open_to_current_pct": _alert_float(row.get("open_to_current_pct", row.get("intraday_change_pct"))),
+        "latest_bar_change_pct": _alert_float(row.get("latest_bar_change_pct")),
+        "latest_bar_close_pos": _alert_float(row.get("latest_bar_close_pos")),
+        "rvol": _alert_float(row.get("rvol", row.get("RVOL"))),
+        "score": _alert_float(row.get("score", row.get("Score"))),
+    }
+
+
+def _bear_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    """Prevent Bear Scanner mails from becoming FOMO shorts after the move is gone."""
+    fields = _extract_bear_short_fields(row)
+    reasons: List[str] = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    latest_bar_change = fields["latest_bar_change_pct"]
+    latest_bar_close_pos = fields["latest_bar_close_pos"]
+    rvol = fields["rvol"]
+
+    if change is None:
+        reasons.append("missing_current_drop")
+    elif change > -3:
+        reasons.append("not_down_enough_for_breakdown")
+    elif change <= -12:
+        reasons.append("drop_too_extended_no_chase")
+
+    if open_to_current is not None and open_to_current > 0.2:
+        reasons.append("current_candle_green_reclaim")
+    if close_pos is not None and close_pos > 0.45:
+        reasons.append("not_closing_near_low")
+    if (
+        latest_bar_change is not None
+        and latest_bar_close_pos is not None
+        and latest_bar_change > 0.15
+        and latest_bar_close_pos > 0.55
+    ):
+        reasons.append("latest_5m_green_reclaim")
+    if rvol is not None and rvol < 1.0:
+        reasons.append("rvol_below_bear_threshold")
+
+    return reasons
+
+
+def _bear_entry_quality(row: Dict[str, Any]) -> str:
+    reasons = _bear_short_rule_reasons(row)
+    if not reasons:
+        return "TRADEABLE"
+    if "drop_too_extended_no_chase" in reasons:
+        return "NO_CHASE"
+    if "current_candle_green_reclaim" in reasons:
+        return "RECLAIM_WATCH"
+    return "WATCH"
+
+
+def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
+    """Crash alert is allowed only while the selloff is still pressing lows."""
+    fields = _extract_bear_short_fields(row)
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    if change is None or change > -10:
+        return False
+    if change <= -30:
+        return False
+    if open_to_current is not None and open_to_current > 0.2:
+        return False
+    if close_pos is not None and close_pos > 0.35:
+        return False
+    latest_bar_change = fields["latest_bar_change_pct"]
+    latest_bar_close_pos = fields["latest_bar_close_pos"]
+    if (
+        latest_bar_change is not None
+        and latest_bar_close_pos is not None
+        and latest_bar_change > 0.15
+        and latest_bar_close_pos > 0.55
+    ):
+        return False
+    return True
+
+
+def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]:
+    """Fetch the latest 5m candle so Bear mails do not chase into a live bounce."""
+    if not ticker or not POLYGON_KEY:
+        return {}
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        except Exception:
+            today_et = datetime.utcnow().strftime("%Y-%m-%d")
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/5/minute/{today_et}/{today_et}"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "desc", "limit": 3}, timeout=10)
+        if resp.status_code != 200:
+            return {}
+        bars = resp.json().get("results", [])
+        if not bars:
+            return {}
+        bar = bars[0]
+        open_ = bar.get("o", 0) or 0
+        high = bar.get("h", 0) or 0
+        low = bar.get("l", 0) or 0
+        close = bar.get("c", 0) or 0
+        if not open_ or not close:
+            return {}
+        change_pct = ((close - open_) / open_) * 100
+        close_pos = ((close - low) / (high - low)) if high > low else 0.5
+        return {
+            "latest_bar_change_pct": round(change_pct, 2),
+            "latest_bar_close_pos": round(close_pos, 3),
+            "latest_bar_timestamp": bar.get("t"),
+        }
+    except Exception:
+        return {}
+
+
 def _alert_cooldown_remaining(key: str, now: Optional[float] = None) -> int:
     now = now or time.time()
     last = _EMAIL_COOLDOWN.get(key)
@@ -1002,6 +1122,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("rvol_below_alert_threshold")
     if scanner_name == "new_listing":
         reasons.extend(_new_listing_rule_reasons(row))
+    if scanner_name == "bear":
+        reasons.extend(_bear_short_rule_reasons(row))
 
     cooldown_key = f"{scanner_name}_{ticker}" if ticker else ""
     cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
@@ -3486,6 +3608,11 @@ def _bear_scan_wrapper() -> None:
                             continue
                         if chg_pct > -3:
                             continue
+                        day_open = day.get("o", 0) or prev_close
+                        day_high = day.get("h", 0) or max(price, day_open)
+                        day_low = day.get("l", 0) or min(price, day_open)
+                        open_to_current_pct = ((price - day_open) / day_open * 100) if day_open else None
+                        close_pos = ((price - day_low) / (day_high - day_low)) if day_high > day_low else 0.5
 
                         ticker_sym = t.get("ticker", "")
                         # V2.6b: ETF/ETP/Leveraged Filter — keine ETFs in Breakdown-Stocks
@@ -3617,7 +3744,7 @@ def _bear_scan_wrapper() -> None:
                         else:
                             grade = "D"
 
-                        losers.append({
+                        bear_row = {
                             "ticker": ticker_sym,
                             "price": round(price, 2),
                             "change_pct": round(chg_pct, 2),
@@ -3628,8 +3755,17 @@ def _bear_scan_wrapper() -> None:
                             "ma50_dist": ma50_dist,
                             "score": score,
                             "grade": grade,
+                            "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
+                            "close_pos": round(close_pos, 3),
                             "score_details": " | ".join(score_details),
-                        })
+                        }
+                        if score >= 55:
+                            bear_row.update(_fetch_bear_latest_intraday_state(ticker_sym))
+                        bear_row["short_block_reasons"] = _bear_short_rule_reasons(bear_row)
+                        bear_row["entry_quality"] = _bear_entry_quality(bear_row)
+                        bear_row["alertable_short"] = not bear_row["short_block_reasons"]
+                        bear_row["crash_alert_ok"] = _bear_crash_alert_ok(bear_row)
+                        losers.append(bear_row)
                     except Exception as e:
                         print(f"[Warning] Error processing breakdown stock: {e}")
                         continue
@@ -3671,7 +3807,7 @@ def _bear_scan_wrapper() -> None:
                 _cs_chg = bd.get("change_pct", 0)
                 _cs_score = bd.get("score", 0)
                 # V2.8: Nur Grade S/A + Drop >= -10% + Score >= 60 (vereinheitlicht mit bg_service)
-                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < 60:
+                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < 60 or not _bear_crash_alert_ok(bd):
                     continue
                 # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
                 _cs_tk_up = _cs_ticker.upper()
@@ -3735,7 +3871,7 @@ def _bear_scan_wrapper() -> None:
             _bd_rows = []
             _bear_summary_tickers = []
             for bd in result.get("breakdown_stocks", []):
-                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < 55:
+                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < 55 or not bd.get("alertable_short"):
                     continue
                 _ticker_up = str(bd.get("ticker", "")).upper()
                 if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:
@@ -3750,6 +3886,7 @@ def _bear_scan_wrapper() -> None:
                     f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{bd.get('change_pct',0):.1f}%</td>"
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('rvol',0):.1f}x</td>"
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>{bd.get('entry_quality','?')}</td>"
                     f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                 )
             _total_signals = len(_bd_rows)
@@ -3769,12 +3906,14 @@ def _bear_scan_wrapper() -> None:
                             "<th style='padding:6px 8px;text-align:right'>Chg%</th>"
                             "<th style='padding:6px 8px;text-align:right'>RVOL</th>"
                             "<th style='padding:6px 8px;text-align:right'>MA20</th>"
+                            "<th style='padding:6px 8px;text-align:right'>Entry</th>"
                             "<th style='padding:6px 8px;text-align:right'>Score</th></tr>"
                             + "".join(_bd_rows) + "</table>"
                         )
                     _bear_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
                     <h2 style="color:#dc2626">Bear Scanner Alert</h2>
                     {_ts}{_bd_html}
+                    <p style="color:#999;font-size:11px;margin-top:12px">Nur handelbare Breakdown-Shorts: Drop -3% bis -12%, keine grüne Reclaim-Kerze, Close nahe Tagestief. Überdehnte Crashs bleiben Watch/Crash-Monitor, kein FOMO-Short.</p>
                     </body></html>'''
                     _send_email_alert(f"Bear Alert: {_total_signals} Aktien-Shorts", _bear_body)
                     if _EMAIL_SEND_LOG and _EMAIL_SEND_LOG[-1].get("status") == "sent":

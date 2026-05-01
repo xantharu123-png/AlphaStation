@@ -38,7 +38,17 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
                 {"ticker": "LABD", "name": "3x Short Biotech", "signal": "STARK", "rvol": 0.6}
             ],
             "breakdown_stocks": [
-                {"ticker": "REAL", "grade": "A", "score": 70, "rvol": 1.1, "price": 12}
+                {
+                    "ticker": "REAL",
+                    "grade": "A",
+                    "score": 70,
+                    "rvol": 1.1,
+                    "price": 12,
+                    "change_pct": -6.0,
+                    "open_to_current_pct": -5.0,
+                    "close_pos": 0.2,
+                    "alertable_short": True,
+                }
             ],
         }],
     }))
@@ -49,6 +59,123 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
     assert audit["alertable_now_count"] == 1
     assert audit["alertable_preview"][0]["ticker"] == "REAL"
     assert all(item["ticker"] != "LABD" for item in audit["alertable_preview"])
+
+
+def test_bear_alert_audit_blocks_overextended_green_reclaim(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "bear_late.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "breakdown_stocks": [{
+                "ticker": "SKBL",
+                "grade": "A",
+                "score": 59,
+                "rvol": 3.4,
+                "price": 3.44,
+                "change_pct": -24.3,
+                "open_to_current_pct": 1.2,
+                "close_pos": 0.65,
+            }],
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("bear", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["drop_too_extended_no_chase"] == 1
+    assert audit["suppression_counts"]["current_candle_green_reclaim"] == 1
+    assert audit["suppression_counts"]["not_closing_near_low"] == 1
+
+
+def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "bear_fresh.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "breakdown_stocks": [{
+                "ticker": "FRESH",
+                "grade": "A",
+                "score": 66,
+                "rvol": 2.1,
+                "price": 9.8,
+                "change_pct": -7.0,
+                "open_to_current_pct": -6.4,
+                "close_pos": 0.12,
+            }],
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("bear", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 1
+    assert audit["alertable_preview"][0]["ticker"] == "FRESH"
+
+
+def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "bear_5m_reclaim.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "breakdown_stocks": [{
+                "ticker": "BOUNCE",
+                "grade": "A",
+                "score": 66,
+                "rvol": 2.1,
+                "price": 9.8,
+                "change_pct": -7.0,
+                "open_to_current_pct": -6.4,
+                "close_pos": 0.12,
+                "latest_bar_change_pct": 0.42,
+                "latest_bar_close_pos": 0.82,
+            }],
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("bear", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["latest_5m_green_reclaim"] == 1
+
+
+def test_bear_crash_alert_requires_current_sell_pressure():
+    late_reclaim = {
+        "ticker": "SKBL",
+        "grade": "A",
+        "score": 70,
+        "change_pct": -24.3,
+        "open_to_current_pct": 1.2,
+        "close_pos": 0.65,
+    }
+    active_flush = {
+        "ticker": "DROP",
+        "grade": "A",
+        "score": 70,
+        "change_pct": -11.0,
+        "open_to_current_pct": -9.0,
+        "close_pos": 0.1,
+        "latest_bar_change_pct": -0.3,
+        "latest_bar_close_pos": 0.2,
+    }
+    latest_5m_bounce = {
+        "ticker": "BOUNCE",
+        "grade": "A",
+        "score": 70,
+        "change_pct": -11.0,
+        "open_to_current_pct": -9.0,
+        "close_pos": 0.1,
+        "latest_bar_change_pct": 0.4,
+        "latest_bar_close_pos": 0.8,
+    }
+
+    assert api._bear_crash_alert_ok(late_reclaim) is False
+    assert api._bear_crash_alert_ok(latest_5m_bounce) is False
+    assert api._bear_crash_alert_ok(active_flush) is True
 
 
 def test_email_sender_blocks_inverse_etf_content():
