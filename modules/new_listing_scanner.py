@@ -87,6 +87,10 @@ CONFIG.update({
     "min_short_rr": 1.5,
     "max_signal_risk_pct": 35.0,
     "min_from_ath_for_short_pct": 3.0,
+    "max_early_crack_from_ath_pct": 18.0,
+    "early_crack_entry_score": 45,
+    "early_crack_stop_buffer_pct": 3.0,
+    "min_stop_above_entry_pct": 2.0,
 })
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -840,6 +844,25 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         pump_pct = max(0, pump_pct - 5)  # Konservativere Schätzung
     current_from_ath = (ath - current_price) / ath * 100 if ath > 0 else 0
     total_range = ath - atl if ath > atl else 0.0001
+    recent_window = candles[-min(6, n):]
+    prior_recent_window = recent_window[:-1] if len(recent_window) > 1 else recent_window
+    recent_rejection_high = max(c["high"] for c in prior_recent_window) if prior_recent_window else ath
+    last_candle = candles[-1]
+    last_range = max(0.0000001, last_candle["high"] - last_candle["low"])
+    last_close_pos = (last_candle["close"] - last_candle["low"]) / last_range
+    last_change_pct = (
+        (last_candle["close"] - last_candle["open"]) / last_candle["open"] * 100
+        if last_candle["open"] > 0 else 0
+    )
+    recent_crack_depth_pct = (
+        (recent_rejection_high - current_price) / recent_rejection_high * 100
+        if recent_rejection_high > 0 else 0
+    )
+    prior_3_lows = [c["low"] for c in candles[-4:-1]]
+    prior_3_low = min(prior_3_lows) if prior_3_lows else 0
+    prior_6_high = max((c["high"] for c in candles[-7:-1]), default=ath)
+    last_ath_index = max(i for i, c in enumerate(candles) if c["high"] == ath)
+    bars_since_ath = max(0, n - 1 - last_ath_index)
 
     pump_data = {
         "first_price": first_price,
@@ -851,6 +874,14 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         "candle_count": n,
         "hours_tracked": n,  # 1h Candles
         "listing_age_hours": round(listing_age_hours, 1) if listing_age_hours is not None else None,
+        "recent_rejection_high": round(recent_rejection_high, 8),
+        "recent_crack_depth_pct": round(recent_crack_depth_pct, 2),
+        "last_candle_change_pct": round(last_change_pct, 2),
+        "last_close_pos": round(last_close_pos, 2),
+        "prior_3_low": round(prior_3_low, 8) if prior_3_low else 0,
+        "prior_3_low_broken": bool(prior_3_low and current_price < prior_3_low),
+        "lower_high_confirmed": bool(last_candle["high"] < prior_6_high and current_price < recent_rejection_high),
+        "bars_since_ath": bars_since_ath,
     }
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1374,7 +1405,15 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         return None
 
     entry = current
-    stop = ath * (1 + CONFIG["stop_above_ath_pct"] / 100)
+    hard_stop = ath * (1 + CONFIG["stop_above_ath_pct"] / 100)
+    stop = hard_stop
+    stop_model = "ath_hard_stop"
+    rejection_high = _to_float(pump_data.get("recent_rejection_high"))
+    if rejection_high > entry:
+        local_stop = rejection_high * (1 + CONFIG["early_crack_stop_buffer_pct"] / 100)
+        min_stop = entry * (1 + CONFIG["min_stop_above_entry_pct"] / 100)
+        stop = min(hard_stop, max(local_stop, min_stop))
+        stop_model = "local_rejection_stop"
     tp1 = ath * (1 - CONFIG["tp1_from_ath_pct"] / 100)
     tp2 = ath * (1 - CONFIG["tp2_from_ath_pct"] / 100)
 
@@ -1393,19 +1432,59 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     momentum_recent = _to_float(pump_data.get("momentum_recent"))
     current_red_streak = int(_to_float(pump_data.get("current_red_streak")))
     avg_upper_wick = _to_float(pump_data.get("avg_upper_wick_pct"))
+    recent_crack_depth = _to_float(pump_data.get("recent_crack_depth_pct"))
+    prior_3_low_broken = bool(pump_data.get("prior_3_low_broken"))
+    lower_high_confirmed = bool(pump_data.get("lower_high_confirmed"))
+    early_crack_window_ok = (
+        CONFIG["min_from_ath_for_short_pct"]
+        <= from_ath
+        <= CONFIG["max_early_crack_from_ath_pct"]
+    )
 
     first_crack_ok = from_ath >= CONFIG["min_from_ath_for_short_pct"]
+    structural_crack_ok = first_crack_ok and (
+        prior_3_low_broken
+        or lower_high_confirmed
+        or recent_crack_depth >= CONFIG["min_from_ath_for_short_pct"]
+    )
     turn_confirmed = first_crack_ok and (
-        momentum_recent <= 0
+        structural_crack_ok
+        or momentum_recent <= 0
         or current_red_streak >= 1
         or avg_upper_wick >= 20
     )
     continuation_risk = (
         not first_crack_ok
-        or (momentum_recent > 0.5 and current_red_streak == 0 and avg_upper_wick < 20)
+        or (
+            momentum_recent > 0.5
+            and current_red_streak == 0
+            and avg_upper_wick < 20
+            and not structural_crack_ok
+        )
     )
     rr_ok = rr_effective >= CONFIG["min_short_rr"]
     risk_ok = risk_pct <= CONFIG["max_signal_risk_pct"]
+    early_crack_ok = (
+        exh_score >= CONFIG["early_crack_entry_score"]
+        and early_crack_window_ok
+        and structural_crack_ok
+        and turn_confirmed
+        and not continuation_risk
+        and not tp1_missed
+        and not tp2_missed
+    )
+    exhaustion_short_ok = exh_score >= CONFIG["exh_short_entry"]
+    trade_setup_ok = (
+        (exhaustion_short_ok or early_crack_ok)
+        and safety_ok
+        and turn_confirmed
+        and rr_ok
+        and risk_ok
+        and pump_pct >= CONFIG["min_pump_pct"]
+        and not continuation_risk
+        and not tp1_missed
+        and not tp2_missed
+    )
 
     risk_flags = []
     if pump_pct < CONFIG["min_pump_pct"]:
@@ -1422,6 +1501,12 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("risk_too_wide")
     if not safety_ok:
         risk_flags.append("safety_failed")
+    if first_crack_ok and not structural_crack_ok:
+        risk_flags.append("crack_structure_weak")
+    if from_ath > CONFIG["max_early_crack_from_ath_pct"] and not exhaustion_short_ok:
+        risk_flags.append("early_crack_window_missed")
+    if exh_score < CONFIG["early_crack_entry_score"]:
+        risk_flags.append("early_crack_score_too_low")
 
     # ── Timing Score ──
     if tp2_missed:
@@ -1430,9 +1515,13 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif tp1_missed:
         timing = "[~] TP1 verpasst — nur noch Extended-Dump möglich"
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
-    elif exh_score >= CONFIG["exh_short_entry"] and safety_ok and turn_confirmed and rr_ok and risk_ok and pump_pct >= CONFIG["min_pump_pct"]:
-        timing = "[-] JETZT SHORTEN"
-        timing_quality = 5
+    elif trade_setup_ok:
+        if early_crack_ok and not exhaustion_short_ok:
+            timing = "[-] JETZT SHORTEN — Early Crack/Rejection"
+            timing_quality = 4
+        else:
+            timing = "[-] JETZT SHORTEN"
+            timing_quality = 5
     elif exh_score >= CONFIG["exh_short_entry"] and continuation_risk:
         timing = "[~] WATCH - Pump laeuft noch, erst Crack/Rejection abwarten"
         timing_quality = 2
@@ -1445,7 +1534,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif exh_score >= CONFIG["exh_short_entry"] and not safety_ok:
         timing = "[~] SIGNAL aber Liquiditäts-Risiko"
         timing_quality = 3
-    elif exh_score >= CONFIG["exh_watch"]:
+    elif exh_score >= CONFIG["exh_watch"] or early_crack_window_ok:
         timing = "[+] WATCHLIST — noch nicht reif"
         timing_quality = 2
     else:
@@ -1456,12 +1545,12 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     if tp2_missed:
         grade = "D"
         grade_label = "[X] D â€” NO TRADE"
-    elif exh_score >= 80 and rr_effective >= 2.0 and safety_ok and turn_confirmed and risk_ok and not continuation_risk and not tp1_missed:
+    elif trade_setup_ok and rr_effective >= 2.0 and (exh_score >= 80 or (early_crack_ok and exh_score >= 60)):
         grade = "S"
         grade_label = " S — ELITE SHORT"
-    elif exh_score >= 65 and rr_effective >= 1.5 and safety_ok and turn_confirmed and risk_ok and not continuation_risk:
+    elif trade_setup_ok and (exhaustion_short_ok or early_crack_ok):
         grade = "A"
-        grade_label = " A — STRONG SHORT"
+        grade_label = " A — EARLY CRACK SHORT" if early_crack_ok and not exhaustion_short_ok else " A — STRONG SHORT"
     elif exh_score >= 50 and rr_effective >= 1.0:
         grade = "B"
         grade_label = " B — MODERATE"
@@ -1477,6 +1566,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "direction": "SHORT",
         "entry": round(entry, 6),
         "stop_loss": round(stop, 6),
+        "hard_stop_loss": round(hard_stop, 6),
+        "stop_model": stop_model,
         "tp1": round(tp1, 6),
         "tp2": round(tp2, 6),
         "rr1": rr1,
@@ -1491,8 +1582,15 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "grade": grade,
         "grade_label": grade_label,
         "confirmation_ok": turn_confirmed,
+        "structural_crack_ok": structural_crack_ok,
+        "early_crack_ok": early_crack_ok,
         "continuation_risk": continuation_risk,
         "first_crack_ok": first_crack_ok,
+        "setup_type": (
+            "early_crack" if early_crack_ok and not exhaustion_short_ok
+            else "exhaustion_short" if exhaustion_short_ok
+            else "watch"
+        ),
         "risk_flags": risk_flags,
         "signal_quality": "tradeable" if _is_tradeable_short_signal({
             "direction": "SHORT",
@@ -1938,6 +2036,8 @@ def run_new_listing_scanner():
                 mon_data["continuation_risk"] = signal.get("continuation_risk", False)
                 mon_data["signal_quality"] = signal.get("signal_quality", "watch_or_blocked")
                 mon_data["risk_flags"] = signal.get("risk_flags", [])
+                mon_data["setup_type"] = signal.get("setup_type", "watch")
+                mon_data["stop_model"] = signal.get("stop_model", "")
 
                 if _is_tradeable_short_signal(signal):
                     results["signals"].append(entry)
@@ -1964,6 +2064,10 @@ def run_new_listing_scanner():
                     "continuation_risk": signal.get("continuation_risk", False),
                     "signal_quality": signal.get("signal_quality", "watch_or_blocked"),
                     "risk_flags": signal.get("risk_flags", []),
+                    "setup_type": signal.get("setup_type", "watch"),
+                    "stop_model": signal.get("stop_model", ""),
+                    "stop_loss": signal.get("stop_loss", 0),
+                    "hard_stop_loss": signal.get("hard_stop_loss", 0),
                     "exchange": exchange,
                     "source": mon_data.get("source", "new_listing"),
                     "hours_tracked": pump_data.get("hours_tracked", 0),

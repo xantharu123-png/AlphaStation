@@ -102,6 +102,85 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
     assert _is_tradeable_short_signal(signal) is True
 
 
+def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gate():
+    signal = generate_short_signal(
+        "EARLYUSDT",
+        {
+            "ath": 100,
+            "current_price": 96,
+            "pump_pct": 70,
+            "from_ath_pct": 4.0,
+            "momentum_recent": -0.2,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 30,
+            "recent_rejection_high": 100,
+            "recent_crack_depth_pct": 4.0,
+            "prior_3_low_broken": True,
+            "lower_high_confirmed": True,
+        },
+        exh_score=50,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal["setup_type"] == "early_crack"
+    assert signal["stop_model"] == "local_rejection_stop"
+    assert signal["stop_loss"] < signal["hard_stop_loss"]
+    assert signal["grade"] == "A"
+    assert signal["timing_quality"] == 4
+    assert signal["signal_quality"] == "tradeable"
+    assert _is_tradeable_short_signal(signal) is True
+
+
+def test_early_crack_blocks_after_tp1_or_without_structure():
+    too_late = generate_short_signal(
+        "LATEUSDT",
+        {
+            "ath": 100,
+            "current_price": 79,
+            "pump_pct": 70,
+            "from_ath_pct": 21.0,
+            "momentum_recent": -1.0,
+            "current_red_streak": 2,
+            "avg_upper_wick_pct": 35,
+            "recent_rejection_high": 92,
+            "recent_crack_depth_pct": 14.0,
+            "prior_3_low_broken": True,
+            "lower_high_confirmed": True,
+        },
+        exh_score=55,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+    no_structure = generate_short_signal(
+        "NOSTRUCTUSDT",
+        {
+            "ath": 100,
+            "current_price": 96,
+            "pump_pct": 70,
+            "from_ath_pct": 4.0,
+            "momentum_recent": 0.8,
+            "current_red_streak": 0,
+            "avg_upper_wick_pct": 5,
+            "recent_rejection_high": 96.5,
+            "recent_crack_depth_pct": 0.5,
+            "prior_3_low_broken": False,
+            "lower_high_confirmed": False,
+        },
+        exh_score=55,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert too_late["signal_quality"] == "watch_or_blocked"
+    assert too_late["tp1_missed"] is True
+    assert no_structure["signal_quality"] == "watch_or_blocked"
+    assert "crack_structure_weak" in no_structure["risk_flags"]
+
+
 def test_low_rr_confirmed_crack_stays_watchlist_only():
     signal = generate_short_signal(
         "NORRUSDT",

@@ -1560,6 +1560,8 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "exchange": entry.get("exchange", ""),
             "grade": fields["grade"],
             "timing": sig.get("timing", ""),
+            "setup": sig.get("setup_type", ""),
+            "stop_model": sig.get("stop_model", ""),
             "entry": sig.get("entry", 0),
             "stop": sig.get("stop_loss", sig.get("stop", 0)),
             "tp1": sig.get("tp1", 0),
@@ -1579,9 +1581,9 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["symbol"]}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["exchange"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["timing"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["setup"] or a["timing"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["entry"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}<br><span style="color:#999;font-size:11px">{a["stop_model"]}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["tp1"]} / ${a["tp2"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R</td></tr>'
         )
@@ -1595,7 +1597,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
     <th style="padding:8px;text-align:left">R</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte SHORT-now Signale: Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; 8h Cooldown pro Coin.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte SHORT-now Signale: Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Early-Crack nutzt lokalen Rejection-Stop mit ATH-Hardstop als Deckel; 8h Cooldown pro Coin.</p>
     </body></html>'''
     sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
     if sent:
@@ -7963,6 +7965,10 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "safety_ok": sig.get("safety_ok", False),
             "safety_warnings": sig.get("safety_warnings", []),
             "risk_pct": sig.get("risk_pct", 0),
+            "stop_loss": sig.get("stop_loss", 0),
+            "hard_stop_loss": sig.get("hard_stop_loss", 0),
+            "stop_model": sig.get("stop_model", ""),
+            "setup_type": sig.get("setup_type", ""),
             "confirmation_ok": sig.get("confirmation_ok", False),
             "continuation_risk": sig.get("continuation_risk", False),
             "signal_quality": sig.get("signal_quality", ""),
@@ -7997,6 +8003,10 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "safety_warnings": item.get("safety_warnings", []),
             "rr_effective": item.get("rr_effective", 0),
             "risk_pct": item.get("risk_pct", 0),
+            "stop_loss": item.get("stop_loss", 0),
+            "hard_stop_loss": item.get("hard_stop_loss", 0),
+            "stop_model": item.get("stop_model", ""),
+            "setup_type": item.get("setup_type", ""),
             "confirmation_ok": item.get("confirmation_ok", False),
             "continuation_risk": item.get("continuation_risk", False),
             "signal_quality": item.get("signal_quality", ""),
