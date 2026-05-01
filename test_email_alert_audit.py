@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime
 
 import api
@@ -85,6 +86,19 @@ def test_email_dedupe_persists_crash_ticker(tmp_path, monkeypatch):
     assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_060.0) is False
     assert json.loads(dedupe_file.read_text())[key] == 1_000_000.0
     assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_000.0 + 37 * 3600) is True
+
+
+def test_email_status_exposes_dedupe(tmp_path, monkeypatch):
+    dedupe_file = tmp_path / "email_dedupe.json"
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(dedupe_file))
+    api._email_dedupe_mark("crash_stock_20260430_NCSM", now=time.time())
+
+    status = api._email_alert_status()
+
+    assert status["dedupe"]["file_exists"] is True
+    assert status["dedupe"]["entries"] == 1
+    assert status["dedupe"]["active_crash_entries"] == 1
+    assert status["dedupe"]["recent"][0]["key"] == "crash_stock_20260430_NCSM"
 
 
 def test_alert_classifier_respects_cooldown():

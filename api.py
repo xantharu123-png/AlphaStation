@@ -729,6 +729,7 @@ def _email_alert_status() -> Dict[str, Any]:
         "recipient_count": len([addr for addr in str(alert_to).split(",") if addr.strip()]),
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
+        "dedupe": _email_dedupe_status(),
         "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
         "optional_keys": ["ALERT_EMAIL"],
         "config_sources_checked": [
@@ -771,6 +772,27 @@ def _load_email_dedupe(now: Optional[float] = None, max_keep_seconds: int = 7 * 
         return dedupe
     except Exception:
         return {}
+
+
+def _email_dedupe_status(now: Optional[float] = None) -> Dict[str, Any]:
+    now = now or time.time()
+    dedupe = _load_email_dedupe(now=now)
+    recent = []
+    for key, ts in sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:20]:
+        ttl = _CRASH_ALERT_DEDUPE_SEC if key.startswith("crash_stock_") else _EMAIL_COOLDOWN_SEC
+        recent.append({
+            "key": key,
+            "timestamp": datetime.fromtimestamp(ts).isoformat(),
+            "age_seconds": int(max(0, now - ts)),
+            "remaining_seconds": int(max(0, ttl - (now - ts))),
+        })
+    return {
+        "file": _EMAIL_DEDUPE_FILE,
+        "file_exists": os.path.exists(_EMAIL_DEDUPE_FILE),
+        "entries": len(dedupe),
+        "active_crash_entries": len([key for key in dedupe if key.startswith("crash_stock_")]),
+        "recent": recent,
+    }
 
 
 def _save_email_dedupe(dedupe: Dict[str, float]) -> None:
@@ -4257,6 +4279,14 @@ def get_email_alert_status():
     return {
         "status": "ok",
         "email_alerts": _email_alert_status(),
+        "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),
+        "common_reasons_for_no_mail": [
+            "Keine neuen S/A/A+ Setups in den aktuellen Scanner-Caches.",
+            "Startup-Cooldown nach Restart ist noch aktiv.",
+            "Ticker ist im 8h Alert-Cooldown oder Crash-Dedupe 36h aktiv.",
+            "Mail wurde wegen ETF/ETP-Inhalt geblockt.",
+            "Gmail SMTP/Test-Mail ist fehlgeschlagen.",
+        ],
         "timestamp": datetime.now().isoformat(),
     }
 
