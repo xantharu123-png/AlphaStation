@@ -165,6 +165,8 @@ def _load_secrets():
 # ── E-Mail Alert System ──
 _EMAIL_COOLDOWN = {}  # Verhindert Spam: {ticker: last_sent_ts}
 _EMAIL_COOLDOWN_SEC = 3600 * 4  # 4 Stunden Cooldown pro Ticker
+_EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
+_CRASH_ALERT_DEDUPE_SEC = 36 * 3600
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -187,6 +189,66 @@ def _email_has_blocked_etf_content(subject, body_html):
         return True
     tokens = set(re.findall(r"\b[A-Z]{2,6}\b", content))
     return bool(tokens & _EMAIL_BLOCKED_ETF_TICKERS)
+
+
+def _load_email_dedupe(now=None, max_keep_seconds=7 * 86400):
+    now = now or time.time()
+    try:
+        if not os.path.exists(_EMAIL_DEDUPE_FILE):
+            return {}
+        with open(_EMAIL_DEDUPE_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        dedupe = {}
+        for key, ts in raw.items():
+            try:
+                ts_float = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if now - ts_float <= max_keep_seconds:
+                dedupe[str(key)] = ts_float
+        return dedupe
+    except Exception:
+        return {}
+
+
+def _save_email_dedupe(dedupe):
+    tmp_path = f"{_EMAIL_DEDUPE_FILE}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(dedupe, f)
+        os.replace(tmp_path, _EMAIL_DEDUPE_FILE)
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Datei konnte nicht gespeichert werden: {exc}")
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _email_dedupe_active(key, ttl_seconds, now=None):
+    now = now or time.time()
+    dedupe = _load_email_dedupe(now=now)
+    last = dedupe.get(key)
+    return last is not None and now - last < ttl_seconds
+
+
+def _email_dedupe_mark(key, now=None):
+    now = now or time.time()
+    dedupe = _load_email_dedupe(now=now)
+    dedupe[key] = now
+    _save_email_dedupe(dedupe)
+
+
+def _email_dedupe_claim(key, ttl_seconds, now=None):
+    """Return True only once per key+TTL, even after process restarts."""
+    now = now or time.time()
+    if _email_dedupe_active(key, ttl_seconds, now=now):
+        return False
+    _email_dedupe_mark(key, now=now)
+    return True
 
 
 def _cleanup_email_cooldown():
@@ -1006,9 +1068,24 @@ def _run_bear_scanner(poly_key, secrets):
         now = time.time()
         crash_stocks = [l for l in top_losers if l["grade"] in ("S", "A") and l["change_pct"] <= -10 and l["score"] >= 60]
         if crash_stocks:
+            crash_date = datetime.now().strftime('%Y%m%d')
+            fresh_crash_stocks = []
+            crash_dedupe_keys = []
+            for cs in crash_stocks:
+                ticker = str(cs.get("ticker", "?")).upper()
+                dedupe_key = f"crash_stock_{crash_date}_{ticker}"
+                if not _email_dedupe_active(dedupe_key, _CRASH_ALERT_DEDUPE_SEC):
+                    fresh_crash_stocks.append(cs)
+                    crash_dedupe_keys.append(dedupe_key)
+                else:
+                    log.info(f"  CRASH Alert skipped by persistent dedupe: {ticker}")
+            crash_stocks = fresh_crash_stocks
+        else:
+            crash_dedupe_keys = []
+
+        if crash_stocks:
             _crash_ck = f"crash_bg_{datetime.now().strftime('%Y%m%d_%H')}"  # Stündlicher Cooldown
             if _crash_ck not in _EMAIL_COOLDOWN:
-                _EMAIL_COOLDOWN[_crash_ck] = now
                 _crash_rows = ""
                 for cs in crash_stocks[:8]:
                     _gc = {"S": "#7c3aed", "A": "#16a34a"}.get(cs["grade"], "#666")
@@ -1033,8 +1110,12 @@ def _run_bear_scanner(poly_key, secrets):
                 {_crash_rows}</table>
                 <p style="color:#999;font-size:11px;margin-top:12px">Automatischer Short/Crash Alert vom Background Service (stündlich)</p>
                 </body></html>'''
-                _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets)
-                log.info(f"  CRASH ALERT sent: {[c['ticker'] for c in crash_stocks]}")
+                sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets)
+                if sent:
+                    _EMAIL_COOLDOWN[_crash_ck] = now
+                    for dedupe_key in crash_dedupe_keys:
+                        _email_dedupe_mark(dedupe_key)
+                    log.info(f"  CRASH ALERT sent: {[c['ticker'] for c in crash_stocks]}")
 
     except Exception as e:
         log.error(f"Bear Scanner: {e}\n{traceback.format_exc()}")

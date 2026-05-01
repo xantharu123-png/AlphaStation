@@ -75,6 +75,18 @@ def test_email_etf_guard_allows_stock_setups():
     ) is False
 
 
+def test_email_dedupe_persists_crash_ticker(tmp_path, monkeypatch):
+    dedupe_file = tmp_path / "email_dedupe.json"
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(dedupe_file))
+
+    key = "crash_stock_20260430_NCSM"
+
+    assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_000.0) is True
+    assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_060.0) is False
+    assert json.loads(dedupe_file.read_text())[key] == 1_000_000.0
+    assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_000.0 + 37 * 3600) is True
+
+
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0
