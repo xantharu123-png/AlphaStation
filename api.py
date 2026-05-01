@@ -705,6 +705,7 @@ _EMAIL_SEND_LOG: List[Dict[str, Any]] = []
 _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
+_NEW_LISTING_MIN_ALERT_RR = 1.5
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -817,6 +818,15 @@ def _email_dedupe_active(key: str, ttl_seconds: int, now: Optional[float] = None
     return last is not None and now - last < ttl_seconds
 
 
+def _email_dedupe_remaining(key: str, ttl_seconds: int, now: Optional[float] = None) -> int:
+    now = now or time.time()
+    dedupe = _load_email_dedupe(now=now)
+    last = dedupe.get(key)
+    if last is None:
+        return 0
+    return int(max(0, ttl_seconds - (now - last)))
+
+
 def _email_dedupe_mark(key: str, now: Optional[float] = None) -> None:
     now = now or time.time()
     dedupe = _load_email_dedupe(now=now)
@@ -898,6 +908,43 @@ def _extract_alert_price(row: Dict[str, Any]) -> Any:
     return 0
 
 
+def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    sig = row.get("signal", {}) if isinstance(row, dict) else {}
+    nested = sig if isinstance(sig, dict) else {}
+    timing_text = str(nested.get("timing", sig if not isinstance(sig, dict) else row.get("timing", "")) or "")
+    return {
+        "grade": str(nested.get("grade", row.get("grade", "")) or "").strip().upper(),
+        "timing": timing_text,
+        "timing_quality": _alert_float(nested.get("timing_quality", row.get("timing_quality")), 0) or 0,
+        "rr_effective": _alert_float(
+            nested.get("rr_effective", nested.get("rr1", row.get("rr_effective", row.get("rr1")))),
+            0,
+        ) or 0,
+        "safety_ok": bool(nested.get("safety_ok", row.get("safety_ok", False))),
+        "tp1_missed": bool(nested.get("tp1_missed", row.get("tp1_missed", False))),
+        "tp2_missed": bool(nested.get("tp2_missed", row.get("tp2_missed", False))),
+        "source": str(row.get("source", "") or "").lower(),
+    }
+
+
+def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    fields = _extract_new_listing_signal_fields(row)
+    reasons: List[str] = []
+    timing_upper = fields["timing"].upper()
+    source = fields["source"]
+    if source and source != "signals":
+        reasons.append("not_active_short_signal")
+    if fields["timing_quality"] < 4 or "SHORT" not in timing_upper:
+        reasons.append("not_active_short_timing")
+    if not fields["safety_ok"]:
+        reasons.append("safety_not_ok")
+    if fields["tp1_missed"] or fields["tp2_missed"]:
+        reasons.append("target_already_missed")
+    if fields["rr_effective"] < _NEW_LISTING_MIN_ALERT_RR:
+        reasons.append("rr_below_alert_threshold")
+    return reasons
+
+
 def _alert_cooldown_remaining(key: str, now: Optional[float] = None) -> int:
     now = now or time.time()
     last = _EMAIL_COOLDOWN.get(key)
@@ -913,17 +960,27 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     rvol = _extract_alert_rvol(row)
     reasons = []
 
+    if scanner_name == "new_listing":
+        nl_fields = _extract_new_listing_signal_fields(row)
+        if nl_fields["grade"]:
+            grade = nl_fields["grade"]
+
     if not ticker:
         reasons.append("missing_ticker")
     if grade not in _ALERT_TOP_GRADES:
         reasons.append("grade_below_alert_threshold")
     if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and (rvol is None or rvol < _ALERT_MIN_RVOL):
         reasons.append("rvol_below_alert_threshold")
+    if scanner_name == "new_listing":
+        reasons.extend(_new_listing_rule_reasons(row))
 
     cooldown_key = f"{scanner_name}_{ticker}" if ticker else ""
     cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
     if cooldown_remaining > 0:
         reasons.append("cooldown_active")
+    dedupe_remaining = _email_dedupe_remaining(cooldown_key, _EMAIL_COOLDOWN_SEC, now) if cooldown_key else 0
+    if dedupe_remaining > 0:
+        reasons.append("persistent_dedupe_active")
 
     return {
         "ticker": ticker,
@@ -933,6 +990,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "rvol": rvol,
         "cooldown_key": cooldown_key,
         "cooldown_remaining_seconds": cooldown_remaining,
+        "persistent_dedupe_remaining_seconds": dedupe_remaining,
         "alertable_now": not reasons,
         "suppression_reasons": reasons,
     }
@@ -953,6 +1011,13 @@ def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> L
             if isinstance(container, dict):
                 flat.extend([r for r in container.get("breakdown_stocks", []) or [] if isinstance(r, dict)])
         return flat
+    if scanner_name == "new_listing":
+        flat = [r for r in rows if isinstance(r, dict)]
+        return [
+            r for r in flat
+            if str(r.get("source", "")).lower() == "signals"
+            or str(r.get("signal", "")).upper().startswith("SHORT")
+        ]
     return [r for r in rows if isinstance(r, dict)]
 
 
@@ -1188,31 +1253,44 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         return
     now = time.time()
     alerts = []
+    suppressed: Dict[str, int] = {}
     for entry in signals:
         if not isinstance(entry, dict):
             continue
         sig = entry.get("signal", {}) or {}
-        grade = str(sig.get("grade", "")).upper()
-        if grade not in _ALERT_TOP_GRADES:
+        fields = _extract_new_listing_signal_fields(entry)
+        reasons = []
+        if fields["grade"] not in _ALERT_TOP_GRADES:
+            reasons.append("grade_below_alert_threshold")
+        reasons.extend(_new_listing_rule_reasons(entry))
+        if reasons:
+            for reason in reasons:
+                suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         symbol = _display_crypto_contract_symbol(entry.get("symbol") or sig.get("symbol") or "")
         cooldown_key = f"new_listing_{symbol}"
         if _alert_cooldown_remaining(cooldown_key, now) > 0:
+            suppressed["cooldown_active"] = suppressed.get("cooldown_active", 0) + 1
             continue
-        _EMAIL_COOLDOWN[cooldown_key] = now
+        if _email_dedupe_active(cooldown_key, _EMAIL_COOLDOWN_SEC, now):
+            suppressed["persistent_dedupe_active"] = suppressed.get("persistent_dedupe_active", 0) + 1
+            continue
         alerts.append({
             "symbol": symbol,
             "exchange": entry.get("exchange", ""),
-            "grade": grade,
+            "grade": fields["grade"],
             "timing": sig.get("timing", ""),
             "entry": sig.get("entry", 0),
             "stop": sig.get("stop_loss", sig.get("stop", 0)),
             "tp1": sig.get("tp1", 0),
             "tp2": sig.get("tp2", 0),
-            "rr": sig.get("rr_effective", sig.get("rr1", 0)),
+            "rr": fields["rr_effective"],
             "exh_score": sig.get("exh_score", 0),
+            "cooldown_key": cooldown_key,
         })
     if not alerts:
+        if suppressed:
+            _record_email_event("Pump & Dump SHORT Alert", "skipped", f"no_active_short_signals:{suppressed}")
         return
 
     rows = ""
@@ -1237,9 +1315,13 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
     <th style="padding:8px;text-align:left">R</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur aktive Signale, nicht Watchlist; 8h Cooldown pro Coin.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte SHORT-now Signale: Timing-Quality >=4, Safety OK, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; 8h Cooldown pro Coin.</p>
     </body></html>'''
-    _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
+    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
+    if sent:
+        for alert in alerts:
+            _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+            _email_dedupe_mark(alert["cooldown_key"], now=now)
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -4285,6 +4367,7 @@ def get_email_alert_status():
             "Startup-Cooldown nach Restart ist noch aktiv.",
             "Ticker ist im 8h Alert-Cooldown oder Crash-Dedupe 36h aktiv.",
             "Mail wurde wegen ETF/ETP-Inhalt geblockt.",
+            "Pump-&-Dump: kein aktives SHORT-now Signal mit Safety OK, unverpassten Targets und R:R >= 1.5.",
             "Gmail SMTP/Test-Mail ist fehlgeschlagen.",
         ],
         "timestamp": datetime.now().isoformat(),
@@ -4320,7 +4403,8 @@ def get_email_alert_audit():
             "startup_delay_seconds": _EMAIL_STARTUP_DELAY,
             "rvol_guard_scanners": sorted(_ALERT_RVOL_GUARD_SCANNERS),
             "min_rvol": _ALERT_MIN_RVOL,
-            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email.",
+            "new_listing_min_rr": _NEW_LISTING_MIN_ALERT_RR,
+            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Pump-&-Dump mails require active SHORT-now timing, Safety OK, unmissed targets and minimum R:R.",
         },
         "coverage": {
             "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing"],
@@ -7541,6 +7625,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "rr_effective": sig.get("rr_effective", sig.get("rr1", 0)),
             "tp1_missed": sig.get("tp1_missed", False),
             "tp2_missed": sig.get("tp2_missed", False),
+            "timing_quality": sig.get("timing_quality", 0),
             "grade": sig.get("grade", ""),
             "safety_ok": sig.get("safety_ok", False),
             "safety_warnings": sig.get("safety_warnings", []),

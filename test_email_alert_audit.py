@@ -128,6 +128,8 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
                 "signal": {
                     "grade": "A",
                     "timing": "[-] JETZT SHORTEN",
+                    "timing_quality": 5,
+                    "safety_ok": True,
                     "entry": 1.2,
                     "stop_loss": 1.5,
                     "tp1": 0.9,
@@ -137,6 +139,28 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
                 },
             },
             {"symbol": "LOWUSDT", "exchange": "mexc", "signal": {"grade": "B", "timing": "WATCH"}},
+            {
+                "symbol": "WATCHUSDT",
+                "exchange": "mexc",
+                "signal": {
+                    "grade": "A",
+                    "timing": "[+] WATCHLIST - noch nicht reif",
+                    "timing_quality": 2,
+                    "safety_ok": True,
+                    "rr_effective": 2.2,
+                },
+            },
+            {
+                "symbol": "RISKUSDT",
+                "exchange": "mexc",
+                "signal": {
+                    "grade": "S",
+                    "timing": "[-] JETZT SHORTEN",
+                    "timing_quality": 5,
+                    "safety_ok": False,
+                    "rr_effective": 3.0,
+                },
+            },
         ]
     }
 
@@ -146,3 +170,41 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
     assert "Pump & Dump" in sent[0][0]
     assert "WLD" in sent[0][1]
     assert "LOW" not in sent[0][1]
+    assert "WATCH" not in sent[0][1]
+    assert "RISK" not in sent[0][1]
+
+
+def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "new_listing.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [
+            {
+                "symbol": "SHORT",
+                "grade": "A",
+                "signal": "SHORT",
+                "source": "signals",
+                "timing_quality": 5,
+                "safety_ok": True,
+                "rr_effective": 1.8,
+                "tp1_missed": False,
+                "tp2_missed": False,
+            },
+            {
+                "symbol": "WATCH",
+                "grade": "S",
+                "signal": "WATCH",
+                "source": "watchlist",
+                "timing_quality": 2,
+                "safety_ok": True,
+                "rr_effective": 3.0,
+            },
+        ],
+    }))
+
+    audit = api._build_alert_audit_for_cache("new_listing", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 1
+    assert audit["alertable_preview"][0]["ticker"] == "SHORT"

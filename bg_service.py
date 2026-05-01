@@ -33,6 +33,7 @@ import re
 import atexit
 import fcntl
 import tempfile
+import math
 import glob
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -164,15 +165,35 @@ def _load_secrets():
 
 # ── E-Mail Alert System ──
 _EMAIL_COOLDOWN = {}  # Verhindert Spam: {ticker: last_sent_ts}
-_EMAIL_COOLDOWN_SEC = 3600 * 4  # 4 Stunden Cooldown pro Ticker
+_EMAIL_COOLDOWN_SEC = 3600 * 8  # 8 Stunden Cooldown pro Ticker, wie im API-Mailpfad
 _EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
+_NLS_MIN_ALERT_RR = 1.5
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
     "KOLD", "BOIL", "DRIP", "GUSH", "JDST", "JNUG", "NUGT", "DUST", "YANG", "YINN",
     "SVXY", "VXX", "TVIX", "BITI", "BITO", "LABU",
 }
+
+
+def _safe_float(value, default=0.0):
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(val) or math.isinf(val):
+        return default
+    return val
+
+
+def _display_crypto_contract_symbol(symbol):
+    display = str(symbol or "").strip().upper()
+    for suffix in ("USD-PERP", "USDT-PERP", "_USDT", "-USDT", "USDT", "_PERP", "-PERP", "USD"):
+        if display.endswith(suffix) and len(display) > len(suffix):
+            display = display[:-len(suffix)]
+            break
+    return display or str(symbol or "").strip().upper()
 
 
 def _email_has_blocked_etf_content(subject, body_html):
@@ -2107,8 +2128,9 @@ def _run_btc_divergence(poly_key=None):
 # NEW LISTING DUMP SCANNER
 # ══════════════════════════════════════════════════════════════
 
-def _alert_nls_signals(results, secrets):
-    """Sendet E-Mail wenn NLS Short-Signale mit Grade S/A gefunden werden."""
+def _alert_nls_signals_legacy(results, secrets):
+    """Legacy NLS mailer kept for rollback reference; hardened mailer is defined below."""
+    return
     if not results:
         return
     signals = results.get("signals", [])
@@ -2195,6 +2217,117 @@ def _alert_nls_signals(results, secrets):
 
     _send_email_alert(subject, body_html, secrets)
     log.info(f"📧 NLS Alert: {n} Dump-Signale gesendet ({', '.join(a['symbol'] for a in alerts)})")
+
+
+def _alert_nls_signals(results, secrets):
+    """Override: mail only active, safe Pump-&-Dump SHORT-now signals."""
+    if not results:
+        return
+    signals = results.get("signals", [])
+    if not signals:
+        return
+
+    now = time.time()
+    alerts = []
+    for entry in signals:
+        if not isinstance(entry, dict):
+            continue
+        sig = entry.get("signal", {})
+        if not isinstance(sig, dict):
+            continue
+
+        raw_symbol = entry.get("symbol", "")
+        symbol = _display_crypto_contract_symbol(raw_symbol)
+        grade = str(sig.get("grade", "")).upper()
+        timing = str(sig.get("timing", ""))
+        timing_quality = _safe_float(sig.get("timing_quality"), 0)
+        rr_effective = _safe_float(sig.get("rr_effective", sig.get("rr1", 0)), 0)
+        safety_ok = bool(sig.get("safety_ok", False))
+        tp_missed = bool(sig.get("tp1_missed", False) or sig.get("tp2_missed", False))
+        reasons = []
+
+        if grade not in ("S", "A", "A+"):
+            reasons.append("grade_below_alert_threshold")
+        if timing_quality < 4 or "SHORT" not in timing.upper():
+            reasons.append("not_active_short_timing")
+        if not safety_ok:
+            reasons.append("safety_not_ok")
+        if tp_missed:
+            reasons.append("target_already_missed")
+        if rr_effective < _NLS_MIN_ALERT_RR:
+            reasons.append("rr_below_alert_threshold")
+
+        cooldown_key = f"new_listing_{symbol}"
+        if cooldown_key in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[cooldown_key] < _EMAIL_COOLDOWN_SEC:
+            reasons.append("cooldown_active")
+        if _email_dedupe_active(cooldown_key, _EMAIL_COOLDOWN_SEC, now=now):
+            reasons.append("persistent_dedupe_active")
+        if reasons:
+            log.debug(f"NLS Alert suppressed {symbol}: {', '.join(reasons)}")
+            continue
+
+        alerts.append({
+            "symbol": symbol,
+            "exchange": entry.get("exchange", ""),
+            "grade": grade,
+            "grade_label": sig.get("grade_label", grade),
+            "timing": timing,
+            "entry": _safe_float(sig.get("entry"), 0),
+            "stop": _safe_float(sig.get("stop_loss", sig.get("stop", 0)), 0),
+            "tp1": _safe_float(sig.get("tp1"), 0),
+            "tp2": _safe_float(sig.get("tp2"), 0),
+            "rr_effective": rr_effective,
+            "cooldown_key": cooldown_key,
+        })
+
+    if not alerts:
+        return
+
+    n = len(alerts)
+    rows = ""
+    for a in alerts:
+        rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{a['symbol']}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['exchange']}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['grade_label']}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['timing']}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${a['entry']:.4f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${a['stop']:.4f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${a['tp1']:.4f} / ${a['tp2']:.4f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['rr_effective']:.1f}R</td>
+        </tr>"""
+
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto">
+    <h2 style="color:#dc3545">New Listing Dump - SHORT Signale</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} aktive SHORT-now Signale</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Symbol</th>
+            <th style="padding:8px;text-align:left">Exchange</th>
+            <th style="padding:8px;text-align:left">Grade</th>
+            <th style="padding:8px;text-align:left">Timing</th>
+            <th style="padding:8px;text-align:left">Entry</th>
+            <th style="padding:8px;text-align:left">Stop</th>
+            <th style="padding:8px;text-align:left">TP1 / TP2</th>
+            <th style="padding:8px;text-align:left">R:R</th>
+        </tr>
+        {rows}
+    </table>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Nur aktive SHORT-now Signale: Timing-Quality >=4, Safety OK, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol.
+    </p>
+    </body></html>
+    """
+
+    sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets)
+    if sent:
+        for alert in alerts:
+            _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+            _email_dedupe_mark(alert["cooldown_key"], now=now)
+        log.info(f"NLS Alert: {n} Dump-Signale gesendet ({', '.join(a['symbol'] for a in alerts)})")
+    else:
+        log.warning(f"NLS Alert konnte nicht gesendet werden ({', '.join(a['symbol'] for a in alerts)})")
 
 
 def _run_new_listing_scanner():
