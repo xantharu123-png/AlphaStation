@@ -3,6 +3,7 @@ import time
 from modules.new_listing_scanner import (
     _is_tradeable_short_signal,
     _monitor_key,
+    calculate_micro_crack_trigger,
     check_safety,
     generate_short_signal,
 )
@@ -30,6 +31,31 @@ def _deep_book():
         "bids": [(96.9, 200), (96.8, 200)],
         "asks": [(97.1, 200), (97.2, 200)],
     }
+
+
+def _micro_crack_candles():
+    now = int(time.time())
+    rows = []
+    price = 80.0
+    for i in range(18):
+        rows.append({
+            "timestamp": now + i * 300,
+            "open": price,
+            "high": price * 1.018,
+            "low": price * 0.995,
+            "close": price * 1.015,
+            "volume_usd": 100_000 + i * 2_000,
+        })
+        price *= 1.015
+    high = 130.0
+    rows.extend([
+        {"timestamp": now + 18 * 300, "open": price, "high": high, "low": 99, "close": 118, "volume_usd": 420_000},
+        {"timestamp": now + 19 * 300, "open": 118, "high": 119, "low": 115, "close": 116, "volume_usd": 360_000},
+        {"timestamp": now + 20 * 300, "open": 116, "high": 117, "low": 113, "close": 114, "volume_usd": 340_000},
+        {"timestamp": now + 21 * 300, "open": 114, "high": 116.5, "low": 112, "close": 115, "volume_usd": 280_000},
+        {"timestamp": now + 22 * 300, "open": 115, "high": 117, "low": 113, "close": 114.5, "volume_usd": 520_000},
+    ])
+    return rows
 
 
 def test_monitor_key_keeps_same_symbol_separate_by_exchange():
@@ -131,6 +157,48 @@ def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gat
     assert signal["timing_quality"] == 4
     assert signal["signal_quality"] == "tradeable"
     assert _is_tradeable_short_signal(signal) is True
+
+
+def test_micro_crack_trigger_can_create_tradeable_signal():
+    pump_data = {
+        "ath": 130,
+        "current_price": _micro_crack_candles()[-1]["close"],
+        "pump_pct": 80,
+        "from_ath_pct": 9.0,
+        "momentum_recent": 0.2,
+        "current_red_streak": 0,
+        "avg_upper_wick_pct": 5,
+    }
+    micro = calculate_micro_crack_trigger(_micro_crack_candles(), pump_data)
+    pump_data.update(micro)
+    signal = generate_short_signal(
+        "MICROUSDT",
+        pump_data,
+        exh_score=35,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert micro["micro_trigger_ok"] is True
+    assert signal["setup_type"] == "early_crack"
+    assert signal["stop_model"] == "micro_crack_stop"
+    assert signal["signal_quality"] == "tradeable"
+    assert _is_tradeable_short_signal(signal) is True
+
+
+def test_micro_crack_blocks_green_squeeze_without_first_crack():
+    candles = _micro_crack_candles()
+    last = candles[-1]
+    last["open"] = last["close"] * 0.98
+    last["high"] = last["close"] * 1.01
+    last["low"] = last["open"] * 0.995
+    last["close"] = last["high"] * 0.995
+
+    micro = calculate_micro_crack_trigger(candles, {"ath": 135})
+
+    assert micro["micro_trigger_ok"] is False
+    assert "micro_still_squeezing" in micro["micro_warnings"] or "micro_too_early_no_crack" in micro["micro_warnings"]
 
 
 def test_early_crack_blocks_after_tp1_or_without_structure():

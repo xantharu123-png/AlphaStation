@@ -91,6 +91,13 @@ CONFIG.update({
     "early_crack_entry_score": 45,
     "early_crack_stop_buffer_pct": 3.0,
     "min_stop_above_entry_pct": 2.0,
+    "micro_crack_enabled": True,
+    "micro_timeframe": "5m",
+    "micro_candle_count": 72,
+    "micro_min_score": 70,
+    "micro_min_crack_pct": 1.2,
+    "micro_max_from_high_pct": 14.0,
+    "micro_stop_buffer_pct": 1.5,
 })
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1389,6 +1396,189 @@ def check_safety(ticker, book, candles):
 # SIGNAL GENERATOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _upper_wick_pct(candle):
+    rng = _to_float(candle.get("high")) - _to_float(candle.get("low"))
+    if rng <= 0:
+        return 0.0
+    body_top = max(_to_float(candle.get("open")), _to_float(candle.get("close")))
+    return max(0.0, (_to_float(candle.get("high")) - body_top) / rng * 100)
+
+
+def _close_position(candle):
+    rng = _to_float(candle.get("high")) - _to_float(candle.get("low"))
+    if rng <= 0:
+        return 0.5
+    return (_to_float(candle.get("close")) - _to_float(candle.get("low"))) / rng
+
+
+def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None):
+    """5m/15m execution trigger for Pump & Dump shorts."""
+    pump_data = pump_data or {}
+    result = {
+        "micro_trigger_ok": False,
+        "micro_score": 0,
+        "micro_reasons": [],
+        "micro_warnings": [],
+        "micro_stop_loss": 0,
+        "micro_rejection_high": 0,
+        "micro_from_high_pct": 0,
+        "micro_rr_preview": 0,
+        "micro_current_price": 0,
+    }
+    if not candles or len(candles) < 18:
+        result["micro_warnings"].append("micro_not_enough_candles")
+        return result
+
+    clean = [c for c in candles if _to_float(c.get("open")) > 0 and _to_float(c.get("close")) > 0]
+    if len(clean) < 18:
+        result["micro_warnings"].append("micro_invalid_candles")
+        return result
+
+    window = clean[-min(len(clean), int(CONFIG["micro_candle_count"])):]
+    last = window[-1]
+    entry = _to_float(last.get("close"))
+    if entry <= 0:
+        result["micro_warnings"].append("micro_invalid_entry")
+        return result
+
+    highs = [_to_float(c.get("high")) for c in window]
+    micro_high = max(highs)
+    high_index = max(i for i, value in enumerate(highs) if value == micro_high)
+    bars_since_high = len(window) - 1 - high_index
+    from_high_pct = (micro_high - entry) / micro_high * 100 if micro_high > 0 else 0
+
+    recent_before_last = window[-16:-3] if len(window) >= 16 else window[:-3]
+    recent_support = min((_to_float(c.get("low")) for c in recent_before_last), default=0)
+    support_break = bool(recent_support and entry < recent_support)
+    prior_high_zone = window[max(0, high_index - 2):min(len(window), high_index + 4)]
+    rejection_high = max((_to_float(c.get("high")) for c in prior_high_zone), default=micro_high)
+    recent_high = max((_to_float(c.get("high")) for c in window[-7:-1]), default=0)
+    prior_swing_high = max((_to_float(c.get("high")) for c in window[-25:-7]), default=0)
+    after_high_window = window[high_index + 1:-1]
+    recent_high_after_peak = max((_to_float(c.get("high")) for c in after_high_window), default=0)
+    lower_high = bool(
+        (prior_swing_high and recent_high and recent_high < prior_swing_high * 0.995)
+        or (recent_high_after_peak and recent_high_after_peak < micro_high * 0.995)
+    )
+    if lower_high:
+        lower_high_stop_ref = recent_high_after_peak or recent_high
+        if lower_high_stop_ref > entry:
+            rejection_high = min(rejection_high, lower_high_stop_ref)
+
+    last_change_pct = (
+        (_to_float(last.get("close")) - _to_float(last.get("open"))) / _to_float(last.get("open")) * 100
+        if _to_float(last.get("open")) > 0 else 0
+    )
+    last_close_pos = _close_position(last)
+    red_streak = 0
+    for candle in reversed(window):
+        if _to_float(candle.get("close")) < _to_float(candle.get("open")):
+            red_streak += 1
+        else:
+            break
+
+    recent_3 = window[-3:]
+    avg_upper_wick = sum(_upper_wick_pct(c) for c in recent_3) / max(1, len(recent_3))
+    avg_vol_window = window[-25:-5]
+    avg_vol = sum(_to_float(c.get("volume_usd")) for c in avg_vol_window) / max(1, len(avg_vol_window))
+    recent_vol = sum(_to_float(c.get("volume_usd")) for c in recent_3) / max(1, len(recent_3))
+    sell_volume = recent_vol >= avg_vol * 1.15 if avg_vol > 0 else False
+
+    pump_ref = window[-13]["open"] if len(window) >= 13 else window[0]["open"]
+    micro_pump_pct = (micro_high - pump_ref) / pump_ref * 100 if pump_ref > 0 else 0
+    too_early = from_high_pct < CONFIG["micro_min_crack_pct"]
+    too_late = from_high_pct > CONFIG["micro_max_from_high_pct"]
+    still_squeezing = last_change_pct > 1.2 and last_close_pos > 0.72 and not support_break
+
+    score = 0
+    reasons = []
+    if micro_pump_pct >= 20:
+        score += 20
+        reasons.append("micro_pump_extreme")
+    elif micro_pump_pct >= 12:
+        score += 15
+        reasons.append("micro_pump_strong")
+    elif micro_pump_pct >= 7:
+        score += 10
+        reasons.append("micro_pump_visible")
+    if CONFIG["micro_min_crack_pct"] <= from_high_pct <= 8:
+        score += 20
+        reasons.append("first_crack_not_chased")
+    elif from_high_pct <= CONFIG["micro_max_from_high_pct"]:
+        score += 12
+        reasons.append("crack_extended_but_tradeable")
+    if support_break:
+        score += 20
+        reasons.append("micro_support_break")
+    if lower_high:
+        score += 12
+        reasons.append("lower_high_confirmed")
+    if avg_upper_wick >= 30:
+        score += 10
+        reasons.append("rejection_wicks")
+    if red_streak >= 2:
+        score += 12
+        reasons.append("red_streak")
+    elif last_change_pct < 0 and last_close_pos < 0.45:
+        score += 8
+        reasons.append("bearish_close")
+    if sell_volume:
+        score += 10
+        reasons.append("sell_volume_pickup")
+    if bars_since_high <= 12:
+        score += 8
+        reasons.append("fresh_crack")
+
+    local_stop = rejection_high * (1 + CONFIG["micro_stop_buffer_pct"] / 100)
+    min_stop = entry * (1 + CONFIG["min_stop_above_entry_pct"] / 100)
+    micro_stop = max(local_stop, min_stop)
+    ath = _to_float(pump_data.get("ath"))
+    tp1 = ath * (1 - CONFIG["tp1_from_ath_pct"] / 100) if ath > 0 else 0
+    rr_preview = (entry - tp1) / (micro_stop - entry) if micro_stop > entry and tp1 > 0 else 0
+
+    warnings = []
+    if too_early:
+        warnings.append("micro_too_early_no_crack")
+    if too_late:
+        warnings.append("micro_too_late_chased")
+    if still_squeezing:
+        warnings.append("micro_still_squeezing")
+    if rr_preview < CONFIG["min_short_rr"]:
+        warnings.append("micro_rr_too_low")
+
+    trigger_ok = (
+        score >= CONFIG["micro_min_score"]
+        and not too_early
+        and not too_late
+        and not still_squeezing
+        and micro_stop > entry
+        and rr_preview >= CONFIG["min_short_rr"]
+        and (support_break or lower_high)
+        and (red_streak >= 1 or avg_upper_wick >= 30 or last_change_pct < 0)
+    )
+    result.update({
+        "micro_trigger_ok": trigger_ok,
+        "micro_score": int(min(100, score)),
+        "micro_reasons": reasons,
+        "micro_warnings": warnings,
+        "micro_stop_loss": round(micro_stop, 8),
+        "micro_current_price": round(entry, 8),
+        "micro_rejection_high": round(rejection_high, 8),
+        "micro_from_high_pct": round(from_high_pct, 2),
+        "micro_rr_preview": round(rr_preview, 2),
+        "micro_support_break": support_break,
+        "micro_lower_high": lower_high,
+        "micro_red_streak": red_streak,
+        "micro_last_close_pos": round(last_close_pos, 2),
+        "micro_last_change_pct": round(last_change_pct, 2),
+        "micro_avg_upper_wick_pct": round(avg_upper_wick, 1),
+        "micro_sell_volume": sell_volume,
+        "micro_pump_pct": round(micro_pump_pct, 2),
+        "micro_bars_since_high": bars_since_high,
+    })
+    return result
+
+
 def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, safety_warnings):
     """
     Generiert ein Short-Signal mit Entry, Stop-Loss und Take-Profit Levels.
@@ -1414,6 +1604,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         min_stop = entry * (1 + CONFIG["min_stop_above_entry_pct"] / 100)
         stop = min(hard_stop, max(local_stop, min_stop))
         stop_model = "local_rejection_stop"
+    micro_stop = _to_float(pump_data.get("micro_stop_loss"))
+    if pump_data.get("micro_trigger_ok") and micro_stop > entry:
+        stop = min(hard_stop, micro_stop)
+        stop_model = "micro_crack_stop"
     tp1 = ath * (1 - CONFIG["tp1_from_ath_pct"] / 100)
     tp2 = ath * (1 - CONFIG["tp2_from_ath_pct"] / 100)
 
@@ -1435,6 +1629,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     recent_crack_depth = _to_float(pump_data.get("recent_crack_depth_pct"))
     prior_3_low_broken = bool(pump_data.get("prior_3_low_broken"))
     lower_high_confirmed = bool(pump_data.get("lower_high_confirmed"))
+    micro_trigger_ok = bool(pump_data.get("micro_trigger_ok"))
+    micro_score = _to_float(pump_data.get("micro_score"))
     early_crack_window_ok = (
         CONFIG["min_from_ath_for_short_pct"]
         <= from_ath
@@ -1446,6 +1642,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         prior_3_low_broken
         or lower_high_confirmed
         or recent_crack_depth >= CONFIG["min_from_ath_for_short_pct"]
+        or micro_trigger_ok
     )
     turn_confirmed = first_crack_ok and (
         structural_crack_ok
@@ -1465,7 +1662,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     rr_ok = rr_effective >= CONFIG["min_short_rr"]
     risk_ok = risk_pct <= CONFIG["max_signal_risk_pct"]
     early_crack_ok = (
-        exh_score >= CONFIG["early_crack_entry_score"]
+        (exh_score >= CONFIG["early_crack_entry_score"] or micro_score >= CONFIG["micro_min_score"])
         and early_crack_window_ok
         and structural_crack_ok
         and turn_confirmed
@@ -1505,8 +1702,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("crack_structure_weak")
     if from_ath > CONFIG["max_early_crack_from_ath_pct"] and not exhaustion_short_ok:
         risk_flags.append("early_crack_window_missed")
-    if exh_score < CONFIG["early_crack_entry_score"]:
+    if exh_score < CONFIG["early_crack_entry_score"] and not micro_trigger_ok:
         risk_flags.append("early_crack_score_too_low")
+    if CONFIG.get("micro_crack_enabled") and not micro_trigger_ok:
+        risk_flags.append("micro_trigger_missing")
 
     # ── Timing Score ──
     if tp2_missed:
@@ -1986,6 +2185,21 @@ def run_new_listing_scanner():
                 # Safety prüfen
                 safety_ok, safety_warnings = check_safety(ticker, book, candles)
 
+                if CONFIG.get("micro_crack_enabled") and pump_data.get("pump_pct", 0) >= CONFIG["min_pump_pct"]:
+                    micro_candles = fetch_candles_for(
+                        symbol,
+                        exchange,
+                        CONFIG["micro_timeframe"],
+                        CONFIG["micro_candle_count"],
+                    )
+                    pump_data.update(calculate_micro_crack_trigger(micro_candles, pump_data, ticker))
+                    micro_price = _to_float(pump_data.get("micro_current_price"))
+                    ath_price = _to_float(pump_data.get("ath"))
+                    if micro_price > 0:
+                        pump_data["current_price"] = micro_price
+                        if ath_price > 0:
+                            pump_data["from_ath_pct"] = round((ath_price - micro_price) / ath_price * 100, 1)
+
                 # Monitoring-Status aktualisieren
                 mon_data["last_exh_score"] = exh_score
                 mon_data["peak_exh_score"] = max(mon_data.get("peak_exh_score", 0), exh_score)
@@ -2038,6 +2252,8 @@ def run_new_listing_scanner():
                 mon_data["risk_flags"] = signal.get("risk_flags", [])
                 mon_data["setup_type"] = signal.get("setup_type", "watch")
                 mon_data["stop_model"] = signal.get("stop_model", "")
+                mon_data["micro_trigger_ok"] = pump_data.get("micro_trigger_ok", False)
+                mon_data["micro_score"] = pump_data.get("micro_score", 0)
 
                 if _is_tradeable_short_signal(signal):
                     results["signals"].append(entry)
@@ -2068,6 +2284,11 @@ def run_new_listing_scanner():
                     "stop_model": signal.get("stop_model", ""),
                     "stop_loss": signal.get("stop_loss", 0),
                     "hard_stop_loss": signal.get("hard_stop_loss", 0),
+                    "micro_trigger_ok": pump_data.get("micro_trigger_ok", False),
+                    "micro_score": pump_data.get("micro_score", 0),
+                    "micro_reasons": pump_data.get("micro_reasons", []),
+                    "micro_warnings": pump_data.get("micro_warnings", []),
+                    "micro_from_high_pct": pump_data.get("micro_from_high_pct", 0),
                     "exchange": exchange,
                     "source": mon_data.get("source", "new_listing"),
                     "hours_tracked": pump_data.get("hours_tracked", 0),

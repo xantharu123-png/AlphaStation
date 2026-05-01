@@ -1568,6 +1568,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "tp2": sig.get("tp2", 0),
             "rr": fields["rr_effective"],
             "exh_score": sig.get("exh_score", 0),
+            "micro_score": (sig.get("pump_data", {}) or {}).get("micro_score", 0),
             "cooldown_key": cooldown_key,
         })
     if not alerts:
@@ -1585,7 +1586,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["entry"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}<br><span style="color:#999;font-size:11px">{a["stop_model"]}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["tp1"]} / ${a["tp2"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R</td></tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R<br><span style="color:#999;font-size:11px">Micro {a["micro_score"]}</span></td></tr>'
         )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
     <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
@@ -7969,6 +7970,12 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "hard_stop_loss": sig.get("hard_stop_loss", 0),
             "stop_model": sig.get("stop_model", ""),
             "setup_type": sig.get("setup_type", ""),
+            "micro_trigger_ok": pump.get("micro_trigger_ok", False),
+            "micro_score": pump.get("micro_score", 0),
+            "micro_reasons": pump.get("micro_reasons", []),
+            "micro_warnings": pump.get("micro_warnings", []),
+            "micro_from_high_pct": pump.get("micro_from_high_pct", 0),
+            "micro_current_price": pump.get("micro_current_price", 0),
             "confirmation_ok": sig.get("confirmation_ok", False),
             "continuation_risk": sig.get("continuation_risk", False),
             "signal_quality": sig.get("signal_quality", ""),
@@ -8007,6 +8014,12 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "hard_stop_loss": item.get("hard_stop_loss", 0),
             "stop_model": item.get("stop_model", ""),
             "setup_type": item.get("setup_type", ""),
+            "micro_trigger_ok": item.get("micro_trigger_ok", False),
+            "micro_score": item.get("micro_score", 0),
+            "micro_reasons": item.get("micro_reasons", []),
+            "micro_warnings": item.get("micro_warnings", []),
+            "micro_from_high_pct": item.get("micro_from_high_pct", 0),
+            "micro_current_price": item.get("micro_current_price", 0),
             "confirmation_ok": item.get("confirmation_ok", False),
             "continuation_risk": item.get("continuation_risk", False),
             "signal_quality": item.get("signal_quality", ""),
