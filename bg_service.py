@@ -170,6 +170,7 @@ _EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
 _NLS_MIN_ALERT_RR = 1.5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
+_LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "strategies", "stock_strategy", "strategy_scan"}
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -186,6 +187,91 @@ def _safe_float(value, default=0.0):
     if math.isnan(val) or math.isinf(val):
         return default
     return val
+
+
+def _extract_long_entry_fields(row):
+    return {
+        "change_pct": _safe_float(row.get("change_pct", row.get("Change_Pct", row.get("Change%"))), None),
+        "close_pos": _safe_float(row.get("close_pos", row.get("Close_Position", row.get("Close Position"))), None),
+        "open_to_current_pct": _safe_float(row.get("open_to_current_pct", row.get("Open_To_Current_Pct")), None),
+        "latest_bar_change_pct": _safe_float(row.get("latest_bar_change_pct"), None),
+        "latest_bar_close_pos": _safe_float(row.get("latest_bar_close_pos"), None),
+        "extension_atr": _safe_float(row.get("Extension_ATR", row.get("extension_atr")), None),
+        "rvol": _safe_float(row.get("rvol", row.get("RVOL")), None),
+        "mdr_tag": str(row.get("mdr_tag", "") or "").upper(),
+    }
+
+
+def _long_continuation_ok(fields):
+    close_pos = fields.get("close_pos")
+    latest_change = fields.get("latest_bar_change_pct")
+    latest_close_pos = fields.get("latest_bar_close_pos")
+    rvol = fields.get("rvol")
+    mdr_tag = fields.get("mdr_tag", "")
+    latest_ok = (
+        latest_change is None
+        or latest_close_pos is None
+        or latest_change >= -0.05
+        or latest_close_pos >= 0.55
+    )
+    volume_ok = rvol is None or rvol >= 1.2
+    holding_highs = close_pos is not None and close_pos >= 0.78
+    mdr_ok = "MDR" in mdr_tag and "CRASH" not in mdr_tag and close_pos is not None and close_pos >= 0.65
+    return (holding_highs and latest_ok and volume_ok) or mdr_ok
+
+
+def _long_entry_rule_reasons(row):
+    direction = str(row.get("Signal_Direction", row.get("direction", "")) or "").lower()
+    if "short" in direction:
+        return []
+    fields = _extract_long_entry_fields(row)
+    reasons = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    latest_change = fields["latest_bar_change_pct"]
+    latest_close_pos = fields["latest_bar_close_pos"]
+    extension_atr = fields["extension_atr"]
+
+    latest_red_fade = (
+        latest_change is not None
+        and latest_close_pos is not None
+        and latest_change < -0.15
+        and latest_close_pos < 0.45
+    )
+    intraday_red_fade = open_to_current is not None and open_to_current < -0.25
+    not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
+    extended = (change is not None and change >= 12) or (extension_atr is not None and extension_atr >= 4.0)
+    hard_extended = (change is not None and change >= 30) or (extension_atr is not None and extension_atr >= 6.0)
+    continuation_ok = _long_continuation_ok(fields)
+
+    if latest_red_fade:
+        reasons.append("latest_5m_red_fade")
+    if intraday_red_fade:
+        reasons.append("current_candle_red_fade")
+    if not_holding_highs and (extended or latest_red_fade or intraday_red_fade):
+        reasons.append("not_holding_highs_after_up_move")
+    if hard_extended and not continuation_ok:
+        reasons.append("hard_extended_long_wait_retest")
+    elif extended and (latest_red_fade or intraday_red_fade or not_holding_highs):
+        reasons.append("extended_long_fading_wait_retest")
+    return reasons
+
+
+def _long_entry_quality(row):
+    reasons = _long_entry_rule_reasons(row)
+    if reasons:
+        if any(reason.endswith("wait_retest") for reason in reasons):
+            return "WAIT_RETEST"
+        return "FADE_WATCH"
+    fields = _extract_long_entry_fields(row)
+    extended = (
+        (fields["change_pct"] is not None and fields["change_pct"] >= 12)
+        or (fields["extension_atr"] is not None and fields["extension_atr"] >= 4.0)
+    )
+    if extended and _long_continuation_ok(fields):
+        return "CONTINUATION_OK"
+    return "TRADEABLE"
 
 
 def _extract_bear_short_fields(row):
@@ -299,6 +385,11 @@ def _fetch_bear_latest_intraday_state(ticker, poly_key):
         }
     except Exception:
         return {}
+
+
+def _fetch_long_latest_intraday_state(ticker, poly_key):
+    """Same 5m state, used to block fading long mails without blocking continuation."""
+    return _fetch_bear_latest_intraday_state(ticker, poly_key)
 
 
 def _display_crypto_contract_symbol(symbol):
@@ -512,6 +603,15 @@ def _check_and_alert_scan_results(scanner_name, secrets):
             if scanner_name == "bi_short" and _bearish_stock_alert_active(ticker, now=now):
                 log.debug(f"BI short alert suppressed by bearish ticker dedupe: {ticker}")
                 continue
+            if scanner_name in _LONG_ENTRY_ALERT_SCANNERS and ticker:
+                r = dict(r)
+                if "latest_bar_change_pct" not in r:
+                    r.update(_fetch_long_latest_intraday_state(ticker, secrets.get("POLYGON_KEY", "")))
+                r["long_entry_quality"] = _long_entry_quality(r)
+                r["alertable_long"] = not _long_entry_rule_reasons(r)
+                if not r["alertable_long"]:
+                    log.debug(f"Long alert suppressed by timing guard: {ticker} {r.get('long_entry_quality')} {r.get('latest_bar_change_pct')}")
+                    continue
 
             # Cooldown: Nicht denselben Ticker nochmal innerhalb 4h
             cooldown_key = f"{scanner_name}_{ticker}"
@@ -527,6 +627,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "direction": r.get("direction", direction if scanner_name.startswith("bi_") else ""),
                 "name": r.get("Name", r.get("name", "")),
                 "rvol": r.get("RVOL", r.get("rvol", 0)),
+                "entry_quality": r.get("long_entry_quality", ""),
                 "cooldown_key": cooldown_key,
             })
 
@@ -556,6 +657,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 <td style="padding:8px;border-bottom:1px solid #eee">${a['price']}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{dir_label}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{a['rvol']:.1f}x</td>
+                <td style="padding:8px;border-bottom:1px solid #eee">{a.get('entry_quality', '')}</td>
             </tr>"""
 
         body_html = f"""
@@ -571,6 +673,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 <th style="padding:8px;text-align:left">Preis</th>
                 <th style="padding:8px;text-align:left">Richtung</th>
                 <th style="padding:8px;text-align:left">RVOL</th>
+                <th style="padding:8px;text-align:left">Entry</th>
             </tr>
             {rows}
         </table>
@@ -1385,6 +1488,8 @@ def _run_strategy_scanner(poly_key, secrets):
                     "Ticker": ticker, "Name": (t.get("name", "") or "")[:30],
                     "Preis": round(price, 2), "Change%": round(change_pct, 2),
                     "RVOL": round(rvol, 2), "Close Position": round(close_pos, 3),
+                    "close_pos": round(close_pos, 3),
+                    "open_to_current_pct": round(((price - day_open) / day_open * 100), 2) if day_open > 0 else None,
                     "Volume": vol, "DollarVol": dollar_vol,
                     "Gap%": round(gap_pct, 2), "Vortag%": round(vortag_pct, 2),
                 })
@@ -1501,6 +1606,13 @@ def _run_strategy_scanner(poly_key, secrets):
                     continue
                 # Nur starke Setups: Score >= 60
                 if m["_score"] >= 60:
+                    if m.get("_direction") == "long":
+                        m = dict(m)
+                        m.update(_fetch_long_latest_intraday_state(m["Ticker"], poly_key))
+                        m["long_entry_quality"] = _long_entry_quality(m)
+                        m["alertable_long"] = not _long_entry_rule_reasons(m)
+                        if not m["alertable_long"]:
+                            continue
                     all_alerts.append(m)
                     _EMAIL_COOLDOWN[ck] = now
 
@@ -1539,6 +1651,7 @@ def _run_strategy_scanner(poly_key, secrets):
                         <td style="padding:6px;border-bottom:1px solid #eee">${a['Preis']}</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a['Change%']:+.1f}%</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a['RVOL']:.1f}x</td>
+                        <td style="padding:6px;border-bottom:1px solid #eee">{a.get('long_entry_quality', '')}</td>
                     </tr>"""
 
             body_html = f"""
@@ -1555,6 +1668,7 @@ def _run_strategy_scanner(poly_key, secrets):
                     <th style="padding:6px;text-align:left">Preis</th>
                     <th style="padding:6px;text-align:left">Change</th>
                     <th style="padding:6px;text-align:left">RVOL</th>
+                    <th style="padding:6px;text-align:left">Entry</th>
                 </tr>
                 {rows}
             </table>

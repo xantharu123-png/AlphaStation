@@ -28,6 +28,81 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
 
 
+def test_long_alert_audit_blocks_extended_fading_move(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "long_fade.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "ticker": "LATE",
+            "grade": "A",
+            "score": 82,
+            "rvol": 2.4,
+            "price": 18.2,
+            "change_pct": 16.5,
+            "close_pos": 0.38,
+            "open_to_current_pct": -1.1,
+            "latest_bar_change_pct": -0.4,
+            "latest_bar_close_pos": 0.2,
+            "Signal_Direction": "LONG",
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("stock_strategy", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["latest_5m_red_fade"] == 1
+    assert audit["suppression_counts"]["extended_long_fading_wait_retest"] == 1
+
+
+def test_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "long_continuation.json"
+    row = {
+        "ticker": "RUNR",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.8,
+        "price": 24.5,
+        "change_pct": 18.0,
+        "close_pos": 0.91,
+        "open_to_current_pct": 8.5,
+        "latest_bar_change_pct": 0.35,
+        "latest_bar_close_pos": 0.82,
+        "Extension_ATR": 4.5,
+        "Signal_Direction": "LONG",
+    }
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [row],
+    }))
+
+    audit = api._build_alert_audit_for_cache("stock_strategy", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 1
+    assert api._long_entry_quality(row) == "CONTINUATION_OK"
+
+
+def test_long_alert_rule_labels_extended_continuation_ok():
+    row = {
+        "ticker": "MDRX",
+        "grade": "A",
+        "score": 90,
+        "rvol": 2.2,
+        "change_pct": 24.0,
+        "close_pos": 0.88,
+        "latest_bar_change_pct": 0.1,
+        "latest_bar_close_pos": 0.7,
+        "mdr_tag": "MDR STARK",
+        "Signal_Direction": "LONG",
+    }
+
+    assert api._long_entry_rule_reasons(row) == []
+    assert api._long_entry_quality(row) == "CONTINUATION_OK"
+
+
 def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "bear.json"

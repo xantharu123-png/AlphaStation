@@ -708,6 +708,7 @@ _ALERT_MIN_RVOL = 0.7
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
+_LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -974,6 +975,93 @@ def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+def _extract_long_entry_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "change_pct": _alert_float(row.get("change_pct", row.get("Change_Pct", row.get("Change%", row.get("todaysChangePerc"))))),
+        "close_pos": _alert_float(row.get("close_pos", row.get("Close_Position", row.get("Close Position")))),
+        "open_to_current_pct": _alert_float(row.get("open_to_current_pct", row.get("Open_To_Current_Pct"))),
+        "latest_bar_change_pct": _alert_float(row.get("latest_bar_change_pct")),
+        "latest_bar_close_pos": _alert_float(row.get("latest_bar_close_pos")),
+        "extension_atr": _alert_float(row.get("Extension_ATR", row.get("extension_atr"))),
+        "rvol": _alert_float(row.get("rvol", row.get("RVOL"))),
+        "mdr_tag": str(row.get("mdr_tag", "") or "").upper(),
+    }
+
+
+def _long_continuation_ok(fields: Dict[str, Any]) -> bool:
+    close_pos = fields.get("close_pos")
+    latest_change = fields.get("latest_bar_change_pct")
+    latest_close_pos = fields.get("latest_bar_close_pos")
+    rvol = fields.get("rvol")
+    mdr_tag = fields.get("mdr_tag", "")
+
+    latest_ok = (
+        latest_change is None
+        or latest_close_pos is None
+        or latest_change >= -0.05
+        or latest_close_pos >= 0.55
+    )
+    volume_ok = rvol is None or rvol >= 1.2
+    holding_highs = close_pos is not None and close_pos >= 0.78
+    mdr_ok = "MDR" in mdr_tag and "CRASH" not in mdr_tag and close_pos is not None and close_pos >= 0.65
+    return (holding_highs and latest_ok and volume_ok) or mdr_ok
+
+
+def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    """Block late long mails only when the move is fading, not when it is cleanly continuing."""
+    direction = str(row.get("Signal_Direction", row.get("direction", "")) or "").lower()
+    if "short" in direction:
+        return []
+    fields = _extract_long_entry_fields(row)
+    reasons: List[str] = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    latest_change = fields["latest_bar_change_pct"]
+    latest_close_pos = fields["latest_bar_close_pos"]
+    extension_atr = fields["extension_atr"]
+
+    latest_red_fade = (
+        latest_change is not None
+        and latest_close_pos is not None
+        and latest_change < -0.15
+        and latest_close_pos < 0.45
+    )
+    intraday_red_fade = open_to_current is not None and open_to_current < -0.25
+    not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
+    extended = (change is not None and change >= 12) or (extension_atr is not None and extension_atr >= 4.0)
+    hard_extended = (change is not None and change >= 30) or (extension_atr is not None and extension_atr >= 6.0)
+    continuation_ok = _long_continuation_ok(fields)
+
+    if latest_red_fade:
+        reasons.append("latest_5m_red_fade")
+    if intraday_red_fade:
+        reasons.append("current_candle_red_fade")
+    if not_holding_highs and (extended or latest_red_fade or intraday_red_fade):
+        reasons.append("not_holding_highs_after_up_move")
+    if hard_extended and not continuation_ok:
+        reasons.append("hard_extended_long_wait_retest")
+    elif extended and (latest_red_fade or intraday_red_fade or not_holding_highs):
+        reasons.append("extended_long_fading_wait_retest")
+    return reasons
+
+
+def _long_entry_quality(row: Dict[str, Any]) -> str:
+    reasons = _long_entry_rule_reasons(row)
+    if reasons:
+        if any(reason.endswith("wait_retest") for reason in reasons):
+            return "WAIT_RETEST"
+        return "FADE_WATCH"
+    fields = _extract_long_entry_fields(row)
+    extended = (
+        (fields["change_pct"] is not None and fields["change_pct"] >= 12)
+        or (fields["extension_atr"] is not None and fields["extension_atr"] >= 4.0)
+    )
+    if extended and _long_continuation_ok(fields):
+        return "CONTINUATION_OK"
+    return "TRADEABLE"
+
+
 def _extract_bear_short_fields(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
     """Fields used to decide whether a bear row is still a tradeable short entry."""
     return {
@@ -1094,6 +1182,11 @@ def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]
         return {}
 
 
+def _fetch_long_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]:
+    """Same 5m state, used to block fading long mails without blocking continuation."""
+    return _fetch_bear_latest_intraday_state(ticker)
+
+
 def _alert_cooldown_remaining(key: str, now: Optional[float] = None) -> int:
     now = now or time.time()
     last = _EMAIL_COOLDOWN.get(key)
@@ -1124,6 +1217,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.extend(_new_listing_rule_reasons(row))
     if scanner_name == "bear":
         reasons.extend(_bear_short_rule_reasons(row))
+    if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+        reasons.extend(_long_entry_rule_reasons(row))
 
     cooldown_key = f"{scanner_name}_{ticker}" if ticker else ""
     cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
@@ -1288,6 +1383,14 @@ def _check_and_alert(scanner_name, cache_file):
         for r in results:
             if not isinstance(r, dict):
                 continue
+            if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+                ticker_probe = _extract_alert_ticker(r)
+                grade_probe = _extract_alert_grade(r)
+                if ticker_probe and grade_probe in _ALERT_TOP_GRADES:
+                    r = dict(r)
+                    r.update(_fetch_long_latest_intraday_state(ticker_probe))
+                    r["long_entry_quality"] = _long_entry_quality(r)
+                    r["alertable_long"] = not _long_entry_rule_reasons(r)
             state = _classify_alert_candidate(scanner_name, r, now)
             ticker = state["ticker"]
             grade = state["grade"]
@@ -1309,6 +1412,7 @@ def _check_and_alert(scanner_name, cache_file):
                            "price": r.get("Preis", r.get("price", r.get("current", 0))),
                            "direction": r.get("BI_Direction", r.get("direction", "")),
                            "rvol": r.get("RVOL", r.get("rvol", 0)),
+                           "entry_quality": r.get("long_entry_quality", ""),
                            "cooldown_key": ck})
         if not alerts:
             # Log warum keine Alerts
@@ -1329,14 +1433,16 @@ def _check_and_alert(scanner_name, cache_file):
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a["grade"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${a["price"]}</td>'
-            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]}x</td></tr>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]}x</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a.get("entry_quality", "")}</td></tr>'
         body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
         <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
         <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {n} starke Setups</p>
         <table style="width:100%;border-collapse:collapse;font-size:14px">
         <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
         <th style="padding:8px;text-align:left">Grade</th><th style="padding:8px;text-align:left">Score</th>
-        <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">RVOL</th></tr>
+        <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">RVOL</th>
+        <th style="padding:8px;text-align:left">Entry</th></tr>
         {rows}</table>
         <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
@@ -1362,6 +1468,17 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     for row in results[:25]:
         if not isinstance(row, dict):
             continue
+        if scanner_key in _LONG_ENTRY_ALERT_SCANNERS:
+            ticker_probe = _extract_alert_ticker(row)
+            grade_probe = _extract_alert_grade(row)
+            direction_probe = str(row.get("Signal_Direction", row.get("direction", "")) or "").lower()
+            is_long_probe = "short" not in direction_probe and "short" not in strategy_name.lower()
+            if ticker_probe and grade_probe in _ALERT_TOP_GRADES and is_long_probe:
+                row = dict(row)
+                if "latest_bar_change_pct" not in row:
+                    row.update(_fetch_long_latest_intraday_state(ticker_probe))
+                row["long_entry_quality"] = _long_entry_quality(row)
+                row["alertable_long"] = not _long_entry_rule_reasons(row)
         state = _classify_alert_candidate(scanner_key, row, now)
         if not state["alertable_now"]:
             continue
@@ -1373,6 +1490,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "price": state["price"],
             "rvol": _alert_float(state["rvol"], 0) or 0,
             "change_pct": _alert_float(row.get("Change_Pct", row.get("change_pct", row.get("Change%", 0))), 0) or 0,
+            "entry_quality": row.get("long_entry_quality", _long_entry_quality(row) if scanner_key in _LONG_ENTRY_ALERT_SCANNERS else ""),
             "strategy": strategy_name,
             "market_type": market_type,
         })
@@ -1389,7 +1507,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["price"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td></tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["entry_quality"]}</td></tr>'
         )
     label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
@@ -1399,7 +1518,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
     <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
     <th style="padding:8px;text-align:left">Score</th><th style="padding:8px;text-align:left">Preis</th>
-    <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th></tr>
+    <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
+    <th style="padding:8px;text-align:left">Entry</th></tr>
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Grade S/A/A+; 8h Cooldown pro Ticker.</p>
     </body></html>'''
@@ -3018,7 +3138,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         _strat_score = max(0, min(100, _strat_score))
                         _strat_grade = _strategy_score_to_grade(_strat_score)
 
-                    results.append({
+                    strategy_row = {
                         "Ticker": ticker,
                         "ticker": ticker,
                         "Preis": round(price, 2),
@@ -3035,6 +3155,8 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         "Day_High": round(day_high, 2),
                         "Day_Low": round(day_low, 2),
                         "Close_Position": round(close_pos, 2),
+                        "close_pos": round(close_pos, 2),
+                        "open_to_current_pct": round(((price - day_open) / day_open * 100), 2) if day_open > 0 else None,
                         "Gap_Pct": round(gap_pct, 2),
                         "gap_pct": round(gap_pct, 2),
                         "Vortag_Pct": round(vortag_pct, 2),
@@ -3051,7 +3173,12 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         "score": _strat_score,
                         "grade": _strat_grade,
                         "mdr_tag": _mdr_label,
-                    })
+                    }
+                    if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
+                        strategy_row.update(_fetch_long_latest_intraday_state(ticker))
+                        strategy_row["long_entry_quality"] = _long_entry_quality(strategy_row)
+                        strategy_row["alertable_long"] = not _long_entry_rule_reasons(strategy_row)
+                    results.append(strategy_row)
                 except Exception as item_err:
                     print(f"[Strategy Scan] {strategy_name}: skip {t.get('ticker', '?')} ({item_err})")
                     continue
