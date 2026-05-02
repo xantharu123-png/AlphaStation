@@ -888,6 +888,21 @@ def _alert_float(value: Any, default: Optional[float] = None) -> Optional[float]
     return val
 
 
+def _alert_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "y", "ja"):
+        return True
+    if text in ("0", "false", "no", "n", "nein", "none", "null", ""):
+        return False
+    return default
+
+
 def _extract_alert_grade(row: Dict[str, Any]) -> str:
     for key in ("BI_Grade", "Grade", "grade", "rating", "ExhGrade", "base_grade"):
         value = row.get(key)
@@ -944,20 +959,20 @@ def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
             nested.get("rr_effective", nested.get("rr1", row.get("rr_effective", row.get("rr1")))),
             0,
         ) or 0,
-        "safety_ok": bool(nested.get("safety_ok", row.get("safety_ok", False))),
-        "tp1_missed": bool(nested.get("tp1_missed", row.get("tp1_missed", False))),
-        "tp2_missed": bool(nested.get("tp2_missed", row.get("tp2_missed", False))),
-        "confirmation_ok": bool(nested.get("confirmation_ok", row.get("confirmation_ok", False))),
-        "continuation_risk": bool(nested.get("continuation_risk", row.get("continuation_risk", False))),
+        "safety_ok": _alert_bool(nested.get("safety_ok", row.get("safety_ok", False))),
+        "tp1_missed": _alert_bool(nested.get("tp1_missed", row.get("tp1_missed", False))),
+        "tp2_missed": _alert_bool(nested.get("tp2_missed", row.get("tp2_missed", False))),
+        "confirmation_ok": _alert_bool(nested.get("confirmation_ok", row.get("confirmation_ok", False))),
+        "continuation_risk": _alert_bool(nested.get("continuation_risk", row.get("continuation_risk", False))),
         "risk_pct": _alert_float(nested.get("risk_pct", row.get("risk_pct")), 999) or 999,
         "signal_quality": str(nested.get("signal_quality", row.get("signal_quality", "")) or "").lower(),
         "row_source": row_source,
         "listing_source": listing_source,
-        "listing_trade_ok": bool(nested.get("listing_trade_ok", pump_data.get("listing_trade_ok", row.get("listing_trade_ok", False)))),
+        "listing_trade_ok": _alert_bool(nested.get("listing_trade_ok", pump_data.get("listing_trade_ok", row.get("listing_trade_ok", False)))),
         "listing_age_hours": _alert_float(nested.get("listing_age_hours", pump_data.get("listing_age_hours", row.get("listing_age_hours")))),
         "trade_category": str(nested.get("trade_category", row.get("trade_category", "")) or ""),
-        "micro_required": bool(nested.get("micro_required", row.get("micro_required", True))),
-        "micro_trigger_ok": bool(
+        "micro_required": _alert_bool(nested.get("micro_required", row.get("micro_required", True)), True),
+        "micro_trigger_ok": _alert_bool(
             nested.get("micro_trigger_ok", row.get("micro_trigger_ok", pump_data.get("micro_trigger_ok", False)))
         ),
     }

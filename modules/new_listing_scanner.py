@@ -199,7 +199,7 @@ def _is_tradeable_short_signal(signal):
         and not signal.get("tp2_missed")
         and rr_effective >= CONFIG["min_short_rr"]
         and risk_pct <= CONFIG["max_signal_risk_pct"]
-        and signal.get("listing_trade_ok", True) is True
+        and signal.get("listing_trade_ok") is True
     )
 
 
@@ -690,6 +690,16 @@ def detect_new_listings():
     def _is_stock_token(sym):
         return any(pat in sym.upper() for pat in STOCK_PATTERNS)
 
+    def _listing_ts_ms(instrument):
+        for field in ("onboard_date", "create_time", "launch_time"):
+            try:
+                value = int(instrument.get(field) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return value
+        return 0
+
     # ── Alle 4 Exchanges abfragen ──
     exchanges = {
         "crypto.com": fetch_cryptocom_instruments,
@@ -754,20 +764,24 @@ def detect_new_listings():
 
     # ── Deduplizieren (gleicher Base-Coin auf mehreren Exchanges) ──
     known_new = {n["symbol"] for n in all_new}
+    max_new_listing_age_hours = float(CONFIG.get("new_listing_short_max_age_hours", CONFIG.get("monitor_hours_max", 72)))
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=max_new_listing_age_hours)).timestamp() * 1000)
 
     # ── MEXC isNew-Flag als zuverlässige Erkennung ──
     # MEXC markiert kürzlich gelistete Coins mit isNew=True
     for p in all_perps:
         if p.get("exchange") == "mexc" and p.get("is_new"):
             sym = p["symbol"]
+            listing_ts = _listing_ts_ms(p)
+            if listing_ts and listing_ts <= cutoff_ms:
+                continue
             if sym not in known_new and not _is_stock_token(sym):
                 all_new.append(p)
                 known_new.add(sym)
                 log.info(f"🆕 NLS: {sym} via MEXC isNew-Flag erkannt")
 
     # ── Bitget launchTime Erkennung ──
-    # Coins mit launchTime in den letzten 14 Tagen = kürzlich gelistet
-    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=14)).timestamp() * 1000)
+    # Nur Listings im aktiven Short-Fenster aufnehmen; aeltere Coins bleiben Radar, keine Trade-Kandidaten.
     for p in all_perps:
         if p.get("exchange") == "bitget" and p.get("launch_time", 0) > cutoff_ms:
             sym = p["symbol"]
@@ -778,7 +792,7 @@ def detect_new_listings():
                 log.info(f"🆕 NLS: {sym} via Bitget launchTime erkannt (gelistet {lt_str})")
 
     # ── MEXC createTime Erkennung ──
-    # Coins mit createTime in den letzten 14 Tagen
+    # Coins im aktiven Short-Fenster
     for p in all_perps:
         if p.get("exchange") == "mexc" and p.get("create_time", 0) > cutoff_ms:
             sym = p["symbol"]
@@ -789,7 +803,7 @@ def detect_new_listings():
                 log.info(f"🆕 NLS: {sym} via MEXC createTime erkannt (gelistet {ct_str})")
 
     # ── Binance onboardDate Erkennung ──
-    # Coins mit onboardDate in den letzten 14 Tagen
+    # Coins im aktiven Short-Fenster
     for p in all_perps:
         if p.get("exchange") == "binance" and p.get("onboard_date", 0) > cutoff_ms:
             sym = p["symbol"]
@@ -1638,7 +1652,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     micro_required = bool(CONFIG.get("micro_crack_enabled"))
     micro_execution_ok = (not micro_required) or micro_trigger_ok
     listing_gate_present = "listing_source" in pump_data or "listing_age_hours" in pump_data
-    listing_source = str(pump_data.get("listing_source", "new_listing") or "").lower()
+    listing_source = str(pump_data.get("listing_source", "") or "").lower()
     listing_age_raw = pump_data.get("listing_age_hours")
     try:
         listing_age_hours = float(listing_age_raw) if listing_age_raw is not None else None
@@ -1648,12 +1662,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     max_listing_age = float(CONFIG["new_listing_short_max_age_hours"])
     is_new_listing_source = listing_source == "new_listing"
     listing_age_known = listing_age_hours is not None
-    listing_too_early = listing_gate_present and listing_age_known and listing_age_hours < min_listing_age
-    listing_expired = listing_gate_present and listing_age_known and listing_age_hours > max_listing_age
-    listing_trade_ok = (
-        True if not listing_gate_present
-        else is_new_listing_source and listing_age_known and not listing_too_early and not listing_expired
-    )
+    listing_info_missing = not listing_gate_present
+    listing_too_early = is_new_listing_source and listing_age_known and listing_age_hours < min_listing_age
+    listing_expired = is_new_listing_source and listing_age_known and listing_age_hours > max_listing_age
+    listing_trade_ok = is_new_listing_source and listing_age_known and not listing_too_early and not listing_expired
     early_crack_window_ok = (
         CONFIG["min_from_ath_for_short_pct"]
         <= from_ath
@@ -1732,18 +1744,19 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("early_crack_score_too_low")
     if micro_required and not micro_trigger_ok:
         risk_flags.append("micro_trigger_missing")
-    if listing_gate_present:
-        if not is_new_listing_source:
-            risk_flags.append("active_pump_watch_only")
-        elif not listing_age_known:
-            risk_flags.append("listing_age_unknown")
-        elif listing_too_early:
-            risk_flags.append("listing_too_early")
-        elif listing_expired:
-            risk_flags.append("listing_age_expired")
+    if listing_info_missing:
+        risk_flags.append("listing_info_missing")
+    elif not is_new_listing_source:
+        risk_flags.append("active_pump_watch_only")
+    elif not listing_age_known:
+        risk_flags.append("listing_age_unknown")
+    elif listing_too_early:
+        risk_flags.append("listing_too_early")
+    elif listing_expired:
+        risk_flags.append("listing_age_expired")
 
-    if not listing_gate_present:
-        trade_category = "NEW_LISTING_DUMP"
+    if listing_info_missing:
+        trade_category = "LISTING_INFO_MISSING"
     elif not is_new_listing_source:
         trade_category = "ACTIVE_PUMP_WATCH"
     elif not listing_age_known:
@@ -1764,10 +1777,13 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif tp1_missed:
         timing = "[~] TP1 verpasst — nur noch Extended-Dump möglich"
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
-    elif listing_gate_present and not is_new_listing_source:
+    elif listing_info_missing:
+        timing = "[~] WATCH - Listing-Kontext fehlt, keine Short-Mail"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif not is_new_listing_source:
         timing = "[~] ACTIVE PUMP WATCH - kein New Listing, keine Short-Mail"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
-    elif listing_gate_present and not listing_age_known:
+    elif not listing_age_known:
         timing = "[~] WATCH - Listing-Alter unklar, keine Short-Mail"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif listing_too_early:
@@ -1947,9 +1963,16 @@ def cleanup_monitoring(monitoring):
     to_remove = []
     for sym, data in monitoring.items():
         try:
-            detected = datetime.fromisoformat(data["detected_at"].replace("Z", "+00:00"))
             is_pump = data.get("source") == "pump_detection"
-            cutoff = cutoff_pump if is_pump else cutoff_listing
+            if is_pump:
+                age_basis = data.get("detected_at")
+                cutoff = cutoff_pump
+            else:
+                # Exchange listing time is stricter than local detection time. This keeps
+                # 3-14 day old "recent" exchange rows from clogging the short scanner.
+                age_basis = data.get("listing_time") or data.get("detected_at")
+                cutoff = cutoff_listing
+            detected = datetime.fromisoformat(str(age_basis).replace("Z", "+00:00"))
             if detected < cutoff:
                 to_remove.append(sym)
         except Exception:
@@ -2298,8 +2321,17 @@ def run_new_listing_scanner():
                 if from_ath > 40:
                     log.info(f" NLS: {symbol} übersprungen — bereits {from_ath:.0f}% unter ATH (falling knife)")
                     mon_data["status"] = "expired_dumped"
+                    mon_data["listing_age_hours"] = round(listing_age_hours, 1) if listing_age_hours is not None else None
+                    mon_data["listing_age_source"] = listing_age_source
+                    mon_data["listing_trade_ok"] = False
+                    mon_data["trade_category"] = "ALREADY_DUMPED"
                     results["monitoring"].append({
                         "symbol": symbol,
+                        "source": source,
+                        "listing_age_hours": round(listing_age_hours, 1) if listing_age_hours is not None else None,
+                        "listing_age_source": listing_age_source,
+                        "listing_trade_ok": False,
+                        "trade_category": "ALREADY_DUMPED",
                         "exh_score": exh_score,
                         "pump_pct": pump_data.get("pump_pct", 0),
                         "from_ath_pct": from_ath,
@@ -2308,6 +2340,7 @@ def run_new_listing_scanner():
                         "grade": "SKIP",
                         "timing": " Already dumped",
                         "hours_tracked": pump_data.get("hours_tracked", 0),
+                        "risk_flags": ["already_dumped"],
                     })
                     continue
 

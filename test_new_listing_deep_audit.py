@@ -1,10 +1,12 @@
 import time
+from datetime import datetime, timedelta, timezone
 
 from modules.new_listing_scanner import (
     _is_tradeable_short_signal,
     _monitor_key,
     calculate_micro_crack_trigger,
     check_safety,
+    cleanup_monitoring,
     generate_short_signal,
 )
 
@@ -62,6 +64,24 @@ def test_monitor_key_keeps_same_symbol_separate_by_exchange():
     assert _monitor_key("ABCUSDT", "mexc") != _monitor_key("ABCUSDT", "binance")
 
 
+def test_cleanup_expires_new_listing_by_exchange_listing_time_not_detection_time():
+    now = datetime.now(timezone.utc)
+    monitoring = {
+        "binance:OLDUSDT": {
+            "symbol": "OLDUSDT",
+            "exchange": "binance",
+            "source": "new_listing",
+            "status": "monitoring",
+            "detected_at": now.isoformat(),
+            "listing_time": (now - timedelta(hours=96)).isoformat(),
+        }
+    }
+
+    cleaned = cleanup_monitoring(monitoring)
+
+    assert cleaned["binance:OLDUSDT"]["status"] == "expired"
+
+
 def test_safety_requires_fresh_ticker_candles_and_orderbook():
     safe, warnings = check_safety(_fresh_ticker(), _deep_book(), _fresh_candles())
     assert safe is True
@@ -116,6 +136,8 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
             "micro_trigger_ok": True,
             "micro_score": 75,
             "micro_stop_loss": 101,
+            "listing_source": "new_listing",
+            "listing_age_hours": 24,
         },
         exh_score=85,
         exh_details=[],
@@ -129,6 +151,34 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
     assert signal["grade"] in ("S", "A")
     assert signal["signal_quality"] == "tradeable"
     assert _is_tradeable_short_signal(signal) is True
+
+
+def test_missing_listing_context_is_watch_only_even_if_crack_is_confirmed():
+    signal = generate_short_signal(
+        "UNKNOWNAGEUSDT",
+        {
+            "ath": 100,
+            "current_price": 97,
+            "pump_pct": 80,
+            "from_ath_pct": 3.0,
+            "momentum_recent": -0.8,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal["trade_category"] == "LISTING_INFO_MISSING"
+    assert signal["listing_trade_ok"] is False
+    assert "listing_info_missing" in signal["risk_flags"]
+    assert signal["signal_quality"] == "watch_or_blocked"
+    assert _is_tradeable_short_signal(signal) is False
 
 
 def test_active_pump_detection_is_watch_only_even_with_crack():
@@ -233,6 +283,8 @@ def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gat
             "micro_trigger_ok": True,
             "micro_score": 75,
             "micro_stop_loss": 100,
+            "listing_source": "new_listing",
+            "listing_age_hours": 24,
         },
         exh_score=50,
         exh_details=[],
@@ -288,6 +340,8 @@ def test_micro_crack_trigger_can_create_tradeable_signal():
         "momentum_recent": 0.2,
         "current_red_streak": 0,
         "avg_upper_wick_pct": 5,
+        "listing_source": "new_listing",
+        "listing_age_hours": 24,
     }
     micro = calculate_micro_crack_trigger(_micro_crack_candles(), pump_data)
     pump_data.update(micro)

@@ -519,6 +519,41 @@ def test_new_listing_alert_audit_blocks_active_pump_watch_rows(tmp_path):
     assert audit["suppression_counts"]["listing_age_not_tradeable"] == 1
 
 
+def test_new_listing_alert_audit_treats_string_false_as_false(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "string_bool_new_listing.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "symbol": "STRINGBOOL",
+            "grade": "A",
+            "signal": "SHORT",
+            "source": "signals",
+            "listing_source": "new_listing",
+            "listing_trade_ok": "false",
+            "listing_age_hours": "24",
+            "trade_category": "NEW_LISTING_DUMP",
+            "timing_quality": "5",
+            "safety_ok": "true",
+            "rr_effective": "2.0",
+            "risk_pct": "12",
+            "confirmation_ok": "true",
+            "continuation_risk": "false",
+            "signal_quality": "tradeable",
+            "micro_required": "true",
+            "micro_trigger_ok": "true",
+            "tp1_missed": "false",
+            "tp2_missed": "false",
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("new_listing", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["listing_age_not_tradeable"] == 1
+
+
 def test_crypto_strategy_alerts_are_watch_only_without_execution_trigger():
     api._EMAIL_COOLDOWN.clear()
     row = {
