@@ -932,6 +932,10 @@ def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     nested = sig if isinstance(sig, dict) else {}
     pump_data = nested.get("pump_data", {}) if isinstance(nested.get("pump_data", {}), dict) else {}
     timing_text = str(nested.get("timing", sig if not isinstance(sig, dict) else row.get("timing", "")) or "")
+    row_source = str(row.get("source", "") or "").lower()
+    listing_source = str(
+        nested.get("listing_source", pump_data.get("listing_source", row.get("listing_source", ""))) or ""
+    ).lower()
     return {
         "grade": str(nested.get("grade", row.get("grade", "")) or "").strip().upper(),
         "timing": timing_text,
@@ -947,7 +951,11 @@ def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "continuation_risk": bool(nested.get("continuation_risk", row.get("continuation_risk", False))),
         "risk_pct": _alert_float(nested.get("risk_pct", row.get("risk_pct")), 999) or 999,
         "signal_quality": str(nested.get("signal_quality", row.get("signal_quality", "")) or "").lower(),
-        "source": str(row.get("source", "") or "").lower(),
+        "row_source": row_source,
+        "listing_source": listing_source,
+        "listing_trade_ok": bool(nested.get("listing_trade_ok", pump_data.get("listing_trade_ok", row.get("listing_trade_ok", False)))),
+        "listing_age_hours": _alert_float(nested.get("listing_age_hours", pump_data.get("listing_age_hours", row.get("listing_age_hours")))),
+        "trade_category": str(nested.get("trade_category", row.get("trade_category", "")) or ""),
         "micro_required": bool(nested.get("micro_required", row.get("micro_required", True))),
         "micro_trigger_ok": bool(
             nested.get("micro_trigger_ok", row.get("micro_trigger_ok", pump_data.get("micro_trigger_ok", False)))
@@ -959,9 +967,16 @@ def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     fields = _extract_new_listing_signal_fields(row)
     reasons: List[str] = []
     timing_upper = fields["timing"].upper()
-    source = fields["source"]
-    if source and source != "signals":
+    row_source = fields["row_source"]
+    listing_source = fields["listing_source"]
+    if row_source and row_source not in ("signals", "new_listing"):
         reasons.append("not_active_short_signal")
+    if not listing_source:
+        reasons.append("listing_source_unknown")
+    elif listing_source != "new_listing":
+        reasons.append("not_new_listing_dump")
+    if not fields["listing_trade_ok"]:
+        reasons.append("listing_age_not_tradeable")
     if fields["timing_quality"] < 4 or "SHORT" not in timing_upper:
         reasons.append("not_active_short_timing")
     if not fields["safety_ok"]:
@@ -1616,7 +1631,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
     <th style="padding:8px;text-align:left">R</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte SHORT-now Signale: Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Early-Crack nutzt lokalen Rejection-Stop mit ATH-Hardstop als Deckel; 8h Cooldown pro Coin.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump SHORT-now Signale: New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pump Radar bleibt Watch-only; 8h Cooldown pro Coin.</p>
     </body></html>'''
     sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
     if sent:
@@ -4775,7 +4790,7 @@ def get_email_alert_audit():
             "min_rvol": _ALERT_MIN_RVOL,
             "new_listing_min_rr": _NEW_LISTING_MIN_ALERT_RR,
             "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
-            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Generic crypto strategy scans are watch-only because CoinGecko snapshots are not execution triggers.",
+            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Active-pump detections on older/unclear coins are watch-only.",
         },
         "coverage": {
             "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing"],
@@ -8005,7 +8020,12 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "confirmations": 0,
             "listing_date": entry.get("detected_at", ""),
             "hours_tracked": pump.get("hours_tracked", 0),
-            "listing_age_hours": pump.get("listing_age_hours"),
+            "listing_age_hours": sig.get("listing_age_hours", pump.get("listing_age_hours", entry.get("listing_age_hours"))),
+            "listing_age_source": sig.get("listing_age_source", pump.get("listing_age_source", entry.get("listing_age_source"))),
+            "listing_source": sig.get("listing_source", pump.get("listing_source", entry.get("listing_source", ""))),
+            "listing_trade_ok": sig.get("listing_trade_ok", entry.get("listing_trade_ok", False)),
+            "trade_category": sig.get("trade_category", entry.get("trade_category", "")),
+            "trade_action": "SHORT_NOW" if bucket == "signals" and sig.get("listing_trade_ok") else "WATCHLIST_ONLY",
             "vol_ratio": pump.get("vol_ratio", 0),
             "funding_rate": pump.get("funding_rate", 0),
             "long_pct": pump.get("long_pct", 0),
@@ -8060,6 +8080,12 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "funding_rate": item.get("funding_rate", 0),
             "grade": item.get("grade", ""),
             "hours_tracked": item.get("hours_tracked", 0),
+            "listing_age_hours": item.get("listing_age_hours"),
+            "listing_age_source": item.get("listing_age_source"),
+            "listing_source": item.get("source", ""),
+            "listing_trade_ok": item.get("listing_trade_ok", False),
+            "trade_category": item.get("trade_category", ""),
+            "trade_action": "WATCHLIST_ONLY",
             "vol_ratio": item.get("volume_ratio", 0),
             "safety_ok": item.get("safety_ok", False),
             "safety_warnings": item.get("safety_warnings", []),

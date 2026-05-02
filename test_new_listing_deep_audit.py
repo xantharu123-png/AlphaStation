@@ -131,6 +131,90 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
     assert _is_tradeable_short_signal(signal) is True
 
 
+def test_active_pump_detection_is_watch_only_even_with_crack():
+    signal = generate_short_signal(
+        "OLDPUMPUSDT",
+        {
+            "ath": 100,
+            "current_price": 97,
+            "pump_pct": 80,
+            "from_ath_pct": 3.0,
+            "momentum_recent": -0.8,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
+            "listing_source": "pump_detection",
+            "listing_age_hours": None,
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal["trade_category"] == "ACTIVE_PUMP_WATCH"
+    assert signal["listing_trade_ok"] is False
+    assert "active_pump_watch_only" in signal["risk_flags"]
+    assert "ACTIVE PUMP WATCH" in signal["timing"]
+    assert signal["signal_quality"] == "watch_or_blocked"
+    assert _is_tradeable_short_signal(signal) is False
+
+
+def test_new_listing_age_window_required_for_short_mail_quality():
+    too_early = generate_short_signal(
+        "BABYUSDT",
+        {
+            "ath": 100,
+            "current_price": 97,
+            "pump_pct": 80,
+            "from_ath_pct": 3.0,
+            "momentum_recent": -0.8,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
+            "listing_source": "new_listing",
+            "listing_age_hours": 0.3,
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+    valid = generate_short_signal(
+        "NEWUSDT",
+        {
+            "ath": 100,
+            "current_price": 97,
+            "pump_pct": 80,
+            "from_ath_pct": 3.0,
+            "momentum_recent": -0.8,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
+            "listing_source": "new_listing",
+            "listing_age_hours": 24,
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert too_early["trade_category"] == "NEW_LISTING_TOO_EARLY"
+    assert too_early["listing_trade_ok"] is False
+    assert "listing_too_early" in too_early["risk_flags"]
+    assert _is_tradeable_short_signal(too_early) is False
+    assert valid["trade_category"] == "NEW_LISTING_DUMP"
+    assert valid["signal_quality"] == "tradeable"
+    assert _is_tradeable_short_signal(valid) is True
+
+
 def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gate():
     signal = generate_short_signal(
         "EARLYUSDT",

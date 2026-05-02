@@ -98,6 +98,8 @@ CONFIG.update({
     "micro_min_crack_pct": 1.2,
     "micro_max_from_high_pct": 14.0,
     "micro_stop_buffer_pct": 1.5,
+    "new_listing_short_min_age_hours": 1.0,
+    "new_listing_short_max_age_hours": 72.0,
 })
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -197,6 +199,7 @@ def _is_tradeable_short_signal(signal):
         and not signal.get("tp2_missed")
         and rr_effective >= CONFIG["min_short_rr"]
         and risk_pct <= CONFIG["max_signal_risk_pct"]
+        and signal.get("listing_trade_ok", True) is True
     )
 
 
@@ -1634,6 +1637,23 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     micro_score = _to_float(pump_data.get("micro_score"))
     micro_required = bool(CONFIG.get("micro_crack_enabled"))
     micro_execution_ok = (not micro_required) or micro_trigger_ok
+    listing_gate_present = "listing_source" in pump_data or "listing_age_hours" in pump_data
+    listing_source = str(pump_data.get("listing_source", "new_listing") or "").lower()
+    listing_age_raw = pump_data.get("listing_age_hours")
+    try:
+        listing_age_hours = float(listing_age_raw) if listing_age_raw is not None else None
+    except (TypeError, ValueError):
+        listing_age_hours = None
+    min_listing_age = float(CONFIG["new_listing_short_min_age_hours"])
+    max_listing_age = float(CONFIG["new_listing_short_max_age_hours"])
+    is_new_listing_source = listing_source == "new_listing"
+    listing_age_known = listing_age_hours is not None
+    listing_too_early = listing_gate_present and listing_age_known and listing_age_hours < min_listing_age
+    listing_expired = listing_gate_present and listing_age_known and listing_age_hours > max_listing_age
+    listing_trade_ok = (
+        True if not listing_gate_present
+        else is_new_listing_source and listing_age_known and not listing_too_early and not listing_expired
+    )
     early_crack_window_ok = (
         CONFIG["min_from_ath_for_short_pct"]
         <= from_ath
@@ -1672,6 +1692,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         and not continuation_risk
         and not tp1_missed
         and not tp2_missed
+        and listing_trade_ok
     )
     exhaustion_short_ok = exh_score >= CONFIG["exh_short_entry"]
     trade_setup_ok = (
@@ -1685,6 +1706,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         and not continuation_risk
         and not tp1_missed
         and not tp2_missed
+        and listing_trade_ok
     )
 
     risk_flags = []
@@ -1710,6 +1732,30 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("early_crack_score_too_low")
     if micro_required and not micro_trigger_ok:
         risk_flags.append("micro_trigger_missing")
+    if listing_gate_present:
+        if not is_new_listing_source:
+            risk_flags.append("active_pump_watch_only")
+        elif not listing_age_known:
+            risk_flags.append("listing_age_unknown")
+        elif listing_too_early:
+            risk_flags.append("listing_too_early")
+        elif listing_expired:
+            risk_flags.append("listing_age_expired")
+
+    if not listing_gate_present:
+        trade_category = "NEW_LISTING_DUMP"
+    elif not is_new_listing_source:
+        trade_category = "ACTIVE_PUMP_WATCH"
+    elif not listing_age_known:
+        trade_category = "UNKNOWN_LISTING_AGE"
+    elif listing_too_early:
+        trade_category = "NEW_LISTING_TOO_EARLY"
+    elif listing_expired:
+        trade_category = "NEW_LISTING_EXPIRED"
+    elif trade_setup_ok:
+        trade_category = "NEW_LISTING_DUMP"
+    else:
+        trade_category = "NEW_LISTING_WATCH"
 
     # ── Timing Score ──
     if tp2_missed:
@@ -1718,6 +1764,18 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif tp1_missed:
         timing = "[~] TP1 verpasst — nur noch Extended-Dump möglich"
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
+    elif listing_gate_present and not is_new_listing_source:
+        timing = "[~] ACTIVE PUMP WATCH - kein New Listing, keine Short-Mail"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif listing_gate_present and not listing_age_known:
+        timing = "[~] WATCH - Listing-Alter unklar, keine Short-Mail"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif listing_too_early:
+        timing = "[~] WATCH - neues Listing noch zu frueh fuer Short"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif listing_expired:
+        timing = "[~] WATCH - Listing-Fenster abgelaufen, nur Radar"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif trade_setup_ok:
         if early_crack_ok and not exhaustion_short_ok:
             timing = "[-] JETZT SHORTEN — Early Crack/Rejection"
@@ -1812,12 +1870,18 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
             "tp2_missed": tp2_missed,
             "micro_required": micro_required,
             "micro_trigger_ok": micro_trigger_ok,
+            "listing_trade_ok": listing_trade_ok,
             "rr_effective": rr_effective,
             "risk_pct": risk_pct,
         }) else "watch_or_blocked",
         "safety_ok": safety_ok,
         "safety_warnings": safety_warnings,
         "pump_data": pump_data,
+        "listing_source": listing_source,
+        "listing_age_hours": round(listing_age_hours, 1) if listing_age_hours is not None else None,
+        "listing_age_source": pump_data.get("listing_age_source"),
+        "listing_trade_ok": listing_trade_ok,
+        "trade_category": trade_category,
         "exh_details": exh_details,
         "max_leverage": CONFIG["max_leverage"],
         "max_position_hours": CONFIG["max_position_hours"],
@@ -2178,9 +2242,12 @@ def run_new_listing_scanner():
                     mon_data["status"] = "monitoring"
 
                 listing_age_hours = None
+                listing_age_source = None
                 source = mon_data.get("source", "new_listing")
-                if source != "pump_detection":
+                is_new_source = source == "new_listing"
+                if is_new_source:
                     age_basis = mon_data.get("listing_time") or mon_data.get("detected_at")
+                    listing_age_source = "exchange_timestamp" if mon_data.get("listing_time") else "detected_at"
                     try:
                         age_dt = datetime.fromisoformat(str(age_basis).replace("Z", "+00:00"))
                         listing_age_hours = max(0, (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600)
@@ -2191,8 +2258,12 @@ def run_new_listing_scanner():
                 exh_score, exh_details, pump_data = calculate_listing_exhaustion(
                     candles, ticker, book,
                     listing_age_hours=listing_age_hours,
-                    is_new_listing=(source != "pump_detection"),
+                    is_new_listing=is_new_source,
                 )
+                pump_data["listing_source"] = source
+                pump_data["listing_age_hours"] = round(listing_age_hours, 1) if listing_age_hours is not None else None
+                pump_data["listing_age_source"] = listing_age_source
+                pump_data["is_new_listing"] = is_new_source
 
                 # Safety prüfen
                 safety_ok, safety_warnings = check_safety(ticker, book, candles)
@@ -2253,6 +2324,11 @@ def run_new_listing_scanner():
                     "symbol": symbol,
                     "exchange": mon_data.get("exchange", "crypto.com"),
                     "detected_at": mon_data.get("detected_at", ""),
+                    "listing_source": source,
+                    "listing_age_hours": signal.get("listing_age_hours"),
+                    "listing_age_source": listing_age_source,
+                    "listing_trade_ok": signal.get("listing_trade_ok", False),
+                    "trade_category": signal.get("trade_category", "UNKNOWN"),
                     "signal": signal,
                 }
 
@@ -2266,6 +2342,10 @@ def run_new_listing_scanner():
                 mon_data["stop_model"] = signal.get("stop_model", "")
                 mon_data["micro_trigger_ok"] = pump_data.get("micro_trigger_ok", False)
                 mon_data["micro_score"] = pump_data.get("micro_score", 0)
+                mon_data["listing_age_hours"] = signal.get("listing_age_hours")
+                mon_data["listing_age_source"] = listing_age_source
+                mon_data["listing_trade_ok"] = signal.get("listing_trade_ok", False)
+                mon_data["trade_category"] = signal.get("trade_category", "UNKNOWN")
 
                 if _is_tradeable_short_signal(signal):
                     results["signals"].append(entry)
@@ -2303,6 +2383,10 @@ def run_new_listing_scanner():
                     "micro_from_high_pct": pump_data.get("micro_from_high_pct", 0),
                     "exchange": exchange,
                     "source": mon_data.get("source", "new_listing"),
+                    "listing_age_hours": signal.get("listing_age_hours"),
+                    "listing_age_source": listing_age_source,
+                    "listing_trade_ok": signal.get("listing_trade_ok", False),
+                    "trade_category": signal.get("trade_category", "UNKNOWN"),
                     "hours_tracked": pump_data.get("hours_tracked", 0),
                 })
 

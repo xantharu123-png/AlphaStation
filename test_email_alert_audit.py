@@ -357,6 +357,10 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
                     "confirmation_ok": True,
                     "continuation_risk": False,
                     "signal_quality": "tradeable",
+                    "listing_source": "new_listing",
+                    "listing_trade_ok": True,
+                    "listing_age_hours": 24,
+                    "trade_category": "NEW_LISTING_DUMP",
                     "micro_required": True,
                     "micro_trigger_ok": True,
                     "pump_data": {"micro_score": 75, "micro_trigger_ok": True},
@@ -410,6 +414,10 @@ def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
                 "grade": "A",
                 "signal": "SHORT",
                 "source": "signals",
+                "listing_source": "new_listing",
+                "listing_trade_ok": True,
+                "listing_age_hours": 24,
+                "trade_category": "NEW_LISTING_DUMP",
                 "timing_quality": 5,
                 "safety_ok": True,
                 "rr_effective": 1.8,
@@ -451,6 +459,10 @@ def test_new_listing_alert_audit_requires_micro_trigger_for_short_now(tmp_path):
             "grade": "A",
             "signal": "SHORT",
             "source": "signals",
+            "listing_source": "new_listing",
+            "listing_trade_ok": True,
+            "listing_age_hours": 24,
+            "trade_category": "NEW_LISTING_DUMP",
             "timing_quality": 4,
             "safety_ok": True,
             "rr_effective": 2.8,
@@ -470,6 +482,41 @@ def test_new_listing_alert_audit_requires_micro_trigger_for_short_now(tmp_path):
     assert audit["rows_checked"] == 1
     assert audit["alertable_now_count"] == 0
     assert audit["suppression_counts"]["micro_trigger_missing"] == 1
+
+
+def test_new_listing_alert_audit_blocks_active_pump_watch_rows(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "active_pump.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "symbol": "OLDPUMP",
+            "grade": "A",
+            "signal": "SHORT",
+            "source": "signals",
+            "listing_source": "pump_detection",
+            "listing_trade_ok": False,
+            "trade_category": "ACTIVE_PUMP_WATCH",
+            "timing_quality": 5,
+            "safety_ok": True,
+            "rr_effective": 2.0,
+            "risk_pct": 12,
+            "confirmation_ok": True,
+            "continuation_risk": False,
+            "signal_quality": "tradeable",
+            "micro_required": True,
+            "micro_trigger_ok": True,
+            "tp1_missed": False,
+            "tp2_missed": False,
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("new_listing", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["not_new_listing_dump"] == 1
+    assert audit["suppression_counts"]["listing_age_not_tradeable"] == 1
 
 
 def test_crypto_strategy_alerts_are_watch_only_without_execution_trigger():

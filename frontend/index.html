@@ -5921,6 +5921,23 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
         if (exhaustion >= 40) return 'signal-lightdiv';  // Mittel = gelb/orange
         return 'signal-bearish';                         // Niedrig = Pump noch aktiv = rot
     };
+    const pdTypeLabel = (item) => {
+        const cat = item.trade_category || '';
+        if (cat === 'NEW_LISTING_DUMP') return 'New Listing Dump';
+        if (cat === 'ACTIVE_PUMP_WATCH') return 'Active Pump Watch';
+        if (cat === 'NEW_LISTING_TOO_EARLY') return 'Zu frueh';
+        if (cat === 'NEW_LISTING_EXPIRED') return 'Alt/Radar';
+        if (cat === 'UNKNOWN_LISTING_AGE') return 'Alter unklar';
+        if ((item.listing_source || '').toLowerCase() === 'new_listing') return 'New Listing';
+        return 'Radar';
+    };
+    const pdTypeClass = (item) => {
+        const cat = item.trade_category || '';
+        if (cat === 'NEW_LISTING_DUMP') return 'signal-bearish';
+        if (cat === 'ACTIVE_PUMP_WATCH') return 'signal-lightdiv';
+        if (cat === 'NEW_LISTING_TOO_EARLY' || cat === 'UNKNOWN_LISTING_AGE') return 'signal-abwarten';
+        return 'signal-neutral';
+    };
 
     return (
         <div className="space-y-6">
@@ -5933,6 +5950,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         <tr>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('symbol')}>Symbol{sortKey === 'symbol' && ' ↓'}</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('exchange')}>Exchange{sortKey === 'exchange' && ' ↓'}</th>
+                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('trade_category')}>Typ{sortKey === 'trade_category' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis{sortKey === 'price' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('pump_pct')}>Pump%{sortKey === 'pump_pct' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('from_ath_pct')}>vom ATH%{sortKey === 'from_ath_pct' && ' ↓'}</th>
@@ -5947,6 +5965,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker({ticker: item.symbol, isCrypto: true, isExchangeCrypto: true, exchange: item.exchange, contract: item.contract, ...item})}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.exchange}</td>
+                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${pdTypeClass(item)}`} title={item.listing_age_hours != null ? `${item.listing_age_hours}h alt` : 'Alter unklar'}>{pdTypeLabel(item)}</span></td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(4)}</td>
                                 <td className={`py-3 px-2 text-right font-semibold ${item.pump_pct > 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct ? `+${item.pump_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right color-negative">{item.from_ath_pct ? `-${item.from_ath_pct}%` : '—'}</td>
