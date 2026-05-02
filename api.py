@@ -929,6 +929,7 @@ def _extract_alert_price(row: Dict[str, Any]) -> Any:
 def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     sig = row.get("signal", {}) if isinstance(row, dict) else {}
     nested = sig if isinstance(sig, dict) else {}
+    pump_data = nested.get("pump_data", {}) if isinstance(nested.get("pump_data", {}), dict) else {}
     timing_text = str(nested.get("timing", sig if not isinstance(sig, dict) else row.get("timing", "")) or "")
     return {
         "grade": str(nested.get("grade", row.get("grade", "")) or "").strip().upper(),
@@ -946,6 +947,10 @@ def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "risk_pct": _alert_float(nested.get("risk_pct", row.get("risk_pct")), 999) or 999,
         "signal_quality": str(nested.get("signal_quality", row.get("signal_quality", "")) or "").lower(),
         "source": str(row.get("source", "") or "").lower(),
+        "micro_required": bool(nested.get("micro_required", row.get("micro_required", True))),
+        "micro_trigger_ok": bool(
+            nested.get("micro_trigger_ok", row.get("micro_trigger_ok", pump_data.get("micro_trigger_ok", False)))
+        ),
     }
 
 
@@ -968,6 +973,8 @@ def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("turn_not_confirmed")
     if fields["continuation_risk"]:
         reasons.append("pump_continuation_risk")
+    if fields["micro_required"] and not fields["micro_trigger_ok"]:
+        reasons.append("micro_trigger_missing")
     if fields["risk_pct"] > 35:
         reasons.append("risk_too_wide")
     if fields["signal_quality"] and fields["signal_quality"] != "tradeable":

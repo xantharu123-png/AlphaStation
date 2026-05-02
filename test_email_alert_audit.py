@@ -357,6 +357,9 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
                     "confirmation_ok": True,
                     "continuation_risk": False,
                     "signal_quality": "tradeable",
+                    "micro_required": True,
+                    "micro_trigger_ok": True,
+                    "pump_data": {"micro_score": 75, "micro_trigger_ok": True},
                     "exh_score": 70,
                 },
             },
@@ -414,6 +417,8 @@ def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
                 "confirmation_ok": True,
                 "continuation_risk": False,
                 "signal_quality": "tradeable",
+                "micro_required": True,
+                "micro_trigger_ok": True,
                 "tp1_missed": False,
                 "tp2_missed": False,
             },
@@ -434,3 +439,34 @@ def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
     assert audit["rows_checked"] == 1
     assert audit["alertable_now_count"] == 1
     assert audit["alertable_preview"][0]["ticker"] == "SHORT"
+
+
+def test_new_listing_alert_audit_requires_micro_trigger_for_short_now(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "new_listing_micro.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "symbol": "GENIUS",
+            "grade": "A",
+            "signal": "SHORT",
+            "source": "signals",
+            "timing_quality": 4,
+            "safety_ok": True,
+            "rr_effective": 2.8,
+            "risk_pct": 4.3,
+            "confirmation_ok": True,
+            "continuation_risk": False,
+            "signal_quality": "tradeable",
+            "micro_required": True,
+            "micro_trigger_ok": False,
+            "tp1_missed": False,
+            "tp2_missed": False,
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("new_listing", str(cache_file))
+
+    assert audit["rows_checked"] == 1
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["micro_trigger_missing"] == 1

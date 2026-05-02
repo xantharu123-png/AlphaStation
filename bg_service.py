@@ -2530,6 +2530,9 @@ def _alert_nls_signals(results, secrets):
         continuation_risk = bool(sig.get("continuation_risk", False))
         signal_quality = str(sig.get("signal_quality", "") or "").lower()
         tp_missed = bool(sig.get("tp1_missed", False) or sig.get("tp2_missed", False))
+        pump_data = sig.get("pump_data", {}) if isinstance(sig.get("pump_data", {}), dict) else {}
+        micro_required = bool(sig.get("micro_required", True))
+        micro_trigger_ok = bool(sig.get("micro_trigger_ok", pump_data.get("micro_trigger_ok", False)))
         reasons = []
 
         if grade not in ("S", "A", "A+"):
@@ -2546,6 +2549,8 @@ def _alert_nls_signals(results, secrets):
             reasons.append("turn_not_confirmed")
         if continuation_risk:
             reasons.append("pump_continuation_risk")
+        if micro_required and not micro_trigger_ok:
+            reasons.append("micro_trigger_missing")
         if risk_pct > 35:
             reasons.append("risk_too_wide")
         if signal_quality and signal_quality != "tradeable":

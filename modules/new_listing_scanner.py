@@ -191,6 +191,7 @@ def _is_tradeable_short_signal(signal):
         and signal.get("grade") in ("S", "A", "A+")
         and signal.get("safety_ok") is True
         and signal.get("confirmation_ok") is True
+        and (not signal.get("micro_required", bool(CONFIG.get("micro_crack_enabled"))) or signal.get("micro_trigger_ok") is True)
         and not signal.get("continuation_risk")
         and not signal.get("tp1_missed")
         and not signal.get("tp2_missed")
@@ -1631,6 +1632,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     lower_high_confirmed = bool(pump_data.get("lower_high_confirmed"))
     micro_trigger_ok = bool(pump_data.get("micro_trigger_ok"))
     micro_score = _to_float(pump_data.get("micro_score"))
+    micro_required = bool(CONFIG.get("micro_crack_enabled"))
+    micro_execution_ok = (not micro_required) or micro_trigger_ok
     early_crack_window_ok = (
         CONFIG["min_from_ath_for_short_pct"]
         <= from_ath
@@ -1662,7 +1665,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     rr_ok = rr_effective >= CONFIG["min_short_rr"]
     risk_ok = risk_pct <= CONFIG["max_signal_risk_pct"]
     early_crack_ok = (
-        (exh_score >= CONFIG["early_crack_entry_score"] or micro_score >= CONFIG["micro_min_score"])
+        (exh_score >= CONFIG["early_crack_entry_score"] or (micro_trigger_ok and micro_score >= CONFIG["micro_min_score"]))
         and early_crack_window_ok
         and structural_crack_ok
         and turn_confirmed
@@ -1677,6 +1680,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         and turn_confirmed
         and rr_ok
         and risk_ok
+        and micro_execution_ok
         and pump_pct >= CONFIG["min_pump_pct"]
         and not continuation_risk
         and not tp1_missed
@@ -1704,7 +1708,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("early_crack_window_missed")
     if exh_score < CONFIG["early_crack_entry_score"] and not micro_trigger_ok:
         risk_flags.append("early_crack_score_too_low")
-    if CONFIG.get("micro_crack_enabled") and not micro_trigger_ok:
+    if micro_required and not micro_trigger_ok:
         risk_flags.append("micro_trigger_missing")
 
     # ── Timing Score ──
@@ -1721,6 +1725,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         else:
             timing = "[-] JETZT SHORTEN"
             timing_quality = 5
+    elif micro_required and not micro_trigger_ok and (exh_score >= CONFIG["early_crack_entry_score"] or early_crack_window_ok):
+        timing = "[~] WATCH - 5m Micro-Crack fehlt"
+        timing_quality = 2
     elif exh_score >= CONFIG["exh_short_entry"] and continuation_risk:
         timing = "[~] WATCH - Pump laeuft noch, erst Crack/Rejection abwarten"
         timing_quality = 2
@@ -1785,6 +1792,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "early_crack_ok": early_crack_ok,
         "continuation_risk": continuation_risk,
         "first_crack_ok": first_crack_ok,
+        "micro_required": micro_required,
+        "micro_trigger_ok": micro_trigger_ok,
+        "micro_score": micro_score,
         "setup_type": (
             "early_crack" if early_crack_ok and not exhaustion_short_ok
             else "exhaustion_short" if exhaustion_short_ok
@@ -1800,6 +1810,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
             "continuation_risk": continuation_risk,
             "tp1_missed": tp1_missed,
             "tp2_missed": tp2_missed,
+            "micro_required": micro_required,
+            "micro_trigger_ok": micro_trigger_ok,
             "rr_effective": rr_effective,
             "risk_pct": risk_pct,
         }) else "watch_or_blocked",

@@ -113,6 +113,9 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
             "momentum_recent": -0.8,
             "current_red_streak": 1,
             "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
         },
         exh_score=85,
         exh_details=[],
@@ -143,6 +146,9 @@ def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gat
             "recent_crack_depth_pct": 4.0,
             "prior_3_low_broken": True,
             "lower_high_confirmed": True,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 100,
         },
         exh_score=50,
         exh_details=[],
@@ -151,12 +157,42 @@ def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gat
     )
 
     assert signal["setup_type"] == "early_crack"
-    assert signal["stop_model"] == "local_rejection_stop"
+    assert signal["stop_model"] == "micro_crack_stop"
     assert signal["stop_loss"] < signal["hard_stop_loss"]
     assert signal["grade"] == "A"
     assert signal["timing_quality"] == 4
     assert signal["signal_quality"] == "tradeable"
     assert _is_tradeable_short_signal(signal) is True
+
+
+def test_early_crack_without_micro_trigger_stays_watchlist_only():
+    signal = generate_short_signal(
+        "GENIUSUSDT",
+        {
+            "ath": 0.5226,
+            "current_price": 0.5006,
+            "pump_pct": 20,
+            "from_ath_pct": 4.2,
+            "momentum_recent": -0.2,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "recent_rejection_high": 0.5226,
+            "recent_crack_depth_pct": 4.2,
+            "prior_3_low_broken": True,
+            "lower_high_confirmed": True,
+            "micro_trigger_ok": False,
+            "micro_score": 20,
+        },
+        exh_score=47,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert "micro_trigger_missing" in signal["risk_flags"]
+    assert signal["timing_quality"] < 4
+    assert signal["signal_quality"] == "watch_or_blocked"
+    assert _is_tradeable_short_signal(signal) is False
 
 
 def test_micro_crack_trigger_can_create_tradeable_signal():
