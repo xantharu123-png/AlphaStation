@@ -709,6 +709,7 @@ _NEW_LISTING_MIN_ALERT_RR = 1.5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
+_CRYPTO_STRATEGY_ALERTS_ENABLED = False
 _EMAIL_BLOCKED_ETF_TICKERS = {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
@@ -1226,6 +1227,16 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.extend(_bear_short_rule_reasons(row))
     if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
+    if scanner_name == "crypto_strategy":
+        if not _CRYPTO_STRATEGY_ALERTS_ENABLED:
+            reasons.append("crypto_strategy_watch_only")
+        signal_quality = str(row.get("signal_quality", "") or "").lower()
+        if signal_quality != "tradeable":
+            reasons.append("no_crypto_tradeable_signal")
+        if not bool(row.get("execution_trigger_ok") or row.get("crypto_entry_ok") or row.get("alertable_crypto")):
+            reasons.append("no_crypto_execution_trigger")
+        if bool(row.get("partial_data") or row.get("data_partial")):
+            reasons.append("partial_crypto_data")
 
     cooldown_key = f"{scanner_name}_{ticker}" if ticker else ""
     cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
@@ -3228,6 +3239,10 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         trend_min, trend_max = filters.get("Vortag %", (-999, 999))
 
         coins = _fetch_coingecko_markets(pages=8)
+        cg_status = dict(_CG_MARKETS_STATUS)
+        cg_partial = bool(cg_status.get("partial"))
+        cg_source = cg_status.get("source") or "unknown"
+        cg_warning = cg_status.get("warning")
         results = []
         btc_7d = 0.0
         for coin in coins:
@@ -3323,6 +3338,9 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
 
                 score = max(0, min(100, int(round(score))))
                 grade = _strategy_score_to_grade(score)
+                risk_flags = ["coingecko_snapshot_only", "no_intraday_execution_trigger"]
+                if cg_partial:
+                    risk_flags.append("partial_crypto_data")
                 results.append({
                     "Ticker": symbol,
                     "ticker": symbol,
@@ -3344,7 +3362,17 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "score": score,
                     "grade": grade,
                     "isCrypto": True,
-                    "data_source": "CoinGecko markets",
+                    "signal_quality": "watch_only",
+                    "entry_status": "WATCH_ONLY",
+                    "trade_action": "WATCHLIST_ONLY",
+                    "execution_trigger_ok": False,
+                    "alertable_crypto": False,
+                    "risk_flags": risk_flags,
+                    "data_status": "partial" if cg_partial else "ok",
+                    "partial_data": cg_partial,
+                    "data_warning": cg_warning,
+                    "data_source": f"CoinGecko markets ({cg_source})",
+                    "scanner_note": "Crypto-Strategie-Score ist Watchlist/Radar, kein Entry. Alerts brauchen einen frischen Micro-/Execution-Trigger.",
                     "volume_model": "RVOL = Vol/MCap/10",
                 })
             except Exception as item_err:
@@ -4747,11 +4775,12 @@ def get_email_alert_audit():
             "min_rvol": _ALERT_MIN_RVOL,
             "new_listing_min_rr": _NEW_LISTING_MIN_ALERT_RR,
             "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
-            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require active SHORT-now timing, Safety OK, unmissed targets and minimum R:R.",
+            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Generic crypto strategy scans are watch-only because CoinGecko snapshots are not execution triggers.",
         },
         "coverage": {
             "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing"],
-            "manual_scan_alerts": ["stock_strategy", "crypto_strategy"],
+            "manual_scan_alerts": ["stock_strategy"],
+            "watch_only_crypto_no_trade_email": ["crypto_strategy", "early_movers", "btc_divergenz"],
             "informational_no_trade_email": ["early_movers", "btc_divergenz", "money_flow", "crash_monitor"],
         },
         "scanners": scanners,
@@ -7397,18 +7426,18 @@ def fetch_early_movers(_prefetched_perps=None):
             alpha = c24 - btc_24h
             if phase == 1:
                 if score >= 70:
-                    signal_text = "Smart Money Accumulation — guter Einstieg"
+                    signal_text = "WATCH: Smart-Money-Akkumulation - Entry erst mit 5m Trigger/Retest"
                 elif score >= 40:
-                    signal_text = "Volume-Anomalie — beobachten"
+                    signal_text = "WATCH: Volume-Anomalie - noch kein Entry-Signal"
                 else:
-                    signal_text = "Leichte Aktivität"
+                    signal_text = "WATCH: leichte Aktivitaet"
             elif phase == 2:
                 if c24 > 12:
-                    signal_text = f"Starker Breakout +{c24:.0f}% — Einstieg riskant"
+                    signal_text = f"WATCH: Breakout +{c24:.0f}% - nicht chase, Retest/5m bestaetigen"
                 elif score >= 60:
-                    signal_text = "Breakout bestätigt — Momentum, enger Stop"
+                    signal_text = "WATCH: Momentum stark - Entry nur mit frischem Intraday-Trigger"
                 else:
-                    signal_text = "Ausbruch läuft — Vorsicht"
+                    signal_text = "WATCH: Ausbruch laeuft - Vorsicht"
             else:
                 signal_text = f"ÜBERHITZT +{c24:.0f}%/24h — NICHT kaufen, Korrektur kommt"
                 if c7d > 40:
@@ -7427,6 +7456,10 @@ def fetch_early_movers(_prefetched_perps=None):
                 grade, grade_label = "D", "Uninteressant"
 
             unified_entry = dict(entry)
+            watch_flags = list(risk_reasons or [])
+            watch_flags.extend(["watch_only_scanner", "no_intraday_execution_trigger"])
+            if _CG_MARKETS_STATUS.get("partial"):
+                watch_flags.append("partial_crypto_data")
             unified_entry.update({
                 "phase": phase,
                 "phase_label": phase_label,
@@ -7440,6 +7473,15 @@ def fetch_early_movers(_prefetched_perps=None):
                 "grade_label": grade_label,
                 "signal_text": signal_text,
                 "source": source_name,
+                "signal_quality": "watch_only",
+                "entry_status": "WATCH_ONLY",
+                "trade_action": "WATCHLIST_ONLY",
+                "execution_trigger_ok": False,
+                "alertable_crypto": False,
+                "risk_flags": watch_flags,
+                "data_source": f"CoinGecko + multi-exchange perps ({_CG_MARKETS_STATUS.get('source') or 'unknown'})",
+                "data_warning": _CG_MARKETS_STATUS.get("warning"),
+                "scanner_note": "Early Movers ist ein Radar fuer Kandidaten. Kein Entry ohne separaten 5m/1m Trigger.",
             })
 
             # Dedup: Behalte den mit höherem Score, aber merke ALLE Quellen
@@ -7730,13 +7772,19 @@ def _btc_divergenz_wrapper() -> None:
                 r["aligned_days"] = len(common_dates)
 
                 if z_score > 1.5 and correlation > 0.5:
-                    r["signal"] = "KAUFEN"
+                    r["signal"] = "WATCH LONG-BIAS"
                 elif z_score < -1.5 and correlation > 0.5:
-                    r["signal"] = "MEIDEN"
+                    r["signal"] = "WATCH RISIKO"
                 elif abs(z_score) < 0.5:
-                    r["signal"] = "ABWARTEN"
+                    r["signal"] = "NEUTRAL"
                 else:
-                    r["signal"] = "BEOBACHTEN"
+                    r["signal"] = "WATCH"
+                r["signal_quality"] = "watch_only"
+                r["entry_status"] = "CONTEXT_ONLY"
+                r["trade_action"] = "WATCHLIST_ONLY"
+                r["execution_trigger_ok"] = False
+                r["risk_flags"] = ["btc_divergence_context_only", "no_intraday_execution_trigger"]
+                r["scanner_note"] = "BTC-Divergenz ist Kontext/Bias, kein Kauf- oder Short-Trigger."
 
         # Remove internal bars and filter out BTC reference before saving
         final_results = []

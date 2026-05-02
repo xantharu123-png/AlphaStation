@@ -4357,8 +4357,12 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const getSignalClass = (signal) => {
         if (signal.includes('KAUFEN')) return 'signal-kaufen';
         if (signal.includes('MEIDEN')) return 'signal-meiden';
+        if (signal.includes('WATCH LONG')) return 'signal-kaufen';
+        if (signal.includes('WATCH RISIKO')) return 'signal-meiden';
         if (signal.includes('ABWARTEN')) return 'signal-abwarten';
+        if (signal.includes('NEUTRAL')) return 'signal-abwarten';
         if (signal.includes('BEOBACHTEN')) return 'signal-beobachten';
+        if (signal.includes('WATCH')) return 'signal-beobachten';
         if (signal.includes('BTC')) return 'signal-btc';
         return 'signal-neutral';
     };

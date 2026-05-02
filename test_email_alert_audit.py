@@ -470,3 +470,44 @@ def test_new_listing_alert_audit_requires_micro_trigger_for_short_now(tmp_path):
     assert audit["rows_checked"] == 1
     assert audit["alertable_now_count"] == 0
     assert audit["suppression_counts"]["micro_trigger_missing"] == 1
+
+
+def test_crypto_strategy_alerts_are_watch_only_without_execution_trigger():
+    api._EMAIL_COOLDOWN.clear()
+    row = {
+        "Ticker": "GENIUS",
+        "grade": "A",
+        "score": 92,
+        "RVOL": 3.0,
+        "Preis": 0.42,
+        "signal_quality": "watch_only",
+        "execution_trigger_ok": False,
+        "partial_data": False,
+    }
+
+    state = api._classify_alert_candidate("crypto_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "crypto_strategy_watch_only" in state["suppression_reasons"]
+    assert "no_crypto_tradeable_signal" in state["suppression_reasons"]
+    assert "no_crypto_execution_trigger" in state["suppression_reasons"]
+
+
+def test_crypto_strategy_scan_does_not_email_snapshot_rows(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Low Cap Rockets", [{
+        "Ticker": "PUMP",
+        "grade": "S",
+        "score": 95,
+        "RVOL": 5.0,
+        "Preis": 0.12,
+        "Change_Pct": 34.0,
+        "signal_quality": "watch_only",
+        "execution_trigger_ok": False,
+        "data_source": "CoinGecko markets",
+    }], "crypto")
+
+    assert sent == []
