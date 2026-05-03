@@ -349,9 +349,13 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
             "error": "No BPIQ catalyst rows loaded",
             "timestamp": datetime.now().isoformat(),
         })
+    bpiq_error = status.get("error") if status.get("status") != "success" else None
+    warning = bpiq_error or (
+        None if rows else "No matching Phase 2/3 catalyst rows in the selected window"
+    )
 
     return {
-        "status": "success" if rows else "warning",
+        "status": "success" if rows and not bpiq_error else "warning",
         "count": len(rows),
         "data": rows,
         "summary": {
@@ -372,7 +376,7 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
             "note": "Newsletter table was embedded/remote, so rows come from the BPIQ API calendar when configured.",
         },
         "bpiq_status": status,
-        "warning": None if rows else (status.get("error") or "No matching Phase 2/3 catalyst rows in the selected window"),
+        "warning": warning,
         "timestamp": datetime.now().isoformat(),
     }
 

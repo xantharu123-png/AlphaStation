@@ -92,3 +92,39 @@ def test_bpiq_watchlist_surfaces_api_warning(monkeypatch):
     assert result["count"] == 0
     assert result["bpiq_status"]["http_status"] == 401
     assert "401" in result["warning"]
+
+
+def test_bpiq_watchlist_warns_on_partial_api_rows(monkeypatch):
+    monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: {
+        "AAAA": [
+            {
+                "company_name": "Alpha Therapeutics",
+                "drug_name": "Alpha",
+                "stage_label": "Phase 3",
+                "event_label": "Topline readout",
+                "full_label": "Phase 3 topline data",
+                "catalyst_date": "2026-05-20",
+                "catalyst_date_text": "Q2 2026",
+                "days_until": 10,
+                "category": "IMMINENT",
+                "phase_mult": 3.0,
+                "bpiq_score": 90,
+                "indications": "Oncology",
+                "source": "BPIQ",
+            }
+        ]
+    })
+    monkeypatch.setattr(df, "_BPIQ_CATALYST_STATUS", {
+        "status": "warning",
+        "http_status": 429,
+        "error": "BPIQ returned HTTP 429",
+        "rows_loaded": 200,
+        "ticker_count": 120,
+        "timestamp": "2026-05-03T00:00:00",
+    })
+
+    result = df.get_bpiq_catalyst_watchlist(limit=85, window_days=60)
+
+    assert result["count"] == 1
+    assert result["status"] == "warning"
+    assert "429" in result["warning"]
