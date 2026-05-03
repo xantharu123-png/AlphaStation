@@ -28,7 +28,7 @@ import smtplib
 import threading
 from copy import deepcopy
 from typing import Optional, Dict, List, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
@@ -706,6 +706,7 @@ _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
 _NEW_LISTING_MIN_ALERT_RR = 1.5
+_NEW_LISTING_RADAR_DEDUPE_SEC = 20 * 3600
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
@@ -1574,10 +1575,147 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
 
 
+def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
+    sig = entry.get("signal", {}) if isinstance(entry, dict) else {}
+    return sig if isinstance(sig, dict) else {}
+
+
+def _new_listing_radar_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if not isinstance(payload, dict):
+        return candidates
+
+    for bucket in ("signals", "watchlist"):
+        for entry in payload.get(bucket, []) or []:
+            if not isinstance(entry, dict):
+                continue
+            sig = _new_listing_nested_signal(entry)
+            fields = _extract_new_listing_signal_fields(entry)
+            if fields["listing_source"] != "new_listing":
+                continue
+            symbol = _display_crypto_contract_symbol(entry.get("symbol") or sig.get("symbol") or "")
+            if not symbol:
+                continue
+            pump = sig.get("pump_data", {}) if isinstance(sig.get("pump_data", {}), dict) else {}
+            candidates.append({
+                "symbol": symbol,
+                "exchange": entry.get("exchange", ""),
+                "bucket": bucket,
+                "grade": fields["grade"] or str(entry.get("grade", "") or ""),
+                "timing": sig.get("timing", entry.get("timing", "")),
+                "category": fields["trade_category"] or sig.get("trade_category", entry.get("trade_category", "")),
+                "age": fields["listing_age_hours"],
+                "pump_pct": _alert_float(pump.get("pump_pct", entry.get("pump_pct")), 0) or 0,
+                "from_ath_pct": _alert_float(pump.get("from_ath_pct", entry.get("from_ath_pct")), 0) or 0,
+                "exh_score": _alert_float(sig.get("exh_score", entry.get("exh_score")), 0) or 0,
+                "rr": fields["rr_effective"],
+                "btc_change": _alert_float(pump.get("btc_change_pct", sig.get("btc_change_pct")), None),
+                "coin_change": _alert_float(pump.get("coin_change_pct", sig.get("coin_change_pct")), None),
+                "btc_divergence": _alert_float(pump.get("btc_divergence", sig.get("btc_divergence")), None),
+                "btc_context": str(pump.get("btc_short_context", sig.get("btc_short_context", "")) or ""),
+                "risk_flags": sig.get("risk_flags", entry.get("risk_flags", [])) if isinstance(sig.get("risk_flags", entry.get("risk_flags", [])), list) else [],
+            })
+
+    for item in payload.get("monitoring", []) or []:
+        if not isinstance(item, dict) or item.get("source") != "new_listing":
+            continue
+        category = str(item.get("trade_category", "") or "")
+        if category in ("ALREADY_DUMPED", "NEW_LISTING_EXPIRED"):
+            continue
+        symbol = _display_crypto_contract_symbol(item.get("symbol", ""))
+        if not symbol:
+            continue
+        candidates.append({
+            "symbol": symbol,
+            "exchange": item.get("exchange", ""),
+            "bucket": "monitoring",
+            "grade": item.get("grade", ""),
+            "timing": item.get("timing", ""),
+            "category": category or "NEW_LISTING_RADAR",
+            "age": _alert_float(item.get("listing_age_hours")),
+            "pump_pct": _alert_float(item.get("pump_pct"), 0) or 0,
+            "from_ath_pct": _alert_float(item.get("from_ath_pct"), 0) or 0,
+            "exh_score": _alert_float(item.get("exh_score"), 0) or 0,
+            "rr": _alert_float(item.get("rr_effective"), 0) or 0,
+            "btc_change": _alert_float(item.get("btc_change_pct"), None),
+            "coin_change": _alert_float(item.get("coin_change_pct"), None),
+            "btc_divergence": _alert_float(item.get("btc_divergence"), None),
+            "btc_context": str(item.get("btc_short_context", "") or ""),
+            "risk_flags": item.get("risk_flags", []) if isinstance(item.get("risk_flags", []), list) else [],
+        })
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for candidate in candidates:
+        key = candidate["symbol"]
+        old = deduped.get(key)
+        candidate_rank = (candidate["bucket"] == "signals", candidate["exh_score"] or 0, candidate["rr"] or 0)
+        old_rank = (old["bucket"] == "signals", old["exh_score"] or 0, old["rr"] or 0) if old else None
+        if old is None or candidate_rank > old_rank:
+            deduped[key] = candidate
+    return sorted(deduped.values(), key=lambda c: (c["bucket"] != "signals", -(c["exh_score"] or 0), -(c["rr"] or 0)))[:12]
+
+
+def _send_new_listing_radar_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
+    now = now or time.time()
+    candidates = _new_listing_radar_candidates(payload)
+    if not candidates:
+        _record_email_event("Crypto New Listing Radar", "skipped", "no_new_listing_radar_candidates")
+        return False
+
+    radar_dt = datetime.fromtimestamp(now, timezone.utc)
+    day_key = radar_dt.strftime("%Y%m%d")
+    dedupe_key = f"new_listing_radar_{day_key}"
+    if not _email_dedupe_claim(dedupe_key, _NEW_LISTING_RADAR_DEDUPE_SEC, now=now):
+        _record_email_event("Crypto New Listing Radar", "skipped", "daily_radar_dedupe_active")
+        return False
+
+    def _fmt(value, suffix="", default="-"):
+        if value is None:
+            return default
+        try:
+            return f"{float(value):.1f}{suffix}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    rows = ""
+    for c in candidates:
+        risk = ", ".join(c["risk_flags"][:3]) if c["risk_flags"] else ""
+        rows += (
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{c["symbol"]}</b><br><span style="color:#777">{c["exchange"]}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{c["category"]}<br><span style="color:#777">{c["timing"]}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["age"], "h")}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["pump_pct"], "%")} / {_fmt(c["from_ath_pct"], "%")}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{c["grade"] or "-"} / {int(c["exh_score"] or 0)}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["rr"], "R")}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {_fmt(c["btc_change"], "%")}<br>Coin {_fmt(c["coin_change"], "%")}<br>Div {_fmt(c["btc_divergence"], "%")}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{risk}</td></tr>'
+        )
+
+    suppressed_text = ""
+    if suppressed:
+        suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine SHORT NOW Mail: " + ", ".join(f"{k}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
+    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
+    <h2 style="color:#f97316">Crypto New Listing Radar</h2>
+    <p style="color:#666">{radar_dt.strftime("%d.%m.%Y %H:%M")} UTC | Watchlist, kein automatisches Short-Now Signal</p>
+    <p style="color:#444">BTC-Divergenz ist hier Marktwind: BTC risk-on blockt nicht jeden New-Listing-Dump, aber wir warten auf echte Underperformance oder einen tieferen Crack.</p>
+    {suppressed_text}
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr style="background:#fff7ed"><th style="padding:8px;text-align:left">Coin</th>
+    <th style="padding:8px;text-align:left">Status</th><th style="padding:8px;text-align:left">Alter</th>
+    <th style="padding:8px;text-align:left">Pump/ATH</th><th style="padding:8px;text-align:left">Grade/Score</th>
+    <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC Kontext</th>
+    <th style="padding:8px;text-align:left">Warnungen</th></tr>
+    {rows}</table>
+    <p style="color:#999;font-size:12px;margin-top:20px">Radar-Mail maximal 1x taeglich. SHORT NOW kommt separat nur bei Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
+    </body></html>'''
+    return _send_email_alert(f"Crypto New Listing Radar: {len(candidates)} Coin(s) im Blick", body)
+
+
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     """Mail S/A active Pump-&-Dump short signals from the FastAPI pipeline."""
     signals = payload.get("signals", []) if isinstance(payload, dict) else []
     if not signals:
+        _send_new_listing_radar_email(payload if isinstance(payload, dict) else {})
         return
     now = time.time()
     alerts = []
@@ -1603,6 +1741,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         if _email_dedupe_active(cooldown_key, _EMAIL_COOLDOWN_SEC, now):
             suppressed["persistent_dedupe_active"] = suppressed.get("persistent_dedupe_active", 0) + 1
             continue
+        pump = sig.get("pump_data", {}) if isinstance(sig.get("pump_data", {}), dict) else {}
         alerts.append({
             "symbol": symbol,
             "exchange": entry.get("exchange", ""),
@@ -1616,12 +1755,17 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "tp2": sig.get("tp2", 0),
             "rr": fields["rr_effective"],
             "exh_score": sig.get("exh_score", 0),
-            "micro_score": (sig.get("pump_data", {}) or {}).get("micro_score", 0),
+            "micro_score": pump.get("micro_score", 0),
+            "btc_change": pump.get("btc_change_pct", sig.get("btc_change_pct")),
+            "coin_change": pump.get("coin_change_pct", sig.get("coin_change_pct")),
+            "btc_divergence": pump.get("btc_divergence", sig.get("btc_divergence")),
+            "btc_context": pump.get("btc_short_context", sig.get("btc_short_context", "")),
             "cooldown_key": cooldown_key,
         })
     if not alerts:
         if suppressed:
             _record_email_event("Pump & Dump SHORT Alert", "skipped", f"no_active_short_signals:{suppressed}")
+            _send_new_listing_radar_email(payload if isinstance(payload, dict) else {}, suppressed=suppressed, now=now)
         return
 
     rows = ""
@@ -1634,7 +1778,8 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["entry"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}<br><span style="color:#999;font-size:11px">{a["stop_model"]}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["tp1"]} / ${a["tp2"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R<br><span style="color:#999;font-size:11px">Micro {a["micro_score"]}</span></td></tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R<br><span style="color:#999;font-size:11px">Micro {a["micro_score"]}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {a["btc_change"]}<br>Coin {a["coin_change"]}<br>Div {a["btc_divergence"]}</td></tr>'
         )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
     <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
@@ -1644,7 +1789,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
     <th style="padding:8px;text-align:left">Timing</th><th style="padding:8px;text-align:left">Entry</th>
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
-    <th style="padding:8px;text-align:left">R</th></tr>
+    <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC</th></tr>
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump SHORT-now Signale: New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pump Radar bleibt Watch-only; 8h Cooldown pro Coin.</p>
     </body></html>'''
@@ -8046,6 +8191,11 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "long_pct": pump.get("long_pct", 0),
             "red_streak": pump.get("red_streak", 0),
             "btc_divergence": pump.get("btc_divergence", 0),
+            "btc_change_pct": pump.get("btc_change_pct", sig.get("btc_change_pct")),
+            "coin_change_pct": pump.get("coin_change_pct", sig.get("coin_change_pct")),
+            "btc_short_context": pump.get("btc_short_context", sig.get("btc_short_context", "")),
+            "btc_tailwind_risk": pump.get("btc_tailwind_risk", sig.get("btc_tailwind_risk", False)),
+            "btc_context_ok": sig.get("btc_context_ok", True),
             "rr1": sig.get("rr1", 0),
             "rr2": sig.get("rr2", 0),
             "rr_effective": sig.get("rr_effective", sig.get("rr1", 0)),
@@ -8116,6 +8266,11 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "micro_warnings": item.get("micro_warnings", []),
             "micro_from_high_pct": item.get("micro_from_high_pct", 0),
             "micro_current_price": item.get("micro_current_price", 0),
+            "btc_change_pct": item.get("btc_change_pct"),
+            "coin_change_pct": item.get("coin_change_pct"),
+            "btc_divergence": item.get("btc_divergence"),
+            "btc_short_context": item.get("btc_short_context", ""),
+            "btc_tailwind_risk": item.get("btc_tailwind_risk", False),
             "confirmation_ok": item.get("confirmation_ok", False),
             "continuation_risk": item.get("continuation_risk", False),
             "signal_quality": item.get("signal_quality", ""),

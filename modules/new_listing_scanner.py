@@ -100,6 +100,9 @@ CONFIG.update({
     "micro_stop_buffer_pct": 1.5,
     "new_listing_short_min_age_hours": 1.0,
     "new_listing_short_max_age_hours": 72.0,
+    "btc_tailwind_risk_change_pct": 2.0,
+    "btc_tailwind_min_divergence_pct": -5.0,
+    "btc_tailwind_min_crack_pct": 8.0,
 })
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -193,6 +196,7 @@ def _is_tradeable_short_signal(signal):
         and signal.get("grade") in ("S", "A", "A+")
         and signal.get("safety_ok") is True
         and signal.get("confirmation_ok") is True
+        and signal.get("btc_context_ok", True) is True
         and (not signal.get("micro_required", bool(CONFIG.get("micro_crack_enabled"))) or signal.get("micro_trigger_ok") is True)
         and not signal.get("continuation_risk")
         and not signal.get("tp1_missed")
@@ -1287,13 +1291,28 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
             if btc_change > 0 and coin_change < -3:
                 btc_divergence_pts = min(10, btc_divergence_pts + 2)
 
+            btc_tailwind_risk = (
+                btc_change >= CONFIG["btc_tailwind_risk_change_pct"]
+                and divergence > CONFIG["btc_tailwind_min_divergence_pct"]
+            )
+            if btc_tailwind_risk:
+                btc_context = "BTC_RISK_ON_WAIT_FOR_DEEPER_CRACK"
+            elif divergence <= CONFIG["btc_tailwind_min_divergence_pct"]:
+                btc_context = "COIN_UNDERPERFORMS_BTC_SHORT_TAILWIND"
+            else:
+                btc_context = "NEUTRAL"
+
             pump_data["btc_change_pct"] = round(btc_change, 1)
             pump_data["coin_change_pct"] = round(coin_change, 1)
             pump_data["btc_divergence"] = round(divergence, 1)
+            pump_data["btc_tailwind_risk"] = btc_tailwind_risk
+            pump_data["btc_short_context"] = btc_context
             details.append(f"₿ BTC Divergenz: BTC {btc_change:+.1f}% vs Coin {coin_change:+.1f}% (Div: {divergence:+.1f}%) → {btc_divergence_pts}/10")
         else:
+            pump_data["btc_short_context"] = "UNKNOWN"
             details.append("₿ BTC Divergenz: keine BTC-Daten")
     except Exception as e:
+        pump_data["btc_short_context"] = "UNKNOWN"
         details.append(f"₿ BTC Divergenz: Fehler ({e})")
 
     score += btc_divergence_pts
@@ -1651,6 +1670,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     micro_score = _to_float(pump_data.get("micro_score"))
     micro_required = bool(CONFIG.get("micro_crack_enabled"))
     micro_execution_ok = (not micro_required) or micro_trigger_ok
+    btc_tailwind_risk = bool(pump_data.get("btc_tailwind_risk"))
+    btc_divergence = _to_float(pump_data.get("btc_divergence"))
     listing_gate_present = "listing_source" in pump_data or "listing_age_hours" in pump_data
     listing_source = str(pump_data.get("listing_source", "") or "").lower()
     listing_age_raw = pump_data.get("listing_age_hours")
@@ -1696,6 +1717,12 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     )
     rr_ok = rr_effective >= CONFIG["min_short_rr"]
     risk_ok = risk_pct <= CONFIG["max_signal_risk_pct"]
+    btc_tailwind_override = (
+        from_ath >= CONFIG["btc_tailwind_min_crack_pct"]
+        or btc_divergence <= CONFIG["btc_tailwind_min_divergence_pct"]
+        or (micro_trigger_ok and micro_score >= 85 and recent_crack_depth >= 5)
+    )
+    btc_context_ok = (not btc_tailwind_risk) or btc_tailwind_override
     early_crack_ok = (
         (exh_score >= CONFIG["early_crack_entry_score"] or (micro_trigger_ok and micro_score >= CONFIG["micro_min_score"]))
         and early_crack_window_ok
@@ -1705,6 +1732,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         and not tp1_missed
         and not tp2_missed
         and listing_trade_ok
+        and btc_context_ok
     )
     exhaustion_short_ok = exh_score >= CONFIG["exh_short_entry"]
     trade_setup_ok = (
@@ -1719,6 +1747,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         and not tp1_missed
         and not tp2_missed
         and listing_trade_ok
+        and btc_context_ok
     )
 
     risk_flags = []
@@ -1744,6 +1773,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("early_crack_score_too_low")
     if micro_required and not micro_trigger_ok:
         risk_flags.append("micro_trigger_missing")
+    if not btc_context_ok:
+        risk_flags.append("btc_risk_on_wait_for_deeper_crack")
     if listing_info_missing:
         risk_flags.append("listing_info_missing")
     elif not is_new_listing_source:
@@ -1779,6 +1810,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
     elif listing_info_missing:
         timing = "[~] WATCH - Listing-Kontext fehlt, keine Short-Mail"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif not btc_context_ok:
+        timing = "[~] WATCH - BTC risk-on, erst klare Underperformance/deeper crack abwarten"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not is_new_listing_source:
         timing = "[~] ACTIVE PUMP WATCH - kein New Listing, keine Short-Mail"
@@ -1869,6 +1903,12 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "micro_required": micro_required,
         "micro_trigger_ok": micro_trigger_ok,
         "micro_score": micro_score,
+        "btc_tailwind_risk": btc_tailwind_risk,
+        "btc_context_ok": btc_context_ok,
+        "btc_short_context": pump_data.get("btc_short_context", "UNKNOWN"),
+        "btc_change_pct": pump_data.get("btc_change_pct"),
+        "coin_change_pct": pump_data.get("coin_change_pct"),
+        "btc_divergence": pump_data.get("btc_divergence"),
         "setup_type": (
             "early_crack" if early_crack_ok and not exhaustion_short_ok
             else "exhaustion_short" if exhaustion_short_ok
@@ -1886,6 +1926,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
             "tp2_missed": tp2_missed,
             "micro_required": micro_required,
             "micro_trigger_ok": micro_trigger_ok,
+            "btc_context_ok": btc_context_ok,
             "listing_trade_ok": listing_trade_ok,
             "rr_effective": rr_effective,
             "risk_pct": risk_pct,
@@ -2256,14 +2297,6 @@ def run_new_listing_scanner():
                     ticker["bid"] = book["bids"][0][0]
                     ticker["ask"] = book["asks"][0][0]
 
-                # Candle-Mindestanzahl prüfen
-                if not candles or len(candles) < 3:
-                    log.info(f"⏳ NLS: {symbol} — nur {len(candles) if candles else 0} Candles, warte auf History")
-                    mon_data["status"] = "waiting_for_history"
-                    continue
-                if mon_data.get("status") == "waiting_for_history":
-                    mon_data["status"] = "monitoring"
-
                 listing_age_hours = None
                 listing_age_source = None
                 source = mon_data.get("source", "new_listing")
@@ -2276,6 +2309,30 @@ def run_new_listing_scanner():
                         listing_age_hours = max(0, (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600)
                     except Exception:
                         listing_age_hours = None
+
+                # Candle-Mindestanzahl prüfen
+                if not candles or len(candles) < 3:
+                    log.info(f"⏳ NLS: {symbol} — nur {len(candles) if candles else 0} Candles, warte auf History")
+                    mon_data["status"] = "waiting_for_history"
+                    mon_data["listing_age_hours"] = round(listing_age_hours, 1) if listing_age_hours is not None else None
+                    mon_data["listing_age_source"] = listing_age_source
+                    mon_data["listing_trade_ok"] = False
+                    mon_data["trade_category"] = "WAITING_FOR_HISTORY"
+                    results["monitoring"].append({
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "source": source,
+                        "listing_age_hours": round(listing_age_hours, 1) if listing_age_hours is not None else None,
+                        "listing_age_source": listing_age_source,
+                        "listing_trade_ok": False,
+                        "trade_category": "WAITING_FOR_HISTORY",
+                        "grade": "WAIT",
+                        "timing": "Waiting for history",
+                        "risk_flags": ["waiting_for_history"],
+                    })
+                    continue
+                if mon_data.get("status") == "waiting_for_history":
+                    mon_data["status"] = "monitoring"
 
                 # Exhaustion Score berechnen
                 exh_score, exh_details, pump_data = calculate_listing_exhaustion(
@@ -2325,6 +2382,11 @@ def run_new_listing_scanner():
                     mon_data["listing_age_source"] = listing_age_source
                     mon_data["listing_trade_ok"] = False
                     mon_data["trade_category"] = "ALREADY_DUMPED"
+                    mon_data["btc_change_pct"] = pump_data.get("btc_change_pct")
+                    mon_data["coin_change_pct"] = pump_data.get("coin_change_pct")
+                    mon_data["btc_divergence"] = pump_data.get("btc_divergence")
+                    mon_data["btc_short_context"] = pump_data.get("btc_short_context", "UNKNOWN")
+                    mon_data["btc_tailwind_risk"] = pump_data.get("btc_tailwind_risk", False)
                     results["monitoring"].append({
                         "symbol": symbol,
                         "source": source,
@@ -2332,6 +2394,11 @@ def run_new_listing_scanner():
                         "listing_age_source": listing_age_source,
                         "listing_trade_ok": False,
                         "trade_category": "ALREADY_DUMPED",
+                        "btc_change_pct": pump_data.get("btc_change_pct"),
+                        "coin_change_pct": pump_data.get("coin_change_pct"),
+                        "btc_divergence": pump_data.get("btc_divergence"),
+                        "btc_short_context": pump_data.get("btc_short_context", "UNKNOWN"),
+                        "btc_tailwind_risk": pump_data.get("btc_tailwind_risk", False),
                         "exh_score": exh_score,
                         "pump_pct": pump_data.get("pump_pct", 0),
                         "from_ath_pct": from_ath,
@@ -2375,6 +2442,11 @@ def run_new_listing_scanner():
                 mon_data["stop_model"] = signal.get("stop_model", "")
                 mon_data["micro_trigger_ok"] = pump_data.get("micro_trigger_ok", False)
                 mon_data["micro_score"] = pump_data.get("micro_score", 0)
+                mon_data["btc_change_pct"] = pump_data.get("btc_change_pct")
+                mon_data["coin_change_pct"] = pump_data.get("coin_change_pct")
+                mon_data["btc_divergence"] = pump_data.get("btc_divergence")
+                mon_data["btc_short_context"] = pump_data.get("btc_short_context", "UNKNOWN")
+                mon_data["btc_tailwind_risk"] = pump_data.get("btc_tailwind_risk", False)
                 mon_data["listing_age_hours"] = signal.get("listing_age_hours")
                 mon_data["listing_age_source"] = listing_age_source
                 mon_data["listing_trade_ok"] = signal.get("listing_trade_ok", False)
@@ -2414,6 +2486,11 @@ def run_new_listing_scanner():
                     "micro_reasons": pump_data.get("micro_reasons", []),
                     "micro_warnings": pump_data.get("micro_warnings", []),
                     "micro_from_high_pct": pump_data.get("micro_from_high_pct", 0),
+                    "btc_change_pct": pump_data.get("btc_change_pct"),
+                    "coin_change_pct": pump_data.get("coin_change_pct"),
+                    "btc_divergence": pump_data.get("btc_divergence"),
+                    "btc_short_context": pump_data.get("btc_short_context", "UNKNOWN"),
+                    "btc_tailwind_risk": pump_data.get("btc_tailwind_risk", False),
                     "exchange": exchange,
                     "source": mon_data.get("source", "new_listing"),
                     "listing_age_hours": signal.get("listing_age_hours"),

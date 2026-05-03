@@ -212,6 +212,40 @@ def test_active_pump_detection_is_watch_only_even_with_crack():
     assert _is_tradeable_short_signal(signal) is False
 
 
+def test_btc_risk_on_waits_for_deeper_crack_before_short():
+    signal = generate_short_signal(
+        "BTCRISKONUSDT",
+        {
+            "ath": 100,
+            "current_price": 97,
+            "pump_pct": 80,
+            "from_ath_pct": 3.0,
+            "momentum_recent": -0.8,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
+            "listing_source": "new_listing",
+            "listing_age_hours": 24,
+            "btc_tailwind_risk": True,
+            "btc_change_pct": 3.2,
+            "coin_change_pct": 1.0,
+            "btc_divergence": -2.2,
+            "btc_short_context": "BTC_RISK_ON_WAIT_FOR_DEEPER_CRACK",
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal["btc_context_ok"] is False
+    assert "btc_risk_on_wait_for_deeper_crack" in signal["risk_flags"]
+    assert signal["signal_quality"] == "watch_or_blocked"
+    assert _is_tradeable_short_signal(signal) is False
+
+
 def test_new_listing_age_window_required_for_short_mail_quality():
     too_early = generate_short_signal(
         "BABYUSDT",

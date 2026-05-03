@@ -403,6 +403,83 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
     assert "RISK" not in sent[0][1]
 
 
+def test_new_listing_pipeline_sends_daily_radar_when_no_short_now(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+
+    payload = {
+        "signals": [],
+        "watchlist": [{
+            "symbol": "BABYUSDT",
+            "exchange": "mexc",
+            "signal": {
+                "grade": "A",
+                "timing": "[~] WATCH - BTC risk-on, erst klare Underperformance/deeper crack abwarten",
+                "timing_quality": 2,
+                "safety_ok": True,
+                "rr_effective": 2.0,
+                "risk_pct": 12,
+                "confirmation_ok": True,
+                "continuation_risk": False,
+                "signal_quality": "watch_or_blocked",
+                "listing_source": "new_listing",
+                "listing_trade_ok": False,
+                "listing_age_hours": 18,
+                "trade_category": "NEW_LISTING_WATCH",
+                "micro_required": True,
+                "micro_trigger_ok": True,
+                "tp1_missed": False,
+                "tp2_missed": False,
+                "exh_score": 74,
+                "pump_data": {
+                    "pump_pct": 90,
+                    "from_ath_pct": 3,
+                    "btc_change_pct": 3.2,
+                    "coin_change_pct": 1.0,
+                    "btc_divergence": -2.2,
+                    "btc_short_context": "BTC_RISK_ON_WAIT_FOR_DEEPER_CRACK",
+                },
+                "risk_flags": ["btc_risk_on_wait_for_deeper_crack"],
+            },
+        }],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert len(sent) == 1
+    assert "Crypto New Listing Radar" in sent[0][0]
+    assert "BABY" in sent[0][1]
+    assert "SHORT NOW" in sent[0][1]
+
+
+def test_new_listing_radar_ignores_active_pump_rows(monkeypatch):
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+
+    payload = {
+        "signals": [],
+        "watchlist": [{
+            "symbol": "OLDPUMPUSDT",
+            "exchange": "binance",
+            "signal": {
+                "grade": "A",
+                "timing": "[~] ACTIVE PUMP WATCH",
+                "timing_quality": 2,
+                "listing_source": "pump_detection",
+                "listing_trade_ok": False,
+                "trade_category": "ACTIVE_PUMP_WATCH",
+            },
+        }],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert sent == []
+
+
 def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "new_listing.json"
