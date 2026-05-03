@@ -2111,12 +2111,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const controller = new AbortController();
         const signal = controller.signal;
         const fetchChart = async () => {
+            const fetchWithTimeout = (url, options = {}, timeoutMs = 8000) => Promise.race([
+                fetch(url, options),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('chart_fetch_timeout')), timeoutMs)),
+            ]);
             try {
                 if (isExchangeCrypto && scannerData?.contract && scannerData?.exchange) {
                     // Pump & Dump Coins: direkt von der Exchange holen
                     const contract = scannerData.contract;
                     const exchange = scannerData.exchange;
-                    const res = await fetch(`${API}/api/exchange-chart?symbol=${encodeURIComponent(contract)}&exchange=${encodeURIComponent(exchange)}&timeframe=${timeframe}&count=100`, { signal });
+                    const res = await fetchWithTimeout(`${API}/api/exchange-chart?symbol=${encodeURIComponent(contract)}&exchange=${encodeURIComponent(exchange)}&timeframe=${timeframe}&count=100`, { signal }, 7000);
                     if (signal.aborted) return;
                     if (res.ok) {
                         setChartData(await res.json());
@@ -2134,7 +2138,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     // nutzen wir zuerst Exchange-Candles statt CoinGecko-Daily-Kontext.
                     if (scannerData?.HasPerp && exchangeSymbol && exchangeName) {
                         try {
-                            const res = await fetch(`${API}/api/exchange-chart?symbol=${encodeURIComponent(exchangeSymbol)}&exchange=${encodeURIComponent(exchangeName)}&timeframe=${timeframe}&count=160`, { signal });
+                            const res = await fetchWithTimeout(`${API}/api/exchange-chart?symbol=${encodeURIComponent(exchangeSymbol)}&exchange=${encodeURIComponent(exchangeName)}&timeframe=${timeframe}&count=160`, { signal }, 5000);
                             if (signal.aborted) return;
                             if (res.ok) {
                                 const chartJson = await res.json();
@@ -2208,7 +2212,22 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         };
         fetchChart();
         return () => controller.abort();  // Vorherigen Request abbrechen
-    }, [ticker, timeframe, isCrypto, isExchangeCrypto, scannerData]);
+    }, [
+        ticker,
+        timeframe,
+        isCrypto,
+        isExchangeCrypto,
+        scannerData?.contract,
+        scannerData?.exchange,
+        scannerData?.ID,
+        scannerData?.id,
+        scannerData?.HasPerp,
+        scannerData?.PerpChartSymbol,
+        scannerData?.perp_chart_symbol,
+        scannerData?.PerpChartExchange,
+        scannerData?.perp_chart_exchange,
+        scannerData?.BestExchange,
+    ]);
 
     const loadAiAnalysis = async () => {
         setAiLoading(true);
@@ -2288,7 +2307,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             if (candles.length > 0) candleSeries.current.setData(candles);
 
             const setupForChart = scannerData?.trade_setup || tickerData?.trade_setup;
-            if (setupForChart && candleSeries.current) {
+            if (setupForChart && candleSeries.current && typeof candleSeries.current.createPriceLine === 'function') {
                 [
                     { key: 'entry', label: 'ENTRY', color: '#2563eb' },
                     { key: 'stop_loss', alt: 'stop', label: 'STOP', color: '#dc2626' },
@@ -2298,14 +2317,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     const rawPrice = setupForChart[line.key] ?? setupForChart[line.alt];
                     const linePrice = Number(rawPrice);
                     if (Number.isFinite(linePrice) && linePrice > 0) {
-                        candleSeries.current.createPriceLine({
-                            price: linePrice,
-                            color: line.color,
-                            lineWidth: line.key === 'entry' ? 2 : 1,
-                            lineStyle: line.key === 'entry' ? LineStyle.Solid : LineStyle.Dashed,
-                            axisLabelVisible: true,
-                            title: line.label,
-                        });
+                        try {
+                            candleSeries.current.createPriceLine({
+                                price: linePrice,
+                                color: line.color,
+                                lineWidth: line.key === 'entry' ? 2 : 1,
+                                lineStyle: line.key === 'entry' ? (LineStyle.Solid || 0) : LineStyle.Dashed,
+                                axisLabelVisible: true,
+                                title: line.label,
+                            });
+                        } catch(e) {}
                     }
                 });
             }
@@ -2651,7 +2672,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (oldCanvas) oldCanvas.remove();
             }
         };
-    }, [chartData, sidebarMode, customWidth, customHeight, overlays, tickerData, scannerData]);
+    }, [chartData, sidebarMode, customWidth, customHeight, overlays, tickerData]);
 
     if (loading && !tickerData) {
         return (
@@ -2843,26 +2864,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         )}
                         {tradeHealth.positives && tradeHealth.positives.length > 0 && (
                             <div className="mt-2 text-emerald-700">{tradeHealth.positives.slice(0, 3).join(' | ')}</div>
-                        )}
-                    </div>
-                )}
-
-                {quality && (
-                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-lg mb-3 text-xs">
-                        <h4 className="font-semibold text-sm mb-2">Warum ist das Signal drin?</h4>
-                        <div className="space-y-1">
-                            {(quality.why_in || []).slice(0, 5).map((line, i) => (
-                                <div key={i} className="text-slate-700">• {line}</div>
-                            ))}
-                        </div>
-                        <div className="mt-2 grid grid-cols-2 gap-2 text-slate-500">
-                            <div>Quelle: <span className="font-semibold text-slate-700">{quality.data_source || 'Scanner'}</span></div>
-                            <div>Datenalter: <span className="font-semibold text-slate-700">{formatCacheAge(quality.data_age_seconds)}</span></div>
-                        </div>
-                        {quality.warnings && quality.warnings.length > 0 && (
-                            <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-800">
-                                {quality.warnings.slice(0, 4).join(' | ')}
-                            </div>
                         )}
                     </div>
                 )}
