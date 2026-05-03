@@ -4374,29 +4374,58 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             </a>
                         )}
                     </div>
+                    {catalystWatchlist.summary && (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                            {[
+                                ['New Catalysts', catalystWatchlist.summary.new_catalysts],
+                                ['May 2026 Catalysts', catalystWatchlist.summary.may_2026_catalysts],
+                                ['June 2026 Catalysts', catalystWatchlist.summary.june_2026_catalysts],
+                                ['Total Catalysts', catalystWatchlist.summary.total_catalysts],
+                            ].map(([label, value]) => (
+                                <div key={label} className="rounded-xl border border-emerald-100 bg-white px-3 py-2">
+                                    <div className="text-xl font-black text-emerald-700">{value || 0}</div>
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                     {catalystWatchlist.warning && (
                         <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
                             {catalystWatchlist.warning}
                         </div>
                     )}
                     {(catalystWatchlist.data || []).length > 0 && (
-                        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                            {(catalystWatchlist.data || []).slice(0, 12).map((row, idx) => (
-                                <button key={`${row.ticker}-${idx}`} onClick={() => onSelectTicker(row.ticker)} className="text-left rounded-xl border border-emerald-100 bg-white p-3 hover:border-emerald-300 hover:shadow-sm transition">
-                                    <div className="flex items-center justify-between gap-2">
-                                        <span className="font-bold text-gray-900">{row.ticker}</span>
-                                        <span className={`text-xs px-2 py-0.5 rounded-full ${row.category === 'IMMINENT' || row.category === 'OVERDUE' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                                            {row.category || 'WATCH'}
-                                        </span>
-                                    </div>
-                                    <div className="text-xs text-gray-500 mt-1 truncate">{row.full_label || row.stage_label || 'Catalyst'}</div>
-                                    <div className="text-xs text-gray-500 truncate">{row.drug_name || row.indications || ''}</div>
-                                    <div className="mt-2 flex items-center justify-between text-xs">
-                                        <span className="text-gray-600">{row.catalyst_date_text || row.catalyst_date || 'TBA'}</span>
-                                        <span className="font-semibold text-emerald-700">{row.days_until != null ? `${row.days_until}d` : 'TBA'}</span>
-                                    </div>
-                                </button>
-                            ))}
+                        <div className="mt-4 max-h-96 overflow-auto rounded-xl border border-emerald-100 bg-white">
+                            <table className="w-full text-xs">
+                                <thead className="sticky top-0 bg-emerald-700 text-white">
+                                    <tr>
+                                        <th className="text-left py-2 px-3">Company</th>
+                                        <th className="text-left py-2 px-3">Ticker</th>
+                                        <th className="text-left py-2 px-3">Drug</th>
+                                        <th className="text-left py-2 px-3">Indication</th>
+                                        <th className="text-left py-2 px-3">Stage</th>
+                                        <th className="text-left py-2 px-3">Catalyst Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {(catalystWatchlist.data || []).map((row, idx) => (
+                                        <tr key={`${row.ticker}-${idx}`} onClick={() => onSelectTicker(row.ticker)} className="border-b border-emerald-50 hover:bg-emerald-50 cursor-pointer">
+                                            <td className="py-2 px-3 text-gray-700">{row.company_name || '-'}</td>
+                                            <td className="py-2 px-3 font-bold text-gray-900">
+                                                {row.ticker}
+                                                {row.is_new && <span className="ml-1 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] font-bold text-pink-700">NEW</span>}
+                                            </td>
+                                            <td className="py-2 px-3 text-gray-700">{row.drug_name || '-'}</td>
+                                            <td className="py-2 px-3 text-gray-600">{row.indications || '-'}</td>
+                                            <td className="py-2 px-3 text-gray-700">{row.full_label || row.stage_label || '-'}</td>
+                                            <td className="py-2 px-3 font-semibold text-emerald-700">
+                                                {row.catalyst_date_text || row.catalyst_date || 'TBA'}
+                                                {row.days_until != null && <span className="ml-1 text-gray-400">({row.days_until}d)</span>}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         </div>
                     )}
                 </div>

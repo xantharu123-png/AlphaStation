@@ -39,6 +39,17 @@ _BPIQ_CATALYST_STATUS = {
     "timestamp": None,
 }
 
+def _first_nonempty(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if not isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _get_config_value(key):
     """Read config from env first, then the repo/root secrets files used by API/bg service."""
     value = _os.getenv(key, "")
@@ -172,6 +183,13 @@ def _load_bpiq_catalyst_cache():
                 phase_mult = 0.5
 
             entry = {
+                "company_name": _first_nonempty(
+                    drug.get("company_name"),
+                    drug.get("company"),
+                    drug.get("company_full_name"),
+                    drug.get("issuer_name"),
+                    drug.get("sponsor"),
+                ),
                 "drug_name": drug.get("drug_name", "")[:60],
                 "stage_label": stage_label,
                 "event_label": event_label,
@@ -185,6 +203,12 @@ def _load_bpiq_catalyst_cache():
                 "indications": drug.get("indications_text", ""),
                 "note": (drug.get("note", "") or "")[:200],
                 "source": drug.get("catalyst_source", ""),
+                "is_new": bool(
+                    drug.get("is_new")
+                    or drug.get("new")
+                    or drug.get("is_new_catalyst")
+                    or drug.get("new_catalyst")
+                ),
             }
 
             if ticker not in cache:
@@ -280,6 +304,7 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
                 continue
             rows.append({
                 "ticker": ticker,
+                "company_name": drug.get("company_name", ""),
                 "drug_name": drug.get("drug_name", ""),
                 "stage_label": drug.get("stage_label", ""),
                 "event_label": drug.get("event_label", ""),
@@ -292,6 +317,7 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
                 "phase_mult": drug.get("phase_mult", 0),
                 "indications": drug.get("indications", ""),
                 "source": drug.get("source", "BPIQ"),
+                "is_new": bool(drug.get("is_new")),
             })
 
     cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2, "LATER": 3, "": 9}
@@ -302,6 +328,19 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
         x.get("ticker", ""),
     ))
     rows = rows[:max(1, int(limit or 85))]
+    by_month = {}
+    new_count = 0
+    for row in rows:
+        if row.get("is_new"):
+            new_count += 1
+        month_key = "TBA"
+        cat_date = row.get("catalyst_date")
+        if cat_date:
+            try:
+                month_key = datetime.strptime(cat_date[:10], "%Y-%m-%d").strftime("%B %Y")
+            except Exception:
+                month_key = row.get("catalyst_date_text") or "TBA"
+        by_month[month_key] = by_month.get(month_key, 0) + 1
 
     status = dict(_BPIQ_CATALYST_STATUS)
     if not cache and status.get("status") in ("unknown", "success"):
@@ -315,6 +354,13 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
         "status": "success" if rows else "warning",
         "count": len(rows),
         "data": rows,
+        "summary": {
+            "new_catalysts": new_count,
+            "may_2026_catalysts": by_month.get("May 2026", 0),
+            "june_2026_catalysts": by_month.get("June 2026", 0),
+            "total_catalysts": len(rows),
+            "by_month": by_month,
+        },
         "window_days": window_days,
         "source": "BPIQ catalyst calendar",
         "source_url": "https://app.bpiq.com/catalyst-calendar",

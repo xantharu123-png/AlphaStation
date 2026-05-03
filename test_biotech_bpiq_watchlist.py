@@ -5,6 +5,7 @@ def test_bpiq_watchlist_filters_late_stage_rows(monkeypatch):
     sample_cache = {
         "AAAA": [
             {
+                "company_name": "Alpha Therapeutics",
                 "drug_name": "Alpha",
                 "stage_label": "Phase 3",
                 "event_label": "Topline readout",
@@ -17,6 +18,7 @@ def test_bpiq_watchlist_filters_late_stage_rows(monkeypatch):
                 "bpiq_score": 90,
                 "indications": "Oncology",
                 "source": "BPIQ",
+                "is_new": True,
             }
         ],
         "BBBB": [
@@ -67,7 +69,10 @@ def test_bpiq_watchlist_filters_late_stage_rows(monkeypatch):
     assert result["status"] == "success"
     assert result["count"] == 1
     assert result["data"][0]["ticker"] == "AAAA"
+    assert result["data"][0]["company_name"] == "Alpha Therapeutics"
     assert result["data"][0]["category"] == "IMMINENT"
+    assert result["summary"]["new_catalysts"] == 1
+    assert result["summary"]["total_catalysts"] == 1
 
 
 def test_bpiq_watchlist_surfaces_api_warning(monkeypatch):
