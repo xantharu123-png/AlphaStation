@@ -670,3 +670,116 @@ def test_crypto_strategy_scan_does_not_email_snapshot_rows(monkeypatch):
     }], "crypto")
 
     assert sent == []
+
+
+def _early_mover_row(**overrides):
+    row = {
+        "Symbol": "EMO",
+        "Name": "Early Mover",
+        "grade": "A",
+        "score": 72,
+        "Price": 1.25,
+        "Change24h": 4.2,
+        "VolMCapRatio": 8.5,
+        "direction": "LONG",
+        "trade_action": "LONG_TRIGGER",
+        "entry_status": "CONDITIONAL_LONG",
+        "entry_quality": "GOOD",
+        "execution_trigger_ok": True,
+        "signal_quality": "conditional_long_setup",
+        "entry": 1.25,
+        "stop_loss": 1.15,
+        "tp1": 1.43,
+        "tp2": 1.57,
+        "live_rr_ratio": 2.4,
+        "distance_to_entry_r": 0,
+        "late_to_tp1": False,
+        "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        "risk_flags": ["requires_5m_trigger"],
+        "trade_setup": {
+            "trade_action": "LONG_TRIGGER",
+            "entry": 1.25,
+            "stop_loss": 1.15,
+            "tp1": 1.43,
+            "tp2": 1.57,
+            "live_rr": 2.4,
+            "distance_to_entry_r": 0,
+            "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        },
+    }
+    row.update(overrides)
+    return row
+
+
+def test_early_mover_alert_audit_flattens_coins_and_allows_long_trigger(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "early_movers.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "coins": [
+                _early_mover_row(),
+                _early_mover_row(Symbol="CHASE", trade_action="NO_LONG_CHASE", signal_quality="no_chase", risk_flags=["overheated_phase3"]),
+            ],
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("early_movers", str(cache_file))
+
+    assert audit["rows_checked"] == 2
+    assert audit["alertable_now_count"] == 1
+    assert audit["alertable_preview"][0]["ticker"] == "EMO"
+    assert audit["suppression_counts"]["early_mover_action_not_alertable"] == 1
+    assert audit["suppression_counts"]["early_mover_no_chase"] == 1
+
+
+def test_early_mover_retest_alert_requires_near_entry():
+    near = _early_mover_row(
+        Symbol="RETEST",
+        trade_action="WAIT_FOR_RETEST",
+        execution_trigger_ok=False,
+        entry_status="WAIT_FOR_RETEST",
+        entry_quality="EXTENDED",
+        distance_to_entry_r=0.2,
+        risk_flags=["no_market_entry"],
+    )
+    far = dict(near, Symbol="FAR", distance_to_entry_r=0.9, risk_flags=["no_market_entry", "chased_from_entry"])
+
+    assert api._classify_alert_candidate("early_movers", near, 1_000_000.0)["alertable_now"] is True
+    far_state = api._classify_alert_candidate("early_movers", far, 1_000_000.0)
+    assert far_state["alertable_now"] is False
+    assert "early_mover_retest_not_near_entry" in far_state["suppression_reasons"]
+    assert "early_mover_chased_from_entry" in far_state["suppression_reasons"]
+
+
+def test_early_mover_blocks_btc_headwind_and_partial_data():
+    row = _early_mover_row(
+        Symbol="HEADWIND",
+        btc_context={"btc_24h": -3.5, "alpha_24h": 1.0, "tailwind": False},
+        risk_flags=["btc_headwind", "data_warning"],
+        data_warning="CoinGecko partial data",
+    )
+
+    state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "early_mover_btc_headwind" in state["suppression_reasons"]
+    assert "early_mover_data_warning" in state["suppression_reasons"]
+
+
+def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    payload = {"coins": [_early_mover_row(Symbol="MAILME")]}
+
+    api._send_early_mover_long_alerts(payload)
+    api._send_early_mover_long_alerts(payload)
+
+    assert len(sent) == 1
+    assert "Crypto Early Mover LONG" in sent[0][0]
+    assert "MAILME" in sent[0][1]
+    assert "Entry" in sent[0][1]
+    assert "BTC" in sent[0][1]

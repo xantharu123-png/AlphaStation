@@ -26,6 +26,7 @@ import time
 import re
 import smtplib
 import threading
+import html
 from copy import deepcopy
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta, timezone
@@ -707,6 +708,8 @@ _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan",
 _ALERT_MIN_RVOL = 0.7
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_RADAR_DEDUPE_SEC = 20 * 3600
+_EARLY_MOVER_MIN_ALERT_RR = 1.5
+_EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
@@ -936,7 +939,7 @@ def _extract_alert_ticker(row: Dict[str, Any]) -> str:
 
 
 def _extract_alert_price(row: Dict[str, Any]) -> Any:
-    for key in ("Preis", "price", "current", "current_price", "entry"):
+    for key in ("Preis", "Price", "price", "current", "current_price", "entry"):
         value = row.get(key)
         if value not in (None, ""):
             return value
@@ -1012,6 +1015,183 @@ def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     if fields["signal_quality"] and fields["signal_quality"] != "tradeable":
         reasons.append("not_tradeable_signal_quality")
     return reasons
+
+
+def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+    btc = row.get("btc_context", setup.get("btc_context", {}))
+    btc_context = btc if isinstance(btc, dict) else {}
+    risk_flags = row.get("risk_flags", setup.get("risk_flags", []))
+    if not isinstance(risk_flags, list):
+        risk_flags = [str(risk_flags)] if risk_flags else []
+    return {
+        "direction": str(row.get("direction", setup.get("direction", "")) or "").upper(),
+        "trade_action": str(row.get("trade_action", setup.get("trade_action", "")) or "").upper(),
+        "entry_status": str(row.get("entry_status", setup.get("entry_status", "")) or "").upper(),
+        "entry_quality": str(row.get("entry_quality", setup.get("entry_quality", "")) or "").upper(),
+        "signal_quality": str(row.get("signal_quality", "") or "").lower(),
+        "live_rr": _alert_float(row.get("live_rr_ratio", setup.get("live_rr")), 0) or 0,
+        "distance_to_entry_r": _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")), 999) or 999,
+        "late_to_tp1": _alert_bool(row.get("late_to_tp1", setup.get("late_to_tp1", False))),
+        "execution_trigger_ok": _alert_bool(row.get("execution_trigger_ok", False)),
+        "partial_data": _alert_bool(row.get("partial_data", row.get("data_partial", False))),
+        "data_warning": row.get("data_warning"),
+        "btc_tailwind": _alert_bool(btc_context.get("tailwind"), True),
+        "risk_flags": [str(flag).lower() for flag in risk_flags],
+    }
+
+
+def _early_mover_alert_key(row: Dict[str, Any], ticker: Optional[str] = None) -> str:
+    symbol = (ticker or _extract_alert_ticker(row)).upper()
+    action = str(row.get("trade_action", row.get("entry_status", "long")) or "long").lower()
+    action = re.sub(r"[^a-z0-9_]+", "_", action).strip("_") or "long"
+    return f"early_movers_{symbol}_{action}" if symbol else ""
+
+
+def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    """Only mail Early-Mover crypto rows that are close to an actual long decision."""
+    fields = _extract_early_mover_fields(row)
+    reasons: List[str] = []
+    action = fields["trade_action"]
+    risk_flags = set(fields["risk_flags"])
+
+    if fields["direction"] and fields["direction"] != "LONG":
+        reasons.append("early_mover_not_long")
+    if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+        reasons.append("early_mover_action_not_alertable")
+    if fields["signal_quality"] == "no_chase" or "overheated_phase3" in risk_flags:
+        reasons.append("early_mover_no_chase")
+    if not fields["btc_tailwind"] or "btc_headwind" in risk_flags:
+        reasons.append("early_mover_btc_headwind")
+    if fields["partial_data"] or fields["data_warning"] or "data_warning" in risk_flags:
+        reasons.append("early_mover_data_warning")
+    if fields["late_to_tp1"] or "tp1_already_reached" in risk_flags:
+        reasons.append("early_mover_late_to_tp1")
+    if "chased_from_entry" in risk_flags:
+        reasons.append("early_mover_chased_from_entry")
+    if "very_high_volume_turnover" in risk_flags:
+        reasons.append("early_mover_blowoff_turnover")
+    if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
+        reasons.append("early_mover_live_rr_below_threshold")
+    if action == "LONG_TRIGGER" and not fields["execution_trigger_ok"]:
+        reasons.append("early_mover_trigger_missing")
+    if action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
+        reasons.append("early_mover_retest_not_near_entry")
+    return reasons
+
+
+def _flatten_early_mover_rows(payload_or_rows: Any) -> List[Dict[str, Any]]:
+    containers = payload_or_rows if isinstance(payload_or_rows, list) else [payload_or_rows]
+    rows: List[Dict[str, Any]] = []
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        coins = container.get("coins")
+        if isinstance(coins, list):
+            rows.extend([coin for coin in coins if isinstance(coin, dict)])
+        elif _extract_alert_ticker(container):
+            rows.append(container)
+    return rows
+
+
+def _format_alert_price(value: Any) -> str:
+    price = _alert_float(value)
+    if price is None:
+        return "-"
+    if abs(price) >= 100:
+        return f"${price:,.2f}"
+    if abs(price) >= 1:
+        return f"${price:,.4f}".rstrip("0").rstrip(".")
+    return f"${price:.8f}".rstrip("0").rstrip(".")
+
+
+def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
+    """Mail only active Early-Mover long/retest candidates; watch/no-chase rows stay UI-only."""
+    now = time.time()
+    candidates = []
+    suppressed: Dict[str, int] = {}
+    seen_keys = set()
+
+    for row in _flatten_early_mover_rows(payload):
+        state = _classify_alert_candidate("early_movers", row, now)
+        if not state["alertable_now"]:
+            for reason in state["suppression_reasons"]:
+                suppressed[reason] = suppressed.get(reason, 0) + 1
+            continue
+        key = state["cooldown_key"]
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+        btc_context = row.get("btc_context", setup.get("btc_context", {}))
+        if not isinstance(btc_context, dict):
+            btc_context = {}
+        candidates.append({
+            "key": key,
+            "symbol": state["ticker"],
+            "name": row.get("Name", row.get("name", "")),
+            "grade": state["grade"],
+            "score": state["score"],
+            "price": row.get("Price", state["price"]),
+            "action": row.get("trade_action", setup.get("trade_action", "")),
+            "entry": row.get("entry", setup.get("entry")),
+            "stop": row.get("stop_loss", row.get("stop", setup.get("stop_loss", setup.get("stop")))),
+            "tp1": row.get("tp1", setup.get("tp1")),
+            "tp2": row.get("tp2", setup.get("tp2")),
+            "live_rr": row.get("live_rr_ratio", setup.get("live_rr")),
+            "distance_r": row.get("distance_to_entry_r", setup.get("distance_to_entry_r")),
+            "change24": row.get("Change24h"),
+            "vol_mcap": row.get("VolMCapRatio"),
+            "btc_24h": btc_context.get("btc_24h"),
+            "alpha_24h": btc_context.get("alpha_24h"),
+            "exchange": row.get("PerpChartExchange", row.get("Exchange", "")),
+        })
+
+    if not candidates:
+        if suppressed:
+            _record_email_event("Crypto Early Mover LONG Alert", "skipped", f"no_active_long_setups:{suppressed}")
+        return
+
+    def _fmt_num(value, suffix="", decimals=1, default="-"):
+        number = _alert_float(value)
+        if number is None:
+            return default
+        return f"{number:.{decimals}f}{suffix}"
+
+    rows = ""
+    for item in candidates[:10]:
+        symbol = html.escape(str(item["symbol"]))
+        name = html.escape(str(item["name"] or ""))
+        action = html.escape(str(item["action"] or "LONG"))
+        exchange = html.escape(str(item["exchange"] or ""))
+        rows += (
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item["grade"]))} / {html.escape(str(item["score"]))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">TP1 {_format_alert_price(item["tp1"])}<br>TP2 {_format_alert_price(item["tp2"])}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt_num(item["live_rr"], "R", 2)}<br><span style="color:#777">Dist {_fmt_num(item["distance_r"], "R", 2)}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">24h {_fmt_num(item["change24"], "%")}<br>V/MCap {_fmt_num(item["vol_mcap"], "x")}<br>BTC {_fmt_num(item["btc_24h"], "%")} / Alpha {_fmt_num(item["alpha_24h"], "%")}</td></tr>'
+        )
+
+    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
+    <h2 style="color:#059669">Crypto Early Mover LONG Alert</h2>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(candidates)} aktive Long/Retest Setup(s)</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
+    <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
+    <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">Entry/Stop</th>
+    <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
+    <th style="padding:8px;text-align:left">Kontext</th></tr>
+    {rows}</table>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur S/A/A+ Early-Mover LONG_TRIGGER oder nahe WAIT_FOR_RETEST Setups; Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Data, TP1 nicht verpasst. Entry trotzdem nur nach 5m/1m Trigger oder sauberem Retest.</p>
+    </body></html>'''
+    sent = _send_email_alert(f"Crypto Early Mover LONG: {len(candidates)} Setup(s)", body)
+    if sent:
+        for item in candidates:
+            _EMAIL_COOLDOWN[item["key"]] = now
+            _email_dedupe_mark(item["key"], now=now)
 
 
 def _extract_long_entry_fields(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1268,8 +1448,10 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("no_crypto_execution_trigger")
         if bool(row.get("partial_data") or row.get("data_partial")):
             reasons.append("partial_crypto_data")
+    if scanner_name == "early_movers":
+        reasons.extend(_early_mover_long_rule_reasons(row))
 
-    cooldown_key = f"{scanner_name}_{ticker}" if ticker else ""
+    cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
     cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
     if cooldown_remaining > 0:
         reasons.append("cooldown_active")
@@ -1317,6 +1499,8 @@ def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> L
             if str(r.get("source", "")).lower() == "signals"
             or str(r.get("signal", "")).upper().startswith("SHORT")
         ]
+    if scanner_name == "early_movers":
+        return _flatten_early_mover_rows(rows)
     return [r for r in rows if isinstance(r, dict)]
 
 
@@ -4941,6 +5125,7 @@ def get_email_alert_audit():
         "bear": BEAR_CACHE,
         "orb": ORB_CACHE,
         "new_listing": NEW_LISTING_CACHE,
+        "early_movers": EARLY_MOVERS_CACHE,
         "volume_spikes": VOLUME_SPIKES_CACHE,
         "strategy_scan": STRATEGY_SCAN_CACHE,
     }
@@ -4961,14 +5146,16 @@ def get_email_alert_audit():
             "rvol_guard_scanners": sorted(_ALERT_RVOL_GUARD_SCANNERS),
             "min_rvol": _ALERT_MIN_RVOL,
             "new_listing_min_rr": _NEW_LISTING_MIN_ALERT_RR,
+            "early_mover_min_rr": _EARLY_MOVER_MIN_ALERT_RR,
+            "early_mover_retest_max_distance_r": _EARLY_MOVER_RETEST_MAX_DISTANCE_R,
             "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
-            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Active-pump detections on older/unclear coins are watch-only.",
+            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require LONG_TRIGGER or a nearby retest, BTC tailwind, fresh data, TP1 not missed and live R:R.",
         },
         "coverage": {
-            "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing"],
+            "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers"],
             "manual_scan_alerts": ["stock_strategy"],
-            "watch_only_crypto_no_trade_email": ["crypto_strategy", "early_movers", "btc_divergenz"],
-            "informational_no_trade_email": ["early_movers", "btc_divergenz", "money_flow", "crash_monitor"],
+            "watch_only_crypto_no_trade_email": ["crypto_strategy", "btc_divergenz"],
+            "informational_no_trade_email": ["btc_divergenz", "money_flow", "crash_monitor"],
         },
         "scanners": scanners,
         "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),
@@ -8148,6 +8335,7 @@ def _early_movers_wrapper() -> None:
         print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
               f"Phase 1: {s.get('phase_1_count', 0)}, Phase 2: {s.get('phase_2_count', 0)}, "
               f"Phase 3: {s.get('phase_3_count', 0)}")
+        _send_early_mover_long_alerts(result)
     except Exception as e:
         print(f"[Early Movers] Error: {e}")
 
