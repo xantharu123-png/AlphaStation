@@ -15,7 +15,8 @@ import datetime as dt
 from datetime import datetime, timedelta
 from modules.data_fetchers import (
     rate_limited_get, fetch_grouped_daily, get_ticker_details,
-    _get_bpiq_catalysts, _calculate_biotech_catalyst_score
+    _get_bpiq_catalysts, _calculate_biotech_catalyst_score,
+    get_premium_catalyst_tickers
 )
 from modules.indicators import (
     calculate_sma, calculate_ema, calculate_rsi_from_bars,
@@ -2514,6 +2515,26 @@ def _biotech_background_scan(poly_key):
         else:
             universe = _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=20)
             _biotech_universe_cache_save(universe)
+
+        try:
+            catalyst_calendar_tickers = get_premium_catalyst_tickers(window_days=90)
+        except Exception as _cat_seed_err:
+            print(f"[BIOTECH] Catalyst calendar seed unavailable: {_cat_seed_err}")
+            catalyst_calendar_tickers = set()
+
+        if catalyst_calendar_tickers:
+            universe_ticker_set = {
+                str(u.get("ticker", "")).upper()
+                for u in universe
+                if isinstance(u, dict) and u.get("ticker")
+            }
+            for _cat_ticker in sorted(catalyst_calendar_tickers - universe_ticker_set):
+                universe.append({
+                    "ticker": _cat_ticker,
+                    "name": "",
+                    "catalyst_calendar_seed": True,
+                })
+
         total = len(universe)
         _biotech_progress_write("running", checked=0, total=total, hits=0,
                                 detail=f"{total} Biotech-Aktien gefunden, starte Full Scan...")
@@ -2542,6 +2563,7 @@ def _biotech_background_scan(poly_key):
             ticker = stock.get("ticker", "")
             if not ticker:
                 continue
+            _in_catalyst_calendar = ticker.upper() in catalyst_calendar_tickers
 
             # SPAC-Filter: Acquisition Corps etc. aus BioTech-Ergebnissen entfernen
             _stock_name = stock.get("name", "") or ""
@@ -2572,7 +2594,7 @@ def _biotech_background_scan(poly_key):
                 # had_catalyst_keywords = Alte Catalysts gefunden (Time-Decay auf 0) — BPIQ könnte aktuelle haben
                 # Alles andere ist Rauschen (normale Biotech-Aktie mit Alltagsnews)
                 _had_kw = news_data.get("had_catalyst_keywords", False)
-                if catalyst_score == 0 and momentum_score < 6 and not _had_kw:
+                if catalyst_score == 0 and momentum_score < 6 and not _had_kw and not _in_catalyst_calendar:
                     continue
 
                 # C) Ticker Details (MCap, Shares)
@@ -2599,7 +2621,7 @@ def _biotech_background_scan(poly_key):
                 # BPIQ hat eigene aktuelle Readout-Dates — unabhängig vom News-Alter.
                 _had_keywords = news_data.get("had_catalyst_keywords", False)
                 bpiq_data = {"bpiq_available": False, "readout_score": 0, "readout_label": "", "catalyst_readouts": []}  # Default
-                if catalyst_score > 0 or _had_keywords or momentum_score >= 6:
+                if catalyst_score > 0 or _had_keywords or momentum_score >= 6 or _in_catalyst_calendar:
                     # Nur BPIQ — einzige zuverlässige Catalyst-Quelle
                     bpiq_data = _get_bpiq_catalysts(ticker)
                     if bpiq_data.get("bpiq_available"):
@@ -3066,9 +3088,15 @@ def _biotech_quick_scan(poly_key):
         if universe:
             universe_tickers = {u["ticker"] for u in universe}
 
+        try:
+            catalyst_calendar_tickers = get_premium_catalyst_tickers(window_days=90)
+        except Exception as _cat_seed_err:
+            print(f"[BIOTECH-QUICK] Catalyst calendar seed unavailable: {_cat_seed_err}")
+            catalyst_calendar_tickers = set()
+
         # Merge: bestehende + ggf. neue Tickers aus Universe
         existing_tickers = {r["Ticker"] for r in existing}
-        all_tickers = list(existing_tickers | universe_tickers)
+        all_tickers = list(existing_tickers | universe_tickers | catalyst_calendar_tickers)
         total = len(all_tickers)
 
         _biotech_progress_write("running", checked=0, total=total, hits=0,
@@ -3097,6 +3125,7 @@ def _biotech_quick_scan(poly_key):
                                         hits=len(results), detail=f" Quick: {ticker}...")
 
             try:
+                _in_catalyst_calendar = ticker.upper() in catalyst_calendar_tickers
                 # NUR News neu scannen
                 news_data = _scan_biotech_news(poly_key, ticker, limit=5)
                 catalyst_score = news_data["catalyst_score"]
@@ -3105,8 +3134,12 @@ def _biotech_quick_scan(poly_key):
 
                 # Quick Filter — gleiche Qualitäts-Logik wie Full Scan
                 _had_kw = news_data.get("had_catalyst_keywords", False)
-                if catalyst_score == 0 and momentum_score < 6 and not _had_kw:
+                if catalyst_score == 0 and momentum_score < 6 and not _had_kw and not _in_catalyst_calendar:
                     continue
+
+                bpiq_data = {"bpiq_available": False, "readout_score": 0, "readout_label": "", "catalyst_readouts": []}
+                if catalyst_score > 0 or _had_kw or _in_catalyst_calendar:
+                    bpiq_data = _get_bpiq_catalysts(ticker)
 
                 # Bestehende Daten wiederverwenden wenn vorhanden
                 old = existing_map.get(ticker)
@@ -3120,6 +3153,13 @@ def _biotech_quick_scan(poly_key):
                     old["Negative_Flags"] = news_data.get("negative_flags", [])
                     old["Sentiment"] = momentum_data.get("sentiment_summary", "")
                     old["Catalysts_All"] = news_data.get("catalysts", [])
+                    if bpiq_data.get("bpiq_available"):
+                        old["Readout_Score"] = bpiq_data.get("readout_score", 0)
+                        old["Readout_Label"] = bpiq_data.get("readout_label", "")
+                        old["Readout_Details"] = bpiq_data.get("catalyst_readouts", [])[:3]
+                        old["BPIQ_Available"] = True
+                        old["BPIQ_Catalysts"] = bpiq_data.get("catalyst_readouts", [])[:5]
+                        old["Pipeline_Score"] = min(20, int(bpiq_data.get("readout_score", 0) * 20 / 15))
 
                     # Best Catalyst aktualisieren
                     best_cat = news_data.get("best_catalyst")
@@ -3144,6 +3184,34 @@ def _biotech_quick_scan(poly_key):
                     elif _chart_health_val <= 6:
                         old["Score"] = max(0, old["Score"] - 8)
 
+                    _bio_edge = _calculate_biotech_catalyst_edge(
+                        trial_data={
+                            "pipeline_score": old.get("Pipeline_Score", 0),
+                            "readout_score": old.get("Readout_Score", 0),
+                            "catalyst_readouts": old.get("Readout_Details") or old.get("BPIQ_Catalysts") or [],
+                        },
+                        news_data=news_data,
+                        tech_data={
+                            "technical_score": old.get("Technical_Score", 0),
+                            "details": old.get("Tech_Details", {}),
+                        },
+                        details={
+                            "market_cap_millions": old.get("MCap_M", 0),
+                            "shares_millions": old.get("Shares_M", 0),
+                        },
+                    )
+                    old["Score"] = max(0, min(100, old["Score"] + _bio_edge.get("score_adjustment", 0)))
+                    old["Bio_Edge_Score"] = _bio_edge.get("bio_edge_score", 0)
+                    old["Catalyst_Power"] = _bio_edge.get("catalyst_power", 0)
+                    old["Bio_Risk_Penalty"] = _bio_edge.get("risk_penalty", 0)
+                    old["Bio_Trade_Mode"] = _bio_edge.get("trade_mode", "WATCHLIST")
+                    old["Bio_Risk_Flags"] = _bio_edge.get("risk_flags", [])
+                    old["Bio_Positive_Factors"] = _bio_edge.get("positive_factors", [])
+                    old["Dilution_Risk"] = _bio_edge.get("dilution_risk", 0)
+                    old["Regulatory_Risk"] = _bio_edge.get("regulatory_risk", 0)
+                    old["Sell_The_News_Risk"] = _bio_edge.get("sell_the_news_risk", 0)
+                    old["Halt_Risk"] = _bio_edge.get("halt_risk", 0)
+
                     # Grade aktualisieren — synchron zu Full Scan / Biotech Audit V3
                     s = old["Score"]
                     _has_readout = bool(old.get("Readout_Details") or old.get("BPIQ_Catalysts"))
@@ -3164,13 +3232,29 @@ def _biotech_quick_scan(poly_key):
                         results.append(old)
                 else:
                     # Neuer Ticker — minimal-Eintrag (wird beim nächsten Full Scan vervollständigt)
-                    if catalyst_score >= 15 and momentum_score >= 6:
+                    if catalyst_score >= 15 and momentum_score >= 6 or bpiq_data.get("bpiq_available"):
+                        _readout_score = bpiq_data.get("readout_score", 0)
+                        _pipeline_score = min(20, int(_readout_score * 20 / 15))
+                        _score = _calculate_biotech_catalyst_score(
+                            catalyst_score=catalyst_score,
+                            pipeline_score=_pipeline_score,
+                            technical_score=0,
+                            risk_score=5,
+                            news_momentum_score=momentum_score,
+                            rvol=0,
+                        )
+                        _score = max(_score, catalyst_score + momentum_score + _readout_score)
+                        _grade = "B" if _score >= 62 else "C" if _score >= 45 else "D"
+                        if _score < 35:
+                            continue
                         results.append({
-                            "Ticker": ticker, "Name": "", "Score": catalyst_score + momentum_score,
-                            "Grade": "D", "Risk_Flag": "",
-                            "Catalyst": news_data.get("best_catalyst", {}).get("label", " Neu"),
-                            "Catalyst_Score": catalyst_score, "Pipeline_Score": 0,
-                            "Readout_Score": 0, "Readout_Label": "", "Readout_Details": [],
+                            "Ticker": ticker, "Name": "", "Score": _score,
+                            "Grade": _grade, "Risk_Flag": "",
+                            "Catalyst": bpiq_data.get("readout_label") or news_data.get("best_catalyst", {}).get("label", " Catalyst"),
+                            "Catalyst_Score": catalyst_score, "Pipeline_Score": _pipeline_score,
+                            "Readout_Score": _readout_score,
+                            "Readout_Label": bpiq_data.get("readout_label", ""),
+                            "Readout_Details": bpiq_data.get("catalyst_readouts", [])[:3],
                             "Technical_Score": 0, "Risk_Score": 5, "Momentum_Score": momentum_score,
                             "Preis": 0, "MCap_M": 0, "Shares_M": 0, "RVOL": 0, "Float_Cat": "UNKNOWN",
                             "Headline": news_data.get("best_catalyst", {}).get("headline", ""),
@@ -3181,6 +3265,8 @@ def _biotech_quick_scan(poly_key):
                             "Risk_Details": [], "Tech_Details": {},
                             "Sentiment": momentum_data.get("sentiment_summary", ""),
                             "Catalysts_All": news_data.get("catalysts", []),
+                            "BPIQ_Available": bpiq_data.get("bpiq_available", False),
+                            "BPIQ_Catalysts": bpiq_data.get("catalyst_readouts", [])[:5],
                         })
             except Exception as _bio_q_err:
                 print(f"[BIOTECH-QUICK] Fehler bei {ticker}: {_bio_q_err}")

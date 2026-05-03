@@ -5220,8 +5220,7 @@ def get_risk_policy():
 
 
 @app.get("/api/catalyst-data-status")
-@app.get("/api/biotech-bpiq-status")
-def get_biotech_bpiq_status():
+def get_catalyst_data_status():
     """Admin check whether the configured premium catalyst feed is reachable."""
     key = os.environ.get("BPIQ_API_KEY") or _SECRETS.get("BPIQ_API_KEY", "")
     payload = {
@@ -5265,7 +5264,7 @@ def get_biotech_catalyst_watchlist(
     limit: int = Query(85, ge=1, le=200),
     window_days: Optional[int] = Query(None, ge=1, le=365),
 ):
-    """Supplemental BPIQ catalyst watchlist for the Biotech scanner UI."""
+    """Supplemental premium catalyst watchlist for the Biotech scanner UI."""
     watchlist = get_bpiq_catalyst_watchlist(limit=limit, window_days=window_days)
     return watchlist
 

@@ -82,6 +82,86 @@ def test_bpiq_watchlist_filters_late_stage_rows(monkeypatch):
     assert "BPIQ" not in json.dumps(result)
 
 
+def test_premium_catalyst_tickers_seed_scanner_universe(monkeypatch):
+    sample_cache = {
+        "SEED": [
+            {
+                "stage_label": "Phase 3",
+                "event_label": "Topline readout",
+                "full_label": "Phase 3 topline data",
+                "days_until": 14,
+                "category": "IMMINENT",
+                "phase_mult": 3.0,
+            }
+        ],
+        "PHASE1": [
+            {
+                "stage_label": "Phase 1",
+                "event_label": "Safety update",
+                "full_label": "Phase 1 safety update",
+                "days_until": 14,
+                "category": "IMMINENT",
+                "phase_mult": 1.0,
+            }
+        ],
+        "FAR": [
+            {
+                "stage_label": "Phase 2",
+                "event_label": "Readout",
+                "full_label": "Phase 2 readout",
+                "days_until": 180,
+                "category": "LATER",
+                "phase_mult": 2.0,
+            }
+        ],
+    }
+    monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: sample_cache)
+
+    tickers = df.get_premium_catalyst_tickers(window_days=90)
+
+    assert tickers == {"SEED"}
+
+
+def test_bpiq_cache_paginates_past_legacy_800_row_limit(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, results):
+            self._results = results
+
+        def json(self):
+            return {"results": self._results}
+
+    offsets = []
+
+    def fake_get(url, headers=None, timeout=None):
+        offset = int(url.split("offset=", 1)[1])
+        offsets.append(offset)
+        size = 200 if offset < 800 else 50
+        rows = []
+        for i in range(size):
+            idx = offset + i
+            rows.append({
+                "ticker": f"T{idx}",
+                "drug_name": "Alpha",
+                "stage_event": {"stage_label": "Phase 3", "event_label": "Readout", "label": "Phase 3 readout", "score": 80},
+                "catalyst_date": "2026-05-20",
+                "catalyst_date_text": "May 20, 2026",
+            })
+        return FakeResponse(rows)
+
+    monkeypatch.setattr(df, "_get_config_value", lambda key: "test-key")
+    monkeypatch.setattr(df, "rate_limited_get", fake_get)
+    monkeypatch.setattr(df, "_BPIQ_CATALYST_CACHE", {})
+    monkeypatch.setattr(df, "_BPIQ_CACHE_TIMESTAMP", 0)
+
+    cache = df._load_bpiq_catalyst_cache()
+
+    assert offsets == [0, 200, 400, 600, 800]
+    assert len(cache) == 850
+    assert "T849" in cache
+
+
 def test_bpiq_watchlist_surfaces_api_warning(monkeypatch):
     monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: {})
     monkeypatch.setattr(df, "_BPIQ_CATALYST_STATUS", {

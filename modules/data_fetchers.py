@@ -111,9 +111,12 @@ def _load_bpiq_catalyst_cache():
     try:
         all_drugs = []
         api_error_status = None
-        for offset in range(0, 800, 200):
+        offset = 0
+        page_limit = 200
+        max_rows = 3000
+        while offset < max_rows:
             resp = rate_limited_get(
-                f"https://api.bpiq.com/api/v1/drugs/?has_catalyst=true&limit=200&offset={offset}",
+                f"https://api.bpiq.com/api/v1/drugs/?has_catalyst=true&limit={page_limit}&offset={offset}",
                 headers={"Authorization": f"Token {bpiq_key}"},
                 timeout=15
             )
@@ -134,6 +137,11 @@ def _load_bpiq_catalyst_cache():
             if not results:
                 break
             all_drugs.extend(results)
+            if len(results) < page_limit:
+                break
+            if "next" in data and not data.get("next"):
+                break
+            offset += page_limit
 
         # Gruppiere nach Ticker mit vollständiger Daten-Aufbereitung
         cache = {}
@@ -297,6 +305,26 @@ def _public_catalyst_warning(status, rows):
     if not rows:
         return "Keine passenden Phase-2/3- oder PDUFA-Catalysts im aktuellen Zeitfenster gefunden."
     return None
+
+
+def get_premium_catalyst_tickers(window_days=90, include_overdue_days=30):
+    """Return late-stage catalyst-calendar tickers that should seed the Bio scanner."""
+    cache = _load_bpiq_catalyst_cache()
+    tickers = set()
+    for ticker, drugs in cache.items():
+        if not ticker:
+            continue
+        for drug in drugs:
+            days_until = drug.get("days_until")
+            if days_until is None:
+                continue
+            if days_until < -abs(int(include_overdue_days or 0)) or days_until > int(window_days or 90):
+                continue
+            if not _is_late_stage_bpiq_event(drug):
+                continue
+            tickers.add(ticker.upper())
+            break
+    return tickers
 
 
 def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
