@@ -4436,12 +4436,14 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                     <thead className="border-b border-gray-200">
                         <tr>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('bio_edge_score')}>Edge</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('mcap_m')}>MCap</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL</th>
                             <th className="text-left py-2 px-2">Catalyst</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('event_result')}>Ergebnis</th>
+                            <th className="text-left py-2 px-2">Modus</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('chart_health')}>Chart</th>
                             <th className="text-left py-2 px-2">Sentiment</th>
                         </tr>
@@ -4457,6 +4459,11 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     <span className="text-gray-400 text-xs ml-1">{item.score}</span>
                                 </td>
                                 <td className="py-3 px-2">
+                                    <span className={`text-xs px-2 py-0.5 rounded font-semibold ${(item.bio_edge_score || 0) >= 75 ? 'bg-green-100 text-green-700' : (item.bio_edge_score || 0) >= 60 ? 'bg-blue-100 text-blue-700' : (item.bio_edge_score || 0) <= 40 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
+                                        {item.bio_edge_score ?? '–'}
+                                    </span>
+                                </td>
+                                <td className="py-3 px-2">
                                     <div className="font-semibold">{item.ticker}</div>
                                     <div className="text-xs text-gray-400 truncate" style={{maxWidth:'120px'}}>{item.name}</div>
                                 </td>
@@ -4469,6 +4476,12 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 </td>
                                 <td className="py-3 px-2" style={{ color: resultColor, fontWeight: 600 }}>
                                     {(item.event_result || '').includes('Positiv') ? '✅ Positiv' : (item.event_result || '').includes('Negativ') ? '❌ Negativ' : (item.event_result || '').includes('Ausstehend') ? '⏳ Ausstehend' : '–'}
+                                </td>
+                                <td className="py-3 px-2 text-xs">
+                                    <div className="font-semibold text-gray-700">{(item.bio_trade_mode || 'WATCHLIST').replaceAll('_', ' ')}</div>
+                                    {(item.bio_risk_flags || []).slice(0, 2).map(flag => (
+                                        <div key={flag} className="text-amber-700">{flag.replaceAll('_', ' ')}</div>
+                                    ))}
                                 </td>
                                 <td className="py-3 px-2">
                                     <span className={`text-xs px-2 py-0.5 rounded ${item.chart_health >= 7 ? 'bg-green-100 text-green-700' : item.chart_health >= 4 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>

@@ -43,6 +43,10 @@ def _first_nonempty(*values):
     for value in values:
         if value is None:
             continue
+        if isinstance(value, dict):
+            nested = _first_nonempty(value.get("name"), value.get("company_name"), value.get("ticker"))
+            if nested:
+                return nested
         if isinstance(value, str) and value.strip():
             return value.strip()
         if not isinstance(value, str) and value:
@@ -123,7 +127,7 @@ def _load_bpiq_catalyst_cache():
                     "ticker_count": len(_BPIQ_CATALYST_CACHE),
                     "timestamp": datetime.now().isoformat(),
                 }
-                print(f"[BPIQ] API HTTP {resp.status_code}; Catalyst-Daten nicht geladen")
+                print(f"[CatalystData] API HTTP {resp.status_code}; Catalyst-Daten nicht geladen")
                 break
             data = resp.json()
             results = data.get("results", [])
@@ -209,6 +213,11 @@ def _load_bpiq_catalyst_cache():
                     or drug.get("is_new_catalyst")
                     or drug.get("new_catalyst")
                 ),
+                "is_big_mover": bool(drug.get("is_big_mover")),
+                "is_hedge_fund_pick": bool(drug.get("is_hedge_fund_pick")),
+                "is_hedge_fund_avoid": bool(drug.get("is_hedge_fund_avoid")),
+                "is_high_mgmt_interest": bool(drug.get("is_high_mgmt_interest")),
+                "is_suspected_mover": bool(drug.get("is_suspected_mover")),
             }
 
             if ticker not in cache:
@@ -243,7 +252,7 @@ def _load_bpiq_catalyst_cache():
                 "ticker_count": len(cache),
                 "timestamp": datetime.now().isoformat(),
             }
-        print(f"[BPIQ] Cache geladen: {len(all_drugs)} Drugs, {len(cache)} Tickers")
+        print(f"[CatalystData] Cache geladen: {len(all_drugs)} Drugs, {len(cache)} Tickers")
         return cache
 
     except Exception as e:
@@ -255,7 +264,7 @@ def _load_bpiq_catalyst_cache():
             "ticker_count": len(_BPIQ_CATALYST_CACHE),
             "timestamp": datetime.now().isoformat(),
         }
-        print(f"[BPIQ] FEHLER beim Laden: {e}")
+        print(f"[CatalystData] FEHLER beim Laden: {e}")
         return _BPIQ_CATALYST_CACHE or {}
 
 

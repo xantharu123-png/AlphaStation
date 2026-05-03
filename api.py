@@ -2068,8 +2068,13 @@ _BIOTECH_KEY_MAP = {
     "Float_Cat": "float_cat", "Headline": "headline",
     "Catalyst_Date": "catalyst_date", "Catalyst_Keyword": "catalyst_keyword",
     "Readout_Label": "readout_label", "Event_Result": "event_result",
-    "BPIQ_Available": "bpiq_available", "BPIQ_Catalysts": "bpiq_catalysts",
+    "BPIQ_Available": "catalyst_data_available", "BPIQ_Catalysts": "catalyst_events",
     "Selloff_Reason": "selloff_reason", "Negative_Flags": "negative_flags",
+    "Bio_Edge_Score": "bio_edge_score", "Catalyst_Power": "catalyst_power",
+    "Bio_Risk_Penalty": "bio_risk_penalty", "Bio_Trade_Mode": "bio_trade_mode",
+    "Bio_Risk_Flags": "bio_risk_flags", "Bio_Positive_Factors": "bio_positive_factors",
+    "Dilution_Risk": "dilution_risk", "Regulatory_Risk": "regulatory_risk",
+    "Sell_The_News_Risk": "sell_the_news_risk", "Halt_Risk": "halt_risk",
     "Phase3": "phase3", "Phase2": "phase2", "Phase1": "phase1",
     "Active_Trials": "active_trials",
 }
@@ -2087,6 +2092,43 @@ def _normalize_keys(results: list, key_map: dict) -> list:
             new_item[new_key] = v
         normalized.append(new_item)
     return normalized
+
+
+def _sanitize_public_catalyst_events(events: Any) -> list:
+    """Remove upstream/provider-specific field names from public catalyst payloads."""
+    if not isinstance(events, list):
+        return []
+    sanitized = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        clean = {}
+        for key, value in event.items():
+            if key == "source":
+                continue
+            if key == "bpiq_available":
+                continue
+            clean_key = "catalyst_score" if key == "bpiq_score" else key
+            clean[clean_key] = value
+        clean["source"] = "Premium catalyst calendar"
+        if "catalyst_score" not in clean and "score" in clean:
+            clean["catalyst_score"] = clean.get("score")
+        sanitized.append(clean)
+    return sanitized
+
+
+def _sanitize_biotech_public_results(results: list) -> list:
+    """Keep Biotech API responses product-owned and provider-neutral."""
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        item.pop("bpiq_available", None)
+        item.pop("bpiq_catalysts", None)
+        if "catalyst_events" in item:
+            item["catalyst_events"] = _sanitize_public_catalyst_events(item.get("catalyst_events"))
+        if "readout_details" in item:
+            item["readout_details"] = _sanitize_public_catalyst_events(item.get("readout_details"))
+    return results
 
 
 SCAN_DATA_SOURCES = {
@@ -5019,9 +5061,9 @@ def get_health():
         version=API_VERSION,
         timestamp=datetime.now().isoformat(),
         api_keys_configured={
-            "POLYGON_KEY": bool(POLYGON_KEY),
-            "BPIQ_API_KEY": bool(BPIQ_API_KEY),
-            "ANTHROPIC_API_KEY": bool(ANTHROPIC_API_KEY),
+            "market_data": bool(POLYGON_KEY),
+            "catalyst_data": bool(BPIQ_API_KEY),
+            "ai_assistant": bool(ANTHROPIC_API_KEY),
         },
     )
 
@@ -5051,16 +5093,16 @@ def _build_system_health() -> Dict[str, Any]:
             }
 
     api_keys = {
-        "POLYGON_KEY": bool(POLYGON_KEY),
-        "BPIQ_API_KEY": bool(BPIQ_API_KEY),
-        "ANTHROPIC_API_KEY": bool(ANTHROPIC_API_KEY),
+        "market_data": bool(POLYGON_KEY),
+        "catalyst_data": bool(BPIQ_API_KEY),
+        "ai_assistant": bool(ANTHROPIC_API_KEY),
     }
     email_alerts = _email_alert_status()
 
     warnings = []
     critical = []
-    if not api_keys["POLYGON_KEY"]:
-        critical.append("POLYGON_KEY fehlt - Aktien-/ORB-/Marktdaten koennen nicht sauber laufen")
+    if not api_keys["market_data"]:
+        critical.append("Market-Data-Zugang fehlt - Aktien-/ORB-/Marktdaten koennen nicht sauber laufen")
     if not email_alerts["configured"]:
         warnings.append("Email-Alerts sind nicht konfiguriert - GMAIL_USER/GMAIL_APP_PASSWORD fehlen")
     if not _scheduler_running:
@@ -5177,9 +5219,10 @@ def get_risk_policy():
     return {"status": "success", "risk_policy": RISK_POLICY, "timestamp": datetime.now().isoformat()}
 
 
+@app.get("/api/catalyst-data-status")
 @app.get("/api/biotech-bpiq-status")
 def get_biotech_bpiq_status():
-    """Check whether the configured BPIQ API key can actually reach catalyst data."""
+    """Admin check whether the configured premium catalyst feed is reachable."""
     key = os.environ.get("BPIQ_API_KEY") or _SECRETS.get("BPIQ_API_KEY", "")
     payload = {
         "status": "ok",
@@ -5188,12 +5231,12 @@ def get_biotech_bpiq_status():
         "http_status": None,
         "sample_results": 0,
         "error": None,
-        "source_note": "Checks BPIQ /drugs/?has_catalyst=true without exposing the key.",
+        "source_note": "Checks the premium catalyst feed without exposing the key.",
         "timestamp": datetime.now().isoformat(),
     }
     if not key:
         payload["status"] = "warning"
-        payload["error"] = "BPIQ_API_KEY missing"
+        payload["error"] = "Catalyst data key missing"
         return payload
     try:
         resp = req.get(
@@ -5209,7 +5252,7 @@ def get_biotech_bpiq_status():
             payload["working"] = True
             return payload
         payload["status"] = "warning"
-        payload["error"] = f"BPIQ returned HTTP {resp.status_code}"
+        payload["error"] = f"Catalyst data feed returned HTTP {resp.status_code}"
         return payload
     except Exception as exc:
         payload["status"] = "error"
@@ -5229,19 +5272,8 @@ def get_biotech_catalyst_watchlist(
 
 @app.get("/api/debug-keys")
 def debug_keys():
-    """Temp debug: zeigt ob secrets.toml geladen wird."""
-    import pathlib
-    p1 = Path(__file__).parent / ".streamlit" / "secrets.toml"
-    p2 = Path.home() / ".streamlit" / "secrets.toml"
-    return {
-        "polygon_key_len": len(POLYGON_KEY),
-        "polygon_key_first4": POLYGON_KEY[:4] if POLYGON_KEY else "LEER",
-        "secrets_loaded_keys": list(_SECRETS.keys()),
-        "path1_exists": p1.exists(),
-        "path1": str(p1),
-        "path2_exists": p2.exists(),
-        "path2": str(p2),
-    }
+    """Disabled: never expose provider/key diagnostics in a sellable build."""
+    return {"status": "disabled", "message": "Key diagnostics are disabled in this build."}
 
 
 @app.post("/api/test-email")
@@ -7016,6 +7048,7 @@ def get_biotech_results():
     """Get cached biotech scan results."""
     results, cached_at = load_cache_file(BIOTECH_CACHE)
     results = _normalize_keys(results, _BIOTECH_KEY_MAP)
+    results = _sanitize_biotech_public_results(results)
 
     cache_age = None
     if cached_at:

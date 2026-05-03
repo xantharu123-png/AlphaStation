@@ -2251,6 +2251,196 @@ def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price, catalyst_
     return {"risk_score": min(15, risk_score), "risk_details": risk_details}
 
 
+def _clamp_int(value, low=0, high=100):
+    return int(max(low, min(high, round(value))))
+
+
+def _news_text_blob(news_data):
+    parts = []
+    for item in news_data.get("news", [])[:10]:
+        if not isinstance(item, dict):
+            continue
+        parts.append(item.get("title", "") or "")
+        parts.append(item.get("description", "") or "")
+    for flag in news_data.get("negative_flags", [])[:10]:
+        if isinstance(flag, dict):
+            parts.append(flag.get("flag", "") or "")
+    return " ".join(parts).lower()
+
+
+def _has_any_keyword(text, keywords):
+    return any(re.search(r"\b" + re.escape(keyword) + r"\b", text) for keyword in keywords)
+
+
+def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
+    """
+    Trader-facing Bio Catalyst Edge.
+
+    This does not expose the upstream provider. It converts catalyst calendar,
+    news risk and chart context into a product-owned risk/edge layer.
+    """
+    readouts = trial_data.get("catalyst_readouts", []) or []
+    tech_details = tech_data.get("details", {}) or {}
+    news_blob = _news_text_blob(news_data)
+    negative_flags = news_data.get("negative_flags", []) or []
+    market_cap_m = details.get("market_cap_millions", 0) or 0
+    shares_m = details.get("shares_millions", 0) or 0
+    price = tech_details.get("price", 0) or 0
+
+    catalyst_power = 0
+    positive_factors = []
+    risk_flags = []
+    dilution_risk = 0
+    regulatory_risk = 0
+    sell_news_risk = 0
+    halt_risk = 0
+
+    if readouts:
+        top = readouts[0]
+        stage_text = " ".join(str(top.get(k, "") or "") for k in ("stage_label", "event_label", "full_label")).lower()
+        days = top.get("days_until")
+        provider_score = float(top.get("bpiq_score", 0) or 0)
+
+        if "pdufa" in stage_text or "phase 3" in stage_text or "phase iii" in stage_text:
+            catalyst_power += 22
+            positive_factors.append("late_stage_or_pdufa")
+        elif "phase 2" in stage_text or "phase ii" in stage_text:
+            catalyst_power += 16
+            positive_factors.append("phase2_readout")
+        elif "phase 1" in stage_text or "phase i" in stage_text:
+            catalyst_power += 5
+            risk_flags.append("early_stage_lower_predictability")
+
+        if days is not None:
+            if days < 0:
+                catalyst_power -= 8
+                risk_flags.append("overdue_catalyst")
+            elif days <= 3:
+                catalyst_power += 4
+                halt_risk += 18
+                risk_flags.append("near_binary_event")
+            elif days <= 14:
+                catalyst_power += 14
+                positive_factors.append("near_term_catalyst")
+            elif days <= 45:
+                catalyst_power += 18
+                positive_factors.append("prime_catalyst_window")
+            elif days <= 90:
+                catalyst_power += 9
+                positive_factors.append("watchlist_window")
+            else:
+                catalyst_power += 2
+                risk_flags.append("catalyst_too_far_out")
+
+        if provider_score >= 80:
+            catalyst_power += 8
+            positive_factors.append("high_catalyst_quality")
+        elif provider_score >= 50:
+            catalyst_power += 4
+
+        if top.get("is_big_mover") or top.get("is_suspected_mover"):
+            catalyst_power += 6
+            positive_factors.append("expected_high_move_event")
+        if top.get("is_hedge_fund_pick") or top.get("is_high_mgmt_interest"):
+            catalyst_power += 5
+            positive_factors.append("institutional_interest_marker")
+        if top.get("is_hedge_fund_avoid"):
+            regulatory_risk += 18
+            risk_flags.append("institutional_avoid_marker")
+    else:
+        if news_data.get("catalyst_score", 0) > 0:
+            catalyst_power += 8
+            risk_flags.append("news_catalyst_without_calendar_confirmation")
+        else:
+            risk_flags.append("no_confirmed_catalyst_calendar_event")
+
+    dilution_keywords = {
+        "offering", "public offering", "registered direct", "atm", "shelf",
+        "s-3", "424b5", "warrant", "convertible", "raise", "priced offering",
+        "equity financing", "dilution",
+    }
+    if _has_any_keyword(news_blob, dilution_keywords):
+        dilution_risk += 28
+        risk_flags.append("dilution_or_offering_risk")
+
+    regulatory_keywords = {
+        "complete response letter", "crl issued", "clinical hold", "partial clinical hold",
+        "trial failure", "missed endpoint", "failed to meet", "did not meet",
+        "fda rejection", "refuse to file", "safety concern", "adverse events",
+        "discontinued", "terminated", "going concern", "delisting",
+    }
+    if _has_any_keyword(news_blob, regulatory_keywords):
+        regulatory_risk += 35
+        risk_flags.append("regulatory_or_trial_failure_risk")
+    if len(negative_flags) >= 2:
+        regulatory_risk += 10
+        risk_flags.append("multiple_negative_news_flags")
+
+    pos_90d = tech_details.get("pos_90d", 50) or 50
+    range_10d = tech_details.get("range_10d%", 0) or 0
+    rvol = tech_details.get("RVOL", 0) or 0
+    rvol_up_day = tech_details.get("rvol_up_day", True)
+    chart_health = tech_details.get("chart_health", 10) or 10
+    if pos_90d >= 85 and range_10d >= 12:
+        sell_news_risk += 18
+        risk_flags.append("sell_the_news_risk_extended_chart")
+    if rvol >= 3 and not rvol_up_day:
+        sell_news_risk += 18
+        risk_flags.append("distribution_volume")
+    if chart_health <= 4:
+        sell_news_risk += 10
+        risk_flags.append("weak_chart_before_catalyst")
+
+    if price and price < 2:
+        halt_risk += 8
+        risk_flags.append("penny_biotech_volatility")
+    if market_cap_m and market_cap_m < 100:
+        halt_risk += 8
+        risk_flags.append("microcap_binary_risk")
+    if shares_m and shares_m < 10:
+        halt_risk += 6
+        risk_flags.append("microfloat_halt_risk")
+
+    risk_penalty = min(60, dilution_risk + regulatory_risk + sell_news_risk + halt_risk)
+    edge_score = _clamp_int(50 + catalyst_power - risk_penalty + min(10, tech_data.get("technical_score", 0) or 0))
+
+    if regulatory_risk >= 30 or dilution_risk >= 25:
+        trade_mode = "AVOID_NEWS_RISK"
+        score_adjustment = -18
+    elif sell_news_risk >= 25:
+        trade_mode = "WAIT_PULLBACK"
+        score_adjustment = -10
+    elif halt_risk >= 25:
+        trade_mode = "SMALL_SIZE_BINARY_RISK"
+        score_adjustment = -5
+    elif edge_score >= 75:
+        trade_mode = "PRIORITY_WATCH"
+        score_adjustment = 8
+    elif edge_score >= 65:
+        trade_mode = "WATCH_FOR_TRIGGER"
+        score_adjustment = 4
+    elif edge_score <= 40:
+        trade_mode = "LOW_QUALITY"
+        score_adjustment = -8
+    else:
+        trade_mode = "WATCHLIST"
+        score_adjustment = 0
+
+    return {
+        "bio_edge_score": edge_score,
+        "catalyst_power": _clamp_int(catalyst_power, 0, 60),
+        "risk_penalty": risk_penalty,
+        "score_adjustment": score_adjustment,
+        "trade_mode": trade_mode,
+        "risk_flags": sorted(set(risk_flags)),
+        "positive_factors": sorted(set(positive_factors)),
+        "dilution_risk": _clamp_int(dilution_risk, 0, 100),
+        "regulatory_risk": _clamp_int(regulatory_risk, 0, 100),
+        "sell_the_news_risk": _clamp_int(sell_news_risk, 0, 100),
+        "halt_risk": _clamp_int(halt_risk, 0, 100),
+    }
+
+
 def _biotech_news_momentum(news_items):
     """
     Bewertet News-Sentiment und -Momentum (max 15 pts).
@@ -2484,6 +2674,16 @@ def _biotech_background_scan(poly_key):
                 if ("4/5 rote Tage" in _recent_action or "5/5 rote Tage" in _recent_action) and _bearish_patterns:
                     total_score = max(0, total_score - 10)
 
+                # Catalyst Edge Layer: combines catalyst quality with dilution,
+                # regulatory, sell-the-news and halt-risk guards.
+                _bio_edge = _calculate_biotech_catalyst_edge(
+                    trial_data=trial_data,
+                    news_data=news_data,
+                    tech_data=tech_data,
+                    details=details,
+                )
+                total_score = max(0, min(100, total_score + _bio_edge.get("score_adjustment", 0)))
+
                 # Qualitäts-Gate: Score UND echtes Catalyst-Signal nötig
                 # V4 AUDIT: min_required angehoben, weil Grade C vorher = min_required
                 # was jede valide Zeile automatisch zu "C" machte. Jetzt Abstand Grade-C
@@ -2559,7 +2759,10 @@ def _biotech_background_scan(poly_key):
                     if trial_data.get("readout_score", 0) >= 5:
                         catalyst_label = _readout_lbl
                         _cat_readouts = trial_data.get("catalyst_readouts", [])
-                        catalyst_headline = f"Trial-Readout erwartet — {_cat_readouts[0]['title'][:60]}" if _cat_readouts and len(_cat_readouts) > 0 else ""
+                        if _cat_readouts:
+                            _rd = _cat_readouts[0]
+                            _rd_title = _rd.get("title") or _rd.get("drug_name") or _rd.get("full_label") or "Catalyst"
+                            catalyst_headline = f"Trial-Readout erwartet — {_rd_title[:60]}"
 
                 # ── Fallback Readout_Label: Wenn CT.gov leer, nutze besten News-Catalyst ──
                 if not _readout_lbl and best_cat:
@@ -2773,6 +2976,16 @@ def _biotech_background_scan(poly_key):
                     "Chart_Health": _chart_health,
                     "Drawdown": round(_drawdown, 1),
                     "Selloff_Reason": _selloff_reason,
+                    "Bio_Edge_Score": _bio_edge.get("bio_edge_score", 0),
+                    "Catalyst_Power": _bio_edge.get("catalyst_power", 0),
+                    "Bio_Risk_Penalty": _bio_edge.get("risk_penalty", 0),
+                    "Bio_Trade_Mode": _bio_edge.get("trade_mode", "WATCHLIST"),
+                    "Bio_Risk_Flags": _bio_edge.get("risk_flags", []),
+                    "Bio_Positive_Factors": _bio_edge.get("positive_factors", []),
+                    "Dilution_Risk": _bio_edge.get("dilution_risk", 0),
+                    "Regulatory_Risk": _bio_edge.get("regulatory_risk", 0),
+                    "Sell_The_News_Risk": _bio_edge.get("sell_the_news_risk", 0),
+                    "Halt_Risk": _bio_edge.get("halt_risk", 0),
                     "Trials": trial_data.get("trials", [])[:5],
                     "News": news_data.get("news", [])[:5],
                     "Negative_Flags": _neg_flags,

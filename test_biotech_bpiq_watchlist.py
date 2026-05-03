@@ -1,5 +1,6 @@
 import json
 
+from api import _sanitize_biotech_public_results
 import modules.data_fetchers as df
 
 
@@ -137,3 +138,21 @@ def test_bpiq_watchlist_warns_on_partial_api_rows(monkeypatch):
     assert result["count"] == 1
     assert result["status"] == "warning"
     assert "limitiert" in result["warning"]
+
+
+def test_biotech_public_results_hide_provider_event_fields():
+    rows = [{
+        "ticker": "TEST",
+        "bpiq_available": True,
+        "bpiq_catalysts": [{"source": "BPIQ", "bpiq_score": 55}],
+        "catalyst_events": [{"source": "BPIQ", "bpiq_score": 88, "drug_name": "Alpha"}],
+        "readout_details": [{"source": "BPIQ", "bpiq_score": 77, "drug_name": "Beta"}],
+    }]
+
+    sanitized = _sanitize_biotech_public_results(rows)
+    payload = json.dumps(sanitized)
+
+    assert "BPIQ" not in payload
+    assert "bpiq" not in payload.lower()
+    assert sanitized[0]["catalyst_events"][0]["catalyst_score"] == 88
+    assert sanitized[0]["readout_details"][0]["source"] == "Premium catalyst calendar"
