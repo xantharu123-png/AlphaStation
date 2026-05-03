@@ -30,6 +30,14 @@ from pathlib import Path as _Path
 _BPIQ_CATALYST_CACHE = {}
 _BPIQ_CACHE_TIMESTAMP = 0
 _BPIQ_CACHE_TTL = 3600  # 1 hour
+_BPIQ_CATALYST_STATUS = {
+    "status": "unknown",
+    "http_status": None,
+    "error": None,
+    "rows_loaded": 0,
+    "ticker_count": 0,
+    "timestamp": None,
+}
 
 def _get_config_value(key):
     """Read config from env first, then the repo/root secrets files used by API/bg service."""
@@ -66,10 +74,18 @@ def _load_bpiq_catalyst_cache():
         dict: {TICKER: [{drug_name, stage_label, catalyst_date, catalyst_date_text,
                          days_until, category, phase_mult, ...}], ...}
     """
-    global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP
+    global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP, _BPIQ_CATALYST_STATUS
 
     bpiq_key = _get_config_value("BPIQ_API_KEY")
     if not bpiq_key:
+        _BPIQ_CATALYST_STATUS = {
+            "status": "warning",
+            "http_status": None,
+            "error": "BPIQ_API_KEY missing",
+            "rows_loaded": 0,
+            "ticker_count": 0,
+            "timestamp": datetime.now().isoformat(),
+        }
         return {}
 
     # Cache noch gültig? (4h = 14400s)
@@ -79,6 +95,7 @@ def _load_bpiq_catalyst_cache():
 
     try:
         all_drugs = []
+        api_error_status = None
         for offset in range(0, 800, 200):
             resp = rate_limited_get(
                 f"https://api.bpiq.com/api/v1/drugs/?has_catalyst=true&limit=200&offset={offset}",
@@ -86,6 +103,15 @@ def _load_bpiq_catalyst_cache():
                 timeout=15
             )
             if resp.status_code != 200:
+                api_error_status = resp.status_code
+                _BPIQ_CATALYST_STATUS = {
+                    "status": "warning",
+                    "http_status": resp.status_code,
+                    "error": f"BPIQ returned HTTP {resp.status_code}",
+                    "rows_loaded": len(all_drugs),
+                    "ticker_count": len(_BPIQ_CATALYST_CACHE),
+                    "timestamp": datetime.now().isoformat(),
+                }
                 print(f"[BPIQ] API HTTP {resp.status_code}; Catalyst-Daten nicht geladen")
                 break
             data = resp.json()
@@ -175,12 +201,134 @@ def _load_bpiq_catalyst_cache():
 
         _BPIQ_CATALYST_CACHE = cache
         _BPIQ_CACHE_TIMESTAMP = now
+        if api_error_status is not None:
+            _BPIQ_CATALYST_STATUS = {
+                "status": "warning",
+                "http_status": api_error_status,
+                "error": f"BPIQ returned HTTP {api_error_status}",
+                "rows_loaded": len(all_drugs),
+                "ticker_count": len(cache),
+                "timestamp": datetime.now().isoformat(),
+            }
+        else:
+            _BPIQ_CATALYST_STATUS = {
+                "status": "success" if cache else "warning",
+                "http_status": 200,
+                "error": None if cache else "BPIQ returned no catalyst rows",
+                "rows_loaded": len(all_drugs),
+                "ticker_count": len(cache),
+                "timestamp": datetime.now().isoformat(),
+            }
         print(f"[BPIQ] Cache geladen: {len(all_drugs)} Drugs, {len(cache)} Tickers")
         return cache
 
     except Exception as e:
+        _BPIQ_CATALYST_STATUS = {
+            "status": "error",
+            "http_status": None,
+            "error": str(e),
+            "rows_loaded": 0,
+            "ticker_count": len(_BPIQ_CATALYST_CACHE),
+            "timestamp": datetime.now().isoformat(),
+        }
         print(f"[BPIQ] FEHLER beim Laden: {e}")
         return _BPIQ_CATALYST_CACHE or {}
+
+
+def _is_late_stage_bpiq_event(drug):
+    """True for the newsletter-style Phase 2/3/PDUFA readout universe."""
+    text = " ".join(
+        str(drug.get(k, "") or "")
+        for k in ("stage_label", "event_label", "full_label", "note", "indications")
+    ).lower()
+    phase_markers = (
+        "phase 2", "phase ii", "phase iib", "phase 2b", "ph2", "ph 2",
+        "phase 3", "phase iii", "phase ii/iii", "phase 2/3", "ph3", "ph 3",
+        "pdufa", "nda", "bla",
+    )
+    return any(marker in text for marker in phase_markers)
+
+
+def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
+    """
+    Supplemental BPIQ catalyst watchlist for the Biotech scanner.
+
+    The BPIQ newsletter advertises a weekly watchlist of Phase 2/3 readouts.
+    We do not scrape the newsletter image/table. Instead, this returns the
+    machine-readable BPIQ calendar rows when the API key works, so the UI can
+    show catalyst context without turning newsletter marketing into blind
+    scan results.
+    """
+    now = datetime.now()
+    if window_days is None:
+        h1_end = datetime(now.year, 6, 30)
+        if now <= h1_end:
+            window_days = max(14, (h1_end - now).days + 1)
+        else:
+            window_days = 90
+
+    cache = _load_bpiq_catalyst_cache()
+    rows = []
+    for ticker, drugs in cache.items():
+        for drug in drugs:
+            days_until = drug.get("days_until")
+            if days_until is None:
+                continue
+            if days_until < -30 or days_until > window_days:
+                continue
+            if not _is_late_stage_bpiq_event(drug):
+                continue
+            rows.append({
+                "ticker": ticker,
+                "drug_name": drug.get("drug_name", ""),
+                "stage_label": drug.get("stage_label", ""),
+                "event_label": drug.get("event_label", ""),
+                "full_label": drug.get("full_label", ""),
+                "catalyst_date": drug.get("catalyst_date"),
+                "catalyst_date_text": drug.get("catalyst_date_text", "TBA"),
+                "days_until": days_until,
+                "category": drug.get("category", ""),
+                "bpiq_score": drug.get("bpiq_score", 0),
+                "phase_mult": drug.get("phase_mult", 0),
+                "indications": drug.get("indications", ""),
+                "source": drug.get("source", "BPIQ"),
+            })
+
+    cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2, "LATER": 3, "": 9}
+    rows.sort(key=lambda x: (
+        cat_order.get(x.get("category", ""), 9),
+        x.get("days_until") if x.get("days_until") is not None else 9999,
+        -float(x.get("bpiq_score") or 0),
+        x.get("ticker", ""),
+    ))
+    rows = rows[:max(1, int(limit or 85))]
+
+    status = dict(_BPIQ_CATALYST_STATUS)
+    if not cache and status.get("status") in ("unknown", "success"):
+        status.update({
+            "status": "warning",
+            "error": "No BPIQ catalyst rows loaded",
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    return {
+        "status": "success" if rows else "warning",
+        "count": len(rows),
+        "data": rows,
+        "window_days": window_days,
+        "source": "BPIQ catalyst calendar",
+        "source_url": "https://app.bpiq.com/catalyst-calendar",
+        "newsletter_context": {
+            "title": "BPIQ Catalyst Watchlist",
+            "newsletter_subject": "Weekly Catalyst Watchlist & 40% Off APEX",
+            "newsletter_date": "2026-05-03",
+            "newsletter_claim": "85 Ph2 & Ph3 readouts in Q2 2026 / H1 2026",
+            "note": "Newsletter table was embedded/remote, so rows come from the BPIQ API calendar when configured.",
+        },
+        "bpiq_status": status,
+        "warning": None if rows else (status.get("error") or "No matching Phase 2/3 catalyst rows in the selected window"),
+        "timestamp": datetime.now().isoformat(),
+    }
 
 # Catalyst detection keywords (used by _detect_catalyst)
 CATALYST_KEYWORDS = {

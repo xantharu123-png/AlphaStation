@@ -81,6 +81,7 @@ from modules.data_fetchers import (
     fetch_grouped_daily,
     fetch_daily_candles_crypto,
     fetch_multi_day_data,
+    get_bpiq_catalyst_watchlist,
 )
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
@@ -5214,6 +5215,16 @@ def get_biotech_bpiq_status():
         payload["status"] = "error"
         payload["error"] = str(exc)
         return payload
+
+
+@app.get("/api/biotech-catalyst-watchlist")
+def get_biotech_catalyst_watchlist(
+    limit: int = Query(85, ge=1, le=200),
+    window_days: Optional[int] = Query(None, ge=1, le=365),
+):
+    """Supplemental BPIQ catalyst watchlist for the Biotech scanner UI."""
+    watchlist = get_bpiq_catalyst_watchlist(limit=limit, window_days=window_days)
+    return watchlist
 
 
 @app.get("/api/debug-keys")
