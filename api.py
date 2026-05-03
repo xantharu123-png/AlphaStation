@@ -2075,6 +2075,18 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
     return decorated
 
 
+def _decorate_early_mover_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
+    """Decorate Early Mover container rows and the nested crypto coin rows."""
+    decorated = _decorate_scan_results(results, "early_movers", cache_age_seconds)
+    for payload in decorated:
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("coins")
+        if isinstance(rows, list):
+            payload["coins"] = _decorate_scan_results(rows, "early_movers", cache_age_seconds)
+    return decorated
+
+
 def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
     """Load cache file and return (data, cached_at_timestamp) (thread-safe).
 
@@ -6828,6 +6840,283 @@ CRYPTO_NARRATIVES = {
     "ronin": "Gaming", "pixels": "Gaming",
 }
 
+EXCLUDED_CRYPTO_SYMBOLS = {
+    "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE", "USDS", "USDD",
+    "USDP", "PYUSD", "FRAX", "LUSD", "GUSD", "DOLA", "SUSD", "EUSD", "USDL",
+    "USDY", "USDX", "EURC", "EUROC", "WBTC", "CBTC", "TBTC", "LBTC", "WETH",
+    "WBNB", "STETH", "WSTETH", "RETH", "CBETH", "WBETH", "WEETH", "EZETH",
+    "METH", "RSETH", "SFRXETH", "FRXETH",
+}
+EXCLUDED_CRYPTO_TEXT_TERMS = (
+    "stablecoin", "stable coin", "wrapped ", "bridged ", "liquid staked",
+    "liquid-staked", "staked ether", "staked eth", "staked bitcoin",
+    "staked btc", "staking ether", "staking eth", "tether", "usd coin",
+    "paypal usd", "binance usd", "frax", "ethena usde",
+)
+PERP_OI_HISTORY_CACHE = "/tmp/early_movers_perp_oi_history.json"
+
+
+def _crypto_asset_exclusion_reason(symbol: str, coin_id: str = "", name: str = "") -> Optional[str]:
+    """Return why a crypto asset should not be treated as a directional mover."""
+    sym = (symbol or "").upper().strip()
+    cid = (coin_id or "").lower().strip()
+    lower_name = (name or "").lower().strip()
+    text = f"{cid} {lower_name}"
+
+    if sym in EXCLUDED_CRYPTO_SYMBOLS:
+        return f"excluded stable/wrapped symbol {sym}"
+    if any(term in text for term in EXCLUDED_CRYPTO_TEXT_TERMS):
+        return "excluded stable/wrapped/liquid-staking asset"
+    if sym.startswith("USD") and len(sym) <= 5:
+        return f"excluded USD-pegged symbol {sym}"
+    return None
+
+
+def _is_excluded_crypto_asset(symbol: str, coin_id: str = "", name: str = "") -> bool:
+    return _crypto_asset_exclusion_reason(symbol, coin_id, name) is not None
+
+
+def _round_crypto_price(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if number >= 100:
+        return round(number, 2)
+    if number >= 1:
+        return round(number, 4)
+    if number >= 0.01:
+        return round(number, 6)
+    return round(number, 8)
+
+
+def _enrich_perp_oi_history(perp_data: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Attach OI change since the previous scan so positioning is not just a snapshot."""
+    if not isinstance(perp_data, dict) or not perp_data:
+        return perp_data or {}
+
+    now = time.time()
+    previous = {}
+    try:
+        if os.path.exists(PERP_OI_HISTORY_CACHE):
+            with open(PERP_OI_HISTORY_CACHE, "r") as _f:
+                previous = json.load(_f)
+    except Exception:
+        previous = {}
+
+    next_history = {}
+    for sym, info in perp_data.items():
+        if not isinstance(info, dict):
+            continue
+        oi_now = float(info.get("oi_usdt") or 0)
+        prev = previous.get(sym, {}) if isinstance(previous, dict) else {}
+        oi_prev = float(prev.get("oi_usdt") or 0)
+        prev_ts = float(prev.get("timestamp") or 0)
+        if oi_now > 0 and oi_prev > 0:
+            info["oi_change_pct"] = round(((oi_now - oi_prev) / oi_prev) * 100, 2)
+            info["oi_history_age_seconds"] = int(max(0, now - prev_ts)) if prev_ts else None
+        else:
+            info.setdefault("oi_change_pct", None)
+            info.setdefault("oi_history_age_seconds", None)
+        next_history[sym] = {
+            "oi_usdt": oi_now,
+            "volume24_usdt": float(info.get("volume24_usdt") or 0),
+            "timestamp": now,
+        }
+
+    try:
+        with open(PERP_OI_HISTORY_CACHE, "w") as _f:
+            json.dump(next_history, _f, default=_serialize_json)
+    except Exception:
+        pass
+
+    return perp_data
+
+
+def _build_early_mover_long_setup(
+    entry: Dict[str, Any],
+    phase: int,
+    score: int,
+    btc_24h: float,
+    btc_7d: float,
+) -> Dict[str, Any]:
+    """Build a conditional long plan from daily crypto radar data.
+
+    Early Movers is still a radar: the plan gives tactical levels and the
+    confirmation that must happen before taking the trade.
+    """
+    price = float(entry.get("Price") or 0)
+    if price <= 0:
+        return {"direction": "LONG", "trade_action": "NO_TRADE", "warnings": ["missing price"]}
+
+    high_24h = float(entry.get("High24h") or price)
+    low_24h = float(entry.get("Low24h") or price)
+    if high_24h <= low_24h:
+        high_24h = price * 1.04
+        low_24h = price * 0.96
+
+    range_24h = max(high_24h - low_24h, price * 0.025)
+    range_pct = range_24h / price
+    price_pos = max(0.0, min(1.0, (price - low_24h) / range_24h))
+    mcap = float(entry.get("MCap") or 0)
+    vol_mcap = float(entry.get("VolMCapRatio") or 0)
+    c24 = float(entry.get("Change24h") or 0)
+    c7d = float(entry.get("Change7d") or 0)
+    alpha_24h = round(c24 - (btc_24h or 0), 2)
+    alpha_7d = round(c7d - (btc_7d or 0), 2)
+
+    risk_pct = max(0.035, min(0.12, range_pct * 0.42))
+    if mcap and mcap < 20_000_000:
+        risk_pct = max(risk_pct, 0.055)
+    if vol_mcap > 80:
+        risk_pct = max(risk_pct, 0.065)
+
+    warnings = []
+    notes = []
+    trigger_conditions = [
+        "5m higher-low oder VWAP-Hold abwarten",
+        "kein Market-Buy in eine lange gruene Kerze",
+        "BTC darf im Moment des Entries nicht hart abverkaufen",
+    ]
+    btc_block = bool(btc_24h <= -3.0 or btc_7d <= -7.0)
+    btc_warn = bool((btc_24h < -1.0 or btc_7d < -4.0) and not btc_block)
+    if btc_block:
+        warnings.append(f"BTC Gegenwind: 24h {btc_24h:+.1f}%, 7d {btc_7d:+.1f}%")
+    elif btc_warn:
+        warnings.append(f"BTC ist nicht sauber risk-on: 24h {btc_24h:+.1f}%, 7d {btc_7d:+.1f}%")
+    elif btc_24h >= 0.5 and alpha_24h >= 1:
+        notes.append(f"BTC Tailwind + Coin-Alpha {alpha_24h:+.1f}%")
+
+    if phase == 1:
+        if price_pos <= 0.72 and 0 <= c24 <= 8:
+            setup_entry = price
+            trade_action = "LONG_TRIGGER"
+            entry_status = "CONDITIONAL_LONG"
+            entry_quality = "GOOD"
+            notes.append("Phase 1: Volumen kommt rein, Preis noch nicht ueberhitzt")
+        else:
+            setup_entry = min(price, max(low_24h + range_24h * 0.55, price * (1 - min(0.07, risk_pct))))
+            trade_action = "WAIT_FOR_RETEST"
+            entry_status = "WAIT_FOR_RETEST"
+            entry_quality = "EXTENDED"
+            warnings.append("Preis ist nah am 24h-Hoch - Retest statt Chase")
+    elif phase == 2:
+        if price_pos <= 0.82 and c24 <= 10 and score >= 60:
+            setup_entry = price
+            trade_action = "LONG_TRIGGER"
+            entry_status = "CONDITIONAL_LONG"
+            entry_quality = "EXTENDED"
+            notes.append("Phase 2: Breakout laeuft, nur mit frischem Intraday-Trigger")
+        else:
+            setup_entry = min(price, max(low_24h + range_24h * 0.62, price * (1 - min(0.08, risk_pct * 0.9))))
+            trade_action = "WAIT_FOR_RETEST"
+            entry_status = "WAIT_FOR_RETEST"
+            entry_quality = "LATE"
+            warnings.append("Breakout ist erweitert - besser Pullback/Flag handeln")
+    else:
+        pullback_pct = min(0.16, max(0.08, risk_pct * 1.35))
+        setup_entry = min(price, max(low_24h + range_24h * 0.50, price * (1 - pullback_pct)))
+        trade_action = "NO_LONG_CHASE"
+        entry_status = "WAIT_FOR_DEEP_RETEST"
+        entry_quality = "CHASE"
+        warnings.append("Phase 3 ueberhitzt - kein Long ohne tiefen Retest")
+
+    if btc_block and trade_action == "LONG_TRIGGER":
+        trade_action = "WAIT_FOR_BTC_CONFIRMATION"
+        entry_status = "WAIT_FOR_BTC_CONFIRMATION"
+        entry_quality = "EXTENDED"
+
+    risk_distance = max(setup_entry * risk_pct, range_24h * 0.25)
+    swing_stop = low_24h - max(range_24h * 0.05, setup_entry * 0.01)
+    stop = setup_entry - risk_distance
+    if low_24h < setup_entry and (setup_entry - swing_stop) <= setup_entry * 0.16:
+        stop = min(stop, swing_stop)
+    max_risk = setup_entry * 0.14
+    if setup_entry - stop > max_risk:
+        stop = setup_entry - max_risk
+    if stop <= 0 or stop >= setup_entry:
+        stop = setup_entry * (1 - risk_pct)
+
+    risk = max(setup_entry - stop, setup_entry * 0.01)
+    rr_tp1 = 1.8 if phase == 1 else 1.5
+    rr_tp2 = 3.2 if phase == 1 else 2.8
+    if mcap and mcap < 20_000_000:
+        rr_tp2 += 0.3
+    tp1 = setup_entry + risk * rr_tp1
+    tp2 = setup_entry + risk * rr_tp2
+    live_entry = max(price, setup_entry)
+    live_risk = max(live_entry - stop, risk)
+    live_reward = ((tp1 - live_entry) + (tp2 - live_entry)) / 2
+    live_rr = round(max(0.0, live_reward) / live_risk, 2) if live_risk > 0 else 0
+    distance_to_entry_r = round((price - setup_entry) / risk, 2) if risk > 0 else 0
+    late_to_tp1 = price >= tp1
+
+    if late_to_tp1:
+        trade_action = "WAIT_FOR_CONTINUATION"
+        entry_status = "TP1_ALREADY_REACHED"
+        entry_quality = "CHASE"
+        warnings.append("TP1 waere live bereits erreicht - nicht hinterherlaufen")
+    elif live_rr < 1.2 and trade_action == "LONG_TRIGGER":
+        trade_action = "WAIT_FOR_RETEST"
+        entry_status = "WAIT_FOR_RETEST"
+        entry_quality = "LATE"
+        warnings.append(f"Live R:R nur {live_rr:.2f} - besserer Entry noetig")
+
+    risk_flags = []
+    if phase == 3:
+        risk_flags.append("overheated_phase3")
+    if btc_block or btc_warn:
+        risk_flags.append("btc_headwind")
+    if distance_to_entry_r >= 0.75:
+        risk_flags.append("chased_from_entry")
+    if vol_mcap > 100:
+        risk_flags.append("very_high_volume_turnover")
+    if entry.get("data_warning"):
+        risk_flags.append("data_warning")
+
+    action_label = {
+        "LONG_TRIGGER": "Long nur mit Trigger",
+        "WAIT_FOR_RETEST": "Auf Retest warten",
+        "WAIT_FOR_BTC_CONFIRMATION": "BTC-Bestaetigung abwarten",
+        "WAIT_FOR_CONTINUATION": "Nur neue Continuation-Flag",
+        "NO_LONG_CHASE": "Kein Long-Chase",
+        "NO_TRADE": "No Trade",
+    }.get(trade_action, trade_action)
+
+    return {
+        "direction": "LONG",
+        "entry": _round_crypto_price(setup_entry),
+        "stop": _round_crypto_price(stop),
+        "stop_loss": _round_crypto_price(stop),
+        "tp1": _round_crypto_price(tp1),
+        "tp2": _round_crypto_price(tp2),
+        "risk": _round_crypto_price(risk),
+        "rr": round((rr_tp1 + rr_tp2) / 2, 2),
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "live_rr": live_rr,
+        "model": "conditional long: TP1/TP2 blended",
+        "trade_action": trade_action,
+        "action_label": action_label,
+        "entry_status": entry_status,
+        "entry_quality": entry_quality,
+        "distance_to_entry_r": distance_to_entry_r,
+        "late_to_tp1": late_to_tp1,
+        "warnings": list(dict.fromkeys(warnings))[:6],
+        "notes": list(dict.fromkeys(notes))[:6],
+        "trigger_conditions": trigger_conditions,
+        "risk_flags": risk_flags,
+        "btc_context": {
+            "btc_24h": round(btc_24h or 0, 2),
+            "btc_7d": round(btc_7d or 0, 2),
+            "alpha_24h": alpha_24h,
+            "alpha_7d": alpha_7d,
+            "tailwind": not btc_block and not btc_warn,
+        },
+    }
+
 
 def _fetch_coingecko_markets(pages=4):
     """Fetch CoinGecko markets API with 2 min file cache to reduce rate limiting."""
@@ -7060,7 +7349,7 @@ def fetch_multi_exchange_perps():
             "bitget": b,
         }
 
-    return result
+    return _enrich_perp_oi_history(result)
 
 
 def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
@@ -7168,9 +7457,11 @@ def fetch_early_movers(_prefetched_perps=None):
     perp_data = _prefetched_perps if _prefetched_perps is not None else fetch_multi_exchange_perps()
 
     btc_7d = 0
+    btc_24h = 0
     for c in all_coins:
         if c.get("id") == "bitcoin":
             btc_7d = c.get("price_change_percentage_7d_in_currency") or c.get("price_change_percentage_7d") or 0
+            btc_24h = c.get("price_change_percentage_24h") or 0
             break
 
     # Fetch trending coins
@@ -7190,6 +7481,7 @@ def fetch_early_movers(_prefetched_perps=None):
     volume_spikes = []
     micro_caps = []
     whale_accumulations = []
+    excluded_assets = 0
 
     for coin in all_coins:
         try:
@@ -7222,11 +7514,13 @@ def fetch_early_movers(_prefetched_perps=None):
             best_exchange = perp_info.get("best_exchange", "")
             exchanges = perp_info.get("exchanges", [])
 
-            # Skip stablecoins + wrapped
-            if symbol in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "WBTC", "WETH", "STETH", "RETH"):
+            # Skip stablecoins, wrapped assets and liquid-staking derivatives.
+            if _is_excluded_crypto_asset(symbol, cid, name):
+                excluded_assets += 1
                 continue
 
             vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0
+            initial_phase, _, _ = _classify_phase(change_24h, change_7d, vol_mcap_ratio, btc_24h)
             narrative = CRYPTO_NARRATIVES.get(cid, "")
             is_trending = cid in trending_ids
             # BTC-relative Performance (zeigt Alpha vs. Markt)
@@ -7247,6 +7541,16 @@ def fetch_early_movers(_prefetched_perps=None):
                 "High24h": high_24h, "Low24h": low_24h,
                 "IsTrending": is_trending,
                 "BtcRelative7d": btc_relative_7d,
+                "Btc24h": round(btc_24h, 2),
+                "Btc7d": round(btc_7d, 2),
+                "BtcRelative24h": round(change_24h - btc_24h, 2),
+                "current_price": price,
+                "direction": "LONG",
+                "dollar_volume": vol_24h,
+                "relative_volume": round(max(0, vol_mcap_ratio / 30), 2),
+                "close_pos": round((price - low_24h) / (high_24h - low_24h), 2) if high_24h > low_24h else 0.5,
+                "OI_ChangePct": perp_info.get("oi_change_pct") if perp_info else None,
+                "OI_HistoryAgeSeconds": perp_info.get("oi_history_age_seconds") if perp_info else None,
             }
 
             # 1. VOLUME SPIKE DETECTOR (MCap >$10M, Vol >$500k — kleinere sind manipulierbar)
@@ -7350,7 +7654,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
                         # V3.2: Phase 3 (Überhitzt) NICHT empfehlen + Threshold von 30 auf 40
                         # Phase 3 sagt "NICHT kaufen" aber Score war hoch genug → widersprüchlich
-                        if total_score >= 40 and phase != 3:
+                        if total_score >= 40 and initial_phase != 3:
                             entry = dict(base_entry)
                             entry["EarlyScore"] = min(100, total_score)
                             entry["PricePosition"] = round(price_position, 2)
@@ -7373,12 +7677,14 @@ def fetch_early_movers(_prefetched_perps=None):
                     degen_score = 0
 
                     # 7d-Momentum (max 30)
-                    if change_7d >= 100:
-                        degen_score += 30
-                    elif change_7d >= 50:
-                        degen_score += 25
+                    if 5 < change_7d < 35:
+                        degen_score += 24
+                    elif change_7d < 75:
+                        degen_score += 18
+                    elif change_7d < 120:
+                        degen_score += 10
                     else:
-                        degen_score += 15
+                        degen_score += 3
 
                     # Vol/MCap (max 25)
                     if vol_mcap_ratio > 50:
@@ -7413,10 +7719,18 @@ def fetch_early_movers(_prefetched_perps=None):
                         degen_score += 12  # War 15 — Trending allein ist kein starkes Signal
 
                     # Extreme Pumps (>200% 7d) = wahrscheinlich zu spät, Abzug
-                    if change_7d > 200:
+                    if change_24h >= 18:
+                        degen_score -= 25
+                    elif change_24h >= 12:
                         degen_score -= 15
+                    if change_7d > 200:
+                        degen_score -= 30
                     elif change_7d > 150:
-                        degen_score -= 10
+                        degen_score -= 22
+                    elif change_7d > 100:
+                        degen_score -= 12
+                    if initial_phase == 3:
+                        degen_score -= 25
 
                     # BTC-Alpha Bonus
                     if btc_relative_7d > 15:
@@ -7456,6 +7770,25 @@ def fetch_early_movers(_prefetched_perps=None):
             if has_perp and mcap > 10_000_000 and perp_vol_usdt > 100_000:
                 whale_score = 0
                 signals = []
+                oi_change_pct = perp_info.get("oi_change_pct")
+
+                # Snapshot OI alone is not accumulation. We need OI expansion when
+                # history is available; otherwise this stays a lower-confidence read.
+                if oi_change_pct is None:
+                    whale_score -= 5
+                    signals.append("OI history fehlt - nur Perp-Snapshot, keine bestaetigte Akkumulation")
+                elif oi_change_pct >= 25:
+                    whale_score += 20
+                    signals.append(f"OI +{oi_change_pct:.1f}% seit letztem Scan (starker Aufbau)")
+                elif oi_change_pct >= 10:
+                    whale_score += 14
+                    signals.append(f"OI +{oi_change_pct:.1f}% seit letztem Scan")
+                elif oi_change_pct >= 3:
+                    whale_score += 6
+                    signals.append(f"OI +{oi_change_pct:.1f}% leicht steigend")
+                elif oi_change_pct <= -10:
+                    whale_score -= 12
+                    signals.append(f"OI {oi_change_pct:.1f}% - Positionen werden abgebaut")
 
                 # OI/Vol Ratio — NUR mit absolutem OI-Gate (sonst = Illiquidität)
                 # Mindestens $200k OI nötig damit der Ratio überhaupt Bedeutung hat
@@ -7465,7 +7798,7 @@ def fetch_early_movers(_prefetched_perps=None):
                         signals.append(f"OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
                     elif oi_ratio >= 1.5:
                         whale_score += 18
-                        signals.append(f"OI/Vol {oi_ratio:.1f}x (Positionen im Aufbau)")
+                        signals.append(f"OI/Vol {oi_ratio:.1f}x (Positioning hoch)")
                     elif oi_ratio >= 0.8:
                         whale_score += 10
                         signals.append(f"OI/Vol {oi_ratio:.1f}x (moderat)")
@@ -7545,10 +7878,14 @@ def fetch_early_movers(_prefetched_perps=None):
                 # BUG FIX: Negativen Score abfangen (kann durch Malus passieren)
                 whale_score = max(0, whale_score)
 
-                if whale_score >= 35:
+                min_whale_threshold = 45 if oi_change_pct is None else 35
+                if whale_score >= min_whale_threshold:
                     entry = dict(base_entry)
                     entry["WhaleScore"] = min(100, whale_score)
                     entry["Signals"] = signals
+                    entry["Signal"] = "Perp Positioning + OI-Aufbau" if oi_change_pct is not None and oi_change_pct >= 3 else "Perp Positioning (Snapshot)"
+                    entry["OI_ChangePct"] = oi_change_pct
+                    entry["oi_snapshot_only"] = oi_change_pct is None
                     # BTC-Alpha für Whale: Coin hält sich besser als BTC = stärkeres Signal
                     if btc_relative_7d > 5:
                         entry["WhaleScore"] = min(100, entry["WhaleScore"] + 5)
@@ -7576,6 +7913,17 @@ def fetch_early_movers(_prefetched_perps=None):
         if c.get("id") == "bitcoin":
             btc_24h = c.get("price_change_percentage_24h") or 0
             break
+
+    def _grade_for_score(score_value):
+        if score_value >= 80:
+            return "S", "Excellent"
+        if score_value >= 60:
+            return "A", "Stark"
+        if score_value >= 40:
+            return "B", "Solide"
+        if score_value >= 25:
+            return "C", "Schwach"
+        return "D", "Uninteressant"
 
     def _add_to_unified(entries, source_name, score_key):
         for entry in entries:
@@ -7618,17 +7966,7 @@ def fetch_early_movers(_prefetched_perps=None):
                 if c7d > 40:
                     signal_text = f"ÜBERHITZT +{c7d:.0f}%/7d — Gewinnmitnahmen wahrscheinlich"
 
-            # Grade berechnen
-            if score >= 80:
-                grade, grade_label = "S", "Excellent"
-            elif score >= 60:
-                grade, grade_label = "A", "Stark"
-            elif score >= 40:
-                grade, grade_label = "B", "Solide"
-            elif score >= 25:
-                grade, grade_label = "C", "Schwach"
-            else:
-                grade, grade_label = "D", "Uninteressant"
+            grade, grade_label = _grade_for_score(score)
 
             unified_entry = dict(entry)
             watch_flags = list(risk_reasons or [])
@@ -7674,7 +8012,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
     _add_to_unified(volume_spikes, "Volume Spike", "EarlyScore")
     _add_to_unified(micro_caps, "Micro-Cap", "DegenScore")
-    _add_to_unified(whale_accumulations, "Whale", "WhaleScore")
+    _add_to_unified(whale_accumulations, "Perp Positioning", "WhaleScore")
 
     # Konfluenz-Bonus: Coin in 2+ Strategien = stärkeres Signal
     for sym, entry in seen_symbols.items():
@@ -7685,6 +8023,50 @@ def fetch_early_movers(_prefetched_perps=None):
         elif n_sources == 2:
             entry["score"] = min(100, entry["score"] + 5)
             entry["signal_text"] += f" | {', '.join(entry['sources'])}"
+
+    # Final trade-plan pass after confluence bonuses. Early Movers are long-only,
+    # but every setup remains conditional because CoinGecko data is not a 5m trigger.
+    for entry in seen_symbols.values():
+        final_score = int(entry.get("score") or 0)
+        grade, grade_label = _grade_for_score(final_score)
+        entry["grade"] = grade
+        entry["grade_label"] = grade_label
+        setup = _build_early_mover_long_setup(entry, entry.get("phase") or 1, final_score, btc_24h, btc_7d)
+        setup_warnings = setup.get("warnings") or []
+        setup_flags = list(setup.get("risk_flags") or [])
+        existing_flags = [str(f) for f in (entry.get("risk_flags") or [])]
+        if setup.get("trade_action") == "LONG_TRIGGER":
+            setup_flags.append("requires_5m_trigger")
+        else:
+            setup_flags.append("no_market_entry")
+        if entry.get("oi_snapshot_only"):
+            setup_flags.append("oi_snapshot_only")
+        entry.update({
+            "direction": "LONG",
+            "entry": setup.get("entry"),
+            "live_entry": entry.get("Price"),
+            "stop_loss": setup.get("stop_loss"),
+            "stop": setup.get("stop"),
+            "tp1": setup.get("tp1"),
+            "tp2": setup.get("tp2"),
+            "risk_reward": setup.get("rr"),
+            "rr_tp1": setup.get("rr_tp1"),
+            "rr_tp2": setup.get("rr_tp2"),
+            "live_rr_ratio": setup.get("live_rr"),
+            "distance_to_entry_r": setup.get("distance_to_entry_r"),
+            "late_to_tp1": setup.get("late_to_tp1"),
+            "entry_quality": setup.get("entry_quality"),
+            "entry_status": setup.get("entry_status"),
+            "trade_action": setup.get("trade_action"),
+            "execution_trigger_ok": setup.get("trade_action") == "LONG_TRIGGER",
+            "signal_quality": "conditional_long_setup" if setup.get("trade_action") != "NO_LONG_CHASE" else "no_chase",
+            "alertable_crypto": False,
+            "trade_setup": setup,
+            "btc_context": setup.get("btc_context"),
+            "risk_flags": list(dict.fromkeys(existing_flags + setup_flags + setup_warnings)),
+            "scanner_note": "Early Movers ist ein Long-Radar. Levels sind conditional; Entry nur mit 5m/1m Trigger oder Retest.",
+        })
+        entry["signal_text"] = f"{setup.get('action_label')}: {entry.get('signal_text', '')}"
 
     # Sortierung: Score absteigend — Coins aus ALLEN Phasen mischen
     # (vorher: Phase 1 zuerst → bei 300+ Phase-1-Coins kamen Breakout/Überhitzt nie in Top 50)
@@ -7714,6 +8096,8 @@ def fetch_early_movers(_prefetched_perps=None):
         "phase_3_count": len(p3_coins),
         "total_found": len(all_unified),  # Gesamtzahl vor Limit
         "trending_coins": len(trending_ids),
+        "excluded_assets": excluded_assets,
+        "btc_24h": btc_24h,
         "btc_7d": btc_7d,
         "perps_total": len(perp_data),
         "data_source": _CG_MARKETS_STATUS.get("source"),
@@ -7763,7 +8147,7 @@ def get_early_movers():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    decorated = _decorate_scan_results(results, "early_movers", cache_age)
+    decorated = _decorate_early_mover_results(results, cache_age)
     quality = _scan_quality_payload("early_movers", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 

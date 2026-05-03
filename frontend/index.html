@@ -4530,6 +4530,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('score')}>Score{sortKey === 'score' && ' \u2193'}</th>
                             <th className="text-center py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('risk_level')}>Risk{sortKey === 'risk_level' && ' \u2193'}</th>
                             <th className="text-center py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('grade')}>Grade{sortKey === 'grade' && ' \u2193'}</th>
+                            <th className="text-left py-2 px-2">Long-Plan</th>
+                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('entry')}>Entry{sortKey === 'entry' && ' \u2193'}</th>
+                            <th className="text-right py-2 px-2">TP1 / TP2</th>
+                            <th className="text-center py-2 px-2">BTC</th>
                             <th className="text-left py-2 px-2">Signal</th>
                             <th className="text-left py-2 px-2">Perp</th>
                         </tr>
@@ -4554,6 +4558,18 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 </td>
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${riskBadge(item.risk_level)}`}>{item.risk_level}</span></td>
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.grade === 'S' ? 'signal-bullish' : item.grade === 'A' ? 'signal-bullish' : item.grade === 'B' ? 'signal-lightdiv' : item.grade === 'C' ? 'signal-bearish' : 'signal-neutral'}`}>{item.grade}</span></td>
+                                <td className="py-3 px-2 text-xs">
+                                    <span className={`px-2 py-1 rounded font-semibold ${(item.trade_action || '').includes('LONG') ? 'bg-green-100 text-green-800' : (item.trade_action || '').includes('RETEST') ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                                        {item.trade_setup?.action_label || item.trade_action || 'Watch'}
+                                    </span>
+                                </td>
+                                <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
+                                <td className="py-3 px-2 text-right text-xs">
+                                    {item.tp1 ? <><span className="color-positive">{formatPrice(item.tp1)}</span> / <span className="color-positive">{formatPrice(item.tp2)}</span></> : '\u2014'}
+                                </td>
+                                <td className="py-3 px-2 text-center text-xs" title={item.btc_context ? `BTC 24h ${item.btc_context.btc_24h}% | Alpha ${item.btc_context.alpha_24h}%` : ''}>
+                                    {item.btc_context ? <span className={item.btc_context.tailwind ? 'color-positive' : 'text-yellow-600'}>{item.btc_context.tailwind ? 'Tailwind' : 'Check'}</span> : '\u2014'}
+                                </td>
                                 <td className="py-3 px-2 text-sm text-gray-600 truncate max-w-xs" title={item.signal_text}>{item.signal_text || '\u2014'}</td>
                                 <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
                             </tr>
