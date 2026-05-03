@@ -27,6 +27,7 @@ def _volume_coin(symbol="tvol", coin_id="test-volume", change_24h=4.0):
         "symbol": symbol,
         "name": "Test Volume",
         "current_price": 1.0,
+        "market_cap_rank": 321,
         "market_cap": 20_000_000,
         "total_volume": 12_000_000,
         "price_change_percentage_1h_in_currency": 1.5,
@@ -93,6 +94,8 @@ def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
             "oi_usdt": 5_000_000,
             "volume24_usdt": 2_000_000,
             "best_exchange": "MEXC",
+            "best_contract_symbol": "WHALE_USDT",
+            "best_chart_exchange": "mexc",
             "exchanges": ["MEXC", "Bitget"],
             "oi_change_pct": None,
         }
@@ -106,6 +109,9 @@ def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
     assert "Perp Positioning" in row["sources"]
     assert row["oi_snapshot_only"] is True
     assert "oi_snapshot_only" in row["risk_flags"]
+    assert row["Rank"] == 321
+    assert row["PerpChartSymbol"] == "WHALE_USDT"
+    assert row["PerpChartExchange"] == "mexc"
 
 
 def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):

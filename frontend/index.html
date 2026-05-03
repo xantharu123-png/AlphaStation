@@ -2125,14 +2125,40 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     }
                 } else if (isCrypto) {
                     const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
+                    const exchangeNameRaw = scannerData?.PerpChartExchange || scannerData?.perp_chart_exchange || scannerData?.BestExchange || '';
+                    const exchangeName = String(exchangeNameRaw).toLowerCase().replace('mexc', 'mexc').replace('bitget', 'bitget');
+                    const exchangeSymbol = scannerData?.PerpChartSymbol || scannerData?.perp_chart_symbol || null;
+                    let cryptoSuccess = false;
+
+                    // Early Movers brauchen echte Intraday-Trigger. Wenn ein Perp-Match existiert,
+                    // nutzen wir zuerst Exchange-Candles statt CoinGecko-Daily-Kontext.
+                    if (scannerData?.HasPerp && exchangeSymbol && exchangeName) {
+                        try {
+                            const res = await fetch(`${API}/api/exchange-chart?symbol=${encodeURIComponent(exchangeSymbol)}&exchange=${encodeURIComponent(exchangeName)}&timeframe=${timeframe}&count=160`, { signal });
+                            if (signal.aborted) return;
+                            if (res.ok) {
+                                const chartJson = await res.json();
+                                if (chartJson.candles && chartJson.candles.length > 0) {
+                                    setChartData({
+                                        ...chartJson,
+                                        source: `Exchange Perp (${exchangeNameRaw || exchangeName})`,
+                                        chart_note: 'Echter Perp-Chart fuer Entry/Retest-Trigger',
+                                    });
+                                    cryptoSuccess = true;
+                                }
+                            }
+                        } catch (exErr) {
+                            if (exErr.name === 'AbortError') return;
+                        }
+                    }
+
                     // Auto-Retry bei CoinGecko Rate Limiting (max 2 Versuche, schneller)
                     // Abort-aware sleep: bricht sofort ab wenn Ticker wechselt
                     const abortableSleep = (ms) => new Promise((resolve) => {
                         const timer = setTimeout(resolve, ms);
                         signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
                     });
-                    let cryptoSuccess = false;
-                    for (let attempt = 0; attempt < 2; attempt++) {
+                    for (let attempt = 0; !cryptoSuccess && attempt < 2; attempt++) {
                         if (signal.aborted) return;
                         if (attempt > 0) {
                             setChartData({ ticker, timeframe: '1D', candles: [], error: `Lade Chart... (Versuch ${attempt + 1}/2)` });
@@ -2145,11 +2171,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             if (res.ok) {
                                 const chartJson = await res.json();
                                 if (chartJson.candles && chartJson.candles.length > 0) {
-                                    setChartData(chartJson);
+                                    setChartData({
+                                        ...chartJson,
+                                        source: 'CoinGecko Daily Context',
+                                        chart_note: 'Nur Tages-Kontext - kein 5m/1m Entry-Trigger',
+                                    });
                                     cryptoSuccess = true;
                                     break;
                                 }
-                                // Backend returned empty candles (rate_limited) — retry
+                                // Backend returned empty candles (rate_limited) - retry
                                 continue;
                             }
                         } catch (retryErr) {
@@ -2158,7 +2188,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         }
                     }
                     if (!cryptoSuccess && !signal.aborted) {
-                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart vorübergehend nicht verfügbar — CoinGecko Rate Limit' });
+                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart voruebergehend nicht verfuegbar - CoinGecko Rate Limit' });
                     }
                 } else {
                     const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
@@ -2178,7 +2208,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         };
         fetchChart();
         return () => controller.abort();  // Vorherigen Request abbrechen
-    }, [ticker, timeframe, isCrypto, isExchangeCrypto]);
+    }, [ticker, timeframe, isCrypto, isExchangeCrypto, scannerData]);
 
     const loadAiAnalysis = async () => {
         setAiLoading(true);
@@ -2256,6 +2286,29 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 time: c.time, open: c.open, high: c.high, low: c.low, close: c.close
             }));
             if (candles.length > 0) candleSeries.current.setData(candles);
+
+            const setupForChart = scannerData?.trade_setup || tickerData?.trade_setup;
+            if (setupForChart && candleSeries.current) {
+                [
+                    { key: 'entry', label: 'ENTRY', color: '#2563eb' },
+                    { key: 'stop_loss', alt: 'stop', label: 'STOP', color: '#dc2626' },
+                    { key: 'tp1', label: 'TP1', color: '#059669' },
+                    { key: 'tp2', label: 'TP2', color: '#10b981' },
+                ].forEach(line => {
+                    const rawPrice = setupForChart[line.key] ?? setupForChart[line.alt];
+                    const linePrice = Number(rawPrice);
+                    if (Number.isFinite(linePrice) && linePrice > 0) {
+                        candleSeries.current.createPriceLine({
+                            price: linePrice,
+                            color: line.color,
+                            lineWidth: line.key === 'entry' ? 2 : 1,
+                            lineStyle: line.key === 'entry' ? LineStyle.Solid : LineStyle.Dashed,
+                            axisLabelVisible: true,
+                            title: line.label,
+                        });
+                    }
+                });
+            }
 
             // Volume overlay
             if (overlays.vol && chartData.volume) {
@@ -2469,7 +2522,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 // V4.0: Pivot-Marker entfernt (nur Noise) — Pivots werden intern genutzt
 
                 // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
-                const _viewDir = (d.confluence?.direction || '').toUpperCase();
+                const _viewDir = (tickerData?.confluence?.direction || scannerData?.trade_setup?.direction || scannerData?.direction || '').toUpperCase();
 
                 // Chart pattern markers + Linien-Zeichnung
                 // V4: Marker-Dedup — nur 1 Marker pro Kerze (höchste Priorität gewinnt)
@@ -2598,7 +2651,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (oldCanvas) oldCanvas.remove();
             }
         };
-    }, [chartData, sidebarMode, customWidth, customHeight, overlays, tickerData]);
+    }, [chartData, sidebarMode, customWidth, customHeight, overlays, tickerData, scannerData]);
 
     if (loading && !tickerData) {
         return (
@@ -2638,6 +2691,37 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : (_chartChange != null ? _chartChange : d.change_1d)) || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
+    const activeTradeSetup = cd.trade_setup || d.trade_setup || null;
+    const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
+    const setupActionLabel = activeTradeSetup?.action_label || cd.action_label || setupAction || 'Setup';
+    const setupTone = setupAction === 'LONG_TRIGGER'
+        ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+        : (setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
+            ? 'bg-red-50 border-red-300 text-red-900'
+            : setupAction.includes('WAIT')
+                ? 'bg-amber-50 border-amber-300 text-amber-900'
+                : 'bg-sky-50 border-sky-300 text-sky-900';
+    const setupTitleTone = setupAction === 'LONG_TRIGGER'
+        ? 'text-emerald-800'
+        : (setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
+            ? 'text-red-800'
+            : setupAction.includes('WAIT')
+                ? 'text-amber-800'
+                : 'text-sky-800';
+    const viewDirection = (d.confluence?.direction || activeTradeSetup?.direction || cd.direction || '').toUpperCase();
+    const formatSidebarPrice = (value) => {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return '-';
+        if (n >= 100) return `$${n.toFixed(2)}`;
+        if (n >= 1) return `$${n.toFixed(4)}`;
+        if (n >= 0.01) return `$${n.toFixed(6)}`;
+        return `$${n.toFixed(8)}`;
+    };
+    const formatPctValue = (value, digits = 1) => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return '-';
+        return `${n > 0 ? '+' : ''}${n.toFixed(digits)}%`;
+    };
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
     const modeLabel = sidebarMode === 'normal' ? 'Normal' : sidebarMode === 'wide' ? 'Breit' : 'Vollbild';
 
@@ -2792,6 +2876,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         </button>
                     ))}
                 </div>
+                {isCrypto && chartData?.chart_note && (
+                    <div className={`mb-3 rounded border px-3 py-2 text-xs ${String(chartData.source || '').includes('Exchange') ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                        Chart: <span className="font-semibold">{chartData.source || 'Crypto'}</span> - {chartData.chart_note}
+                    </div>
+                )}
 
                 {/* Overlay Toggles */}
                 <div className="flex gap-1 mb-3 flex-wrap">
@@ -2865,7 +2954,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Pattern Info */}
                 {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
                 {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
-                    const _vd = (d.confluence?.direction || '').toUpperCase();
+                    const _vd = viewDirection;
                     const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
                     return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
@@ -2878,7 +2967,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     ) : null;
                 })()}
                 {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
-                    const _vd = (d.confluence?.direction || '').toUpperCase();
+                    const _vd = viewDirection;
                     const filtered = chartData.patterns.harmonic.filter(h => (!_vd || _vd === 'NEUTRAL' || h.direction === _vd) && (h.score || 0) >= 30);
                     return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
@@ -2945,6 +3034,33 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Crypto Detail Panel (CoinGecko) */}
                 {isCrypto && !isExchangeCrypto && cd && (
                 <>
+                {activeTradeSetup && (
+                <div className={`border p-3 rounded-lg mb-3 text-xs ${setupTone}`}>
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                        <div>
+                            <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel}</h4>
+                            <div className="opacity-80">{activeTradeSetup.entry_status || cd.entry_status || 'CONDITIONAL'}</div>
+                        </div>
+                        <span className="text-[11px] font-bold px-2 py-1 rounded bg-white/70">{activeTradeSetup.entry_quality || cd.entry_quality || '-'}</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <div><span className="opacity-70">Live R:R</span><div className="font-semibold">{activeTradeSetup.live_rr ?? cd.live_rr_ratio ?? '-'}</div></div>
+                        <div><span className="opacity-70">Distanz</span><div className="font-semibold">{activeTradeSetup.distance_to_entry_r ?? cd.distance_to_entry_r ?? '-'}R</div></div>
+                        <div><span className="opacity-70">BTC</span><div className="font-semibold">{activeTradeSetup.btc_context?.tailwind === false ? 'Headwind' : activeTradeSetup.btc_context?.tailwind === true ? 'Tailwind' : '-'}</div></div>
+                    </div>
+                    {activeTradeSetup.trigger_conditions && activeTradeSetup.trigger_conditions.length > 0 && (
+                        <div className="mt-2 rounded border border-white/50 bg-white/50 p-2">
+                            <div className="font-semibold mb-1">Trigger-Checkliste</div>
+                            {activeTradeSetup.trigger_conditions.slice(0, 4).map((line, i) => (
+                                <div key={i}>- {line}</div>
+                            ))}
+                        </div>
+                    )}
+                    {(cd.scanner_note || activeTradeSetup.model) && (
+                        <div className="mt-2 opacity-80">{cd.scanner_note || activeTradeSetup.model}</div>
+                    )}
+                </div>
+                )}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Crypto Info</h4>
                     <div className="grid grid-cols-2 gap-2">
@@ -2969,12 +3085,21 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     <h4 className="font-semibold text-sm mb-2">Scanner Daten</h4>
                     <div className="grid grid-cols-2 gap-2">
                         {cd.EarlyScore && <div><span className="text-gray-500">Score</span> <span className={`font-semibold px-2 py-0.5 rounded ${cd.EarlyScore >= 70 ? 'bg-green-100 text-green-800' : cd.EarlyScore >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{cd.EarlyScore}</span></div>}
-                        {cd.DegenScore && <div><span className="text-gray-500">DegenScore</span> <span className="font-semibold">{cd.DegenScore}</span></div>}
-                        {cd.WhaleScore && <div><span className="text-gray-500">WhaleScore</span> <span className="font-semibold">{cd.WhaleScore}</span></div>}
+                        {cd.DegenScore && <div><span className="text-gray-500">Micro Score</span> <span className="font-semibold">{cd.DegenScore}</span></div>}
+                        {cd.WhaleScore && <div><span className="text-gray-500">Perp/OI Score</span> <span className="font-semibold">{cd.WhaleScore}</span></div>}
+                        {cd.trade_action && <div><span className="text-gray-500">Aktion</span> <span className={`font-semibold ${setupTitleTone}`}>{setupActionLabel}</span></div>}
+                        {cd.entry_status && <div><span className="text-gray-500">Status</span> <span className="font-semibold">{cd.entry_status}</span></div>}
                         {cd.Signal && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className="font-semibold">{cd.Signal}</span></div>}
-                        {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'}</span></div>}
+                        {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'} {cd.PerpChartSymbol ? `(${cd.PerpChartSymbol})` : ''}</span></div>}
                         {cd.FundingRate != null && <div><span className="text-gray-500">Funding</span> <span className="font-semibold">{(cd.FundingRate * 100).toFixed(3)}%</span></div>}
                         {cd.OI_Ratio && <div><span className="text-gray-500">OI Ratio</span> <span className="font-semibold">{cd.OI_Ratio.toFixed(2)}x</span></div>}
+                        {cd.OI_ChangePct != null && <div><span className="text-gray-500">OI Delta</span> <span className={`font-semibold ${cd.OI_ChangePct >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.OI_ChangePct, 1)}</span></div>}
+                        {cd.OI_HistoryAgeSeconds != null && <div><span className="text-gray-500">OI Alter</span> <span className="font-semibold">{formatCacheAge(cd.OI_HistoryAgeSeconds)}</span></div>}
+                        {cd.Btc24h != null && <div><span className="text-gray-500">BTC 24h</span> <span className={`font-semibold ${cd.Btc24h >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.Btc24h, 1)}</span></div>}
+                        {cd.BtcRelative24h != null && <div><span className="text-gray-500">Alpha 24h</span> <span className={`font-semibold ${cd.BtcRelative24h >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.BtcRelative24h, 1)}</span></div>}
+                        {cd.live_rr_ratio != null && <div><span className="text-gray-500">Live R:R</span> <span className="font-semibold">{cd.live_rr_ratio}</span></div>}
+                        {cd.distance_to_entry_r != null && <div><span className="text-gray-500">Distanz</span> <span className="font-semibold">{cd.distance_to_entry_r}R</span></div>}
+                        {cd.risk_flags && cd.risk_flags.length > 0 && <div className="col-span-2"><span className="text-gray-500">Warnungen</span> <span className="font-semibold text-xs text-amber-700">{cd.risk_flags.slice(0, 4).join(', ')}</span></div>}
                         {cd.Signals && <div className="col-span-2"><span className="text-gray-500">Signale</span> <span className="font-semibold text-xs">{Array.isArray(cd.Signals) ? cd.Signals.join(', ') : cd.Signals}</span></div>}
                     </div>
                 </div>
@@ -3091,33 +3216,38 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 )}
 
                 {/* Trade Setup */}
-                {d.trade_setup && (
-                    <div className="bg-green-50 border border-green-200 p-3 rounded-lg mb-3 text-xs">
-                        <h4 className="font-semibold text-sm mb-2 text-green-800">Trade Setup ({d.trade_setup.direction})</h4>
-                        <div className="grid grid-cols-2 gap-2">
-                            <div><span className="text-gray-500">Entry</span> <span className="font-semibold">${d.trade_setup.entry}</span></div>
-                            <div><span className="text-gray-500">Stop Loss</span> <span className="font-semibold color-negative">${d.trade_setup.stop}</span></div>
-                            <div><span className="text-gray-500">TP1</span> <span className="font-semibold color-positive">${d.trade_setup.tp1}</span></div>
-                            <div><span className="text-gray-500">TP2</span> <span className="font-semibold color-positive">${d.trade_setup.tp2}</span></div>
-                            <div><span className="text-gray-500">R:R</span> <span className="font-semibold">{d.trade_setup.rr}x</span></div>
-                            {d.trade_setup.risk != null && <div><span className="text-gray-500">Risk</span> <span className="font-semibold">${d.trade_setup.risk}</span></div>}
+                {activeTradeSetup && (
+                    <div className={`border p-3 rounded-lg mb-3 text-xs ${setupTone}`}>
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                            <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel} ({activeTradeSetup.direction})</h4>
+                            {activeTradeSetup.entry_status && <span className="text-[11px] font-bold px-2 py-1 rounded bg-white/70">{activeTradeSetup.entry_status}</span>}
                         </div>
-                        {(d.trade_setup.rr_tp1 || d.trade_setup.rr_tp2 || d.trade_setup.model) && (
+                        <div className="grid grid-cols-2 gap-2">
+                            <div><span className="text-gray-500">Entry</span> <span className="font-semibold">{formatSidebarPrice(activeTradeSetup.entry)}</span></div>
+                            <div><span className="text-gray-500">Stop Loss</span> <span className="font-semibold color-negative">{formatSidebarPrice(activeTradeSetup.stop_loss ?? activeTradeSetup.stop)}</span></div>
+                            <div><span className="text-gray-500">TP1</span> <span className="font-semibold color-positive">{formatSidebarPrice(activeTradeSetup.tp1)}</span></div>
+                            <div><span className="text-gray-500">TP2</span> <span className="font-semibold color-positive">{formatSidebarPrice(activeTradeSetup.tp2)}</span></div>
+                            <div><span className="text-gray-500">R:R</span> <span className="font-semibold">{activeTradeSetup.rr}x</span></div>
+                            {activeTradeSetup.live_rr != null && <div><span className="text-gray-500">Live R:R</span> <span className="font-semibold">{activeTradeSetup.live_rr}</span></div>}
+                            {activeTradeSetup.distance_to_entry_r != null && <div><span className="text-gray-500">Distanz</span> <span className="font-semibold">{activeTradeSetup.distance_to_entry_r}R</span></div>}
+                            {activeTradeSetup.risk != null && <div><span className="text-gray-500">Risk</span> <span className="font-semibold">{formatSidebarPrice(activeTradeSetup.risk)}</span></div>}
+                        </div>
+                        {(activeTradeSetup.rr_tp1 || activeTradeSetup.rr_tp2 || activeTradeSetup.model) && (
                             <div className="mt-2 text-gray-600">
-                                {d.trade_setup.model && <div>Modell: <span className="font-semibold">{d.trade_setup.model}</span></div>}
-                                {(d.trade_setup.rr_tp1 || d.trade_setup.rr_tp2) && (
-                                    <div>TP-R: <span className="font-semibold">TP1 {d.trade_setup.rr_tp1 || '-'}R / TP2 {d.trade_setup.rr_tp2 || '-'}R</span></div>
+                                {activeTradeSetup.model && <div>Modell: <span className="font-semibold">{activeTradeSetup.model}</span></div>}
+                                {(activeTradeSetup.rr_tp1 || activeTradeSetup.rr_tp2) && (
+                                    <div>TP-R: <span className="font-semibold">TP1 {activeTradeSetup.rr_tp1 || '-'}R / TP2 {activeTradeSetup.rr_tp2 || '-'}R</span></div>
                                 )}
                             </div>
                         )}
-                        {d.trade_setup.warnings && d.trade_setup.warnings.length > 0 && (
+                        {activeTradeSetup.warnings && activeTradeSetup.warnings.length > 0 && (
                             <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-800">
-                                {d.trade_setup.warnings.slice(0, 3).join(' | ')}
+                                {activeTradeSetup.warnings.slice(0, 3).join(' | ')}
                             </div>
                         )}
-                        {d.trade_setup.notes && d.trade_setup.notes.length > 0 && (
+                        {activeTradeSetup.notes && activeTradeSetup.notes.length > 0 && (
                             <div className="mt-2 text-gray-600">
-                                {d.trade_setup.notes.slice(0, 3).join(' | ')}
+                                {activeTradeSetup.notes.slice(0, 3).join(' | ')}
                             </div>
                         )}
                     </div>

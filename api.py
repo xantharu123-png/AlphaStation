@@ -7250,6 +7250,8 @@ def fetch_mexc_funding_oi():
             vol_usdt = volume24 * last_price if last_price > 0 else volume24
             oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
             result[base] = {
+                "contract_symbol": symbol,
+                "chart_exchange": "mexc",
                 "funding_rate": fr,
                 "hold_vol": hold_vol,
                 "volume24": vol_usdt,
@@ -7289,6 +7291,8 @@ def fetch_bitget_funding_oi():
             oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
 
             result[base] = {
+                "contract_symbol": symbol,
+                "chart_exchange": "bitget",
                 "funding_rate": fr,
                 "hold_amount": hold_amount,
                 "oi_usdt": oi_usdt,
@@ -7325,12 +7329,16 @@ def fetch_multi_exchange_perps():
 
         if bitget_vol >= mexc_vol and b:
             best = "Bitget"
+            best_contract = b.get("contract_symbol") or f"{sym}USDT"
+            best_chart_exchange = b.get("chart_exchange") or "bitget"
             best_fr = b.get("funding_rate", 0)
             best_oi_ratio = b.get("oi_ratio", 0)
             best_oi_usdt = b.get("oi_usdt", 0)
             best_vol = bitget_vol
         elif m:
             best = "MEXC"
+            best_contract = m.get("contract_symbol") or f"{sym}_USDT"
+            best_chart_exchange = m.get("chart_exchange") or "mexc"
             best_fr = m.get("funding_rate", 0)
             best_oi_ratio = m.get("oi_ratio", 0)
             best_oi_usdt = m.get("oi_usdt", 0)  # FIX: war hold_vol (Kontraktanzahl statt USDT)
@@ -7341,6 +7349,8 @@ def fetch_multi_exchange_perps():
         result[sym] = {
             "exchanges": exchanges,
             "best_exchange": best,
+            "best_contract_symbol": best_contract,
+            "best_chart_exchange": best_chart_exchange,
             "funding_rate": best_fr,
             "oi_ratio": best_oi_ratio,
             "oi_usdt": best_oi_usdt,
@@ -7503,16 +7513,22 @@ def fetch_early_movers(_prefetched_perps=None):
             low_24h = coin.get("low_24h") or price
 
             # Perp-Match: Direkt oder mit 1000-Prefix (Börsen listen z.B. 1000PEPE, 1000SHIB)
+            perp_match_symbol = symbol
             perp_info = perp_data.get(symbol, {})
             if not perp_info:
-                perp_info = perp_data.get(f"1000{symbol}", {})
+                perp_match_symbol = f"1000{symbol}"
+                perp_info = perp_data.get(perp_match_symbol, {})
             if not perp_info:
-                perp_info = perp_data.get(f"10000{symbol}", {})
+                perp_match_symbol = f"10000{symbol}"
+                perp_info = perp_data.get(perp_match_symbol, {})
+            if not perp_info:
+                perp_match_symbol = symbol
             has_perp = bool(perp_info)
             funding_rate = perp_info.get("funding_rate", 0)
             oi_ratio = perp_info.get("oi_ratio", 0)
             best_exchange = perp_info.get("best_exchange", "")
             exchanges = perp_info.get("exchanges", [])
+            rank = coin.get("market_cap_rank")
 
             # Skip stablecoins, wrapped assets and liquid-staking derivatives.
             if _is_excluded_crypto_asset(symbol, cid, name):
@@ -7528,6 +7544,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
             base_entry = {
                 "Symbol": symbol, "Name": name, "ID": cid,
+                "Rank": rank,
                 "Price": price, "MCap": mcap, "Vol24h": vol_24h,
                 "Change1h": round(change_1h, 2), "Change24h": round(change_24h, 2),
                 "Change7d": round(change_7d, 2), "Change14d": round(change_14d, 2),
@@ -7536,6 +7553,9 @@ def fetch_early_movers(_prefetched_perps=None):
                 "HasPerp": has_perp, "FundingRate": funding_rate,
                 "OI_Ratio": oi_ratio,
                 "BestExchange": best_exchange,
+                "PerpMatchSymbol": perp_match_symbol if has_perp else None,
+                "PerpChartSymbol": perp_info.get("best_contract_symbol") if perp_info else None,
+                "PerpChartExchange": perp_info.get("best_chart_exchange") if perp_info else None,
                 "Exchanges": exchanges,
                 "Narrative": narrative,
                 "High24h": high_24h, "Low24h": low_24h,
