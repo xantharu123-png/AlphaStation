@@ -1471,18 +1471,26 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
         start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start_date}/{end_date}"
-        params = {"apiKey": poly_key, "adjusted": adjusted, "sort": "asc", "limit": 50000}
-        
+        # Polygon truncates large aggregate queries once the base-bar queryCount
+        # hits its cap. With ascending intraday queries that can return old
+        # candles and miss the current market entirely. Fetch newest intraday
+        # bars first, then reverse back to chronological order for the chart.
+        sort_order = "desc" if span in ("minute", "hour") else "asc"
+        params = {"apiKey": poly_key, "adjusted": adjusted, "sort": sort_order, "limit": 50000}
+
         resp = rate_limited_get(url, params=params, timeout=15)
         if resp.status_code != 200:
             return None
-        
+
         data = resp.json()
         results = data.get("results", [])
-        
+
         if not results:
             return None
-        
+
+        if sort_order == "desc":
+            results = list(reversed(results))
+
         # Für 4H: Aggregiere 1H Bars zu 4H
         if timeframe == "4H":
             aggregated = []

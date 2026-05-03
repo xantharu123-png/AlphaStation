@@ -5886,6 +5886,17 @@ def get_chart_data(
             "timeframe": timeframe,
             "candles": ohlcv,  # Already in {time, open, high, low, close, volume} format
         }
+        last_candle_ts = ohlcv[-1].get("time") if ohlcv else None
+        if last_candle_ts:
+            candle_age_seconds = max(0, int(time.time() - int(last_candle_ts)))
+            is_chart_stale = candle_age_seconds > 7 * 24 * 3600
+            result["chart_freshness"] = {
+                "last_candle_time": datetime.fromtimestamp(int(last_candle_ts), tz=timezone.utc).isoformat(),
+                "age_seconds": candle_age_seconds,
+                "stale": is_chart_stale,
+            }
+            if is_chart_stale:
+                result["chart_warning"] = "Chart-Daten sind stale; Preis/Trade-Setup nutzen aktuelle Scanner-/Quote-Daten."
 
         closes = [bar["close"] for bar in ohlcv]
         highs = [bar["high"] for bar in ohlcv]

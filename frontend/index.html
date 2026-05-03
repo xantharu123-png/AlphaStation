@@ -2702,14 +2702,34 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         tradeHealth.decision === 'WAIT_FOR_RETEST' ? 'border-amber-200 bg-amber-50 text-amber-900' :
         'border-sky-200 bg-sky-50 text-sky-900';
     const riskTone = (risk) => risk === 'LOW' ? 'text-emerald-700' : risk === 'MEDIUM' ? 'text-amber-700' : 'text-red-700';
+    const firstFiniteNumber = (...values) => {
+        for (const value of values) {
+            const n = Number(value);
+            if (Number.isFinite(n) && n > 0) return n;
+        }
+        return null;
+    };
+    const firstFiniteChange = (...values) => {
+        for (const value of values) {
+            const n = Number(value);
+            if (Number.isFinite(n)) return n;
+        }
+        return null;
+    };
     // V4: Header-Preis aus Chart-Daten aktualisieren (damit Header und letzte Kerze IMMER übereinstimmen)
     // Vorher: ticker-detail und chart-data hatten verschiedene Cache-Zeiten → Preis-Diskrepanz
     const _chartLastCandle = chartData?.candles?.length > 0 ? chartData.candles[chartData.candles.length - 1] : null;
     const _chartPrice = _chartLastCandle ? _chartLastCandle.close : null;
     const _chartPrevClose = chartData?.candles?.length > 1 ? chartData.candles[chartData.candles.length - 2].close : null;
     const _chartChange = (_chartPrice && _chartPrevClose && _chartPrevClose > 0) ? ((_chartPrice - _chartPrevClose) / _chartPrevClose * 100) : null;
-    const price = Number(isExchangeCrypto ? cd.price : isCrypto ? cd.Price : (_chartPrice || d.price)) || 0;
-    const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : (_chartChange != null ? _chartChange : d.change_1d)) || 0;
+    const stockQuotePrice = firstFiniteNumber(
+        d.price, cd.price, cd.Price, cd.Preis, cd.current_price, cd.CurrentPrice, cd.close, cd.Close
+    );
+    const stockQuoteChange = firstFiniteChange(
+        d.change_1d, cd.change_pct, cd.ChangePct, cd.ChangePct1D, cd.change_percent, cd.ChangePercent, cd['Change %'], cd['Änderung%']
+    );
+    const price = Number(isExchangeCrypto ? cd.price : isCrypto ? cd.Price : (stockQuotePrice ?? _chartPrice)) || 0;
+    const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : (stockQuoteChange ?? _chartChange)) || 0;
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const activeTradeSetup = cd.trade_setup || d.trade_setup || null;
@@ -2910,6 +2930,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 </div>
 
                 {/* Chart */}
+                {chartData?.chart_warning && (
+                    <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        {chartData.chart_warning}
+                    </div>
+                )}
                 {chartData && chartData.candles && chartData.candles.length === 0 ? (
                     <div className="text-center py-8 text-gray-500 text-sm bg-gray-800 rounded-lg mb-4">
                         {(chartData.error || '').includes('Versuch') ? (
