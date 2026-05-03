@@ -4345,7 +4345,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                     setCatalystWatchlist(data);
                     updateScanCache('biotech_catalyst_watchlist', data);
                 }
-            } catch (err) { console.error('BPIQ watchlist error:', err); }
+            } catch (err) { console.error('Catalyst watchlist error:', err); }
         };
         fetchResults();
         fetchCatalystWatchlist();
@@ -4359,18 +4359,18 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 <div className="card border border-emerald-100 bg-emerald-50/60 p-5 rounded-lg">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
                         <div>
-                            <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">BPIQ Catalyst Watchlist</div>
+                            <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">Catalyst Watchlist</div>
                             <h3 className="text-lg font-bold text-gray-900 mt-1">
                                 Phase 2/3 & PDUFA Kontext
                                 <span className="ml-2 text-sm font-semibold text-emerald-700">{catalystWatchlist.count || 0} Events</span>
                             </h3>
                             <p className="text-sm text-gray-600 mt-1">
-                                Zusatzliste aus dem BPIQ Catalyst Calendar. Sie priorisiert Biotech-Ticker mit nahen Readouts, wird aber nicht blind als Scan-Signal gewertet.
+                                Premium-Catalyst-Kalender fuer Biotech-Ticker mit nahen Readouts. Wird als Kontext genutzt, aber nicht blind als Scan-Signal gewertet.
                             </p>
                         </div>
                         {catalystWatchlist.source_url && (
                             <a href={catalystWatchlist.source_url} target="_blank" rel="noreferrer" className="text-sm font-semibold text-emerald-700 hover:text-emerald-900">
-                                BPIQ Kalender oeffnen
+                                Catalyst Kalender oeffnen
                             </a>
                         )}
                     </div>

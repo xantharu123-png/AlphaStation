@@ -1,3 +1,5 @@
+import json
+
 import modules.data_fetchers as df
 
 
@@ -71,8 +73,12 @@ def test_bpiq_watchlist_filters_late_stage_rows(monkeypatch):
     assert result["data"][0]["ticker"] == "AAAA"
     assert result["data"][0]["company_name"] == "Alpha Therapeutics"
     assert result["data"][0]["category"] == "IMMINENT"
+    assert result["data"][0]["source"] == "Premium catalyst calendar"
+    assert result["data"][0]["catalyst_score"] == 90
+    assert "bpiq_score" not in result["data"][0]
     assert result["summary"]["new_catalysts"] == 1
     assert result["summary"]["total_catalysts"] == 1
+    assert "BPIQ" not in json.dumps(result)
 
 
 def test_bpiq_watchlist_surfaces_api_warning(monkeypatch):
@@ -90,8 +96,11 @@ def test_bpiq_watchlist_surfaces_api_warning(monkeypatch):
 
     assert result["status"] == "warning"
     assert result["count"] == 0
-    assert result["bpiq_status"]["http_status"] == 401
-    assert "401" in result["warning"]
+    assert result["provider_status"]["http_status"] == 401
+    assert "autorisiert" in result["warning"]
+    public_payload = json.dumps(result)
+    assert "BPIQ" not in public_payload
+    assert "bpiq_status" not in result
 
 
 def test_bpiq_watchlist_warns_on_partial_api_rows(monkeypatch):
@@ -127,4 +136,4 @@ def test_bpiq_watchlist_warns_on_partial_api_rows(monkeypatch):
 
     assert result["count"] == 1
     assert result["status"] == "warning"
-    assert "429" in result["warning"]
+    assert "limitiert" in result["warning"]

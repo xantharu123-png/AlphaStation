@@ -273,6 +273,23 @@ def _is_late_stage_bpiq_event(drug):
     return any(marker in text for marker in phase_markers)
 
 
+def _public_catalyst_warning(status, rows):
+    """Map raw provider/API errors to product-safe user-facing messages."""
+    raw_error = (status.get("error") or "").lower()
+    http_status = status.get("http_status")
+    if http_status == 401 or "401" in raw_error or "unauthor" in raw_error:
+        return "Catalyst-Datenquelle ist nicht autorisiert. Bitte Datenzugang im Admin-Bereich prüfen."
+    if http_status == 429 or "429" in raw_error or "rate" in raw_error:
+        return "Catalyst-Datenquelle ist aktuell limitiert. Die Watchlist kann unvollständig sein."
+    if "missing" in raw_error or "not configured" in raw_error:
+        return "Catalyst-Datenquelle ist nicht verbunden. Bitte Datenzugang im Admin-Bereich prüfen."
+    if status.get("status") not in ("success", "unknown") and raw_error:
+        return "Catalyst-Datenquelle ist aktuell nicht verfügbar. Bitte später erneut prüfen."
+    if not rows:
+        return "Keine passenden Phase-2/3- oder PDUFA-Catalysts im aktuellen Zeitfenster gefunden."
+    return None
+
+
 def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
     """
     Supplemental BPIQ catalyst watchlist for the Biotech scanner.
@@ -313,10 +330,10 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
                 "catalyst_date_text": drug.get("catalyst_date_text", "TBA"),
                 "days_until": days_until,
                 "category": drug.get("category", ""),
-                "bpiq_score": drug.get("bpiq_score", 0),
+                "catalyst_score": drug.get("bpiq_score", 0),
                 "phase_mult": drug.get("phase_mult", 0),
                 "indications": drug.get("indications", ""),
-                "source": drug.get("source", "BPIQ"),
+                "source": "Premium catalyst calendar",
                 "is_new": bool(drug.get("is_new")),
             })
 
@@ -324,7 +341,7 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
     rows.sort(key=lambda x: (
         cat_order.get(x.get("category", ""), 9),
         x.get("days_until") if x.get("days_until") is not None else 9999,
-        -float(x.get("bpiq_score") or 0),
+        -float(x.get("catalyst_score") or 0),
         x.get("ticker", ""),
     ))
     rows = rows[:max(1, int(limit or 85))]
@@ -349,13 +366,11 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
             "error": "No BPIQ catalyst rows loaded",
             "timestamp": datetime.now().isoformat(),
         })
-    bpiq_error = status.get("error") if status.get("status") != "success" else None
-    warning = bpiq_error or (
-        None if rows else "No matching Phase 2/3 catalyst rows in the selected window"
-    )
+    data_source_error = status.get("error") if status.get("status") != "success" else None
+    warning = _public_catalyst_warning(status, rows)
 
     return {
-        "status": "success" if rows and not bpiq_error else "warning",
+        "status": "success" if rows and not data_source_error else "warning",
         "count": len(rows),
         "data": rows,
         "summary": {
@@ -366,16 +381,22 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
             "by_month": by_month,
         },
         "window_days": window_days,
-        "source": "BPIQ catalyst calendar",
-        "source_url": "https://app.bpiq.com/catalyst-calendar",
+        "source": "Premium catalyst calendar",
+        "source_url": None,
         "newsletter_context": {
-            "title": "BPIQ Catalyst Watchlist",
-            "newsletter_subject": "Weekly Catalyst Watchlist & 40% Off APEX",
+            "title": "Catalyst Watchlist",
+            "newsletter_subject": "Weekly Catalyst Watchlist",
             "newsletter_date": "2026-05-03",
             "newsletter_claim": "85 Ph2 & Ph3 readouts in Q2 2026 / H1 2026",
-            "note": "Newsletter table was embedded/remote, so rows come from the BPIQ API calendar when configured.",
+            "note": "Watchlist rows come from the configured premium catalyst calendar when connected.",
         },
-        "bpiq_status": status,
+        "provider_status": {
+            "status": status.get("status"),
+            "http_status": status.get("http_status"),
+            "rows_loaded": status.get("rows_loaded", 0),
+            "ticker_count": status.get("ticker_count", 0),
+            "timestamp": status.get("timestamp"),
+        },
         "warning": warning,
         "timestamp": datetime.now().isoformat(),
     }
