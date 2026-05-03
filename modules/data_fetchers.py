@@ -26,9 +26,35 @@ _CANDLE_CACHE_TTL = 300  # 5 Minuten
 
 # BPIQ catalyst cache — fetches from BPIQ API if key is available
 import os as _os
+from pathlib import Path as _Path
 _BPIQ_CATALYST_CACHE = {}
 _BPIQ_CACHE_TIMESTAMP = 0
 _BPIQ_CACHE_TTL = 3600  # 1 hour
+
+def _get_config_value(key):
+    """Read config from env first, then the repo/root secrets files used by API/bg service."""
+    value = _os.getenv(key, "")
+    if value:
+        return value
+    paths = [
+        _Path.home() / ".streamlit" / "secrets.toml",
+        _Path(__file__).resolve().parents[1] / ".streamlit" / "secrets.toml",
+        _Path(__file__).resolve().parents[1] / ".env",
+    ]
+    for path in paths:
+        try:
+            if not path.exists():
+                continue
+            for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                cfg_key, cfg_val = line.split("=", 1)
+                if cfg_key.strip() == key:
+                    return cfg_val.strip().strip('"').strip("'")
+        except Exception:
+            continue
+    return ""
 
 def _load_bpiq_catalyst_cache():
     """
@@ -42,7 +68,7 @@ def _load_bpiq_catalyst_cache():
     """
     global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP
 
-    bpiq_key = _os.getenv("BPIQ_API_KEY", "")
+    bpiq_key = _get_config_value("BPIQ_API_KEY")
     if not bpiq_key:
         return {}
 
@@ -60,6 +86,7 @@ def _load_bpiq_catalyst_cache():
                 timeout=15
             )
             if resp.status_code != 200:
+                print(f"[BPIQ] API HTTP {resp.status_code}; Catalyst-Daten nicht geladen")
                 break
             data = resp.json()
             results = data.get("results", [])

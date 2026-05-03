@@ -2923,20 +2923,38 @@ def _biotech_quick_scan(poly_key):
                         rvol=old.get("RVOL", 0)
                     )
 
-                    # Grade aktualisieren
-                    s = old["Score"]
-                    old["Grade"] = "A" if s >= 75 else "B" if s >= 55 else "C" if s >= 35 else "D"
+                    # Gleiche Qualitätslogik wie Full Scan: Chart-Health und schwache Technik
+                    # dürfen einen News-Refresh nicht wieder künstlich hochstufen.
+                    _chart_health_val = old.get("Chart_Health", old.get("Tech_Details", {}).get("chart_health", 10))
+                    if _chart_health_val <= 4:
+                        old["Score"] = max(0, old["Score"] - 15)
+                    elif _chart_health_val <= 6:
+                        old["Score"] = max(0, old["Score"] - 8)
 
-                    # Qualitäts-Gate: mit Catalyst ab 20, ohne ab 35
-                    _min_req = 20 if catalyst_score > 0 else 35
+                    # Grade aktualisieren — synchron zu Full Scan / Biotech Audit V3
+                    s = old["Score"]
+                    _has_readout = bool(old.get("Readout_Details") or old.get("BPIQ_Catalysts"))
+                    _has_cat_signal = catalyst_score > 0 or _has_readout
+                    _has_tech_signal = old.get("Technical_Score", 0) >= 8
+                    if s >= 75:
+                        old["Grade"] = "A"
+                    elif s >= 62:
+                        old["Grade"] = "B"
+                    elif s >= 45 and (_has_cat_signal or _has_tech_signal):
+                        old["Grade"] = "C"
+                    else:
+                        old["Grade"] = "D"
+
+                    # Qualitäts-Gate — synchron zu Full Scan
+                    _min_req = 35 if _has_cat_signal else 45
                     if old["Score"] >= _min_req:
                         results.append(old)
                 else:
                     # Neuer Ticker — minimal-Eintrag (wird beim nächsten Full Scan vervollständigt)
-                    if catalyst_score >= 8:
+                    if catalyst_score >= 15 and momentum_score >= 6:
                         results.append({
                             "Ticker": ticker, "Name": "", "Score": catalyst_score + momentum_score,
-                            "Grade": "C", "Risk_Flag": "",
+                            "Grade": "D", "Risk_Flag": "",
                             "Catalyst": news_data.get("best_catalyst", {}).get("label", " Neu"),
                             "Catalyst_Score": catalyst_score, "Pipeline_Score": 0,
                             "Readout_Score": 0, "Readout_Label": "", "Readout_Details": [],

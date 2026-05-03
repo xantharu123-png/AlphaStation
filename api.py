@@ -695,6 +695,13 @@ _SECRETS = _load_secrets()
 # Fix: POLYGON_KEY aus secrets.toml laden falls env var leer
 if not POLYGON_KEY:
     POLYGON_KEY = _SECRETS.get("POLYGON_KEY", "")
+if not BPIQ_API_KEY:
+    BPIQ_API_KEY = _SECRETS.get("BPIQ_API_KEY", "")
+if not ANTHROPIC_API_KEY:
+    ANTHROPIC_API_KEY = _SECRETS.get("ANTHROPIC_API_KEY", "")
+for _cfg_key in ("POLYGON_KEY", "BPIQ_API_KEY", "ANTHROPIC_API_KEY", "FINNHUB_KEY"):
+    if _SECRETS.get(_cfg_key) and not os.environ.get(_cfg_key):
+        os.environ[_cfg_key] = _SECRETS[_cfg_key]
 
 _EMAIL_COOLDOWN = {}
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
@@ -5167,6 +5174,46 @@ def get_email_alert_audit():
 def get_risk_policy():
     """Central risk guardrails used by scanner quality explanations."""
     return {"status": "success", "risk_policy": RISK_POLICY, "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/api/biotech-bpiq-status")
+def get_biotech_bpiq_status():
+    """Check whether the configured BPIQ API key can actually reach catalyst data."""
+    key = os.environ.get("BPIQ_API_KEY") or _SECRETS.get("BPIQ_API_KEY", "")
+    payload = {
+        "status": "ok",
+        "key_configured": bool(key),
+        "working": False,
+        "http_status": None,
+        "sample_results": 0,
+        "error": None,
+        "source_note": "Checks BPIQ /drugs/?has_catalyst=true without exposing the key.",
+        "timestamp": datetime.now().isoformat(),
+    }
+    if not key:
+        payload["status"] = "warning"
+        payload["error"] = "BPIQ_API_KEY missing"
+        return payload
+    try:
+        resp = req.get(
+            "https://api.bpiq.com/api/v1/drugs/?has_catalyst=true&limit=1&offset=0",
+            headers={"Authorization": f"Token {key}"},
+            timeout=15,
+        )
+        payload["http_status"] = resp.status_code
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("results", []) if isinstance(data, dict) else []
+            payload["sample_results"] = len(results)
+            payload["working"] = True
+            return payload
+        payload["status"] = "warning"
+        payload["error"] = f"BPIQ returned HTTP {resp.status_code}"
+        return payload
+    except Exception as exc:
+        payload["status"] = "error"
+        payload["error"] = str(exc)
+        return payload
 
 
 @app.get("/api/debug-keys")
