@@ -2741,6 +2741,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         tradeHealth.decision === 'WAIT_FOR_RETEST' ? 'border-amber-200 bg-amber-50 text-amber-900' :
         'border-sky-200 bg-sky-50 text-sky-900';
     const riskTone = (risk) => risk === 'LOW' ? 'text-emerald-700' : risk === 'MEDIUM' ? 'text-amber-700' : 'text-red-700';
+    const riskLabel = (risk) => {
+        const key = String(risk || '').toUpperCase();
+        return {
+            EXTREME: 'extrem',
+            HIGH: 'hoch',
+            MEDIUM: 'mittel',
+            LOW: 'niedrig',
+            UNKNOWN: 'unklar',
+        }[key] || String(risk || '-').toLowerCase();
+    };
     const firstFiniteNumber = (...values) => {
         for (const value of values) {
             const n = Number(value);
@@ -2825,11 +2835,28 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const clean = list.map(humanizeRiskFlag).filter(Boolean);
         return clean.length ? clean.slice(0, 2).join(' + ') : 'normal';
     };
-    const weatherOneLine = (() => {
+    const marketContextLine = (() => {
         if (!marketContext) return null;
-        const headline = marketContext.headline_level === 'HIGH' || marketContext.headline_level === 'EXTREME' ? 'News vorsichtig' : 'News ok';
-        const event = marketContext.event_level === 'HIGH' || marketContext.event_level === 'EXTREME' ? 'Event-Risiko' : 'keine Event-Blockade';
-        return `${marketContext.regime || 'NEUTRAL'} | ${marketContext.trade_mode || 'SELECTIVE'} | ${headline}, ${event}`;
+        const mode = marketContext.trade_mode || marketContext.regime || 'SELECTIVE';
+        const risk = marketContext.overall_risk_score != null ? `Markt-Risk ${Math.round(Number(marketContext.overall_risk_score))}/100` : null;
+        const size = marketContext.size_multiplier != null ? `Size ${Math.round(Number(marketContext.size_multiplier) * 100)}%` : null;
+        return [mode, risk, size].filter(Boolean).join(' | ');
+    })();
+    const newsEventLine = (() => {
+        if (!marketContext) return null;
+        const news = marketContext.headline_level ? `News/Politik ${riskLabel(marketContext.headline_level)}` : null;
+        const event = marketContext.event_level ? `Event ${riskLabel(marketContext.event_level)}` : null;
+        const fear = marketContext.fear_score != null ? `Fear ${Math.round(Number(marketContext.fear_score))}` : null;
+        return [news, event, fear].filter(Boolean).join(' | ');
+    })();
+    const tradeHealthLine = (() => {
+        if (!tradeHealth) return null;
+        const label = tradeHealth.decision_label || tradeHealth.decision || 'Trade Health';
+        const score = tradeHealth.health_score != null ? `${Math.round(Number(tradeHealth.health_score))}/100` : null;
+        const entry = tradeHealth.entry_quality ? `Entry ${tradeHealth.entry_quality}${tradeHealth.entry_quality_score != null ? ` ${Math.round(Number(tradeHealth.entry_quality_score))}/100` : ''}` : null;
+        const fakeout = tradeHealth.fakeout_risk ? `Fakeout ${riskLabel(tradeHealth.fakeout_risk)}` : null;
+        const chase = tradeHealth.chase_risk ? `Chase ${riskLabel(tradeHealth.chase_risk)}` : null;
+        return [score ? `${label} ${score}` : label, entry, fakeout, chase].filter(Boolean).join(' | ');
     })();
     const nextStepText = (() => {
         const action = String(setupAction || '').toUpperCase();
@@ -3035,6 +3062,21 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <div><span className="opacity-70">Risk</span><div className={`font-semibold ${riskTone(cd.risk_level || tradeHealth?.fakeout_risk)}`}>{cd.risk_level || tradeHealth?.fakeout_risk || 'LOW'}</div></div>
                             <div><span className="opacity-70">BTC</span><div className="font-semibold">{activeTradeSetup?.btc_context?.tailwind === false ? 'Gegenwind' : activeTradeSetup?.btc_context?.tailwind === true || cd.btc_context?.tailwind ? 'Tailwind' : '-'}</div></div>
                         </div>
+                        {(tradeHealthLine || marketContextLine || newsEventLine) && (
+                            <div className="mt-2 rounded border border-white/70 bg-white/50 p-2">
+                                {tradeHealthLine && (
+                                    <div><span className="font-semibold">Trade Health:</span> {tradeHealthLine}</div>
+                                )}
+                                {marketContextLine && (
+                                    <div className="mt-1"><span className="font-semibold">Markt:</span> {marketContextLine}</div>
+                                )}
+                                {newsEventLine && (
+                                    <div className="mt-1 opacity-80">
+                                        <span className="font-semibold">News/Event:</span> {newsEventLine} <span className="opacity-70">(Kontext, kein Entry-Signal)</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         {showTriggerChecklist && (
                             <div className="mt-2 rounded border border-white/70 bg-white/60 p-2">
                                 <div className="font-semibold mb-1">Trigger-Checkliste</div>
@@ -3048,9 +3090,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         )}
                         {(cd.risk_flags && cd.risk_flags.length > 0) && (
                             <div className="mt-2 text-amber-800">Hinweis: {compactRiskText(cd.risk_flags)}</div>
-                        )}
-                        {weatherOneLine && (
-                            <div className="mt-1 opacity-80">Market: {weatherOneLine}</div>
                         )}
                         {reminderEligible && (
                             <div className="mt-3 border-t border-white/60 pt-2">
