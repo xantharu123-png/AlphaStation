@@ -78,7 +78,7 @@ def test_crypto_trade_simulation_long_hits_tp2():
 
     assert trade is not None
     assert trade["outcome"] == "TP2"
-    assert trade["pnl_pct"] == 25.0
+    assert trade["pnl_pct"] == 20.0
     assert trade["is_winner"] is True
 
 
@@ -103,3 +103,38 @@ def test_crypto_trade_simulation_short_stops_before_target_when_same_daily_bar()
     assert trade is not None
     assert trade["outcome"] == "STOP"
     assert trade["pnl_pct"] == -10.0
+
+
+def test_backtest_result_sorts_trades_chronologically_before_drawdown():
+    trades = [
+        {"ticker": "LATE", "entry_date": "2026-01-10", "pnl_pct": -10.0, "r_multiple": -1, "outcome": "STOP"},
+        {"ticker": "EARLY", "entry_date": "2026-01-01", "pnl_pct": 10.0, "r_multiple": 1, "outcome": "TP1"},
+    ]
+
+    result = api._build_backtest_result("x", "Test", "long", 1, trades)
+
+    assert [t["ticker"] for t in result["trades"]] == ["EARLY", "LATE"]
+    assert result["sum_pnl"] == 0.0
+    assert result["compounded_return"] == -1.0
+    assert result["max_drawdown"] == 10.0
+
+
+def test_crypto_trade_simulation_rejects_invalid_long_levels():
+    bars = [
+        {"date": "2026-01-01", "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2},
+        {"date": "2026-01-02", "open": 10.0, "high": 13.0, "low": 10.0, "close": 12.5},
+    ]
+
+    trade = api._simulate_crypto_trade(
+        bars=bars,
+        entry_idx=1,
+        direction="long",
+        entry=10.0,
+        stop=10.5,
+        tp1=11.5,
+        tp2=12.5,
+        max_hold=1,
+        fee_pct=0.0,
+    )
+
+    assert trade is None

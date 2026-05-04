@@ -11245,6 +11245,19 @@ def _bt_max_drawdown(trades: List[Dict[str, Any]]) -> float:
     return round(max_dd, 2)
 
 
+def _bt_compounded_return(trades: List[Dict[str, Any]]) -> float:
+    equity = 100.0
+    for trade in trades:
+        equity *= 1 + (_bt_float(trade.get("pnl_pct")) / 100)
+    return round(equity - 100.0, 2)
+
+
+def _bt_trade_sort_key(trade: Dict[str, Any]) -> Tuple[str, str]:
+    date_key = str(trade.get("entry_date") or trade.get("signal_date") or trade.get("exit_date") or "")
+    ticker_key = str(trade.get("ticker") or trade.get("symbol") or "")
+    return (date_key, ticker_key)
+
+
 def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     stats: Dict[str, Dict[str, Any]] = {}
     for grade in ["S", "A", "B", "C", "D"]:
@@ -11303,6 +11316,7 @@ def _build_backtest_result(
     crypto: bool = False,
 ) -> Dict[str, Any]:
     filled = [t for t in trades if str(t.get("outcome") or "").upper() != "NO_FILL"]
+    filled = sorted(filled, key=_bt_trade_sort_key)
     pcts = [_bt_float(t.get("pnl_pct")) for t in filled]
     wins = [p for p in pcts if p > 0]
     losses = [p for p in pcts if p <= 0]
@@ -11322,7 +11336,9 @@ def _build_backtest_result(
         "no_fill": int(no_fill),
         "win_rate": round(len(wins) / total_trades * 100, 1) if total_trades else 0,
         "avg_pnl": round(sum(pcts) / total_trades, 2) if total_trades else 0,
-        "total_return": round(sum(pcts), 2) if total_trades else 0,
+        "sum_pnl": round(sum(pcts), 2) if total_trades else 0,
+        "total_return": _bt_compounded_return(filled),
+        "compounded_return": _bt_compounded_return(filled),
         "max_drawdown": _bt_max_drawdown(filled),
         "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
         "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
@@ -11333,6 +11349,7 @@ def _build_backtest_result(
         "stats_by_grade": stats_by_grade or _bt_stats_by_grade(filled),
         "trades": normalized_trades,
         "note": note,
+        "methodology": "Universe-Kennzahlen sind chronologisch sortierte Trade-Statistiken, keine garantierte Portfolio-Rendite.",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -11364,9 +11381,9 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
 
     strategy = request.strategy
     meta = ADVANCED_SCANNER_BACKTESTS[strategy]
-    max_tickers = int(request.max_tickers or meta["default_max_tickers"])
-    min_price = float(request.min_price or meta["default_min_price"])
-    min_volume = int(request.min_volume or meta["default_min_volume"])
+    max_tickers = max(5, min(int(request.max_tickers or meta["default_max_tickers"]), 500))
+    min_price = max(0.0, float(request.min_price or meta["default_min_price"]))
+    min_volume = max(0, int(request.min_volume or meta["default_min_volume"]))
     months = max(1, min(int(request.months or 6), 24))
 
     if meta["engine"] == "bi_v2":
@@ -11436,10 +11453,16 @@ def _simulate_crypto_trade(
     if entry_idx >= len(bars) or entry <= 0:
         return None
     side = direction.lower()
+    if side not in ("long", "short"):
+        return None
     risk = abs(entry - stop)
     if risk <= 0:
         return None
+    if side == "long" and not (stop < entry < tp1 < tp2):
+        return None
     if side == "short" and (tp1 <= 0 or tp2 <= 0):
+        return None
+    if side == "short" and not (tp2 < tp1 < entry < stop):
         return None
 
     current_stop = stop
@@ -11458,8 +11481,9 @@ def _simulate_crypto_trade(
                 exit_date = bar["date"]
                 break
             if bar["high"] >= tp2:
-                exit_price = tp2
+                exit_price = (tp1 + tp2) / 2
                 exit_reason = "TP2"
+                tp1_hit = True
                 exit_date = bar["date"]
                 break
             if not tp1_hit and bar["high"] >= tp1:
@@ -11472,8 +11496,9 @@ def _simulate_crypto_trade(
                 exit_date = bar["date"]
                 break
             if bar["low"] <= tp2:
-                exit_price = tp2
+                exit_price = (tp1 + tp2) / 2
                 exit_reason = "TP2"
+                tp1_hit = True
                 exit_date = bar["date"]
                 break
             if not tp1_hit and bar["low"] <= tp1:
@@ -11531,6 +11556,7 @@ def _crypto_backtest_universe(max_tickers: int) -> List[Dict[str, Any]]:
 
 
 def _crypto_signal_grade(score: float) -> str:
+    score = min(100, max(0, _bt_float(score)))
     if score >= 85:
         return "S"
     if score >= 75:

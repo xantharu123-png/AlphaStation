@@ -5718,6 +5718,10 @@ function BacktestTab() {
         const n = Number(value || 0);
         return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
     };
+    const numberOr = (value, fallback) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : fallback;
+    };
 
     const runBacktest = async () => {
         if (requiresTicker && !ticker.trim()) {
@@ -5734,10 +5738,10 @@ function BacktestTab() {
                 body: JSON.stringify({
                     ticker: requiresTicker ? ticker.toUpperCase() : 'UNIVERSE',
                     strategy,
-                    months: parseInt(months),
-                    max_tickers: parseInt(maxTickers || selectedStrategy.default_max_tickers || 50),
-                    min_price: parseFloat(minPrice || selectedStrategy.default_min_price || 0),
-                    min_volume: parseInt(minVolume || selectedStrategy.default_min_volume || 0)
+                    months: numberOr(months, 6),
+                    max_tickers: numberOr(maxTickers || selectedStrategy.default_max_tickers, 50),
+                    min_price: numberOr(minPrice || selectedStrategy.default_min_price, 0),
+                    min_volume: numberOr(minVolume || selectedStrategy.default_min_volume, 0)
                 })
             });
 
@@ -5749,8 +5753,8 @@ function BacktestTab() {
                     setTrades([]);
                     if (window.addToast) window.addToast(data.error, 'error');
                 } else if (data.total_trades === 0) {
-                    setError('Keine Trades gefunden — probiere einen anderen Zeitraum oder Ticker');
-                    setResults(null);
+                    setError(null);
+                    setResults(data);
                     setTrades([]);
                     if (window.addToast) window.addToast('Keine Trades gefunden', 'info');
                 } else {
@@ -5884,7 +5888,7 @@ function BacktestTab() {
                             <div className="text-2xl font-bold mt-1 color-negative">-{(results.max_drawdown ?? 0).toFixed(2)}%</div>
                         </div>
                         <div className="metric-card" style={{ borderColor: (results.total_return ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>
-                            <div className="text-xs font-semibold text-gray-500">Gesamtrendite</div>
+                            <div className="text-xs font-semibold text-gray-500">{results.backtest_type ? 'Equity*' : 'Gesamtrendite'}</div>
                             <div className={`text-2xl font-bold mt-1 ${(results.total_return ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>
                                 {(results.total_return ?? 0) >= 0 ? '+' : ''}{(results.total_return ?? 0).toFixed(2)}%
                             </div>
@@ -5912,14 +5916,16 @@ function BacktestTab() {
 
                     {(results.total_signals !== undefined || results.n_tickers || results.note) && (
                         <div className="card border border-blue-100 bg-blue-50 p-4 rounded-lg text-sm text-blue-900">
-                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
                                 <div><span className="font-semibold">Signale:</span> {results.total_signals ?? results.total_trades}</div>
                                 <div><span className="font-semibold">No Fill:</span> {results.no_fill ?? 0}</div>
                                 <div><span className="font-semibold">Ticker:</span> {results.n_tickers ?? '-'}</div>
+                                <div><span className="font-semibold">Sum PnL:</span> {formatBtPct(results.sum_pnl ?? results.total_return ?? 0)}</div>
                                 <div><span className="font-semibold">Profit Factor:</span> {(results.profit_factor ?? 0).toFixed ? (results.profit_factor ?? 0).toFixed(2) : results.profit_factor}</div>
                                 <div><span className="font-semibold">Avg R:</span> {(results.avg_r ?? 0).toFixed ? (results.avg_r ?? 0).toFixed(2) : results.avg_r}</div>
                             </div>
                             {results.note && <div className="mt-2 text-xs text-blue-700">{results.note}</div>}
+                            {results.methodology && <div className="mt-1 text-xs text-blue-700">{results.methodology}</div>}
                         </div>
                     )}
 
