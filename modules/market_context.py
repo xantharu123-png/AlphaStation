@@ -38,7 +38,10 @@ HEADLINE_CATEGORIES = {
     },
     "regulation_ai_crypto": {
         "weight": 14,
-        "keywords": ("sec", "crypto regulation", "ai regulation", "antitrust", "lawsuit", "ban"),
+        "keywords": (
+            "crypto regulation", "ai regulation", "antitrust probe", "antitrust crackdown",
+            "sec sues", "sec charges", "sec investigation", "crypto ban", "ai ban",
+        ),
     },
     "shutdown_debt": {
         "weight": 18,
@@ -54,6 +57,47 @@ CALMING_KEYWORDS = (
     "dovish",
     "stimulus",
     "rescues",
+)
+
+NOISE_HEADLINE_PATTERNS = (
+    "class action", "law firm", "legal inquiry", "shareholder alert", "lost money",
+    "contact ", "deadline", "sec filing", "recent sec filing", "13f", "stake",
+    "reports since-inception performance", "announces first national bank",
+)
+
+MACRO_OVERRIDE_KEYWORDS = (
+    "iran", "hormuz", "strait", "oil", "crude", "opec", "federal reserve",
+    "fomc", "powell", "tariff", "trade war", "missile", "war", "attack",
+    "bank failure", "credit crisis", "debt ceiling", "government shutdown",
+)
+
+SOURCE_WEIGHT_HINTS = (
+    ("reuters", 1.15),
+    ("associated press", 1.10),
+    ("ap", 1.10),
+    ("bloomberg", 1.05),
+    ("wall street journal", 1.05),
+    ("benzinga", 0.90),
+    ("investing.com", 0.55),
+    ("the motley fool", 0.65),
+    ("globenewswire", 0.45),
+    ("pr newswire", 0.45),
+)
+
+SINGLE_STOCK_ANALYSIS_PATTERNS = (
+    "for investors", "1 ai chip stock", "why ", "shares slumped", "stock is",
+    "stock falls", "plummeting today", "reports earnings", "here's what's next",
+)
+
+LOW_RISK_ANALYSIS_PATTERNS = (
+    "not this year", "leads the charge", "room to rise", "buying the nasdaq",
+    "rallies", "sets sail",
+)
+
+OIL_RISK_CONTEXT = (
+    "jumps", "jumped", "spikes", "spiked", "surges", "surged", "shock",
+    "disrupted", "strike", "strikes", "attack", "tensions", "crisis",
+    "above $", "shut", "closed", "blocked", "pressuring",
 )
 
 
@@ -96,7 +140,7 @@ def _recency_weight(published: Optional[datetime], now_utc: datetime) -> float:
 
 
 def _risk_level(score: float) -> str:
-    if score >= 75:
+    if score >= 80:
         return "EXTREME"
     if score >= 50:
         return "HIGH"
@@ -112,6 +156,77 @@ def _keyword_matches(text: str, keyword: str) -> bool:
         return False
     pattern = r"(?<![a-z0-9])" + re.escape(keyword) + r"(?![a-z0-9])"
     return re.search(pattern, text) is not None
+
+
+def _headline_source(item: Dict[str, Any]) -> str:
+    publisher = item.get("publisher")
+    if isinstance(publisher, dict):
+        return str(publisher.get("name") or "")
+    return str(item.get("source") or item.get("publisher") or "")
+
+
+def _source_weight(source: str) -> float:
+    src = str(source or "").lower()
+    for needle, weight in SOURCE_WEIGHT_HINTS:
+        if needle in src:
+            return weight
+    return 0.75
+
+
+def _is_noise_headline(title: str, description: str, source: str) -> bool:
+    text = f"{title} {description}".lower()
+    title_text = str(title or "").lower()
+    source_text = str(source or "").lower()
+    broad_market_title = any(term in title_text for term in ("stock market", "wall street", "s&p", "nasdaq", "dow", "oil"))
+    if "the motley fool" in source_text and not broad_market_title and any(pattern in title_text for pattern in SINGLE_STOCK_ANALYSIS_PATTERNS):
+        return True
+    if any(pattern in text for pattern in LOW_RISK_ANALYSIS_PATTERNS) and not any(term in text for term in ("drops", "falls", "selloff", "crash")):
+        return True
+    if any(_keyword_matches(text, keyword) for keyword in MACRO_OVERRIDE_KEYWORDS):
+        return False
+    noisy_source = any(src in source_text for src in ("globenewswire", "pr newswire"))
+    return noisy_source or any(pattern in text for pattern in NOISE_HEADLINE_PATTERNS)
+
+
+def _category_matches(category: str, text: str, title_text: str, keywords: Iterable[str]) -> bool:
+    if category == "fed_rates":
+        if any(_keyword_matches(title_text, keyword) for keyword in ("federal reserve", "fed", "fomc", "powell")):
+            return True
+        return any(_keyword_matches(text, keyword) for keyword in ("rate decision", "interest rate"))
+    if category == "oil_energy":
+        if not any(_keyword_matches(text, keyword) for keyword in keywords):
+            return False
+        return any(pattern in text for pattern in OIL_RISK_CONTEXT) or "hormuz" in text or "shipping lane" in text
+    return any(_keyword_matches(text, keyword) for keyword in keywords)
+
+
+def _story_key(text: str, categories: Iterable[str]) -> str:
+    category_set = set(categories)
+    if (
+        ("war_geopolitics" in category_set or "oil_energy" in category_set)
+        and any(_keyword_matches(text, keyword) for keyword in ("iran", "hormuz", "uae", "strait"))
+    ):
+        return "iran_hormuz_oil"
+    if "tariffs_trade" in category_set and any(_keyword_matches(text, keyword) for keyword in ("china", "tariff", "trade war")):
+        return "tariffs_trade"
+    if "fed_rates" in category_set:
+        return "fed_rates"
+    if "banking_credit" in category_set:
+        return "banking_credit"
+    if "shutdown_debt" in category_set:
+        return "shutdown_debt"
+    return "_".join(sorted(category_set)) or "uncategorized"
+
+
+def _story_cap(story_key: str, categories: Iterable[str]) -> float:
+    category_set = set(categories)
+    if story_key == "iran_hormuz_oil":
+        return 58.0
+    if "banking_credit" in category_set or "shutdown_debt" in category_set:
+        return 60.0
+    if "tariffs_trade" in category_set:
+        return 54.0
+    return 42.0
 
 
 def missing_headline_risk(error: str = "Headline data unavailable") -> Dict[str, Any]:
@@ -137,6 +252,10 @@ def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[dat
     now_utc = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     category_scores: Dict[str, float] = {key: 0.0 for key in HEADLINE_CATEGORIES}
     matched: List[Dict[str, Any]] = []
+    ignored: List[Dict[str, Any]] = []
+    story_totals: Dict[str, float] = {}
+    story_category_scores: Dict[str, Dict[str, float]] = {}
+    story_categories: Dict[str, set[str]] = {}
     headline_count = 0
     calming_score = 0.0
 
@@ -147,29 +266,66 @@ def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[dat
         title = str(item.get("title") or item.get("headline") or "")
         description = str(item.get("description") or item.get("summary") or "")
         text = f"{title} {description}".lower()
+        title_text = title.lower()
+        source = _headline_source(item)
+        source_weight = _source_weight(source)
         published = _parse_dt(item.get("published_utc") or item.get("published_at") or item.get("timestamp"))
         recency = _recency_weight(published, now_utc)
-        matched_categories = []
+        category_points: Dict[str, float] = {}
+
+        if _is_noise_headline(title, description, source):
+            ignored.append({
+                "title": title[:160],
+                "source": source,
+                "reason": "company_pr_or_legal_noise",
+            })
+            continue
 
         if any(_keyword_matches(text, keyword) for keyword in CALMING_KEYWORDS):
-            calming_score += 8 * recency
+            calming_score += 8 * recency * source_weight
 
         for category, cfg in HEADLINE_CATEGORIES.items():
-            if any(_keyword_matches(text, keyword) for keyword in cfg["keywords"]):
-                points = cfg["weight"] * recency
-                category_scores[category] += points
-                matched_categories.append(category)
+            if _category_matches(category, text, title_text, cfg["keywords"]):
+                category_points[category] = cfg["weight"] * recency * source_weight
+
+        matched_categories = list(category_points.keys())
+        if matched_categories:
+            key = _story_key(text, matched_categories)
+            for category, points in category_points.items():
+                story_totals[key] = story_totals.get(key, 0.0) + points
+                story_category_scores.setdefault(key, {})
+                story_category_scores[key][category] = story_category_scores[key].get(category, 0.0) + points
+                story_categories.setdefault(key, set()).add(category)
 
         if matched_categories:
+            key = _story_key(text, matched_categories)
             matched.append({
                 "title": title[:180],
                 "published_utc": published.isoformat() if published else item.get("published_utc"),
                 "categories": matched_categories,
-                "source": item.get("publisher", {}).get("name") if isinstance(item.get("publisher"), dict) else item.get("source"),
+                "source": source,
+                "story_key": key,
+                "source_weight": round(source_weight, 2),
                 "url": item.get("article_url") or item.get("url"),
             })
 
-    raw_score = sum(min(35.0, score) for score in category_scores.values()) - calming_score
+    story_scores = []
+    for key, total in story_totals.items():
+        categories = story_categories.get(key, set())
+        cap = _story_cap(key, categories)
+        adjusted = min(cap, total)
+        scale = adjusted / total if total > 0 else 0
+        for category, value in story_category_scores.get(key, {}).items():
+            category_scores[category] += value * scale
+        story_scores.append({
+            "story_key": key,
+            "score": int(round(adjusted)),
+            "raw_score": int(round(total)),
+            "cap": int(round(cap)),
+            "categories": sorted(categories),
+        })
+
+    raw_score = sum(item["score"] for item in story_scores) - calming_score
     score = int(round(max(0.0, min(100.0, raw_score))))
     active_categories = {
         key: int(round(min(100.0, value)))
@@ -182,11 +338,16 @@ def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[dat
         "level": _risk_level(score),
         "headline_count": headline_count,
         "matched_count": len(matched),
+        "story_count": len(story_scores),
         "data_status": "ok",
         "categories": active_categories,
         "top_headlines": matched[:8],
+        "story_scores": sorted(story_scores, key=lambda item: item["score"], reverse=True)[:6],
+        "ignored_count": len(ignored),
+        "ignored_headlines": ignored[:5],
         "calming_score": int(round(calming_score)),
-        "source": "Polygon news headline keyword risk",
+        "source": "Polygon news headline story risk",
+        "scoring_note": "Story-deduped and PR/legal/company-filing noise filtered.",
         "timestamp": now_utc.isoformat(),
     }
 
@@ -282,6 +443,23 @@ def build_market_context(
     headline_score = _to_float(headline_risk.get("score"), 0)
     if headline_status not in {"ok", "fresh"}:
         headline_score = max(headline_score, 35)
+    headline_confirmers = []
+    if market_risk >= 60:
+        headline_confirmers.append("market_risk")
+    if vix >= 20:
+        headline_confirmers.append("vix")
+    if ad_ratio < 0.7 or advancing_pct < 40:
+        headline_confirmers.append("breadth")
+    if headline_status in {"ok", "fresh"} and headline_score >= 85 and not headline_confirmers:
+        headline_risk = dict(headline_risk)
+        headline_risk["score_adjusted_from"] = int(round(headline_score))
+        headline_risk["score"] = 75
+        headline_risk["level"] = _risk_level(75)
+        headline_risk["confirmation"] = "capped_without_market_confirmation"
+        headline_score = 75
+    elif headline_status in {"ok", "fresh"}:
+        headline_risk = dict(headline_risk)
+        headline_risk["confirmation"] = "confirmed_by_" + ",".join(headline_confirmers) if headline_confirmers else "headline_only"
     event_score = _to_float(event_risk.get("score"), 0)
     overall_risk = int(round(market_risk * 0.50 + headline_score * 0.30 + event_score * 0.20))
 
@@ -289,10 +467,14 @@ def build_market_context(
         regime = "PANIC"
         trade_mode = "PROTECT_CAPITAL"
         size_multiplier = 0.25
-    elif overall_risk >= 55:
+    elif overall_risk >= 65:
         regime = "RISK_OFF"
         trade_mode = "DEFENSIVE"
         size_multiplier = 0.50
+    elif overall_risk >= 55:
+        regime = "RISK_OFF_LIGHT"
+        trade_mode = "CAUTIOUS"
+        size_multiplier = 0.65
     elif overall_risk >= 32:
         regime = "NEUTRAL"
         trade_mode = "SELECTIVE"
@@ -314,6 +496,8 @@ def build_market_context(
         warnings.append("Headline-/Politikrisiko hoch: keine FOMO-Market-Entries.")
     if event_score >= 50:
         warnings.append("High-Impact-Event nah: Positionsgroesse reduzieren und News-Spikes meiden.")
+    if regime == "RISK_OFF_LIGHT":
+        warnings.append("Risk-Off-Light: selektiv bleiben, Longs bevorzugt nur mit Retest/VWAP-Hold.")
     if regime in {"RISK_OFF", "PANIC"}:
         warnings.append("Risk-Off-Regime: Long-Breakouts nur mit Retest/VWAP-Hold, Shorts bevorzugt beobachten.")
 
@@ -323,7 +507,7 @@ def build_market_context(
         "trade_mode": trade_mode,
         "overall_risk_score": overall_risk,
         "size_multiplier": size_multiplier,
-        "long_bias": "normal" if regime == "RISK_ON" else ("retest_only" if regime == "NEUTRAL" else "defensive"),
+        "long_bias": "normal" if regime == "RISK_ON" else ("retest_only" if regime in {"NEUTRAL", "RISK_OFF_LIGHT"} else "defensive"),
         "short_bias": "normal" if regime in {"NEUTRAL", "RISK_ON"} else "favored_but_no_chase",
         "market_risk": {
             "score": int(round(market_risk)),

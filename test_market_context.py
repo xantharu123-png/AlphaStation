@@ -42,6 +42,60 @@ def test_headline_keywords_do_not_match_inside_harmless_words():
     assert "regulation_ai_crypto" not in risk["categories"]
 
 
+def test_company_pr_and_law_firm_noise_do_not_create_extreme_headline_risk():
+    now = datetime(2026, 5, 4, 18, 50, tzinfo=timezone.utc)
+    headlines = [
+        {
+            "title": "FINQ Reports Since-Inception Performance for AIUP and AINT AI-Managed ETFs",
+            "description": "The funds are SEC-registered U.S. ETFs fully managed by artificial intelligence.",
+            "published_utc": "2026-05-04T17:56:00Z",
+            "publisher": {"name": "GlobeNewswire Inc."},
+        },
+        {
+            "title": "Villere St Denis Liquidates $18 Million Euronet Worldwide Stake, According to Recent SEC Filing",
+            "published_utc": "2026-05-04T17:25:29Z",
+            "publisher": {"name": "The Motley Fool"},
+        },
+        {
+            "title": "Lost Money With TCOM? Contact Glancy Prongay Wolke & Rotter LLP",
+            "description": "A securities fraud class action has been filed against Trip.com Group.",
+            "published_utc": "2026-05-04T16:00:00Z",
+            "publisher": {"name": "GlobeNewswire Inc."},
+        },
+    ]
+
+    risk = analyze_headlines(headlines, now)
+
+    assert risk["level"] == "LOW"
+    assert risk["matched_count"] == 0
+    assert risk["ignored_count"] >= 2
+
+
+def test_geopolitical_oil_story_is_high_but_deduped_not_extreme_by_itself():
+    now = datetime(2026, 5, 4, 18, 50, tzinfo=timezone.utc)
+    headlines = [
+        {
+            "title": "Stock Market Today: Oil Jumps 5%, S&P 500 Drops As Iran Strikes UAE Port",
+            "description": "Brent crude rose after an Iranian drone strike on a UAE oil facility.",
+            "published_utc": "2026-05-04T17:34:04Z",
+            "publisher": {"name": "Benzinga"},
+        },
+        {
+            "title": "Closing the Strait of Hormuz Disrupted 30% of the World's Helium",
+            "description": "An Iranian missile strike disrupted supply chains near the strait.",
+            "published_utc": "2026-05-04T17:30:00Z",
+            "publisher": {"name": "The Motley Fool"},
+        },
+    ]
+
+    risk = analyze_headlines(headlines, now)
+
+    assert risk["level"] == "HIGH"
+    assert 45 <= risk["score"] < 75
+    assert risk["story_count"] == 1
+    assert risk["story_scores"][0]["story_key"] == "iran_hormuz_oil"
+
+
 def test_missing_headline_data_is_unknown_and_defensive():
     context = build_market_context(
         {"fear_score": 60, "vix": {"price": 16}, "breadth": {"ad_ratio": 1.2, "advancing_pct": 52}},
@@ -53,6 +107,58 @@ def test_missing_headline_data_is_unknown_and_defensive():
     assert context["summary"]["headline_status"] == "error"
     assert context["regime"] != "RISK_ON"
     assert any("Headline-Daten" in warning for warning in context["warnings"])
+
+
+def test_today_style_headline_risk_stays_selective_when_market_is_not_panicking():
+    now = datetime(2026, 5, 4, 18, 50, tzinfo=timezone.utc)
+    headlines = [
+        {
+            "title": "FINQ Reports Since-Inception Performance for AIUP and AINT AI-Managed ETFs",
+            "description": "The funds are SEC-registered U.S. ETFs fully managed by artificial intelligence.",
+            "published_utc": "2026-05-04T17:56:00Z",
+            "publisher": {"name": "GlobeNewswire Inc."},
+        },
+        {
+            "title": "Stock Market Today: Oil Jumps 5%, S&P 500 Drops As Iran Strikes UAE Port",
+            "description": "Brent crude rose after an Iranian drone strike on a UAE oil facility.",
+            "published_utc": "2026-05-04T17:34:04Z",
+            "publisher": {"name": "Benzinga"},
+        },
+        {
+            "title": "Closing the Strait of Hormuz Disrupted 30% of the World's Helium",
+            "description": "An Iranian missile strike disrupted supply chains near the strait.",
+            "published_utc": "2026-05-04T17:30:00Z",
+            "publisher": {"name": "The Motley Fool"},
+        },
+        {
+            "title": "Lost Money With TCOM? Contact Glancy Prongay Wolke & Rotter LLP",
+            "description": "A securities fraud class action has been filed against Trip.com Group.",
+            "published_utc": "2026-05-04T16:00:00Z",
+            "publisher": {"name": "GlobeNewswire Inc."},
+        },
+    ]
+    headline_risk = analyze_headlines(headlines, now)
+    context = build_market_context(
+        {"fear_score": 58, "vix": {"price": 16.5}, "breadth": {"ad_ratio": 0.66, "advancing_pct": 37.9}},
+        headline_risk,
+        {"score": 18, "level": "LOW", "data_status": "ok", "upcoming_events": []},
+    )
+
+    assert context["regime"] == "NEUTRAL"
+    assert context["trade_mode"] == "SELECTIVE"
+    assert context["summary"]["headline_level"] == "HIGH"
+
+
+def test_risk_off_light_between_selective_and_defensive():
+    context = build_market_context(
+        {"fear_score": 50, "vix": {"price": 18}, "breadth": {"ad_ratio": 0.65, "advancing_pct": 38}},
+        {"score": 80, "level": "EXTREME", "data_status": "ok", "top_headlines": []},
+        {"score": 18, "level": "LOW", "data_status": "ok", "upcoming_events": []},
+    )
+
+    assert context["regime"] == "RISK_OFF_LIGHT"
+    assert context["trade_mode"] == "CAUTIOUS"
+    assert context["size_multiplier"] == 0.65
 
 
 def test_near_high_impact_event_sets_event_risk():

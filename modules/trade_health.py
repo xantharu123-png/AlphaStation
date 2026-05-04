@@ -425,6 +425,9 @@ def calculate_trade_health(
         elif trade_mode == "DEFENSIVE" or regime == "RISK_OFF":
             context_penalty = 13
             warnings.append("Market Weather Risk-Off: Longs nur defensiv/Retest, keine FOMO Entries")
+        elif trade_mode == "CAUTIOUS" or regime == "RISK_OFF_LIGHT":
+            context_penalty = 8
+            warnings.append("Market Weather Risk-Off-Light: selektiv bleiben, keine News-FOMO Entries")
         elif trade_mode == "SELECTIVE" or regime == "NEUTRAL":
             context_penalty = 5
         if headline_level in {"HIGH", "EXTREME"}:
@@ -441,7 +444,7 @@ def calculate_trade_health(
             if direction == "LONG":
                 entry_score -= context_penalty
                 fakeout_score -= max(4, int(context_penalty * 0.7))
-            elif regime in {"RISK_OFF", "PANIC"}:
+            elif regime in {"RISK_OFF_LIGHT", "RISK_OFF", "PANIC"}:
                 fakeout_score -= max(3, int(context_penalty * 0.35))
                 positives.append("Risk-Off kann Short-Setups unterstuetzen, aber trotzdem nicht chasen")
             else:
