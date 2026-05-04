@@ -153,3 +153,18 @@ def test_backtest_progress_lifecycle():
     assert progress["message"] == "Halbzeit"
     assert progress["total_items"] == 10
     assert progress["done_items"] == 4
+
+
+def test_backtest_verdict_blocks_unprofitable_strategy():
+    trades = [
+        {"ticker": "A", "entry_date": "2026-01-01", "pnl_pct": -8.0, "r_multiple": -1.0, "outcome": "STOP"},
+        {"ticker": "B", "entry_date": "2026-01-02", "pnl_pct": -6.0, "r_multiple": -1.0, "outcome": "STOP"},
+        {"ticker": "C", "entry_date": "2026-01-03", "pnl_pct": 2.0, "r_multiple": 0.3, "outcome": "TP1"},
+    ] * 8
+
+    result = api._build_backtest_result("x", "Weak Strategy", "long", 6, trades)
+
+    assert result["profit_factor"] < 1
+    assert result["verdict"]["status"] == "blocked"
+    assert result["verdict"]["tradable"] is False
+    assert "nicht live" in result["verdict"]["summary"].lower()

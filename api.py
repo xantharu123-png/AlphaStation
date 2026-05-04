@@ -11319,6 +11319,97 @@ def _bt_compounded_return(trades: List[Dict[str, Any]]) -> float:
     return round(equity - 100.0, 2)
 
 
+def _bt_backtest_verdict(
+    total_trades: int,
+    win_rate: float,
+    avg_pnl: float,
+    profit_factor: float,
+    avg_r: float,
+    max_drawdown: float,
+    total_return: float,
+) -> Dict[str, Any]:
+    """Translate raw stats into a clear trading gate for the UI."""
+    if total_trades <= 0:
+        return {
+            "status": "no_trades",
+            "label": "KEIN SIGNAL",
+            "color": "gray",
+            "tradable": False,
+            "summary": "Backtest hat keine ausfuehrbaren Trades gefunden.",
+            "reasons": ["Keine belastbare Aussage ohne Trades."],
+        }
+
+    blockers: List[str] = []
+    warnings: List[str] = []
+    if total_trades < 20:
+        warnings.append(f"Sample klein: nur {total_trades} Trades.")
+    if profit_factor <= 0:
+        blockers.append("Profit Factor nicht positiv.")
+    elif profit_factor < 1.0:
+        blockers.append(f"Profit Factor {profit_factor:.2f} < 1.00.")
+    elif profit_factor < 1.15:
+        warnings.append(f"Profit Factor {profit_factor:.2f} ist nur knapp positiv.")
+    if avg_pnl < 0:
+        blockers.append(f"Durchschnitt pro Trade {avg_pnl:.2f}% ist negativ.")
+    elif avg_pnl < 0.25:
+        warnings.append(f"Durchschnitt pro Trade {avg_pnl:.2f}% ist sehr duenn.")
+    if avg_r < 0:
+        blockers.append(f"Avg R {avg_r:.2f} ist negativ.")
+    elif total_trades >= 10 and avg_r < 0.10:
+        warnings.append(f"Avg R {avg_r:.2f} zeigt kaum Edge.")
+    if max_drawdown >= 35:
+        blockers.append(f"Max Drawdown {max_drawdown:.1f}% ist zu hoch.")
+    elif max_drawdown >= 20:
+        warnings.append(f"Max Drawdown {max_drawdown:.1f}% ist erhoeht.")
+    if total_return <= -10:
+        blockers.append(f"Equity {total_return:.1f}% ist klar negativ.")
+
+    if blockers:
+        return {
+            "status": "blocked",
+            "label": "NICHT FREIGEBEN",
+            "color": "red",
+            "tradable": False,
+            "summary": "Diese Strategie darf mit diesen Regeln nicht live gehandelt werden.",
+            "reasons": blockers + warnings,
+        }
+    if total_trades < 20:
+        return {
+            "status": "sample_small",
+            "label": "ZU WENIG DATEN",
+            "color": "orange",
+            "tradable": False,
+            "summary": "Ergebnis ist noch nicht belastbar genug fuer Live-Freigabe.",
+            "reasons": warnings or ["Mindestens 20 Trades fuer eine erste Aussage abwarten."],
+        }
+    if profit_factor >= 1.35 and avg_pnl >= 0.35 and avg_r >= 0.20 and max_drawdown <= 20 and win_rate >= 45:
+        return {
+            "status": "approved",
+            "label": "FREIGABE MOEGLICH",
+            "color": "green",
+            "tradable": True,
+            "summary": "Backtest zeigt eine robuste Edge, trotzdem nur mit Risk-Limits handeln.",
+            "reasons": warnings,
+        }
+    if profit_factor >= 1.10 and avg_pnl > 0 and max_drawdown < 30:
+        return {
+            "status": "selective",
+            "label": "NUR SELEKTIV",
+            "color": "blue",
+            "tradable": False,
+            "summary": "Leichte Edge, aber noch nicht stark genug fuer automatische Freigabe.",
+            "reasons": warnings or ["Filter/Entry-Regeln weiter verschaerfen."],
+        }
+    return {
+        "status": "weak",
+        "label": "EDGE ZU SCHWACH",
+        "color": "orange",
+        "tradable": False,
+        "summary": "Nicht schlecht genug fuer einen harten Block, aber noch keine Live-Freigabe.",
+        "reasons": warnings or ["Profit Factor, Avg PnL oder Drawdown sind nicht ueberzeugend."],
+    }
+
+
 def _bt_trade_sort_key(trade: Dict[str, Any]) -> Tuple[str, str]:
     date_key = str(trade.get("entry_date") or trade.get("signal_date") or trade.get("exit_date") or "")
     ticker_key = str(trade.get("ticker") or trade.get("symbol") or "")
@@ -11391,6 +11482,13 @@ def _build_backtest_result(
     gross_loss = abs(sum(losses))
     total_trades = len(filled)
     normalized_trades = _normalize_backtest_trades(filled, direction, crypto)
+    win_rate = round(len(wins) / total_trades * 100, 1) if total_trades else 0
+    avg_pnl = round(sum(pcts) / total_trades, 2) if total_trades else 0
+    sum_pnl = round(sum(pcts), 2) if total_trades else 0
+    total_return = _bt_compounded_return(filled)
+    max_drawdown = _bt_max_drawdown(filled)
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0)
+    avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in filled) / total_trades, 2) if total_trades else 0
     return {
         "ticker": "Crypto Universe" if crypto else "Scanner Universe",
         "strategy": strategy,
@@ -11401,18 +11499,19 @@ def _build_backtest_result(
         "total_signals": int(total_signals if total_signals is not None else len(trades)),
         "total_trades": total_trades,
         "no_fill": int(no_fill),
-        "win_rate": round(len(wins) / total_trades * 100, 1) if total_trades else 0,
-        "avg_pnl": round(sum(pcts) / total_trades, 2) if total_trades else 0,
-        "sum_pnl": round(sum(pcts), 2) if total_trades else 0,
-        "total_return": _bt_compounded_return(filled),
-        "compounded_return": _bt_compounded_return(filled),
-        "max_drawdown": _bt_max_drawdown(filled),
+        "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
+        "sum_pnl": sum_pnl,
+        "total_return": total_return,
+        "compounded_return": total_return,
+        "max_drawdown": max_drawdown,
         "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
         "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
         "best_trade": round(max(pcts), 2) if pcts else 0,
         "worst_trade": round(min(pcts), 2) if pcts else 0,
-        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0),
-        "avg_r": round(sum(_bt_float(t.get("r_multiple")) for t in filled) / total_trades, 2) if total_trades else 0,
+        "profit_factor": profit_factor,
+        "avg_r": avg_r,
+        "verdict": _bt_backtest_verdict(total_trades, win_rate, avg_pnl, profit_factor, avg_r, max_drawdown, total_return),
         "stats_by_grade": stats_by_grade or _bt_stats_by_grade(filled),
         "trades": normalized_trades,
         "note": note,
@@ -11815,6 +11914,8 @@ def _backtest_stats(trades, ticker, strategy, months):
             "ticker": ticker, "strategy": strategy, "months": months,
             "total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_return": 0,
             "max_drawdown": 0, "avg_win": 0, "avg_loss": 0, "best_trade": 0,
+            "profit_factor": 0, "avg_r": 0,
+            "verdict": _bt_backtest_verdict(0, 0, 0, 0, 0, 0, 0),
             "worst_trade": 0, "trades": [], "timestamp": datetime.now().isoformat(),
         }
     wins = [t for t in trades if t["pnl_pct"] > 0]
@@ -11826,6 +11927,10 @@ def _backtest_stats(trades, ticker, strategy, months):
     avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
     best_trade = round(max(t["pnl_pct"] for t in trades), 2)
     worst_trade = round(min(t["pnl_pct"] for t in trades), 2)
+    gross_profit = sum(t["pnl_pct"] for t in wins)
+    gross_loss = abs(sum(t["pnl_pct"] for t in losses_list))
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0)
+    avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in trades) / total_trades, 2) if any("r_multiple" in t for t in trades) else 0
     # Max Drawdown als % des Equity-Peaks (nicht in Prozentpunkten)
     max_dd = 0
     peak = 100  # Start-Equity = 100%
@@ -11842,7 +11947,9 @@ def _backtest_stats(trades, ticker, strategy, months):
         "total_trades": total_trades, "win_rate": win_rate, "avg_pnl": avg_pnl,
         "total_return": total_return, "max_drawdown": round(max_dd, 2),
         "avg_win": avg_win, "avg_loss": avg_loss, "best_trade": best_trade,
-        "worst_trade": worst_trade, "trades": trades[-50:],
+        "worst_trade": worst_trade, "profit_factor": profit_factor, "avg_r": avg_r,
+        "verdict": _bt_backtest_verdict(total_trades, win_rate, avg_pnl, profit_factor, avg_r, round(max_dd, 2), total_return),
+        "trades": trades[-50:],
         "timestamp": datetime.now().isoformat(),
     }
 
