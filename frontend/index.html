@@ -2841,6 +2841,18 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return 'Beobachten, noch kein Sofort-Entry.';
     })();
     const reminderEligible = activeTradeSetup && tradeSignal !== 'JETZT_TRADEN' && tradeSignal !== 'NICHT_TRADEN';
+    const triggerChecklist = (() => {
+        const raw = activeTradeSetup?.trigger_conditions || cd.trigger_conditions;
+        const lines = Array.isArray(raw) && raw.length
+            ? raw
+            : [
+                '5m higher-low oder VWAP-Hold abwarten',
+                'kein Market-Buy in eine lange gruene Kerze',
+                'BTC darf im Entry-Moment nicht hart abverkaufen',
+            ];
+        return lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3);
+    })();
+    const showTriggerChecklist = isCrypto && reminderEligible && triggerChecklist.length > 0;
     const createTradeReminder = async (hours = 6, channel = 'email_browser') => {
         setReminderBusy(true);
         try {
@@ -3000,6 +3012,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 <div className={`text-base font-bold ${setupTitleTone}`}>
                                     {tradeSignal === 'JETZT_TRADEN' ? 'JETZT TRADEN' : tradeSignal === 'NICHT_TRADEN' ? 'NICHT TRADEN' : 'BEOBACHTEN'}
                                 </div>
+                                {(activeTradeSetup?.entry_status || cd.entry_status) && (
+                                    <div className="text-[11px] font-semibold opacity-70">
+                                        {activeTradeSetup?.entry_status || cd.entry_status}
+                                    </div>
+                                )}
                                 <div className="opacity-80">{nextStepText}</div>
                             </div>
                             <div className="text-right">
@@ -3018,6 +3035,17 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <div><span className="opacity-70">Risk</span><div className={`font-semibold ${riskTone(cd.risk_level || tradeHealth?.fakeout_risk)}`}>{cd.risk_level || tradeHealth?.fakeout_risk || 'LOW'}</div></div>
                             <div><span className="opacity-70">BTC</span><div className="font-semibold">{activeTradeSetup?.btc_context?.tailwind === false ? 'Gegenwind' : activeTradeSetup?.btc_context?.tailwind === true || cd.btc_context?.tailwind ? 'Tailwind' : '-'}</div></div>
                         </div>
+                        {showTriggerChecklist && (
+                            <div className="mt-2 rounded border border-white/70 bg-white/60 p-2">
+                                <div className="font-semibold mb-1">Trigger-Checkliste</div>
+                                {triggerChecklist.map((line, idx) => (
+                                    <div key={idx}>- {line}</div>
+                                ))}
+                                <div className="mt-2 opacity-80">
+                                    Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem 5m/1m Trigger oder sauberem Retest.
+                                </div>
+                            </div>
+                        )}
                         {(cd.risk_flags && cd.risk_flags.length > 0) && (
                             <div className="mt-2 text-amber-800">Hinweis: {compactRiskText(cd.risk_flags)}</div>
                         )}
