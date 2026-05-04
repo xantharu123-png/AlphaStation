@@ -551,7 +551,7 @@ def fetch_daily_candles_crypto(coin_id, days=30):
         ohlc_data = _fetch_json(ohlc_url, {"vs_currency": "usd", "days": ohlc_days})
 
         market_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-        market_data = _fetch_json(market_url, {"vs_currency": "usd", "days": min(requested_days, 90)})
+        market_data = _fetch_json(market_url, {"vs_currency": "usd", "days": requested_days})
         volumes = (market_data or {}).get("total_volumes", [])
 
         daily_volume = {}

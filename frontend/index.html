@@ -5673,6 +5673,9 @@ function BacktestTab() {
     const [ticker, setTicker] = useState('');
     const [strategy, setStrategy] = useState('sma_crossover');
     const [months, setMonths] = useState('6');
+    const [maxTickers, setMaxTickers] = useState('50');
+    const [minPrice, setMinPrice] = useState('');
+    const [minVolume, setMinVolume] = useState('');
     const [isRunning, setIsRunning] = useState(false);
     const [results, setResults] = useState(null);
     const [trades, setTrades] = useState([]);
@@ -5700,8 +5703,24 @@ function BacktestTab() {
         fetchStrategies();
     }, []);
 
+    const selectedStrategy = strategyOptions.find(s => s.id === strategy) || {};
+    const requiresTicker = selectedStrategy.requires_ticker !== false;
+    const isUniverseBacktest = !requiresTicker;
+    const formatBtPrice = (value) => {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return '-';
+        if (n >= 100) return `$${n.toFixed(2)}`;
+        if (n >= 1) return `$${n.toFixed(3)}`;
+        if (n >= 0.01) return `$${n.toFixed(5)}`;
+        return `$${n.toFixed(8)}`;
+    };
+    const formatBtPct = (value) => {
+        const n = Number(value || 0);
+        return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+    };
+
     const runBacktest = async () => {
-        if (!ticker.trim()) {
+        if (requiresTicker && !ticker.trim()) {
             if (window.addToast) window.addToast('Bitte Ticker eingeben', 'error');
             return;
         }
@@ -5712,7 +5731,14 @@ function BacktestTab() {
             const response = await fetch(`${API}/api/run-backtest`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ticker: ticker.toUpperCase(), strategy, months: parseInt(months) })
+                body: JSON.stringify({
+                    ticker: requiresTicker ? ticker.toUpperCase() : 'UNIVERSE',
+                    strategy,
+                    months: parseInt(months),
+                    max_tickers: parseInt(maxTickers || selectedStrategy.default_max_tickers || 50),
+                    min_price: parseFloat(minPrice || selectedStrategy.default_min_price || 0),
+                    min_volume: parseInt(minVolume || selectedStrategy.default_min_volume || 0)
+                })
             });
 
             if (response.ok) {
@@ -5748,20 +5774,27 @@ function BacktestTab() {
     return (
         <div className="space-y-6">
             <div className="card border border-gray-200 p-6 rounded-lg">
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-4">
                     <div>
-                        <label className="block text-sm font-semibold mb-2">Ticker</label>
+                        <label className="block text-sm font-semibold mb-2">{requiresTicker ? 'Ticker' : 'Universe'}</label>
                         <input
                             type="text"
                             value={ticker}
                             onChange={(e) => setTicker(e.target.value.toUpperCase())}
                             onKeyDown={(e) => e.key === 'Enter' && runBacktest()}
-                            placeholder="z.B. AAPL"
+                            placeholder={requiresTicker ? 'z.B. AAPL' : 'Scanner-Universum'}
+                            disabled={!requiresTicker}
                         />
                     </div>
-                    <div>
+                    <div className="md:col-span-2">
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
-                        <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+                        <select value={strategy} onChange={(e) => {
+                            const next = strategyOptions.find(s => s.id === e.target.value) || {};
+                            setStrategy(e.target.value);
+                            if (next.default_max_tickers) setMaxTickers(String(next.default_max_tickers));
+                            if (next.default_min_price) setMinPrice(String(next.default_min_price));
+                            if (next.default_min_volume) setMinVolume(String(next.default_min_volume));
+                        }}>
                             {(() => {
                                 const categories = {};
                                 strategyOptions.forEach(s => {
@@ -5788,12 +5821,38 @@ function BacktestTab() {
                             <option value="24">24 Monate</option>
                         </select>
                     </div>
+                    <div>
+                        <label className="block text-sm font-semibold mb-2">Max Ticker</label>
+                        <input
+                            type="number"
+                            value={maxTickers}
+                            onChange={(e) => setMaxTickers(e.target.value)}
+                            min="5"
+                            max="500"
+                            disabled={!isUniverseBacktest}
+                        />
+                    </div>
                     <div className="flex items-end">
                         <button onClick={runBacktest} disabled={isRunning} className="button w-full">
                             {isRunning ? 'Läuft...' : 'Backtest starten'}
                         </button>
                     </div>
                 </div>
+                {isUniverseBacktest && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                        <div>
+                            <label className="block text-xs font-semibold mb-1 text-gray-500">Min Preis optional</label>
+                            <input type="number" value={minPrice} onChange={(e) => setMinPrice(e.target.value)} placeholder={selectedStrategy.default_min_price || 'auto'} />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold mb-1 text-gray-500">Min Volumen optional</label>
+                            <input type="number" value={minVolume} onChange={(e) => setMinVolume(e.target.value)} placeholder={selectedStrategy.default_min_volume || 'auto'} />
+                        </div>
+                        <div className="text-xs text-gray-500 flex items-end">
+                            {selectedStrategy.note || 'Scanner-Backtest nutzt ein ganzes Universum statt nur einen Ticker.'}
+                        </div>
+                    </div>
+                )}
                 {strategyOptions.find(s => s.id === strategy)?.direction === 'short' && (
                     <p className="text-xs text-red-500 mt-1 font-semibold">Short-Strategie — profitiert von fallenden Kursen</p>
                 )}
@@ -5851,6 +5910,49 @@ function BacktestTab() {
                         </div>
                     </div>
 
+                    {(results.total_signals !== undefined || results.n_tickers || results.note) && (
+                        <div className="card border border-blue-100 bg-blue-50 p-4 rounded-lg text-sm text-blue-900">
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                <div><span className="font-semibold">Signale:</span> {results.total_signals ?? results.total_trades}</div>
+                                <div><span className="font-semibold">No Fill:</span> {results.no_fill ?? 0}</div>
+                                <div><span className="font-semibold">Ticker:</span> {results.n_tickers ?? '-'}</div>
+                                <div><span className="font-semibold">Profit Factor:</span> {(results.profit_factor ?? 0).toFixed ? (results.profit_factor ?? 0).toFixed(2) : results.profit_factor}</div>
+                                <div><span className="font-semibold">Avg R:</span> {(results.avg_r ?? 0).toFixed ? (results.avg_r ?? 0).toFixed(2) : results.avg_r}</div>
+                            </div>
+                            {results.note && <div className="mt-2 text-xs text-blue-700">{results.note}</div>}
+                        </div>
+                    )}
+
+                    {results.stats_by_grade && Object.keys(results.stats_by_grade).length > 0 && (
+                        <div className="card border border-gray-200 p-4 rounded-lg overflow-x-auto">
+                            <h3 className="font-semibold mb-3">Qualitaet nach Grade</h3>
+                            <table className="w-full text-sm">
+                                <thead className="border-b border-gray-200">
+                                    <tr>
+                                        <th className="text-left py-2 px-2">Grade</th>
+                                        <th className="text-right py-2 px-2">Trades</th>
+                                        <th className="text-right py-2 px-2">Win%</th>
+                                        <th className="text-right py-2 px-2">Avg PnL</th>
+                                        <th className="text-right py-2 px-2">Avg R</th>
+                                        <th className="text-right py-2 px-2">PF</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {Object.entries(results.stats_by_grade).map(([grade, stat]) => (
+                                        <tr key={grade} className="table-row border-b border-gray-200">
+                                            <td className="py-2 px-2 font-semibold">{grade}</td>
+                                            <td className="py-2 px-2 text-right">{stat.total ?? 0}</td>
+                                            <td className="py-2 px-2 text-right">{(stat.win_rate ?? 0).toFixed(1)}%</td>
+                                            <td className={`py-2 px-2 text-right ${(stat.avg_pnl ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatBtPct(stat.avg_pnl ?? 0)}</td>
+                                            <td className="py-2 px-2 text-right">{(stat.avg_r ?? 0).toFixed(2)}</td>
+                                            <td className="py-2 px-2 text-right">{(stat.profit_factor ?? 0).toFixed ? (stat.profit_factor ?? 0).toFixed(2) : stat.profit_factor}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+
                     {trades.length > 0 && (
                         <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                             <h3 className="font-semibold mb-4">Trade Historie ({trades.length} Trades)</h3>
@@ -5858,11 +5960,15 @@ function BacktestTab() {
                                 <thead className="border-b border-gray-200">
                                     <tr>
                                         <th className="text-left py-2 px-2">#</th>
+                                        <th className="text-left py-2 px-2">Ticker</th>
                                         <th className="text-left py-2 px-2">Entry</th>
                                         <th className="text-right py-2 px-2">Entry Preis</th>
                                         <th className="text-left py-2 px-2">Exit</th>
                                         <th className="text-right py-2 px-2">Exit Preis</th>
                                         <th className="text-right py-2 px-2">PnL%</th>
+                                        <th className="text-right py-2 px-2">R</th>
+                                        <th className="text-center py-2 px-2">Grade</th>
+                                        <th className="text-center py-2 px-2">Outcome</th>
                                         <th className="text-center py-2 px-2">Typ</th>
                                     </tr>
                                 </thead>
@@ -5870,11 +5976,15 @@ function BacktestTab() {
                                     {trades.map((trade, idx) => (
                                         <tr key={idx} className="table-row border-b border-gray-200">
                                             <td className="py-3 px-2 text-gray-400">{idx + 1}</td>
+                                            <td className="py-3 px-2 font-semibold">{trade.ticker || '-'}</td>
                                             <td className="py-3 px-2">{trade.entry_date}</td>
-                                            <td className="py-3 px-2 text-right">${trade.entry_price?.toFixed(2)}</td>
+                                            <td className="py-3 px-2 text-right">{formatBtPrice(trade.entry_price)}</td>
                                             <td className="py-3 px-2">{trade.exit_date}</td>
-                                            <td className="py-3 px-2 text-right">${trade.exit_price?.toFixed(2)}</td>
-                                            <td className={`py-3 px-2 text-right font-semibold ${(trade.pnl_pct ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{(trade.pnl_pct ?? 0) >= 0 ? '+' : ''}{(trade.pnl_pct ?? 0).toFixed(2)}%</td>
+                                            <td className="py-3 px-2 text-right">{formatBtPrice(trade.exit_price)}</td>
+                                            <td className={`py-3 px-2 text-right font-semibold ${(trade.pnl_pct ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatBtPct(trade.pnl_pct ?? 0)}</td>
+                                            <td className="py-3 px-2 text-right">{(trade.r_multiple ?? 0).toFixed ? (trade.r_multiple ?? 0).toFixed(2) : trade.r_multiple}</td>
+                                            <td className="py-3 px-2 text-center text-xs">{trade.grade || '-'}</td>
+                                            <td className="py-3 px-2 text-center text-xs">{trade.outcome || '-'}</td>
                                             <td className="py-3 px-2 text-center text-xs">{trade.type || 'LONG'}</td>
                                         </tr>
                                     ))}

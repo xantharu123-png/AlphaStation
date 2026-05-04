@@ -87,6 +87,13 @@ from modules.indicators import calculate_ema_series, calculate_vwap, calculate_r
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 
 try:
+    from modules.backtests import run_bi_v2_backtest, run_biotech_backtest
+    HAS_ADVANCED_BACKTESTS = True
+except ImportError as _backtest_err:
+    HAS_ADVANCED_BACKTESTS = False
+    print(f"[Warning] Advanced backtest engines not loaded: {_backtest_err}")
+
+try:
     from modules.scorers import calculate_setup_score as calculate_stock_setup_score
 except ImportError:
     calculate_stock_setup_score = None
@@ -11136,6 +11143,517 @@ class BacktestRequest(BaseModel):
     ticker: str = "AAPL"
     strategy: str = "sma_crossover"  # sma_crossover, rsi_mean_reversion, ema_crossover
     months: int = 6
+    max_tickers: int = 50
+    min_price: float = 0
+    min_volume: int = 0
+
+
+ADVANCED_SCANNER_BACKTESTS = {
+    "scanner_bi_long": {
+        "name": "BI Scanner Long",
+        "category": "Scanner Backtests",
+        "direction": "long",
+        "engine": "bi_v2",
+        "default_max_tickers": 200,
+        "default_min_price": 5.0,
+        "default_min_volume": 200000,
+        "note": "Backtest nutzt die BI-Retest-Engine mit 50/50 TP1/TP2-Logik.",
+    },
+    "scanner_bi_short": {
+        "name": "BI Scanner Short",
+        "category": "Scanner Backtests",
+        "direction": "short",
+        "engine": "bi_v2",
+        "default_max_tickers": 200,
+        "default_min_price": 5.0,
+        "default_min_volume": 200000,
+        "note": "Backtest nutzt die BI-Short-Retest-Engine mit 50/50 TP1/TP2-Logik.",
+    },
+    "scanner_biotech": {
+        "name": "Bio Catalyst Scanner",
+        "category": "Scanner Backtests",
+        "direction": "long",
+        "engine": "biotech",
+        "default_max_tickers": 100,
+        "default_min_price": 2.0,
+        "default_min_volume": 100000,
+        "note": "Historische Catalyst-Daten sind begrenzt; Volume-Spikes dienen als Catalyst-Proxy.",
+    },
+}
+
+CRYPTO_BACKTESTS = {
+    "crypto_early_mover_long": {
+        "name": "Crypto Early Mover Long",
+        "category": "Crypto Backtests",
+        "direction": "long",
+        "default_max_tickers": 40,
+        "note": "Daily-OHLC Backtest; Intraday-Trigger/Retests koennen historisch nur naeherungsweise abgebildet werden.",
+    },
+    "crypto_pump_dump_short": {
+        "name": "Crypto Pump & Dump Short",
+        "category": "Crypto Backtests",
+        "direction": "short",
+        "default_max_tickers": 40,
+        "note": "Daily-OHLC Backtest fuer parabolische Pumps mit bestaetigtem Crack; neue Coin-Microstructure ist nicht voll rekonstruierbar.",
+    },
+}
+
+
+def _bt_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return default
+        return number
+    except Exception:
+        return default
+
+
+def _bt_round_price(value: Any, crypto: bool = False) -> Optional[float]:
+    number = _bt_float(value, 0)
+    if number <= 0:
+        return None
+    if crypto:
+        return _round_crypto_price(number)
+    return _round_trade_price(number)
+
+
+def _bt_bar_date(bar: Dict[str, Any]) -> str:
+    raw = bar.get("date") or bar.get("time")
+    if raw:
+        return str(raw)[:10]
+    ts = bar.get("t")
+    try:
+        if ts:
+            return datetime.utcfromtimestamp(float(ts) / 1000).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return ""
+
+
+def _bt_max_drawdown(trades: List[Dict[str, Any]]) -> float:
+    equity = 100.0
+    peak = equity
+    max_dd = 0.0
+    for trade in trades:
+        equity *= 1 + (_bt_float(trade.get("pnl_pct")) / 100)
+        peak = max(peak, equity)
+        if peak > 0:
+            max_dd = max(max_dd, ((peak - equity) / peak) * 100)
+    return round(max_dd, 2)
+
+
+def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    stats: Dict[str, Dict[str, Any]] = {}
+    for grade in ["S", "A", "B", "C", "D"]:
+        grade_trades = [t for t in trades if str(t.get("grade") or "").upper() == grade]
+        if not grade_trades:
+            continue
+        wins = [t for t in grade_trades if _bt_float(t.get("pnl_pct")) > 0]
+        losses = [t for t in grade_trades if _bt_float(t.get("pnl_pct")) <= 0]
+        gross_profit = sum(_bt_float(t.get("pnl_pct")) for t in wins)
+        gross_loss = abs(sum(_bt_float(t.get("pnl_pct")) for t in losses))
+        stats[grade] = {
+            "total": len(grade_trades),
+            "winners": len(wins),
+            "losers": len(losses),
+            "win_rate": round(len(wins) / len(grade_trades) * 100, 1),
+            "avg_pnl": round(sum(_bt_float(t.get("pnl_pct")) for t in grade_trades) / len(grade_trades), 2),
+            "avg_r": round(sum(_bt_float(t.get("r_multiple")) for t in grade_trades) / len(grade_trades), 2),
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0),
+        }
+    return stats
+
+
+def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, crypto: bool = False) -> List[Dict[str, Any]]:
+    rows = []
+    for trade in trades[-150:]:
+        entry_price = trade.get("actual_entry", trade.get("entry_price", trade.get("entry_target")))
+        exit_price = trade.get("exit_price")
+        rows.append({
+            "ticker": trade.get("ticker") or trade.get("symbol") or "",
+            "entry_date": trade.get("entry_date") or trade.get("signal_date") or "",
+            "entry_price": _bt_round_price(entry_price, crypto),
+            "exit_date": trade.get("exit_date") or "",
+            "exit_price": _bt_round_price(exit_price, crypto),
+            "pnl_pct": round(_bt_float(trade.get("pnl_pct")), 2),
+            "r_multiple": round(_bt_float(trade.get("r_multiple")), 2),
+            "type": str(trade.get("direction") or direction or "LONG").upper(),
+            "grade": str(trade.get("grade") or "").upper(),
+            "outcome": trade.get("outcome") or trade.get("exit_reason") or "",
+            "signal_date": trade.get("signal_date") or "",
+            "tp1_hit": bool(trade.get("tp1_hit")),
+        })
+    return rows
+
+
+def _build_backtest_result(
+    strategy: str,
+    label: str,
+    direction: str,
+    months: int,
+    trades: List[Dict[str, Any]],
+    total_signals: Optional[int] = None,
+    no_fill: int = 0,
+    n_tickers: int = 0,
+    stats_by_grade: Optional[Dict[str, Dict[str, Any]]] = None,
+    note: str = "",
+    crypto: bool = False,
+) -> Dict[str, Any]:
+    filled = [t for t in trades if str(t.get("outcome") or "").upper() != "NO_FILL"]
+    pcts = [_bt_float(t.get("pnl_pct")) for t in filled]
+    wins = [p for p in pcts if p > 0]
+    losses = [p for p in pcts if p <= 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    total_trades = len(filled)
+    normalized_trades = _normalize_backtest_trades(filled, direction, crypto)
+    return {
+        "ticker": "Crypto Universe" if crypto else "Scanner Universe",
+        "strategy": strategy,
+        "strategy_label": label,
+        "backtest_type": "crypto" if crypto else "scanner",
+        "months": months,
+        "n_tickers": n_tickers,
+        "total_signals": int(total_signals if total_signals is not None else len(trades)),
+        "total_trades": total_trades,
+        "no_fill": int(no_fill),
+        "win_rate": round(len(wins) / total_trades * 100, 1) if total_trades else 0,
+        "avg_pnl": round(sum(pcts) / total_trades, 2) if total_trades else 0,
+        "total_return": round(sum(pcts), 2) if total_trades else 0,
+        "max_drawdown": _bt_max_drawdown(filled),
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+        "best_trade": round(max(pcts), 2) if pcts else 0,
+        "worst_trade": round(min(pcts), 2) if pcts else 0,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0),
+        "avg_r": round(sum(_bt_float(t.get("r_multiple")) for t in filled) / total_trades, 2) if total_trades else 0,
+        "stats_by_grade": stats_by_grade or _bt_stats_by_grade(filled),
+        "trades": normalized_trades,
+        "note": note,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+def _normalize_scanner_backtest(raw: Dict[str, Any], strategy: str, meta: Dict[str, Any], months: int) -> Dict[str, Any]:
+    summary = raw.get("summary") or {}
+    all_trades = raw.get("trades") or []
+    filled = [t for t in all_trades if str(t.get("outcome") or "").upper() != "NO_FILL"]
+    return _build_backtest_result(
+        strategy=strategy,
+        label=meta.get("name", strategy),
+        direction=meta.get("direction", "long"),
+        months=months,
+        trades=filled,
+        total_signals=summary.get("total_signals", len(all_trades)),
+        no_fill=summary.get("no_fill", len(all_trades) - len(filled)),
+        n_tickers=summary.get("n_tickers", 0),
+        stats_by_grade=raw.get("stats_by_grade") or None,
+        note=meta.get("note", ""),
+        crypto=False,
+    )
+
+
+def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
+    if not HAS_ADVANCED_BACKTESTS:
+        return {"error": "Advanced Backtest Engines sind nicht geladen"}
+    if not POLYGON_KEY:
+        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+
+    strategy = request.strategy
+    meta = ADVANCED_SCANNER_BACKTESTS[strategy]
+    max_tickers = int(request.max_tickers or meta["default_max_tickers"])
+    min_price = float(request.min_price or meta["default_min_price"])
+    min_volume = int(request.min_volume or meta["default_min_volume"])
+    months = max(1, min(int(request.months or 6), 24))
+
+    if meta["engine"] == "bi_v2":
+        raw = run_bi_v2_backtest(
+            POLYGON_KEY,
+            direction=meta["direction"],
+            months=months,
+            max_tickers=max_tickers,
+            min_price=min_price,
+            min_volume=min_volume,
+        )
+    else:
+        raw = run_biotech_backtest(
+            POLYGON_KEY,
+            months=months,
+            max_tickers=max_tickers,
+            min_price=min_price,
+            min_volume=min_volume,
+        )
+    return _normalize_scanner_backtest(raw or {}, strategy, meta, months)
+
+
+def _normalize_crypto_bars(raw_bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    bars = []
+    for bar in raw_bars or []:
+        o = _bt_float(bar.get("o"))
+        h = _bt_float(bar.get("h"))
+        l = _bt_float(bar.get("l"))
+        c = _bt_float(bar.get("c"))
+        if min(o, h, l, c) <= 0:
+            continue
+        bars.append({
+            "date": _bt_bar_date(bar),
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": _bt_float(bar.get("v")),
+        })
+    return bars
+
+
+def _bt_atr(bars: List[Dict[str, Any]], idx: int, period: int = 14) -> float:
+    if idx <= 0:
+        return 0.0
+    start = max(1, idx - period + 1)
+    trs = []
+    for i in range(start, idx + 1):
+        high = bars[i]["high"]
+        low = bars[i]["low"]
+        prev_close = bars[i - 1]["close"]
+        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    return sum(trs) / len(trs) if trs else 0.0
+
+
+def _simulate_crypto_trade(
+    bars: List[Dict[str, Any]],
+    entry_idx: int,
+    direction: str,
+    entry: float,
+    stop: float,
+    tp1: float,
+    tp2: float,
+    max_hold: int,
+    fee_pct: float = 0.25,
+) -> Optional[Dict[str, Any]]:
+    if entry_idx >= len(bars) or entry <= 0:
+        return None
+    side = direction.lower()
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    if side == "short" and (tp1 <= 0 or tp2 <= 0):
+        return None
+
+    current_stop = stop
+    tp1_hit = False
+    exit_price = None
+    exit_reason = None
+    exit_date = None
+    end_idx = min(len(bars) - 1, entry_idx + max_hold - 1)
+
+    for idx in range(entry_idx, end_idx + 1):
+        bar = bars[idx]
+        if side == "long":
+            if bar["low"] <= current_stop:
+                exit_price = current_stop
+                exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
+                exit_date = bar["date"]
+                break
+            if bar["high"] >= tp2:
+                exit_price = tp2
+                exit_reason = "TP2"
+                exit_date = bar["date"]
+                break
+            if not tp1_hit and bar["high"] >= tp1:
+                tp1_hit = True
+                current_stop = max(current_stop, entry + risk * 0.25)
+        else:
+            if bar["high"] >= current_stop:
+                exit_price = current_stop
+                exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
+                exit_date = bar["date"]
+                break
+            if bar["low"] <= tp2:
+                exit_price = tp2
+                exit_reason = "TP2"
+                exit_date = bar["date"]
+                break
+            if not tp1_hit and bar["low"] <= tp1:
+                tp1_hit = True
+                current_stop = min(current_stop, entry - risk * 0.25)
+
+    if exit_price is None:
+        close_price = bars[end_idx]["close"]
+        if tp1_hit:
+            if side == "long":
+                exit_price = (tp1 + max(close_price, entry)) / 2
+            else:
+                exit_price = (tp1 + min(close_price, entry)) / 2
+            exit_reason = "TP1_PARTIAL"
+        else:
+            exit_price = close_price
+            exit_reason = "MAX_HOLD"
+        exit_date = bars[end_idx]["date"]
+
+    if side == "long":
+        pnl_pct = ((exit_price - entry) / entry) * 100 - fee_pct
+    else:
+        pnl_pct = ((entry - exit_price) / entry) * 100 - fee_pct
+    return {
+        "entry_date": bars[entry_idx]["date"],
+        "actual_entry": entry,
+        "exit_date": exit_date,
+        "exit_price": exit_price,
+        "outcome": exit_reason,
+        "tp1_hit": tp1_hit,
+        "pnl_pct": round(pnl_pct, 2),
+        "r_multiple": round(pnl_pct / (risk / entry * 100), 2) if risk > 0 else 0,
+        "is_winner": pnl_pct > 0,
+    }
+
+
+def _crypto_backtest_universe(max_tickers: int) -> List[Dict[str, Any]]:
+    pages = max(1, min(4, math.ceil(max_tickers / 180)))
+    coins = _fetch_coingecko_markets(pages=pages)
+    universe = []
+    for coin in coins or []:
+        symbol = str(coin.get("symbol") or "").upper()
+        coin_id = str(coin.get("id") or "")
+        name = str(coin.get("name") or "")
+        if not symbol or not coin_id:
+            continue
+        if _is_excluded_crypto_asset(symbol, coin_id, name):
+            continue
+        if _bt_float(coin.get("total_volume")) < 500000:
+            continue
+        universe.append(coin)
+        if len(universe) >= max_tickers:
+            break
+    return universe
+
+
+def _crypto_signal_grade(score: float) -> str:
+    if score >= 85:
+        return "S"
+    if score >= 75:
+        return "A"
+    if score >= 62:
+        return "B"
+    return "C"
+
+
+def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
+    strategy = request.strategy
+    meta = CRYPTO_BACKTESTS[strategy]
+    months = max(1, min(int(request.months or 3), 12))
+    max_tickers = max(5, min(int(request.max_tickers or meta["default_max_tickers"]), 120))
+    days = min(365, max(90, months * 30 + 45))
+    universe = _crypto_backtest_universe(max_tickers)
+    trades: List[Dict[str, Any]] = []
+    total_signals = 0
+
+    for coin in universe:
+        coin_id = str(coin.get("id") or "")
+        symbol = str(coin.get("symbol") or "").upper()
+        bars = _normalize_crypto_bars(fetch_daily_candles_crypto(coin_id, days=days))
+        if len(bars) < 45:
+            continue
+        cooldown_until = -999
+
+        for idx in range(30, len(bars) - 1):
+            if idx <= cooldown_until:
+                continue
+            close = bars[idx]["close"]
+            prev_close = bars[idx - 1]["close"]
+            if close <= 0 or prev_close <= 0:
+                continue
+            change_1d = ((close - prev_close) / prev_close) * 100
+            change_3d = ((close - bars[idx - 3]["close"]) / bars[idx - 3]["close"]) * 100 if idx >= 3 and bars[idx - 3]["close"] > 0 else 0
+            change_7d = ((close - bars[idx - 7]["close"]) / bars[idx - 7]["close"]) * 100 if idx >= 7 and bars[idx - 7]["close"] > 0 else 0
+            closes20 = [b["close"] for b in bars[idx - 20:idx]]
+            volumes20 = [b["volume"] for b in bars[idx - 20:idx] if b.get("volume", 0) > 0]
+            sma20 = sum(closes20) / len(closes20)
+            avg_vol20 = sum(volumes20) / len(volumes20) if volumes20 else 0
+            volume_ratio = bars[idx]["volume"] / avg_vol20 if avg_vol20 > 0 else 1.0
+            atr = _bt_atr(bars, idx, 14)
+            if atr <= 0:
+                continue
+
+            if strategy == "crypto_early_mover_long":
+                if not (2.0 <= change_1d <= 18.0 and 5.0 <= change_7d <= 90.0):
+                    continue
+                if close < sma20 or volume_ratio < 1.15:
+                    continue
+                if change_3d > 45 or change_7d > 120:
+                    continue
+                entry_idx = idx + 1
+                entry = bars[entry_idx]["open"]
+                stop_distance = max(atr * 1.6, entry * 0.055)
+                stop = entry - stop_distance
+                tp1 = entry + stop_distance * 1.5
+                tp2 = entry + stop_distance * 2.5
+                score = 52 + min(18, change_7d / 3) + min(14, volume_ratio * 4) + (8 if close > sma20 else 0)
+                direction = "LONG"
+                max_hold = 10
+            else:
+                recent_high = max(b["high"] for b in bars[max(0, idx - 7):idx + 1])
+                pullback_from_high = ((close - recent_high) / recent_high) * 100 if recent_high > 0 else 0
+                red_day = close < bars[idx]["open"]
+                broke_prev_low = close < bars[idx - 1]["low"]
+                if not (change_7d >= 35 or change_3d >= 22):
+                    continue
+                if pullback_from_high > -7:
+                    continue
+                if not (red_day or broke_prev_low):
+                    continue
+                if volume_ratio < 1.1:
+                    continue
+                entry_idx = idx + 1
+                entry = bars[entry_idx]["open"]
+                stop_distance = max(atr * 1.8, entry * 0.08)
+                stop = max(recent_high * 1.02, entry + stop_distance)
+                risk = stop - entry
+                if risk <= 0 or (risk / entry) > 0.35:
+                    continue
+                tp1 = entry - risk * 1.5
+                tp2 = entry - risk * 2.5
+                score = 50 + min(20, change_7d / 3) + min(12, abs(pullback_from_high)) + min(12, volume_ratio * 3)
+                direction = "SHORT"
+                max_hold = 7
+
+            sim = _simulate_crypto_trade(bars, entry_idx, direction.lower(), entry, stop, tp1, tp2, max_hold)
+            if not sim:
+                continue
+            total_signals += 1
+            cooldown_until = idx + 7
+            sim.update({
+                "ticker": symbol,
+                "symbol": symbol,
+                "coin_id": coin_id,
+                "signal_date": bars[idx]["date"],
+                "direction": direction,
+                "grade": _crypto_signal_grade(score),
+                "score": round(score, 1),
+                "change_1d": round(change_1d, 2),
+                "change_7d": round(change_7d, 2),
+                "rvol": round(volume_ratio, 2),
+                "entry_target": entry,
+                "stop_target": stop,
+                "tp1_target": tp1,
+                "tp2_target": tp2,
+            })
+            trades.append(sim)
+
+    return _build_backtest_result(
+        strategy=strategy,
+        label=meta["name"],
+        direction=meta["direction"],
+        months=months,
+        trades=trades,
+        total_signals=total_signals,
+        no_fill=0,
+        n_tickers=len(universe),
+        note=meta["note"],
+        crypto=True,
+    )
 
 
 def _calc_ema_series(data, period):
@@ -11580,14 +12098,22 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 @app.post("/api/run-backtest")
 def run_backtest(request: BacktestRequest):
     """Run a backtest for a ticker with given strategy."""
-    if not POLYGON_KEY:
-        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
-
-    result = _run_backtest(request.ticker, request.strategy, request.months)
+    if request.strategy in ADVANCED_SCANNER_BACKTESTS:
+        result = _run_advanced_scanner_backtest(request)
+    elif request.strategy in CRYPTO_BACKTESTS:
+        result = _run_crypto_backtest(request)
+    else:
+        if not POLYGON_KEY:
+            raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+        if not str(request.ticker or "").strip():
+            raise HTTPException(status_code=400, detail="Ticker ist fuer diese Strategie erforderlich")
+        result = _run_backtest(request.ticker.upper(), request.strategy, request.months)
 
     # Cache result
     try:
-        cache_key = f"/tmp/backtest_{request.ticker}_{request.strategy}.json"
+        safe_ticker = re.sub(r"[^A-Za-z0-9_-]", "_", str(request.ticker or "UNIVERSE").upper()) or "UNIVERSE"
+        safe_strategy = re.sub(r"[^A-Za-z0-9_-]", "_", str(request.strategy or "unknown"))
+        cache_key = f"/tmp/backtest_{safe_ticker}_{safe_strategy}.json"
         with open(cache_key, "w") as f:
             json.dump({"cached_at": datetime.now().isoformat(), "results": result}, f, default=_serialize_json)
     except Exception as e:
@@ -11600,29 +12126,58 @@ def run_backtest(request: BacktestRequest):
 def list_backtest_strategies():
     """List all available backtest strategies."""
     indicator_strats = [
-        {"id": "sma_crossover", "name": "SMA Crossover (20/50)", "category": "Indikator", "direction": "long"},
-        {"id": "ema_crossover", "name": "EMA Crossover (9/21)", "category": "Indikator", "direction": "long"},
-        {"id": "rsi_mean_reversion", "name": "RSI Mean Reversion", "category": "Indikator", "direction": "long"},
-        {"id": "macd", "name": "MACD Crossover", "category": "Indikator", "direction": "long"},
-        {"id": "bollinger_bands", "name": "Bollinger Bands", "category": "Indikator", "direction": "long"},
-        {"id": "mean_reversion_sma", "name": "Mean Reversion (SMA50)", "category": "Indikator", "direction": "long"},
-        {"id": "turtle_breakout", "name": "Turtle Breakout (Donchian 20/10)", "category": "Indikator", "direction": "long"},
+        {"id": "sma_crossover", "name": "SMA Crossover (20/50)", "category": "Indikator", "direction": "long", "requires_ticker": True},
+        {"id": "ema_crossover", "name": "EMA Crossover (9/21)", "category": "Indikator", "direction": "long", "requires_ticker": True},
+        {"id": "rsi_mean_reversion", "name": "RSI Mean Reversion", "category": "Indikator", "direction": "long", "requires_ticker": True},
+        {"id": "macd", "name": "MACD Crossover", "category": "Indikator", "direction": "long", "requires_ticker": True},
+        {"id": "bollinger_bands", "name": "Bollinger Bands", "category": "Indikator", "direction": "long", "requires_ticker": True},
+        {"id": "mean_reversion_sma", "name": "Mean Reversion (SMA50)", "category": "Indikator", "direction": "long", "requires_ticker": True},
+        {"id": "turtle_breakout", "name": "Turtle Breakout (Donchian 20/10)", "category": "Indikator", "direction": "long", "requires_ticker": True},
+    ]
+    scanner_strats = [
+        {
+            "id": sid,
+            "name": meta["name"],
+            "category": meta["category"],
+            "direction": meta["direction"],
+            "requires_ticker": False,
+            "default_max_tickers": meta.get("default_max_tickers"),
+            "default_min_price": meta.get("default_min_price"),
+            "default_min_volume": meta.get("default_min_volume"),
+            "note": meta.get("note", ""),
+        }
+        for sid, meta in ADVANCED_SCANNER_BACKTESTS.items()
+    ]
+    crypto_strats = [
+        {
+            "id": sid,
+            "name": meta["name"],
+            "category": meta["category"],
+            "direction": meta["direction"],
+            "requires_ticker": False,
+            "default_max_tickers": meta.get("default_max_tickers"),
+            "note": meta.get("note", ""),
+        }
+        for sid, meta in CRYPTO_BACKTESTS.items()
     ]
     rule_strats = []
     for name, rule in BACKTEST_RULES.items():
         rule_strats.append({
             "id": name,
             "name": name,
-            "category": "Scanner",
+            "category": "Single-Ticker Scanner-Regeln",
             "direction": rule.get("direction", "long"),
+            "requires_ticker": True,
         })
-    return {"strategies": indicator_strats + rule_strats}
+    return {"strategies": scanner_strats + crypto_strats + indicator_strats + rule_strats}
 
 
 @app.get("/api/backtest-results")
 def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma_crossover")):
     """Get cached backtest results."""
-    cache_key = f"/tmp/backtest_{ticker}_{strategy}.json"
+    safe_ticker = re.sub(r"[^A-Za-z0-9_-]", "_", str(ticker or "UNIVERSE").upper()) or "UNIVERSE"
+    safe_strategy = re.sub(r"[^A-Za-z0-9_-]", "_", str(strategy or "unknown"))
+    cache_key = f"/tmp/backtest_{safe_ticker}_{safe_strategy}.json"
     if Path(cache_key).exists():
         try:
             with open(cache_key, "r") as f:
