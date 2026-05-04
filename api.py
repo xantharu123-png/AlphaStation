@@ -420,7 +420,7 @@ INVERSE_ETFS = {
 }
 
 NON_STOCK_ETP_TICKERS = {
-    "IREX", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ", "NVDL", "NVDQ", "NVDU", "NVDD",
+    "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ", "NVDL", "NVDQ", "NVDU", "NVDD",
     "CONL", "GGLL", "GGLS", "AAPU", "AAPD", "AMZU", "AMZD", "METU", "METD",
     "SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU", "SPXL", "SPXS", "LABU", "LABD",
     "TECL", "TECS", "FNGU", "FNGD", "BOIL", "KOLD", "GUSH", "DRIP", "NUGT", "DUST",
@@ -477,6 +477,32 @@ def _looks_like_non_stock_etp_symbol(ticker: str) -> Optional[str]:
         return "known ETF/ETP ticker"
     if len(tk) >= 4 and tk[-1] in ("X", "Q") and tk[-2] in ("X", "Q", "S"):
         return "leveraged ETF ticker pattern"
+    return None
+
+
+def _stock_alert_asset_exclusion_reason(
+    ticker: str,
+    common_stock_universe: Optional[set[str]] = None,
+    universe_source: str = "",
+    require_reference: bool = False,
+) -> Optional[str]:
+    """Return why a ticker must not be used as an actionable stock alert."""
+    tk = str(ticker or "").upper().strip()
+    if not tk:
+        return "empty ticker"
+    cheap_reason = _looks_like_non_stock_etp_symbol(tk)
+    if cheap_reason:
+        return cheap_reason
+    if "." in tk or "/" in tk:
+        return "non-standard ticker class"
+    if common_stock_universe is not None:
+        if tk not in common_stock_universe:
+            return f"not in common-stock universe ({universe_source or 'unknown source'})"
+        return None
+    if require_reference:
+        is_stock, reason = _is_orb_common_stock_candidate(tk)
+        if not is_stock:
+            return reason
     return None
 
 
@@ -733,12 +759,12 @@ _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
+_STOCK_EMAIL_ASSET_GUARD_SCANNERS = {
+    "bear", "bi_short", "bi_long", "biotech", "orb", "stock_strategy", "strategy_scan"
+}
 _CRYPTO_STRATEGY_ALERTS_ENABLED = False
-_EMAIL_BLOCKED_ETF_TICKERS = {
-    "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
-    "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
-    "KOLD", "BOIL", "DRIP", "GUSH", "JDST", "JNUG", "NUGT", "DUST", "YANG", "YINN",
-    "SVXY", "VXX", "TVIX", "BITI", "BITO", "LABU",
+_EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys()) | {
+    "SDS", "UDOW", "SVXY", "TVIX",
 }
 
 print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
@@ -904,7 +930,9 @@ def _email_has_blocked_etf_content(subject: str, body_html: str) -> bool:
     )):
         return True
     tokens = set(re.findall(r"\b[A-Z]{2,6}\b", content))
-    return bool(tokens & _EMAIL_BLOCKED_ETF_TICKERS)
+    if tokens & _EMAIL_BLOCKED_ETF_TICKERS:
+        return True
+    return any(_looks_like_non_stock_etp_symbol(token) for token in tokens)
 
 
 def _alert_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -1654,6 +1682,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "risk_too_wide",
         "not_new_listing_dump",
         "listing_age_not_tradeable",
+        "non_common_stock_product",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable")
     has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
@@ -1684,6 +1713,11 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
 
     if not ticker:
         reasons.append("missing_ticker")
+    asset_exclusion_reason = None
+    if ticker and scanner_name in _STOCK_EMAIL_ASSET_GUARD_SCANNERS:
+        asset_exclusion_reason = _stock_alert_asset_exclusion_reason(ticker, require_reference=False)
+        if asset_exclusion_reason:
+            reasons.append("non_common_stock_product")
     if grade not in _ALERT_TOP_GRADES:
         reasons.append("grade_below_alert_threshold")
     if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and (rvol is None or rvol < _ALERT_MIN_RVOL):
@@ -1729,6 +1763,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "cooldown_remaining_seconds": cooldown_remaining,
         "persistent_dedupe_remaining_seconds": dedupe_remaining,
         "bearish_dedupe_remaining_seconds": bearish_remaining,
+        "asset_exclusion_reason": asset_exclusion_reason,
         "alertable_now": not reasons,
         "suppression_reasons": reasons,
         **decision,
@@ -4426,6 +4461,8 @@ def _bear_scan_wrapper() -> None:
             if _raw_tickers:
                 tickers = _raw_tickers
                 print(f"[Bear] Processing {len(tickers)} tickers (extended={_is_extended_hours})")
+                _common_stock_universe, _common_stock_source = _load_common_stock_universe()
+                _excluded_non_stock = 0
                 for t in tickers:
                     try:
                         day = t.get("day", {})
@@ -4456,15 +4493,14 @@ def _bear_scan_wrapper() -> None:
                         ticker_sym = t.get("ticker", "")
                         # V2.6b: ETF/ETP/Leveraged Filter — keine ETFs in Breakdown-Stocks
                         _tk_up = ticker_sym.upper()
-                        # Bekannte ETF-Suffixe und Muster filtern
-                        _etf_tickers = {"SOXS","SQQQ","SPXU","SPXS","UVXY","VIXY","QID","SRTY","TZA","SDOW","LABD",
-                                       "SDS","SH","PSQ","DOG","RWM","SOXL","TQQQ","UPRO","SPXL","UDOW","FNGU",
-                                       "AMPL","KOLD","BOIL","DRIP","GUSH","JDST","JNUG","NUGT","DUST","YANG","YINN",
-                                       "SVXY","VXX","TVIX","BITI","BITO"}
-                        if _tk_up in _etf_tickers:
-                            continue
-                        # Heuristik: 4+ Zeichen, endet auf X/Q/S doppelt = wahrscheinlich ETF
-                        if len(_tk_up) >= 4 and _tk_up[-1] in ("X","Q") and _tk_up[-2] in ("X","Q","S"):
+                        non_stock_reason = _stock_alert_asset_exclusion_reason(
+                            _tk_up,
+                            common_stock_universe=_common_stock_universe,
+                            universe_source=_common_stock_source,
+                            require_reference=_common_stock_universe is None,
+                        )
+                        if non_stock_reason:
+                            _excluded_non_stock += 1
                             continue
                         rvol = 0
                         ma20 = 0
@@ -4597,6 +4633,7 @@ def _bear_scan_wrapper() -> None:
                             "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
                             "close_pos": round(close_pos, 3),
                             "score_details": " | ".join(score_details),
+                            "asset_check": "common_stock",
                         }
                         if score >= 55:
                             bear_row.update(_fetch_bear_latest_intraday_state(ticker_sym))
@@ -4610,7 +4647,11 @@ def _bear_scan_wrapper() -> None:
                         continue
                 losers.sort(key=lambda x: x.get("score", 0), reverse=True)
                 result["breakdown_stocks"] = losers[:30]
-                print(f"[Bear] Final breakdown_stocks: {len(losers[:30])}")
+                result["asset_filter"] = {
+                    "source": _common_stock_source,
+                    "excluded_non_common": _excluded_non_stock,
+                }
+                print(f"[Bear] Final breakdown_stocks: {len(losers[:30])} (excluded_non_common={_excluded_non_stock}, source={_common_stock_source})")
         except Exception as e:
             print(f"Breakdown stocks error: {e}")
 

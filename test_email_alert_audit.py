@@ -278,6 +278,53 @@ def test_email_etf_guard_allows_stock_setups():
     ) is False
 
 
+def test_email_guard_blocks_tradr_single_stock_etp():
+    assert api._email_has_blocked_etf_content(
+        "Crash Alert",
+        "<td>IREZ</td><td>$12.12</td><td>-14.5%</td>",
+    ) is True
+
+
+def test_stock_alert_classifier_blocks_non_stock_products():
+    state = api._classify_alert_candidate(
+        "bear",
+        {
+            "ticker": "IREZ",
+            "grade": "S",
+            "score": 72,
+            "price": 12.12,
+            "rvol": 0.3,
+            "change_pct": -14.5,
+            "open_to_current_pct": -12.0,
+            "close_pos": 0.1,
+        },
+        now=1_000_000.0,
+    )
+
+    assert state["alertable_now"] is False
+    assert state["decision"] == "NO_TRADE"
+    assert state["asset_exclusion_reason"] == "known ETF/ETP ticker"
+    assert "non_common_stock_product" in state["suppression_reasons"]
+
+
+def test_stock_alert_asset_guard_uses_common_stock_universe():
+    assert api._stock_alert_asset_exclusion_reason(
+        "REAL",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) is None
+    assert api._stock_alert_asset_exclusion_reason(
+        "IREZ",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "known ETF/ETP ticker"
+    assert api._stock_alert_asset_exclusion_reason(
+        "FAKEETF",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "not in common-stock universe (unit)"
+
+
 def test_email_dedupe_persists_crash_ticker(tmp_path, monkeypatch):
     dedupe_file = tmp_path / "email_dedupe.json"
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(dedupe_file))

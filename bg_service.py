@@ -171,7 +171,23 @@ _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
 _NLS_MIN_ALERT_RR = 1.5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "strategies", "stock_strategy", "strategy_scan"}
-_EMAIL_BLOCKED_ETF_TICKERS = {
+_NON_STOCK_PRODUCT_TICKERS = {
+    "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ",
+    "NVDL", "NVDQ", "NVDU", "NVDD", "CONL", "GGLL", "GGLS", "AAPU", "AAPD",
+    "AMZU", "AMZD", "METU", "METD", "SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO",
+    "SPXU", "SPXL", "SPXS", "LABU", "LABD", "TECL", "TECS", "FNGU", "FNGD",
+    "BOIL", "KOLD", "GUSH", "DRIP", "NUGT", "DUST", "JNUG", "JDST", "YINN",
+    "YANG", "UVXY", "VIXY", "VXX", "BITO", "BITI",
+}
+_NON_STOCK_PRODUCT_KEYWORDS = {
+    " ETF", "ETN", "ETP", " FUND", "2X", "3X", "LEVERAGED", "INVERSE",
+    "ULTRA", "ULTRAPRO", "BULL", "BEAR", "DAILY TARGET", "TRADR", "T-REX",
+    "DIREXION", "PROSHARES", "GRANITESHARES", "YIELDMAX", "ROUNDHILL", "DEFIANCE",
+    "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES",
+}
+_STOCK_REFERENCE_TYPES = {"CS", "ADRC", "ADRP"}
+_COMMON_STOCK_UNIVERSE_CACHE = "/tmp/polygon_common_stock_universe.json"
+_EMAIL_BLOCKED_ETF_TICKERS = set(_NON_STOCK_PRODUCT_TICKERS) | {
     "SOXS", "SQQQ", "SPXU", "SPXS", "UVXY", "VIXY", "QID", "SRTY", "TZA", "SDOW", "LABD",
     "SDS", "SH", "PSQ", "DOG", "RWM", "SOXL", "TQQQ", "UPRO", "SPXL", "UDOW", "FNGU",
     "KOLD", "BOIL", "DRIP", "GUSH", "JDST", "JNUG", "NUGT", "DUST", "YANG", "YINN",
@@ -401,6 +417,91 @@ def _display_crypto_contract_symbol(symbol):
     return display or str(symbol or "").strip().upper()
 
 
+def _looks_like_non_stock_product_symbol(ticker):
+    tk = str(ticker or "").upper().strip()
+    if not tk:
+        return "empty ticker"
+    if tk in _NON_STOCK_PRODUCT_TICKERS:
+        return "known ETF/ETP ticker"
+    if len(tk) >= 4 and tk[-1] in ("X", "Q") and tk[-2] in ("X", "Q", "S"):
+        return "leveraged ETF ticker pattern"
+    return None
+
+
+def _load_common_stock_universe(poly_key, max_age_seconds=24 * 3600):
+    """Load active common-stock/ADR tickers for stock-alert filtering."""
+    if not poly_key:
+        return None, "missing_polygon_key"
+    now_ts = time.time()
+    try:
+        if os.path.exists(_COMMON_STOCK_UNIVERSE_CACHE):
+            with open(_COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if isinstance(cached, dict):
+                cached_at = float(cached.get("cached_at", 0) or 0)
+                cached_tickers = set(cached.get("tickers", []) or [])
+            else:
+                cached_at = os.path.getmtime(_COMMON_STOCK_UNIVERSE_CACHE)
+                cached_tickers = set(cached or [])
+            if cached_tickers and now_ts - cached_at < max_age_seconds:
+                return cached_tickers, "file_cache"
+    except Exception as exc:
+        log.debug(f"Common stock universe cache read failed: {exc}")
+
+    try:
+        from modules.data_fetchers import rate_limited_get
+        tickers = set()
+        for asset_type in sorted(_STOCK_REFERENCE_TYPES):
+            url = "https://api.polygon.io/v3/reference/tickers"
+            params = {
+                "apiKey": poly_key,
+                "market": "stocks",
+                "active": "true",
+                "type": asset_type,
+                "limit": 1000,
+                "sort": "ticker",
+                "order": "asc",
+            }
+            pages = 0
+            while url and pages < 20:
+                resp = rate_limited_get(url, params=params, timeout=20)
+                if resp.status_code != 200:
+                    break
+                payload = resp.json()
+                for item in payload.get("results", []) or []:
+                    tk = str(item.get("ticker", "") or "").upper().strip()
+                    market = str(item.get("market", "") or "").lower()
+                    item_type = str(item.get("type", "") or "").upper()
+                    name = str(item.get("name", "") or "").upper()
+                    if not tk or market != "stocks" or item_type not in _STOCK_REFERENCE_TYPES:
+                        continue
+                    if _looks_like_non_stock_product_symbol(tk) or any(keyword in f" {name}" for keyword in _NON_STOCK_PRODUCT_KEYWORDS):
+                        continue
+                    tickers.add(tk)
+                next_url = payload.get("next_url")
+                url = next_url if next_url else None
+                params = {"apiKey": poly_key} if next_url else {}
+                pages += 1
+        if tickers:
+            _atomic_write_json(_COMMON_STOCK_UNIVERSE_CACHE, {"cached_at": now_ts, "tickers": sorted(tickers)})
+            return tickers, "polygon_reference"
+    except Exception as exc:
+        log.warning(f"Common stock universe fetch failed: {exc}")
+    return None, "unavailable"
+
+
+def _stock_alert_asset_exclusion_reason(ticker, common_stock_universe=None, universe_source=""):
+    tk = str(ticker or "").upper().strip()
+    cheap_reason = _looks_like_non_stock_product_symbol(tk)
+    if cheap_reason:
+        return cheap_reason
+    if "." in tk or "/" in tk:
+        return "non-standard ticker class"
+    if common_stock_universe is not None and tk not in common_stock_universe:
+        return f"not in common-stock universe ({universe_source or 'unknown source'})"
+    return None
+
+
 def _email_has_blocked_etf_content(subject, body_html):
     """Hard guard: email alerts should contain stock/crypto setups, not ETF/ETP watchlists."""
     content = f"{subject or ''} {body_html or ''}".upper()
@@ -414,7 +515,9 @@ def _email_has_blocked_etf_content(subject, body_html):
     )):
         return True
     tokens = set(re.findall(r"\b[A-Z]{2,6}\b", content))
-    return bool(tokens & _EMAIL_BLOCKED_ETF_TICKERS)
+    if tokens & _EMAIL_BLOCKED_ETF_TICKERS:
+        return True
+    return any(_looks_like_non_stock_product_symbol(token) for token in tokens)
 
 
 def _load_email_dedupe(now=None, max_keep_seconds=7 * 86400):
@@ -1230,11 +1333,8 @@ def _run_bear_scanner(poly_key, secrets):
         tickers = snap_resp.json().get("tickers", [])
         log.info(f"  {len(tickers)} Losers geladen")
 
-        # ETF Blacklist
-        _etf_tickers = {"SOXS","SQQQ","SPXU","SPXS","UVXY","VIXY","QID","SRTY","TZA","SDOW","LABD",
-                       "SDS","SH","PSQ","DOG","RWM","SOXL","TQQQ","UPRO","SPXL","UDOW","FNGU",
-                       "AMPL","KOLD","BOIL","DRIP","GUSH","JDST","JNUG","NUGT","DUST","YANG","YINN",
-                       "SVXY","VXX","TVIX","BITI","BITO"}
+        common_stock_universe, common_stock_source = _load_common_stock_universe(poly_key)
+        excluded_non_common = 0
 
         losers = []
         for t in tickers:
@@ -1260,11 +1360,13 @@ def _run_bear_scanner(poly_key, secrets):
 
                 ticker_sym = t.get("ticker", "")
                 _tk_up = ticker_sym.upper()
-                if len(_tk_up) > 5 or "." in _tk_up:
-                    continue
-                if _tk_up in _etf_tickers:
-                    continue
-                if len(_tk_up) >= 4 and _tk_up[-1] in ("X","Q") and _tk_up[-2] in ("X","Q","S"):
+                non_stock_reason = _stock_alert_asset_exclusion_reason(
+                    _tk_up,
+                    common_stock_universe=common_stock_universe,
+                    universe_source=common_stock_source,
+                )
+                if non_stock_reason:
+                    excluded_non_common += 1
                     continue
 
                 # History für RVOL + MA
@@ -1330,6 +1432,7 @@ def _run_bear_scanner(poly_key, secrets):
                     "ma20_dist": ma20_dist, "score": score, "grade": grade,
                     "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
                     "close_pos": round(close_pos, 3),
+                    "asset_check": "common_stock",
                 }
                 if score >= 55:
                     bear_row.update(_fetch_bear_latest_intraday_state(ticker_sym, poly_key))
@@ -1349,6 +1452,10 @@ def _run_bear_scanner(poly_key, secrets):
             "inverse_etfs": [],  # ETFs werden nur in api.py geladen
             "short_candidates": [],
             "breakdown_stocks": top_losers,
+            "asset_filter": {
+                "source": common_stock_source,
+                "excluded_non_common": excluded_non_common,
+            },
         }
         _atomic_write_json("/tmp/bear_scanner_cache.json",
                           {"results": [cache_data], "timestamp": time.time(),
