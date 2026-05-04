@@ -1633,6 +1633,43 @@ def _alert_cooldown_remaining(key: str, now: Optional[float] = None) -> int:
     return max(0, int(_EMAIL_COOLDOWN_SEC - (now - last)))
 
 
+def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[str, str]:
+    """Normalize alert gating into trade/watch/no-trade language."""
+    if not reasons:
+        return {
+            "decision": "TRADE_NOW",
+            "decision_label": "Jetzt traden",
+            "decision_reason": "Alle Alert-Gates bestanden",
+        }
+    no_trade_markers = {
+        "drop_too_extended_no_chase",
+        "hard_extended_long_wait_retest",
+        "target_already_missed",
+        "early_mover_no_chase",
+        "early_mover_late_to_tp1",
+        "early_mover_chased_from_entry",
+        "early_mover_blowoff_turnover",
+        "pump_continuation_risk",
+        "safety_not_ok",
+        "risk_too_wide",
+        "not_new_listing_dump",
+        "listing_age_not_tradeable",
+    }
+    no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable")
+    has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
+    if has_no_trade:
+        return {
+            "decision": "NO_TRADE",
+            "decision_label": "Nicht traden",
+            "decision_reason": ", ".join(reasons[:4]),
+        }
+    return {
+        "decision": "WATCH",
+        "decision_label": "Beobachten",
+        "decision_reason": ", ".join(reasons[:4]),
+    }
+
+
 def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
     now = now or time.time()
     ticker = _extract_alert_ticker(row)
@@ -1653,7 +1690,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("rvol_below_alert_threshold")
     if scanner_name == "new_listing":
         reasons.extend(_new_listing_rule_reasons(row))
-    if scanner_name == "bear":
+    if scanner_name in ("bear", "bi_short"):
         reasons.extend(_bear_short_rule_reasons(row))
     if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
@@ -1681,6 +1718,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     if bearish_remaining > 0:
         reasons.append("bearish_ticker_already_alerted")
 
+    decision = _alert_decision_from_reasons(scanner_name, reasons)
     return {
         "ticker": ticker,
         "grade": grade,
@@ -1693,6 +1731,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "bearish_dedupe_remaining_seconds": bearish_remaining,
         "alertable_now": not reasons,
         "suppression_reasons": reasons,
+        **decision,
     }
 
 
@@ -11804,46 +11843,74 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                 continue
 
             if strategy == "crypto_early_mover_long":
-                if not (2.0 <= change_1d <= 18.0 and 5.0 <= change_7d <= 90.0):
+                if not (1.5 <= change_1d <= 10.5 and 4.0 <= change_7d <= 55.0):
                     continue
-                if close < sma20 or volume_ratio < 1.15:
+                if close < sma20 * 1.005 or not (1.25 <= volume_ratio <= 7.5):
                     continue
-                if change_3d > 45 or change_7d > 120:
+                if change_3d > 28 or change_7d > 75:
                     continue
                 entry_idx = idx + 1
-                entry = bars[entry_idx]["open"]
-                stop_distance = max(atr * 1.6, entry * 0.055)
+                signal_bar = bars[idx]
+                next_bar = bars[entry_idx]
+                range20_high = max(b["high"] for b in bars[idx - 20:idx + 1])
+                range20_low = min(b["low"] for b in bars[idx - 20:idx + 1])
+                range20 = max(range20_high - range20_low, close * 0.02)
+                close_pos20 = (close - range20_low) / range20
+                signal_range = max(signal_bar["high"] - signal_bar["low"], close * 0.01)
+                signal_close_pos = (close - signal_bar["low"]) / signal_range
+                if signal_close_pos < 0.55:
+                    continue
+                if close_pos20 > 0.92 and change_3d > 18:
+                    continue
+                entry = next_bar["open"]
+                pre_risk = max(atr * 1.45, close * 0.05)
+                if entry > close + pre_risk * 0.65 or entry < close - pre_risk * 0.75:
+                    continue
+                if next_bar["close"] < next_bar["open"] and next_bar["close"] < close:
+                    continue
+                stop_distance = max(atr * 1.45, entry * 0.055)
                 stop = entry - stop_distance
-                tp1 = entry + stop_distance * 1.5
-                tp2 = entry + stop_distance * 2.5
-                score = 52 + min(18, change_7d / 3) + min(14, volume_ratio * 4) + (8 if close > sma20 else 0)
+                tp1 = entry + stop_distance * 1.8
+                tp2 = entry + stop_distance * 3.0
+                score = 50 + min(16, change_7d / 3) + min(14, volume_ratio * 4) + min(10, signal_close_pos * 10)
                 direction = "LONG"
-                max_hold = 10
+                max_hold = 8
+                decision_reason = "daily_proxy_trade_now: next_day_confirmation"
             else:
                 recent_high = max(b["high"] for b in bars[max(0, idx - 7):idx + 1])
                 pullback_from_high = ((close - recent_high) / recent_high) * 100 if recent_high > 0 else 0
                 red_day = close < bars[idx]["open"]
                 broke_prev_low = close < bars[idx - 1]["low"]
-                if not (change_7d >= 35 or change_3d >= 22):
+                signal_bar = bars[idx]
+                signal_range = max(signal_bar["high"] - signal_bar["low"], close * 0.01)
+                signal_close_pos = (close - signal_bar["low"]) / signal_range
+                if not (change_7d >= 50 or change_3d >= 28):
                     continue
-                if pullback_from_high > -7:
+                if pullback_from_high > -10 or pullback_from_high < -38:
                     continue
-                if not (red_day or broke_prev_low):
+                if not (red_day and broke_prev_low and signal_close_pos <= 0.35):
                     continue
-                if volume_ratio < 1.1:
+                if volume_ratio < 1.3:
                     continue
                 entry_idx = idx + 1
-                entry = bars[entry_idx]["open"]
-                stop_distance = max(atr * 1.8, entry * 0.08)
+                next_bar = bars[entry_idx]
+                entry = next_bar["open"]
+                pre_risk = max(atr * 1.6, close * 0.07)
+                if entry < close - pre_risk * 0.65 or entry > recent_high:
+                    continue
+                if next_bar["close"] > next_bar["open"] and next_bar["close"] > close:
+                    continue
+                stop_distance = max(atr * 1.6, entry * 0.07)
                 stop = max(recent_high * 1.02, entry + stop_distance)
                 risk = stop - entry
-                if risk <= 0 or (risk / entry) > 0.35:
+                if risk <= 0 or (risk / entry) > 0.28:
                     continue
-                tp1 = entry - risk * 1.5
-                tp2 = entry - risk * 2.5
-                score = 50 + min(20, change_7d / 3) + min(12, abs(pullback_from_high)) + min(12, volume_ratio * 3)
+                tp1 = entry - risk * 1.6
+                tp2 = entry - risk * 2.8
+                score = 52 + min(18, change_7d / 4) + min(14, abs(pullback_from_high)) + min(12, volume_ratio * 3)
                 direction = "SHORT"
-                max_hold = 7
+                max_hold = 6
+                decision_reason = "daily_proxy_trade_now: crack_confirmed"
 
             sim = _simulate_crypto_trade(bars, entry_idx, direction.lower(), entry, stop, tp1, tp2, max_hold)
             if not sim:
@@ -11865,6 +11932,8 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                 "stop_target": stop,
                 "tp1_target": tp1,
                 "tp2_target": tp2,
+                "decision": "TRADE_NOW",
+                "decision_reason": decision_reason,
             })
             trades.append(sim)
 

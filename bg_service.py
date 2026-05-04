@@ -603,6 +603,15 @@ def _check_and_alert_scan_results(scanner_name, secrets):
             if scanner_name == "bi_short" and _bearish_stock_alert_active(ticker, now=now):
                 log.debug(f"BI short alert suppressed by bearish ticker dedupe: {ticker}")
                 continue
+            if scanner_name == "bi_short" and ticker:
+                r = dict(r)
+                if "latest_bar_change_pct" not in r:
+                    r.update(_fetch_bear_latest_intraday_state(ticker, secrets.get("POLYGON_KEY", "")))
+                r["bear_entry_quality"] = _bear_entry_quality(r)
+                _bear_reasons = _bear_short_rule_reasons(r)
+                if _bear_reasons:
+                    log.debug(f"BI short alert suppressed by timing guard: {ticker} {_bear_reasons}")
+                    continue
             if scanner_name in _LONG_ENTRY_ALERT_SCANNERS and ticker:
                 r = dict(r)
                 if "latest_bar_change_pct" not in r:
@@ -627,7 +636,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "direction": r.get("direction", direction if scanner_name.startswith("bi_") else ""),
                 "name": r.get("Name", r.get("name", "")),
                 "rvol": r.get("RVOL", r.get("rvol", 0)),
-                "entry_quality": r.get("long_entry_quality", ""),
+                "entry_quality": r.get("long_entry_quality", r.get("bear_entry_quality", "")),
                 "cooldown_key": cooldown_key,
             })
 
@@ -1613,6 +1622,12 @@ def _run_strategy_scanner(poly_key, secrets):
                         m["alertable_long"] = not _long_entry_rule_reasons(m)
                         if not m["alertable_long"]:
                             continue
+                    elif m.get("_direction") == "short":
+                        m = dict(m)
+                        m.update(_fetch_bear_latest_intraday_state(m["Ticker"], poly_key))
+                        m["bear_entry_quality"] = _bear_entry_quality(m)
+                        if _bear_short_rule_reasons(m):
+                            continue
                     all_alerts.append(m)
                     _EMAIL_COOLDOWN[ck] = now
 
@@ -1651,7 +1666,7 @@ def _run_strategy_scanner(poly_key, secrets):
                         <td style="padding:6px;border-bottom:1px solid #eee">${a['Preis']}</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a['Change%']:+.1f}%</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a['RVOL']:.1f}x</td>
-                        <td style="padding:6px;border-bottom:1px solid #eee">{a.get('long_entry_quality', '')}</td>
+                        <td style="padding:6px;border-bottom:1px solid #eee">{a.get('long_entry_quality', a.get('bear_entry_quality', ''))}</td>
                     </tr>"""
 
             body_html = f"""

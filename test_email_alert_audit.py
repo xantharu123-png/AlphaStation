@@ -333,6 +333,27 @@ def test_bearish_dedupe_suppresses_duplicate_short_alerts(tmp_path, monkeypatch)
     assert long_state["alertable_now"] is True
 
 
+def test_bi_short_alert_blocks_late_crash_chase():
+    row = {
+        "Ticker": "LATE",
+        "BI_Grade": "A",
+        "BI_Score": 90,
+        "RVOL": 3.2,
+        "Preis": 3.4,
+        "change_pct": -24.0,
+        "close_pos": 0.22,
+        "latest_bar_change_pct": 0.8,
+        "latest_bar_close_pos": 0.7,
+    }
+
+    state = api._classify_alert_candidate("bi_short", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert state["decision"] == "NO_TRADE"
+    assert "drop_too_extended_no_chase" in state["suppression_reasons"]
+    assert "latest_5m_green_reclaim" in state["suppression_reasons"]
+
+
 def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
