@@ -125,3 +125,26 @@ def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):
     assert "_quality" in row
     assert row["_quality"]["why_in"]
     assert row["trade_health"]["metrics"]["entry"] == row["entry"]
+
+
+def test_early_mover_intraday_trigger_checks_more_than_top_30(monkeypatch):
+    coins = [_btc()]
+    for idx in range(45):
+        coin = _volume_coin(symbol=f"em{idx}", coin_id=f"early-{idx}", change_24h=3.5 + (idx % 3) * 0.2)
+        coin["market_cap_rank"] = 300 + idx
+        coins.append(coin)
+
+    checked = []
+    monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: coins)
+    monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
+    monkeypatch.setattr(
+        api,
+        "_verify_early_mover_intraday_trigger",
+        lambda row: checked.append(row["Symbol"]) or {"ok": False, "reason": "test_no_trigger"},
+    )
+
+    result = api.fetch_early_movers(_prefetched_perps={})
+
+    assert len(checked) > 30
+    assert result["stats"]["intraday_trigger_scan_limit"] == 1000
+    assert result["stats"]["market_universe_target"] == 1000

@@ -756,6 +756,10 @@ _EARLY_MOVER_DIGEST_DEDUPE_SEC = 2 * 3600
 _EARLY_MOVER_DIGEST_KEY = "early_movers_long_digest"
 _EARLY_MOVER_MAX_EMAIL_ROWS = 5
 _EARLY_MOVER_TRIGGER_TTL = 180
+_EARLY_MOVER_MARKET_PAGES = 4  # 4 * 250 = Top-1000 CoinGecko universe
+_EARLY_MOVER_TRIGGER_SCAN_LIMIT = 1000
+_EARLY_MOVER_MAX_DISPLAY = 160
+_EARLY_MOVER_TRIGGER_CACHE_MAX = 1500
 _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
 _TRADE_REMINDERS_FILE = "/tmp/alphastation_trade_reminders.json"
 _TRADE_REMINDER_CHECK_SEC = 60
@@ -1276,8 +1280,9 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
         result = {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120]}
 
     _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
-    if len(_EARLY_MOVER_TRIGGER_CACHE) > 120:
-        oldest = sorted(_EARLY_MOVER_TRIGGER_CACHE.items(), key=lambda item: item[1].get("ts", 0))[:30]
+    if len(_EARLY_MOVER_TRIGGER_CACHE) > _EARLY_MOVER_TRIGGER_CACHE_MAX:
+        overflow = len(_EARLY_MOVER_TRIGGER_CACHE) - _EARLY_MOVER_TRIGGER_CACHE_MAX
+        oldest = sorted(_EARLY_MOVER_TRIGGER_CACHE.items(), key=lambda item: item[1].get("ts", 0))[:max(overflow, 50)]
         for key, _ in oldest:
             _EARLY_MOVER_TRIGGER_CACHE.pop(key, None)
     return dict(result)
@@ -4360,26 +4365,25 @@ def _turtle_scan_wrapper() -> None:
         print("[Turtle] Starte Turtle Breakout Scanner...")
         results = []
 
-        # ── 1. Polygon Snapshot: Alle Aktien mit positivem Move holen ──
+        # Full snapshot first: Turtle breakouts can emerge from quiet bases, not only top gainers.
         _all_tickers = []
-        for endpoint in ["gainers"]:
-            try:
-                url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250})
-                if resp.status_code == 200:
-                    _all_tickers.extend(resp.json().get("tickers", []))
-            except Exception:
-                pass
+        try:
+            url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY}, timeout=30)
+            if resp.status_code == 200:
+                _all_tickers.extend(resp.json().get("tickers", []))
+        except Exception:
+            pass
 
-        # Auch Full Snapshot falls wenig Gainers (AH/PM)
-        if len(_all_tickers) < 30:
-            try:
-                url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY})
-                if resp.status_code == 200:
-                    _all_tickers.extend(resp.json().get("tickers", []))
-            except Exception:
-                pass
+        if len(_all_tickers) < 250:
+            for endpoint in ["gainers", "losers"]:
+                try:
+                    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                    resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250})
+                    if resp.status_code == 200:
+                        _all_tickers.extend(resp.json().get("tickers", []))
+                except Exception:
+                    pass
 
         # Deduplizieren
         _seen = set()
@@ -4399,6 +4403,8 @@ def _turtle_scan_wrapper() -> None:
             ticker = t.get("ticker", "")
             if not ticker or "." in ticker or len(ticker) > 5:
                 continue  # OTC / Warrants raus
+            if _stock_alert_asset_exclusion_reason(ticker, require_reference=False):
+                continue
             day = t.get("day", {})
             prev = t.get("prevDay", {})
             price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
@@ -4406,25 +4412,33 @@ def _turtle_scan_wrapper() -> None:
             if price < 5 or prev_close <= 0:
                 continue
             change_pct = (price - prev_close) / prev_close * 100
-            if change_pct < 0.5:
-                continue  # Nur Aufwärtsbewegungen — Turtle ist Long-only
+            if change_pct < -0.35:
+                continue
             volume = day.get("v", 0)
-            if volume * price < 500000:
-                continue  # Mindest-Dollar-Volume $500k
-            candidates.append((ticker, t, price, prev_close, change_pct, volume))
+            dollar_volume = volume * price
+            if dollar_volume < 1_000_000:
+                continue
+            day_high = day.get("h", price) or price
+            day_low = day.get("l", price) or price
+            day_open = day.get("o", prev_close) or prev_close
+            close_pos = (price - day_low) / max(day_high - day_low, 1e-9)
+            if price < day_open * 0.995 and close_pos < 0.55:
+                continue
+            priority = (change_pct * 1.4) + (close_pos * 2.0) + min(2.0, dollar_volume / 50_000_000)
+            candidates.append((ticker, t, price, prev_close, change_pct, volume, priority))
 
         print(f"[Turtle] {len(candidates)} Kandidaten nach Vorfilter")
 
-        # ── 3. Top 80 nach Change% sortieren, dann History holen ──
-        candidates.sort(key=lambda x: -x[4])
-        candidates = candidates[:80]
+        # Broad candidate pool by breakout quality, not raw FOMO.
+        candidates.sort(key=lambda x: -x[6])
+        candidates = candidates[:250]
 
         from datetime import timedelta
         _today = datetime.now()
         _from = (_today - timedelta(days=45)).strftime("%Y-%m-%d")
         _to = _today.strftime("%Y-%m-%d")
 
-        for ticker, snap_data, price, prev_close, change_pct, volume in candidates:
+        for ticker, snap_data, price, prev_close, change_pct, volume, priority in candidates:
             try:
                 # 30 Tage Daily Bars holen (brauchen 21+ für Donchian 20)
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{_from}/{_to}"
@@ -8403,7 +8417,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
     Returns: dict with volume_spikes, micro_caps, whale_acc, narratives, stats
     """
-    all_coins = _fetch_coingecko_markets(pages=8)
+    all_coins = _fetch_coingecko_markets(pages=_EARLY_MOVER_MARKET_PAGES)
     if not all_coins:
         return {"coins": [], "stats": {"error": "No data"}}
 
@@ -9044,7 +9058,7 @@ def fetch_early_movers(_prefetched_perps=None):
     phase_2 = [c for c in all_unified if c["phase"] == 2]
     phase_3 = [c for c in all_unified if c["phase"] == 3]
 
-    MAX_DISPLAY = 120  # Mehr Coins analysiert (2000 statt 1000) → mehr Ergebnisse zeigen
+    MAX_DISPLAY = _EARLY_MOVER_MAX_DISPLAY
     # Phase 2 + 3 immer ALLE zeigen (sind selten und wichtig), Rest Phase 1
     p2_coins = phase_2  # alle Breakouts
     p3_coins = phase_3  # alle Überhitzten
@@ -9054,16 +9068,36 @@ def fetch_early_movers(_prefetched_perps=None):
     # Zusammenfügen: Phase 2+3 zuerst (wichtiger), dann Phase 1, jeweils nach Score
     unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (1 if x["phase"] in (2, 3) else 2, -x["score"]))
 
-    # Attach real execution state for the strongest visible candidates. This keeps
-    # the UI honest without burning exchange-rate limits on every observation row.
+    # Verify up to the top-1000 scored candidates before cutting the display list.
     trigger_checks = 0
-    for item in unified[:30]:
+    trigger_eligible = 0
+    trigger_pool = all_unified[:_EARLY_MOVER_TRIGGER_SCAN_LIMIT]
+    for item in trigger_pool:
         if str(item.get("trade_action", "")).upper() not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
             _apply_early_mover_signal_state(item)
             continue
+        trigger_eligible += 1
         trigger_check = _verify_early_mover_intraday_trigger(item)
         trigger_checks += 1
         _apply_early_mover_signal_state(item, trigger_check)
+
+    # Rebuild display selection after trigger checks so actionable rows can bubble up.
+    phase_1 = [c for c in all_unified if c["phase"] == 1]
+    phase_2 = [c for c in all_unified if c["phase"] == 2]
+    phase_3 = [c for c in all_unified if c["phase"] == 3]
+    p2_coins = phase_2
+    p3_coins = phase_3
+    p1_slots = max(0, MAX_DISPLAY - len(p2_coins) - len(p3_coins))
+    p1_coins = phase_1[:p1_slots]
+    unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (1 if x["phase"] in (2, 3) else 2, -x["score"]))
+    unified = sorted(
+        all_unified,
+        key=lambda x: (
+            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            1 if x["phase"] in (2, 3) else 2,
+            -x["score"],
+        ),
+    )[:MAX_DISPLAY]
 
     unified = sorted(
         unified,
@@ -9073,6 +9107,9 @@ def fetch_early_movers(_prefetched_perps=None):
             -x["score"],
         ),
     )
+    p1_coins = [c for c in unified if c["phase"] == 1]
+    p2_coins = [c for c in unified if c["phase"] == 2]
+    p3_coins = [c for c in unified if c["phase"] == 3]
 
     stats = {
         "total_coins": len(all_coins),
@@ -9090,6 +9127,9 @@ def fetch_early_movers(_prefetched_perps=None):
         "data_warning": _CG_MARKETS_STATUS.get("warning"),
         "partial_data": _CG_MARKETS_STATUS.get("partial", False),
         "intraday_trigger_checks": trigger_checks,
+        "intraday_trigger_eligible": trigger_eligible,
+        "intraday_trigger_scan_limit": _EARLY_MOVER_TRIGGER_SCAN_LIMIT,
+        "market_universe_target": _EARLY_MOVER_MARKET_PAGES * 250,
         "trade_now_count": sum(1 for c in unified if c.get("trade_signal") == "JETZT_TRADEN"),
     }
 
@@ -9726,22 +9766,40 @@ VOLUME_SPIKES_CACHE = "/tmp/volume_spikes_cache.json"
 def _volume_spikes_wrapper() -> None:
     """Find US stocks with unusual volume (RVOL > 3.0, price > $2)."""
     try:
-        # Fetch market snapshot using /gainers endpoint (Starter plan compatible) for higher volume stocks
-        # Combine with /losers endpoint to get comprehensive coverage
         spikes = []
+        tickers = []
 
-        for endpoint in ["gainers", "losers"]:
-            snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-            snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+        try:
+            snap_resp = rate_limited_get(
+                "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
+                params={"apiKey": POLYGON_KEY},
+                timeout=30,
+            )
+            if snap_resp.status_code == 200:
+                tickers.extend(snap_resp.json().get("tickers", []))
+        except Exception:
+            pass
 
-            if snap_resp.status_code != 200:
-                if snap_resp.status_code == 403:
-                    print(f"[Warning] 403 Forbidden on {endpoint} endpoint - check API plan")
-                continue
+        if len(tickers) < 250:
+            for endpoint in ["gainers", "losers"]:
+                snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
 
-            tickers = snap_resp.json().get("tickers", [])
-            for t in tickers:
+                if snap_resp.status_code != 200:
+                    if snap_resp.status_code == 403:
+                        print(f"[Warning] 403 Forbidden on {endpoint} endpoint - check API plan")
+                    continue
+                tickers.extend(snap_resp.json().get("tickers", []))
+
+        seen_symbols = set()
+        for t in tickers:
                 try:
+                    symbol = str(t.get("ticker", "") or "").upper().strip()
+                    if not symbol or symbol in seen_symbols:
+                        continue
+                    seen_symbols.add(symbol)
+                    if _stock_alert_asset_exclusion_reason(symbol, require_reference=False):
+                        continue
                     day = t.get("day", {})
                     prev = t.get("prevDay", {})
 
@@ -9779,7 +9837,7 @@ def _volume_spikes_wrapper() -> None:
                             signal_type = "NORMAL"
 
                         spikes.append({
-                            "ticker": t.get("ticker", ""),
+                            "ticker": symbol,
                             "price": round(price, 2),
                             "change_pct": round(chg, 2),
                             "volume": vol,

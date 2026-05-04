@@ -4987,7 +4987,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         {f.v > 0 && stats ? ` (${f.v === 1 ? stats.phase_1_count : f.v === 2 ? stats.phase_2_count : stats.phase_3_count || 0})` : ''}
                     </button>
                 ))}
-                {stats && <span className="text-xs text-gray-400 ml-auto">{stats.unified_count || 0} Coins angezeigt{stats.total_found > stats.unified_count ? ` (${stats.total_found} gefunden)` : ''}</span>}
+                {stats && <span className="text-xs text-gray-400 ml-auto">
+                    {stats.unified_count || 0} angezeigt · {stats.market_universe_target || stats.total_coins || 1000} analysiert
+                    {stats.intraday_trigger_checks != null ? ` · ${stats.intraday_trigger_checks}/${stats.intraday_trigger_scan_limit || 1000} Trigger geprüft` : ''}
+                </span>}
             </div>
             {stats?.data_warning && (
                 <div className="text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2">
