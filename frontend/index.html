@@ -3359,12 +3359,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 </div>
 
-                {/* Support/Resistance + Fibonacci */}
+                {/* Pivot levels + Fibonacci */}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Support / Resistance</h4>
+                    <h4 className="font-semibold text-sm mb-2">Pivot / Range</h4>
                     <div className="grid grid-cols-2 gap-2">
-                        <div><span className="text-gray-500">Support</span> <span className="font-semibold color-positive">${d.support_1}</span></div>
-                        <div><span className="text-gray-500">Resistance</span> <span className="font-semibold color-negative">${d.resistance_1}</span></div>
+                        <div><span className="text-gray-500">Pivot S1</span> <span className="font-semibold color-positive">${d.support_1}</span></div>
+                        <div><span className="text-gray-500">Pivot R1</span> <span className="font-semibold color-negative">${d.resistance_1}</span></div>
                         <div><span className="text-gray-500">Pivot</span> <span className="font-semibold">${d.pivot}</span></div>
                         <div><span className="text-gray-500">Range Pos</span> <span className="font-semibold">{d.range_position != null ? d.range_position.toFixed(0) + '%' : '–'}</span></div>
                         <div><span className="text-gray-500">20D High</span> <span className="font-semibold">${d.high_20d}</span></div>
@@ -3460,7 +3460,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         )}
                         {reminderEligible && (
                             <div className="mt-3 border-t border-white/60 pt-2">
-                                <div className="font-semibold mb-2">Reminder bei Retest/5m Trigger</div>
+                                <div className="font-semibold mb-2">Reminder bei Entry-Zone/Retest</div>
                                 <div className="flex gap-2 flex-wrap">
                                     {[2, 6, 12].map(h => (
                                         <button key={h} disabled={reminderBusy} onClick={() => createTradeReminder(h, 'email_browser')}
@@ -7971,12 +7971,12 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 </div>
                             </div>
 
-                            {/* Support / Resistance */}
+                            {/* Pivot / Range */}
                             <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
-                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Support / Resistance</h4>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Pivot / Range</h4>
                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
-                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Support</span><div style={{ fontWeight: 700, color: '#10b981' }}>${d.support_1 || '-'}</div></div>
-                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Resistance</span><div style={{ fontWeight: 700, color: '#ef4444' }}>${d.resistance_1 || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Pivot S1</span><div style={{ fontWeight: 700, color: '#10b981' }}>${d.support_1 || '-'}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Pivot R1</span><div style={{ fontWeight: 700, color: '#ef4444' }}>${d.resistance_1 || '-'}</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Pivot</span><div style={{ fontWeight: 700 }}>${d.pivot || '-'}</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Range Position</span><div style={{ fontWeight: 700 }}>{d.range_position?.toFixed(0) || '-'}%</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>20D High</span><div style={{ fontWeight: 700 }}>${d.high_20d || '-'}</div></div>
