@@ -783,3 +783,39 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     assert "MAILME" in sent[0][1]
     assert "Entry" in sent[0][1]
     assert "BTC" in sent[0][1]
+
+
+def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="FIRST")]})
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="SECOND")]})
+
+    assert len(sent) == 1
+    assert "FIRST" in sent[0][1]
+    assert "SECOND" not in sent[0][1]
+    status = api._email_dedupe_status(now=time.time())
+    digest = [item for item in status["recent"] if item["key"] == api._EARLY_MOVER_DIGEST_KEY]
+    assert digest
+    assert 0 < digest[0]["remaining_seconds"] <= api._EARLY_MOVER_DIGEST_DEDUPE_SEC
+
+
+def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    rows = [
+        _early_mover_row(Symbol=f"ROW{idx}", score=90 - idx, grade="S" if idx == 0 else "A")
+        for idx in range(api._EARLY_MOVER_MAX_EMAIL_ROWS + 2)
+    ]
+
+    api._send_early_mover_long_alerts({"coins": rows})
+
+    assert len(sent) == 1
+    assert f"{api._EARLY_MOVER_MAX_EMAIL_ROWS}/{len(rows)}" in sent[0][0]
+    assert "ROW0" in sent[0][1]
+    assert f"ROW{api._EARLY_MOVER_MAX_EMAIL_ROWS + 1}" not in sent[0][1]

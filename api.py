@@ -28,7 +28,7 @@ import smtplib
 import threading
 import html
 from copy import deepcopy
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -718,6 +718,9 @@ _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_RADAR_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
+_EARLY_MOVER_DIGEST_DEDUPE_SEC = 6 * 3600
+_EARLY_MOVER_DIGEST_KEY = "early_movers_long_digest"
+_EARLY_MOVER_MAX_EMAIL_ROWS = 5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
@@ -796,7 +799,12 @@ def _email_dedupe_status(now: Optional[float] = None) -> Dict[str, Any]:
     dedupe = _load_email_dedupe(now=now)
     recent = []
     for key, ts in sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:20]:
-        ttl = _CRASH_ALERT_DEDUPE_SEC if key.startswith("crash_stock_") else _EMAIL_COOLDOWN_SEC
+        if key.startswith("crash_stock_"):
+            ttl = _CRASH_ALERT_DEDUPE_SEC
+        elif key == _EARLY_MOVER_DIGEST_KEY:
+            ttl = _EARLY_MOVER_DIGEST_DEDUPE_SEC
+        else:
+            ttl = _EMAIL_COOLDOWN_SEC
         recent.append({
             "key": key,
             "timestamp": datetime.fromtimestamp(ts).isoformat(),
@@ -1159,6 +1167,14 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
         if suppressed:
             _record_email_event("Crypto Early Mover LONG Alert", "skipped", f"no_active_long_setups:{suppressed}")
         return
+    digest_remaining = _email_dedupe_remaining(_EARLY_MOVER_DIGEST_KEY, _EARLY_MOVER_DIGEST_DEDUPE_SEC, now)
+    if digest_remaining > 0:
+        _record_email_event(
+            "Crypto Early Mover LONG Alert",
+            "skipped",
+            f"digest_cooldown_active:{digest_remaining}s candidates={len(candidates)}",
+        )
+        return
 
     def _fmt_num(value, suffix="", decimals=1, default="-"):
         number = _alert_float(value)
@@ -1166,8 +1182,17 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
             return default
         return f"{number:.{decimals}f}{suffix}"
 
+    def _candidate_rank(item: Dict[str, Any]) -> Tuple[float, float, float]:
+        grade_rank = {"S": 4, "A+": 3, "A": 2}.get(str(item.get("grade", "")).upper(), 0)
+        trigger_rank = 1 if str(item.get("action", "")).upper() == "LONG_TRIGGER" else 0
+        score = _alert_float(item.get("score"), 0) or 0
+        return (grade_rank, trigger_rank, score)
+
+    candidates = sorted(candidates, key=_candidate_rank, reverse=True)
+    email_rows = candidates[:_EARLY_MOVER_MAX_EMAIL_ROWS]
+
     rows = ""
-    for item in candidates[:10]:
+    for item in email_rows:
         symbol = html.escape(str(item["symbol"]))
         name = html.escape(str(item["name"] or ""))
         action = html.escape(str(item["action"] or "LONG"))
@@ -1184,8 +1209,8 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
         )
 
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
-    <h2 style="color:#059669">Crypto Early Mover LONG Alert</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(candidates)} aktive Long/Retest Setup(s)</p>
+    <h2 style="color:#059669">Crypto Early Mover LONG Digest</h2>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {len(email_rows)} von {len(candidates)} aktiven Long/Retest Setup(s)</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
@@ -1193,11 +1218,12 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur S/A/A+ Early-Mover LONG_TRIGGER oder nahe WAIT_FOR_RETEST Setups; Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Data, TP1 nicht verpasst. Entry trotzdem nur nach 5m/1m Trigger oder sauberem Retest.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur S/A/A+ Early-Mover LONG_TRIGGER oder nahe WAIT_FOR_RETEST Setups; Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Data, TP1 nicht verpasst. Entry trotzdem nur nach 5m/1m Trigger oder sauberem Retest.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Crypto Early Mover LONG: {len(candidates)} Setup(s)", body)
+    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
-        for item in candidates:
+        _email_dedupe_mark(_EARLY_MOVER_DIGEST_KEY, now=now)
+        for item in email_rows:
             _EMAIL_COOLDOWN[item["key"]] = now
             _email_dedupe_mark(item["key"], now=now)
 
