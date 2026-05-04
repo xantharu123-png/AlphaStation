@@ -953,3 +953,41 @@ def test_early_mover_signal_state_only_marks_trade_now_after_trigger():
     assert row["trade_signal"] == "JETZT_TRADEN"
     assert row["alertable_crypto"] is True
     assert row["execution_trigger_ok"] is True
+
+
+def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
+    reminder_file = tmp_path / "trade_reminders.json"
+    monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(reminder_file))
+    monkeypatch.setattr(api, "_reminder_now", lambda: 1_000_000.0)
+    row = _early_mover_row(Symbol="BROCCOLI")
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: row)
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "last_close": 1.31,
+        "volume_ratio": 1.7,
+    })
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, bypass_startup_cooldown=False: sent.append((subject, body, bypass_startup_cooldown)) or True)
+
+    api._save_trade_reminders([{
+        "id": "rem1",
+        "ticker": "BROCCOLI",
+        "asset_type": "crypto",
+        "scanner": "early_movers",
+        "condition": "trigger_or_retest",
+        "channel": "email_browser",
+        "status": "active",
+        "row": row,
+        "created_at": api._reminder_iso(999_000.0),
+        "expires_at": 1_010_000.0,
+        "expires_at_iso": api._reminder_iso(1_010_000.0),
+        "last_checked_at": 0,
+    }])
+
+    api._process_trade_reminders_once()
+    reminders = api._load_trade_reminders()
+
+    assert reminders[0]["status"] == "triggered"
+    assert reminders[0]["trigger_result"]["reason"] == "5m_breakout_volume_confirmed"
+    assert sent and sent[0][2] is True

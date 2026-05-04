@@ -1656,6 +1656,44 @@ function ToastContainer() {
     );
 }
 
+function TradeReminderPoller() {
+    const seenRef = useRef(new Set((() => {
+        try { return JSON.parse(localStorage.getItem('tradeReminderSeen') || '[]'); }
+        catch(e) { return []; }
+    })()));
+
+    useEffect(() => {
+        const saveSeen = () => {
+            localStorage.setItem('tradeReminderSeen', JSON.stringify(Array.from(seenRef.current).slice(-100)));
+        };
+        const notify = (reminder) => {
+            const title = `Trigger bereit: ${reminder.ticker}`;
+            const reason = (reminder.trigger_result?.reason || reminder.last_check?.reason || 'Trigger bereit').replaceAll('_', ' ');
+            if (window.addToast) window.addToast(`${title} - ${reason}`, 'success');
+            if ('Notification' in window && Notification.permission === 'granted') {
+                try { new Notification(title, { body: reason }); } catch(e) {}
+            }
+        };
+        const poll = async () => {
+            try {
+                const res = await fetch(`${API}/api/trade-reminders?status=triggered`);
+                if (!res.ok) return;
+                const data = await res.json();
+                (data.reminders || []).forEach(reminder => {
+                    if (!reminder.id || seenRef.current.has(reminder.id)) return;
+                    seenRef.current.add(reminder.id);
+                    notify(reminder);
+                });
+                saveSeen();
+            } catch(e) {}
+        };
+        poll();
+        const timer = setInterval(poll, 60000);
+        return () => clearInterval(timer);
+    }, []);
+    return null;
+}
+
 // Custom Hooks
 function useAutoRefresh(url, interval = 30000, dependency = []) {
     const [data, setData] = useState(null);
@@ -2017,6 +2055,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [customHeight, setCustomHeight] = useState(null);
     const [timeframe, setTimeframe] = useState('4H');
     const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
+    const [reminderBusy, setReminderBusy] = useState(false);
     const chartContainer = useRef(null);
     const chart = useRef(null);
     const candleSeries = useRef(null);
@@ -2765,6 +2804,71 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return `${n > 0 ? '+' : ''}${n.toFixed(digits)}%`;
     };
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
+    const riskLabelMap = {
+        observe_only_scanner: 'nur Beobachtung',
+        no_intraday_execution_trigger: '5m Trigger fehlt',
+        very_high_volume_turnover: 'sehr hoher Umsatz',
+        high_volume_turnover: 'hoher Umsatz',
+        overheated_phase3: 'ueberhitzt',
+        btc_headwind: 'BTC Gegenwind',
+        data_warning: 'Daten unsicher',
+        oi_snapshot_only: 'OI nur Snapshot',
+        manipulation_spread: 'Spread/Manipulationsrisiko',
+        headline_high: 'News-Risiko hoch',
+        event_high: 'Event-Risiko hoch',
+        chased_from_entry: 'zu weit vom Entry',
+        early_mover_no_chase: 'nicht hinterherjagen',
+    };
+    const humanizeRiskFlag = (flag) => riskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
+    const compactRiskText = (flags = []) => {
+        const list = Array.isArray(flags) ? flags : [];
+        const clean = list.map(humanizeRiskFlag).filter(Boolean);
+        return clean.length ? clean.slice(0, 2).join(' + ') : 'normal';
+    };
+    const weatherOneLine = (() => {
+        if (!marketContext) return null;
+        const headline = marketContext.headline_level === 'HIGH' || marketContext.headline_level === 'EXTREME' ? 'News vorsichtig' : 'News ok';
+        const event = marketContext.event_level === 'HIGH' || marketContext.event_level === 'EXTREME' ? 'Event-Risiko' : 'keine Event-Blockade';
+        return `${marketContext.regime || 'NEUTRAL'} | ${marketContext.trade_mode || 'SELECTIVE'} | ${headline}, ${event}`;
+    })();
+    const nextStepText = (() => {
+        const action = String(setupAction || '').toUpperCase();
+        if (tradeSignal === 'JETZT_TRADEN') return 'Trigger bestaetigt - jetzt Spread/Chart pruefen.';
+        if (tradeSignal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return 'Nicht handeln - Bewegung ist zu weit gelaufen.';
+        if (action === 'WAIT_FOR_RETEST') return 'Auf Retest nahe Entry warten.';
+        if (action === 'WAIT_FOR_BTC_CONFIRMATION') return 'Warten bis BTC nicht mehr dagegen laeuft.';
+        if (action === 'LONG_TRIGGER') return 'Auf frischen 5m/1m Trigger warten.';
+        return 'Beobachten, noch kein Sofort-Entry.';
+    })();
+    const reminderEligible = activeTradeSetup && tradeSignal !== 'JETZT_TRADEN' && tradeSignal !== 'NICHT_TRADEN';
+    const createTradeReminder = async (hours = 6, channel = 'email_browser') => {
+        setReminderBusy(true);
+        try {
+            if (channel.includes('browser') && 'Notification' in window && Notification.permission === 'default') {
+                try { await Notification.requestPermission(); } catch(e) {}
+            }
+            const res = await fetch(`${API}/api/trade-reminders`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ticker,
+                    asset_type: isCrypto ? 'crypto' : 'stock',
+                    scanner: isCrypto ? 'early_movers' : 'stock',
+                    condition: 'trigger_or_retest',
+                    duration_hours: hours,
+                    channel,
+                    row: { ...cd, ...d, trade_setup: activeTradeSetup },
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Reminder konnte nicht erstellt werden');
+            if (window.addToast) window.addToast(`Reminder aktiv: ${ticker} fuer ${hours}h`, 'success');
+        } catch (err) {
+            if (window.addToast) window.addToast(err.message || 'Reminder Fehler', 'error');
+        } finally {
+            setReminderBusy(false);
+        }
+    };
     const modeLabel = sidebarMode === 'normal' ? 'Normal' : sidebarMode === 'wide' ? 'Breit' : 'Vollbild';
 
     // Simple markdown-to-HTML: bold, headers, line breaks
@@ -2830,7 +2934,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     )}
                 </div>
 
-                {marketContext && (
+                {marketContext && !isCrypto && (
                     <div className="border border-slate-200 bg-slate-900 text-slate-50 p-3 rounded-lg mb-3 text-xs">
                         <div className="flex items-center justify-between gap-2 mb-2">
                             <h4 className="font-semibold text-sm">Market Weather</h4>
@@ -2849,7 +2953,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
-                {tradeHealth && (
+                {tradeHealth && !isCrypto && (
                     <div className={`border p-3 rounded-lg mb-3 text-xs ${tradeHealthTone}`}>
                         <div className="flex items-center justify-between gap-2 mb-2">
                             <h4 className="font-semibold text-sm">Trade Health</h4>
@@ -2889,6 +2993,53 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
+                {isCrypto && (activeTradeSetup || tradeHealth || marketContext) && (
+                    <div className={`border p-3 rounded-lg mb-3 text-xs ${setupTone}`}>
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                            <div>
+                                <div className={`text-base font-bold ${setupTitleTone}`}>
+                                    {tradeSignal === 'JETZT_TRADEN' ? 'JETZT TRADEN' : tradeSignal === 'NICHT_TRADEN' ? 'NICHT TRADEN' : 'BEOBACHTEN'}
+                                </div>
+                                <div className="opacity-80">{nextStepText}</div>
+                            </div>
+                            <div className="text-right">
+                                <div className="font-bold">{cd.grade || d.signal_grade || '-'}</div>
+                                <div className="opacity-70">Score {Math.round(cd.score || cd.EarlyScore || d.signal_score || 0)}</div>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 mb-2">
+                            <div><span className="opacity-70">Entry</span><div className="font-semibold">{formatSidebarPrice(activeTradeSetup?.entry ?? cd.entry)}</div></div>
+                            <div><span className="opacity-70">Stop</span><div className="font-semibold text-red-700">{formatSidebarPrice(activeTradeSetup?.stop_loss ?? cd.stop_loss)}</div></div>
+                            <div><span className="opacity-70">TP1</span><div className="font-semibold text-emerald-700">{formatSidebarPrice(activeTradeSetup?.tp1 ?? cd.tp1)}</div></div>
+                            <div><span className="opacity-70">TP2</span><div className="font-semibold text-emerald-700">{formatSidebarPrice(activeTradeSetup?.tp2 ?? cd.tp2)}</div></div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 rounded bg-white/60 p-2">
+                            <div><span className="opacity-70">Live R:R</span><div className="font-semibold">{activeTradeSetup?.live_rr ?? cd.live_rr_ratio ?? '-'}</div></div>
+                            <div><span className="opacity-70">Risk</span><div className={`font-semibold ${riskTone(cd.risk_level || tradeHealth?.fakeout_risk)}`}>{cd.risk_level || tradeHealth?.fakeout_risk || 'LOW'}</div></div>
+                            <div><span className="opacity-70">BTC</span><div className="font-semibold">{activeTradeSetup?.btc_context?.tailwind === false ? 'Gegenwind' : activeTradeSetup?.btc_context?.tailwind === true || cd.btc_context?.tailwind ? 'Tailwind' : '-'}</div></div>
+                        </div>
+                        {(cd.risk_flags && cd.risk_flags.length > 0) && (
+                            <div className="mt-2 text-amber-800">Hinweis: {compactRiskText(cd.risk_flags)}</div>
+                        )}
+                        {weatherOneLine && (
+                            <div className="mt-1 opacity-80">Market: {weatherOneLine}</div>
+                        )}
+                        {reminderEligible && (
+                            <div className="mt-3 border-t border-white/60 pt-2">
+                                <div className="font-semibold mb-2">Reminder wenn Trigger/Retest kommt</div>
+                                <div className="flex gap-2 flex-wrap">
+                                    {[2, 6, 12, 24].map(h => (
+                                        <button key={h} disabled={reminderBusy} onClick={() => createTradeReminder(h, 'email_browser')}
+                                            className="px-2 py-1 rounded bg-white/80 border border-sky-200 text-sky-800 font-semibold hover:bg-sky-50 disabled:opacity-50">
+                                            {h}h Mail+Browser
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {/* Timeframe Selector */}
                 <div className="flex gap-1 mb-2 flex-wrap">
                     {TIMEFRAMES.map(tf => (
@@ -2899,8 +3050,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     ))}
                 </div>
                 {isCrypto && chartData?.chart_note && (
-                    <div className={`mb-3 rounded border px-3 py-2 text-xs ${String(chartData.source || '').includes('Exchange') ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-                        Chart: <span className="font-semibold">{chartData.source || 'Crypto'}</span> - {chartData.chart_note}
+                    <div className="mb-3 text-[11px] text-gray-500">
+                        Chartquelle: <span className="font-semibold">{chartData.source || 'Crypto'}</span>
                     </div>
                 )}
 
@@ -3061,33 +3212,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {/* Crypto Detail Panel (CoinGecko) */}
                 {isCrypto && !isExchangeCrypto && cd && (
                 <>
-                {activeTradeSetup && (
-                <div className={`border p-3 rounded-lg mb-3 text-xs ${setupTone}`}>
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                        <div>
-                            <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel}</h4>
-                            <div className="opacity-80">{activeTradeSetup.entry_status || cd.entry_status || 'CONDITIONAL'}</div>
-                        </div>
-                        <span className="text-[11px] font-bold px-2 py-1 rounded bg-white/70">{activeTradeSetup.entry_quality || cd.entry_quality || '-'}</span>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                        <div><span className="opacity-70">Live R:R</span><div className="font-semibold">{activeTradeSetup.live_rr ?? cd.live_rr_ratio ?? '-'}</div></div>
-                        <div><span className="opacity-70">Distanz</span><div className="font-semibold">{activeTradeSetup.distance_to_entry_r ?? cd.distance_to_entry_r ?? '-'}R</div></div>
-                        <div><span className="opacity-70">BTC</span><div className="font-semibold">{activeTradeSetup.btc_context?.tailwind === false ? 'Headwind' : activeTradeSetup.btc_context?.tailwind === true ? 'Tailwind' : '-'}</div></div>
-                    </div>
-                    {activeTradeSetup.trigger_conditions && activeTradeSetup.trigger_conditions.length > 0 && (
-                        <div className="mt-2 rounded border border-white/50 bg-white/50 p-2">
-                            <div className="font-semibold mb-1">Trigger-Checkliste</div>
-                            {activeTradeSetup.trigger_conditions.slice(0, 4).map((line, i) => (
-                                <div key={i}>- {line}</div>
-                            ))}
-                        </div>
-                    )}
-                    {(cd.scanner_note || activeTradeSetup.model) && (
-                        <div className="mt-2 opacity-80">{cd.scanner_note || activeTradeSetup.model}</div>
-                    )}
-                </div>
-                )}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Crypto Info</h4>
                     <div className="grid grid-cols-2 gap-2">
@@ -3109,27 +3233,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 </div>
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Scanner Daten</h4>
+                    <h4 className="font-semibold text-sm mb-2">Setup-Kontext</h4>
                     <div className="grid grid-cols-2 gap-2">
-                        {cd.EarlyScore && <div><span className="text-gray-500">Score</span> <span className={`font-semibold px-2 py-0.5 rounded ${cd.EarlyScore >= 70 ? 'bg-green-100 text-green-800' : cd.EarlyScore >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{cd.EarlyScore}</span></div>}
-                        {cd.DegenScore && <div><span className="text-gray-500">Micro Score</span> <span className="font-semibold">{cd.DegenScore}</span></div>}
-                        {cd.WhaleScore && <div><span className="text-gray-500">Perp/OI Score</span> <span className="font-semibold">{cd.WhaleScore}</span></div>}
-                        {(cd.trade_signal || cd.trade_action) && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className={`font-semibold ${setupTitleTone}`}>{setupActionLabel}</span></div>}
-                        {cd.entry_status && <div><span className="text-gray-500">Status</span> <span className="font-semibold">{cd.entry_status}</span></div>}
-                        {cd.intraday_trigger && <div><span className="text-gray-500">5m Trigger</span> <span className={`font-semibold ${cd.intraday_trigger.ok ? 'color-positive' : 'text-amber-700'}`}>{cd.intraday_trigger.ok ? 'Bestaetigt' : (cd.intraday_trigger.reason || 'fehlt')}</span></div>}
-                        {cd.Signal && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className="font-semibold">{cd.Signal}</span></div>}
-                        {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'} {cd.PerpChartSymbol ? `(${cd.PerpChartSymbol})` : ''}</span></div>}
-                        {cd.FundingRate != null && <div><span className="text-gray-500">Funding</span> <span className="font-semibold">{(cd.FundingRate * 100).toFixed(3)}%</span></div>}
-                        {cd.OI_Ratio && <div><span className="text-gray-500">OI Ratio</span> <span className="font-semibold">{cd.OI_Ratio.toFixed(2)}x</span></div>}
+                        <div><span className="text-gray-500">Phase</span> <span className="font-semibold">{cd.phase_label || cd.phase || '-'}</span></div>
+                        <div><span className="text-gray-500">Risk Grund</span> <span className="font-semibold text-amber-700">{compactRiskText(cd.risk_flags)}</span></div>
+                        {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'}</span></div>}
                         {cd.OI_ChangePct != null && <div><span className="text-gray-500">OI Delta</span> <span className={`font-semibold ${cd.OI_ChangePct >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.OI_ChangePct, 1)}</span></div>}
-                        {cd.OI_HistoryAgeSeconds != null && <div><span className="text-gray-500">OI Alter</span> <span className="font-semibold">{formatCacheAge(cd.OI_HistoryAgeSeconds)}</span></div>}
                         {cd.Btc24h != null && <div><span className="text-gray-500">BTC 24h</span> <span className={`font-semibold ${cd.Btc24h >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.Btc24h, 1)}</span></div>}
-                        {cd.BtcRelative24h != null && <div><span className="text-gray-500">Alpha 24h</span> <span className={`font-semibold ${cd.BtcRelative24h >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.BtcRelative24h, 1)}</span></div>}
-                        {cd.live_rr_ratio != null && <div><span className="text-gray-500">Live R:R</span> <span className="font-semibold">{cd.live_rr_ratio}</span></div>}
-                        {cd.distance_to_entry_r != null && <div><span className="text-gray-500">Distanz</span> <span className="font-semibold">{cd.distance_to_entry_r}R</span></div>}
-                        {cd.risk_flags && cd.risk_flags.length > 0 && <div className="col-span-2"><span className="text-gray-500">Warnungen</span> <span className="font-semibold text-xs text-amber-700">{cd.risk_flags.slice(0, 4).join(', ')}</span></div>}
-                        {cd.Signals && <div className="col-span-2"><span className="text-gray-500">Signale</span> <span className="font-semibold text-xs">{Array.isArray(cd.Signals) ? cd.Signals.join(', ') : cd.Signals}</span></div>}
+                        {cd.BtcRelative24h != null && <div><span className="text-gray-500">Alpha</span> <span className={`font-semibold ${cd.BtcRelative24h >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPctValue(cd.BtcRelative24h, 1)}</span></div>}
                     </div>
+                    <div className="mt-2 text-gray-500">Score = Setup-Staerke. Risk = ob der Einstieg jetzt sauber ist.</div>
                 </div>
                 </>
                 )}
@@ -3244,7 +3357,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 )}
 
                 {/* Trade Setup */}
-                {activeTradeSetup && (
+                {activeTradeSetup && !isCrypto && (
                     <div className={`border p-3 rounded-lg mb-3 text-xs ${setupTone}`}>
                         <div className="flex items-center justify-between gap-2 mb-2">
                             <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel} ({activeTradeSetup.direction})</h4>
@@ -3276,6 +3389,19 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         {activeTradeSetup.notes && activeTradeSetup.notes.length > 0 && (
                             <div className="mt-2 text-gray-600">
                                 {activeTradeSetup.notes.slice(0, 3).join(' | ')}
+                            </div>
+                        )}
+                        {reminderEligible && (
+                            <div className="mt-3 border-t border-white/60 pt-2">
+                                <div className="font-semibold mb-2">Reminder bei Retest/5m Trigger</div>
+                                <div className="flex gap-2 flex-wrap">
+                                    {[2, 6, 12].map(h => (
+                                        <button key={h} disabled={reminderBusy} onClick={() => createTradeReminder(h, 'email_browser')}
+                                            className="px-2 py-1 rounded bg-white/80 border border-blue-200 text-blue-800 font-semibold hover:bg-blue-50 disabled:opacity-50">
+                                            {h}h Mail+Browser
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
                         )}
                     </div>
@@ -3901,6 +4027,7 @@ function App() {
 
             {/* Toast Container */}
             <ToastContainer />
+            <TradeReminderPoller />
         </div>
     );
 }
@@ -4686,13 +4813,26 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 
     const phaseIcon = (p) => p === 1 ? '\u{1F7E2}' : p === 2 ? '\u{1F7E1}' : '\u{1F534}';
     const riskBadge = (r) => r === 'HIGH' ? 'signal-bearish' : r === 'MEDIUM' ? 'signal-lightdiv' : 'signal-bullish';
+    const earlyRiskLabelMap = {
+        observe_only_scanner: 'nur Beobachtung',
+        no_intraday_execution_trigger: '5m Trigger fehlt',
+        very_high_volume_turnover: 'sehr hoher Umsatz',
+        high_volume_turnover: 'hoher Umsatz',
+        overheated_phase3: 'ueberhitzt',
+        btc_headwind: 'BTC Gegenwind',
+        data_warning: 'Daten unsicher',
+        oi_snapshot_only: 'OI nur Snapshot',
+        manipulation_spread: 'Spread/Manipulationsrisiko',
+        chased_from_entry: 'zu weit vom Entry',
+    };
+    const humanizeEntryRisk = (flag) => earlyRiskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
     const getEntryRiskReasons = (item) => {
         const reasons = Array.isArray(item.risk_reasons) ? item.risk_reasons : [];
         return reasons.length > 0 ? reasons : (Array.isArray(item.risk_flags) ? item.risk_flags : []);
     };
     const getEntryRiskTitle = (item) => {
         const reasons = getEntryRiskReasons(item);
-        return reasons.length > 0 ? reasons.join(' | ') : 'Keine Entry-Warnung';
+        return reasons.length > 0 ? reasons.map(humanizeEntryRisk).join(' | ') : 'Keine Entry-Warnung';
     };
     const getSetupScoreTitle = (item) => {
         const raw = item.raw_score != null ? `Raw ${item.raw_score}` : 'Raw n/a';
@@ -4788,8 +4928,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                <b>Setup Score</b> = wie stark/auffaellig der Coin ist. <b>Entry Risk</b> = wie riskant der Einstieg jetzt ist.
-                Hoher Score + MEDIUM Risk ist normal, wenn z.B. Vol/MCap extrem hoch ist: beobachten, aber erst Trigger/Retest handeln.
+                <b>Score</b> = Chance/Staerke. <b>Risk</b> = Einstieg jetzt. Hoher Score + Medium Risk heisst: guter Coin, aber erst Trigger/Retest.
             </div>
 
             {/* Unified Phase Table */}
@@ -4803,14 +4942,11 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change24h')}>24h%{sortKey === 'Change24h' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change7d')}>7d%{sortKey === 'Change7d' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('VolMCapRatio')}>Vol/MCap{sortKey === 'VolMCapRatio' && ' \u2193'}</th>
-                            <th className="text-right py-2 px-2 sortable-header cursor-pointer" title="Setup Score: Chance/Staerke des Setups, nicht Entry-Sicherheit" onClick={() => toggleSort('score')}>Setup Score{sortKey === 'score' && ' \u2193'}</th>
-                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Entry Risk: Risiko beim Einstieg jetzt, z.B. Ueberhitzung, Funding oder extremes Vol/MCap" onClick={() => toggleSort('risk_level')}>Entry Risk{sortKey === 'risk_level' && ' \u2193'}</th>
-                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('grade')}>Grade{sortKey === 'grade' && ' \u2193'}</th>
-                            <th className="text-left py-2 px-2">Long-Plan</th>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Score = Setup-Staerke, Risk = Entry-Risiko jetzt" onClick={() => toggleSort('score')}>Score / Risk{sortKey === 'score' && ' \u2193'}</th>
+                            <th className="text-left py-2 px-2">Aktion</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('entry')}>Entry{sortKey === 'entry' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2">TP1 / TP2</th>
                             <th className="text-center py-2 px-2">BTC</th>
-                            <th className="text-left py-2 px-2">Signal</th>
                             <th className="text-left py-2 px-2">Perp</th>
                         </tr>
                     </thead>
@@ -4829,23 +4965,22 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className={`py-3 px-2 text-right font-semibold ${(item.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change24h ? `${item.Change24h > 0 ? '+' : ''}${item.Change24h.toFixed(1)}%` : '\u2014'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.Change7d||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change7d ? `${item.Change7d > 0 ? '+' : ''}${item.Change7d.toFixed(1)}%` : '\u2014'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.VolMCapRatio||0) > 100 ? 'color-negative font-bold' : (item.VolMCapRatio||0) > 60 ? 'text-yellow-600' : ''}`}>{item.VolMCapRatio ? `${item.VolMCapRatio.toFixed(0)}%` : '\u2014'}</td>
-                                <td className="py-3 px-2 text-right" title={getSetupScoreTitle(item)}>
-                                    <span className={`signal-badge ${item.score >= 70 ? 'signal-bullish' : item.score >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.score}</span>
-                                </td>
-                                <td className="py-3 px-2 text-center" title={getEntryRiskTitle(item)}>
-                                    <span className={`signal-badge ${riskBadge(item.risk_level)}`}>{item.risk_level}</span>
+                                <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | ${getEntryRiskTitle(item)}`}>
+                                    <div className="flex items-center justify-center gap-1">
+                                        <span className={`signal-badge ${item.score >= 70 ? 'signal-bullish' : item.score >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.grade || ''} {item.score}</span>
+                                        <span className={`signal-badge ${riskBadge(item.risk_level)}`}>{item.risk_level}</span>
+                                    </div>
                                     {getEntryRiskReasons(item).length > 0 && (
                                         <div className="text-[11px] text-amber-700 mt-1 max-w-[150px] truncate mx-auto">
-                                            {getEntryRiskReasons(item)[0]}
+                                            {humanizeEntryRisk(getEntryRiskReasons(item)[0])}
                                         </div>
                                     )}
                                 </td>
-                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.grade === 'S' ? 'signal-bullish' : item.grade === 'A' ? 'signal-bullish' : item.grade === 'B' ? 'signal-lightdiv' : item.grade === 'C' ? 'signal-bearish' : 'signal-neutral'}`}>{item.grade}</span></td>
                                 <td className="py-3 px-2 text-xs">
                                     <span className={`px-2 py-1 rounded font-semibold ${item.trade_signal === 'JETZT_TRADEN' ? 'bg-green-100 text-green-800' : item.trade_signal === 'NICHT_TRADEN' ? 'bg-red-100 text-red-800' : item.trade_signal === 'WARTEN' ? 'bg-yellow-100 text-yellow-800' : 'bg-sky-100 text-sky-800'}`}>
                                         {item.trade_signal === 'JETZT_TRADEN' ? 'JETZT TRADEN' : item.trade_signal || 'BEOBACHTEN'}
                                     </span>
-                                    {item.signal_label && <div className="text-[11px] text-gray-500 mt-1 max-w-[220px]">{item.signal_label}</div>}
+                                    {item.signal_label && <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={item.signal_label}>{String(item.signal_label).replace('Achtung beobachten: ', '')}</div>}
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
                                 <td className="py-3 px-2 text-right text-xs">
@@ -4854,7 +4989,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className="py-3 px-2 text-center text-xs" title={item.btc_context ? `BTC 24h ${item.btc_context.btc_24h}% | Alpha ${item.btc_context.alpha_24h}%` : ''}>
                                     {item.btc_context ? <span className={item.btc_context.tailwind ? 'color-positive' : 'text-yellow-600'}>{item.btc_context.tailwind ? 'Tailwind' : 'Check'}</span> : '\u2014'}
                                 </td>
-                                <td className="py-3 px-2 text-sm text-gray-600 truncate max-w-xs" title={item.signal_text}>{item.signal_text || '\u2014'}</td>
                                 <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
                             </tr>
                         ))}

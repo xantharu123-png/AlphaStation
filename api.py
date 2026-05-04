@@ -27,6 +27,7 @@ import re
 import smtplib
 import threading
 import html
+import uuid
 from copy import deepcopy
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime, timedelta, timezone
@@ -756,6 +757,11 @@ _EARLY_MOVER_DIGEST_KEY = "early_movers_long_digest"
 _EARLY_MOVER_MAX_EMAIL_ROWS = 5
 _EARLY_MOVER_TRIGGER_TTL = 180
 _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
+_TRADE_REMINDERS_FILE = "/tmp/alphastation_trade_reminders.json"
+_TRADE_REMINDER_CHECK_SEC = 60
+_TRADE_REMINDER_MAX_HOURS = 24
+_TRADE_REMINDER_LOCK = threading.Lock()
+_trade_reminder_running = False
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
@@ -1323,6 +1329,235 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["signal_quality"] = "observe"
         row["entry_status"] = "BEOBACHTEN"
         row["alertable_crypto"] = False
+
+
+def _reminder_now() -> float:
+    return time.time()
+
+
+def _reminder_iso(ts: Optional[float] = None) -> str:
+    return datetime.fromtimestamp(ts or _reminder_now(), timezone.utc).isoformat()
+
+
+def _load_trade_reminders() -> List[Dict[str, Any]]:
+    try:
+        if not os.path.exists(_TRADE_REMINDERS_FILE):
+            return []
+        with open(_TRADE_REMINDERS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, list) else []
+    except Exception as exc:
+        print(f"[Reminder] load error: {exc}")
+        return []
+
+
+def _save_trade_reminders(reminders: List[Dict[str, Any]]) -> None:
+    tmp_path = f"{_TRADE_REMINDERS_FILE}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(reminders, f, indent=2, default=_serialize_json)
+        os.replace(tmp_path, _TRADE_REMINDERS_FILE)
+    except Exception as exc:
+        print(f"[Reminder] save error: {exc}")
+
+
+def _find_early_mover_row(symbol: str) -> Optional[Dict[str, Any]]:
+    rows, _ = load_cache_file(EARLY_MOVERS_CACHE, max_age_hours=24)
+    wanted = str(symbol or "").upper().replace("USDT", "")
+    for row in _flatten_early_mover_rows(rows):
+        if not isinstance(row, dict):
+            continue
+        row_symbol = str(row.get("Symbol", row.get("symbol", row.get("ticker", "")))).upper().replace("USDT", "")
+        if row_symbol == wanted:
+            return dict(row)
+    return None
+
+
+def _fetch_recent_stock_5m_bars(ticker: str, limit: int = 24) -> List[Dict[str, Any]]:
+    if not ticker or not POLYGON_KEY:
+        return []
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        except Exception:
+            today_et = datetime.utcnow().strftime("%Y-%m-%d")
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/range/5/minute/{today_et}/{today_et}"
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "asc", "limit": 500}, timeout=10)
+        if resp.status_code != 200:
+            return []
+        bars = resp.json().get("results", []) or []
+        cleaned = []
+        for bar in bars[-limit:]:
+            cleaned.append({
+                "open": float(bar.get("o", 0) or 0),
+                "high": float(bar.get("h", 0) or 0),
+                "low": float(bar.get("l", 0) or 0),
+                "close": float(bar.get("c", 0) or 0),
+                "volume": float(bar.get("v", 0) or 0),
+            })
+        return cleaned
+    except Exception as exc:
+        print(f"[Reminder] stock bars error {ticker}: {exc}")
+        return []
+
+
+def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
+    row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+    ticker = str(reminder.get("ticker", "")).upper()
+    direction = str(row.get("direction", row.get("Signal_Direction", "LONG")) or "LONG").upper()
+    entry = _alert_float(row.get("entry", row.get("Entry", row.get("entry_price"))))
+    stop = _alert_float(row.get("stop_loss", row.get("stop", row.get("Stop Loss"))))
+    if not ticker or entry is None:
+        return {"triggered": False, "reason": "missing_stock_entry"}
+    bars = _fetch_recent_stock_5m_bars(ticker)
+    if len(bars) < 4:
+        return {"triggered": False, "reason": "not_enough_stock_5m_bars"}
+    last = bars[-1]
+    prev = bars[-8:-1] if len(bars) >= 9 else bars[:-1]
+    last_close = last["close"]
+    last_open = last["open"]
+    last_high = last["high"]
+    last_low = last["low"]
+    median_vol = _median_float([b.get("volume", 0) for b in prev], max(last.get("volume", 1), 1))
+    vol_ratio = last.get("volume", 0) / max(median_vol, 1)
+    close_pos = (last_close - last_low) / max(last_high - last_low, 1e-9)
+    risk = abs(entry - stop) if stop is not None else max(entry * 0.02, 0.01)
+    distance_r = abs(last_close - entry) / max(risk, 1e-9)
+
+    if direction == "SHORT":
+        trigger = last_close <= entry and last_close < last_open and close_pos <= 0.45 and vol_ratio >= 1.1
+        near_retest = distance_r <= 0.25 and last_close <= entry * 1.003
+    else:
+        trigger = last_close >= entry and last_close > last_open and close_pos >= 0.55 and vol_ratio >= 1.1
+        near_retest = distance_r <= 0.25 and last_close >= entry * 0.997
+
+    if trigger or near_retest:
+        return {
+            "triggered": True,
+            "reason": "5m_trigger" if trigger else "retest_near_entry",
+            "last_close": round(last_close, 6),
+            "distance_to_entry_r": round(distance_r, 2),
+            "volume_ratio": round(vol_ratio, 2),
+        }
+    return {
+        "triggered": False,
+        "reason": "stock_trigger_not_ready",
+        "last_close": round(last_close, 6),
+        "distance_to_entry_r": round(distance_r, 2),
+        "volume_ratio": round(vol_ratio, 2),
+    }
+
+
+def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
+    asset_type = str(reminder.get("asset_type", "crypto") or "crypto").lower()
+    ticker = str(reminder.get("ticker", "")).upper()
+    if asset_type == "crypto":
+        row = _find_early_mover_row(ticker)
+        if not row:
+            return {"triggered": False, "reason": "coin_not_in_latest_scan"}
+        trigger_check = _verify_early_mover_intraday_trigger(row)
+        _apply_early_mover_signal_state(row, trigger_check)
+        if trigger_check.get("ok"):
+            setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+            return {
+                "triggered": True,
+                "reason": trigger_check.get("reason", "crypto_trigger_ready"),
+                "last_close": trigger_check.get("last_close"),
+                "entry": row.get("entry", setup.get("entry")),
+                "stop": row.get("stop_loss", setup.get("stop_loss")),
+                "tp1": row.get("tp1", setup.get("tp1")),
+                "tp2": row.get("tp2", setup.get("tp2")),
+                "live_rr": row.get("live_rr_ratio", setup.get("live_rr")),
+                "row": row,
+            }
+        return {"triggered": False, "reason": trigger_check.get("reason", "crypto_trigger_not_ready"), "check": trigger_check}
+    return _evaluate_stock_reminder(reminder)
+
+
+def _format_reminder_email(reminder: Dict[str, Any], result: Dict[str, Any]) -> str:
+    ticker = html.escape(str(reminder.get("ticker", "?")).upper())
+    reason = html.escape(str(result.get("reason", "Trigger bereit")).replace("_", " "))
+    entry = _format_alert_price(result.get("entry") or (reminder.get("row") or {}).get("entry"))
+    stop = _format_alert_price(result.get("stop") or (reminder.get("row") or {}).get("stop_loss") or (reminder.get("row") or {}).get("stop"))
+    tp1 = _format_alert_price(result.get("tp1") or (reminder.get("row") or {}).get("tp1"))
+    tp2 = _format_alert_price(result.get("tp2") or (reminder.get("row") or {}).get("tp2"))
+    price = _format_alert_price(result.get("last_close"))
+    rr = result.get("live_rr") or (reminder.get("row") or {}).get("live_rr_ratio")
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;color:#111827">
+    <h2 style="color:#059669">Reminder: {ticker} Trigger ist da</h2>
+    <p><b>Grund:</b> {reason}</p>
+    <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;background:#f8fafc">
+      <tr><td>Preis jetzt</td><td><b>{price}</b></td></tr>
+      <tr><td>Entry</td><td><b>{entry}</b></td></tr>
+      <tr><td>Stop</td><td><b style="color:#dc2626">{stop}</b></td></tr>
+      <tr><td>TP1 / TP2</td><td><b style="color:#059669">{tp1} / {tp2}</b></td></tr>
+      <tr><td>Live R:R</td><td><b>{rr if rr is not None else '-'}</b></td></tr>
+    </table>
+    <p style="font-size:12px;color:#64748b">Reminder wurde automatisch deaktiviert. Bitte Chart/Spread vor Entry kurz prüfen.</p>
+    </body></html>
+    """
+
+
+def _process_trade_reminders_once() -> None:
+    now = _reminder_now()
+    changed = False
+    with _TRADE_REMINDER_LOCK:
+        reminders = _load_trade_reminders()
+        for reminder in reminders:
+            if reminder.get("status") != "active":
+                continue
+            if now >= float(reminder.get("expires_at", 0) or 0):
+                reminder["status"] = "expired"
+                reminder["updated_at"] = _reminder_iso(now)
+                changed = True
+                continue
+            last_checked = float(reminder.get("last_checked_at", 0) or 0)
+            if now - last_checked < _TRADE_REMINDER_CHECK_SEC:
+                continue
+            reminder["last_checked_at"] = now
+            result = _evaluate_trade_reminder(reminder)
+            reminder["last_check"] = result
+            reminder["updated_at"] = _reminder_iso(now)
+            changed = True
+            if result.get("triggered"):
+                reminder["status"] = "triggered"
+                reminder["triggered_at"] = _reminder_iso(now)
+                reminder["trigger_result"] = result
+                channel = str(reminder.get("channel", "email_browser"))
+                if "email" in channel:
+                    _send_email_alert(
+                        f"Reminder: {reminder.get('ticker', '').upper()} Trigger bereit",
+                        _format_reminder_email(reminder, result),
+                        bypass_startup_cooldown=True,
+                    )
+        if changed:
+            _save_trade_reminders(reminders)
+
+
+def _trade_reminder_loop() -> None:
+    print("[Reminder] Trade reminder monitor started")
+    while _trade_reminder_running:
+        try:
+            _process_trade_reminders_once()
+        except Exception as exc:
+            print(f"[Reminder] loop error: {exc}")
+        time.sleep(_TRADE_REMINDER_CHECK_SEC)
+    print("[Reminder] Trade reminder monitor stopped")
+
+
+def _start_trade_reminder_loop() -> None:
+    global _trade_reminder_running
+    if _trade_reminder_running:
+        return
+    _trade_reminder_running = True
+    threading.Thread(target=_trade_reminder_loop, daemon=True).start()
+
+
+def _stop_trade_reminder_loop() -> None:
+    global _trade_reminder_running
+    _trade_reminder_running = False
 
 
 def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
@@ -2303,6 +2538,16 @@ class ScanRequest(BaseModel):
 class BIScanRequest(BaseModel):
     direction: str = "long"  # long or short
     market_type: str = "stocks"
+
+
+class TradeReminderRequest(BaseModel):
+    ticker: str
+    asset_type: str = "crypto"  # crypto or stock
+    scanner: str = "early_movers"
+    condition: str = "trigger_or_retest"
+    duration_hours: float = 6
+    channel: str = "email_browser"  # email, browser, email_browser
+    row: Optional[Dict[str, Any]] = None
 
 
 class HealthResponse(BaseModel):
@@ -5115,9 +5360,11 @@ async def lifespan(app):
     _scheduler_running = True
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
     scheduler_thread.start()
+    _start_trade_reminder_loop()
     print("[Scheduler] Background scan scheduler started")
     yield
     _scheduler_running = False
+    _stop_trade_reminder_loop()
     print("[Scheduler] Background scan scheduler stopped")
 
 
@@ -5512,6 +5759,113 @@ def get_email_alert_audit():
         "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.get("/api/trade-reminders")
+def get_trade_reminders(status: Optional[str] = Query(None, description="Filter: active, triggered, expired, cancelled")):
+    """List trade reminders for browser polling and UI status."""
+    with _TRADE_REMINDER_LOCK:
+        reminders = _load_trade_reminders()
+    if status:
+        wanted = status.lower()
+        reminders = [r for r in reminders if str(r.get("status", "")).lower() == wanted]
+    now = _reminder_now()
+    public = []
+    for r in reminders:
+        expires_at = float(r.get("expires_at", 0) or 0)
+        last_check = dict(r.get("last_check") or {}) if isinstance(r.get("last_check"), dict) else r.get("last_check")
+        trigger_result = dict(r.get("trigger_result") or {}) if isinstance(r.get("trigger_result"), dict) else r.get("trigger_result")
+        if isinstance(last_check, dict):
+            last_check.pop("row", None)
+        if isinstance(trigger_result, dict):
+            trigger_result.pop("row", None)
+        public.append({
+            "id": r.get("id"),
+            "ticker": r.get("ticker"),
+            "asset_type": r.get("asset_type"),
+            "scanner": r.get("scanner"),
+            "condition": r.get("condition"),
+            "channel": r.get("channel"),
+            "status": r.get("status"),
+            "created_at": r.get("created_at"),
+            "expires_at": r.get("expires_at_iso"),
+            "triggered_at": r.get("triggered_at"),
+            "last_check": last_check,
+            "trigger_result": trigger_result,
+            "remaining_seconds": max(0, int(expires_at - now)) if expires_at else None,
+        })
+    return {
+        "status": "ok",
+        "count": len(public),
+        "reminders": public,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.post("/api/trade-reminders")
+def create_trade_reminder(request: TradeReminderRequest):
+    """Create a temporary monitor for a ticker/coin trigger or retest."""
+    ticker = str(request.ticker or "").upper().strip()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker fehlt")
+    duration_hours = max(0.25, min(float(request.duration_hours or 6), _TRADE_REMINDER_MAX_HOURS))
+    channel = str(request.channel or "email_browser").lower()
+    if channel not in ("email", "browser", "email_browser"):
+        channel = "email_browser"
+    now = _reminder_now()
+    row = request.row if isinstance(request.row, dict) else {}
+    reminder = {
+        "id": uuid.uuid4().hex[:12],
+        "ticker": ticker.replace("USDT", "") if request.asset_type.lower() == "crypto" else ticker,
+        "asset_type": str(request.asset_type or "crypto").lower(),
+        "scanner": str(request.scanner or "early_movers"),
+        "condition": str(request.condition or "trigger_or_retest"),
+        "channel": channel,
+        "status": "active",
+        "row": row,
+        "created_at": _reminder_iso(now),
+        "updated_at": _reminder_iso(now),
+        "expires_at": now + duration_hours * 3600,
+        "expires_at_iso": _reminder_iso(now + duration_hours * 3600),
+        "last_checked_at": 0,
+        "last_check": None,
+    }
+    with _TRADE_REMINDER_LOCK:
+        reminders = _load_trade_reminders()
+        # Replace older active reminder for same ticker/condition to avoid duplicate pings.
+        for old in reminders:
+            if (
+                old.get("status") == "active"
+                and str(old.get("ticker", "")).upper() == reminder["ticker"]
+                and str(old.get("condition", "")) == reminder["condition"]
+            ):
+                old["status"] = "cancelled"
+                old["updated_at"] = _reminder_iso(now)
+        reminders.append(reminder)
+        _save_trade_reminders(reminders)
+    return {
+        "status": "ok",
+        "message": f"Reminder fuer {reminder['ticker']} aktiv",
+        "reminder": {k: v for k, v in reminder.items() if k != "row"},
+    }
+
+
+@app.delete("/api/trade-reminders/{reminder_id}")
+def cancel_trade_reminder(reminder_id: str):
+    """Cancel a reminder."""
+    changed = False
+    with _TRADE_REMINDER_LOCK:
+        reminders = _load_trade_reminders()
+        for r in reminders:
+            if r.get("id") == reminder_id and r.get("status") == "active":
+                r["status"] = "cancelled"
+                r["updated_at"] = _reminder_iso()
+                changed = True
+        if changed:
+            _save_trade_reminders(reminders)
+    if not changed:
+        raise HTTPException(status_code=404, detail="Aktiver Reminder nicht gefunden")
+    return {"status": "ok", "message": "Reminder deaktiviert"}
 
 
 @app.get("/api/risk-policy")
