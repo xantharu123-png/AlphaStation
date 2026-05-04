@@ -715,7 +715,7 @@ _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
 _NEW_LISTING_MIN_ALERT_RR = 1.5
-_NEW_LISTING_RADAR_DEDUPE_SEC = 20 * 3600
+_NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
 _EARLY_MOVER_DIGEST_DEDUPE_SEC = 2 * 3600
@@ -1242,6 +1242,54 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
     return dict(result)
 
 
+def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> None:
+    """Expose a simple user-facing decision: observe, wait, no trade, or trade now."""
+    action = str(row.get("trade_action", "") or "").upper()
+    trigger_ok = bool(trigger_check.get("ok")) if isinstance(trigger_check, dict) else bool(row.get("execution_trigger_ok"))
+    trigger_reason = str((trigger_check or {}).get("reason", "") or "")
+
+    row["execution_trigger_ok"] = bool(trigger_ok)
+    if isinstance(trigger_check, dict):
+        row["intraday_trigger"] = trigger_check
+
+    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok:
+        row["trade_signal"] = "JETZT_TRADEN"
+        row["signal_label"] = f"Jetzt traden: 5m Trigger bestaetigt ({trigger_reason or 'ok'})"
+        row["signal_quality"] = "tradeable"
+        row["entry_status"] = "JETZT_TRADEN"
+        row["alertable_crypto"] = True
+    elif action == "NO_LONG_CHASE":
+        row["trade_signal"] = "NICHT_TRADEN"
+        row["signal_label"] = "Nicht traden: Bewegung ist zu weit gelaufen"
+        row["signal_quality"] = "no_chase"
+        row["entry_status"] = "NICHT_TRADEN"
+        row["alertable_crypto"] = False
+    elif action == "WAIT_FOR_BTC_CONFIRMATION":
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: BTC bestaetigt das Setup noch nicht"
+        row["signal_quality"] = "wait"
+        row["entry_status"] = "WARTEN"
+        row["alertable_crypto"] = False
+    elif action in ("WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION"):
+        row["trade_signal"] = "BEOBACHTEN"
+        row["signal_label"] = "Achtung beobachten: Retest/Continuation-Trigger abwarten"
+        row["signal_quality"] = "observe"
+        row["entry_status"] = "BEOBACHTEN"
+        row["alertable_crypto"] = False
+    elif action == "LONG_TRIGGER":
+        row["trade_signal"] = "BEOBACHTEN"
+        row["signal_label"] = "Achtung beobachten: 5m Trigger fehlt noch"
+        row["signal_quality"] = "observe"
+        row["entry_status"] = "BEOBACHTEN"
+        row["alertable_crypto"] = False
+    else:
+        row["trade_signal"] = "BEOBACHTEN"
+        row["signal_label"] = "Achtung beobachten: noch kein Trade-Signal"
+        row["signal_quality"] = "observe"
+        row["entry_status"] = "BEOBACHTEN"
+        row["alertable_crypto"] = False
+
+
 def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     """Mail only active Early-Mover long/retest candidates; watch/no-chase rows stay UI-only."""
     now = time.time()
@@ -1348,7 +1396,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur S/A/A+ Early-Mover LONG_TRIGGER oder nahe WAIT_FOR_RETEST Setups; Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Data, TP1 nicht verpasst und frischer 5m Exchange-Trigger bestaetigt. Kein Entry ohne eigenen Chart-Check.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur S/A/A+ Early-Mover Setups mit Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, keinem BTC-Gegenwind, keinem No-Chase, keinen Partial-Daten, unverpasstem TP1 und frischem 5m Exchange-Trigger. Ohne 5m-Bestaetigung bleibt es BEOBACHTEN.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
@@ -1928,7 +1976,7 @@ def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
     return sig if isinstance(sig, dict) else {}
 
 
-def _new_listing_radar_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     if not isinstance(payload, dict):
         return candidates
@@ -1979,7 +2027,7 @@ def _new_listing_radar_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             "bucket": "monitoring",
             "grade": item.get("grade", ""),
             "timing": item.get("timing", ""),
-            "category": category or "NEW_LISTING_RADAR",
+            "category": category or "NEW_LISTING_WATCH",
             "age": _alert_float(item.get("listing_age_hours")),
             "pump_pct": _alert_float(item.get("pump_pct"), 0) or 0,
             "from_ath_pct": _alert_float(item.get("from_ath_pct"), 0) or 0,
@@ -2003,18 +2051,18 @@ def _new_listing_radar_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
     return sorted(deduped.values(), key=lambda c: (c["bucket"] != "signals", -(c["exh_score"] or 0), -(c["rr"] or 0)))[:12]
 
 
-def _send_new_listing_radar_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
+def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
     now = now or time.time()
-    candidates = _new_listing_radar_candidates(payload)
+    candidates = _new_listing_watch_candidates(payload)
     if not candidates:
-        _record_email_event("Crypto New Listing Radar", "skipped", "no_new_listing_radar_candidates")
+        _record_email_event("Crypto New Listing Watchlist", "skipped", "no_new_listing_watch_candidates")
         return False
 
-    radar_dt = datetime.fromtimestamp(now, timezone.utc)
-    day_key = radar_dt.strftime("%Y%m%d")
-    dedupe_key = f"new_listing_radar_{day_key}"
-    if not _email_dedupe_claim(dedupe_key, _NEW_LISTING_RADAR_DEDUPE_SEC, now=now):
-        _record_email_event("Crypto New Listing Radar", "skipped", "daily_radar_dedupe_active")
+    watch_dt = datetime.fromtimestamp(now, timezone.utc)
+    day_key = watch_dt.strftime("%Y%m%d")
+    dedupe_key = f"new_listing_watch_{day_key}"
+    if not _email_dedupe_claim(dedupe_key, _NEW_LISTING_WATCH_DEDUPE_SEC, now=now):
+        _record_email_event("Crypto New Listing Watchlist", "skipped", "daily_watchlist_dedupe_active")
         return False
 
     def _fmt(value, suffix="", default="-"):
@@ -2043,8 +2091,8 @@ def _send_new_listing_radar_email(payload: Dict[str, Any], suppressed: Optional[
     if suppressed:
         suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine SHORT NOW Mail: " + ", ".join(f"{k}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
-    <h2 style="color:#f97316">Crypto New Listing Radar</h2>
-    <p style="color:#666">{radar_dt.strftime("%d.%m.%Y %H:%M")} UTC | Watchlist, kein automatisches Short-Now Signal</p>
+    <h2 style="color:#f97316">Crypto New Listing Beobachten</h2>
+    <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | Beobachtungsliste, noch kein Jetzt-Traden-Short</p>
     <p style="color:#444">BTC-Divergenz ist hier Marktwind: BTC risk-on blockt nicht jeden New-Listing-Dump, aber wir warten auf echte Underperformance oder einen tieferen Crack.</p>
     {suppressed_text}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -2054,16 +2102,16 @@ def _send_new_listing_radar_email(payload: Dict[str, Any], suppressed: Optional[
     <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC Kontext</th>
     <th style="padding:8px;text-align:left">Warnungen</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Radar-Mail maximal 1x taeglich. SHORT NOW kommt separat nur bei Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Beobachten-Mail maximal 1x taeglich. JETZT SHORTEN kommt separat nur bei Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
-    return _send_email_alert(f"Crypto New Listing Radar: {len(candidates)} Coin(s) im Blick", body)
+    return _send_email_alert(f"Crypto New Listing beobachten: {len(candidates)} Coin(s)", body)
 
 
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     """Mail S/A active Pump-&-Dump short signals from the FastAPI pipeline."""
     signals = payload.get("signals", []) if isinstance(payload, dict) else []
     if not signals:
-        _send_new_listing_radar_email(payload if isinstance(payload, dict) else {})
+        _send_new_listing_watch_email(payload if isinstance(payload, dict) else {})
         return
     now = time.time()
     alerts = []
@@ -2113,7 +2161,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     if not alerts:
         if suppressed:
             _record_email_event("Pump & Dump SHORT Alert", "skipped", f"no_active_short_signals:{suppressed}")
-            _send_new_listing_radar_email(payload if isinstance(payload, dict) else {}, suppressed=suppressed, now=now)
+        _send_new_listing_watch_email(payload if isinstance(payload, dict) else {}, suppressed=suppressed, now=now)
         return
 
     rows = ""
@@ -2139,7 +2187,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
     <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump SHORT-now Signale: New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pump Radar bleibt Watch-only; 8h Cooldown pro Coin.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
     sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
     if sent:
@@ -2299,7 +2347,7 @@ SCAN_DATA_SOURCES = {
     "btc_divergenz": "Polygon BTC/crypto-equity daily bars",
     "money_flow": "Polygon sector ETF bars",
     "new_listing": "Exchange PERP listings + orderbook/safety checks",
-    "volume_spikes": "Polygon gainers/losers snapshots",
+    "volume_spikes": "Polygon US stock gainers/losers snapshots",
     "orb": "Polygon intraday bars + official market hours",
     "turtle": "Polygon daily bars + Turtle breakout logic",
 }
@@ -3835,7 +3883,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 price = float(coin.get("current_price") or 0)
                 if not symbol or price <= 0:
                     continue
-                if symbol in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "WBTC", "WETH", "STETH", "RETH"):
+                if _is_excluded_crypto_asset(symbol, cid, name):
                     continue
 
                 mcap = float(coin.get("market_cap") or 0)
@@ -3848,7 +3896,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 close_pos = _clamp_float((price - low_24h) / range_24h if range_24h > 0 else 0.5, 0.0, 1.0, 0.5)
 
                 vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0.0
-                crypto_rvol = vol_mcap_ratio / 10.0  # 15% Vol/MCap ~= 1.5 crypto volume intensity
+                turnover_intensity = vol_mcap_ratio / 10.0  # 15% Vol/MCap ~= 1.5 turnover intensity
                 trend_daily = change_7d / 7.0
 
                 if not (change_min <= change_24h <= change_max):
@@ -3857,7 +3905,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     continue
                 if "MarketCap" in filters and not (mcap_min <= mcap <= mcap_max):
                     continue
-                if "RVOL" in filters and not (rvol_min <= crypto_rvol <= rvol_max):
+                if "RVOL" in filters and not (rvol_min <= turnover_intensity <= rvol_max):
                     continue
                 if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
                     continue
@@ -3932,16 +3980,19 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "volume": vol_24h,
                     "MarketCap": round(mcap),
                     "VolMCapRatio": round(vol_mcap_ratio, 2),
-                    "RVOL": round(crypto_rvol, 2),
-                    "rvol": round(crypto_rvol, 2),
+                    "TurnoverIntensity": round(turnover_intensity, 2),
+                    "RVOL": round(turnover_intensity, 2),
+                    "rvol": round(turnover_intensity, 2),
                     "Close_Position": round(close_pos, 2),
                     "BtcRelative7d": round(btc_alpha_7d, 2),
                     "score": score,
                     "grade": grade,
                     "isCrypto": True,
-                    "signal_quality": "watch_only",
-                    "entry_status": "WATCH_ONLY",
-                    "trade_action": "WATCHLIST_ONLY",
+                    "signal_quality": "observe",
+                    "entry_status": "BEOBACHTEN",
+                    "trade_action": "BEOBACHTEN",
+                    "trade_signal": "BEOBACHTEN",
+                    "signal_label": "Achtung beobachten: kein Entry ohne frischen Exchange-Trigger",
                     "execution_trigger_ok": False,
                     "alertable_crypto": False,
                     "risk_flags": risk_flags,
@@ -3949,8 +4000,8 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "partial_data": cg_partial,
                     "data_warning": cg_warning,
                     "data_source": f"CoinGecko markets ({cg_source})",
-                    "scanner_note": "Crypto-Strategie-Score ist Watchlist/Radar, kein Entry. Alerts brauchen einen frischen Micro-/Execution-Trigger.",
-                    "volume_model": "RVOL = Vol/MCap/10",
+                    "scanner_note": "Crypto-Strategie-Score ist Beobachtung, kein Entry. JETZT_TRADEN braucht einen frischen Micro-/Execution-Trigger.",
+                    "volume_model": "TurnoverIntensity = Vol/MCap/10",
                 })
             except Exception as item_err:
                 print(f"[Crypto Strategy] skip {coin.get('symbol', '?')} ({item_err})")
@@ -7386,10 +7437,10 @@ def _build_early_mover_long_setup(
     btc_24h: float,
     btc_7d: float,
 ) -> Dict[str, Any]:
-    """Build a conditional long plan from daily crypto radar data.
+    """Build a conditional long plan from daily crypto market data.
 
-    Early Movers is still a radar: the plan gives tactical levels and the
-    confirmation that must happen before taking the trade.
+    Early Movers gives tactical levels plus the confirmation that must happen
+    before the app can mark the setup as JETZT_TRADEN.
     """
     price = float(entry.get("Price") or 0)
     if price <= 0:
@@ -8413,18 +8464,18 @@ def fetch_early_movers(_prefetched_perps=None):
             alpha = c24 - btc_24h
             if phase == 1:
                 if score >= 70:
-                    signal_text = "WATCH: Smart-Money-Akkumulation - Entry erst mit 5m Trigger/Retest"
+                    signal_text = "BEOBACHTEN: Smart-Money-Akkumulation - Entry erst mit 5m Trigger/Retest"
                 elif score >= 40:
-                    signal_text = "WATCH: Volume-Anomalie - noch kein Entry-Signal"
+                    signal_text = "BEOBACHTEN: Volume-Anomalie - noch kein Entry-Signal"
                 else:
-                    signal_text = "WATCH: leichte Aktivitaet"
+                    signal_text = "BEOBACHTEN: leichte Aktivitaet"
             elif phase == 2:
                 if c24 > 12:
-                    signal_text = f"WATCH: Breakout +{c24:.0f}% - nicht chase, Retest/5m bestaetigen"
+                    signal_text = f"BEOBACHTEN: Breakout +{c24:.0f}% - nicht chase, Retest/5m bestaetigen"
                 elif score >= 60:
-                    signal_text = "WATCH: Momentum stark - Entry nur mit frischem Intraday-Trigger"
+                    signal_text = "BEOBACHTEN: Momentum stark - Entry nur mit frischem Intraday-Trigger"
                 else:
-                    signal_text = "WATCH: Ausbruch laeuft - Vorsicht"
+                    signal_text = "BEOBACHTEN: Ausbruch laeuft - Vorsicht"
             else:
                 signal_text = f"ÜBERHITZT +{c24:.0f}%/24h — NICHT kaufen, Korrektur kommt"
                 if c7d > 40:
@@ -8434,7 +8485,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
             unified_entry = dict(entry)
             watch_flags = list(risk_reasons or [])
-            watch_flags.extend(["watch_only_scanner", "no_intraday_execution_trigger"])
+            watch_flags.extend(["observe_only_scanner", "no_intraday_execution_trigger"])
             if _CG_MARKETS_STATUS.get("partial"):
                 watch_flags.append("partial_crypto_data")
             unified_entry.update({
@@ -8450,15 +8501,17 @@ def fetch_early_movers(_prefetched_perps=None):
                 "grade_label": grade_label,
                 "signal_text": signal_text,
                 "source": source_name,
-                "signal_quality": "watch_only",
-                "entry_status": "WATCH_ONLY",
-                "trade_action": "WATCHLIST_ONLY",
+                "signal_quality": "observe",
+                "entry_status": "BEOBACHTEN",
+                "trade_action": "BEOBACHTEN",
+                "trade_signal": "BEOBACHTEN",
+                "signal_label": "Achtung beobachten: noch kein 5m Entry-Trigger",
                 "execution_trigger_ok": False,
                 "alertable_crypto": False,
                 "risk_flags": watch_flags,
                 "data_source": f"CoinGecko + multi-exchange perps ({_CG_MARKETS_STATUS.get('source') or 'unknown'})",
                 "data_warning": _CG_MARKETS_STATUS.get("warning"),
-                "scanner_note": "Early Movers ist ein Radar fuer Kandidaten. Kein Entry ohne separaten 5m/1m Trigger.",
+                "scanner_note": "Early Movers liefert Beobachten- oder Jetzt-Traden-Signale. Kein Entry ohne bestaetigten 5m/1m Trigger.",
             })
 
             # Dedup: Behalte den mit höherem Score, aber merke ALLE Quellen
@@ -8489,7 +8542,7 @@ def fetch_early_movers(_prefetched_perps=None):
             entry["signal_text"] += f" | {', '.join(entry['sources'])}"
 
     # Final trade-plan pass after confluence bonuses. Early Movers are long-only,
-    # but every setup remains conditional because CoinGecko data is not a 5m trigger.
+    # but the app marks JETZT_TRADEN only after a fresh exchange trigger.
     for entry in seen_symbols.values():
         final_score = int(entry.get("score") or 0)
         grade, grade_label = _grade_for_score(final_score)
@@ -8522,14 +8575,15 @@ def fetch_early_movers(_prefetched_perps=None):
             "entry_quality": setup.get("entry_quality"),
             "entry_status": setup.get("entry_status"),
             "trade_action": setup.get("trade_action"),
-            "execution_trigger_ok": setup.get("trade_action") == "LONG_TRIGGER",
-            "signal_quality": "conditional_long_setup" if setup.get("trade_action") != "NO_LONG_CHASE" else "no_chase",
+            "execution_trigger_ok": False,
+            "signal_quality": "observe" if setup.get("trade_action") != "NO_LONG_CHASE" else "no_chase",
             "alertable_crypto": False,
             "trade_setup": setup,
             "btc_context": setup.get("btc_context"),
             "risk_flags": list(dict.fromkeys(existing_flags + setup_flags + setup_warnings)),
-            "scanner_note": "Early Movers ist ein Long-Radar. Levels sind conditional; Entry nur mit 5m/1m Trigger oder Retest.",
+            "scanner_note": "Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem 5m/1m Trigger oder sauberem Retest.",
         })
+        _apply_early_mover_signal_state(entry)
         entry["signal_text"] = f"{setup.get('action_label')}: {entry.get('signal_text', '')}"
 
     # Sortierung: Score absteigend — Coins aus ALLEN Phasen mischen
@@ -8552,6 +8606,26 @@ def fetch_early_movers(_prefetched_perps=None):
     # Zusammenfügen: Phase 2+3 zuerst (wichtiger), dann Phase 1, jeweils nach Score
     unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (1 if x["phase"] in (2, 3) else 2, -x["score"]))
 
+    # Attach real execution state for the strongest visible candidates. This keeps
+    # the UI honest without burning exchange-rate limits on every observation row.
+    trigger_checks = 0
+    for item in unified[:30]:
+        if str(item.get("trade_action", "")).upper() not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+            _apply_early_mover_signal_state(item)
+            continue
+        trigger_check = _verify_early_mover_intraday_trigger(item)
+        trigger_checks += 1
+        _apply_early_mover_signal_state(item, trigger_check)
+
+    unified = sorted(
+        unified,
+        key=lambda x: (
+            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            1 if x["phase"] in (2, 3) else 2,
+            -x["score"],
+        ),
+    )
+
     stats = {
         "total_coins": len(all_coins),
         "unified_count": len(unified),
@@ -8567,6 +8641,8 @@ def fetch_early_movers(_prefetched_perps=None):
         "data_source": _CG_MARKETS_STATUS.get("source"),
         "data_warning": _CG_MARKETS_STATUS.get("warning"),
         "partial_data": _CG_MARKETS_STATUS.get("partial", False),
+        "intraday_trigger_checks": trigger_checks,
+        "trade_now_count": sum(1 for c in unified if c.get("trade_signal") == "JETZT_TRADEN"),
     }
 
     return {
@@ -8803,9 +8879,11 @@ def _btc_divergenz_wrapper() -> None:
                     r["signal"] = "NEUTRAL"
                 else:
                     r["signal"] = "WATCH"
-                r["signal_quality"] = "watch_only"
-                r["entry_status"] = "CONTEXT_ONLY"
-                r["trade_action"] = "WATCHLIST_ONLY"
+                r["signal_quality"] = "observe"
+                r["entry_status"] = "BEOBACHTEN"
+                r["trade_action"] = "BEOBACHTEN"
+                r["trade_signal"] = "BEOBACHTEN"
+                r["signal_label"] = "Achtung beobachten: BTC-Proxy-Kontext, kein Entry"
                 r["execution_trigger_ok"] = False
                 r["risk_flags"] = ["btc_divergence_context_only", "no_intraday_execution_trigger"]
                 r["scanner_note"] = "BTC-Divergenz ist Kontext/Bias, kein Kauf- oder Short-Trigger."
@@ -8947,6 +9025,10 @@ def _money_flow_wrapper() -> None:
                     "change_1d": round(chg_1d, 2), "change_5d": round(chg_5d, 2),
                     "change_20d": round(chg_20d, 2), "volume": vol, "rvol": rvol,
                     "flow_signal": flow,
+                    "trade_signal": "BEOBACHTEN",
+                    "trade_action": "BEOBACHTEN",
+                    "signal_label": "Achtung beobachten: Aktien-Sektorflow, kein einzelnes Crypto-Entry-Signal",
+                    "execution_trigger_ok": False,
                     "obv_signal": obv_signal,
                     "obv_change": round(obv_change, 2),
                     "cmf": cmf,
@@ -9010,7 +9092,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
         if bucket == "signals":
             signal_label = "SHORT" if "SHORT" in timing.upper() else timing or "SHORT"
         elif bucket == "watchlist":
-            signal_label = "WATCH"
+            signal_label = "BEOBACHTEN"
         else:
             signal_label = sig.get("grade", "MONITOR")
 
@@ -9026,6 +9108,10 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "exhaustion_score": sig.get("exh_score", 0),
             "exhaustion_details": sig.get("exh_details", []),
             "signal": signal_label,
+            "entry": sig.get("entry", 0),
+            "stop": sig.get("stop_loss", sig.get("stop", 0)),
+            "tp1": sig.get("tp1", 0),
+            "tp2": sig.get("tp2", 0),
             "confirmations": 0,
             "listing_date": entry.get("detected_at", ""),
             "hours_tracked": pump.get("hours_tracked", 0),
@@ -9034,7 +9120,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "listing_source": sig.get("listing_source", pump.get("listing_source", entry.get("listing_source", ""))),
             "listing_trade_ok": sig.get("listing_trade_ok", entry.get("listing_trade_ok", False)),
             "trade_category": sig.get("trade_category", entry.get("trade_category", "")),
-            "trade_action": "SHORT_NOW" if bucket == "signals" and sig.get("listing_trade_ok") else "WATCHLIST_ONLY",
+            "trade_action": "SHORT_NOW" if bucket == "signals" and sig.get("listing_trade_ok") else "BEOBACHTEN",
+            "trade_signal": "JETZT_TRADEN" if bucket == "signals" and sig.get("listing_trade_ok") else "BEOBACHTEN",
+            "signal_label": "Jetzt shorten" if bucket == "signals" and sig.get("listing_trade_ok") else "Achtung beobachten",
             "vol_ratio": pump.get("vol_ratio", 0),
             "funding_rate": pump.get("funding_rate", 0),
             "long_pct": pump.get("long_pct", 0),
@@ -9099,7 +9187,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "listing_source": item.get("source", ""),
             "listing_trade_ok": item.get("listing_trade_ok", False),
             "trade_category": item.get("trade_category", ""),
-            "trade_action": "WATCHLIST_ONLY",
+            "trade_action": "BEOBACHTEN",
+            "trade_signal": "BEOBACHTEN",
+            "signal_label": "Achtung beobachten",
             "vol_ratio": item.get("volume_ratio", 0),
             "safety_ok": item.get("safety_ok", False),
             "safety_warnings": item.get("safety_warnings", []),
@@ -9186,7 +9276,7 @@ def get_new_listing_results():
 VOLUME_SPIKES_CACHE = "/tmp/volume_spikes_cache.json"
 
 def _volume_spikes_wrapper() -> None:
-    """Find stocks with unusual volume (RVOL > 3.0, price > $2)."""
+    """Find US stocks with unusual volume (RVOL > 3.0, price > $2)."""
     try:
         # Fetch market snapshot using /gainers endpoint (Starter plan compatible) for higher volume stocks
         # Combine with /losers endpoint to get comprehensive coverage
@@ -9248,6 +9338,11 @@ def _volume_spikes_wrapper() -> None:
                             "rvol": round(rvol, 2),
                             "dollar_volume": round(dollar_volume, 0),
                             "signal_type": signal_type,
+                            "asset_class": "stock",
+                            "trade_signal": "BEOBACHTEN",
+                            "trade_action": "BEOBACHTEN",
+                            "signal_label": "Achtung beobachten: Aktien-Volume-Spike, kein Crypto-Signal",
+                            "execution_trigger_ok": False,
                         })
                 except Exception as e:
                     print(f"[Warning] Error processing volume spike for ticker: {e}")

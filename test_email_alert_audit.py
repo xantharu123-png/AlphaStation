@@ -403,7 +403,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
     assert "RISK" not in sent[0][1]
 
 
-def test_new_listing_pipeline_sends_daily_radar_when_no_short_now(monkeypatch):
+def test_new_listing_pipeline_sends_daily_watch_when_no_short_now(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
@@ -449,12 +449,12 @@ def test_new_listing_pipeline_sends_daily_radar_when_no_short_now(monkeypatch):
     api._send_new_listing_pipeline_alerts(payload)
 
     assert len(sent) == 1
-    assert "Crypto New Listing Radar" in sent[0][0]
+    assert "Crypto New Listing beobachten" in sent[0][0]
     assert "BABY" in sent[0][1]
-    assert "SHORT NOW" in sent[0][1]
+    assert "JETZT SHORTEN" in sent[0][1]
 
 
-def test_new_listing_radar_ignores_active_pump_rows(monkeypatch):
+def test_new_listing_watch_ignores_active_pump_rows(monkeypatch):
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
@@ -847,6 +847,22 @@ def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
 
-    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="RADARONLY")]})
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="OBSERVEONLY")]})
 
     assert sent == []
+
+
+def test_early_mover_signal_state_only_marks_trade_now_after_trigger():
+    row = _early_mover_row(execution_trigger_ok=False)
+
+    api._apply_early_mover_signal_state(row, {"ok": False, "reason": "no_fresh_5m_trigger"})
+
+    assert row["trade_signal"] == "BEOBACHTEN"
+    assert row["alertable_crypto"] is False
+    assert row["execution_trigger_ok"] is False
+
+    api._apply_early_mover_signal_state(row, {"ok": True, "reason": "5m_vwap_reclaim"})
+
+    assert row["trade_signal"] == "JETZT_TRADEN"
+    assert row["alertable_crypto"] is True
+    assert row["execution_trigger_ok"] is True

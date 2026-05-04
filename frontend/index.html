@@ -2734,19 +2734,20 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const activeTradeSetup = cd.trade_setup || d.trade_setup || null;
     const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
-    const setupActionLabel = activeTradeSetup?.action_label || cd.action_label || setupAction || 'Setup';
-    const setupTone = setupAction === 'LONG_TRIGGER'
+    const tradeSignal = cd.trade_signal || d.trade_signal || '';
+    const setupActionLabel = cd.signal_label || activeTradeSetup?.action_label || cd.action_label || tradeSignal || setupAction || 'Setup';
+    const setupTone = tradeSignal === 'JETZT_TRADEN'
         ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-        : (setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
+        : (tradeSignal === 'NICHT_TRADEN' || setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
             ? 'bg-red-50 border-red-300 text-red-900'
-            : setupAction.includes('WAIT')
+            : (tradeSignal === 'WARTEN' || setupAction.includes('WAIT'))
                 ? 'bg-amber-50 border-amber-300 text-amber-900'
                 : 'bg-sky-50 border-sky-300 text-sky-900';
-    const setupTitleTone = setupAction === 'LONG_TRIGGER'
+    const setupTitleTone = tradeSignal === 'JETZT_TRADEN'
         ? 'text-emerald-800'
-        : (setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
+        : (tradeSignal === 'NICHT_TRADEN' || setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
             ? 'text-red-800'
-            : setupAction.includes('WAIT')
+            : (tradeSignal === 'WARTEN' || setupAction.includes('WAIT'))
                 ? 'text-amber-800'
                 : 'text-sky-800';
     const viewDirection = (d.confluence?.direction || activeTradeSetup?.direction || cd.direction || '').toUpperCase();
@@ -3113,8 +3114,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         {cd.EarlyScore && <div><span className="text-gray-500">Score</span> <span className={`font-semibold px-2 py-0.5 rounded ${cd.EarlyScore >= 70 ? 'bg-green-100 text-green-800' : cd.EarlyScore >= 40 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{cd.EarlyScore}</span></div>}
                         {cd.DegenScore && <div><span className="text-gray-500">Micro Score</span> <span className="font-semibold">{cd.DegenScore}</span></div>}
                         {cd.WhaleScore && <div><span className="text-gray-500">Perp/OI Score</span> <span className="font-semibold">{cd.WhaleScore}</span></div>}
-                        {cd.trade_action && <div><span className="text-gray-500">Aktion</span> <span className={`font-semibold ${setupTitleTone}`}>{setupActionLabel}</span></div>}
+                        {(cd.trade_signal || cd.trade_action) && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className={`font-semibold ${setupTitleTone}`}>{setupActionLabel}</span></div>}
                         {cd.entry_status && <div><span className="text-gray-500">Status</span> <span className="font-semibold">{cd.entry_status}</span></div>}
+                        {cd.intraday_trigger && <div><span className="text-gray-500">5m Trigger</span> <span className={`font-semibold ${cd.intraday_trigger.ok ? 'color-positive' : 'text-amber-700'}`}>{cd.intraday_trigger.ok ? 'Bestaetigt' : (cd.intraday_trigger.reason || 'fehlt')}</span></div>}
                         {cd.Signal && <div className="col-span-2"><span className="text-gray-500">Signal</span> <span className="font-semibold">{cd.Signal}</span></div>}
                         {cd.HasPerp && <div><span className="text-gray-500">Perp</span> <span className="font-semibold text-blue-600">{cd.BestExchange || 'Ja'} {cd.PerpChartSymbol ? `(${cd.PerpChartSymbol})` : ''}</span></div>}
                         {cd.FundingRate != null && <div><span className="text-gray-500">Funding</span> <span className="font-semibold">{(cd.FundingRate * 100).toFixed(3)}%</span></div>}
@@ -3442,7 +3444,7 @@ function App() {
                     { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
                     { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
                     { id: 'money-flow', name: 'Money Flow', desc: 'Institutionelle Bewegungen', svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6' },
-                    { id: 'volume-spikes', name: 'Volume Spikes', desc: 'Ungewöhnliches Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
+                    { id: 'volume-spikes', name: 'Aktien Volume Spikes', desc: 'Ungewoehnliches Aktien-Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
                     { id: 'orb', name: 'ORB Scanner', desc: 'Opening Range Breakout', svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899' },
                 ]},
                 { title: 'SPEZIAL', items: [
@@ -4816,9 +4818,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${riskBadge(item.risk_level)}`}>{item.risk_level}</span></td>
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.grade === 'S' ? 'signal-bullish' : item.grade === 'A' ? 'signal-bullish' : item.grade === 'B' ? 'signal-lightdiv' : item.grade === 'C' ? 'signal-bearish' : 'signal-neutral'}`}>{item.grade}</span></td>
                                 <td className="py-3 px-2 text-xs">
-                                    <span className={`px-2 py-1 rounded font-semibold ${(item.trade_action || '').includes('LONG') ? 'bg-green-100 text-green-800' : (item.trade_action || '').includes('RETEST') ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
-                                        {item.trade_setup?.action_label || item.trade_action || 'Watch'}
+                                    <span className={`px-2 py-1 rounded font-semibold ${item.trade_signal === 'JETZT_TRADEN' ? 'bg-green-100 text-green-800' : item.trade_signal === 'NICHT_TRADEN' ? 'bg-red-100 text-red-800' : item.trade_signal === 'WARTEN' ? 'bg-yellow-100 text-yellow-800' : 'bg-sky-100 text-sky-800'}`}>
+                                        {item.trade_signal === 'JETZT_TRADEN' ? 'JETZT TRADEN' : item.trade_signal || 'BEOBACHTEN'}
                                     </span>
+                                    {item.signal_label && <div className="text-[11px] text-gray-500 mt-1 max-w-[220px]">{item.signal_label}</div>}
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
                                 <td className="py-3 px-2 text-right text-xs">
@@ -6197,12 +6200,12 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     const pdTypeLabel = (item) => {
         const cat = item.trade_category || '';
         if (cat === 'NEW_LISTING_DUMP') return 'New Listing Dump';
-        if (cat === 'ACTIVE_PUMP_WATCH') return 'Active Pump Watch';
+        if (cat === 'ACTIVE_PUMP_WATCH') return 'Active Pump beobachten';
         if (cat === 'NEW_LISTING_TOO_EARLY') return 'Zu frueh';
-        if (cat === 'NEW_LISTING_EXPIRED') return 'Alt/Radar';
+        if (cat === 'NEW_LISTING_EXPIRED') return 'Alt/Beobachten';
         if (cat === 'UNKNOWN_LISTING_AGE') return 'Alter unklar';
         if ((item.listing_source || '').toLowerCase() === 'new_listing') return 'New Listing';
-        return 'Radar';
+        return 'Beobachten';
     };
     const pdTypeClass = (item) => {
         const cat = item.trade_category || '';
@@ -6230,6 +6233,8 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('exhaustion_score')}>Exhaustion{sortKey === 'exhaustion_score' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('funding_rate')}>Funding{sortKey === 'funding_rate' && ' ↓'}</th>
                             <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('signal')}>Signal{sortKey === 'signal' && ' ↓'}</th>
+                            <th className="text-right py-2 px-2">Entry / Stop</th>
+                            <th className="text-right py-2 px-2">TP1 / TP2</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('listing_date')}>Gelistet{sortKey === 'listing_date' && ' ↓'}</th>
                         </tr>
                     </thead>
@@ -6244,7 +6249,12 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <td className="py-3 px-2 text-right color-negative">{item.from_ath_pct ? `-${item.from_ath_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
                                 <td className={`py-3 px-2 text-right font-semibold ${item.funding_rate > 0.05 ? 'color-negative' : item.funding_rate > 0 ? 'text-yellow-600' : ''}`}>{item.funding_rate ? `${item.funding_rate.toFixed(3)}%` : '—'}</td>
-                                <td className="py-3 px-2 text-center"><span className={`signal-badge ${item.signal?.includes('SHORT') ? 'signal-bearish' : item.signal === 'WATCH' ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.signal || '—'}{item.confirmations >= 3 ? ` (${item.confirmations})` : ''}</span></td>
+                                <td className="py-3 px-2 text-center">
+                                    <span className={`signal-badge ${item.trade_signal === 'JETZT_TRADEN' || item.trade_action === 'SHORT_NOW' ? 'signal-bearish' : item.trade_signal === 'NICHT_TRADEN' ? 'signal-neutral' : 'signal-lightdiv'}`}>{item.trade_signal === 'JETZT_TRADEN' || item.trade_action === 'SHORT_NOW' ? 'JETZT SHORTEN' : item.trade_signal || item.signal || 'BEOBACHTEN'}{item.confirmations >= 3 ? ` (${item.confirmations})` : ''}</span>
+                                    {item.signal_label && <div className="text-[11px] text-gray-500 mt-1">{item.signal_label}</div>}
+                                </td>
+                                <td className="py-3 px-2 text-right text-xs">{item.entry ? `$${Number(item.entry).toFixed(6)}` : '—'}<br /><span className="color-negative">{item.stop ? `$${Number(item.stop).toFixed(6)}` : '—'}</span></td>
+                                <td className="py-3 px-2 text-right text-xs"><span className="color-positive">{item.tp1 ? `$${Number(item.tp1).toFixed(6)}` : '—'}</span><br /><span className="color-positive">{item.tp2 ? `$${Number(item.tp2).toFixed(6)}` : '—'}</span></td>
                                 <td className="py-3 px-2 text-sm text-gray-500">{item.listing_date || '—'}</td>
                             </tr>
                         ))}

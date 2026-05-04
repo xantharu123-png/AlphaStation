@@ -94,6 +94,11 @@ CONFIG.update({
     "micro_crack_enabled": True,
     "micro_timeframe": "5m",
     "micro_candle_count": 72,
+    "ultra_micro_enabled": True,
+    "ultra_micro_timeframe": "1m",
+    "ultra_micro_candle_count": 45,
+    "ultra_micro_max_age_hours": 6.0,
+    "ultra_micro_min_score": 78,
     "micro_min_score": 70,
     "micro_min_crack_pct": 1.2,
     "micro_max_from_high_pct": 14.0,
@@ -377,6 +382,7 @@ def fetch_mexc_ticker(symbol):
     t = data.get("data", {})
     if not t or not isinstance(t, dict):
         return None
+
     return {
         "price": float(t.get("lastPrice", 0)),
         "bid": float(t.get("bid1", 0)),
@@ -785,7 +791,7 @@ def detect_new_listings():
                 log.info(f"🆕 NLS: {sym} via MEXC isNew-Flag erkannt")
 
     # ── Bitget launchTime Erkennung ──
-    # Nur Listings im aktiven Short-Fenster aufnehmen; aeltere Coins bleiben Radar, keine Trade-Kandidaten.
+    # Nur Listings im aktiven Short-Fenster aufnehmen; aeltere Coins bleiben Beobachtung, keine Trade-Kandidaten.
     for p in all_perps:
         if p.get("exchange") == "bitget" and p.get("launch_time", 0) > cutoff_ms:
             sym = p["symbol"]
@@ -1448,8 +1454,8 @@ def _close_position(candle):
     return (_to_float(candle.get("close")) - _to_float(candle.get("low"))) / rng
 
 
-def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None):
-    """5m/15m execution trigger for Pump & Dump shorts."""
+def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timeframe=None):
+    """1m/5m execution trigger for Pump & Dump shorts."""
     pump_data = pump_data or {}
     result = {
         "micro_trigger_ok": False,
@@ -1461,13 +1467,18 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None):
         "micro_from_high_pct": 0,
         "micro_rr_preview": 0,
         "micro_current_price": 0,
+        "micro_timeframe": timeframe or CONFIG.get("micro_timeframe", "5m"),
     }
-    if not candles or len(candles) < 18:
+    tf = str(timeframe or CONFIG.get("micro_timeframe", "5m"))
+    min_candles = 9 if tf == str(CONFIG.get("ultra_micro_timeframe", "1m")) else 18
+    min_score = int(CONFIG.get("ultra_micro_min_score", CONFIG["micro_min_score"])) if tf == str(CONFIG.get("ultra_micro_timeframe", "1m")) else int(CONFIG["micro_min_score"])
+
+    if not candles or len(candles) < min_candles:
         result["micro_warnings"].append("micro_not_enough_candles")
         return result
 
     clean = [c for c in candles if _to_float(c.get("open")) > 0 and _to_float(c.get("close")) > 0]
-    if len(clean) < 18:
+    if len(clean) < min_candles:
         result["micro_warnings"].append("micro_invalid_candles")
         return result
 
@@ -1584,7 +1595,7 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None):
         warnings.append("micro_rr_too_low")
 
     trigger_ok = (
-        score >= CONFIG["micro_min_score"]
+        score >= min_score
         and not too_early
         and not too_late
         and not still_squeezing
@@ -1612,6 +1623,7 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None):
         "micro_sell_volume": sell_volume,
         "micro_pump_pct": round(micro_pump_pct, 2),
         "micro_bars_since_high": bars_since_high,
+        "micro_timeframe": tf,
     })
     return result
 
@@ -1809,22 +1821,22 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         timing = "[~] TP1 verpasst — nur noch Extended-Dump möglich"
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
     elif listing_info_missing:
-        timing = "[~] WATCH - Listing-Kontext fehlt, keine Short-Mail"
+        timing = "[~] BEOBACHTEN - Listing-Kontext fehlt, keine Short-Mail"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not btc_context_ok:
-        timing = "[~] WATCH - BTC risk-on, erst klare Underperformance/deeper crack abwarten"
+        timing = "[~] BEOBACHTEN - BTC risk-on, erst klare Underperformance/deeper crack abwarten"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not is_new_listing_source:
-        timing = "[~] ACTIVE PUMP WATCH - kein New Listing, keine Short-Mail"
+        timing = "[~] ACTIVE PUMP BEOBACHTEN - kein New Listing, keine Short-Mail"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not listing_age_known:
-        timing = "[~] WATCH - Listing-Alter unklar, keine Short-Mail"
+        timing = "[~] BEOBACHTEN - Listing-Alter unklar, keine Short-Mail"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif listing_too_early:
-        timing = "[~] WATCH - neues Listing noch zu frueh fuer Short"
+        timing = "[~] BEOBACHTEN - neues Listing noch zu frueh fuer Short"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif listing_expired:
-        timing = "[~] WATCH - Listing-Fenster abgelaufen, nur Radar"
+        timing = "[~] BEOBACHTEN - Listing-Fenster abgelaufen"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif trade_setup_ok:
         if early_crack_ok and not exhaustion_short_ok:
@@ -1834,22 +1846,22 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
             timing = "[-] JETZT SHORTEN"
             timing_quality = 5
     elif micro_required and not micro_trigger_ok and (exh_score >= CONFIG["early_crack_entry_score"] or early_crack_window_ok):
-        timing = "[~] WATCH - 5m Micro-Crack fehlt"
+        timing = "[~] BEOBACHTEN - Micro-Crack fehlt"
         timing_quality = 2
     elif exh_score >= CONFIG["exh_short_entry"] and continuation_risk:
-        timing = "[~] WATCH - Pump laeuft noch, erst Crack/Rejection abwarten"
+        timing = "[~] BEOBACHTEN - Pump laeuft noch, erst Crack/Rejection abwarten"
         timing_quality = 2
     elif exh_score >= CONFIG["exh_short_entry"] and (not rr_ok or not risk_ok):
-        timing = "[~] WATCH - R:R/Risiko noch nicht sauber"
+        timing = "[~] BEOBACHTEN - R:R/Risiko noch nicht sauber"
         timing_quality = 2
     elif exh_score >= CONFIG["exh_short_entry"] and not turn_confirmed:
-        timing = "[~] WATCH - Umkehr noch nicht bestaetigt"
+        timing = "[~] BEOBACHTEN - Umkehr noch nicht bestaetigt"
         timing_quality = 2
     elif exh_score >= CONFIG["exh_short_entry"] and not safety_ok:
         timing = "[~] SIGNAL aber Liquiditäts-Risiko"
         timing_quality = 3
     elif exh_score >= CONFIG["exh_watch"] or early_crack_window_ok:
-        timing = "[+] WATCHLIST — noch nicht reif"
+        timing = "[+] BEOBACHTEN - noch nicht reif"
         timing_quality = 2
     else:
         timing = "[o] Kein Signal — Pump noch aktiv"
@@ -1874,6 +1886,36 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     else:
         grade = "D"
         grade_label = "[X] D — NO TRADE"
+
+    tradeability_probe = {
+        "direction": "SHORT",
+        "timing_quality": timing_quality,
+        "grade": grade,
+        "safety_ok": safety_ok,
+        "confirmation_ok": turn_confirmed,
+        "continuation_risk": continuation_risk,
+        "tp1_missed": tp1_missed,
+        "tp2_missed": tp2_missed,
+        "micro_required": micro_required,
+        "micro_trigger_ok": micro_trigger_ok,
+        "btc_context_ok": btc_context_ok,
+        "listing_trade_ok": listing_trade_ok,
+        "rr_effective": rr_effective,
+        "risk_pct": risk_pct,
+    }
+    is_tradeable = _is_tradeable_short_signal(tradeability_probe)
+    if is_tradeable:
+        trade_signal = "JETZT_TRADEN"
+        signal_label = "Jetzt shorten"
+    elif tp1_missed or tp2_missed or risk_pct > CONFIG["max_signal_risk_pct"]:
+        trade_signal = "NICHT_TRADEN"
+        signal_label = "Nicht traden"
+    elif not btc_context_ok or listing_too_early:
+        trade_signal = "WARTEN"
+        signal_label = "Warten"
+    else:
+        trade_signal = "BEOBACHTEN"
+        signal_label = "Achtung beobachten"
 
     return {
         "symbol": symbol,
@@ -1915,22 +1957,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
             else "watch"
         ),
         "risk_flags": risk_flags,
-        "signal_quality": "tradeable" if _is_tradeable_short_signal({
-            "direction": "SHORT",
-            "timing_quality": timing_quality,
-            "grade": grade,
-            "safety_ok": safety_ok,
-            "confirmation_ok": turn_confirmed,
-            "continuation_risk": continuation_risk,
-            "tp1_missed": tp1_missed,
-            "tp2_missed": tp2_missed,
-            "micro_required": micro_required,
-            "micro_trigger_ok": micro_trigger_ok,
-            "btc_context_ok": btc_context_ok,
-            "listing_trade_ok": listing_trade_ok,
-            "rr_effective": rr_effective,
-            "risk_pct": risk_pct,
-        }) else "watch_or_blocked",
+        "signal_quality": "tradeable" if is_tradeable else "watch_or_blocked",
+        "trade_signal": trade_signal,
+        "trade_action": "SHORT_NOW" if is_tradeable else trade_signal,
+        "signal_label": signal_label,
         "safety_ok": safety_ok,
         "safety_warnings": safety_warnings,
         "pump_data": pump_data,
@@ -2349,13 +2379,38 @@ def run_new_listing_scanner():
                 safety_ok, safety_warnings = check_safety(ticker, book, candles)
 
                 if CONFIG.get("micro_crack_enabled") and pump_data.get("pump_pct", 0) >= CONFIG["min_pump_pct"]:
+                    micro_tf = CONFIG["micro_timeframe"]
                     micro_candles = fetch_candles_for(
                         symbol,
                         exchange,
-                        CONFIG["micro_timeframe"],
+                        micro_tf,
                         CONFIG["micro_candle_count"],
                     )
-                    pump_data.update(calculate_micro_crack_trigger(micro_candles, pump_data, ticker))
+                    micro_result = calculate_micro_crack_trigger(micro_candles, pump_data, ticker, timeframe=micro_tf)
+
+                    # Very fresh listings can dump before a 5m model has enough bars.
+                    # Use stricter 1m confirmation only for the first hours after listing.
+                    use_ultra = (
+                        CONFIG.get("ultra_micro_enabled")
+                        and is_new_source
+                        and listing_age_hours is not None
+                        and listing_age_hours <= CONFIG.get("ultra_micro_max_age_hours", 6.0)
+                        and not micro_result.get("micro_trigger_ok")
+                    )
+                    if use_ultra:
+                        ultra_tf = CONFIG.get("ultra_micro_timeframe", "1m")
+                        ultra_candles = fetch_candles_for(
+                            symbol,
+                            exchange,
+                            ultra_tf,
+                            CONFIG.get("ultra_micro_candle_count", 45),
+                        )
+                        ultra_result = calculate_micro_crack_trigger(ultra_candles, pump_data, ticker, timeframe=ultra_tf)
+                        if ultra_result.get("micro_trigger_ok") or ultra_result.get("micro_score", 0) > micro_result.get("micro_score", 0):
+                            ultra_result["ultra_early_trigger"] = bool(ultra_result.get("micro_trigger_ok"))
+                            micro_result = ultra_result
+
+                    pump_data.update(micro_result)
                     micro_price = _to_float(pump_data.get("micro_current_price"))
                     ath_price = _to_float(pump_data.get("ath"))
                     if micro_price > 0:

@@ -207,7 +207,7 @@ def test_active_pump_detection_is_watch_only_even_with_crack():
     assert signal["trade_category"] == "ACTIVE_PUMP_WATCH"
     assert signal["listing_trade_ok"] is False
     assert "active_pump_watch_only" in signal["risk_flags"]
-    assert "ACTIVE PUMP WATCH" in signal["timing"]
+    assert "ACTIVE PUMP BEOBACHTEN" in signal["timing"]
     assert signal["signal_quality"] == "watch_or_blocked"
     assert _is_tradeable_short_signal(signal) is False
 
@@ -393,6 +393,23 @@ def test_micro_crack_trigger_can_create_tradeable_signal():
     assert signal["stop_model"] == "micro_crack_stop"
     assert signal["signal_quality"] == "tradeable"
     assert _is_tradeable_short_signal(signal) is True
+
+
+def test_ultra_early_1m_crack_can_trigger_before_18_candles():
+    candles = _micro_crack_candles()[-12:]
+    pump_data = {
+        "ath": 130,
+        "current_price": candles[-1]["close"],
+        "pump_pct": 80,
+        "from_ath_pct": 9.0,
+        "listing_source": "new_listing",
+        "listing_age_hours": 2,
+    }
+
+    micro = calculate_micro_crack_trigger(candles, pump_data, timeframe="1m")
+
+    assert micro["micro_timeframe"] == "1m"
+    assert "micro_not_enough_candles" not in micro["micro_warnings"]
 
 
 def test_micro_crack_blocks_green_squeeze_without_first_crack():
