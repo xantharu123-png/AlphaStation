@@ -718,9 +718,11 @@ _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_RADAR_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
-_EARLY_MOVER_DIGEST_DEDUPE_SEC = 6 * 3600
+_EARLY_MOVER_DIGEST_DEDUPE_SEC = 2 * 3600
 _EARLY_MOVER_DIGEST_KEY = "early_movers_long_digest"
 _EARLY_MOVER_MAX_EMAIL_ROWS = 5
+_EARLY_MOVER_TRIGGER_TTL = 180
+_EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_scan"}
@@ -1121,6 +1123,125 @@ def _format_alert_price(value: Any) -> str:
     return f"${price:.8f}".rstrip("0").rstrip(".")
 
 
+def _median_float(values: List[Any], default: float = 0.0) -> float:
+    nums = sorted([v for v in (_alert_float(value) for value in values) if v is not None])
+    if not nums:
+        return default
+    mid = len(nums) // 2
+    if len(nums) % 2:
+        return nums[mid]
+    return (nums[mid - 1] + nums[mid]) / 2
+
+
+def _normalize_crypto_exchange(value: Any) -> str:
+    exchange = str(value or "").strip().lower().replace(" ", "_")
+    if exchange in ("mexc", "bitget", "binance", "crypto_com"):
+        return exchange
+    if exchange == "crypto.com":
+        return "crypto_com"
+    return exchange
+
+
+def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Confirm Early-Mover mail candidates with real 5m exchange candles."""
+    symbol = _extract_alert_ticker(row)
+    contract = row.get("PerpChartSymbol") or row.get("PerpMatchSymbol")
+    exchange = _normalize_crypto_exchange(row.get("PerpChartExchange") or row.get("BestExchange"))
+    if not HAS_NEW_LISTING_SCANNER:
+        return {"ok": False, "reason": "exchange_chart_module_missing"}
+    if not contract or not exchange:
+        return {"ok": False, "reason": "no_perp_chart_for_realtime_trigger"}
+
+    cache_key = f"{exchange}:{contract}:5m"
+    now = time.time()
+    cached = _EARLY_MOVER_TRIGGER_CACHE.get(cache_key)
+    if cached and now - cached.get("ts", 0) < _EARLY_MOVER_TRIGGER_TTL:
+        return dict(cached["result"])
+
+    try:
+        bars = fetch_candles_for(str(contract), exchange, timeframe="5m", count=36)
+    except Exception as exc:
+        result = {"ok": False, "reason": "trigger_fetch_failed", "detail": str(exc)[:120]}
+        _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
+        return result
+    if not bars or len(bars) < 12:
+        result = {"ok": False, "reason": "not_enough_5m_candles"}
+        _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
+        return result
+
+    try:
+        recent = bars[-24:] if len(bars) >= 24 else bars
+        last = bars[-1]
+        prev = bars[:-1]
+        prev_window = prev[-8:] if len(prev) >= 8 else prev
+        last_open = float(last["open"])
+        last_high = float(last["high"])
+        last_low = float(last["low"])
+        last_close = float(last["close"])
+        last_vol = float(last.get("volume", 0) or 0)
+        if last_close <= 0 or last_high <= last_low:
+            result = {"ok": False, "reason": "bad_5m_candle"}
+            _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
+            return result
+
+        typical_value = 0.0
+        volume_sum = 0.0
+        for bar in recent:
+            volume = float(bar.get("volume", 0) or 0)
+            typical = (float(bar["high"]) + float(bar["low"]) + float(bar["close"])) / 3
+            typical_value += typical * volume
+            volume_sum += volume
+        vwap = typical_value / volume_sum if volume_sum > 0 else _median_float([b.get("close") for b in recent], last_close)
+        median_vol = _median_float([b.get("volume", 0) for b in prev[-20:]], max(last_vol, 1))
+        vol_ratio = last_vol / max(median_vol, 1)
+        prev_high = max(float(bar["high"]) for bar in prev_window)
+        prev_low = min(float(bar["low"]) for bar in prev_window)
+        prev_close = float(prev[-1]["close"]) if prev else last_close
+        close_pos = (last_close - last_low) / (last_high - last_low)
+        candle_change_pct = ((last_close - last_open) / last_open * 100) if last_open else 0
+        range_pct = ((last_high - last_low) / last_close * 100) if last_close else 0
+        setup_obj = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+        tp1 = _alert_float(row.get("tp1") or setup_obj.get("tp1"))
+
+        if tp1 is not None and last_close >= tp1:
+            result = {"ok": False, "reason": "tp1_already_reached_intraday", "last_close": last_close}
+        elif candle_change_pct >= 6 and close_pos >= 0.88 and range_pct >= 7:
+            result = {"ok": False, "reason": "single_5m_candle_chase", "last_close": last_close}
+        else:
+            breakout = last_close > prev_high * 1.0015 and vol_ratio >= 1.25 and close_pos >= 0.58
+            vwap_reclaim = prev_close < vwap and last_close > vwap and vol_ratio >= 1.25 and close_pos >= 0.58
+            hl_hold = last_close > vwap and last_low > prev_low and last_close > last_open and vol_ratio >= 1.10 and close_pos >= 0.55
+            ok = bool(breakout or vwap_reclaim or hl_hold)
+            if breakout:
+                reason = "5m_breakout_volume_confirmed"
+            elif vwap_reclaim:
+                reason = "5m_vwap_reclaim"
+            elif hl_hold:
+                reason = "5m_higher_low_vwap_hold"
+            else:
+                reason = "no_fresh_5m_trigger"
+            result = {
+                "ok": ok,
+                "reason": reason,
+                "symbol": symbol,
+                "contract": contract,
+                "exchange": exchange,
+                "last_close": round(last_close, 10),
+                "vwap": round(vwap, 10),
+                "volume_ratio": round(vol_ratio, 2),
+                "close_pos": round(close_pos, 2),
+            }
+    except Exception as exc:
+        result = {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120]}
+
+    _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
+    if len(_EARLY_MOVER_TRIGGER_CACHE) > 120:
+        oldest = sorted(_EARLY_MOVER_TRIGGER_CACHE.items(), key=lambda item: item[1].get("ts", 0))[:30]
+        for key, _ in oldest:
+            _EARLY_MOVER_TRIGGER_CACHE.pop(key, None)
+    return dict(result)
+
+
 def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     """Mail only active Early-Mover long/retest candidates; watch/no-chase rows stay UI-only."""
     now = time.time()
@@ -1138,6 +1259,11 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
         if key in seen_keys:
             continue
         seen_keys.add(key)
+        trigger_check = _verify_early_mover_intraday_trigger(row)
+        if not trigger_check.get("ok"):
+            reason = f"early_mover_{trigger_check.get('reason', 'no_intraday_trigger')}"
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+            continue
         setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
         btc_context = row.get("btc_context", setup.get("btc_context", {}))
         if not isinstance(btc_context, dict):
@@ -1161,6 +1287,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
             "btc_24h": btc_context.get("btc_24h"),
             "alpha_24h": btc_context.get("alpha_24h"),
             "exchange": row.get("PerpChartExchange", row.get("Exchange", "")),
+            "trigger": trigger_check,
         })
 
     if not candidates:
@@ -1197,9 +1324,12 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
         name = html.escape(str(item["name"] or ""))
         action = html.escape(str(item["action"] or "LONG"))
         exchange = html.escape(str(item["exchange"] or ""))
+        trigger = item.get("trigger", {}) if isinstance(item.get("trigger"), dict) else {}
+        trigger_text = html.escape(str(trigger.get("reason", "5m_trigger")))
+        volume_ratio = _fmt_num(trigger.get("volume_ratio"), "x", 2)
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange}</span><br><span style="color:#059669">{trigger_text} ({volume_ratio})</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item["grade"]))} / {html.escape(str(item["score"]))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
@@ -1218,7 +1348,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur S/A/A+ Early-Mover LONG_TRIGGER oder nahe WAIT_FOR_RETEST Setups; Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Data, TP1 nicht verpasst. Entry trotzdem nur nach 5m/1m Trigger oder sauberem Retest.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur S/A/A+ Early-Mover LONG_TRIGGER oder nahe WAIT_FOR_RETEST Setups; Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Data, TP1 nicht verpasst und frischer 5m Exchange-Trigger bestaetigt. Kein Entry ohne eigenen Chart-Check.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:

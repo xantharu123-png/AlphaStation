@@ -770,6 +770,11 @@ def test_early_mover_blocks_btc_headwind_and_partial_data():
 def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "volume_ratio": 1.6,
+    })
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
 
@@ -783,11 +788,17 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     assert "MAILME" in sent[0][1]
     assert "Entry" in sent[0][1]
     assert "BTC" in sent[0][1]
+    assert "5m_breakout_volume_confirmed" in sent[0][1]
 
 
 def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "volume_ratio": 1.6,
+    })
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
 
@@ -806,6 +817,11 @@ def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch)
 def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "volume_ratio": 1.6,
+    })
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
     rows = [
@@ -819,3 +835,18 @@ def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
     assert f"{api._EARLY_MOVER_MAX_EMAIL_ROWS}/{len(rows)}" in sent[0][0]
     assert "ROW0" in sent[0][1]
     assert f"ROW{api._EARLY_MOVER_MAX_EMAIL_ROWS + 1}" not in sent[0][1]
+
+
+def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": False,
+        "reason": "no_fresh_5m_trigger",
+    })
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="RADARONLY")]})
+
+    assert sent == []
