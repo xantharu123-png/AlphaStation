@@ -346,6 +346,13 @@ def _bear_entry_quality(row):
 
 
 def _bear_crash_alert_ok(row):
+    if row.get("alertable_short") is False:
+        return False
+    if row.get("short_block_reasons"):
+        return False
+    if row.get("alertable_short") is None and _bear_short_rule_reasons(row):
+        return False
+
     fields = _extract_bear_short_fields(row)
     change = fields["change_pct"]
     close_pos = fields["close_pos"]

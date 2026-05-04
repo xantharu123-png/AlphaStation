@@ -253,6 +253,25 @@ def test_bear_crash_alert_requires_current_sell_pressure():
     assert api._bear_crash_alert_ok(active_flush) is True
 
 
+def test_bear_crash_alert_blocks_no_chase_drop_like_fwrd():
+    fwrd_like = {
+        "ticker": "FWRD",
+        "grade": "S",
+        "score": 100,
+        "change_pct": -22.6,
+        "open_to_current_pct": -22.2,
+        "close_pos": 0.07,
+        "latest_bar_change_pct": 0.0,
+        "latest_bar_close_pos": 0.5,
+        "rvol": 4.4,
+        "short_block_reasons": ["drop_too_extended_no_chase"],
+        "entry_quality": "NO_CHASE",
+        "alertable_short": False,
+    }
+
+    assert api._bear_crash_alert_ok(fwrd_like) is False
+
+
 def test_email_sender_blocks_inverse_etf_content():
     api._EMAIL_SEND_LOG.clear()
 

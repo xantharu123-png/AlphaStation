@@ -1589,6 +1589,13 @@ def _bear_entry_quality(row: Dict[str, Any]) -> str:
 
 def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
     """Crash alert is allowed only while the selloff is still pressing lows."""
+    if row.get("alertable_short") is False:
+        return False
+    if row.get("short_block_reasons"):
+        return False
+    if row.get("alertable_short") is None and _bear_short_rule_reasons(row):
+        return False
+
     fields = _extract_bear_short_fields(row)
     change = fields["change_pct"]
     close_pos = fields["close_pos"]
