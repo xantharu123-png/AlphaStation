@@ -5681,6 +5681,7 @@ function BacktestTab() {
     const [trades, setTrades] = useState([]);
     const [error, setError] = useState(null);
     const [strategyOptions, setStrategyOptions] = useState([]);
+    const [progress, setProgress] = useState({ pct: 0, percent: 0, status: 'idle', message: '' });
 
     // Load available strategies from server
     useEffect(() => {
@@ -5731,6 +5732,24 @@ function BacktestTab() {
 
         setIsRunning(true);
         setError(null);
+        setResults(null);
+        setTrades([]);
+        const jobId = `bt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+        setProgress({ pct: 0.01, percent: 1, status: 'running', message: 'Backtest gestartet...' });
+        let progressTimer = null;
+        const pollProgress = async () => {
+            try {
+                const progressResp = await fetch(`${API}/api/backtest-progress?job_id=${encodeURIComponent(jobId)}`);
+                if (progressResp.ok) {
+                    const progressData = await progressResp.json();
+                    setProgress(progressData);
+                }
+            } catch (e) {
+                // Progress polling is best effort; the main backtest request still decides success/failure.
+            }
+        };
+        progressTimer = setInterval(pollProgress, 800);
+        pollProgress();
         try {
             const response = await fetch(`${API}/api/run-backtest`, {
                 method: 'POST',
@@ -5741,7 +5760,8 @@ function BacktestTab() {
                     months: numberOr(months, 6),
                     max_tickers: numberOr(maxTickers || selectedStrategy.default_max_tickers, 50),
                     min_price: numberOr(minPrice || selectedStrategy.default_min_price, 0),
-                    min_volume: numberOr(minVolume || selectedStrategy.default_min_volume, 0)
+                    min_volume: numberOr(minVolume || selectedStrategy.default_min_volume, 0),
+                    job_id: jobId
                 })
             });
 
@@ -5771,6 +5791,8 @@ function BacktestTab() {
             setError('Netzwerkfehler');
             if (window.addToast) window.addToast('Fehler beim Backtest', 'error');
         } finally {
+            if (progressTimer) clearInterval(progressTimer);
+            await pollProgress();
             setIsRunning(false);
         }
     };
@@ -5861,6 +5883,27 @@ function BacktestTab() {
                     <p className="text-xs text-red-500 mt-1 font-semibold">Short-Strategie — profitiert von fallenden Kursen</p>
                 )}
             </div>
+
+            {isRunning && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                    <div className="flex items-center justify-between text-xs font-semibold text-blue-900 mb-2">
+                        <span>{progress.message || 'Backtest laeuft...'}</span>
+                        <span>{Math.max(0, Math.min(100, Number(progress.percent || 0))).toFixed(1)}%</span>
+                    </div>
+                    <div className="h-3 w-full overflow-hidden rounded-full bg-blue-100">
+                        <div
+                            className="h-full rounded-full bg-blue-600 transition-all duration-500"
+                            style={{ width: `${Math.max(2, Math.min(100, Number(progress.percent || 0)))}%` }}
+                        />
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-3 text-xs text-blue-700">
+                        {progress.current_item && <span>Aktuell: {progress.current_item}</span>}
+                        {progress.total_items !== undefined && <span>{progress.done_items || 0}/{progress.total_items} geprueft</span>}
+                        {progress.signals_found !== undefined && <span>{progress.signals_found} Signale</span>}
+                        {progress.elapsed_seconds !== undefined && <span>{progress.elapsed_seconds}s</span>}
+                    </div>
+                </div>
+            )}
 
             {error && (
                 <div className="card border border-red-200 bg-red-50 p-4 rounded-lg text-sm text-red-700">{error}</div>

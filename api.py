@@ -11137,6 +11137,9 @@ def get_market_context():
 
 # ── Backtest Engine ──
 BACKTEST_CACHE = "/tmp/backtest_cache.json"
+BACKTEST_PROGRESS: Dict[str, Dict[str, Any]] = {}
+_BACKTEST_PROGRESS_LOCK = threading.Lock()
+_BACKTEST_PROGRESS_TTL_SECONDS = 2 * 3600
 
 
 class BacktestRequest(BaseModel):
@@ -11146,6 +11149,7 @@ class BacktestRequest(BaseModel):
     max_tickers: int = 50
     min_price: float = 0
     min_volume: int = 0
+    job_id: Optional[str] = None
 
 
 ADVANCED_SCANNER_BACKTESTS = {
@@ -11197,6 +11201,69 @@ CRYPTO_BACKTESTS = {
         "note": "Daily-OHLC Backtest fuer parabolische Pumps mit bestaetigtem Crack; neue Coin-Microstructure ist nicht voll rekonstruierbar.",
     },
 }
+
+
+def _backtest_progress_key(job_id: Optional[str]) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(job_id or "").strip())
+    return safe[:80] or f"bt_{int(time.time() * 1000)}"
+
+
+def _cleanup_backtest_progress(now: Optional[float] = None) -> None:
+    now = now or time.time()
+    with _BACKTEST_PROGRESS_LOCK:
+        stale = [
+            job_id for job_id, state in BACKTEST_PROGRESS.items()
+            if now - float(state.get("updated_ts") or state.get("started_ts") or now) > _BACKTEST_PROGRESS_TTL_SECONDS
+        ]
+        for job_id in stale:
+            BACKTEST_PROGRESS.pop(job_id, None)
+
+
+def _backtest_progress_update(
+    job_id: Optional[str],
+    status: str = "running",
+    pct: float = 0.0,
+    message: str = "",
+    **extra: Any,
+) -> Optional[str]:
+    if not job_id:
+        return None
+    safe_job = _backtest_progress_key(job_id)
+    now = time.time()
+    pct = max(0.0, min(1.0, _bt_float(pct, 0.0)))
+    with _BACKTEST_PROGRESS_LOCK:
+        current = BACKTEST_PROGRESS.get(safe_job, {})
+        current.update({
+            "job_id": safe_job,
+            "status": status,
+            "pct": round(pct, 4),
+            "percent": round(pct * 100, 1),
+            "message": message or current.get("message") or "",
+            "started_ts": current.get("started_ts") or now,
+            "updated_ts": now,
+            "updated_at": datetime.now().isoformat(),
+        })
+        current.update(extra)
+        BACKTEST_PROGRESS[safe_job] = current
+    return safe_job
+
+
+def _backtest_progress_read(job_id: Optional[str]) -> Dict[str, Any]:
+    safe_job = _backtest_progress_key(job_id)
+    _cleanup_backtest_progress()
+    with _BACKTEST_PROGRESS_LOCK:
+        state = dict(BACKTEST_PROGRESS.get(safe_job, {}))
+    if not state:
+        return {
+            "job_id": safe_job,
+            "status": "unknown",
+            "pct": 0,
+            "percent": 0,
+            "message": "Kein Backtest-Fortschritt gefunden",
+        }
+    started = float(state.get("started_ts") or time.time())
+    state["elapsed_seconds"] = round(max(0, time.time() - started), 1)
+    return state
 
 
 def _bt_float(value: Any, default: float = 0.0) -> float:
@@ -11385,6 +11452,16 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
     min_price = max(0.0, float(request.min_price or meta["default_min_price"]))
     min_volume = max(0, int(request.min_volume or meta["default_min_volume"]))
     months = max(1, min(int(request.months or 6), 24))
+    job_id = _backtest_progress_key(request.job_id)
+
+    def _progress_callback(pct: float, text: str) -> None:
+        _backtest_progress_update(
+            job_id,
+            "running",
+            max(0.02, min(0.96, pct)),
+            text or f"{meta.get('name', 'Scanner')} Backtest laeuft...",
+            strategy=strategy,
+        )
 
     if meta["engine"] == "bi_v2":
         raw = run_bi_v2_backtest(
@@ -11394,6 +11471,7 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
             max_tickers=max_tickers,
             min_price=min_price,
             min_volume=min_volume,
+            progress_callback=_progress_callback,
         )
     else:
         raw = run_biotech_backtest(
@@ -11402,6 +11480,7 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
             max_tickers=max_tickers,
             min_price=min_price,
             min_volume=min_volume,
+            progress_callback=_progress_callback,
         )
     return _normalize_scanner_backtest(raw or {}, strategy, meta, months)
 
@@ -11569,16 +11648,38 @@ def _crypto_signal_grade(score: float) -> str:
 def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
     strategy = request.strategy
     meta = CRYPTO_BACKTESTS[strategy]
+    job_id = _backtest_progress_key(request.job_id)
     months = max(1, min(int(request.months or 3), 12))
     max_tickers = max(5, min(int(request.max_tickers or meta["default_max_tickers"]), 120))
     days = min(365, max(90, months * 30 + 45))
+    _backtest_progress_update(job_id, "running", 0.03, "Crypto-Universum wird geladen...", strategy=strategy)
     universe = _crypto_backtest_universe(max_tickers)
+    _backtest_progress_update(
+        job_id,
+        "running",
+        0.08,
+        f"{len(universe)} Crypto-Kandidaten geladen - historische Kerzen werden geprueft...",
+        strategy=strategy,
+        total_items=len(universe),
+        done_items=0,
+    )
     trades: List[Dict[str, Any]] = []
     total_signals = 0
 
-    for coin in universe:
+    total_universe = max(1, len(universe))
+    for coin_idx, coin in enumerate(universe, start=1):
         coin_id = str(coin.get("id") or "")
         symbol = str(coin.get("symbol") or "").upper()
+        _backtest_progress_update(
+            job_id,
+            "running",
+            0.08 + (coin_idx - 1) / total_universe * 0.84,
+            f"Crypto {coin_idx}/{len(universe)}: {symbol or coin_id} wird backgetestet...",
+            strategy=strategy,
+            total_items=len(universe),
+            done_items=coin_idx - 1,
+            current_item=symbol or coin_id,
+        )
         bars = _normalize_crypto_bars(fetch_daily_candles_crypto(coin_id, days=days))
         if len(bars) < 45:
             continue
@@ -11668,6 +11769,19 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
             })
             trades.append(sim)
 
+        _backtest_progress_update(
+            job_id,
+            "running",
+            0.08 + coin_idx / total_universe * 0.84,
+            f"Crypto {coin_idx}/{len(universe)} erledigt - {total_signals} Signale gefunden",
+            strategy=strategy,
+            total_items=len(universe),
+            done_items=coin_idx,
+            current_item=symbol or coin_id,
+            signals_found=total_signals,
+        )
+
+    _backtest_progress_update(job_id, "running", 0.96, "Crypto-Kennzahlen werden berechnet...", strategy=strategy, signals_found=total_signals)
     return _build_backtest_result(
         strategy=strategy,
         label=meta["name"],
@@ -12124,16 +12238,26 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 @app.post("/api/run-backtest")
 def run_backtest(request: BacktestRequest):
     """Run a backtest for a ticker with given strategy."""
-    if request.strategy in ADVANCED_SCANNER_BACKTESTS:
-        result = _run_advanced_scanner_backtest(request)
-    elif request.strategy in CRYPTO_BACKTESTS:
-        result = _run_crypto_backtest(request)
-    else:
-        if not POLYGON_KEY:
-            raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
-        if not str(request.ticker or "").strip():
-            raise HTTPException(status_code=400, detail="Ticker ist fuer diese Strategie erforderlich")
-        result = _run_backtest(request.ticker.upper(), request.strategy, request.months)
+    job_id = _backtest_progress_key(request.job_id)
+    request.job_id = job_id
+    _backtest_progress_update(job_id, "running", 0.01, "Backtest gestartet...", strategy=request.strategy)
+
+    try:
+        if request.strategy in ADVANCED_SCANNER_BACKTESTS:
+            result = _run_advanced_scanner_backtest(request)
+        elif request.strategy in CRYPTO_BACKTESTS:
+            result = _run_crypto_backtest(request)
+        else:
+            if not POLYGON_KEY:
+                raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
+            if not str(request.ticker or "").strip():
+                raise HTTPException(status_code=400, detail="Ticker ist fuer diese Strategie erforderlich")
+            _backtest_progress_update(job_id, "running", 0.15, f"Daten fuer {request.ticker.upper()} werden geladen...", strategy=request.strategy)
+            result = _run_backtest(request.ticker.upper(), request.strategy, request.months)
+            _backtest_progress_update(job_id, "running", 0.9, "Einzel-Ticker Kennzahlen werden berechnet...", strategy=request.strategy)
+    except Exception as exc:
+        _backtest_progress_update(job_id, "error", 1.0, f"Backtest fehlgeschlagen: {exc}", strategy=request.strategy, error=str(exc))
+        raise
 
     # Cache result
     try:
@@ -12145,7 +12269,26 @@ def run_backtest(request: BacktestRequest):
     except Exception as e:
         print(f"[Warning] {e}")
 
+    result["job_id"] = job_id
+    if result.get("error"):
+        _backtest_progress_update(job_id, "error", 1.0, str(result.get("error")), strategy=request.strategy, error=result.get("error"))
+    else:
+        _backtest_progress_update(
+            job_id,
+            "success",
+            1.0,
+            f"Fertig: {result.get('total_trades', 0)} Trades, {result.get('total_signals', result.get('total_trades', 0))} Signale",
+            strategy=request.strategy,
+            total_trades=result.get("total_trades", 0),
+            total_signals=result.get("total_signals", result.get("total_trades", 0)),
+        )
     return result
+
+
+@app.get("/api/backtest-progress")
+def get_backtest_progress(job_id: str = Query(...)):
+    """Get progress for a running backtest job."""
+    return _backtest_progress_read(job_id)
 
 
 @app.get("/api/backtest-strategies")

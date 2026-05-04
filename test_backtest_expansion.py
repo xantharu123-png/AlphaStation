@@ -138,3 +138,18 @@ def test_crypto_trade_simulation_rejects_invalid_long_levels():
     )
 
     assert trade is None
+
+
+def test_backtest_progress_lifecycle():
+    job_id = "unit_progress_job"
+
+    api._backtest_progress_update(job_id, "running", 0.42, "Halbzeit", total_items=10, done_items=4)
+    progress = api.get_backtest_progress(job_id)
+
+    assert progress["job_id"] == job_id
+    assert progress["status"] == "running"
+    assert progress["pct"] == 0.42
+    assert progress["percent"] == 42.0
+    assert progress["message"] == "Halbzeit"
+    assert progress["total_items"] == 10
+    assert progress["done_items"] == 4
