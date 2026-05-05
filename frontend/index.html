@@ -2817,6 +2817,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const riskLabelMap = {
         observe_only_scanner: 'nur Beobachtung',
         no_intraday_execution_trigger: '5m Trigger fehlt',
+        retest_trigger_missing: 'Retest fehlt',
+        no_market_entry: 'kein Market-Entry',
         very_high_volume_turnover: 'sehr hoher Umsatz',
         high_volume_turnover: 'hoher Umsatz',
         overheated_phase3: 'ueberhitzt',
@@ -4880,9 +4882,21 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 
     const phaseIcon = (p) => p === 1 ? '\u{1F7E2}' : p === 2 ? '\u{1F7E1}' : '\u{1F534}';
     const riskBadge = (r) => r === 'HIGH' ? 'signal-bearish' : r === 'MEDIUM' ? 'signal-lightdiv' : 'signal-bullish';
+    const timingBadge = (item) => {
+        const signal = String(item.trade_signal || '').toUpperCase();
+        const action = String(item.trade_action || '').toUpperCase();
+        if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
+        if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
+        if (signal === 'WARTEN' || action === 'WAIT_FOR_BTC_CONFIRMATION') return { label: 'WARTEN', cls: 'signal-lightdiv' };
+        if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST', cls: 'signal-lightdiv' };
+        if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'TRIGGER FEHLT', cls: 'signal-abwarten' };
+        return { label: 'WATCH', cls: 'signal-abwarten' };
+    };
     const earlyRiskLabelMap = {
         observe_only_scanner: 'nur Beobachtung',
         no_intraday_execution_trigger: '5m Trigger fehlt',
+        retest_trigger_missing: 'Retest fehlt',
+        no_market_entry: 'kein Market-Entry',
         very_high_volume_turnover: 'sehr hoher Umsatz',
         high_volume_turnover: 'hoher Umsatz',
         overheated_phase3: 'ueberhitzt',
@@ -4897,6 +4911,15 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const reasons = Array.isArray(item.risk_reasons) ? item.risk_reasons : [];
         return reasons.length > 0 ? reasons : (Array.isArray(item.risk_flags) ? item.risk_flags : []);
     };
+    const getPrimaryEntryReason = (item) => {
+        const reasons = getEntryRiskReasons(item);
+        const meaningful = reasons.filter(r => String(r || '').toLowerCase() !== 'observe_only_scanner');
+        if (meaningful.length > 0) return meaningful[0];
+        const action = String(item.trade_action || '').toUpperCase();
+        if (action === 'WAIT_FOR_RETEST') return 'retest_trigger_missing';
+        if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return 'no_intraday_execution_trigger';
+        return reasons[0];
+    };
     const getEntryRiskTitle = (item) => {
         const reasons = getEntryRiskReasons(item);
         return reasons.length > 0 ? reasons.map(humanizeEntryRisk).join(' | ') : 'Keine Entry-Warnung';
@@ -4904,7 +4927,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const getSetupScoreTitle = (item) => {
         const raw = item.raw_score != null ? `Raw ${item.raw_score}` : 'Raw n/a';
         const source = item.source || 'Early Mover';
-        return `Setup Score = Chance/Staerke (${source}, ${raw}). Entry trotzdem erst mit Long-Plan/Trigger.`;
+        return `Setup Score = Chance/Staerke (${source}, ${raw}). Timing entscheidet, ob jetzt gehandelt wird.`;
     };
 
     useEffect(() => {
@@ -4998,7 +5021,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                <b>Score</b> = Chance/Staerke. <b>Risk</b> = Einstieg jetzt. Hoher Score + Medium Risk heisst: guter Coin, aber erst Trigger/Retest.
+                <b>Score/Grade</b> = Setup-Qualitaet. <b>Timing</b> = ob jetzt gehandelt wird. Ein S-Setup kann BEOBACHTEN bleiben, wenn 5m-Trigger oder Retest noch fehlt.
             </div>
 
             {/* Unified Phase Table */}
@@ -5012,7 +5035,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change24h')}>24h%{sortKey === 'Change24h' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change7d')}>7d%{sortKey === 'Change7d' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('VolMCapRatio')}>Vol/MCap{sortKey === 'VolMCapRatio' && ' \u2193'}</th>
-                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Score = Setup-Staerke, Risk = Entry-Risiko jetzt" onClick={() => toggleSort('score')}>Score / Risk{sortKey === 'score' && ' \u2193'}</th>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Score = Setup-Staerke, Timing = Handelsfreigabe jetzt" onClick={() => toggleSort('score')}>Setup / Timing{sortKey === 'score' && ' \u2193'}</th>
                             <th className="text-left py-2 px-2">Aktion</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('entry')}>Entry{sortKey === 'entry' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2">TP1 / TP2</th>
@@ -5021,7 +5044,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         </tr>
                     </thead>
                     <tbody>
-                        {filtered.map((item, idx) => (
+                        {filtered.map((item, idx) => {
+                            const timing = timingBadge(item);
+                            const primaryReason = getPrimaryEntryReason(item);
+                            return (
                             <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                 <td className="py-3 px-2 text-center" title={item.phase_label}>
                                     <span className="text-lg">{phaseIcon(item.phase)}</span>
@@ -5035,14 +5061,17 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className={`py-3 px-2 text-right font-semibold ${(item.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change24h ? `${item.Change24h > 0 ? '+' : ''}${item.Change24h.toFixed(1)}%` : '\u2014'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.Change7d||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change7d ? `${item.Change7d > 0 ? '+' : ''}${item.Change7d.toFixed(1)}%` : '\u2014'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.VolMCapRatio||0) > 100 ? 'color-negative font-bold' : (item.VolMCapRatio||0) > 60 ? 'text-yellow-600' : ''}`}>{item.VolMCapRatio ? `${item.VolMCapRatio.toFixed(0)}%` : '\u2014'}</td>
-                                <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | ${getEntryRiskTitle(item)}`}>
+                                <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | Entry-Risk ${item.risk_level || '-'}: ${getEntryRiskTitle(item)}`}>
                                     <div className="flex items-center justify-center gap-1">
                                         <span className={`signal-badge ${item.score >= 70 ? 'signal-bullish' : item.score >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.grade || ''} {item.score}</span>
-                                        <span className={`signal-badge ${riskBadge(item.risk_level)}`}>{item.risk_level}</span>
+                                        <span className={`signal-badge ${timing.cls}`}>{timing.label}</span>
                                     </div>
-                                    {getEntryRiskReasons(item).length > 0 && (
-                                        <div className="text-[11px] text-amber-700 mt-1 max-w-[150px] truncate mx-auto">
-                                            {humanizeEntryRisk(getEntryRiskReasons(item)[0])}
+                                    <div className="text-[11px] text-gray-500 mt-1 max-w-[170px] truncate mx-auto">
+                                        Entry-Risk: <span className={item.risk_level === 'LOW' ? 'color-positive' : item.risk_level === 'MEDIUM' ? 'text-yellow-600' : 'color-negative'}>{item.risk_level || '-'}</span>
+                                    </div>
+                                    {primaryReason && (
+                                        <div className="text-[11px] text-amber-700 max-w-[170px] truncate mx-auto">
+                                            {humanizeEntryRisk(primaryReason)}
                                         </div>
                                     )}
                                 </td>
@@ -5061,7 +5090,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 </td>
                                 <td className="py-3 px-2"><span className={`text-xs px-2 py-1 rounded ${item.HasPerp ? 'bg-blue-100 text-blue-800' : 'text-gray-500'}`}>{item.HasPerp ? item.BestExchange || 'Perp' : '–'}</span></td>
                             </tr>
-                        ))}
+                        )})}
                     </tbody>
                 </table>
                 {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Keine Ergebnisse{phaseFilter > 0 ? ` für Phase ${phaseFilter}` : ''} — starte einen Scan</div>}
