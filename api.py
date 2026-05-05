@@ -86,6 +86,7 @@ from modules.data_fetchers import (
 )
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
+from modules.trade_levels import normalize_alert_trade_levels
 
 try:
     from modules.backtests import run_bi_v2_backtest, run_biotech_backtest
@@ -749,6 +750,11 @@ _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_MIN_SCORE = 80
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
+_ALERT_MIN_LEVEL_RR = 1.0
+_ALERT_TRADE_PLAN_GUARD_SCANNERS = {
+    "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
+    "strategy_scan", "crypto_strategy", "early_movers", "new_listing",
+}
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
@@ -1223,67 +1229,46 @@ def _alert_trade_levels(row: Dict[str, Any]) -> Dict[str, Any]:
     If a legacy scanner row has Entry/Stop but no targets, derive conservative
     R-multiple targets so alerts never show an idealized price without a plan.
     """
-    entry = _first_trade_level(row, ("Entry", "entry", "entry_price", "trigger_entry"))
-    stop = _first_trade_level(row, ("StopLoss", "stop_loss", "Stop", "stop", "SL", "invalidation_stop"))
-    tp1 = _first_trade_level(row, ("TP1", "tp1", "target1", "Target1", "target", "Target", "tp1_target"))
-    tp2 = _first_trade_level(row, ("TP2", "tp2", "target2", "Target2", "tp2_target"))
-    direction = _infer_alert_direction(row)
-
-    if entry is None:
-        entry = _alert_float(_extract_alert_price(row))
-
-    if entry and not stop:
-        day_high = _alert_float(row.get("DayHigh", row.get("day_high", row.get("High24h"))))
-        day_low = _alert_float(row.get("DayLow", row.get("day_low", row.get("Low24h"))))
-        day_range = (day_high - day_low) if day_high and day_low and day_high > day_low else 0
-        risk = max(entry * 0.03, day_range * 0.45 if day_range > 0 else 0)
-        risk = min(risk, entry * 0.12)
-        if direction == "SHORT":
-            stop = entry + risk
-        elif direction == "LONG":
-            stop = max(0.00000001, entry - risk)
-
-    if entry and stop and (not tp1 or not tp2):
-        if stop < entry:
-            risk = entry - stop
-            tp1 = tp1 or (entry + risk * 1.5)
-            tp2 = tp2 or (entry + risk * 2.5)
-            direction = direction or "LONG"
-        elif stop > entry:
-            risk = stop - entry
-            tp1 = tp1 or max(0.00000001, entry - risk * 1.5)
-            tp2 = tp2 or max(0.00000001, entry - risk * 2.5)
-            direction = direction or "SHORT"
-
-    rr = None
-    if entry and stop and tp1 and tp2 and abs(entry - stop) > 0:
-        reward = 0.5 * abs(tp1 - entry) + 0.5 * abs(tp2 - entry)
-        rr = round(reward / abs(entry - stop), 2)
-
-    return {
-        "entry": entry,
-        "stop": stop,
-        "tp1": tp1,
-        "tp2": tp2,
-        "rr": rr,
-        "direction": direction,
-    }
+    return normalize_alert_trade_levels(
+        row,
+        price_fallback=_extract_alert_price(row),
+        allow_estimated=True,
+    )
 
 
 def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     levels = _alert_trade_levels(row)
+    if not levels.get("valid"):
+        error_text = html.escape(", ".join(levels.get("errors", [])[:3]) or "invalid_trade_plan")
+        return (
+            '<span style="color:#dc2626;font-weight:bold">Kein gueltiger Trade-Plan</span>'
+            f'<br><span style="color:#64748b;font-size:12px">{error_text}</span>'
+        )
     entry = _format_alert_price(levels.get("entry"))
     stop = _format_alert_price(levels.get("stop"))
     tp1 = _format_alert_price(levels.get("tp1"))
     tp2 = _format_alert_price(levels.get("tp2"))
     rr = levels.get("rr")
     rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    source_text = (
+        '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
+        if levels.get("estimated") else ""
+    )
     return (
         f'<span>Entry <b>{entry}</b></span><br>'
         f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
         f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b></span>'
         f'{rr_text}'
+        f'{source_text}'
     )
+
+
+def _alert_trade_plan_ok(row: Dict[str, Any], min_rr: float = _ALERT_MIN_LEVEL_RR) -> bool:
+    levels = _alert_trade_levels(row)
+    if not levels.get("valid"):
+        return False
+    rr = levels.get("rr")
+    return not isinstance(rr, (int, float)) or rr >= min_rr
 
 
 def _median_float(values: List[Any], default: float = 0.0) -> float:
@@ -2048,8 +2033,10 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "not_new_listing_dump",
         "listing_age_not_tradeable",
         "non_common_stock_product",
+        "invalid_trade_plan",
+        "trade_rr_below_threshold",
     }
-    no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable")
+    no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
     if has_no_trade:
         return {
@@ -2108,6 +2095,14 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("partial_crypto_data")
     if scanner_name == "early_movers":
         reasons.extend(_early_mover_long_rule_reasons(row))
+    if scanner_name in _ALERT_TRADE_PLAN_GUARD_SCANNERS:
+        levels = _alert_trade_levels(row)
+        if not levels.get("valid"):
+            reasons.append("invalid_trade_plan")
+            for err in levels.get("errors", [])[:2]:
+                reasons.append(f"trade_{err}")
+        elif not _alert_trade_plan_ok(row):
+            reasons.append("trade_rr_below_threshold")
 
     cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
     cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
@@ -2582,6 +2577,8 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         if score < _ALERT_MIN_SCORE:
             reasons.append("score_below_alert_threshold")
         reasons.extend(_new_listing_rule_reasons(entry))
+        if not _alert_trade_plan_ok(entry, _NEW_LISTING_MIN_ALERT_RR):
+            reasons.append("invalid_trade_plan")
         if reasons:
             for reason in reasons:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
@@ -5085,7 +5082,7 @@ def _bear_scan_wrapper() -> None:
                 _cs_chg = bd.get("change_pct", 0)
                 _cs_score = bd.get("score", 0)
                 # Nur Grade S/A + Drop >= -10% + Score >= 80, sonst kein Push-Short.
-                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < _ALERT_MIN_SCORE or not _bear_crash_alert_ok(bd):
+                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < _ALERT_MIN_SCORE or not _bear_crash_alert_ok(bd) or not _alert_trade_plan_ok(bd):
                     continue
                 # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
                 _cs_tk_up = _cs_ticker.upper()
@@ -5151,7 +5148,7 @@ def _bear_scan_wrapper() -> None:
             _bd_rows = []
             _bear_summary_tickers = []
             for bd in result.get("breakdown_stocks", []):
-                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < _ALERT_MIN_SCORE or not bd.get("alertable_short"):
+                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < _ALERT_MIN_SCORE or not bd.get("alertable_short") or not _alert_trade_plan_ok(bd):
                     continue
                 _ticker_up = str(bd.get("ticker", "")).upper()
                 if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:

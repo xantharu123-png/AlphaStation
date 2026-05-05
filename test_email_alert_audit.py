@@ -11,10 +11,10 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
         "results": [
-            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10},
-            {"ticker": "BBB", "grade": "B", "score": 62, "rvol": 3.0, "price": 20},
-            {"ticker": "CCC", "grade": "S", "score": 90, "rvol": 0.2, "price": 30},
-            {"ticker": "DDD", "grade": "A", "score": 72, "rvol": 1.2, "price": 40},
+            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10, "direction": "LONG", "DayHigh": 10.4, "DayLow": 9.5},
+            {"ticker": "BBB", "grade": "B", "score": 62, "rvol": 3.0, "price": 20, "direction": "LONG", "DayHigh": 20.5, "DayLow": 19.0},
+            {"ticker": "CCC", "grade": "S", "score": 90, "rvol": 0.2, "price": 30, "direction": "LONG", "DayHigh": 31.0, "DayLow": 28.0},
+            {"ticker": "DDD", "grade": "A", "score": 72, "rvol": 1.2, "price": 40, "direction": "LONG", "DayHigh": 41.0, "DayLow": 39.0},
         ],
     }))
 
@@ -74,6 +74,9 @@ def test_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
         "latest_bar_close_pos": 0.82,
         "Extension_ATR": 4.5,
         "Signal_Direction": "LONG",
+        "DayHigh": 25.0,
+        "DayLow": 22.5,
+        "price": 24.5,
     }
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
@@ -121,6 +124,9 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
                     "score": 84,
                     "rvol": 1.1,
                     "price": 12,
+                    "direction": "SHORT",
+                    "DayHigh": 13.2,
+                    "DayLow": 11.4,
                     "change_pct": -6.0,
                     "open_to_current_pct": -5.0,
                     "close_pos": 0.2,
@@ -150,6 +156,9 @@ def test_bear_alert_audit_blocks_overextended_green_reclaim(tmp_path):
                 "score": 59,
                 "rvol": 3.4,
                 "price": 3.44,
+                "direction": "SHORT",
+                "DayHigh": 4.2,
+                "DayLow": 3.3,
                 "change_pct": -24.3,
                 "open_to_current_pct": 1.2,
                 "close_pos": 0.65,
@@ -178,6 +187,9 @@ def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
                 "score": 86,
                 "rvol": 2.1,
                 "price": 9.8,
+                "direction": "SHORT",
+                "DayHigh": 10.6,
+                "DayLow": 9.6,
                 "change_pct": -7.0,
                 "open_to_current_pct": -6.4,
                 "close_pos": 0.12,
@@ -204,6 +216,9 @@ def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
                 "score": 66,
                 "rvol": 2.1,
                 "price": 9.8,
+                "direction": "SHORT",
+                "DayHigh": 10.6,
+                "DayLow": 9.6,
                 "change_pct": -7.0,
                 "open_to_current_pct": -6.4,
                 "close_pos": 0.12,
@@ -384,6 +399,42 @@ def test_alert_trade_levels_derive_missing_targets_from_entry_stop():
     assert levels["tp1"] == 8.5
     assert levels["tp2"] == 7.5
     assert levels["rr"] == 2.0
+    assert levels["valid"] is True
+    assert levels["estimated"] is True
+
+
+def test_alert_trade_levels_reject_inverted_long_targets():
+    levels = api._alert_trade_levels({
+        "Ticker": "BADLONG",
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.5,
+        "TP1": 9.8,
+        "TP2": 11.5,
+    })
+
+    assert levels["valid"] is False
+    assert levels["rr"] is None
+    assert "invalid_long_tp1" in levels["errors"]
+
+
+def test_alert_classifier_blocks_invalid_trade_geometry():
+    api._EMAIL_COOLDOWN.clear()
+    state = api._classify_alert_candidate("stock_strategy", {
+        "ticker": "BADRR",
+        "grade": "A",
+        "score": 90,
+        "rvol": 1.5,
+        "price": 10.0,
+        "direction": "LONG",
+        "entry": 10.0,
+        "stop": 9.5,
+        "tp1": 9.8,
+        "tp2": 11.5,
+    }, now=1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "invalid_trade_plan" in state["suppression_reasons"]
 
 
 def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch):
@@ -460,7 +511,7 @@ def test_strategy_scan_email_includes_entry_stop_tp1_tp2(monkeypatch):
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0
-    row = {"ticker": "ORB1", "grade": "A", "score": 80, "price": 12}
+    row = {"ticker": "ORB1", "grade": "A", "score": 80, "price": 12, "direction": "LONG", "DayHigh": 12.4, "DayLow": 11.4}
 
     first = api._classify_alert_candidate("orb", row, now)
     assert first["alertable_now"] is True
@@ -475,12 +526,19 @@ def test_bearish_dedupe_suppresses_duplicate_short_alerts(tmp_path, monkeypatch)
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     now = 1_000_000.0
-    row = {"Ticker": "DUP", "BI_Grade": "A", "BI_Score": 100, "RVOL": 1.4, "Preis": 12}
+    short_row = {
+        "Ticker": "DUP", "BI_Grade": "A", "BI_Score": 100, "RVOL": 1.4, "Preis": 12,
+        "BI_Direction": "SHORT", "Entry": 12.0, "StopLoss": 12.6, "TP1": 11.1, "TP2": 10.5,
+    }
+    long_row = {
+        "Ticker": "DUP", "BI_Grade": "A", "BI_Score": 100, "RVOL": 1.4, "Preis": 12,
+        "BI_Direction": "LONG", "Entry": 12.0, "StopLoss": 11.4, "TP1": 12.9, "TP2": 13.5,
+    }
 
     api._mark_bearish_stock_alert("DUP", now=now)
 
-    short_state = api._classify_alert_candidate("bi_short", row, now + 60)
-    long_state = api._classify_alert_candidate("bi_long", row, now + 60)
+    short_state = api._classify_alert_candidate("bi_short", short_row, now + 60)
+    long_state = api._classify_alert_candidate("bi_long", long_row, now + 60)
 
     assert short_state["alertable_now"] is False
     assert "bearish_ticker_already_alerted" in short_state["suppression_reasons"]
@@ -526,7 +584,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
                     "entry": 1.2,
                     "stop_loss": 1.5,
                     "tp1": 0.9,
-                    "tp2": 0.7,
+                    "tp2": 0.6,
                     "rr_effective": 1.5,
                     "risk_pct": 25,
                     "confirmation_ok": True,
@@ -682,6 +740,10 @@ def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
                 "tp1_missed": False,
                 "tp2_missed": False,
                 "exh_score": 86,
+                "entry": 1.0,
+                "stop_loss": 1.2,
+                "tp1": 0.7,
+                "tp2": 0.5,
             },
             {
                 "symbol": "WATCH",

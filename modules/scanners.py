@@ -26,6 +26,7 @@ from modules.scorers import calculate_setup_score, calculate_alpha_score
 from modules.helpers import is_spac
 from modules.patterns import analyze_breakout_imminent, analyze_candles
 from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
+from modules.trade_levels import trade_geometry
 
 # AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
 try:
@@ -1247,6 +1248,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _near_low = _current < _range_mid  # Preis in unterer Hälfte = Breakdown
                     if _near_low:
                         # BREAKDOWN-SHORT: Preis nahe/unter Range-Low → Entry bei aktuellem Preis
+                        _breakdown_extension = max(0, range_low - _current)
+                        if _breakdown_extension > max(atr_5 * 1.2, _current * 0.04):
+                            rr_fail += 1
+                            continue
                         candidate["Entry"] = round(_current, 2)
                         candidate["StopLoss"] = round(min(range_high, _current + atr_5 * 1.5), 2)
                     else:
@@ -1255,16 +1260,41 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         candidate["StopLoss"] = round(range_high + atr_5 * 0.5, 2)
                     risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])
                     # TP basiert auf nächstem Support (Range-Low) statt fixem Multiplikator
-                    _dist_to_range_low = max(0.01, candidate["Entry"] - range_low)
-                    candidate["TP1"] = round(range_low, 2)  # TP1 = Range-Low (logisches Ziel)
-                    candidate["TP2"] = round(range_low - range_size * 0.618, 2)  # TP2 = unter Range
+                    if candidate["Entry"] > range_low:
+                        candidate["TP1"] = round(range_low, 2)  # TP1 = Range-Low (logisches Ziel)
+                    else:
+                        candidate["TP1"] = round(max(0.01, candidate["Entry"] - risk_short * 1.5), 2)
+                    candidate["TP2"] = round(max(0.01, min(range_low - range_size * 0.618, candidate["Entry"] - risk_short * 2.5)), 2)
 
-                risk = abs(candidate["Entry"] - candidate["StopLoss"])
-                reward_blended = (
-                    0.5 * abs(candidate["TP1"] - candidate["Entry"])
-                    + 0.5 * abs(candidate["TP2"] - candidate["Entry"])
+                _geometry = trade_geometry(
+                    candidate.get("Entry"),
+                    candidate.get("StopLoss"),
+                    candidate.get("TP1"),
+                    candidate.get("TP2"),
+                    direction.upper(),
                 )
-                candidate["RiskReward"] = round(reward_blended / risk, 1) if risk > 0 else 0
+                if not _geometry.get("valid"):
+                    _fallback_risk = None
+                    if direction == "long" and candidate.get("Entry", 0) > candidate.get("StopLoss", 0):
+                        _fallback_risk = candidate["Entry"] - candidate["StopLoss"]
+                        candidate["TP1"] = round(candidate["Entry"] + _fallback_risk * 1.5, 2)
+                        candidate["TP2"] = round(candidate["Entry"] + _fallback_risk * 2.5, 2)
+                    elif direction == "short" and candidate.get("StopLoss", 0) > candidate.get("Entry", 0):
+                        _fallback_risk = candidate["StopLoss"] - candidate["Entry"]
+                        candidate["TP1"] = round(max(0.01, candidate["Entry"] - _fallback_risk * 1.5), 2)
+                        candidate["TP2"] = round(max(0.01, candidate["Entry"] - _fallback_risk * 2.5), 2)
+                    if _fallback_risk:
+                        _geometry = trade_geometry(
+                            candidate.get("Entry"),
+                            candidate.get("StopLoss"),
+                            candidate.get("TP1"),
+                            candidate.get("TP2"),
+                            direction.upper(),
+                        )
+                if not _geometry.get("valid") or (_geometry.get("rr") is not None and _geometry["rr"] < 1.2):
+                    rr_fail += 1
+                    continue
+                candidate["RiskReward"] = round(_geometry["rr"], 1)
                 candidate["RangeHigh"] = round(range_high, 2)
                 candidate["RangeLow"] = round(range_low, 2)
 
@@ -1290,8 +1320,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
                 candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0
 
-                # V2.8: R:R bleibt als Info-Spalte, kein Filter mehr
-                # (War vorher Hard-Filter >= 1.0, hat zu viele Short-Setups eliminiert)
+                # V2.9: R:R ist wieder ein echtes Gate. Targets muessen signed zur
+                # Richtung passen; bereits verpasste Short-Ziele werden nicht per abs()
+                # als Reward schoengerechnet.
 
                 # ── Chart-Pattern-Warnung (auf allen 90 Tage Bars) ──
                 # V2.8: Zurück auf Original — nur informativ, KEINE Score-Penalties, KEIN Hard-Reject

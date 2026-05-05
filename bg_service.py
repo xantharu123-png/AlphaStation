@@ -52,6 +52,8 @@ STATUS_FILE = DATA_DIR / "bg_status.json"
 # Modules importieren
 sys.path.insert(0, str(BASE_DIR))
 
+from modules.trade_levels import normalize_alert_trade_levels
+
 # ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
@@ -262,50 +264,42 @@ def _extract_alert_price(row):
 
 
 def _alert_trade_levels(row):
-    entry = _first_trade_level(row, ("Entry", "entry", "entry_price", "trigger_entry"))
-    stop = _first_trade_level(row, ("StopLoss", "stop_loss", "Stop", "stop", "SL", "invalidation_stop"))
-    tp1 = _first_trade_level(row, ("TP1", "tp1", "target1", "Target1", "target", "Target", "tp1_target"))
-    tp2 = _first_trade_level(row, ("TP2", "tp2", "target2", "Target2", "tp2_target"))
-    direction = _infer_alert_direction(row)
-    if entry is None:
-        entry = _safe_float(_extract_alert_price(row), None)
-    if entry and not stop:
-        high = _safe_float(row.get("DayHigh", row.get("day_high", row.get("High24h"))), None)
-        low = _safe_float(row.get("DayLow", row.get("day_low", row.get("Low24h"))), None)
-        day_range = (high - low) if high and low and high > low else 0
-        risk = max(entry * 0.03, day_range * 0.45 if day_range > 0 else 0)
-        risk = min(risk, entry * 0.12)
-        if direction == "SHORT":
-            stop = entry + risk
-        elif direction == "LONG":
-            stop = max(0.00000001, entry - risk)
-    if entry and stop and (not tp1 or not tp2):
-        if stop < entry:
-            risk = entry - stop
-            tp1 = tp1 or (entry + risk * 1.5)
-            tp2 = tp2 or (entry + risk * 2.5)
-            direction = direction or "LONG"
-        elif stop > entry:
-            risk = stop - entry
-            tp1 = tp1 or max(0.00000001, entry - risk * 1.5)
-            tp2 = tp2 or max(0.00000001, entry - risk * 2.5)
-            direction = direction or "SHORT"
-    rr = None
-    if entry and stop and tp1 and tp2 and abs(entry - stop) > 0:
-        rr = round((0.5 * abs(tp1 - entry) + 0.5 * abs(tp2 - entry)) / abs(entry - stop), 2)
-    return {"entry": entry, "stop": stop, "tp1": tp1, "tp2": tp2, "rr": rr, "direction": direction}
+    return normalize_alert_trade_levels(
+        row,
+        price_fallback=_extract_alert_price(row),
+        allow_estimated=True,
+    )
 
 
 def _format_alert_plan_html(row):
     levels = _alert_trade_levels(row)
+    if not levels.get("valid"):
+        errors = ", ".join(levels.get("errors", [])[:3]) or "invalid_trade_plan"
+        return (
+            '<span style="color:#dc2626;font-weight:bold">Kein gueltiger Trade-Plan</span>'
+            f'<br><span style="color:#64748b;font-size:12px">{errors}</span>'
+        )
     rr = levels.get("rr")
     rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    source_text = (
+        '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
+        if levels.get("estimated") else ""
+    )
     return (
         f'Entry <b>{_format_alert_price(levels.get("entry"))}</b><br>'
         f'Stop <b style="color:#dc2626">{_format_alert_price(levels.get("stop"))}</b><br>'
         f'TP1/TP2 <b style="color:#059669">{_format_alert_price(levels.get("tp1"))} / {_format_alert_price(levels.get("tp2"))}</b>'
         f'{rr_text}'
+        f'{source_text}'
     )
+
+
+def _alert_trade_plan_ok(row, min_rr=1.0):
+    levels = _alert_trade_levels(row)
+    if not levels.get("valid"):
+        return False
+    rr = levels.get("rr")
+    return not isinstance(rr, (int, float)) or rr >= min_rr
 
 
 def _extract_long_entry_fields(row):
@@ -837,6 +831,9 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 if not r["alertable_long"]:
                     log.debug(f"Long alert suppressed by timing guard: {ticker} {r.get('long_entry_quality')} {r.get('latest_bar_change_pct')}")
                     continue
+            if not _alert_trade_plan_ok(r):
+                log.debug(f"Alert suppressed by invalid trade plan: {scanner_name} {ticker} {_alert_trade_levels(r).get('errors')}")
+                continue
 
             # Cooldown: Nicht denselben Ticker nochmal innerhalb 4h
             cooldown_key = f"{scanner_name}_{ticker}"
@@ -1592,6 +1589,7 @@ def _run_bear_scanner(poly_key, secrets):
             and l["change_pct"] <= -10
             and l["score"] >= _ALERT_MIN_SCORE
             and _bear_crash_alert_ok(l)
+            and _alert_trade_plan_ok(l)
         ]
         if crash_stocks:
             crash_date = datetime.now().strftime('%Y%m%d')
@@ -1859,6 +1857,8 @@ def _run_strategy_scanner(poly_key, secrets):
                         m["bear_entry_quality"] = _bear_entry_quality(m)
                         if _bear_short_rule_reasons(m):
                             continue
+                    if not _alert_trade_plan_ok(m):
+                        continue
                     all_alerts.append(m)
                     _EMAIL_COOLDOWN[ck] = now
 
@@ -2796,6 +2796,8 @@ def _alert_nls_signals(results, secrets):
             reasons.append("target_already_missed")
         if rr_effective < _NLS_MIN_ALERT_RR:
             reasons.append("rr_below_alert_threshold")
+        if not _alert_trade_plan_ok({"signal": sig}, _NLS_MIN_ALERT_RR):
+            reasons.append("invalid_trade_plan")
         if not confirmation_ok:
             reasons.append("turn_not_confirmed")
         if continuation_risk:
