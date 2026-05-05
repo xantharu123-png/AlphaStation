@@ -746,6 +746,7 @@ _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 _EMAIL_SEND_LOG: List[Dict[str, Any]] = []
 _ALERT_TOP_GRADES = {"S", "A", "A+"}
+_ALERT_MIN_SCORE = 80
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
 _NEW_LISTING_MIN_ALERT_RR = 1.5
@@ -794,6 +795,7 @@ def _email_alert_status() -> Dict[str, Any]:
         "recipient_count": len([addr for addr in str(alert_to).split(",") if addr.strip()]),
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
+        "min_alert_score": _ALERT_MIN_SCORE,
         "dedupe": _email_dedupe_status(),
         "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
         "optional_keys": ["ALERT_EMAIL"],
@@ -979,10 +981,18 @@ def _extract_alert_grade(row: Dict[str, Any]) -> str:
 
 
 def _extract_alert_score(row: Dict[str, Any]) -> Any:
-    for key in ("BI_Score", "Score", "score", "Alpha", "Setup_Score", "exhaustion_score", "raw_score", "SellProb"):
-        value = row.get(key)
-        if value not in (None, ""):
-            return value
+    nested = row.get("signal") if isinstance(row.get("signal"), dict) else {}
+    pump_data = nested.get("pump_data") if isinstance(nested.get("pump_data"), dict) else {}
+    keys = (
+        "BI_Score", "Score", "score", "Alpha", "Setup_Score",
+        "exhaustion_score", "ExhScore", "exh_score", "raw_score",
+        "SellProb", "micro_score", "MicroScore",
+    )
+    for source in (row, nested, pump_data):
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return value
     return 0
 
 
@@ -1671,7 +1681,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur S/A/A+ Early-Mover Setups mit Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, keinem BTC-Gegenwind, keinem No-Chase, keinen Partial-Daten, unverpasstem TP1 und frischem 5m Exchange-Trigger. Ohne 5m-Bestaetigung bleibt es BEOBACHTEN.</p>
+        <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und frischer 5m Exchange-Trigger. Ohne 5m-Bestaetigung bleibt es BEOBACHTEN.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
@@ -1950,6 +1960,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     now = now or time.time()
     ticker = _extract_alert_ticker(row)
     grade = _extract_alert_grade(row)
+    score = _alert_float(_extract_alert_score(row), 0) or 0
     rvol = _extract_alert_rvol(row)
     reasons = []
 
@@ -1967,6 +1978,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("non_common_stock_product")
     if grade not in _ALERT_TOP_GRADES:
         reasons.append("grade_below_alert_threshold")
+    if score < _ALERT_MIN_SCORE:
+        reasons.append("score_below_alert_threshold")
     if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and (rvol is None or rvol < _ALERT_MIN_RVOL):
         reasons.append("rvol_below_alert_threshold")
     if scanner_name == "new_listing":
@@ -2003,7 +2016,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     return {
         "ticker": ticker,
         "grade": grade,
-        "score": _extract_alert_score(row),
+        "score": int(score) if float(score).is_integer() else round(score, 2),
         "price": _extract_alert_price(row),
         "rvol": rvol,
         "cooldown_key": cooldown_key,
@@ -2286,7 +2299,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} S/A Setup(s)</p>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
     <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
@@ -2294,7 +2307,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
     <th style="padding:8px;text-align:left">Entry</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur Grade S/A/A+; 8h Cooldown pro Ticker.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE} und Grade S/A/A+; 8h Cooldown pro Ticker.</p>
     </body></html>'''
     _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
 
@@ -2376,7 +2389,8 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
         old_rank = (old["bucket"] == "signals", old["exh_score"] or 0, old["rr"] or 0) if old else None
         if old is None or candidate_rank > old_rank:
             deduped[key] = candidate
-    return sorted(deduped.values(), key=lambda c: (c["bucket"] != "signals", -(c["exh_score"] or 0), -(c["rr"] or 0)))[:12]
+    high_score = [c for c in deduped.values() if (c.get("exh_score") or 0) >= _ALERT_MIN_SCORE]
+    return sorted(high_score, key=lambda c: (c["bucket"] != "signals", -(c["exh_score"] or 0), -(c["rr"] or 0)))[:12]
 
 
 def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
@@ -2449,9 +2463,12 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             continue
         sig = entry.get("signal", {}) or {}
         fields = _extract_new_listing_signal_fields(entry)
+        score = _alert_float(_extract_alert_score(entry), 0) or 0
         reasons = []
         if fields["grade"] not in _ALERT_TOP_GRADES:
             reasons.append("grade_below_alert_threshold")
+        if score < _ALERT_MIN_SCORE:
+            reasons.append("score_below_alert_threshold")
         reasons.extend(_new_listing_rule_reasons(entry))
         if reasons:
             for reason in reasons:
@@ -2478,7 +2495,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "tp1": sig.get("tp1", 0),
             "tp2": sig.get("tp2", 0),
             "rr": fields["rr_effective"],
-            "exh_score": sig.get("exh_score", 0),
+            "exh_score": score,
             "micro_score": pump.get("micro_score", 0),
             "btc_change": pump.get("btc_change_pct", sig.get("btc_change_pct")),
             "coin_change": pump.get("coin_change_pct", sig.get("coin_change_pct")),
@@ -2507,7 +2524,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
     <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} aktive S/A Signale</p>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} aktive S/A Signale ab Score {_ALERT_MIN_SCORE}</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
@@ -2515,7 +2532,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
     <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
     sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
     if sent:

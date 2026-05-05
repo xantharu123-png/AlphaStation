@@ -11,21 +11,23 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
         "results": [
-            {"ticker": "AAA", "grade": "A", "score": 72, "rvol": 1.2, "price": 10},
+            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10},
             {"ticker": "BBB", "grade": "B", "score": 62, "rvol": 3.0, "price": 20},
             {"ticker": "CCC", "grade": "S", "score": 90, "rvol": 0.2, "price": 30},
+            {"ticker": "DDD", "grade": "A", "score": 72, "rvol": 1.2, "price": 40},
         ],
     }))
 
     audit = api._build_alert_audit_for_cache("stock_strategy", str(cache_file))
 
-    assert audit["rows_checked"] == 3
+    assert audit["rows_checked"] == 4
     assert audit["alertable_now_count"] == 1
-    assert audit["grade_counts"]["A"] == 1
+    assert audit["grade_counts"]["A"] == 2
     assert audit["grade_counts"]["B"] == 1
     assert audit["grade_counts"]["S"] == 1
     assert audit["suppression_counts"]["grade_below_alert_threshold"] == 1
     assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
+    assert audit["suppression_counts"]["score_below_alert_threshold"] == 2
 
 
 def test_long_alert_audit_blocks_extended_fading_move(tmp_path):
@@ -116,7 +118,7 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
                 {
                     "ticker": "REAL",
                     "grade": "A",
-                    "score": 70,
+                    "score": 84,
                     "rvol": 1.1,
                     "price": 12,
                     "change_pct": -6.0,
@@ -173,7 +175,7 @@ def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
             "breakdown_stocks": [{
                 "ticker": "FRESH",
                 "grade": "A",
-                "score": 66,
+                "score": 86,
                 "rvol": 2.1,
                 "price": 9.8,
                 "change_pct": -7.0,
@@ -451,7 +453,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
                     "micro_required": True,
                     "micro_trigger_ok": True,
                     "pump_data": {"micro_score": 75, "micro_trigger_ok": True},
-                    "exh_score": 70,
+                    "exh_score": 85,
                 },
             },
             {"symbol": "LOWUSDT", "exchange": "mexc", "signal": {"grade": "B", "timing": "WATCH"}},
@@ -519,7 +521,7 @@ def test_new_listing_pipeline_sends_daily_watch_when_no_short_now(monkeypatch):
                 "micro_trigger_ok": True,
                 "tp1_missed": False,
                 "tp2_missed": False,
-                "exh_score": 74,
+                    "exh_score": 84,
                 "pump_data": {
                     "pump_pct": 90,
                     "from_ath_pct": 3,
@@ -593,6 +595,7 @@ def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
                 "micro_trigger_ok": True,
                 "tp1_missed": False,
                 "tp2_missed": False,
+                "exh_score": 86,
             },
             {
                 "symbol": "WATCH",
@@ -638,6 +641,7 @@ def test_new_listing_alert_audit_requires_micro_trigger_for_short_now(tmp_path):
             "micro_trigger_ok": False,
             "tp1_missed": False,
             "tp2_missed": False,
+            "exh_score": 86,
         }],
     }))
 
@@ -672,6 +676,7 @@ def test_new_listing_alert_audit_blocks_active_pump_watch_rows(tmp_path):
             "micro_trigger_ok": True,
             "tp1_missed": False,
             "tp2_missed": False,
+            "exh_score": 86,
         }],
     }))
 
@@ -708,6 +713,7 @@ def test_new_listing_alert_audit_treats_string_false_as_false(tmp_path):
             "micro_trigger_ok": "true",
             "tp1_missed": "false",
             "tp2_missed": "false",
+            "exh_score": "86",
         }],
     }))
 
@@ -764,7 +770,7 @@ def _early_mover_row(**overrides):
         "Symbol": "EMO",
         "Name": "Early Mover",
         "grade": "A",
-        "score": 72,
+        "score": 86,
         "Price": 1.25,
         "Change24h": 4.2,
         "VolMCapRatio": 8.5,
