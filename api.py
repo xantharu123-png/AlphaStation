@@ -8593,19 +8593,74 @@ def fetch_bitget_funding_oi():
         return {}
 
 
+def fetch_binance_funding_oi():
+    """Binance USDT-M Futures: bulk 24h volume + funding for execution routing."""
+    try:
+        time.sleep(0.1)
+        ticker_resp = req.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=15)
+        if ticker_resp.status_code != 200:
+            return {}
+        tickers = ticker_resp.json()
+        if not isinstance(tickers, list):
+            return {}
+
+        funding_by_symbol: Dict[str, float] = {}
+        try:
+            premium_resp = req.get("https://fapi.binance.com/fapi/v1/premiumIndex", timeout=15)
+            if premium_resp.status_code == 200:
+                premiums = premium_resp.json()
+                if isinstance(premiums, list):
+                    for item in premiums:
+                        symbol = str(item.get("symbol") or "")
+                        if symbol.endswith("USDT"):
+                            funding_by_symbol[symbol] = float(item.get("lastFundingRate") or 0)
+        except Exception:
+            funding_by_symbol = {}
+
+        result = {}
+        for t in tickers:
+            symbol = str(t.get("symbol") or "")
+            if not symbol.endswith("USDT"):
+                continue
+            # Avoid coin-margined/quarterly variants and obvious stable/depeg pairs.
+            base = symbol[:-4]
+            vol_usdt = float(t.get("quoteVolume") or 0)
+            last_price = float(t.get("lastPrice") or 0)
+            change_24h = float(t.get("priceChangePercent") or 0)
+            if vol_usdt <= 0 or last_price <= 0:
+                continue
+            result[base] = {
+                "contract_symbol": symbol,
+                "chart_exchange": "binance",
+                "funding_rate": funding_by_symbol.get(symbol, 0),
+                "oi_usdt": 0,
+                "volume24_usdt": vol_usdt,
+                "oi_ratio": 0,
+                "change24h": change_24h,
+                "last_price": last_price,
+            }
+        return result
+    except Exception:
+        return {}
+
+
 def fetch_multi_exchange_perps():
-    """Multi-Exchange Perpetual Data: MEXC + Bitget combined."""
+    """Multi-Exchange Perpetual Data: Binance + Bitget + MEXC combined."""
     mexc = fetch_mexc_funding_oi()
     bitget = fetch_bitget_funding_oi()
+    binance = fetch_binance_funding_oi()
 
-    all_symbols = set(mexc.keys()) | set(bitget.keys())
+    all_symbols = set(mexc.keys()) | set(bitget.keys()) | set(binance.keys())
     result = {}
 
     for sym in all_symbols:
         m = mexc.get(sym, {})
         b = bitget.get(sym, {})
+        bn = binance.get(sym, {})
 
         exchanges = []
+        if bn:
+            exchanges.append("Binance")
         if m:
             exchanges.append("MEXC")
         if b:
@@ -8613,25 +8668,25 @@ def fetch_multi_exchange_perps():
 
         mexc_vol = m.get("volume24", 0) if m else 0
         bitget_vol = b.get("volume24_usdt", 0) if b else 0
-
-        if bitget_vol >= mexc_vol and b:
-            best = "Bitget"
-            best_contract = b.get("contract_symbol") or f"{sym}USDT"
-            best_chart_exchange = b.get("chart_exchange") or "bitget"
-            best_fr = b.get("funding_rate", 0)
-            best_oi_ratio = b.get("oi_ratio", 0)
-            best_oi_usdt = b.get("oi_usdt", 0)
-            best_vol = bitget_vol
-        elif m:
-            best = "MEXC"
-            best_contract = m.get("contract_symbol") or f"{sym}_USDT"
-            best_chart_exchange = m.get("chart_exchange") or "mexc"
-            best_fr = m.get("funding_rate", 0)
-            best_oi_ratio = m.get("oi_ratio", 0)
-            best_oi_usdt = m.get("oi_usdt", 0)  # FIX: war hold_vol (Kontraktanzahl statt USDT)
-            best_vol = mexc_vol
-        else:
+        binance_vol = bn.get("volume24_usdt", 0) if bn else 0
+        candidates = [
+            ("Binance", bn, binance_vol, f"{sym}USDT", "binance"),
+            ("Bitget", b, bitget_vol, f"{sym}USDT", "bitget"),
+            ("MEXC", m, mexc_vol, f"{sym}_USDT", "mexc"),
+        ]
+        candidates = [item for item in candidates if item[1]]
+        if not candidates:
             continue
+        best, best_data, best_vol, fallback_contract, fallback_exchange = max(candidates, key=lambda item: item[2] or 0)
+        best_contract = best_data.get("contract_symbol") or fallback_contract
+        best_chart_exchange = best_data.get("chart_exchange") or fallback_exchange
+        best_fr = best_data.get("funding_rate", 0)
+        # Binance is often best for execution volume, but bulk OI is not available
+        # cheaply. Keep the strongest OI snapshot from Bitget/MEXC for positioning.
+        best_oi_usdt = best_data.get("oi_usdt", 0) or max(m.get("oi_usdt", 0) if m else 0, b.get("oi_usdt", 0) if b else 0)
+        best_oi_ratio = best_data.get("oi_ratio", 0)
+        if not best_oi_ratio and best_oi_usdt and best_vol:
+            best_oi_ratio = round(best_oi_usdt / best_vol, 2)
 
         result[sym] = {
             "exchanges": exchanges,
@@ -8641,7 +8696,8 @@ def fetch_multi_exchange_perps():
             "funding_rate": best_fr,
             "oi_ratio": best_oi_ratio,
             "oi_usdt": best_oi_usdt,
-            "volume24_usdt": max(mexc_vol, bitget_vol),
+            "volume24_usdt": max(mexc_vol, bitget_vol, binance_vol),
+            "binance": bn,
             "mexc": m,
             "bitget": b,
         }

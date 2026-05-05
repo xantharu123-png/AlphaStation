@@ -204,3 +204,47 @@ def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
     assert result["ok"] is False
     assert result["reason"] == "thin_orderbook_market_impact"
     assert "thin_book_10bps" in result["liquidity_reasons"]
+
+
+def test_multi_exchange_perps_prefers_binance_execution_liquidity(monkeypatch):
+    monkeypatch.setattr(api, "fetch_mexc_funding_oi", lambda: {
+        "FET": {
+            "contract_symbol": "FET_USDT",
+            "chart_exchange": "mexc",
+            "funding_rate": 0.0002,
+            "oi_usdt": 500_000,
+            "volume24": 1_000_000,
+            "oi_ratio": 0.5,
+        }
+    })
+    monkeypatch.setattr(api, "fetch_bitget_funding_oi", lambda: {
+        "FET": {
+            "contract_symbol": "FETUSDT",
+            "chart_exchange": "bitget",
+            "funding_rate": 0.0001,
+            "oi_usdt": 8_000_000,
+            "volume24_usdt": 4_000_000,
+            "oi_ratio": 2.0,
+        }
+    })
+    monkeypatch.setattr(api, "fetch_binance_funding_oi", lambda: {
+        "FET": {
+            "contract_symbol": "FETUSDT",
+            "chart_exchange": "binance",
+            "funding_rate": -0.0003,
+            "oi_usdt": 0,
+            "volume24_usdt": 32_000_000,
+            "oi_ratio": 0,
+        }
+    })
+    monkeypatch.setattr(api, "_enrich_perp_oi_history", lambda data: data)
+
+    result = api.fetch_multi_exchange_perps()
+    fet = result["FET"]
+
+    assert fet["best_exchange"] == "Binance"
+    assert fet["best_chart_exchange"] == "binance"
+    assert fet["best_contract_symbol"] == "FETUSDT"
+    assert fet["volume24_usdt"] == 32_000_000
+    assert fet["oi_usdt"] == 8_000_000
+    assert "Binance" in fet["exchanges"]
