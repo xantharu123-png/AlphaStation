@@ -127,6 +127,7 @@ try:
         calculate_listing_exhaustion,
         fetch_ticker_for,
         fetch_candles_for,
+        fetch_orderbook_for,
         fetch_cryptocom_orderbook,
         run_new_listing_scanner,
         seed_instrument_cache,
@@ -768,6 +769,12 @@ _EARLY_MOVER_TRIGGER_SCAN_LIMIT = 1000
 _EARLY_MOVER_MAX_DISPLAY = 160
 _EARLY_MOVER_TRIGGER_CACHE_MAX = 1500
 _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
+_EARLY_MOVER_MIN_PERP_VOLUME_USD = 2_000_000
+_EARLY_MOVER_WARN_PERP_VOLUME_USD = 5_000_000
+_EARLY_MOVER_MAX_SPREAD_BPS = 20.0
+_EARLY_MOVER_MIN_DEPTH_10BPS_USD = 5_000
+_EARLY_MOVER_MIN_DEPTH_25BPS_USD = 25_000
+_EARLY_MOVER_MIN_DEPTH_50BPS_USD = 50_000
 _TRADE_REMINDERS_FILE = "/tmp/alphastation_trade_reminders.json"
 _TRADE_REMINDER_CHECK_SEC = 60
 _TRADE_REMINDER_MAX_HOURS = 24
@@ -1150,6 +1157,8 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_chased_from_entry")
     if "very_high_volume_turnover" in risk_flags:
         reasons.append("early_mover_blowoff_turnover")
+    if risk_flags.intersection({"thin_perp_liquidity", "thin_orderbook", "market_impact_risk", "no_perp_execution_market"}):
+        reasons.append("early_mover_execution_liquidity_too_thin")
     if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
         reasons.append("early_mover_live_rr_below_threshold")
     if action == "LONG_TRIGGER" and not fields["execution_trigger_ok"]:
@@ -1290,6 +1299,161 @@ def _normalize_crypto_exchange(value: Any) -> str:
     return exchange
 
 
+def _compact_usd(value: Any) -> str:
+    amount = _alert_float(value, 0) or 0
+    if amount >= 1_000_000_000:
+        return f"${amount / 1_000_000_000:.1f}B"
+    if amount >= 1_000_000:
+        return f"${amount / 1_000_000:.1f}M"
+    if amount >= 1_000:
+        return f"${amount / 1_000:.0f}k"
+    return f"${amount:.0f}"
+
+
+def _book_liquidity_metrics(book: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    bids_raw = (book or {}).get("bids") or []
+    asks_raw = (book or {}).get("asks") or []
+
+    def _side(raw_side: Any) -> List[Tuple[float, float]]:
+        parsed: List[Tuple[float, float]] = []
+        for level in raw_side if isinstance(raw_side, list) else []:
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
+                continue
+            price = _alert_float(level[0])
+            qty = _alert_float(level[1])
+            if price and price > 0 and qty and qty > 0:
+                parsed.append((price, qty))
+        return parsed
+
+    bids = sorted(_side(bids_raw), key=lambda x: x[0], reverse=True)
+    asks = sorted(_side(asks_raw), key=lambda x: x[0])
+    if not bids or not asks:
+        return {"ok": False, "reason": "orderbook_empty"}
+
+    bid = bids[0][0]
+    ask = asks[0][0]
+    mid = (bid + ask) / 2
+    if mid <= 0 or ask <= bid:
+        return {"ok": False, "reason": "orderbook_bad_prices"}
+
+    def _depth(side: List[Tuple[float, float]], bps: float, is_ask: bool) -> float:
+        if is_ask:
+            cutoff = mid * (1 + bps / 10000)
+            return sum(price * qty for price, qty in side if price <= cutoff)
+        cutoff = mid * (1 - bps / 10000)
+        return sum(price * qty for price, qty in side if price >= cutoff)
+
+    bid_depth_10 = _depth(bids, 10, False)
+    ask_depth_10 = _depth(asks, 10, True)
+    bid_depth_25 = _depth(bids, 25, False)
+    ask_depth_25 = _depth(asks, 25, True)
+    bid_depth_50 = _depth(bids, 50, False)
+    ask_depth_50 = _depth(asks, 50, True)
+    total_bid_depth = sum(price * qty for price, qty in bids)
+    total_ask_depth = sum(price * qty for price, qty in asks)
+    return {
+        "ok": True,
+        "bid": round(bid, 12),
+        "ask": round(ask, 12),
+        "mid": round(mid, 12),
+        "spread_bps": round((ask - bid) / mid * 10000, 2),
+        "depth_10bps_bid_usd": round(bid_depth_10, 2),
+        "depth_10bps_ask_usd": round(ask_depth_10, 2),
+        "depth_10bps_min_usd": round(min(bid_depth_10, ask_depth_10), 2),
+        "depth_25bps_bid_usd": round(bid_depth_25, 2),
+        "depth_25bps_ask_usd": round(ask_depth_25, 2),
+        "depth_25bps_min_usd": round(min(bid_depth_25, ask_depth_25), 2),
+        "depth_50bps_bid_usd": round(bid_depth_50, 2),
+        "depth_50bps_ask_usd": round(ask_depth_50, 2),
+        "depth_50bps_min_usd": round(min(bid_depth_50, ask_depth_50), 2),
+        "top_book_bid_usd": round(total_bid_depth, 2),
+        "top_book_ask_usd": round(total_ask_depth, 2),
+        "top_book_min_usd": round(min(total_bid_depth, total_ask_depth), 2),
+    }
+
+
+def _early_mover_static_liquidity(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Execution liquidity, not CoinGecko popularity.
+
+    CoinGecko volume is aggregate market volume. For a live signal we need the
+    actual perp/trigger venue to have enough turnover; otherwise small orders
+    can paint the chart and invalidate the scanner edge.
+    """
+    has_perp = bool(entry.get("HasPerp"))
+    perp_volume = _alert_float(entry.get("PerpVolume24h"), 0) or 0
+    spot_volume = _alert_float(entry.get("Vol24h") or entry.get("volume") or entry.get("dollar_volume"), 0) or 0
+    flags: List[str] = []
+    reasons: List[str] = []
+    score_penalty = 0
+    hard_block = False
+
+    if not has_perp:
+        flags.append("no_perp_execution_market")
+        reasons.append("kein Perp/Trigger-Markt - nur Watchlist")
+        score_penalty += 25
+        hard_block = True
+    elif perp_volume < _EARLY_MOVER_MIN_PERP_VOLUME_USD:
+        flags.append("thin_perp_liquidity")
+        reasons.append(f"Perp-Volumen duenn: {_compact_usd(perp_volume)}/24h")
+        score_penalty += 25
+        hard_block = True
+    elif perp_volume < _EARLY_MOVER_WARN_PERP_VOLUME_USD:
+        flags.append("perp_liquidity_watch")
+        reasons.append(f"Perp-Volumen nur mittel: {_compact_usd(perp_volume)}/24h")
+        score_penalty += 8
+
+    if spot_volume and spot_volume < 1_000_000:
+        flags.append("thin_spot_liquidity")
+        reasons.append(f"Gesamtvolumen duenn: {_compact_usd(spot_volume)}/24h")
+        score_penalty += 10
+
+    return {
+        "hard_block": hard_block,
+        "score_penalty": score_penalty,
+        "flags": flags,
+        "reasons": reasons,
+        "perp_volume_24h": round(perp_volume, 2),
+        "spot_volume_24h": round(spot_volume, 2),
+    }
+
+
+def _early_mover_orderbook_liquidity(contract: str, exchange: str) -> Dict[str, Any]:
+    if not HAS_NEW_LISTING_SCANNER:
+        return {"ok": False, "reason": "orderbook_module_missing", "reasons": ["orderbook_module_missing"]}
+    try:
+        book = fetch_orderbook_for(str(contract), exchange, depth=50)
+    except Exception as exc:
+        return {"ok": False, "reason": "orderbook_fetch_failed", "detail": str(exc)[:120], "reasons": ["orderbook_fetch_failed"]}
+
+    metrics = _book_liquidity_metrics(book)
+    if not metrics.get("ok"):
+        metrics["reasons"] = [metrics.get("reason", "orderbook_unavailable")]
+        return metrics
+
+    reasons = []
+    if metrics["spread_bps"] > _EARLY_MOVER_MAX_SPREAD_BPS:
+        reasons.append("spread_too_wide")
+    if metrics["depth_10bps_min_usd"] < _EARLY_MOVER_MIN_DEPTH_10BPS_USD:
+        reasons.append("thin_book_10bps")
+    if metrics["depth_25bps_min_usd"] < _EARLY_MOVER_MIN_DEPTH_25BPS_USD:
+        reasons.append("thin_book_25bps")
+    if metrics["depth_50bps_min_usd"] < _EARLY_MOVER_MIN_DEPTH_50BPS_USD:
+        reasons.append("thin_book_50bps")
+
+    metrics.update({
+        "ok": not reasons,
+        "reason": "ok" if not reasons else "thin_orderbook_market_impact",
+        "reasons": reasons,
+        "thresholds": {
+            "max_spread_bps": _EARLY_MOVER_MAX_SPREAD_BPS,
+            "min_depth_10bps_usd": _EARLY_MOVER_MIN_DEPTH_10BPS_USD,
+            "min_depth_25bps_usd": _EARLY_MOVER_MIN_DEPTH_25BPS_USD,
+            "min_depth_50bps_usd": _EARLY_MOVER_MIN_DEPTH_50BPS_USD,
+        },
+    })
+    return metrics
+
+
 def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
     """Confirm Early-Mover mail candidates with real 5m exchange candles."""
     symbol = _extract_alert_ticker(row)
@@ -1379,6 +1543,13 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
                 "volume_ratio": round(vol_ratio, 2),
                 "close_pos": round(close_pos, 2),
             }
+            if ok:
+                liquidity = _early_mover_orderbook_liquidity(str(contract), exchange)
+                result["liquidity"] = liquidity
+                if not liquidity.get("ok"):
+                    result["ok"] = False
+                    result["reason"] = "thin_orderbook_market_impact"
+                    result["liquidity_reasons"] = liquidity.get("reasons", [])
     except Exception as exc:
         result = {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120]}
 
@@ -1400,6 +1571,16 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     row["execution_trigger_ok"] = bool(trigger_ok)
     if isinstance(trigger_check, dict):
         row["intraday_trigger"] = trigger_check
+        if isinstance(trigger_check.get("liquidity"), dict):
+            row["execution_liquidity"] = trigger_check["liquidity"]
+        if trigger_check.get("reason") == "thin_orderbook_market_impact":
+            flags = row.get("risk_flags") if isinstance(row.get("risk_flags"), list) else []
+            flags.extend(["thin_orderbook", "market_impact_risk"])
+            row["risk_flags"] = list(dict.fromkeys(flags))
+            reasons = row.get("risk_reasons") if isinstance(row.get("risk_reasons"), list) else []
+            reasons.append("Orderbuch zu duenn - kleiner Trade kann Kerze bewegen")
+            row["risk_reasons"] = list(dict.fromkeys(reasons))
+            row["risk_level"] = "HIGH"
 
     if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok:
         row["trade_signal"] = "JETZT_TRADEN"
@@ -1416,6 +1597,12 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     elif action == "WAIT_FOR_BTC_CONFIRMATION":
         row["trade_signal"] = "WARTEN"
         row["signal_label"] = "Warten: BTC bestaetigt das Setup noch nicht"
+        row["signal_quality"] = "wait"
+        row["entry_status"] = "WARTEN"
+        row["alertable_crypto"] = False
+    elif action == "WAIT_FOR_LIQUIDITY":
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: Perp/Orderbuch-Liquiditaet ist zu duenn"
         row["signal_quality"] = "wait"
         row["entry_status"] = "WARTEN"
         row["alertable_crypto"] = False
@@ -8063,6 +8250,7 @@ def _build_early_mover_long_setup(
     if vol_mcap > 80:
         risk_pct = max(risk_pct, 0.065)
 
+    liquidity = _early_mover_static_liquidity(entry)
     warnings = []
     notes = []
     trigger_conditions = [
@@ -8118,6 +8306,12 @@ def _build_early_mover_long_setup(
         entry_status = "WAIT_FOR_BTC_CONFIRMATION"
         entry_quality = "EXTENDED"
 
+    if liquidity.get("hard_block"):
+        trade_action = "WAIT_FOR_LIQUIDITY"
+        entry_status = "WAIT_FOR_LIQUIDITY"
+        entry_quality = "THIN"
+        warnings.extend(liquidity.get("reasons") or [])
+
     risk_distance = max(setup_entry * risk_pct, range_24h * 0.25)
     swing_stop = low_24h - max(range_24h * 0.05, setup_entry * 0.01)
     stop = setup_entry - risk_distance
@@ -8165,11 +8359,13 @@ def _build_early_mover_long_setup(
         risk_flags.append("very_high_volume_turnover")
     if entry.get("data_warning"):
         risk_flags.append("data_warning")
+    risk_flags.extend(liquidity.get("flags") or [])
 
     action_label = {
         "LONG_TRIGGER": "Long nur mit Trigger",
         "WAIT_FOR_RETEST": "Auf Retest warten",
         "WAIT_FOR_BTC_CONFIRMATION": "BTC-Bestaetigung abwarten",
+        "WAIT_FOR_LIQUIDITY": "Liquiditaet abwarten",
         "WAIT_FOR_CONTINUATION": "Nur neue Continuation-Flag",
         "NO_LONG_CHASE": "Kein Long-Chase",
         "NO_TRADE": "No Trade",
@@ -8198,6 +8394,7 @@ def _build_early_mover_long_setup(
         "notes": list(dict.fromkeys(notes))[:6],
         "trigger_conditions": trigger_conditions,
         "risk_flags": risk_flags,
+        "execution_liquidity": liquidity,
         "btc_context": {
             "btc_24h": round(btc_24h or 0, 2),
             "btc_7d": round(btc_7d or 0, 2),
@@ -8505,15 +8702,26 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
     return 1, "Accumulation", "#10b981"
 
 
-def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase):
+def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase, perp_volume_24h=None, has_perp=True):
     """Berechnet Risiko-Level basierend auf Marktdaten."""
     c24 = abs(change_24h or 0)
     c7d_raw = change_7d or 0
     vm = vol_mcap_pct or 0
     fr = abs((funding_rate or 0) * 100)
+    perp_volume = _alert_float(perp_volume_24h, 0) or 0
     reasons = []
+    hard_risk = False
 
     # Verschärfte Schwellen — Trader brauchen ehrliche Warnungen
+    if has_perp is False:
+        reasons.append("kein Perp/Trigger-Markt - Ausfuehrung nicht verifizierbar")
+        hard_risk = True
+    elif perp_volume and perp_volume < _EARLY_MOVER_MIN_PERP_VOLUME_USD:
+        reasons.append(f"Perp-Volumen duenn: {_compact_usd(perp_volume)}/24h - Market-Impact-Risiko")
+        hard_risk = True
+    elif perp_volume and perp_volume < _EARLY_MOVER_WARN_PERP_VOLUME_USD:
+        reasons.append(f"Perp-Volumen nur mittel: {_compact_usd(perp_volume)}/24h")
+
     if c24 > 15:
         reasons.append(f"24h Change stark: {change_24h:+.1f}% — Einstieg riskant")
     if c24 > 10:
@@ -8525,6 +8733,8 @@ def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase):
     if abs(c7d_raw) > 30:
         reasons.append(f"7d Change extrem: {c7d_raw:+.1f}%")
 
+    if hard_risk:
+        return "HIGH", "#ef4444", reasons
     if phase == 3:
         if not reasons:
             reasons.append("Überhitzt — Korrektur wahrscheinlich, NICHT kaufen")
@@ -8642,6 +8852,8 @@ def fetch_early_movers(_prefetched_perps=None):
                 "VolMCapRatio": round(vol_mcap_ratio, 2),
                 "HasPerp": has_perp, "FundingRate": funding_rate,
                 "OI_Ratio": oi_ratio,
+                "PerpVolume24h": perp_info.get("volume24_usdt", 0) if perp_info else 0,
+                "PerpOI": perp_info.get("oi_usdt", 0) if perp_info else 0,
                 "BestExchange": best_exchange,
                 "PerpMatchSymbol": perp_match_symbol if has_perp else None,
                 "PerpChartSymbol": perp_info.get("best_contract_symbol") if perp_info else None,
@@ -9045,7 +9257,13 @@ def fetch_early_movers(_prefetched_perps=None):
             fr = entry.get("FundingRate", 0)
 
             phase, phase_label, phase_color = _classify_phase(c24, c7d, vm, btc_24h)
-            risk_level, risk_color, risk_reasons = _calculate_risk(c24, c7d, vm, fr, phase)
+            risk_level, risk_color, risk_reasons = _calculate_risk(
+                c24, c7d, vm, fr, phase,
+                entry.get("PerpVolume24h", 0),
+                bool(entry.get("HasPerp")),
+            )
+            risk_reasons = list(risk_reasons or [])
+            liquidity = _early_mover_static_liquidity(entry)
 
             # Phase-Multiplier: Phase 3 = deutliche Strafe, Phase 1 = leichter Boost
             if phase == 1:
@@ -9054,6 +9272,16 @@ def fetch_early_movers(_prefetched_perps=None):
                 score = min(100, int(raw_score * 0.6))   # -40% — überhitzt = NICHT kaufen
             else:
                 score = raw_score
+            if liquidity.get("score_penalty"):
+                score = max(0, int(score) - int(liquidity["score_penalty"]))
+            if liquidity.get("reasons"):
+                risk_reasons.extend(liquidity["reasons"])
+                if liquidity.get("hard_block"):
+                    risk_level = "HIGH"
+                    risk_color = "#ef4444"
+                elif risk_level == "LOW":
+                    risk_level = "MEDIUM"
+                    risk_color = "#f59e0b"
 
             # Signal-Text basierend auf Phase — ehrlich und direkt
             alpha = c24 - btc_24h
@@ -9081,6 +9309,7 @@ def fetch_early_movers(_prefetched_perps=None):
             unified_entry = dict(entry)
             watch_flags = list(risk_reasons or [])
             watch_flags.extend(["observe_only_scanner", "no_intraday_execution_trigger"])
+            watch_flags.extend(liquidity.get("flags") or [])
             if _CG_MARKETS_STATUS.get("partial"):
                 watch_flags.append("partial_crypto_data")
             unified_entry.update({
@@ -9104,6 +9333,7 @@ def fetch_early_movers(_prefetched_perps=None):
                 "execution_trigger_ok": False,
                 "alertable_crypto": False,
                 "risk_flags": watch_flags,
+                "execution_liquidity": liquidity,
                 "data_source": f"CoinGecko + multi-exchange perps ({_CG_MARKETS_STATUS.get('source') or 'unknown'})",
                 "data_warning": _CG_MARKETS_STATUS.get("warning"),
                 "scanner_note": "Early Movers liefert Beobachten- oder Jetzt-Traden-Signale. Kein Entry ohne bestaetigten 5m/1m Trigger.",

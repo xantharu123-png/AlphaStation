@@ -2826,6 +2826,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         data_warning: 'Daten unsicher',
         oi_snapshot_only: 'OI nur Snapshot',
         manipulation_spread: 'Spread/Manipulationsrisiko',
+        no_perp_execution_market: 'kein Perp-Trigger',
+        thin_perp_liquidity: 'Perp-Liquiditaet duenn',
+        perp_liquidity_watch: 'Perp-Liquiditaet mittel',
+        thin_spot_liquidity: 'Gesamtvolumen duenn',
+        thin_orderbook: 'Orderbuch duenn',
+        market_impact_risk: 'Market-Impact Risiko',
         headline_high: 'News-Risiko hoch',
         event_high: 'Event-Risiko hoch',
         chased_from_entry: 'zu weit vom Entry',
@@ -4887,6 +4893,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const action = String(item.trade_action || '').toUpperCase();
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
+        if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
         if (signal === 'WARTEN' || action === 'WAIT_FOR_BTC_CONFIRMATION') return { label: 'WARTEN', cls: 'signal-lightdiv' };
         if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST', cls: 'signal-lightdiv' };
         if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'TRIGGER FEHLT', cls: 'signal-abwarten' };
@@ -4904,6 +4911,12 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         data_warning: 'Daten unsicher',
         oi_snapshot_only: 'OI nur Snapshot',
         manipulation_spread: 'Spread/Manipulationsrisiko',
+        no_perp_execution_market: 'kein Perp-Trigger',
+        thin_perp_liquidity: 'Perp-Liquiditaet duenn',
+        perp_liquidity_watch: 'Perp-Liquiditaet mittel',
+        thin_spot_liquidity: 'Gesamtvolumen duenn',
+        thin_orderbook: 'Orderbuch duenn',
+        market_impact_risk: 'Market-Impact Risiko',
         chased_from_entry: 'zu weit vom Entry',
     };
     const humanizeEntryRisk = (flag) => earlyRiskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');

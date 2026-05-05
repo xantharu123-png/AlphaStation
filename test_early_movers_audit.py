@@ -40,11 +40,27 @@ def _volume_coin(symbol="tvol", coin_id="test-volume", change_24h=4.0):
     }
 
 
+def _perp(symbol="TVOL", volume=10_000_000):
+    return {
+        symbol.upper(): {
+            "funding_rate": 0.0001,
+            "oi_ratio": 1.2,
+            "oi_usdt": 5_000_000,
+            "volume24_usdt": volume,
+            "best_exchange": "Bitget",
+            "best_contract_symbol": f"{symbol.upper()}USDT",
+            "best_chart_exchange": "bitget",
+            "exchanges": ["Bitget"],
+            "oi_change_pct": 5.0,
+        }
+    }
+
+
 def test_early_mover_volume_spike_builds_conditional_long_setup(monkeypatch):
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), _volume_coin()])
     monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
 
-    result = api.fetch_early_movers(_prefetched_perps={})
+    result = api.fetch_early_movers(_prefetched_perps=_perp())
     row = next(c for c in result["coins"] if c["Symbol"] == "TVOL")
 
     assert row["direction"] == "LONG"
@@ -74,7 +90,7 @@ def test_early_mover_btc_headwind_blocks_active_long_trigger(monkeypatch):
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [weak_btc, coin])
     monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
 
-    result = api.fetch_early_movers(_prefetched_perps={})
+    result = api.fetch_early_movers(_prefetched_perps=_perp())
     row = next(c for c in result["coins"] if c["Symbol"] == "TVOL")
 
     assert row["trade_action"] == "WAIT_FOR_BTC_CONFIRMATION"
@@ -117,7 +133,7 @@ def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
 def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), _volume_coin()])
     monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
-    result = api.fetch_early_movers(_prefetched_perps={})
+    result = api.fetch_early_movers(_prefetched_perps=_perp())
 
     decorated = api._decorate_early_mover_results([result], cache_age_seconds=15)
     row = decorated[0]["coins"][0]
@@ -143,8 +159,48 @@ def test_early_mover_intraday_trigger_checks_more_than_top_30(monkeypatch):
         lambda row: checked.append(row["Symbol"]) or {"ok": False, "reason": "test_no_trigger"},
     )
 
-    result = api.fetch_early_movers(_prefetched_perps={})
+    result = api.fetch_early_movers(_prefetched_perps={f"EM{idx}": _perp(f"EM{idx}")[f"EM{idx}"] for idx in range(45)})
 
     assert len(checked) > 30
     assert result["stats"]["intraday_trigger_scan_limit"] == 1000
     assert result["stats"]["market_universe_target"] == 1000
+
+
+def test_early_mover_thin_perp_liquidity_blocks_trade_signal(monkeypatch):
+    morpho = _volume_coin(symbol="morpho", coin_id="morpho", change_24h=4.0)
+    morpho["market_cap"] = 1_300_000_000
+    morpho["total_volume"] = 45_000_000
+    monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), morpho])
+    monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
+
+    result = api.fetch_early_movers(_prefetched_perps=_perp("MORPHO", volume=1_750_000))
+    row = next(c for c in result["coins"] if c["Symbol"] == "MORPHO")
+
+    assert row["trade_action"] == "WAIT_FOR_LIQUIDITY"
+    assert row["risk_level"] == "HIGH"
+    assert "thin_perp_liquidity" in row["risk_flags"]
+    assert row["score"] < 80
+
+
+def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
+    row = {
+        "Symbol": "THIN",
+        "PerpChartSymbol": "THINUSDT",
+        "PerpChartExchange": "bitget",
+        "tp1": 2.5,
+    }
+    bars = []
+    for i in range(20):
+        bars.append({"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000})
+    bars.append({"open": 1.0, "high": 1.04, "low": 0.99, "close": 1.035, "volume": 2200})
+    monkeypatch.setattr(api, "fetch_candles_for", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(api, "fetch_orderbook_for", lambda *args, **kwargs: {
+        "bids": [(1.069, 100), (1.068, 200)],
+        "asks": [(1.071, 100), (1.072, 200)],
+    })
+
+    result = api._verify_early_mover_intraday_trigger(row)
+
+    assert result["ok"] is False
+    assert result["reason"] == "thin_orderbook_market_impact"
+    assert "thin_book_10bps" in result["liquidity_reasons"]
