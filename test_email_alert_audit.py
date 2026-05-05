@@ -371,6 +371,92 @@ def test_email_status_exposes_dedupe(tmp_path, monkeypatch):
     assert status["dedupe"]["recent"][0]["key"] == "crash_stock_20260430_NCSM"
 
 
+def test_alert_trade_levels_derive_missing_targets_from_entry_stop():
+    levels = api._alert_trade_levels({
+        "Ticker": "SHORTY",
+        "direction": "SHORT",
+        "Entry": 10.0,
+        "StopLoss": 11.0,
+    })
+
+    assert levels["entry"] == 10.0
+    assert levels["stop"] == 11.0
+    assert levels["tp1"] == 8.5
+    assert levels["tp2"] == 7.5
+    assert levels["rr"] == 2.0
+
+
+def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    cache_file = tmp_path / "orb_alert.json"
+    cache_file.write_text(json.dumps({
+        "results": [{
+            "ticker": "REAL",
+            "grade": "A",
+            "score": 88,
+            "rvol": 1.4,
+            "price": 20.25,
+            "direction": "LONG",
+            "entry": 20.5,
+            "stop": 19.5,
+            "target1": 22.0,
+            "target2": 23.5,
+        }]
+    }))
+
+    api._check_and_alert("orb", str(cache_file))
+
+    assert len(sent) == 1
+    body = sent[0][1]
+    assert "Entry" in body
+    assert "Stop" in body
+    assert "TP1/TP2" in body
+    assert "$20.5" in body
+    assert "$19.5" in body
+    assert "$22" in body
+    assert "$23.5" in body
+
+
+def test_strategy_scan_email_includes_entry_stop_tp1_tp2(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Momentum Breakout Long", [{
+        "Ticker": "MOMO",
+        "grade": "A",
+        "score": 91,
+        "RVOL": 2.2,
+        "Preis": 12.4,
+        "Change_Pct": 5.5,
+        "Signal_Direction": "LONG",
+        "change_pct": 5.5,
+        "close_pos": 0.88,
+        "latest_bar_change_pct": 0.15,
+        "latest_bar_close_pos": 0.74,
+        "trade_setup": {
+            "direction": "LONG",
+            "entry": 12.5,
+            "stop": 11.9,
+            "tp1": 13.4,
+            "tp2": 14.0,
+        },
+    }], "stocks")
+
+    assert len(sent) == 1
+    body = sent[0][1]
+    assert "Momentum Breakout Long" in body
+    assert "Entry" in body
+    assert "Stop" in body
+    assert "TP1/TP2" in body
+    assert "$12.5" in body
+    assert "$11.9" in body
+    assert "$13.4" in body
+    assert "$14" in body
+
+
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0

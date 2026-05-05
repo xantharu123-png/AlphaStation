@@ -1178,6 +1178,114 @@ def _format_alert_price(value: Any) -> str:
     return f"${price:.8f}".rstrip("0").rstrip(".")
 
 
+def _first_trade_level(row: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[float]:
+    """Read a positive trade level from top-level or nested scanner payloads."""
+    sources: List[Dict[str, Any]] = [row]
+    for nested_key in ("trade_setup", "setup", "signal"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+            pump_data = nested.get("pump_data")
+            if isinstance(pump_data, dict):
+                sources.append(pump_data)
+    for source in sources:
+        for key in keys:
+            if key not in source:
+                continue
+            value = _alert_float(source.get(key))
+            if value is not None and value > 0:
+                return value
+    return None
+
+
+def _infer_alert_direction(row: Dict[str, Any]) -> str:
+    setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+    text = " ".join(str(value or "") for value in (
+        row.get("Signal_Direction"),
+        row.get("BI_Direction"),
+        row.get("direction"),
+        row.get("_direction"),
+        row.get("side"),
+        row.get("trade_action"),
+        setup.get("direction"),
+        setup.get("trade_action"),
+    )).upper()
+    if "SHORT" in text or text == "SELL":
+        return "SHORT"
+    if "LONG" in text or "BUY" in text:
+        return "LONG"
+    return ""
+
+
+def _alert_trade_levels(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Entry/Stop/TP1/TP2 for every mail path.
+
+    If a legacy scanner row has Entry/Stop but no targets, derive conservative
+    R-multiple targets so alerts never show an idealized price without a plan.
+    """
+    entry = _first_trade_level(row, ("Entry", "entry", "entry_price", "trigger_entry"))
+    stop = _first_trade_level(row, ("StopLoss", "stop_loss", "Stop", "stop", "SL", "invalidation_stop"))
+    tp1 = _first_trade_level(row, ("TP1", "tp1", "target1", "Target1", "target", "Target", "tp1_target"))
+    tp2 = _first_trade_level(row, ("TP2", "tp2", "target2", "Target2", "tp2_target"))
+    direction = _infer_alert_direction(row)
+
+    if entry is None:
+        entry = _alert_float(_extract_alert_price(row))
+
+    if entry and not stop:
+        day_high = _alert_float(row.get("DayHigh", row.get("day_high", row.get("High24h"))))
+        day_low = _alert_float(row.get("DayLow", row.get("day_low", row.get("Low24h"))))
+        day_range = (day_high - day_low) if day_high and day_low and day_high > day_low else 0
+        risk = max(entry * 0.03, day_range * 0.45 if day_range > 0 else 0)
+        risk = min(risk, entry * 0.12)
+        if direction == "SHORT":
+            stop = entry + risk
+        elif direction == "LONG":
+            stop = max(0.00000001, entry - risk)
+
+    if entry and stop and (not tp1 or not tp2):
+        if stop < entry:
+            risk = entry - stop
+            tp1 = tp1 or (entry + risk * 1.5)
+            tp2 = tp2 or (entry + risk * 2.5)
+            direction = direction or "LONG"
+        elif stop > entry:
+            risk = stop - entry
+            tp1 = tp1 or max(0.00000001, entry - risk * 1.5)
+            tp2 = tp2 or max(0.00000001, entry - risk * 2.5)
+            direction = direction or "SHORT"
+
+    rr = None
+    if entry and stop and tp1 and tp2 and abs(entry - stop) > 0:
+        reward = 0.5 * abs(tp1 - entry) + 0.5 * abs(tp2 - entry)
+        rr = round(reward / abs(entry - stop), 2)
+
+    return {
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "rr": rr,
+        "direction": direction,
+    }
+
+
+def _format_alert_plan_html(row: Dict[str, Any]) -> str:
+    levels = _alert_trade_levels(row)
+    entry = _format_alert_price(levels.get("entry"))
+    stop = _format_alert_price(levels.get("stop"))
+    tp1 = _format_alert_price(levels.get("tp1"))
+    tp2 = _format_alert_price(levels.get("tp2"))
+    rr = levels.get("rr")
+    rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    return (
+        f'<span>Entry <b>{entry}</b></span><br>'
+        f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
+        f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b></span>'
+        f'{rr_text}'
+    )
+
+
 def _median_float(values: List[Any], default: float = 0.0) -> float:
     nums = sorted([v for v in (_alert_float(value) for value in values) if v is not None])
     if not nums:
@@ -2195,10 +2303,11 @@ def _check_and_alert(scanner_name, cache_file):
             if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
                 continue
             alerts.append({"ticker": ticker, "grade": grade, "score": score,
-                           "price": r.get("Preis", r.get("price", r.get("current", 0))),
+                           "price": _extract_alert_price(r),
                            "direction": r.get("BI_Direction", r.get("direction", "")),
                            "rvol": r.get("RVOL", r.get("rvol", 0)),
                            "entry_quality": r.get("long_entry_quality", ""),
+                           "trade_plan_html": _format_alert_plan_html(r),
                            "cooldown_key": ck})
         if not alerts:
             # Log warum keine Alerts
@@ -2218,8 +2327,9 @@ def _check_and_alert(scanner_name, cache_file):
             rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a["grade"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
-            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${a["price"]}</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]}x</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a.get("entry_quality", "")}</td></tr>'
         body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
         <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
@@ -2228,7 +2338,7 @@ def _check_and_alert(scanner_name, cache_file):
         <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
         <th style="padding:8px;text-align:left">Grade</th><th style="padding:8px;text-align:left">Score</th>
         <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">RVOL</th>
-        <th style="padding:8px;text-align:left">Entry</th></tr>
+        <th style="padding:8px;text-align:left">Entry / Stop / TP</th><th style="padding:8px;text-align:left">Timing</th></tr>
         {rows}</table>
         <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
@@ -2279,6 +2389,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "entry_quality": row.get("long_entry_quality", _long_entry_quality(row) if scanner_key in _LONG_ENTRY_ALERT_SCANNERS else ""),
             "strategy": strategy_name,
             "market_type": market_type,
+            "trade_plan_html": _format_alert_plan_html(row),
         })
 
     if not alerts:
@@ -2291,9 +2402,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["price"]}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["entry_quality"]}</td></tr>'
         )
     label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie"
@@ -2305,7 +2417,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
     <th style="padding:8px;text-align:left">Score</th><th style="padding:8px;text-align:left">Preis</th>
     <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
-    <th style="padding:8px;text-align:left">Entry</th></tr>
+    <th style="padding:8px;text-align:left">Entry / Stop / TP</th><th style="padding:8px;text-align:left">Timing</th></tr>
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE} und Grade S/A/A+; 8h Cooldown pro Ticker.</p>
     </body></html>'''
@@ -4913,8 +5025,11 @@ def _bear_scan_wrapper() -> None:
                             "ma50_dist": ma50_dist,
                             "score": score,
                             "grade": grade,
+                            "direction": "SHORT",
                             "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
                             "close_pos": round(close_pos, 3),
+                            "DayHigh": round(day_high, 4) if day_high else None,
+                            "DayLow": round(day_low, 4) if day_low else None,
                             "score_details": " | ".join(score_details),
                             "asset_check": "common_stock",
                         }
@@ -4969,8 +5084,8 @@ def _bear_scan_wrapper() -> None:
                 _cs_grade = bd.get("grade", "")
                 _cs_chg = bd.get("change_pct", 0)
                 _cs_score = bd.get("score", 0)
-                # V2.8: Nur Grade S/A + Drop >= -10% + Score >= 60 (vereinheitlicht mit bg_service)
-                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < 60 or not _bear_crash_alert_ok(bd):
+                # Nur Grade S/A + Drop >= -10% + Score >= 80, sonst kein Push-Short.
+                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < _ALERT_MIN_SCORE or not _bear_crash_alert_ok(bd):
                     continue
                 # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
                 _cs_tk_up = _cs_ticker.upper()
@@ -5007,6 +5122,7 @@ def _bear_scan_wrapper() -> None:
                             f"<td style='padding:6px 8px;text-align:right'>${_cs.get('price',0):.2f}</td>"
                             f"<td style='padding:6px 8px;text-align:right;color:#dc2626;font-weight:bold'>{_cs.get('change_pct',0):.1f}%</td>"
                             f"<td style='padding:6px 8px;text-align:right'>{_cs.get('rvol',0):.1f}x</td>"
+                            f"<td style='padding:6px 8px;text-align:left'>{_format_alert_plan_html(_cs)}</td>"
                             f"<td style='padding:6px 8px;text-align:right;font-weight:bold'>{_cs.get('score',0)}</td></tr>"
                         )
                     _crash_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
@@ -5018,6 +5134,7 @@ def _bear_scan_wrapper() -> None:
                     <th style="padding:6px 8px;text-align:right">Preis</th>
                     <th style="padding:6px 8px;text-align:right">Drop</th>
                     <th style="padding:6px 8px;text-align:right">RVOL</th>
+                    <th style="padding:6px 8px;text-align:left">Entry / Stop / TP</th>
                     <th style="padding:6px 8px;text-align:right">Score</th></tr>
                     {_crash_rows}</table>
                     </body></html>'''
@@ -5034,7 +5151,7 @@ def _bear_scan_wrapper() -> None:
             _bd_rows = []
             _bear_summary_tickers = []
             for bd in result.get("breakdown_stocks", []):
-                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < 55 or not bd.get("alertable_short"):
+                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < _ALERT_MIN_SCORE or not bd.get("alertable_short"):
                     continue
                 _ticker_up = str(bd.get("ticker", "")).upper()
                 if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:
@@ -5049,6 +5166,7 @@ def _bear_scan_wrapper() -> None:
                     f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{bd.get('change_pct',0):.1f}%</td>"
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('rvol',0):.1f}x</td>"
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
+                    f"<td style='padding:4px 8px;text-align:left'>{_format_alert_plan_html(bd)}</td>"
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('entry_quality','?')}</td>"
                     f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                 )
@@ -5069,7 +5187,8 @@ def _bear_scan_wrapper() -> None:
                             "<th style='padding:6px 8px;text-align:right'>Chg%</th>"
                             "<th style='padding:6px 8px;text-align:right'>RVOL</th>"
                             "<th style='padding:6px 8px;text-align:right'>MA20</th>"
-                            "<th style='padding:6px 8px;text-align:right'>Entry</th>"
+                            "<th style='padding:6px 8px;text-align:left'>Entry / Stop / TP</th>"
+                            "<th style='padding:6px 8px;text-align:right'>Timing</th>"
                             "<th style='padding:6px 8px;text-align:right'>Score</th></tr>"
                             + "".join(_bd_rows) + "</table>"
                         )
@@ -10470,7 +10589,12 @@ def _orb_scanner_wrapper() -> None:
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${b["current_price"]}</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["gap_pct"]:+.1f}%</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["rvol"]:.1f}x {vol_icon}</td>'
-                rows += f'<td style="padding:8px;border-bottom:1px solid #eee">E: ${b["entry"]} S: ${b["stop"]} T: ${b["target1"]}</td></tr>'
+                rows += (
+                    f'<td style="padding:8px;border-bottom:1px solid #eee">'
+                    f'Entry ${b["entry"]}<br>Stop <span style="color:#dc2626">${b["stop"]}</span><br>'
+                    f'TP1/TP2 <span style="color:#059669">${b["target1"]} / ${b["target2"]}</span>'
+                    f'</td></tr>'
+                )
             body = f'''<html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto">
             <h2 style="color:#1a73e8">🔔 ORB Breakouts — {now_et.strftime("%H:%M")} ET</h2>
             <p style="color:#666">{len(alert_breakouts)} Top-Setups (Grade S/A)</p>
@@ -10478,7 +10602,7 @@ def _orb_scanner_wrapper() -> None:
             <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
             <th style="padding:8px;text-align:left">Setup</th><th style="padding:8px;text-align:left">Preis</th>
             <th style="padding:8px;text-align:left">Gap</th><th style="padding:8px;text-align:left">RVOL</th>
-            <th style="padding:8px;text-align:left">E/S/T</th></tr>
+            <th style="padding:8px;text-align:left">Entry / Stop / TP</th></tr>
             {rows}</table>
             <p style="color:#999;font-size:11px;margin-top:15px">ORB V2 — Volume Confirmed | VWAP Aligned | R:R optimiert</p>
             </body></html>'''

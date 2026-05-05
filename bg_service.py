@@ -168,6 +168,7 @@ _EMAIL_COOLDOWN = {}  # Verhindert Spam: {ticker: last_sent_ts}
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # 8 Stunden Cooldown pro Ticker, wie im API-Mailpfad
 _EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
+_ALERT_MIN_SCORE = 80
 _NLS_MIN_ALERT_RR = 1.5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "strategies", "stock_strategy", "strategy_scan"}
@@ -203,6 +204,108 @@ def _safe_float(value, default=0.0):
     if math.isnan(val) or math.isinf(val):
         return default
     return val
+
+
+def _format_alert_price(value):
+    price = _safe_float(value, None)
+    if price is None:
+        return "-"
+    if abs(price) >= 100:
+        return f"${price:,.2f}"
+    if abs(price) >= 1:
+        return f"${price:,.4f}".rstrip("0").rstrip(".")
+    return f"${price:.8f}".rstrip("0").rstrip(".")
+
+
+def _first_trade_level(row, keys):
+    sources = [row]
+    for nested_key in ("trade_setup", "setup", "signal"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+            pump = nested.get("pump_data")
+            if isinstance(pump, dict):
+                sources.append(pump)
+    for source in sources:
+        for key in keys:
+            value = _safe_float(source.get(key), None)
+            if value is not None and value > 0:
+                return value
+    return None
+
+
+def _infer_alert_direction(row):
+    setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+    text = " ".join(str(value or "") for value in (
+        row.get("Signal_Direction"),
+        row.get("BI_Direction"),
+        row.get("direction"),
+        row.get("_direction"),
+        row.get("side"),
+        row.get("trade_action"),
+        setup.get("direction"),
+        setup.get("trade_action"),
+    )).upper()
+    if "SHORT" in text or text == "SELL":
+        return "SHORT"
+    if "LONG" in text or "BUY" in text:
+        return "LONG"
+    return ""
+
+
+def _extract_alert_price(row):
+    for key in ("Preis", "Price", "price", "current", "current_price", "entry"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return 0
+
+
+def _alert_trade_levels(row):
+    entry = _first_trade_level(row, ("Entry", "entry", "entry_price", "trigger_entry"))
+    stop = _first_trade_level(row, ("StopLoss", "stop_loss", "Stop", "stop", "SL", "invalidation_stop"))
+    tp1 = _first_trade_level(row, ("TP1", "tp1", "target1", "Target1", "target", "Target", "tp1_target"))
+    tp2 = _first_trade_level(row, ("TP2", "tp2", "target2", "Target2", "tp2_target"))
+    direction = _infer_alert_direction(row)
+    if entry is None:
+        entry = _safe_float(_extract_alert_price(row), None)
+    if entry and not stop:
+        high = _safe_float(row.get("DayHigh", row.get("day_high", row.get("High24h"))), None)
+        low = _safe_float(row.get("DayLow", row.get("day_low", row.get("Low24h"))), None)
+        day_range = (high - low) if high and low and high > low else 0
+        risk = max(entry * 0.03, day_range * 0.45 if day_range > 0 else 0)
+        risk = min(risk, entry * 0.12)
+        if direction == "SHORT":
+            stop = entry + risk
+        elif direction == "LONG":
+            stop = max(0.00000001, entry - risk)
+    if entry and stop and (not tp1 or not tp2):
+        if stop < entry:
+            risk = entry - stop
+            tp1 = tp1 or (entry + risk * 1.5)
+            tp2 = tp2 or (entry + risk * 2.5)
+            direction = direction or "LONG"
+        elif stop > entry:
+            risk = stop - entry
+            tp1 = tp1 or max(0.00000001, entry - risk * 1.5)
+            tp2 = tp2 or max(0.00000001, entry - risk * 2.5)
+            direction = direction or "SHORT"
+    rr = None
+    if entry and stop and tp1 and tp2 and abs(entry - stop) > 0:
+        rr = round((0.5 * abs(tp1 - entry) + 0.5 * abs(tp2 - entry)) / abs(entry - stop), 2)
+    return {"entry": entry, "stop": stop, "tp1": tp1, "tp2": tp2, "rr": rr, "direction": direction}
+
+
+def _format_alert_plan_html(row):
+    levels = _alert_trade_levels(row)
+    rr = levels.get("rr")
+    rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    return (
+        f'Entry <b>{_format_alert_price(levels.get("entry"))}</b><br>'
+        f'Stop <b style="color:#dc2626">{_format_alert_price(levels.get("stop"))}</b><br>'
+        f'TP1/TP2 <b style="color:#059669">{_format_alert_price(levels.get("tp1"))} / {_format_alert_price(levels.get("tp2"))}</b>'
+        f'{rr_text}'
+    )
 
 
 def _extract_long_entry_fields(row):
@@ -705,10 +808,13 @@ def _check_and_alert_scan_results(scanner_name, secrets):
             ticker = r.get("ticker", r.get("Ticker", ""))
             grade = r.get("BI_Grade", r.get("Grade", r.get("rating", "")))
             score = r.get("BI_Score", r.get("Score", r.get("score", 0)))
+            score_num = _safe_float(score, 0)
 
             # Grade-Check: S, A, A+ für alle Scanner
             is_top_grade = grade in ("S", "A", "A+")
             if not is_top_grade:
+                continue
+            if score_num < _ALERT_MIN_SCORE:
                 continue
             if scanner_name == "bi_short" and _bearish_stock_alert_active(ticker, now=now):
                 log.debug(f"BI short alert suppressed by bearish ticker dedupe: {ticker}")
@@ -747,6 +853,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "name": r.get("Name", r.get("name", "")),
                 "rvol": r.get("RVOL", r.get("rvol", 0)),
                 "entry_quality": r.get("long_entry_quality", r.get("bear_entry_quality", "")),
+                "trade_plan_html": _format_alert_plan_html(r),
                 "cooldown_key": cooldown_key,
             })
 
@@ -773,9 +880,10 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 <td style="padding:8px;border-bottom:1px solid #eee">{a.get('name', '')[:25]}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a['grade']}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{a['score']}</td>
-                <td style="padding:8px;border-bottom:1px solid #eee">${a['price']}</td>
+                <td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a['price'])}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{dir_label}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{a['rvol']:.1f}x</td>
+                <td style="padding:8px;border-bottom:1px solid #eee">{a['trade_plan_html']}</td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{a.get('entry_quality', '')}</td>
             </tr>"""
 
@@ -792,12 +900,14 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 <th style="padding:8px;text-align:left">Preis</th>
                 <th style="padding:8px;text-align:left">Richtung</th>
                 <th style="padding:8px;text-align:left">RVOL</th>
-                <th style="padding:8px;text-align:left">Entry</th>
+                <th style="padding:8px;text-align:left">Entry / Stop / TP</th>
+                <th style="padding:8px;text-align:left">Timing</th>
             </tr>
             {rows}
         </table>
         <p style="color:#999;font-size:12px;margin-top:20px">
             Automatischer Alert vom TradingBot Background Service.<br>
+            Mail ab Score >= {_ALERT_MIN_SCORE}; 8h Cooldown pro Ticker.<br>
             Grade S = ELITE (Score ≥113 + 4 Smart Money) | Grade A = STARK (Score ≥99 + 3 SM)
         </p>
         </body></html>"""
@@ -1437,8 +1547,11 @@ def _run_bear_scanner(poly_key, secrets):
                     "change_pct": round(chg_pct, 2), "volume": vol,
                     "dollar_volume": round(dollar_vol, 0), "rvol": rvol,
                     "ma20_dist": ma20_dist, "score": score, "grade": grade,
+                    "direction": "SHORT",
                     "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
                     "close_pos": round(close_pos, 3),
+                    "DayHigh": round(day_high, 4) if day_high else None,
+                    "DayLow": round(day_low, 4) if day_low else None,
                     "asset_check": "common_stock",
                 }
                 if score >= 55:
@@ -1477,7 +1590,7 @@ def _run_bear_scanner(poly_key, secrets):
             l for l in top_losers
             if l["grade"] in ("S", "A")
             and l["change_pct"] <= -10
-            and l["score"] >= 60
+            and l["score"] >= _ALERT_MIN_SCORE
             and _bear_crash_alert_ok(l)
         ]
         if crash_stocks:
@@ -1508,6 +1621,7 @@ def _run_bear_scanner(poly_key, secrets):
                         f"<td style='padding:6px 8px;text-align:right'>${cs['price']:.2f}</td>"
                         f"<td style='padding:6px 8px;text-align:right;color:#dc2626;font-weight:bold'>{cs['change_pct']:.1f}%</td>"
                         f"<td style='padding:6px 8px;text-align:right'>{cs['rvol']:.1f}x</td>"
+                        f"<td style='padding:6px 8px;text-align:left'>{_format_alert_plan_html(cs)}</td>"
                         f"<td style='padding:6px 8px;text-align:right;font-weight:bold'>{cs['score']}</td></tr>"
                     )
                 _body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
@@ -1519,6 +1633,7 @@ def _run_bear_scanner(poly_key, secrets):
                 <th style="padding:6px 8px;text-align:right">Preis</th>
                 <th style="padding:6px 8px;text-align:right">Drop</th>
                 <th style="padding:6px 8px;text-align:right">RVOL</th>
+                <th style="padding:6px 8px;text-align:left">Entry / Stop / TP</th>
                 <th style="padding:6px 8px;text-align:right">Score</th></tr>
                 {_crash_rows}</table>
                 <p style="color:#999;font-size:11px;margin-top:12px">Automatischer Short/Crash Alert vom Background Service (stündlich)</p>
@@ -1613,6 +1728,8 @@ def _run_strategy_scanner(poly_key, secrets):
                     "RVOL": round(rvol, 2), "Close Position": round(close_pos, 3),
                     "close_pos": round(close_pos, 3),
                     "open_to_current_pct": round(((price - day_open) / day_open * 100), 2) if day_open > 0 else None,
+                    "DayHigh": round(day_high, 4) if day_high else None,
+                    "DayLow": round(day_low, 4) if day_low else None,
                     "Volume": vol, "DollarVol": dollar_vol,
                     "Gap%": round(gap_pct, 2), "Vortag%": round(vortag_pct, 2),
                 })
@@ -1727,8 +1844,8 @@ def _run_strategy_scanner(poly_key, secrets):
                 ck = f"strat_{strat_name}_{m['Ticker']}"
                 if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
                     continue
-                # Nur starke Setups: Score >= 60
-                if m["_score"] >= 60:
+                # Nur starke Setups: Score >= 80
+                if m["_score"] >= _ALERT_MIN_SCORE:
                     if m.get("_direction") == "long":
                         m = dict(m)
                         m.update(_fetch_long_latest_intraday_state(m["Ticker"], poly_key))
@@ -1753,7 +1870,7 @@ def _run_strategy_scanner(poly_key, secrets):
         except Exception as e:
             log.debug(f"Non-critical error: {e}")
 
-        log.info(f"  {len(all_alerts)} starke Setups gefunden (Score >= 60)")
+        log.info(f"  {len(all_alerts)} starke Setups gefunden (Score >= {_ALERT_MIN_SCORE})")
         _update_status("strategy_scan", "done", f"{len(all_alerts)} Alerts")
 
         # 7) E-Mail senden wenn Alerts vorhanden
@@ -1780,13 +1897,14 @@ def _run_strategy_scanner(poly_key, secrets):
                         <td style="padding:6px;border-bottom:1px solid #eee">${a['Preis']}</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a['Change%']:+.1f}%</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a['RVOL']:.1f}x</td>
+                        <td style="padding:6px;border-bottom:1px solid #eee">{_format_alert_plan_html(a)}</td>
                         <td style="padding:6px;border-bottom:1px solid #eee">{a.get('long_entry_quality', a.get('bear_entry_quality', ''))}</td>
                     </tr>"""
 
             body_html = f"""
             <html><body style="font-family:Arial,sans-serif;max-width:750px;margin:0 auto">
             <h2 style="color:#1a73e8">📊 Strategie-Scanner Alert</h2>
-            <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {len(all_alerts)} Setups (Score ≥ 60)</p>
+            <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {len(all_alerts)} Setups (Score >= {_ALERT_MIN_SCORE})</p>
             <table style="width:100%;border-collapse:collapse;font-size:13px">
                 <tr style="background:#f5f5f5">
                     <th style="padding:6px;text-align:left">Ticker</th>
@@ -1797,13 +1915,14 @@ def _run_strategy_scanner(poly_key, secrets):
                     <th style="padding:6px;text-align:left">Preis</th>
                     <th style="padding:6px;text-align:left">Change</th>
                     <th style="padding:6px;text-align:left">RVOL</th>
-                    <th style="padding:6px;text-align:left">Entry</th>
+                    <th style="padding:6px;text-align:left">Entry / Stop / TP</th>
+                    <th style="padding:6px;text-align:left">Timing</th>
                 </tr>
                 {rows}
             </table>
             <p style="color:#999;font-size:12px;margin-top:20px">
                 Automatischer Strategie-Alert | Score = Change×4 + RVOL×8 + ClosePos×20 + VolBonus<br>
-                Nur Setups mit Score ≥ 60 werden gemeldet | 4h Cooldown pro Ticker
+                Nur Setups mit Score >= {_ALERT_MIN_SCORE} werden gemeldet | 8h Cooldown pro Ticker
             </p>
             </body></html>"""
 
@@ -2662,10 +2781,13 @@ def _alert_nls_signals(results, secrets):
         pump_data = sig.get("pump_data", {}) if isinstance(sig.get("pump_data", {}), dict) else {}
         micro_required = bool(sig.get("micro_required", True))
         micro_trigger_ok = bool(sig.get("micro_trigger_ok", pump_data.get("micro_trigger_ok", False)))
+        score = _safe_float(sig.get("exh_score", entry.get("exh_score", pump_data.get("micro_score", 0))), 0)
         reasons = []
 
         if grade not in ("S", "A", "A+"):
             reasons.append("grade_below_alert_threshold")
+        if score < _ALERT_MIN_SCORE:
+            reasons.append("score_below_alert_threshold")
         if timing_quality < 4 or "SHORT" not in timing.upper():
             reasons.append("not_active_short_timing")
         if not safety_ok:
@@ -2699,6 +2821,7 @@ def _alert_nls_signals(results, secrets):
             "exchange": entry.get("exchange", ""),
             "grade": grade,
             "grade_label": sig.get("grade_label", grade),
+            "score": score,
             "timing": timing,
             "setup": sig.get("setup_type", ""),
             "stop_model": sig.get("stop_model", ""),
@@ -2721,6 +2844,7 @@ def _alert_nls_signals(results, secrets):
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{a['symbol']}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{a['exchange']}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{a['grade_label']}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{a['score']:.0f}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{a['setup'] or a['timing']}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">${a['entry']:.4f}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">${a['stop']:.4f}<br><span style="color:#999;font-size:11px">{a['stop_model']}</span></td>
@@ -2737,6 +2861,7 @@ def _alert_nls_signals(results, secrets):
             <th style="padding:8px;text-align:left">Symbol</th>
             <th style="padding:8px;text-align:left">Exchange</th>
             <th style="padding:8px;text-align:left">Grade</th>
+            <th style="padding:8px;text-align:left">Score</th>
             <th style="padding:8px;text-align:left">Timing</th>
             <th style="padding:8px;text-align:left">Entry</th>
             <th style="padding:8px;text-align:left">Stop</th>
@@ -2746,7 +2871,7 @@ def _alert_nls_signals(results, secrets):
         {rows}
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
-        Nur aktive SHORT-now Signale: Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol.
+        Nur aktive SHORT-now Signale: Score >= {_ALERT_MIN_SCORE}, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol.
     </p>
     </body></html>
     """
