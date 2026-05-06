@@ -2235,7 +2235,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     }
                 } else {
                     const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
-                    const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}`, { signal });
+                    const chartDirection = [
+                        scannerData?.trade_setup?.direction,
+                        scannerData?.direction,
+                        scannerData?.Signal_Direction,
+                        scannerData?.confluence?.direction,
+                        scannerData?.signal,
+                        scannerData?.Signal,
+                    ].filter(Boolean).join(' ');
+                    const res = await fetch(`${API}/api/chart-data?ticker=${ticker}&timeframe=${timeframe}&overlays=${allOverlays}&direction=${encodeURIComponent(chartDirection)}`, { signal });
                     if (signal.aborted) return;
                     if (res.ok) {
                         setChartData(await res.json());
@@ -2555,6 +2563,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             // Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
             if (overlays.fib && chartData.fib) {
                 const isShort = chartData.fib_direction === 'short';
+                const fibLabel = chartData.fib_meta ? `${String(chartData.fib_meta.direction || '').toUpperCase()} ${chartData.fib_meta.timeframe || timeframe}` : '';
                 const fibColors = {
                     '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
                     '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
@@ -2570,7 +2579,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         price, color: fibColors[level] || '#6b7280',
                         lineWidth: 1,
                         lineStyle: isExtended ? LineStyle.Dashed : LineStyle.Dotted,
-                        axisLabelVisible: true, title: `Fib ${level}`,
+                        axisLabelVisible: true, title: `Fib ${level}${fibLabel ? ' ' + fibLabel : ''}`,
                     });
                 });
             }
@@ -3380,7 +3389,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                     {d.fib_levels && (
                         <div className="mt-2 pt-2 border-t border-gray-200">
-                            <div className="text-gray-500 mb-1">Fibonacci</div>
+                            <div className="text-gray-500 mb-1">
+                                Fibonacci {d.fib_meta ? `(${String(d.fib_meta.direction || '').toUpperCase()} ${d.fib_meta.timeframe || '1D'}, ${d.fib_meta.lookback_bars || 20} Bars)` : '(1D, 20 Bars)'}
+                            </div>
                             <div className="grid grid-cols-4 gap-1">
                                 {Object.entries(d.fib_levels).map(([k, v]) => (
                                     <div key={k}><span className="text-gray-400">{k}</span> ${v}</div>
@@ -7372,7 +7383,15 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         const fetchChart = async () => {
             try {
                 const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
-                const res = await fetch(`${API}/api/chart-data?ticker=${activeTicker}&timeframe=${timeframe}&overlays=${allOverlays}`, { signal: controller.signal });
+                const chartDirection = [
+                    tickerData?.trade_setup?.direction,
+                    tickerData?.direction,
+                    tickerData?.Signal_Direction,
+                    tickerData?.confluence?.direction,
+                    tickerData?.trade_action,
+                    tickerData?.signal,
+                ].filter(Boolean).join(' ');
+                const res = await fetch(`${API}/api/chart-data?ticker=${activeTicker}&timeframe=${timeframe}&overlays=${allOverlays}&direction=${encodeURIComponent(chartDirection)}`, { signal: controller.signal });
                 if (controller.signal.aborted) return;
                 if (res.ok) {
                     setChartData(await res.json());
@@ -7575,6 +7594,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
             // Fibonacci — V3.0: Richtungsabhängig
             if (overlays.fib && chartData.fib) {
                 const isShort = chartData.fib_direction === 'short';
+                const fibLabel = chartData.fib_meta ? `${String(chartData.fib_meta.direction || '').toUpperCase()} ${chartData.fib_meta.timeframe || timeframe}` : '';
                 const fibColors = {
                     '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
                     '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
@@ -7588,7 +7608,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     candleSeriesRef.current.createPriceLine({
                         price, color: fibColors[level] || '#6b7280',
                         lineWidth: 1, lineStyle: isExtended ? LineStyle.Dashed : LineStyle.Dotted,
-                        axisLabelVisible: true, title: `Fib ${level}`,
+                        axisLabelVisible: true, title: `Fib ${level}${fibLabel ? ' ' + fibLabel : ''}`,
                     });
                 });
             }
@@ -8029,7 +8049,9 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 </div>
                                 {d.fib_levels && (
                                     <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border-color)' }}>
-                                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Fibonacci Levels</div>
+                                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                                            Fibonacci {d.fib_meta ? `(${String(d.fib_meta.direction || '').toUpperCase()} ${d.fib_meta.timeframe || '1D'}, ${d.fib_meta.lookback_bars || 20} Bars)` : '(1D, 20 Bars)'}
+                                        </div>
                                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, fontSize: 11 }}>
                                             {Object.entries(d.fib_levels).map(([k, v]) => (
                                                 <div key={k}><span style={{ color: 'var(--text-muted)' }}>{k}</span> ${v}</div>

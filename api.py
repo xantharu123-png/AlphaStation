@@ -3254,6 +3254,29 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         rr = item.get("risk_reward", item.get("RiskReward", item.get("rr_effective", item.get("rr1"))))
         source = item.get("source") or item.get("data_source") or SCAN_DATA_SOURCES.get(scanner_name, "Scanner cache")
 
+        numeric_score = _alert_float(score)
+        if scanner_name == "turtle" and numeric_score is not None:
+            capped_score, turtle_flags = _turtle_score_cap(
+                numeric_score,
+                item.get("Change_Pct", item.get("change_pct")),
+                rvol,
+                item.get("Breakout_Pct", item.get("breakout_pct")),
+            )
+            if capped_score < numeric_score:
+                item["raw_score"] = round(numeric_score, 2)
+                item["score"] = round(capped_score, 2)
+                score = item["score"]
+                warnings.append("Turtle-Score gedeckelt: " + ", ".join(turtle_flags))
+            else:
+                item.setdefault("score", round(numeric_score, 2))
+            grade = _strategy_score_to_grade(float(item.get("score", numeric_score)))
+            item["grade"] = grade
+        elif numeric_score is not None:
+            item.setdefault("score", round(numeric_score, 2))
+            if not grade:
+                grade = _strategy_score_to_grade(numeric_score)
+                item["grade"] = grade
+
         if grade:
             why.append(f"Grade {grade}")
         if score is not None:
@@ -3497,6 +3520,139 @@ def _round_trade_price(price: float) -> float:
     if price >= 0.1:
         return round(price, 3)
     return round(price, 5)
+
+
+def _round_level_price(price: float) -> float:
+    """Round chart levels without destroying small crypto prices."""
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        return 0.0
+    if abs(price) >= 10:
+        return round(price, 2)
+    if abs(price) >= 1:
+        return round(price, 3)
+    if abs(price) >= 0.01:
+        return round(price, 5)
+    return round(price, 8)
+
+
+def _normalize_chart_direction(value: Any) -> str:
+    """Normalize scanner/chart direction into long/short for directional overlays."""
+    text = str(value or "").upper()
+    if any(token in text for token in ("SHORT", "BEAR", "SELL", "PUT", "DOWN")):
+        return "short"
+    if any(token in text for token in ("LONG", "BULL", "BUY", "CALL", "UP")):
+        return "long"
+    return ""
+
+
+def _fib_lookback_for_timeframe(timeframe: str) -> int:
+    tf = str(timeframe or "1D")
+    if tf in ("5m", "15m"):
+        return 80
+    if tf == "1H":
+        return 100
+    if tf == "4H":
+        return 120
+    if tf == "1W":
+        return 52
+    return 60
+
+
+def _calculate_directional_fib_levels(
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    timeframe: str = "1D",
+    direction: Any = None,
+    lookback: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Return Fibonacci retracements/extensions from the selected timeframe and setup direction.
+
+    Long: pullback levels are below the swing high, extensions above it.
+    Short: pullback levels are above the swing low, extensions below it.
+    Input series must be chronological (oldest -> newest).
+    """
+    clean = []
+    for h, l, c in zip(highs or [], lows or [], closes or []):
+        h_val = _alert_float(h)
+        l_val = _alert_float(l)
+        c_val = _alert_float(c)
+        if h_val is None or l_val is None or c_val is None:
+            continue
+        clean.append((h_val, l_val, c_val))
+    if len(clean) < 3:
+        return {}
+
+    lb = min(int(lookback or _fib_lookback_for_timeframe(timeframe)), len(clean))
+    recent = clean[-lb:]
+    period_high = max(row[0] for row in recent)
+    period_low = min(row[1] for row in recent)
+    rng = period_high - period_low
+    if rng <= 0:
+        return {}
+
+    dir_norm = _normalize_chart_direction(direction)
+    if not dir_norm:
+        first_close = recent[0][2]
+        last_close = recent[-1][2]
+        mid = period_low + rng * 0.5
+        dir_norm = "long" if (last_close >= first_close or last_close >= mid) else "short"
+
+    retracements = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    levels: Dict[str, float] = {}
+    if dir_norm == "short":
+        for ratio in retracements:
+            levels[f"{int(ratio * 100)}%"] = _round_level_price(period_low + rng * ratio)
+        levels["127%"] = _round_level_price(period_low - rng * 0.272)
+        levels["161%"] = _round_level_price(period_low - rng * 0.618)
+        levels["200%"] = _round_level_price(period_low - rng)
+    else:
+        for ratio in retracements:
+            levels[f"{int(ratio * 100)}%"] = _round_level_price(period_high - rng * ratio)
+        levels["127%"] = _round_level_price(period_high + rng * 0.272)
+        levels["161%"] = _round_level_price(period_high + rng * 0.618)
+        levels["200%"] = _round_level_price(period_high + rng)
+
+    return {
+        "levels": levels,
+        "meta": {
+            "direction": dir_norm,
+            "timeframe": str(timeframe or "1D"),
+            "lookback_bars": lb,
+            "anchor_high": _round_level_price(period_high),
+            "anchor_low": _round_level_price(period_low),
+            "model": "directional_retracement_v2",
+            "basis": "selected_chart_timeframe" if str(timeframe or "1D") != "1D" else "daily_detail_timeframe",
+        },
+    }
+
+
+def _turtle_score_cap(score: float, change_pct: Any, rvol: Any, breakout_pct: Any) -> tuple[float, List[str]]:
+    """Cap Turtle score when the Donchian breakout lacks live confirmation."""
+    capped = float(score or 0)
+    flags: List[str] = []
+    change = _alert_float(change_pct, 0.0) or 0.0
+    rel_vol = _alert_float(rvol, 1.0) or 1.0
+    breakout = _alert_float(breakout_pct, 0.0) or 0.0
+
+    if rel_vol < 1.0:
+        capped = min(capped, 69)
+        flags.append("RVOL unter 1.0x")
+    elif rel_vol < 1.3:
+        capped = min(capped, 79)
+        flags.append("RVOL nur leicht bestaetigt")
+
+    if change < 0.75 and rel_vol < 1.5:
+        capped = min(capped, 79)
+        flags.append("Tagesmomentum noch schwach")
+
+    if breakout > 5.0:
+        capped = min(capped, 74)
+        flags.append("Breakout bereits weit weg vom Trigger")
+
+    return max(0, min(100, capped)), flags
 
 
 def _build_structured_trade_setup(
@@ -5019,19 +5175,9 @@ def _turtle_scan_wrapper() -> None:
                     else:
                         score += 2   # Zu weit — Entry riskant
 
-                score = min(100, score)
-
-                # Grade
-                if score >= 75:
-                    grade = "S"
-                elif score >= 60:
-                    grade = "A"
-                elif score >= 45:
-                    grade = "B"
-                elif score >= 30:
-                    grade = "C"
-                else:
-                    grade = "D"
+                raw_score = min(100, score)
+                score, turtle_quality_flags = _turtle_score_cap(raw_score, change_pct, rvol, breakout_pct)
+                grade = _strategy_score_to_grade(score)
 
                 results.append({
                     "Ticker": ticker,
@@ -5049,8 +5195,11 @@ def _turtle_scan_wrapper() -> None:
                     "RVOL": round(rvol, 2),
                     "Volume": volume,
                     "Dollar_Volume": round(volume * current_close),
+                    "raw_score": round(raw_score, 2),
                     "score": score,
                     "grade": grade,
+                    "turtle_quality_flags": turtle_quality_flags,
+                    "score_details": f"Donchian {breakout_pct:.2f}% over 20D high | RVOL {rvol:.2f}x | ATR {atr_pct:.2f}%",
                     "signal": f"Breakout +{breakout_pct:.1f}% über 20T-Hoch | Stop ${stop_loss:.2f} (2×ATR) | Exit ${exit_level:.2f} (10T-Tief)",
                 })
 
@@ -6671,16 +6820,20 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             bb_upper = round(ma20 + 2 * stddev, 2)
             bb_lower = round(ma20 - 2 * stddev, 2)
 
-        # 5. Fibonacci Retracement Levels (from 20d high/low)
+        # 5. Fibonacci levels: daily detail uses the same directional model as chart overlays.
         fib_levels = {}
+        fib_meta = {}
         if len(bars) >= 20:
-            high_20 = max(highs[:20])
-            low_20 = min(lows[:20])
-            range_fib = high_20 - low_20
-            fib_ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
-            for ratio in fib_ratios:
-                level_price = low_20 + range_fib * ratio
-                fib_levels[f"{int(ratio*100)}%"] = round(level_price, 2)
+            fib_payload = _calculate_directional_fib_levels(
+                list(reversed(highs[:60])),
+                list(reversed(lows[:60])),
+                list(reversed(closes[:60])),
+                timeframe="1D",
+                direction=None,
+                lookback=min(60, len(bars)),
+            )
+            fib_levels = fib_payload.get("levels", {}) if fib_payload else {}
+            fib_meta = fib_payload.get("meta", {}) if fib_payload else {}
 
         # 6. ATR (Average True Range, 14-period, Wilder's Smoothing)
         # V3.4 FIX: Vorher simpler Durchschnitt, jetzt korrekt Wilder's wie TradingView
@@ -6984,6 +7137,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             "macd": macd, "macd_signal": macd_signal, "macd_histogram": macd_histogram,
             "bb_upper": bb_upper, "bb_lower": bb_lower,
             "fib_levels": fib_levels,
+            "fib_meta": fib_meta,
             "atr": atr,
             "signals": signals, "signal_score": score, "signal_grade": signal_grade,
             "confluence": confluence,
@@ -7007,12 +7161,14 @@ _CHART_CACHE_MAX = 100  # Max Einträge (LRU-artiges Cleanup)
 def get_chart_data(
     ticker: str = Query(..., description="Ticker symbol"),
     timeframe: str = Query("1D", description="5m, 15m, 1H, 4H, 1D, 1W"),
-    overlays: str = Query("ema,vwap,sr,fib", description="Comma-separated: ema,vwap,sr,fib,patterns")
+    overlays: str = Query("ema,vwap,sr,fib", description="Comma-separated: ema,vwap,sr,fib,patterns"),
+    direction: Optional[str] = Query(None, description="Optional setup direction for directional overlays")
 ):
     """Get OHLCV data with chart overlays for TradingView Lightweight Charts."""
     try:
         # ── Chart Cache Check ──
-        _cache_key = f"{ticker}:{timeframe}"
+        fib_direction = _normalize_chart_direction(direction)
+        _cache_key = f"{ticker}:{timeframe}:{overlays}:{fib_direction or 'auto'}"
         _ttl = _CHART_CACHE_TTL.get(timeframe, 120)
         if _cache_key in _CHART_CACHE:
             _cached = _CHART_CACHE[_cache_key]
@@ -7263,39 +7419,18 @@ def get_chart_data(
         # Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
         if "fib" in overlay_list and len(ohlcv) >= 20:
             try:
-                h20 = max(highs[-20:])
-                l20 = min(lows[-20:])
-                rng = h20 - l20
-                cur_price = closes[-1]
-                fib = {}
+                fib_payload = _calculate_directional_fib_levels(
+                    highs,
+                    lows,
+                    closes,
+                    timeframe=timeframe,
+                    direction=fib_direction,
+                )
+                if fib_payload:
+                    result["fib"] = fib_payload["levels"]
+                    result["fib_direction"] = fib_payload["meta"]["direction"]
+                    result["fib_meta"] = fib_payload["meta"]
 
-                if rng > 0:
-                    # Bestimme Richtung: Preis näher am High = SHORT (Abverkauf erwartet)
-                    # Preis näher am Low = LONG (Erholung erwartet)
-                    mid = l20 + rng * 0.5
-                    is_short_bias = cur_price > mid  # Preis in oberer Hälfte = eher SHORT
-
-                    if is_short_bias:
-                        # SHORT: Fib von HIGH nach LOW (High=100%, Low=0%)
-                        # Retracement = wie weit ist Preis vom High zurückgekommen
-                        for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
-                            fib[f"{int(ratio*100)}%"] = round(h20 - rng * ratio, 2)
-                        # Extensions nach UNTEN (Short-Targets)
-                        fib["127%"] = round(h20 - rng * 1.272, 2)
-                        fib["161%"] = round(h20 - rng * 1.618, 2)
-                        fib["200%"] = round(h20 - rng * 2.0, 2)
-                    else:
-                        # LONG: Fib von LOW nach HIGH (Low=0%, High=100%)
-                        # Retracement = wie weit ist Preis vom Low gestiegen
-                        for ratio in [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]:
-                            fib[f"{int(ratio*100)}%"] = round(l20 + rng * ratio, 2)
-                        # Extensions nach OBEN (Long-Targets)
-                        fib["127%"] = round(l20 + rng * 1.272, 2)
-                        fib["161%"] = round(l20 + rng * 1.618, 2)
-                        fib["200%"] = round(l20 + rng * 2.0, 2)
-
-                    result["fib"] = fib
-                    result["fib_direction"] = "short" if is_short_bias else "long"
             except Exception as e:
                 print(f"[Warning] Error calculating Fibonacci levels: {e}")
 
@@ -8057,6 +8192,8 @@ def get_scan_results(
             scanner_name = "bear"
         elif "orb" in sl:
             scanner_name = "orb"
+        elif "turtle" in sl:
+            scanner_name = "turtle"
         elif "crypto" in market_type:
             scanner_name = "early_movers"
     results = _decorate_scan_results(results, scanner_name, cache_age)
