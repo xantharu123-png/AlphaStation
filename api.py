@@ -7207,6 +7207,7 @@ def get_chart_data(
         # EMA Overlays (as time-series for line drawing)
         if "ema" in overlay_list:
             ema_overlays = {}
+            ema_meta = {}
             for period in [9, 20, 50, 100, 200]:
                 if len(closes) >= period:
                     try:
@@ -7217,10 +7218,19 @@ def get_chart_data(
                             if val is not None:
                                 ema_data.append({"time": times[start + i], "value": round(val, 2)})
                         if ema_data:
-                            ema_overlays[f"ema{period}"] = ema_data
+                            key = f"ema{period}"
+                            ema_overlays[key] = ema_data
+                            ema_meta[key] = {
+                                "period": period,
+                                "timeframe": timeframe,
+                                "bars_available": len(closes),
+                                "warmup_ok": len(closes) >= period * 2,
+                                "model": f"EMA({period}) on selected {timeframe} candles",
+                            }
                     except Exception as e:
                         print(f"[Warning] Error calculating EMA{period}: {e}")
             result["ema"] = ema_overlays
+            result["ema_meta"] = ema_meta
 
         # VWAP V4.0: Intraday (5m/15m/1H) = Daily Reset, Higher TF (4H/1D/1W) = Session VWAP
         if "vwap" in overlay_list and len(ohlcv) >= 10:

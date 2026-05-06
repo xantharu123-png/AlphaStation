@@ -150,3 +150,27 @@ def test_scanner_without_levels_waits_for_trigger():
 
     assert health["decision"] == "WAIT_FOR_TRIGGER"
     assert any("Entry/Stop" in warning for warning in health["warnings"])
+
+
+def test_near_entry_does_not_claim_not_chased_when_entry_is_extended():
+    row = {
+        "ticker": "NNE",
+        "direction": "LONG",
+        "current_price": 26.55,
+        "entry": 26.20,
+        "stop": 22.00,
+        "tp1": 31.00,
+        "tp2": 35.00,
+        "entry_quality": "EXTENDED",
+        "distance_to_entry_r": 0.06,
+        "rvol": 1.1,
+        "vol_confirmed": False,
+        "dollar_volume": 12_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    positives = " | ".join(health["positives"])
+    assert "nicht gechased" not in positives
+    assert health["chase_risk"] in {"HIGH", "MEDIUM"}
+    assert any("Chase-Risiko bleibt" in warning for warning in health["warnings"])

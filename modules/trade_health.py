@@ -237,6 +237,7 @@ def calculate_trade_health(
     vol_confirmed_bool: Optional[bool] = None
     vwap_aligned_bool: Optional[bool] = None
     close_strength = False
+    near_entry_distance = False
 
     entry_score = 100
     fakeout_score = 100
@@ -274,7 +275,7 @@ def calculate_trade_health(
             entry_score -= 15
             warnings.append(f"Entry nicht mehr perfekt: {distance_r:.2f}R Entfernung")
         elif distance_r <= 0.15:
-            positives.append("Entry ist noch nicht gechased")
+            near_entry_distance = True
 
     if live_rr is not None:
         if live_rr < HARD_MIN_RR:
@@ -453,6 +454,13 @@ def calculate_trade_health(
     entry_score = max(0, min(100, int(round(entry_score))))
     fakeout_score = max(0, min(100, int(round(fakeout_score))))
     liquidity_score = max(0, min(100, int(round(liquidity_score))))
+
+    if near_entry_distance:
+        if entry_score >= 70 and not tactical_reasons and raw_entry_quality not in {"CHASE", "LATE", "EXTENDED"}:
+            positives.append("Entry liegt nahe am Trigger")
+        elif entry_score < 70:
+            warnings.append("Preis ist nah am Entry, aber Chase-Risiko bleibt durch Setup-/Market-Filter erhoeht")
+
     health_score = int(round(entry_score * 0.45 + fakeout_score * 0.35 + liquidity_score * 0.20))
 
     chase_risk = _risk_band(entry_score)

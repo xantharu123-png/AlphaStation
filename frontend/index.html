@@ -2393,12 +2393,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             if (overlays.ema && chartData.ema) {
                 Object.entries(chartData.ema).forEach(([key, data]) => {
                     if (data && data.length > 0) {
+                        const emaMeta = chartData.ema_meta?.[key] || {};
+                        const emaTitle = `${key.toUpperCase()} ${emaMeta.timeframe || timeframe}${emaMeta.warmup_ok === false ? ' warmup' : ''}`;
                         const line = chart.current.addLineSeries({
                             color: EMA_COLORS[key] || '#888',
                             lineWidth: key === 'ema200' ? 2 : 1,
+                            lineStyle: emaMeta.warmup_ok === false ? LineStyle.Dotted : LineStyle.Solid,
                             priceLineVisible: false,
                             lastValueVisible: false,
-                            title: key.toUpperCase(),
+                            title: emaTitle,
                         });
                         line.setData(data);
                         overlaySeriesRef.current.push(line);
@@ -7460,9 +7463,12 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
             if (overlays.ema && chartData.ema) {
                 Object.entries(chartData.ema).forEach(([key, data]) => {
                     if (data && data.length > 0) {
+                        const emaMeta = chartData.ema_meta?.[key] || {};
+                        const emaTitle = `${key.toUpperCase()} ${emaMeta.timeframe || timeframe}${emaMeta.warmup_ok === false ? ' warmup' : ''}`;
                         const line = chartRef.current.addLineSeries({
                             color: EMA_COLORS[key] || '#888', lineWidth: key === 'ema200' ? 2 : 1,
-                            priceLineVisible: false, lastValueVisible: false, title: key.toUpperCase(),
+                            lineStyle: emaMeta.warmup_ok === false ? LineStyle.Dotted : LineStyle.Solid,
+                            priceLineVisible: false, lastValueVisible: false, title: emaTitle,
                         });
                         line.setData(data);
                         overlaySeriesRef.current.push(line);
