@@ -212,6 +212,41 @@ def _decision_label(decision: str) -> str:
     }.get(decision, decision)
 
 
+def _sanitize_trade_health_messages(
+    positives: List[str],
+    warnings: List[str],
+    tactical_reasons: List[str],
+    exclusion_reasons: List[str],
+    *,
+    vol_confirmed_bool: Optional[bool],
+    chase_risk: str,
+    fakeout_risk: str,
+) -> List[str]:
+    """Remove positive snippets that contradict the final risk state."""
+    risk_text = " | ".join(warnings + tactical_reasons + exclusion_reasons).lower()
+    cleaned: List[str] = []
+    for msg in positives:
+        lower = msg.lower()
+        if vol_confirmed_bool is False and (
+            "relative volumenbestaetigung" in lower or "breakout-volumen bestaetigt" in lower
+        ):
+            continue
+        if chase_risk in {"HIGH", "CRITICAL"} and (
+            "entry liegt nahe" in lower or "nicht gechased" in lower
+        ):
+            continue
+        if fakeout_risk in {"HIGH", "CRITICAL"} and "close stark" in lower and (
+            "wick" in risk_text or "close sitzt" in risk_text
+        ):
+            continue
+        if "live r:r" in lower and (
+            "live r:r nur" in risk_text or "tp1 bereits erreicht" in risk_text or "tp2 bereits erreicht" in risk_text
+        ):
+            continue
+        cleaned.append(msg)
+    return list(dict.fromkeys(cleaned))[:6]
+
+
 def calculate_trade_health(
     row: Dict[str, Any],
     scanner_name: str = "scanner",
@@ -480,6 +515,9 @@ def calculate_trade_health(
     if strong_continuation:
         positives.append("Starke Momentum-Fortsetzung: nicht market chasen, Retest/Flag/VWAP-Hold abwarten")
 
+    if vol_confirmed_bool is False and rvol is not None and rvol >= 2.0:
+        warnings.append(f"RVOL {rvol:.1f}x hoch, aber der konkrete Breakout-Bar ist nicht bestaetigt")
+
     if exclusion_reasons:
         decision = "NO_TRADE"
     elif strong_continuation:
@@ -497,6 +535,16 @@ def calculate_trade_health(
     else:
         decision = "NO_TRADE"
 
+    positives = _sanitize_trade_health_messages(
+        positives,
+        warnings,
+        tactical_reasons,
+        exclusion_reasons,
+        vol_confirmed_bool=vol_confirmed_bool,
+        chase_risk=chase_risk,
+        fakeout_risk=fakeout_risk,
+    )
+
     return {
         "scanner": scanner_name,
         "health_score": health_score,
@@ -512,7 +560,7 @@ def calculate_trade_health(
         "liquidity_score": liquidity_score,
         "direction": direction,
         "warnings": list(dict.fromkeys(warnings + tactical_reasons))[:8],
-        "positives": list(dict.fromkeys(positives))[:6],
+        "positives": positives,
         "exclusion_reasons": list(dict.fromkeys(exclusion_reasons))[:6],
         "tactical_reasons": list(dict.fromkeys(tactical_reasons))[:6],
         "continuation_watch": strong_continuation,

@@ -174,3 +174,28 @@ def test_near_entry_does_not_claim_not_chased_when_entry_is_extended():
     assert "nicht gechased" not in positives
     assert health["chase_risk"] in {"HIGH", "MEDIUM"}
     assert any("Chase-Risiko bleibt" in warning for warning in health["warnings"])
+
+
+def test_high_rvol_does_not_contradict_unconfirmed_breakout_volume():
+    row = {
+        "ticker": "VOLX",
+        "direction": "LONG",
+        "current_price": 20.05,
+        "entry": 20.00,
+        "stop": 19.00,
+        "tp1": 22.00,
+        "tp2": 24.00,
+        "rvol": 3.1,
+        "vol_confirmed": False,
+        "vwap_aligned": True,
+        "close_pos": 0.80,
+        "dollar_volume": 20_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    positives = " | ".join(health["positives"])
+    warnings = " | ".join(health["warnings"])
+    assert "relative Volumenbestaetigung" not in positives
+    assert "Breakout-Volumen nicht bestaetigt" in warnings
+    assert "RVOL 3.1x hoch" in warnings
