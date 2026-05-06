@@ -1454,8 +1454,201 @@ def _early_mover_orderbook_liquidity(contract: str, exchange: str) -> Dict[str, 
     return metrics
 
 
+def _early_mover_trigger_profile(row: Dict[str, Any]) -> Dict[str, Any]:
+    action = str(row.get("trade_action", row.get("entry_status", "")) or "").upper()
+    phase = _alert_float(row.get("phase", row.get("Phase")), 0) or 0
+    change24 = _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0
+    vol_mcap = _alert_float(row.get("VolMCapRatio", row.get("vol_mcap", row.get("Vol/MCap"))), 0) or 0
+    distance_r = _alert_float(row.get("distance_to_entry_r"), 999) or 999
+    risk_flags = [str(flag).lower() for flag in (row.get("risk_flags") or []) if flag is not None]
+    fast_coin = bool(abs(change24) >= 8 or vol_mcap >= 35 or int(phase) == 2 or "breakout" in " ".join(risk_flags))
+    near_retest = bool(action == "WAIT_FOR_RETEST" or distance_r <= _EARLY_MOVER_RETEST_MAX_DISTANCE_R)
+    return {
+        "action": action,
+        "fast_coin": fast_coin,
+        "near_retest": near_retest,
+        "change24": change24,
+        "vol_mcap": vol_mcap,
+        "distance_to_entry_r": distance_r,
+    }
+
+
+def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    min_bars = 12 if timeframe == "5m" else 18
+    if not bars or len(bars) < min_bars:
+        return {"ok": False, "reason": f"not_enough_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
+
+    try:
+        clean = []
+        for bar in bars:
+            open_ = float(bar["open"])
+            high = float(bar["high"])
+            low = float(bar["low"])
+            close = float(bar["close"])
+            volume = float(bar.get("volume", 0) or 0)
+            if open_ > 0 and close > 0 and high > low:
+                clean.append({"open": open_, "high": high, "low": low, "close": close, "volume": max(volume, 0)})
+        if len(clean) < min_bars:
+            return {"ok": False, "reason": f"bad_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
+
+        recent_len = 24 if timeframe == "5m" else 30
+        window_len = 8 if timeframe == "5m" else 12
+        recent = clean[-recent_len:] if len(clean) >= recent_len else clean
+        last = clean[-1]
+        prev = clean[:-1]
+        prev_window = prev[-window_len:] if len(prev) >= window_len else prev
+        last_open = last["open"]
+        last_high = last["high"]
+        last_low = last["low"]
+        last_close = last["close"]
+        last_vol = last["volume"]
+
+        typical_value = 0.0
+        volume_sum = 0.0
+        for bar in recent:
+            typical = (bar["high"] + bar["low"] + bar["close"]) / 3
+            typical_value += typical * bar["volume"]
+            volume_sum += bar["volume"]
+        vwap = typical_value / volume_sum if volume_sum > 0 else _median_float([b.get("close") for b in recent], last_close)
+        median_vol = _median_float([b.get("volume", 0) for b in prev[-30:]], max(last_vol, 1))
+        vol_ratio = last_vol / max(median_vol, 1)
+        prev_high = max(bar["high"] for bar in prev_window)
+        prev_low = min(bar["low"] for bar in prev_window)
+        prev_close = prev[-1]["close"] if prev else last_close
+        close_pos = (last_close - last_low) / max(last_high - last_low, 1e-9)
+        candle_change_pct = ((last_close - last_open) / last_open * 100) if last_open else 0
+        range_pct = ((last_high - last_low) / last_close * 100) if last_close else 0
+
+        setup_obj = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+        tp1 = _alert_float(row.get("tp1") or setup_obj.get("tp1"))
+        entry = _alert_float(row.get("entry") or setup_obj.get("entry"))
+        stop = _alert_float(row.get("stop_loss") or row.get("stop") or setup_obj.get("stop_loss") or setup_obj.get("stop"))
+        risk = abs(entry - stop) if entry is not None and stop is not None and entry != stop else None
+        distance_r = ((last_close - entry) / risk) if entry is not None and risk and risk > 0 else None
+
+        if tp1 is not None and last_close >= tp1:
+            return {
+                "ok": False,
+                "reason": "tp1_already_reached_intraday",
+                "timeframe": timeframe,
+                "execution_score": 0,
+                "last_close": round(last_close, 10),
+            }
+
+        breakout_vol = 1.25 if timeframe == "5m" else 1.45
+        hold_vol = 1.10 if timeframe == "5m" else 1.25
+        breakout_buffer = 1.0015 if timeframe == "5m" else 1.0008
+        max_safe_candle = 5.0 if timeframe == "5m" else 2.6
+        max_safe_range = 7.0 if timeframe == "5m" else 4.5
+
+        breakout = last_close > prev_high * breakout_buffer and vol_ratio >= breakout_vol and close_pos >= 0.60
+        vwap_reclaim = prev_close < vwap and last_close > vwap and vol_ratio >= breakout_vol and close_pos >= 0.58
+        hl_hold = last_close > vwap and last_low > prev_low and last_close > last_open and vol_ratio >= hold_vol and close_pos >= 0.55
+        retest_hold = bool(
+            entry is not None
+            and risk
+            and -0.10 <= (distance_r if distance_r is not None else 999) <= 0.35
+            and last_low <= entry * (1.004 if timeframe == "5m" else 1.0025)
+            and last_close >= entry * 0.998
+            and last_close >= vwap * 0.997
+            and close_pos >= 0.55
+            and vol_ratio >= hold_vol
+        )
+        continuation = bool(
+            profile.get("fast_coin")
+            and last_close > prev_close
+            and last_close > vwap
+            and close_pos >= 0.62
+            and vol_ratio >= breakout_vol
+            and (distance_r is None or distance_r <= 0.55)
+        )
+
+        matched = []
+        score = 0.0
+        if retest_hold:
+            matched.append("retest_hold")
+            score += 34
+        if breakout:
+            matched.append("breakout")
+            score += 34
+        if vwap_reclaim:
+            matched.append("vwap_reclaim")
+            score += 30
+        if hl_hold:
+            matched.append("higher_low_vwap_hold")
+            score += 28
+        if continuation and not matched:
+            matched.append("trend_continuation")
+            score += 25
+
+        if vol_ratio >= 2.2:
+            score += 20
+        elif vol_ratio >= 1.6:
+            score += 16
+        elif vol_ratio >= hold_vol:
+            score += 10
+
+        if close_pos >= 0.78:
+            score += 14
+        elif close_pos >= 0.62:
+            score += 10
+        elif close_pos < 0.45:
+            score -= 15
+
+        if distance_r is not None:
+            if -0.10 <= distance_r <= 0.25:
+                score += 18
+            elif distance_r <= 0.50:
+                score += 10
+            elif distance_r <= 0.75:
+                score += 2
+            else:
+                score -= 28
+            if distance_r < -0.25:
+                score -= 18
+        elif matched:
+            score += 8
+
+        chase_candle = candle_change_pct >= max_safe_candle and close_pos >= 0.86 and range_pct >= max_safe_range
+        if chase_candle and (distance_r is None or distance_r > 0.45):
+            score -= 35
+            matched = [m for m in matched if m != "breakout"]
+        elif candle_change_pct <= max_safe_candle:
+            score += 6
+
+        threshold = 76 if timeframe == "5m" else 82
+        ok = bool(matched and score >= threshold)
+        if ok:
+            reason = f"adaptive_{timeframe}_{matched[0]}"
+        elif chase_candle:
+            reason = f"single_{timeframe}_candle_chase"
+        elif not matched:
+            reason = f"no_fresh_{timeframe}_trigger"
+        else:
+            reason = "execution_score_below_threshold"
+
+        return {
+            "ok": ok,
+            "reason": reason,
+            "symbol": _extract_alert_ticker(row),
+            "timeframe": timeframe,
+            "execution_score": int(round(max(0, min(score, 100)))),
+            "execution_model": "adaptive_execution_v1",
+            "matched": matched,
+            "last_close": round(last_close, 10),
+            "vwap": round(vwap, 10),
+            "volume_ratio": round(vol_ratio, 2),
+            "close_pos": round(close_pos, 2),
+            "candle_change_pct": round(candle_change_pct, 2),
+            "range_pct": round(range_pct, 2),
+            "distance_to_entry_r": round(distance_r, 2) if distance_r is not None else None,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
+
+
 def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Confirm Early-Mover mail candidates with real 5m exchange candles."""
+    """Confirm Early-Mover mail candidates with adaptive exchange execution candles."""
     symbol = _extract_alert_ticker(row)
     contract = row.get("PerpChartSymbol") or row.get("PerpMatchSymbol")
     exchange = _normalize_crypto_exchange(row.get("PerpChartExchange") or row.get("BestExchange"))
@@ -1464,94 +1657,46 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
     if not contract or not exchange:
         return {"ok": False, "reason": "no_perp_chart_for_realtime_trigger"}
 
-    cache_key = f"{exchange}:{contract}:5m"
+    profile = _early_mover_trigger_profile(row)
+    cache_key = f"{exchange}:{contract}:adaptive_v1"
     now = time.time()
     cached = _EARLY_MOVER_TRIGGER_CACHE.get(cache_key)
     if cached and now - cached.get("ts", 0) < _EARLY_MOVER_TRIGGER_TTL:
         return dict(cached["result"])
 
-    try:
-        bars = fetch_candles_for(str(contract), exchange, timeframe="5m", count=36)
-    except Exception as exc:
-        result = {"ok": False, "reason": "trigger_fetch_failed", "detail": str(exc)[:120]}
-        _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
-        return result
-    if not bars or len(bars) < 12:
-        result = {"ok": False, "reason": "not_enough_5m_candles"}
-        _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
-        return result
+    checks: List[Tuple[str, int]] = [("5m", 36)]
+    if profile.get("fast_coin") or profile.get("near_retest"):
+        checks.append(("1m", 45))
 
-    try:
-        recent = bars[-24:] if len(bars) >= 24 else bars
-        last = bars[-1]
-        prev = bars[:-1]
-        prev_window = prev[-8:] if len(prev) >= 8 else prev
-        last_open = float(last["open"])
-        last_high = float(last["high"])
-        last_low = float(last["low"])
-        last_close = float(last["close"])
-        last_vol = float(last.get("volume", 0) or 0)
-        if last_close <= 0 or last_high <= last_low:
-            result = {"ok": False, "reason": "bad_5m_candle"}
-            _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
-            return result
+    results = []
+    for timeframe, count in checks:
+        try:
+            bars = fetch_candles_for(str(contract), exchange, timeframe=timeframe, count=count)
+            scored = _score_early_mover_trigger_bars(row, bars, timeframe, profile)
+        except Exception as exc:
+            scored = {"ok": False, "reason": "trigger_fetch_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
+        scored.update({"symbol": symbol, "contract": contract, "exchange": exchange})
+        results.append(scored)
+        if scored.get("ok"):
+            break
 
-        typical_value = 0.0
-        volume_sum = 0.0
-        for bar in recent:
-            volume = float(bar.get("volume", 0) or 0)
-            typical = (float(bar["high"]) + float(bar["low"]) + float(bar["close"])) / 3
-            typical_value += typical * volume
-            volume_sum += volume
-        vwap = typical_value / volume_sum if volume_sum > 0 else _median_float([b.get("close") for b in recent], last_close)
-        median_vol = _median_float([b.get("volume", 0) for b in prev[-20:]], max(last_vol, 1))
-        vol_ratio = last_vol / max(median_vol, 1)
-        prev_high = max(float(bar["high"]) for bar in prev_window)
-        prev_low = min(float(bar["low"]) for bar in prev_window)
-        prev_close = float(prev[-1]["close"]) if prev else last_close
-        close_pos = (last_close - last_low) / (last_high - last_low)
-        candle_change_pct = ((last_close - last_open) / last_open * 100) if last_open else 0
-        range_pct = ((last_high - last_low) / last_close * 100) if last_close else 0
-        setup_obj = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
-        tp1 = _alert_float(row.get("tp1") or setup_obj.get("tp1"))
-
-        if tp1 is not None and last_close >= tp1:
-            result = {"ok": False, "reason": "tp1_already_reached_intraday", "last_close": last_close}
-        elif candle_change_pct >= 6 and close_pos >= 0.88 and range_pct >= 7:
-            result = {"ok": False, "reason": "single_5m_candle_chase", "last_close": last_close}
-        else:
-            breakout = last_close > prev_high * 1.0015 and vol_ratio >= 1.25 and close_pos >= 0.58
-            vwap_reclaim = prev_close < vwap and last_close > vwap and vol_ratio >= 1.25 and close_pos >= 0.58
-            hl_hold = last_close > vwap and last_low > prev_low and last_close > last_open and vol_ratio >= 1.10 and close_pos >= 0.55
-            ok = bool(breakout or vwap_reclaim or hl_hold)
-            if breakout:
-                reason = "5m_breakout_volume_confirmed"
-            elif vwap_reclaim:
-                reason = "5m_vwap_reclaim"
-            elif hl_hold:
-                reason = "5m_higher_low_vwap_hold"
-            else:
-                reason = "no_fresh_5m_trigger"
-            result = {
-                "ok": ok,
-                "reason": reason,
-                "symbol": symbol,
-                "contract": contract,
-                "exchange": exchange,
-                "last_close": round(last_close, 10),
-                "vwap": round(vwap, 10),
-                "volume_ratio": round(vol_ratio, 2),
-                "close_pos": round(close_pos, 2),
-            }
-            if ok:
-                liquidity = _early_mover_orderbook_liquidity(str(contract), exchange)
-                result["liquidity"] = liquidity
-                if not liquidity.get("ok"):
-                    result["ok"] = False
-                    result["reason"] = "thin_orderbook_market_impact"
-                    result["liquidity_reasons"] = liquidity.get("reasons", [])
-    except Exception as exc:
-        result = {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120]}
+    result = max(results, key=lambda item: item.get("execution_score", 0)) if results else {"ok": False, "reason": "no_trigger_checks", "execution_score": 0}
+    result["adaptive_checks"] = [
+        {
+            "timeframe": item.get("timeframe"),
+            "ok": bool(item.get("ok")),
+            "score": item.get("execution_score", 0),
+            "reason": item.get("reason"),
+        }
+        for item in results
+    ]
+    if result.get("ok"):
+        liquidity = _early_mover_orderbook_liquidity(str(contract), exchange)
+        result["liquidity"] = liquidity
+        if not liquidity.get("ok"):
+            result["ok"] = False
+            result["reason"] = "thin_orderbook_market_impact"
+            result["liquidity_reasons"] = liquidity.get("reasons", [])
 
     _EARLY_MOVER_TRIGGER_CACHE[cache_key] = {"ts": now, "result": result}
     if len(_EARLY_MOVER_TRIGGER_CACHE) > _EARLY_MOVER_TRIGGER_CACHE_MAX:
@@ -1571,6 +1716,10 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     row["execution_trigger_ok"] = bool(trigger_ok)
     if isinstance(trigger_check, dict):
         row["intraday_trigger"] = trigger_check
+        if trigger_check.get("execution_score") is not None:
+            row["execution_quality_score"] = trigger_check.get("execution_score")
+        if trigger_check.get("timeframe"):
+            row["execution_timeframe"] = trigger_check.get("timeframe")
         if isinstance(trigger_check.get("liquidity"), dict):
             row["execution_liquidity"] = trigger_check["liquidity"]
         if trigger_check.get("reason") == "thin_orderbook_market_impact":
@@ -1584,7 +1733,9 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
 
     if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok:
         row["trade_signal"] = "JETZT_TRADEN"
-        row["signal_label"] = f"Jetzt traden: 5m Trigger bestaetigt ({trigger_reason or 'ok'})"
+        score_txt = f" Score {trigger_check.get('execution_score')}/100" if isinstance(trigger_check, dict) and trigger_check.get("execution_score") is not None else ""
+        tf_txt = str(trigger_check.get("timeframe") or "adaptive") if isinstance(trigger_check, dict) else "adaptive"
+        row["signal_label"] = f"Jetzt traden: {tf_txt} Execution-Trigger bestaetigt ({trigger_reason or 'ok'}{score_txt})"
         row["signal_quality"] = "tradeable"
         row["entry_status"] = "JETZT_TRADEN"
         row["alertable_crypto"] = True
@@ -1614,7 +1765,7 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["alertable_crypto"] = False
     elif action == "LONG_TRIGGER":
         row["trade_signal"] = "BEOBACHTEN"
-        row["signal_label"] = "Achtung beobachten: 5m Trigger fehlt noch"
+        row["signal_label"] = "Achtung beobachten: Execution-Trigger fehlt noch"
         row["signal_quality"] = "observe"
         row["entry_status"] = "BEOBACHTEN"
         row["alertable_crypto"] = False
@@ -1901,6 +2052,8 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
             "alpha_24h": btc_context.get("alpha_24h"),
             "exchange": row.get("PerpChartExchange", row.get("Exchange", "")),
             "trigger": trigger_check,
+            "execution_score": trigger_check.get("execution_score"),
+            "execution_timeframe": trigger_check.get("timeframe"),
         })
 
     if not candidates:
@@ -1938,11 +2091,13 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
         action = html.escape(str(item["action"] or "LONG"))
         exchange = html.escape(str(item["exchange"] or ""))
         trigger = item.get("trigger", {}) if isinstance(item.get("trigger"), dict) else {}
-        trigger_text = html.escape(str(trigger.get("reason", "5m_trigger")))
+        trigger_text = html.escape(str(trigger.get("reason", "execution_trigger")))
+        exec_score = _fmt_num(item.get("execution_score"), "/100", 0)
+        exec_tf = html.escape(str(item.get("execution_timeframe") or trigger.get("timeframe") or "adaptive"))
         volume_ratio = _fmt_num(trigger.get("volume_ratio"), "x", 2)
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange}</span><br><span style="color:#059669">{trigger_text} ({volume_ratio})</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange} {exec_tf}</span><br><span style="color:#059669">{trigger_text} ({volume_ratio}, EQ {exec_score})</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item["grade"]))} / {html.escape(str(item["score"]))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
@@ -1961,7 +2116,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-        <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und frischer 5m Exchange-Trigger. Ohne 5m-Bestaetigung bleibt es BEOBACHTEN.</p>
+        <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und bestaetigter adaptiver Exchange-Trigger. Ohne Execution-Bestaetigung bleibt es BEOBACHTEN.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
@@ -8254,7 +8409,7 @@ def _build_early_mover_long_setup(
     warnings = []
     notes = []
     trigger_conditions = [
-        "5m higher-low oder VWAP-Hold abwarten",
+        "adaptiven Execution-Trigger abwarten (1m fuer schnelle Coins, sonst 5m)",
         "kein Market-Buy in eine lange gruene Kerze",
         "BTC darf im Moment des Entries nicht hart abverkaufen",
     ]
@@ -9343,14 +9498,14 @@ def fetch_early_movers(_prefetched_perps=None):
             alpha = c24 - btc_24h
             if phase == 1:
                 if score >= 70:
-                    signal_text = "BEOBACHTEN: Smart-Money-Akkumulation - Entry erst mit 5m Trigger/Retest"
+                    signal_text = "BEOBACHTEN: Smart-Money-Akkumulation - Entry erst mit Execution-Trigger/Retest"
                 elif score >= 40:
                     signal_text = "BEOBACHTEN: Volume-Anomalie - noch kein Entry-Signal"
                 else:
                     signal_text = "BEOBACHTEN: leichte Aktivitaet"
             elif phase == 2:
                 if c24 > 12:
-                    signal_text = f"BEOBACHTEN: Breakout +{c24:.0f}% - nicht chase, Retest/5m bestaetigen"
+                    signal_text = f"BEOBACHTEN: Breakout +{c24:.0f}% - nicht chase, Retest/Execution bestaetigen"
                 elif score >= 60:
                     signal_text = "BEOBACHTEN: Momentum stark - Entry nur mit frischem Intraday-Trigger"
                 else:
@@ -9385,14 +9540,14 @@ def fetch_early_movers(_prefetched_perps=None):
                 "entry_status": "BEOBACHTEN",
                 "trade_action": "BEOBACHTEN",
                 "trade_signal": "BEOBACHTEN",
-                "signal_label": "Achtung beobachten: noch kein 5m Entry-Trigger",
+                "signal_label": "Achtung beobachten: noch kein Execution-Trigger",
                 "execution_trigger_ok": False,
                 "alertable_crypto": False,
                 "risk_flags": watch_flags,
                 "execution_liquidity": liquidity,
                 "data_source": f"CoinGecko + multi-exchange perps ({_CG_MARKETS_STATUS.get('source') or 'unknown'})",
                 "data_warning": _CG_MARKETS_STATUS.get("warning"),
-                "scanner_note": "Early Movers liefert Beobachten- oder Jetzt-Traden-Signale. Kein Entry ohne bestaetigten 5m/1m Trigger.",
+                "scanner_note": "Early Movers liefert Beobachten- oder Jetzt-Traden-Signale. Kein Entry ohne bestaetigten adaptiven Execution-Trigger.",
             })
 
             # Dedup: Behalte den mit höherem Score, aber merke ALLE Quellen
@@ -9462,7 +9617,7 @@ def fetch_early_movers(_prefetched_perps=None):
             "trade_setup": setup,
             "btc_context": setup.get("btc_context"),
             "risk_flags": list(dict.fromkeys(existing_flags + setup_flags + setup_warnings)),
-            "scanner_note": "Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem 5m/1m Trigger oder sauberem Retest.",
+            "scanner_note": "Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem adaptiven Execution-Trigger oder sauberem Retest.",
         })
         _apply_early_mover_signal_state(entry)
         entry["signal_text"] = f"{setup.get('action_label')}: {entry.get('signal_text', '')}"

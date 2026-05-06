@@ -183,6 +183,7 @@ def test_early_mover_thin_perp_liquidity_blocks_trade_signal(monkeypatch):
 
 
 def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
+    api._EARLY_MOVER_TRIGGER_CACHE.clear()
     row = {
         "Symbol": "THIN",
         "PerpChartSymbol": "THINUSDT",
@@ -204,6 +205,58 @@ def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
     assert result["ok"] is False
     assert result["reason"] == "thin_orderbook_market_impact"
     assert "thin_book_10bps" in result["liquidity_reasons"]
+
+
+def test_early_mover_adaptive_1m_trigger_confirms_fast_coin(monkeypatch):
+    api._EARLY_MOVER_TRIGGER_CACHE.clear()
+    row = {
+        "Symbol": "FAST",
+        "PerpChartSymbol": "FASTUSDT",
+        "PerpChartExchange": "binance",
+        "Change24h": 11.0,
+        "VolMCapRatio": 42.0,
+        "entry": 1.01,
+        "stop_loss": 0.96,
+        "tp1": 1.18,
+    }
+    flat_5m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(36)]
+    micro_1m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(44)]
+    micro_1m.append({"open": 1.01, "high": 1.055, "low": 1.008, "close": 1.049, "volume": 2600})
+    monkeypatch.setattr(api, "fetch_candles_for", lambda symbol, exchange, timeframe="1h", count=50: micro_1m if timeframe == "1m" else flat_5m)
+    monkeypatch.setattr(api, "fetch_orderbook_for", lambda *args, **kwargs: {
+        "bids": [(1.048, 50_000), (1.047, 50_000)],
+        "asks": [(1.050, 50_000), (1.051, 50_000)],
+    })
+
+    result = api._verify_early_mover_intraday_trigger(row)
+
+    assert result["ok"] is True
+    assert result["timeframe"] == "1m"
+    assert result["execution_score"] >= 82
+    assert result["reason"].startswith("adaptive_1m_")
+
+
+def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
+    api._EARLY_MOVER_TRIGGER_CACHE.clear()
+    row = {
+        "Symbol": "CHASE",
+        "PerpChartSymbol": "CHASEUSDT",
+        "PerpChartExchange": "binance",
+        "Change24h": 14.0,
+        "VolMCapRatio": 55.0,
+        "entry": 1.00,
+        "stop_loss": 0.96,
+        "tp1": 1.30,
+    }
+    flat_5m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(36)]
+    micro_1m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(44)]
+    micro_1m.append({"open": 1.01, "high": 1.12, "low": 1.005, "close": 1.115, "volume": 4000})
+    monkeypatch.setattr(api, "fetch_candles_for", lambda symbol, exchange, timeframe="1h", count=50: micro_1m if timeframe == "1m" else flat_5m)
+
+    result = api._verify_early_mover_intraday_trigger(row)
+
+    assert result["ok"] is False
+    assert result["reason"] in {"single_1m_candle_chase", "execution_score_below_threshold"}
 
 
 def test_multi_exchange_perps_prefers_binance_execution_liquidity(monkeypatch):
