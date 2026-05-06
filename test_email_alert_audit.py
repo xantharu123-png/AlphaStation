@@ -355,10 +355,31 @@ def test_stock_alert_asset_guard_uses_common_stock_universe():
         universe_source="unit",
     ) == "known ETF/ETP ticker"
     assert api._stock_alert_asset_exclusion_reason(
+        "NVBD",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "known ETF/ETP ticker"
+    assert api._stock_alert_asset_exclusion_reason(
+        "NVDG",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "known ETF/ETP ticker"
+    assert api._stock_alert_asset_exclusion_reason(
         "FAKEETF",
         common_stock_universe={"REAL"},
         universe_source="unit",
     ) == "not in common-stock universe (unit)"
+
+
+def test_strategy_scan_decoration_filters_single_stock_etps():
+    rows = [
+        {"Ticker": "NVBD", "score": 99, "grade": "S"},
+        {"Ticker": "REAL", "score": 80, "grade": "S"},
+    ]
+
+    decorated = api._decorate_scan_results(rows, "strategy_scan", cache_age_seconds=10)
+
+    assert [row["Ticker"] for row in decorated] == ["REAL"]
 
 
 def test_email_dedupe_persists_crash_ticker(tmp_path, monkeypatch):

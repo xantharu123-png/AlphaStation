@@ -423,11 +423,16 @@ INVERSE_ETFS = {
 }
 
 NON_STOCK_ETP_TICKERS = {
-    "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ", "NVDL", "NVDQ", "NVDU", "NVDD",
+    "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ",
+    "NVDL", "NVDQ", "NVDU", "NVDD", "NVDS", "NVDX", "NVDY", "NVDG", "NVBD",
     "CONL", "GGLL", "GGLS", "AAPU", "AAPD", "AMZU", "AMZD", "METU", "METD",
     "SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU", "SPXL", "SPXS", "LABU", "LABD",
     "TECL", "TECS", "FNGU", "FNGD", "BOIL", "KOLD", "GUSH", "DRIP", "NUGT", "DUST",
     "JNUG", "JDST", "YINN", "YANG", "UVXY", "VIXY", "VXX", "BITO", "BITI",
+}
+
+STOCK_SCANNER_ASSET_GUARD_NAMES = {
+    "strategy_scan", "stock_strategy", "bi_long", "bi_short", "biotech", "bear", "orb", "turtle", "volume_spikes"
 }
 
 NON_STOCK_ETP_KEYWORDS = {
@@ -3247,6 +3252,12 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         why = []
         warnings = []
 
+        ticker_for_guard = str(item.get("Ticker") or item.get("ticker") or item.get("symbol") or "").upper().strip()
+        if ticker_for_guard and scanner_name in STOCK_SCANNER_ASSET_GUARD_NAMES:
+            exclusion_reason = _stock_alert_asset_exclusion_reason(ticker_for_guard, require_reference=False)
+            if exclusion_reason:
+                continue
+
         score = item.get("score", item.get("Score", item.get("BI_Score", item.get("exhaustion_score", item.get("fear_score")))))
         grade = item.get("grade", item.get("Grade", item.get("BI_Grade")))
         direction = item.get("direction", item.get("Direction", item.get("signal", item.get("Signal"))))
@@ -4604,6 +4615,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         # Wyckoff, Compression) entstehen oft NICHT in den Top-Gainern/Losern.
         results = []
         _all_snapshot_tickers = _fetch_strategy_snapshot_universe(strategy_name)
+        common_stock_universe, common_stock_source = _load_common_stock_universe()
         session_name, _session_label = get_current_trading_session()
         _use_extended_prices = session_name in ("Pre-Market", "After-Hours")
 
@@ -4613,6 +4625,14 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                     day = t.get("day", {}) or {}
                     prev = t.get("prevDay", {}) or {}
                     if not ticker or "." in ticker or "/" in ticker or not prev.get("c"):
+                        continue
+                    non_stock_reason = _stock_alert_asset_exclusion_reason(
+                        ticker,
+                        common_stock_universe=common_stock_universe,
+                        universe_source=common_stock_source,
+                        require_reference=False,
+                    )
+                    if non_stock_reason:
                         continue
 
                     prev_close_regular = float(prev.get("c", 0) or 0)
