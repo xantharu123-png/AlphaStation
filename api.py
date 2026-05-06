@@ -1161,8 +1161,8 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_execution_liquidity_too_thin")
     if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
         reasons.append("early_mover_live_rr_below_threshold")
-    if action == "LONG_TRIGGER" and not fields["execution_trigger_ok"]:
-        reasons.append("early_mover_trigger_missing")
+    # Email delivery performs a fresh exchange-trigger check before sending.
+    # Do not block here just because the cached scan row was not pre-confirmed.
     if action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
         reasons.append("early_mover_retest_not_near_entry")
     return reasons
