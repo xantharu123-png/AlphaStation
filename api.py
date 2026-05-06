@@ -585,9 +585,14 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
     """Return active common-stock/ADR tickers for breadth filtering without per-symbol reference calls."""
     now_ts = time.time()
     mem_tickers = _COMMON_STOCK_UNIVERSE_MEM.get("tickers")
-    if mem_tickers is not None and now_ts - float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0) < max_age_seconds:
-        return set(mem_tickers), str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+    mem_loaded_at = float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0)
+    stale_mem_tickers = set(mem_tickers or []) if mem_tickers is not None else set()
+    if stale_mem_tickers and now_ts - mem_loaded_at < max_age_seconds:
+        return stale_mem_tickers, str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
 
+    stale_cached_tickers: set[str] = stale_mem_tickers
+    stale_cached_source = str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+    stale_cached_at = mem_loaded_at
     try:
         if os.path.exists(COMMON_STOCK_UNIVERSE_CACHE):
             with open(COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
@@ -597,10 +602,21 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
             if cached_tickers and now_ts - cached_at < max_age_seconds:
                 _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(cached_tickers), "source": "file_cache"})
                 return cached_tickers, "file_cache"
+            if cached_tickers:
+                stale_cached_tickers = cached_tickers
+                stale_cached_source = "stale_file_cache"
+                stale_cached_at = cached_at
     except Exception as cache_err:
         print(f"[Common Stock Universe] cache read error: {cache_err}")
 
     if not POLYGON_KEY:
+        if stale_cached_tickers:
+            _COMMON_STOCK_UNIVERSE_MEM.update({
+                "loaded_at": stale_cached_at or now_ts,
+                "tickers": sorted(stale_cached_tickers),
+                "source": stale_cached_source,
+            })
+            return stale_cached_tickers, stale_cached_source
         return None, "missing_polygon_key"
 
     tickers: set[str] = set()
@@ -640,6 +656,7 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
 
         if tickers:
             try:
+                os.makedirs(os.path.dirname(COMMON_STOCK_UNIVERSE_CACHE) or ".", exist_ok=True)
                 with open(COMMON_STOCK_UNIVERSE_CACHE, "w", encoding="utf-8") as f:
                     json.dump({"cached_at": now_ts, "tickers": sorted(tickers)}, f)
             except Exception as write_err:
@@ -649,7 +666,30 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
     except Exception as e:
         print(f"[Common Stock Universe] fetch error: {e}")
 
+    if stale_cached_tickers:
+        _COMMON_STOCK_UNIVERSE_MEM.update({
+            "loaded_at": stale_cached_at or now_ts,
+            "tickers": sorted(stale_cached_tickers),
+            "source": stale_cached_source,
+        })
+        return stale_cached_tickers, stale_cached_source
+
     return None, "unavailable"
+
+
+def _common_stock_guard_status() -> Dict[str, Any]:
+    tickers, source = _load_common_stock_universe()
+    mem_loaded_at = float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0)
+    age_seconds = int(max(0, time.time() - mem_loaded_at)) if mem_loaded_at else None
+    return {
+        "configured": bool(POLYGON_KEY),
+        "available": bool(tickers),
+        "ticker_count": len(tickers or []),
+        "source": source,
+        "age_seconds": age_seconds,
+        "stale": str(source).startswith("stale"),
+        "allowed_reference_types": sorted(STOCK_SCANNER_ALLOWED_REFERENCE_TYPES),
+    }
 
 
 # ── ORB risk helpers ──
@@ -6402,6 +6442,7 @@ def get_email_alert_status():
     return {
         "status": "ok",
         "email_alerts": _email_alert_status(),
+        "common_stock_guard": _common_stock_guard_status(),
         "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),
         "common_reasons_for_no_mail": [
             "Keine neuen S/A/A+ Setups in den aktuellen Scanner-Caches.",
@@ -6440,6 +6481,7 @@ def get_email_alert_audit():
     return {
         "status": "ok",
         "email_alerts": _email_alert_status(),
+        "common_stock_guard": _common_stock_guard_status(),
         "policy": {
             "top_grades": sorted(_ALERT_TOP_GRADES),
             "cooldown_seconds": _EMAIL_COOLDOWN_SEC,

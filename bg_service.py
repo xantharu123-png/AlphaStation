@@ -183,10 +183,10 @@ _NON_STOCK_PRODUCT_TICKERS = {
     "YANG", "UVXY", "VIXY", "VXX", "BITO", "BITI",
 }
 _NON_STOCK_PRODUCT_KEYWORDS = {
-    " ETF", "ETN", "ETP", " FUND", "2X", "3X", "LEVERAGED", "INVERSE",
+    "ETF", "ETN", "ETP", "FUND", "2X", "3X", "LEVERAGED", "INVERSE",
     "ULTRA", "ULTRAPRO", "BULL", "BEAR", "DAILY TARGET", "TRADR", "T-REX",
     "DIREXION", "PROSHARES", "GRANITESHARES", "YIELDMAX", "ROUNDHILL", "DEFIANCE",
-    "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES",
+    "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES", "WARRANT", "RIGHT", "UNIT",
 }
 _STOCK_REFERENCE_TYPES = {"CS", "ADRC", "ADRP"}
 _COMMON_STOCK_UNIVERSE_CACHE = "/tmp/polygon_common_stock_universe.json"
@@ -532,11 +532,24 @@ def _looks_like_non_stock_product_symbol(ticker):
     return None
 
 
+def _name_has_non_stock_product_keyword(name):
+    normalized_name = re.sub(r"[^A-Z0-9]+", " ", str(name or "").upper()).strip()
+    if not normalized_name:
+        return False
+    padded_name = f" {normalized_name} "
+    for keyword in _NON_STOCK_PRODUCT_KEYWORDS:
+        normalized_keyword = re.sub(r"[^A-Z0-9]+", " ", keyword.upper()).strip()
+        if normalized_keyword and f" {normalized_keyword} " in padded_name:
+            return True
+    return False
+
+
 def _load_common_stock_universe(poly_key, max_age_seconds=24 * 3600):
     """Load active common-stock/ADR tickers for stock-alert filtering."""
-    if not poly_key:
-        return None, "missing_polygon_key"
     now_ts = time.time()
+    stale_cached_tickers = set()
+    stale_cached_source = "not_loaded"
+    stale_cached_at = 0
     try:
         if os.path.exists(_COMMON_STOCK_UNIVERSE_CACHE):
             with open(_COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
@@ -549,8 +562,17 @@ def _load_common_stock_universe(poly_key, max_age_seconds=24 * 3600):
                 cached_tickers = set(cached or [])
             if cached_tickers and now_ts - cached_at < max_age_seconds:
                 return cached_tickers, "file_cache"
+            if cached_tickers:
+                stale_cached_tickers = cached_tickers
+                stale_cached_source = "stale_file_cache"
+                stale_cached_at = cached_at
     except Exception as exc:
         log.debug(f"Common stock universe cache read failed: {exc}")
+
+    if not poly_key:
+        if stale_cached_tickers:
+            return stale_cached_tickers, stale_cached_source
+        return None, "missing_polygon_key"
 
     try:
         from modules.data_fetchers import rate_limited_get
@@ -579,7 +601,7 @@ def _load_common_stock_universe(poly_key, max_age_seconds=24 * 3600):
                     name = str(item.get("name", "") or "").upper()
                     if not tk or market != "stocks" or item_type not in _STOCK_REFERENCE_TYPES:
                         continue
-                    if _looks_like_non_stock_product_symbol(tk) or any(keyword in f" {name}" for keyword in _NON_STOCK_PRODUCT_KEYWORDS):
+                    if _looks_like_non_stock_product_symbol(tk) or _name_has_non_stock_product_keyword(name):
                         continue
                     tickers.add(tk)
                 next_url = payload.get("next_url")
@@ -587,10 +609,13 @@ def _load_common_stock_universe(poly_key, max_age_seconds=24 * 3600):
                 params = {"apiKey": poly_key} if next_url else {}
                 pages += 1
         if tickers:
+            os.makedirs(os.path.dirname(_COMMON_STOCK_UNIVERSE_CACHE) or ".", exist_ok=True)
             _atomic_write_json(_COMMON_STOCK_UNIVERSE_CACHE, {"cached_at": now_ts, "tickers": sorted(tickers)})
             return tickers, "polygon_reference"
     except Exception as exc:
         log.warning(f"Common stock universe fetch failed: {exc}")
+    if stale_cached_tickers:
+        return stale_cached_tickers, stale_cached_source
     return None, "unavailable"
 
 
