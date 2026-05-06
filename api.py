@@ -424,12 +424,11 @@ INVERSE_ETFS = {
 
 NON_STOCK_ETP_TICKERS = {
     "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ",
-    "NVDL", "NVDQ", "NVDU", "NVDD", "NVDS", "NVDX", "NVDY", "NVDG", "NVBD", "NVDB",
+    "NVDL", "NVDQ", "NVDU", "NVDD", "NVDS", "NVDX", "NVDY",
     "CONL", "GGLL", "GGLS", "AAPU", "AAPD", "AMZU", "AMZD", "METU", "METD",
     "SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU", "SPXL", "SPXS", "LABU", "LABD",
     "TECL", "TECS", "FNGU", "FNGD", "BOIL", "KOLD", "GUSH", "DRIP", "NUGT", "DUST",
     "JNUG", "JDST", "YINN", "YANG", "UVXY", "VIXY", "VXX", "BITO", "BITI",
-    "BATT", "KSTR", "LEUX", "CORZZ",
 }
 
 STOCK_SCANNER_ASSET_GUARD_NAMES = {
@@ -437,13 +436,14 @@ STOCK_SCANNER_ASSET_GUARD_NAMES = {
 }
 
 NON_STOCK_ETP_KEYWORDS = {
-    " ETF", "ETN", "ETP", " FUND", "2X", "3X", "LEVERAGED", "INVERSE",
+    "ETF", "ETN", "ETP", "FUND", "2X", "3X", "LEVERAGED", "INVERSE",
     "ULTRA", "ULTRAPRO", "BULL", "BEAR", "DAILY TARGET", "TRADR", "T-REX",
     "DIREXION", "PROSHARES", "GRANITESHARES", "YIELDMAX", "ROUNDHILL", "DEFIANCE",
-    "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES",
+    "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES", "WARRANT", "RIGHT", "UNIT",
 }
 
-ORB_ALLOWED_POLYGON_TYPES = {"CS", "ADRC", "ADRP"}
+STOCK_SCANNER_ALLOWED_REFERENCE_TYPES = {"CS", "ADRC", "ADRP"}
+ORB_ALLOWED_POLYGON_TYPES = STOCK_SCANNER_ALLOWED_REFERENCE_TYPES
 _ORB_REFERENCE_CACHE: Dict[str, tuple[bool, str]] = {}
 _ORB_ATR_CACHE: Dict[str, float] = {}
 
@@ -478,7 +478,7 @@ def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str
 
 
 def _looks_like_non_stock_etp_symbol(ticker: str) -> Optional[str]:
-    """Cheap symbol-level guard for products that should never be in stock ORB."""
+    """Last-ditch symbol guard; primary stock filtering is by reference asset type."""
     tk = str(ticker or "").upper().strip()
     if not tk:
         return "empty ticker"
@@ -486,6 +486,35 @@ def _looks_like_non_stock_etp_symbol(ticker: str) -> Optional[str]:
         return "known ETF/ETP ticker"
     if len(tk) >= 4 and tk[-1] in ("X", "Q") and tk[-2] in ("X", "Q", "S"):
         return "leveraged ETF ticker pattern"
+    return None
+
+
+def _name_has_non_stock_product_keyword(name: str) -> bool:
+    normalized_name = re.sub(r"[^A-Z0-9]+", " ", str(name or "").upper()).strip()
+    if not normalized_name:
+        return False
+    padded_name = f" {normalized_name} "
+    for keyword in NON_STOCK_ETP_KEYWORDS:
+        normalized_keyword = re.sub(r"[^A-Z0-9]+", " ", keyword.upper()).strip()
+        if normalized_keyword and f" {normalized_keyword} " in padded_name:
+            return True
+    return False
+
+
+def _reference_asset_exclusion_reason(asset_type: str = "", name: str = "", market: str = "") -> Optional[str]:
+    """Classify Polygon reference metadata into tradeable stock vs non-stock product."""
+    ref_type = str(asset_type or "").upper().strip()
+    ref_name = str(name or "").upper().strip()
+    ref_market = str(market or "").lower().strip()
+
+    if ref_market and ref_market != "stocks":
+        return f"market={ref_market}"
+    if ref_type and ref_type not in STOCK_SCANNER_ALLOWED_REFERENCE_TYPES:
+        return f"type={ref_type}"
+    if _name_has_non_stock_product_keyword(ref_name):
+        return "non-stock product keyword"
+    if not ref_type:
+        return "missing reference type"
     return None
 
 
@@ -524,7 +553,7 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
     if tk in _ORB_REFERENCE_CACHE:
         return _ORB_REFERENCE_CACHE[tk]
     if not POLYGON_KEY:
-        return True, "no polygon key for reference check"
+        return False, "reference unavailable: missing Polygon key"
 
     try:
         url = f"https://api.polygon.io/v3/reference/tickers/{tk}"
@@ -539,14 +568,8 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
         name = str(details.get("name", "") or "").upper()
         market = str(details.get("market", "") or "").lower()
 
-        if asset_type and asset_type not in ORB_ALLOWED_POLYGON_TYPES:
-            result = (False, f"type={asset_type}")
-        elif any(keyword in f" {name}" for keyword in NON_STOCK_ETP_KEYWORDS):
-            result = (False, "ETF/ETP keyword")
-        elif market and market != "stocks":
-            result = (False, f"market={market}")
-        else:
-            result = (True, asset_type or "reference ok")
+        exclusion_reason = _reference_asset_exclusion_reason(asset_type, name, market)
+        result = (False, exclusion_reason) if exclusion_reason else (True, asset_type or "reference ok")
     except Exception as e:
         result = (False, f"reference error: {e}")
 
@@ -607,7 +630,7 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
                     name = str(item.get("name", "") or "").upper()
                     if not tk or market != "stocks" or item_type not in ORB_ALLOWED_POLYGON_TYPES:
                         continue
-                    if _looks_like_non_stock_etp_symbol(tk) or any(keyword in f" {name}" for keyword in NON_STOCK_ETP_KEYWORDS):
+                    if _looks_like_non_stock_etp_symbol(tk) or _name_has_non_stock_product_keyword(name):
                         continue
                     tickers.add(tk)
                 next_url = payload.get("next_url")
@@ -2416,7 +2439,13 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("missing_ticker")
     asset_exclusion_reason = None
     if ticker and scanner_name in _STOCK_EMAIL_ASSET_GUARD_SCANNERS:
-        asset_exclusion_reason = _stock_alert_asset_exclusion_reason(ticker, require_reference=False)
+        common_stock_universe, common_stock_source = _load_common_stock_universe()
+        asset_exclusion_reason = _stock_alert_asset_exclusion_reason(
+            ticker,
+            common_stock_universe=common_stock_universe,
+            universe_source=common_stock_source,
+            require_reference=common_stock_universe is None,
+        )
         if asset_exclusion_reason:
             reasons.append("non_common_stock_product")
     if grade not in _ALERT_TOP_GRADES:
@@ -3263,7 +3292,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
                 ticker_for_guard,
                 common_stock_universe=stock_guard_universe,
                 universe_source=stock_guard_source,
-                require_reference=False,
+                require_reference=stock_guard_universe is None,
             )
             if exclusion_reason:
                 continue
@@ -4640,7 +4669,7 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         ticker,
                         common_stock_universe=common_stock_universe,
                         universe_source=common_stock_source,
-                        require_reference=False,
+                        require_reference=common_stock_universe is None,
                     )
                     if non_stock_reason:
                         continue
@@ -5052,12 +5081,18 @@ def _turtle_scan_wrapper() -> None:
         print(f"[Turtle] {len(_all_tickers)} Aktien im Snapshot")
 
         # ── 2. Vorfilter: Preis $5+, Change > 0%, kein OTC ──
+        _common_stock_universe, _common_stock_source = _load_common_stock_universe()
         candidates = []
         for t in _all_tickers:
             ticker = t.get("ticker", "")
             if not ticker or "." in ticker or len(ticker) > 5:
                 continue  # OTC / Warrants raus
-            if _stock_alert_asset_exclusion_reason(ticker, require_reference=False):
+            if _stock_alert_asset_exclusion_reason(
+                ticker,
+                common_stock_universe=_common_stock_universe,
+                universe_source=_common_stock_source,
+                require_reference=_common_stock_universe is None,
+            ):
                 continue
             day = t.get("day", {})
             prev = t.get("prevDay", {})
@@ -10542,6 +10577,7 @@ def _volume_spikes_wrapper() -> None:
                     continue
                 tickers.extend(snap_resp.json().get("tickers", []))
 
+        common_stock_universe, common_stock_source = _load_common_stock_universe()
         seen_symbols = set()
         for t in tickers:
                 try:
@@ -10549,7 +10585,12 @@ def _volume_spikes_wrapper() -> None:
                     if not symbol or symbol in seen_symbols:
                         continue
                     seen_symbols.add(symbol)
-                    if _stock_alert_asset_exclusion_reason(symbol, require_reference=False):
+                    if _stock_alert_asset_exclusion_reason(
+                        symbol,
+                        common_stock_universe=common_stock_universe,
+                        universe_source=common_stock_source,
+                        require_reference=common_stock_universe is None,
+                    ):
                         continue
                     day = t.get("day", {})
                     prev = t.get("prevDay", {})

@@ -2,7 +2,20 @@ import json
 import time
 from datetime import datetime
 
+import pytest
+
 import api
+
+
+@pytest.fixture(autouse=True)
+def _mock_common_stock_universe(monkeypatch):
+    """Keep alert unit tests offline; individual asset-guard tests override this."""
+    test_stocks = {
+        "AAA", "BBB", "CCC", "DDD", "LATE", "RUNR", "MDRX", "REAL", "SKBL",
+        "FRESH", "BOUNCE", "DROP", "FWRD", "SHORTY", "BADLONG", "BADRR",
+        "MOMO", "ORB1", "DUP",
+    }
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
 
 
 def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
@@ -358,27 +371,27 @@ def test_stock_alert_asset_guard_uses_common_stock_universe():
         "NVBD",
         common_stock_universe={"REAL"},
         universe_source="unit",
-    ) == "known ETF/ETP ticker"
+    ) == "not in common-stock universe (unit)"
     assert api._stock_alert_asset_exclusion_reason(
         "NVDG",
         common_stock_universe={"REAL"},
         universe_source="unit",
-    ) == "known ETF/ETP ticker"
+    ) == "not in common-stock universe (unit)"
     assert api._stock_alert_asset_exclusion_reason(
         "NVDB",
         common_stock_universe={"REAL"},
         universe_source="unit",
-    ) == "known ETF/ETP ticker"
+    ) == "not in common-stock universe (unit)"
     assert api._stock_alert_asset_exclusion_reason(
         "BATT",
         common_stock_universe={"REAL"},
         universe_source="unit",
-    ) == "known ETF/ETP ticker"
+    ) == "not in common-stock universe (unit)"
     assert api._stock_alert_asset_exclusion_reason(
         "CORZZ",
         common_stock_universe={"REAL"},
         universe_source="unit",
-    ) == "known ETF/ETP ticker"
+    ) == "not in common-stock universe (unit)"
     assert api._stock_alert_asset_exclusion_reason(
         "FAKEETF",
         common_stock_universe={"REAL"},
@@ -403,6 +416,33 @@ def test_strategy_scan_decoration_filters_single_stock_etps(monkeypatch):
     decorated = api._decorate_scan_results(rows, "strategy_scan", cache_age_seconds=10)
 
     assert [row["Ticker"] for row in decorated] == ["REAL"]
+
+
+def test_reference_type_blocks_etfs_without_ticker_blacklist(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "results": {
+                    "ticker": "NVDB",
+                    "market": "stocks",
+                    "type": "ETF",
+                    "name": "ProShares UltraShort NVIDIA ETF",
+                }
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: FakeResponse())
+    api._ORB_REFERENCE_CACHE.clear()
+
+    assert "NVDB" not in api.NON_STOCK_ETP_TICKERS
+    assert api._stock_alert_asset_exclusion_reason("NVDB", require_reference=True) == "type=ETF"
+
+
+def test_reference_name_keyword_uses_whole_words():
+    assert api._reference_asset_exclusion_reason("CS", "Fundamental Global Inc", "stocks") is None
+    assert api._reference_asset_exclusion_reason("CS", "Example Acquisition Warrant", "stocks") == "non-stock product keyword"
 
 
 def test_email_dedupe_persists_crash_ticker(tmp_path, monkeypatch):
