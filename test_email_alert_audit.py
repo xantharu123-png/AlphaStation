@@ -365,15 +365,38 @@ def test_stock_alert_asset_guard_uses_common_stock_universe():
         universe_source="unit",
     ) == "known ETF/ETP ticker"
     assert api._stock_alert_asset_exclusion_reason(
+        "NVDB",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "known ETF/ETP ticker"
+    assert api._stock_alert_asset_exclusion_reason(
+        "BATT",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "known ETF/ETP ticker"
+    assert api._stock_alert_asset_exclusion_reason(
+        "CORZZ",
+        common_stock_universe={"REAL"},
+        universe_source="unit",
+    ) == "known ETF/ETP ticker"
+    assert api._stock_alert_asset_exclusion_reason(
         "FAKEETF",
         common_stock_universe={"REAL"},
         universe_source="unit",
     ) == "not in common-stock universe (unit)"
 
 
-def test_strategy_scan_decoration_filters_single_stock_etps():
+def test_strategy_scan_decoration_filters_single_stock_etps(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda: ({"REAL"}, "unit"))
     rows = [
         {"Ticker": "NVBD", "score": 99, "grade": "S"},
+        {"Ticker": "NVDB", "score": 99, "grade": "S"},
+        {"Ticker": "NVDG", "score": 99, "grade": "S"},
+        {"Ticker": "BATT", "score": 99, "grade": "S"},
+        {"Ticker": "KSTR", "score": 99, "grade": "S"},
+        {"Ticker": "LEUX", "score": 99, "grade": "S"},
+        {"Ticker": "CORZZ", "score": 99, "grade": "S"},
+        {"Ticker": "NOTREAL", "score": 99, "grade": "S"},
         {"Ticker": "REAL", "score": 80, "grade": "S"},
     ]
 

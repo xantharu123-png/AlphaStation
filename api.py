@@ -424,11 +424,12 @@ INVERSE_ETFS = {
 
 NON_STOCK_ETP_TICKERS = {
     "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ",
-    "NVDL", "NVDQ", "NVDU", "NVDD", "NVDS", "NVDX", "NVDY", "NVDG", "NVBD",
+    "NVDL", "NVDQ", "NVDU", "NVDD", "NVDS", "NVDX", "NVDY", "NVDG", "NVBD", "NVDB",
     "CONL", "GGLL", "GGLS", "AAPU", "AAPD", "AMZU", "AMZD", "METU", "METD",
     "SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU", "SPXL", "SPXS", "LABU", "LABD",
     "TECL", "TECS", "FNGU", "FNGD", "BOIL", "KOLD", "GUSH", "DRIP", "NUGT", "DUST",
     "JNUG", "JDST", "YINN", "YANG", "UVXY", "VIXY", "VXX", "BITO", "BITI",
+    "BATT", "KSTR", "LEUX", "CORZZ",
 }
 
 STOCK_SCANNER_ASSET_GUARD_NAMES = {
@@ -3244,6 +3245,10 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
     """Add consistent signal explanations and risk warnings to scanner rows."""
     decorated = []
     market_context = _get_market_context_snapshot()
+    stock_guard_universe = None
+    stock_guard_source = ""
+    if scanner_name in STOCK_SCANNER_ASSET_GUARD_NAMES:
+        stock_guard_universe, stock_guard_source = _load_common_stock_universe()
     for raw in results or []:
         if not isinstance(raw, dict):
             decorated.append(raw)
@@ -3254,7 +3259,12 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
 
         ticker_for_guard = str(item.get("Ticker") or item.get("ticker") or item.get("symbol") or "").upper().strip()
         if ticker_for_guard and scanner_name in STOCK_SCANNER_ASSET_GUARD_NAMES:
-            exclusion_reason = _stock_alert_asset_exclusion_reason(ticker_for_guard, require_reference=False)
+            exclusion_reason = _stock_alert_asset_exclusion_reason(
+                ticker_for_guard,
+                common_stock_universe=stock_guard_universe,
+                universe_source=stock_guard_source,
+                require_reference=False,
+            )
             if exclusion_reason:
                 continue
 
