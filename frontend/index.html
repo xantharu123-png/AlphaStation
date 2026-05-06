@@ -2821,6 +2821,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         if (normalizedSetupAction === 'WAIT_FOR_CONTINUATION') return 'WARTEN AUF FORTSETZUNG';
         return 'BEOBACHTEN';
     })();
+    const rawEntryStatus = activeTradeSetup?.entry_status || cd.entry_status || '';
+    const entryStatusDisplay = String(rawEntryStatus).toUpperCase() === 'BEOBACHTEN' ? '' : rawEntryStatus;
     const setupActionLabel = activeTradeSetup?.action_label || cd.signal_label || cd.action_label || timingHeadline || tradeSignal || setupAction || 'Setup';
     const setupTone = tradeSignal === 'JETZT_TRADEN'
         ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
@@ -3102,9 +3104,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 <div className={`text-base font-bold ${setupTitleTone}`}>
                                     {timingHeadline}
                                 </div>
-                                {(activeTradeSetup?.entry_status || cd.entry_status) && (
+                                {entryStatusDisplay && (
                                     <div className="text-[11px] font-semibold opacity-70">
-                                        {activeTradeSetup?.entry_status || cd.entry_status}
+                                        {entryStatusDisplay}
                                     </div>
                                 )}
                                 <div className="opacity-80">{nextStepText}</div>
@@ -4957,6 +4959,32 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'TRIGGER FEHLT', cls: 'signal-abwarten' };
         return { label: 'WATCH', cls: 'signal-abwarten' };
     };
+    const actionBadge = (item) => {
+        const signal = String(item.trade_signal || '').toUpperCase();
+        const action = String(item.trade_action || item.entry_status || '').toUpperCase();
+        if (signal === 'JETZT_TRADEN') {
+            return { label: 'JETZT TRADEN', detail: 'Execution bestaetigt', cls: 'bg-green-100 text-green-800' };
+        }
+        if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') {
+            return { label: 'NICHT TRADEN', detail: 'Kein Entry', cls: 'bg-red-100 text-red-800' };
+        }
+        if (action === 'WAIT_FOR_RETEST' || action === 'WAIT_FOR_CONTINUATION') {
+            return { label: 'WARTEN AUF RETEST', detail: 'Retest/Continuation abwarten', cls: 'bg-amber-100 text-amber-800' };
+        }
+        if (action === 'WAIT_FOR_BTC_CONFIRMATION') {
+            return { label: 'BTC FEHLT', detail: 'BTC muss bestaetigen', cls: 'bg-yellow-100 text-yellow-800' };
+        }
+        if (action === 'WAIT_FOR_LIQUIDITY') {
+            return { label: 'LIQUIDITAET FEHLT', detail: 'Orderbuch/Perp zu duenn', cls: 'bg-yellow-100 text-yellow-800' };
+        }
+        if (action === 'LONG_TRIGGER') {
+            return { label: 'TRIGGER FEHLT', detail: 'Execution-Trigger fehlt', cls: 'bg-blue-100 text-blue-800' };
+        }
+        if (signal === 'WARTEN') {
+            return { label: 'WARTEN', detail: 'Noch keine Freigabe', cls: 'bg-yellow-100 text-yellow-800' };
+        }
+        return { label: 'SETUP WATCH', detail: 'Noch kein Entry', cls: 'bg-sky-100 text-sky-800' };
+    };
     const earlyRiskLabelMap = {
         observe_only_scanner: 'nur Beobachtung',
         no_intraday_execution_trigger: '5m Trigger fehlt',
@@ -5092,7 +5120,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                <b>Score/Grade</b> = Setup-Qualitaet. <b>Timing</b> = ob jetzt gehandelt wird. Ein S-Setup kann BEOBACHTEN bleiben, wenn 5m-Trigger oder Retest noch fehlt.
+                <b>Score/Grade</b> = Setup-Qualitaet. <b>Timing</b> = ob jetzt gehandelt wird. Ein S-Setup ist erst ein Trade, wenn Trigger oder Retest bestaetigt sind.
             </div>
 
             {/* Unified Phase Table */}
@@ -5117,6 +5145,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     <tbody>
                         {filtered.map((item, idx) => {
                             const timing = timingBadge(item);
+                            const actionView = actionBadge(item);
                             const primaryReason = getPrimaryEntryReason(item);
                             return (
                             <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
@@ -5147,10 +5176,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     )}
                                 </td>
                                 <td className="py-3 px-2 text-xs">
-                                    <span className={`px-2 py-1 rounded font-semibold ${item.trade_signal === 'JETZT_TRADEN' ? 'bg-green-100 text-green-800' : item.trade_signal === 'NICHT_TRADEN' ? 'bg-red-100 text-red-800' : item.trade_signal === 'WARTEN' ? 'bg-yellow-100 text-yellow-800' : 'bg-sky-100 text-sky-800'}`}>
-                                        {item.trade_signal === 'JETZT_TRADEN' ? 'JETZT TRADEN' : item.trade_signal || 'BEOBACHTEN'}
+                                    <span className={`px-2 py-1 rounded font-semibold ${actionView.cls}`}>
+                                        {actionView.label}
                                     </span>
-                                    {item.signal_label && <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={item.signal_label}>{String(item.signal_label).replace('Achtung beobachten: ', '')}</div>}
+                                    <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={item.signal_label || actionView.detail}>{String(item.signal_label || actionView.detail).replace('Achtung beobachten: ', '')}</div>
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
                                 <td className="py-3 px-2 text-right text-xs">
