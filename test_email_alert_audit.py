@@ -650,8 +650,9 @@ def test_bi_short_alert_blocks_late_crash_chase():
     assert "latest_5m_green_reclaim" in state["suppression_reasons"]
 
 
-def test_new_listing_pipeline_alerts_only_active_top_grades(monkeypatch):
+def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
 

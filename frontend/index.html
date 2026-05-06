@@ -2123,6 +2123,20 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
     const isCrypto = scannerData?.isCrypto || false;
     const isExchangeCrypto = scannerData?.isExchangeCrypto || false;
+    const cryptoPerpExchangeRaw = scannerData?.PerpChartExchange || scannerData?.perp_chart_exchange || scannerData?.BestExchange || '';
+    const cryptoPerpExchange = String(cryptoPerpExchangeRaw || '').toLowerCase();
+    const cryptoPerpSymbol = scannerData?.PerpChartSymbol || scannerData?.perp_chart_symbol || null;
+    const hasCryptoIntradayChart = Boolean(
+        isExchangeCrypto ||
+        (isCrypto && scannerData?.HasPerp && cryptoPerpSymbol && cryptoPerpExchange)
+    );
+    const availableTimeframes = isCrypto && !hasCryptoIntradayChart ? ['1D'] : TIMEFRAMES;
+
+    useEffect(() => {
+        if (isCrypto && !hasCryptoIntradayChart && timeframe !== '1D') {
+            setTimeframe('1D');
+        }
+    }, [isCrypto, hasCryptoIntradayChart, timeframe]);
 
     // Fetch ticker detail data (metrics) — skip for crypto
     useEffect(() => {
@@ -2168,23 +2182,20 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     }
                 } else if (isCrypto) {
                     const coinId = scannerData?.ID || scannerData?.id || ticker.toLowerCase();
-                    const exchangeNameRaw = scannerData?.PerpChartExchange || scannerData?.perp_chart_exchange || scannerData?.BestExchange || '';
-                    const exchangeName = String(exchangeNameRaw).toLowerCase().replace('mexc', 'mexc').replace('bitget', 'bitget');
-                    const exchangeSymbol = scannerData?.PerpChartSymbol || scannerData?.perp_chart_symbol || null;
                     let cryptoSuccess = false;
 
                     // Early Movers brauchen echte Intraday-Trigger. Wenn ein Perp-Match existiert,
                     // nutzen wir zuerst Exchange-Candles statt CoinGecko-Daily-Kontext.
-                    if (scannerData?.HasPerp && exchangeSymbol && exchangeName) {
+                    if (scannerData?.HasPerp && cryptoPerpSymbol && cryptoPerpExchange) {
                         try {
-                            const res = await fetchWithTimeout(`${API}/api/exchange-chart?symbol=${encodeURIComponent(exchangeSymbol)}&exchange=${encodeURIComponent(exchangeName)}&timeframe=${timeframe}&count=160`, { signal }, 5000);
+                            const res = await fetchWithTimeout(`${API}/api/exchange-chart?symbol=${encodeURIComponent(cryptoPerpSymbol)}&exchange=${encodeURIComponent(cryptoPerpExchange)}&timeframe=${timeframe}&count=160`, { signal }, 5000);
                             if (signal.aborted) return;
                             if (res.ok) {
                                 const chartJson = await res.json();
                                 if (chartJson.candles && chartJson.candles.length > 0) {
                                     setChartData({
                                         ...chartJson,
-                                        source: `Exchange Perp (${exchangeNameRaw || exchangeName})`,
+                                        source: `Exchange Perp (${cryptoPerpExchangeRaw || cryptoPerpExchange})`,
                                         chart_note: 'Echter Perp-Chart fuer Entry/Retest-Trigger',
                                     });
                                     cryptoSuccess = true;
@@ -2274,6 +2285,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         scannerData?.PerpChartExchange,
         scannerData?.perp_chart_exchange,
         scannerData?.BestExchange,
+        cryptoPerpSymbol,
+        cryptoPerpExchange,
+        cryptoPerpExchangeRaw,
     ]);
 
     const loadAiAnalysis = async () => {
@@ -2789,26 +2803,37 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const stockQuoteChange = firstFiniteChange(
         d.change_1d, cd.change_pct, cd.ChangePct, cd.ChangePct1D, cd.change_percent, cd.ChangePercent, cd['Change %'], cd['Änderung%']
     );
-    const price = Number(isExchangeCrypto ? cd.price : isCrypto ? cd.Price : (stockQuotePrice ?? _chartPrice)) || 0;
-    const change = Number(isExchangeCrypto ? cd.change_24h : isCrypto ? cd.Change24h : (stockQuoteChange ?? _chartChange)) || 0;
+    const price = Number(_chartPrice ?? stockQuotePrice) || 0;
+    const change = Number(_chartChange ?? stockQuoteChange) || 0;
+    const priceSourceLabel = _chartPrice ? `${chartData?.timeframe || timeframe} Chart` : 'Scanner';
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const activeTradeSetup = cd.trade_setup || d.trade_setup || null;
     const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
+    const normalizedSetupAction = String(setupAction || '').toUpperCase();
     const tradeSignal = cd.trade_signal || d.trade_signal || '';
-    const setupActionLabel = cd.signal_label || activeTradeSetup?.action_label || cd.action_label || tradeSignal || setupAction || 'Setup';
+    const timingHeadline = (() => {
+        if (tradeSignal === 'JETZT_TRADEN') return 'JETZT TRADEN';
+        if (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_TRADE' || normalizedSetupAction === 'NO_LONG_CHASE') return 'NICHT TRADEN';
+        if (normalizedSetupAction === 'WAIT_FOR_RETEST') return 'WARTEN AUF RETEST';
+        if (normalizedSetupAction === 'WAIT_FOR_BTC_CONFIRMATION') return 'BTC BESTAETIGUNG FEHLT';
+        if (normalizedSetupAction.includes('TRIGGER')) return 'TRIGGER FEHLT';
+        if (normalizedSetupAction === 'WAIT_FOR_CONTINUATION') return 'WARTEN AUF FORTSETZUNG';
+        return 'BEOBACHTEN';
+    })();
+    const setupActionLabel = activeTradeSetup?.action_label || cd.signal_label || cd.action_label || timingHeadline || tradeSignal || setupAction || 'Setup';
     const setupTone = tradeSignal === 'JETZT_TRADEN'
         ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-        : (tradeSignal === 'NICHT_TRADEN' || setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
+        : (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
             ? 'bg-red-50 border-red-300 text-red-900'
-            : (tradeSignal === 'WARTEN' || setupAction.includes('WAIT'))
+            : (tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
                 ? 'bg-amber-50 border-amber-300 text-amber-900'
                 : 'bg-sky-50 border-sky-300 text-sky-900';
     const setupTitleTone = tradeSignal === 'JETZT_TRADEN'
         ? 'text-emerald-800'
-        : (tradeSignal === 'NICHT_TRADEN' || setupAction === 'NO_LONG_CHASE' || setupAction === 'NO_TRADE')
+        : (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
             ? 'text-red-800'
-            : (tradeSignal === 'WARTEN' || setupAction.includes('WAIT'))
+            : (tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
                 ? 'text-amber-800'
                 : 'text-sky-800';
     const viewDirection = (d.confluence?.direction || activeTradeSetup?.direction || cd.direction || '').toUpperCase();
@@ -2881,13 +2906,24 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const nextStepText = (() => {
         const action = String(setupAction || '').toUpperCase();
         if (tradeSignal === 'JETZT_TRADEN') return 'Trigger bestaetigt - jetzt Spread/Chart pruefen.';
-        if (tradeSignal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return 'Nicht handeln - Bewegung ist zu weit gelaufen.';
+        if (tradeSignal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') return 'Nicht handeln - Bewegung ist zu weit gelaufen oder Setup ist ungueltig.';
         if (action === 'WAIT_FOR_RETEST') return 'Auf Retest nahe Entry warten.';
         if (action === 'WAIT_FOR_BTC_CONFIRMATION') return 'Warten bis BTC nicht mehr dagegen laeuft.';
         if (action === 'LONG_TRIGGER') return 'Auf frischen 5m/1m Trigger warten.';
         return 'Beobachten, noch kein Sofort-Entry.';
     })();
-    const reminderEligible = activeTradeSetup && tradeSignal !== 'JETZT_TRADEN' && tradeSignal !== 'NICHT_TRADEN';
+    const reminderEligible = Boolean(
+        activeTradeSetup &&
+        tradeSignal !== 'JETZT_TRADEN' &&
+        tradeSignal !== 'NICHT_TRADEN' &&
+        !['NO_TRADE', 'NO_LONG_CHASE', 'BEOBACHTEN', 'WATCH_ONLY'].includes(normalizedSetupAction) &&
+        (
+            normalizedSetupAction.includes('WAIT') ||
+            normalizedSetupAction.includes('TRIGGER') ||
+            normalizedSetupAction.includes('RETEST') ||
+            tradeSignal === 'WARTEN'
+        )
+    );
     const triggerChecklist = (() => {
         const raw = activeTradeSetup?.trigger_conditions || cd.trigger_conditions;
         const lines = Array.isArray(raw) && raw.length
@@ -2916,7 +2952,13 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     condition: 'trigger_or_retest',
                     duration_hours: hours,
                     channel,
-                    row: { ...cd, ...d, trade_setup: activeTradeSetup },
+                    row: {
+                        ...d,
+                        ...cd,
+                        trade_setup: activeTradeSetup,
+                        chart_timeframe: chartData?.timeframe || timeframe,
+                        chart_source: chartData?.source || 'chart',
+                    },
                 }),
             });
             const data = await res.json().catch(() => ({}));
@@ -2962,6 +3004,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <p className="text-2xl font-bold mt-1">
                             ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
+                        <div className="text-[11px] text-gray-400 mt-0.5">Preis: {priceSourceLabel}</div>
                     </div>
                     <div className="flex gap-2 items-center">
                         <button onClick={cycleMode} className="sidebar-mode-btn" title={`Modus: ${modeLabel}`}>
@@ -3057,7 +3100,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div className="flex items-start justify-between gap-2 mb-2">
                             <div>
                                 <div className={`text-base font-bold ${setupTitleTone}`}>
-                                    {tradeSignal === 'JETZT_TRADEN' ? 'JETZT TRADEN' : tradeSignal === 'NICHT_TRADEN' ? 'NICHT TRADEN' : 'BEOBACHTEN'}
+                                    {timingHeadline}
                                 </div>
                                 {(activeTradeSetup?.entry_status || cd.entry_status) && (
                                     <div className="text-[11px] font-semibold opacity-70">
@@ -3068,7 +3111,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             </div>
                             <div className="text-right">
                                 <div className="font-bold">{cd.grade || d.signal_grade || '-'}</div>
-                                <div className="opacity-70">Score {Math.round(cd.score || cd.EarlyScore || d.signal_score || 0)}</div>
+                                <div className="opacity-70">Setup {Math.round(cd.score || cd.EarlyScore || d.signal_score || 0)}</div>
                             </div>
                         </div>
                         <div className="grid grid-cols-4 gap-2 mb-2">
@@ -3129,7 +3172,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
                 {/* Timeframe Selector */}
                 <div className="flex gap-1 mb-2 flex-wrap">
-                    {TIMEFRAMES.map(tf => (
+                    {availableTimeframes.map(tf => (
                         <button key={tf} onClick={() => setTimeframe(tf)}
                             className={`px-2 py-1 text-xs rounded ${timeframe === tf ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
                             {tf}
@@ -3139,6 +3182,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 {isCrypto && chartData?.chart_note && (
                     <div className="mb-3 text-[11px] text-gray-500">
                         Chartquelle: <span className="font-semibold">{chartData.source || 'Crypto'}</span>
+                        {!hasCryptoIntradayChart && <span> - nur Daily-Kontext, kein Intraday-Entry</span>}
                     </div>
                 )}
 
@@ -3381,7 +3425,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
                 {/* Pivot levels + Fibonacci */}
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
-                    <h4 className="font-semibold text-sm mb-2">Pivot / Range</h4>
+                    <h4 className="font-semibold text-sm mb-2">Daily Pivot / Range</h4>
                     <div className="grid grid-cols-2 gap-2">
                         <div><span className="text-gray-500">Pivot S1</span> <span className="font-semibold color-positive">${d.support_1}</span></div>
                         <div><span className="text-gray-500">Pivot R1</span> <span className="font-semibold color-negative">${d.resistance_1}</span></div>
@@ -8042,9 +8086,9 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 </div>
                             </div>
 
-                            {/* Pivot / Range */}
+                            {/* Daily Pivot / Range */}
                             <div className="card" style={{ padding: 16, borderRadius: 12, border: '1px solid var(--border-color)' }}>
-                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Pivot / Range</h4>
+                                <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Daily Pivot / Range</h4>
                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Pivot S1</span><div style={{ fontWeight: 700, color: '#10b981' }}>${d.support_1 || '-'}</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Pivot R1</span><div style={{ fontWeight: 700, color: '#ef4444' }}>${d.resistance_1 || '-'}</div></div>
