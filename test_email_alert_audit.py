@@ -695,6 +695,51 @@ def test_strategy_scan_email_includes_entry_stop_tp1_tp2(monkeypatch):
     assert "$14" in body
 
 
+def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: False)
+
+    api._send_strategy_scan_alerts("Momentum Breakout Long", [{
+        "Ticker": "MOMO",
+        "grade": "A",
+        "score": 91,
+        "RVOL": 2.2,
+        "Preis": 12.4,
+        "Change %": 3.0,
+        "Signal_Direction": "LONG",
+        "Entry": 12.4,
+        "StopLoss": 11.8,
+        "TP1": 13.4,
+        "TP2": 14.0,
+    }], "stocks")
+
+    assert "stock_strategy_MOMO" not in api._EMAIL_COOLDOWN
+
+
+def test_strategy_scan_dedupes_same_ticker_inside_one_mail(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    row = {
+        "Ticker": "MOMO",
+        "grade": "A",
+        "score": 91,
+        "RVOL": 2.2,
+        "Preis": 12.4,
+        "Change %": 3.0,
+        "Signal_Direction": "LONG",
+        "Entry": 12.4,
+        "StopLoss": 11.8,
+        "TP1": 13.4,
+        "TP2": 14.0,
+    }
+
+    api._send_strategy_scan_alerts("Momentum Breakout Long", [dict(row), dict(row)], "stocks")
+
+    assert len(sent) == 1
+    assert sent[0][1].count("<b>MOMO</b>") == 1
+
+
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0

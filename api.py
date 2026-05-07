@@ -2940,6 +2940,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     alerts = []
     suppressed: Dict[str, int] = {}
     grade_counts: Dict[str, int] = {}
+    seen_cooldown_keys = set()
     for row in results[:25]:
         if not isinstance(row, dict):
             continue
@@ -2961,8 +2962,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
-        _EMAIL_COOLDOWN[state["cooldown_key"]] = now
+        if state["cooldown_key"] in seen_cooldown_keys:
+            suppressed["duplicate_ticker_in_scan"] = suppressed.get("duplicate_ticker_in_scan", 0) + 1
+            continue
+        seen_cooldown_keys.add(state["cooldown_key"])
         alerts.append({
+            "cooldown_key": state["cooldown_key"],
             "ticker": state["ticker"],
             "grade": state["grade"],
             "score": state["score"],
@@ -3010,7 +3015,11 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE} und Grade S/A/A+; 8h Cooldown pro Ticker.</p>
     </body></html>'''
-    _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
+    sent = _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
+    if sent:
+        for alert in alerts:
+            if alert.get("cooldown_key"):
+                _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
 
 
 def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
