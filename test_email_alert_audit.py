@@ -43,6 +43,69 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert audit["suppression_counts"]["score_below_alert_threshold"] == 2
 
 
+def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BIOA"}, "unit"))
+    cache_file = tmp_path / "biotech.json"
+    monkeypatch.setattr(api, "BIOTECH_CACHE", str(cache_file))
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "Ticker": "BIOA",
+            "Grade": "A",
+            "Score": 86,
+            "RVOL": 1.4,
+            "Preis": 12.0,
+            "Tech_Details": {
+                "support": 11.4,
+                "resistance": 12.8,
+                "high_90d": 13.2,
+                "low_90d": 9.5,
+                "range_10d%": 8.0,
+                "pos_90d": 68,
+            },
+        }],
+    }))
+
+    audit = api._build_alert_audit_for_cache("biotech", str(cache_file))
+
+    assert audit["alertable_now_count"] == 1
+    row = json.loads(cache_file.read_text())["results"][0]
+    assert row["Signal_Direction"] == "LONG"
+    assert row["Entry"] > row["StopLoss"]
+    assert row["TP1"] > row["Entry"]
+    assert row["TP2"] > row["TP1"]
+
+
+def test_stock_alert_skip_reason_is_logged(tmp_path, monkeypatch):
+    api._EMAIL_SEND_LOG.clear()
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"AAA"}, "unit"))
+    cache_file = tmp_path / "bi_long.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [{
+            "Ticker": "AAA",
+            "BI_Grade": "B",
+            "BI_Score": 74,
+            "RVOL": 1.4,
+            "Preis": 10.0,
+            "BI_Direction": "LONG",
+            "Entry": 10.0,
+            "StopLoss": 9.5,
+            "TP1": 10.8,
+            "TP2": 11.3,
+        }],
+    }))
+
+    api._check_and_alert("bi_long", str(cache_file))
+
+    assert api._EMAIL_SEND_LOG[-1]["status"] == "skipped"
+    assert api._EMAIL_SEND_LOG[-1]["subject"] == "bi_long Stock Alert"
+    assert "no_alertable_stock_setups" in api._EMAIL_SEND_LOG[-1]["reason"]
+    assert "score_below_alert_threshold" in api._EMAIL_SEND_LOG[-1]["reason"]
+
+
 def test_long_alert_audit_blocks_extended_fading_move(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "long_fade.json"

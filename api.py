@@ -855,6 +855,7 @@ _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "stock_strategy", "strategy_
 _STOCK_EMAIL_ASSET_GUARD_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "stock_strategy", "strategy_scan"
 }
+_STOCK_ALERT_SCANNERS = set(_STOCK_EMAIL_ASSET_GUARD_SCANNERS)
 _CRYPTO_STRATEGY_ALERTS_ENABLED = False
 _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys()) | {
     "SDS", "UDOW", "SVXY", "TVIX",
@@ -899,6 +900,26 @@ def _record_email_event(subject: str, status: str, reason: str = "") -> None:
     })
     if len(_EMAIL_SEND_LOG) > 50:
         del _EMAIL_SEND_LOG[:-50]
+
+
+def _format_alert_suppression_summary(
+    suppressed: Dict[str, int],
+    grade_counts: Optional[Dict[str, int]] = None,
+    max_items: int = 8,
+) -> str:
+    parts = [
+        f"{reason}={count}"
+        for reason, count in sorted(suppressed.items(), key=lambda item: (-item[1], item[0]))[:max_items]
+    ]
+    summary = ", ".join(parts) if parts else "no_candidates"
+    if grade_counts:
+        grades = ", ".join(
+            f"{grade}:{count}"
+            for grade, count in sorted(grade_counts.items(), key=lambda item: str(item[0]))
+        )
+        if grades:
+            summary = f"{summary}; grades={grades}"
+    return summary[:900]
 
 
 def _load_email_dedupe(now: Optional[float] = None, max_keep_seconds: int = 7 * 86400) -> Dict[str, float]:
@@ -2578,6 +2599,8 @@ def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> L
 
 
 def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str, Any]:
+    if scanner_name == "biotech":
+        _enrich_biotech_alert_trade_levels()
     rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file)
     now = time.time()
     grade_counts: Dict[str, int] = {}
@@ -2606,6 +2629,20 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
         "alertable_preview": alertable[:10],
         "suppression_counts": reason_counts,
     }
+
+
+def _alert_suppression_summary_for_rows(scanner_name: str, rows: List[Dict[str, Any]], now: Optional[float] = None) -> str:
+    now = now or time.time()
+    suppressed: Dict[str, int] = {}
+    grade_counts: Dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = _classify_alert_candidate(scanner_name, row, now)
+        grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
+        for reason in state["suppression_reasons"]:
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+    return _format_alert_suppression_summary(suppressed, grade_counts)
 
 
 def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False):
@@ -2724,7 +2761,14 @@ def _check_and_alert(scanner_name, cache_file):
         if not alerts:
             # Log warum keine Alerts
             all_grades = [_extract_alert_grade(r) or "?" for r in results if isinstance(r, dict)]
-            print(f"[Alert] {scanner_name}: Keine alertbaren Grades. Vorhandene Grades: {dict((g, all_grades.count(g)) for g in set(all_grades))}; suppressed={suppressed}")
+            grade_counts = dict((g, all_grades.count(g)) for g in set(all_grades))
+            print(f"[Alert] {scanner_name}: Keine alertbaren Grades. Vorhandene Grades: {grade_counts}; suppressed={suppressed}")
+            if scanner_name in _STOCK_ALERT_SCANNERS:
+                _record_email_event(
+                    f"{scanner_name} Stock Alert",
+                    "skipped",
+                    f"no_alertable_stock_setups:{_format_alert_suppression_summary(suppressed, grade_counts)}",
+                )
             return
         labels = {"bi_long": "BI Scanner LONG", "bi_short": "BI Scanner SHORT",
                   "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
@@ -2773,9 +2817,13 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
     now = time.time()
     alerts = []
+    suppressed: Dict[str, int] = {}
+    grade_counts: Dict[str, int] = {}
     for row in results[:25]:
         if not isinstance(row, dict):
             continue
+        grade_for_counts = _extract_alert_grade(row) or "UNKNOWN"
+        grade_counts[grade_for_counts] = grade_counts.get(grade_for_counts, 0) + 1
         if scanner_key in _LONG_ENTRY_ALERT_SCANNERS:
             ticker_probe = _extract_alert_ticker(row)
             grade_probe = _extract_alert_grade(row)
@@ -2789,6 +2837,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 row["alertable_long"] = not _long_entry_rule_reasons(row)
         state = _classify_alert_candidate(scanner_key, row, now)
         if not state["alertable_now"]:
+            for reason in state["suppression_reasons"]:
+                suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         _EMAIL_COOLDOWN[state["cooldown_key"]] = now
         alerts.append({
@@ -2805,6 +2855,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         })
 
     if not alerts:
+        if market_type == "stocks":
+            _record_email_event(
+                f"Aktien Strategie Alert - {strategy_name}",
+                "skipped",
+                f"no_alertable_strategy_setups:{_format_alert_suppression_summary(suppressed, grade_counts)}",
+            )
         return
 
     rows = ""
@@ -4652,12 +4708,78 @@ def _bi_background_scan_wrapper(direction: str) -> None:
         traceback.print_exc()
 
 
+def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
+    """Add structured long levels to Biotech cache rows before email gating."""
+    rows, _ = load_cache_file(BIOTECH_CACHE, max_age_hours=24 * 30)
+    if not rows:
+        return {"rows": 0, "changed": 0, "valid_after": 0}
+
+    changed = 0
+    valid_after = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if _alert_trade_levels(row).get("valid"):
+            valid_after += 1
+            continue
+
+        price = _alert_float(row.get("Preis", row.get("price", row.get("Price"))))
+        if not price or price <= 0:
+            continue
+
+        tech = row.get("Tech_Details") if isinstance(row.get("Tech_Details"), dict) else {}
+        support = _alert_float(tech.get("support"))
+        resistance = _alert_float(tech.get("resistance"))
+        high_90d = _alert_float(tech.get("high_90d"))
+        low_90d = _alert_float(tech.get("low_90d"))
+        atr = _alert_float(tech.get("atr_14"))
+
+        if not atr or atr <= 0:
+            sr_range = (resistance - support) if support and resistance and resistance > support else 0
+            range_10d_pct = _alert_float(tech.get("range_10d%"))
+            atr = max(price * 0.035, sr_range * 0.25 if sr_range > 0 else 0)
+            if range_10d_pct and range_10d_pct > 0:
+                atr = max(atr, price * min(max(range_10d_pct / 300, 0.025), 0.08))
+
+        setup = _build_structured_trade_setup(
+            "LONG",
+            price,
+            atr,
+            support,
+            resistance,
+            high_90d,
+            low_90d,
+            tech.get("pos_90d"),
+        )
+        if not setup:
+            continue
+
+        row["direction"] = "LONG"
+        row["Signal_Direction"] = "LONG"
+        row["Entry"] = setup["entry"]
+        row["StopLoss"] = setup["stop"]
+        row["TP1"] = setup["tp1"]
+        row["TP2"] = setup["tp2"]
+        row["trade_setup"] = setup
+        row["Trade_Setup_Source"] = "biotech_daily_structure"
+        changed += 1
+        if _alert_trade_levels(row).get("valid"):
+            valid_after += 1
+
+    if changed:
+        save_cache_file(BIOTECH_CACHE, rows)
+    return {"rows": len(rows), "changed": changed, "valid_after": valid_after}
+
+
 def _biotech_scan_wrapper() -> None:
     """Wrapper to run biotech background scan in background."""
     try:
         print("[Biotech] Starting scan... (this takes 5-15 minutes)")
         _biotech_background_scan(POLYGON_KEY)
         print("[Biotech] Scan completed")
+        enrichment = _enrich_biotech_alert_trade_levels()
+        if enrichment.get("changed"):
+            print(f"[Biotech] Added alert trade levels: {enrichment}")
         # Email Alert bei Grade S/A
         _check_and_alert("biotech", BIOTECH_CACHE)
     except Exception as e:
@@ -5739,6 +5861,13 @@ def _bear_scan_wrapper() -> None:
                         for _cs in _crash_stocks:
                             _mark_bearish_stock_alert(_cs.get("ticker", ""), now=time.time())
                         print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
+            elif result.get("breakdown_stocks"):
+                _record_email_event(
+                    "Crash Alert",
+                    "skipped",
+                    "no_active_crash_stock:"
+                    + _alert_suppression_summary_for_rows("bear", result.get("breakdown_stocks", [])),
+                )
 
             # V2.6b: Bear Summary Email — 1x pro Tag, nur wenn Grade S/A Signale dabei
             _bd_rows = []
@@ -5795,6 +5924,13 @@ def _bear_scan_wrapper() -> None:
                         _EMAIL_COOLDOWN[_bear_ck] = time.time()
                         for _ticker in _bear_summary_tickers:
                             _mark_bearish_stock_alert(_ticker, now=time.time())
+            elif result.get("breakdown_stocks"):
+                _record_email_event(
+                    "Bear Scanner Alert",
+                    "skipped",
+                    "no_alertable_short_setup:"
+                    + _alert_suppression_summary_for_rows("bear", result.get("breakdown_stocks", [])),
+                )
         else:
             print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
@@ -8454,6 +8590,7 @@ def trigger_biotech_scan():
 @app.get("/api/biotech-results", response_model=ScanResultsResponse)
 def get_biotech_results():
     """Get cached biotech scan results."""
+    _enrich_biotech_alert_trade_levels()
     results, cached_at = load_cache_file(BIOTECH_CACHE)
     results = _normalize_keys(results, _BIOTECH_KEY_MAP)
     results = _sanitize_biotech_public_results(results)
