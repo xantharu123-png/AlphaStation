@@ -98,6 +98,22 @@ def test_early_mover_btc_headwind_blocks_active_long_trigger(monkeypatch):
     assert row["btc_context"]["tailwind"] is False
 
 
+def test_early_mover_wait_states_keep_specific_timing_label():
+    row = {"trade_action": "LONG_TRIGGER"}
+    api._apply_early_mover_signal_state(row, {"ok": False, "reason": "no_fresh_5m_trigger"})
+
+    assert row["trade_signal"] == "WARTEN"
+    assert row["entry_status"] == "WAIT_FOR_TRIGGER"
+    assert "Trigger" in row["signal_label"]
+
+    retest = {"trade_action": "WAIT_FOR_RETEST"}
+    api._apply_early_mover_signal_state(retest, {"ok": False, "reason": "no_fresh_5m_trigger"})
+
+    assert retest["trade_signal"] == "WARTEN"
+    assert retest["entry_status"] == "WAIT_FOR_RETEST"
+    assert "Retest" in retest["signal_label"]
+
+
 def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
     coin = _volume_coin(symbol="whale", coin_id="whale-test", change_24h=2.0)
     coin["market_cap"] = 80_000_000

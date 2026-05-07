@@ -2911,6 +2911,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         if (tradeSignal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') return 'Nicht handeln - Bewegung ist zu weit gelaufen oder Setup ist ungueltig.';
         if (action === 'WAIT_FOR_RETEST') return 'Auf Retest nahe Entry warten.';
         if (action === 'WAIT_FOR_BTC_CONFIRMATION') return 'Warten bis BTC nicht mehr dagegen laeuft.';
+        if (action === 'WAIT_FOR_CONTINUATION') return 'Erst neue Flag, VWAP-Hold oder Higher-Low handeln.';
         if (action === 'LONG_TRIGGER') return 'Auf frischen 5m/1m Trigger warten.';
         return 'Beobachten, noch kein Sofort-Entry.';
     })();
@@ -4954,9 +4955,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
-        if (signal === 'WARTEN' || action === 'WAIT_FOR_BTC_CONFIRMATION') return { label: 'WARTEN', cls: 'signal-lightdiv' };
         if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST', cls: 'signal-lightdiv' };
         if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'TRIGGER FEHLT', cls: 'signal-abwarten' };
+        if (action === 'WAIT_FOR_CONTINUATION') return { label: 'FORTSETZUNG', cls: 'signal-lightdiv' };
+        if (signal === 'WARTEN' || action === 'WAIT_FOR_BTC_CONFIRMATION') return { label: 'WARTEN', cls: 'signal-lightdiv' };
         return { label: 'WATCH', cls: 'signal-abwarten' };
     };
     const actionBadge = (item) => {
@@ -4968,8 +4970,11 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') {
             return { label: 'NICHT TRADEN', detail: 'Kein Entry', cls: 'bg-red-100 text-red-800' };
         }
-        if (action === 'WAIT_FOR_RETEST' || action === 'WAIT_FOR_CONTINUATION') {
-            return { label: 'WARTEN AUF RETEST', detail: 'Retest/Continuation abwarten', cls: 'bg-amber-100 text-amber-800' };
+        if (action === 'WAIT_FOR_RETEST') {
+            return { label: 'WARTEN AUF RETEST', detail: 'Retest nahe Entry abwarten', cls: 'bg-amber-100 text-amber-800' };
+        }
+        if (action === 'WAIT_FOR_CONTINUATION') {
+            return { label: 'FORTSETZUNG FEHLT', detail: 'Neue Flag/VWAP-Hold abwarten', cls: 'bg-amber-100 text-amber-800' };
         }
         if (action === 'WAIT_FOR_BTC_CONFIRMATION') {
             return { label: 'BTC FEHLT', detail: 'BTC muss bestaetigen', cls: 'bg-yellow-100 text-yellow-800' };
@@ -4981,7 +4986,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'TRIGGER FEHLT', detail: 'Execution-Trigger fehlt', cls: 'bg-blue-100 text-blue-800' };
         }
         if (signal === 'WARTEN') {
-            return { label: 'WARTEN', detail: 'Noch keine Freigabe', cls: 'bg-yellow-100 text-yellow-800' };
+            return { label: 'WARTEN', detail: 'Noch keine Entry-Freigabe', cls: 'bg-yellow-100 text-yellow-800' };
         }
         return { label: 'SETUP WATCH', detail: 'Noch kein Entry', cls: 'bg-sky-100 text-sky-800' };
     };

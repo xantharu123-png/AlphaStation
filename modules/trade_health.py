@@ -120,10 +120,8 @@ def _distance_to_entry_r(
     direction: str,
 ) -> Optional[float]:
     provided = _to_float(_first(row, ["distance_to_entry_r", "entry_distance_r"]))
-    if provided is not None:
-        return provided
     if current is None or entry is None or risk is None or risk <= 0:
-        return None
+        return provided
     distance = (current - entry) / risk if direction == "LONG" else (entry - current) / risk
     return round(distance, 2)
 
@@ -147,8 +145,6 @@ def _live_rr(
             ],
         )
     )
-    if provided is not None:
-        return provided
     fallback = _to_float(
         _first(
             row,
@@ -162,7 +158,7 @@ def _live_rr(
         )
     )
     if current is None or entry is None or stop is None or tp1 is None:
-        return fallback
+        return provided if provided is not None else fallback
     if direction == "LONG":
         live_entry = max(current, entry)
         live_risk = live_entry - stop
@@ -176,7 +172,7 @@ def _live_rr(
         if tp2 is not None:
             rewards.append(live_entry - tp2)
     if live_risk <= 0:
-        return fallback
+        return provided if provided is not None else fallback
     reward = sum(rewards) / len(rewards)
     return round(max(0.0, reward) / live_risk, 2)
 

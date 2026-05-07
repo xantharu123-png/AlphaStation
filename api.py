@@ -1200,6 +1200,7 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     risk_flags = row.get("risk_flags", setup.get("risk_flags", []))
     if not isinstance(risk_flags, list):
         risk_flags = [str(risk_flags)] if risk_flags else []
+    distance_to_entry_r = _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")))
     return {
         "direction": str(row.get("direction", setup.get("direction", "")) or "").upper(),
         "trade_action": str(row.get("trade_action", setup.get("trade_action", "")) or "").upper(),
@@ -1207,7 +1208,7 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "entry_quality": str(row.get("entry_quality", setup.get("entry_quality", "")) or "").upper(),
         "signal_quality": str(row.get("signal_quality", "") or "").lower(),
         "live_rr": _alert_float(row.get("live_rr_ratio", setup.get("live_rr")), 0) or 0,
-        "distance_to_entry_r": _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")), 999) or 999,
+        "distance_to_entry_r": distance_to_entry_r if distance_to_entry_r is not None else 999,
         "late_to_tp1": _alert_bool(row.get("late_to_tp1", setup.get("late_to_tp1", False))),
         "execution_trigger_ok": _alert_bool(row.get("execution_trigger_ok", False)),
         "partial_data": _alert_bool(row.get("partial_data", row.get("data_partial", False))),
@@ -1549,7 +1550,8 @@ def _early_mover_trigger_profile(row: Dict[str, Any]) -> Dict[str, Any]:
     phase = _alert_float(row.get("phase", row.get("Phase")), 0) or 0
     change24 = _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0
     vol_mcap = _alert_float(row.get("VolMCapRatio", row.get("vol_mcap", row.get("Vol/MCap"))), 0) or 0
-    distance_r = _alert_float(row.get("distance_to_entry_r"), 999) or 999
+    distance_value = _alert_float(row.get("distance_to_entry_r"))
+    distance_r = distance_value if distance_value is not None else 999
     risk_flags = [str(flag).lower() for flag in (row.get("risk_flags") or []) if flag is not None]
     fast_coin = bool(abs(change24) >= 8 or vol_mcap >= 35 or int(phase) == 2 or "breakout" in " ".join(risk_flags))
     near_retest = bool(action == "WAIT_FOR_RETEST" or distance_r <= _EARLY_MOVER_RETEST_MAX_DISTANCE_R)
@@ -1847,17 +1849,23 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["signal_quality"] = "wait"
         row["entry_status"] = "WARTEN"
         row["alertable_crypto"] = False
-    elif action in ("WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION"):
-        row["trade_signal"] = "BEOBACHTEN"
-        row["signal_label"] = "Achtung beobachten: Retest/Continuation-Trigger abwarten"
-        row["signal_quality"] = "observe"
-        row["entry_status"] = "BEOBACHTEN"
+    elif action == "WAIT_FOR_RETEST":
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: Retest nahe Entry fehlt"
+        row["signal_quality"] = "wait_retest"
+        row["entry_status"] = "WAIT_FOR_RETEST"
+        row["alertable_crypto"] = False
+    elif action == "WAIT_FOR_CONTINUATION":
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: neue Continuation-Flag fehlt"
+        row["signal_quality"] = "wait_continuation"
+        row["entry_status"] = "WAIT_FOR_CONTINUATION"
         row["alertable_crypto"] = False
     elif action == "LONG_TRIGGER":
-        row["trade_signal"] = "BEOBACHTEN"
-        row["signal_label"] = "Achtung beobachten: Execution-Trigger fehlt noch"
-        row["signal_quality"] = "observe"
-        row["entry_status"] = "BEOBACHTEN"
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: Execution-Trigger fehlt noch"
+        row["signal_quality"] = "wait_trigger"
+        row["entry_status"] = "WAIT_FOR_TRIGGER"
         row["alertable_crypto"] = False
     else:
         row["trade_signal"] = "BEOBACHTEN"
@@ -2236,16 +2244,18 @@ def _long_continuation_ok(fields: Dict[str, Any]) -> bool:
     rvol = fields.get("rvol")
     mdr_tag = fields.get("mdr_tag", "")
 
+    latest_available = latest_change is not None and latest_close_pos is not None
     latest_ok = (
-        latest_change is None
-        or latest_close_pos is None
-        or latest_change >= -0.05
-        or latest_close_pos >= 0.55
+        latest_available
+        and (
+            latest_change >= -0.05
+            or latest_close_pos >= 0.55
+        )
     )
     volume_ok = rvol is None or rvol >= 1.2
     holding_highs = close_pos is not None and close_pos >= 0.78
     mdr_ok = "MDR" in mdr_tag and "CRASH" not in mdr_tag and close_pos is not None and close_pos >= 0.65
-    return (holding_highs and latest_ok and volume_ok) or mdr_ok
+    return (holding_highs and latest_ok and volume_ok) or (mdr_ok and latest_ok)
 
 
 def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
@@ -2268,6 +2278,7 @@ def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
         and latest_change < -0.15
         and latest_close_pos < 0.45
     )
+    latest_missing = latest_change is None or latest_close_pos is None
     intraday_red_fade = open_to_current is not None and open_to_current < -0.25
     not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
     extended = (change is not None and change >= 12) or (extension_atr is not None and extension_atr >= 4.0)
@@ -2282,6 +2293,8 @@ def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("not_holding_highs_after_up_move")
     if hard_extended and not continuation_ok:
         reasons.append("hard_extended_long_wait_retest")
+    elif extended and latest_missing:
+        reasons.append("fresh_5m_state_missing_wait_retest")
     elif extended and (latest_red_fade or intraday_red_fade or not_holding_highs):
         reasons.append("extended_long_fading_wait_retest")
     return reasons
@@ -2363,18 +2376,17 @@ def _bear_entry_quality(row: Dict[str, Any]) -> str:
 
 
 def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
-    """Crash alert is allowed only while the selloff is still pressing lows."""
-    if row.get("alertable_short") is False:
-        return False
-    if row.get("short_block_reasons"):
-        return False
-    if row.get("alertable_short") is None and _bear_short_rule_reasons(row):
+    """Crash alert is informational and uses active-flush rules, not short-entry no-chase rules."""
+    block_reasons = set(row.get("short_block_reasons") or _bear_short_rule_reasons(row))
+    hard_blocks = block_reasons - {"drop_too_extended_no_chase"}
+    if hard_blocks:
         return False
 
     fields = _extract_bear_short_fields(row)
     change = fields["change_pct"]
     close_pos = fields["close_pos"]
     open_to_current = fields["open_to_current_pct"]
+    rvol = fields["rvol"]
     if change is None or change > -10:
         return False
     if change <= -30:
@@ -2382,6 +2394,8 @@ def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
     if open_to_current is not None and open_to_current > 0.2:
         return False
     if close_pos is not None and close_pos > 0.35:
+        return False
+    if rvol is not None and rvol < 1.2:
         return False
     latest_bar_change = fields["latest_bar_change_pct"]
     latest_bar_close_pos = fields["latest_bar_close_pos"]
@@ -2451,9 +2465,13 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
             "decision_label": "Jetzt traden",
             "decision_reason": "Alle Alert-Gates bestanden",
         }
+    wait_retest_markers = {
+        "hard_extended_long_wait_retest",
+        "extended_long_fading_wait_retest",
+        "early_mover_retest_not_near_entry",
+    }
     no_trade_markers = {
         "drop_too_extended_no_chase",
-        "hard_extended_long_wait_retest",
         "target_already_missed",
         "early_mover_no_chase",
         "early_mover_late_to_tp1",
@@ -2474,6 +2492,12 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         return {
             "decision": "NO_TRADE",
             "decision_label": "Nicht traden",
+            "decision_reason": ", ".join(reasons[:4]),
+        }
+    if any(reason in wait_retest_markers or reason.endswith("wait_retest") for reason in reasons):
+        return {
+            "decision": "WAIT_RETEST",
+            "decision_label": "Auf Retest warten",
             "decision_reason": ", ".join(reasons[:4]),
         }
     return {

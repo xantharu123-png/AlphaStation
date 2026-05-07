@@ -97,6 +97,29 @@ def test_live_rr_recomputes_instead_of_trusting_planned_rr():
     assert health["decision"] == "NO_TRADE"
 
 
+def test_live_rr_and_distance_ignore_stale_provided_values_when_levels_exist():
+    row = {
+        "ticker": "STALE",
+        "direction": "LONG",
+        "current_price": 10.80,
+        "entry": 10.00,
+        "stop": 9.50,
+        "tp1": 11.00,
+        "tp2": 12.00,
+        "live_rr_ratio": 5.0,
+        "distance_to_entry_r": 0.0,
+        "rvol": 2.0,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "dollar_volume": 8_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    assert health["metrics"]["live_rr"] < 1.0
+    assert health["metrics"]["distance_to_entry_r"] == 1.6
+
+
 def test_short_distance_uses_short_math():
     row = {
         "ticker": "DOWN",

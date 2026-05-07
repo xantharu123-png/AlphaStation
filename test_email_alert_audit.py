@@ -346,7 +346,7 @@ def test_bear_crash_alert_requires_current_sell_pressure():
     assert api._bear_crash_alert_ok(active_flush) is True
 
 
-def test_bear_crash_alert_blocks_no_chase_drop_like_fwrd():
+def test_bear_crash_alert_allows_active_flush_despite_short_no_chase():
     fwrd_like = {
         "ticker": "FWRD",
         "grade": "S",
@@ -362,7 +362,14 @@ def test_bear_crash_alert_blocks_no_chase_drop_like_fwrd():
         "alertable_short": False,
     }
 
-    assert api._bear_crash_alert_ok(fwrd_like) is False
+    assert api._bear_crash_alert_ok(fwrd_like) is True
+
+
+def test_alert_decision_labels_wait_retest_instead_of_no_trade():
+    state = api._alert_decision_from_reasons("stock_strategy", ["hard_extended_long_wait_retest"])
+
+    assert state["decision"] == "WAIT_RETEST"
+    assert state["decision_label"] == "Auf Retest warten"
 
 
 def test_email_sender_blocks_inverse_etf_content():
@@ -711,6 +718,23 @@ def test_bi_short_alert_blocks_late_crash_chase():
     assert state["decision"] == "NO_TRADE"
     assert "drop_too_extended_no_chase" in state["suppression_reasons"]
     assert "latest_5m_green_reclaim" in state["suppression_reasons"]
+
+
+def test_extended_long_requires_fresh_intraday_state_for_continuation():
+    row = {
+        "ticker": "RUNR",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.8,
+        "price": 24.5,
+        "change_pct": 18.0,
+        "close_pos": 0.91,
+        "open_to_current_pct": 8.5,
+        "Extension_ATR": 4.5,
+        "Signal_Direction": "LONG",
+    }
+
+    assert api._long_entry_quality(row) == "WAIT_RETEST"
 
 
 def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatch):
@@ -1141,6 +1165,23 @@ def test_early_mover_retest_alert_requires_near_entry():
     assert "early_mover_chased_from_entry" in far_state["suppression_reasons"]
 
 
+def test_early_mover_zero_r_distance_stays_near_entry():
+    row = _early_mover_row(
+        Symbol="ZERO",
+        trade_action="WAIT_FOR_RETEST",
+        execution_trigger_ok=False,
+        entry_status="WAIT_FOR_RETEST",
+        entry_quality="EXTENDED",
+        distance_to_entry_r=0,
+        risk_flags=["no_market_entry"],
+    )
+
+    state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
+
+    assert state["alertable_now"] is True
+    assert "early_mover_retest_not_near_entry" not in state["suppression_reasons"]
+
+
 def test_early_mover_blocks_btc_headwind_and_partial_data():
     row = _early_mover_row(
         Symbol="HEADWIND",
@@ -1266,7 +1307,8 @@ def test_early_mover_signal_state_only_marks_trade_now_after_trigger():
 
     api._apply_early_mover_signal_state(row, {"ok": False, "reason": "no_fresh_5m_trigger"})
 
-    assert row["trade_signal"] == "BEOBACHTEN"
+    assert row["trade_signal"] == "WARTEN"
+    assert row["entry_status"] == "WAIT_FOR_TRIGGER"
     assert row["alertable_crypto"] is False
     assert row["execution_trigger_ok"] is False
 
