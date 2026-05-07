@@ -1391,9 +1391,15 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     )
 
 
-def _alert_trade_plan_ok(row: Dict[str, Any], min_rr: float = _ALERT_MIN_LEVEL_RR) -> bool:
+def _alert_trade_plan_ok(
+    row: Dict[str, Any],
+    min_rr: float = _ALERT_MIN_LEVEL_RR,
+    require_native_levels: bool = True,
+) -> bool:
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
+        return False
+    if require_native_levels and levels.get("estimated"):
         return False
     rr = levels.get("rr")
     return not isinstance(rr, (int, float)) or rr >= min_rr
@@ -2474,6 +2480,8 @@ def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = 
         reasons.append("invalid_trade_plan")
         for err in levels.get("errors", [])[:2]:
             reasons.append(f"trade_{err}")
+    elif levels.get("estimated"):
+        reasons.append("estimated_trade_plan")
     elif not _alert_trade_plan_ok(row):
         reasons.append("trade_rr_below_threshold")
 
@@ -2571,6 +2579,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "not_new_listing_dump",
         "listing_age_not_tradeable",
         "non_common_stock_product",
+        "estimated_trade_plan",
         "invalid_trade_plan",
         "trade_rr_below_threshold",
     }
@@ -2651,6 +2660,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("invalid_trade_plan")
             for err in levels.get("errors", [])[:2]:
                 reasons.append(f"trade_{err}")
+        elif levels.get("estimated"):
+            reasons.append("estimated_trade_plan")
         elif not _alert_trade_plan_ok(row):
             reasons.append("trade_rr_below_threshold")
 

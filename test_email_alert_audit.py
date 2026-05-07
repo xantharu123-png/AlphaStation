@@ -25,7 +25,7 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
         "results": [
-            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10, "direction": "LONG", "DayHigh": 10.4, "DayLow": 9.5},
+            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10, "direction": "LONG", "Entry": 10.0, "StopLoss": 9.5, "TP1": 10.8, "TP2": 11.3, "DayHigh": 10.4, "DayLow": 9.5},
             {"ticker": "BBB", "grade": "B", "score": 62, "rvol": 3.0, "price": 20, "direction": "LONG", "DayHigh": 20.5, "DayLow": 19.0},
             {"ticker": "CCC", "grade": "S", "score": 90, "rvol": 0.2, "price": 30, "direction": "LONG", "DayHigh": 31.0, "DayLow": 28.0},
             {"ticker": "DDD", "grade": "A", "score": 72, "rvol": 1.2, "price": 40, "direction": "LONG", "DayHigh": 41.0, "DayLow": 39.0},
@@ -188,6 +188,10 @@ def test_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
         "DayHigh": 25.0,
         "DayLow": 22.5,
         "price": 24.5,
+        "Entry": 24.5,
+        "StopLoss": 23.6,
+        "TP1": 25.9,
+        "TP2": 26.8,
     }
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
@@ -242,6 +246,10 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
                     "open_to_current_pct": -5.0,
                     "close_pos": 0.2,
                     "alertable_short": True,
+                    "Entry": 12.0,
+                    "StopLoss": 12.8,
+                    "TP1": 10.8,
+                    "TP2": 10.0,
                 }
             ],
         }],
@@ -304,6 +312,10 @@ def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
                 "change_pct": -7.0,
                 "open_to_current_pct": -6.4,
                 "close_pos": 0.12,
+                "Entry": 9.8,
+                "StopLoss": 10.3,
+                "TP1": 9.0,
+                "TP2": 8.55,
             }],
         }],
     }))
@@ -625,6 +637,28 @@ def test_alert_trade_levels_derive_missing_targets_from_entry_stop():
     assert levels["estimated"] is True
 
 
+def test_estimated_trade_levels_do_not_pass_active_email_gate():
+    row = {
+        "ticker": "FWRD",
+        "grade": "S",
+        "score": 92,
+        "rvol": 2.1,
+        "price": 17.33,
+        "direction": "SHORT",
+        "change_pct": -5.6,
+        "open_to_current_pct": -5.6,
+        "close_pos": 0.18,
+        "Entry": 17.33,
+        "StopLoss": 17.91,
+    }
+
+    state = api._classify_alert_candidate("bear", row)
+
+    assert state["alertable_now"] is False
+    assert "estimated_trade_plan" in state["suppression_reasons"]
+    assert api._alert_trade_plan_ok(row) is False
+
+
 def test_alert_trade_levels_reject_inverted_long_targets():
     levels = api._alert_trade_levels({
         "Ticker": "BADLONG",
@@ -778,7 +812,11 @@ def test_strategy_scan_dedupes_same_ticker_inside_one_mail(monkeypatch):
 def test_alert_classifier_respects_cooldown():
     api._EMAIL_COOLDOWN.clear()
     now = 1_000_000.0
-    row = {"ticker": "ORB1", "grade": "A", "score": 80, "price": 12, "direction": "LONG", "DayHigh": 12.4, "DayLow": 11.4}
+    row = {
+        "ticker": "ORB1", "grade": "A", "score": 80, "price": 12, "direction": "LONG",
+        "Entry": 12.0, "StopLoss": 11.4, "TP1": 12.9, "TP2": 13.5,
+        "DayHigh": 12.4, "DayLow": 11.4,
+    }
 
     first = api._classify_alert_candidate("orb", row, now)
     assert first["alertable_now"] is True
