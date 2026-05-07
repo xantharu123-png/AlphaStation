@@ -813,6 +813,7 @@ _EMAIL_COOLDOWN = {}
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
 _EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
+_BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600  # Catalyst setups persist for days; avoid repeat ticker mails.
 _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach Restart
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 _EMAIL_SEND_LOG: List[Dict[str, Any]] = []
@@ -878,6 +879,12 @@ def _email_alert_status() -> Dict[str, Any]:
         "recipient_count": len([addr for addr in str(alert_to).split(",") if addr.strip()]),
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
+        "scanner_cooldowns_seconds": {
+            "default": _EMAIL_COOLDOWN_SEC,
+            "biotech": _BIOTECH_ALERT_DEDUPE_SEC,
+            "crash_stock": _CRASH_ALERT_DEDUPE_SEC,
+            "early_mover_digest": _EARLY_MOVER_DIGEST_DEDUPE_SEC,
+        },
         "min_alert_score": _ALERT_MIN_SCORE,
         "dedupe": _email_dedupe_status(),
         "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
@@ -944,17 +951,30 @@ def _load_email_dedupe(now: Optional[float] = None, max_keep_seconds: int = 7 * 
         return {}
 
 
+def _alert_dedupe_ttl_seconds(scanner_name: str) -> int:
+    scanner = str(scanner_name or "").lower()
+    if scanner == "biotech":
+        return _BIOTECH_ALERT_DEDUPE_SEC
+    return _EMAIL_COOLDOWN_SEC
+
+
+def _email_dedupe_ttl_for_key(key: str) -> int:
+    key = str(key or "")
+    if key.startswith("crash_stock_"):
+        return _CRASH_ALERT_DEDUPE_SEC
+    if key == _EARLY_MOVER_DIGEST_KEY:
+        return _EARLY_MOVER_DIGEST_DEDUPE_SEC
+    if key.startswith("biotech_"):
+        return _BIOTECH_ALERT_DEDUPE_SEC
+    return _EMAIL_COOLDOWN_SEC
+
+
 def _email_dedupe_status(now: Optional[float] = None) -> Dict[str, Any]:
     now = now or time.time()
     dedupe = _load_email_dedupe(now=now)
     recent = []
     for key, ts in sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:20]:
-        if key.startswith("crash_stock_"):
-            ttl = _CRASH_ALERT_DEDUPE_SEC
-        elif key == _EARLY_MOVER_DIGEST_KEY:
-            ttl = _EARLY_MOVER_DIGEST_DEDUPE_SEC
-        else:
-            ttl = _EMAIL_COOLDOWN_SEC
+        ttl = _email_dedupe_ttl_for_key(key)
         recent.append({
             "key": key,
             "timestamp": datetime.fromtimestamp(ts).isoformat(),
@@ -2635,10 +2655,12 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("trade_rr_below_threshold")
 
     cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
-    cooldown_remaining = _alert_cooldown_remaining(cooldown_key, now) if cooldown_key else 0
+    cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
+    cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
+    cooldown_remaining = max(0, int(cooldown_ttl - (now - cooldown_last))) if cooldown_last else 0
     if cooldown_remaining > 0:
         reasons.append("cooldown_active")
-    dedupe_remaining = _email_dedupe_remaining(cooldown_key, _EMAIL_COOLDOWN_SEC, now) if cooldown_key else 0
+    dedupe_remaining = _email_dedupe_remaining(cooldown_key, cooldown_ttl, now) if cooldown_key else 0
     if dedupe_remaining > 0:
         reasons.append("persistent_dedupe_active")
     bearish_remaining = _bearish_stock_alert_remaining(ticker, now) if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS else 0
@@ -2870,7 +2892,8 @@ def _check_and_alert(scanner_name, cache_file):
             if grade not in _alert_grades:
                 continue
             ck = f"{scanner_name}_{ticker}"
-            if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
+            ck_ttl = _alert_dedupe_ttl_seconds(scanner_name)
+            if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < ck_ttl:
                 continue
             alerts.append({"ticker": ticker, "grade": grade, "score": score,
                            "price": _extract_alert_price(r),
@@ -2924,6 +2947,7 @@ def _check_and_alert(scanner_name, cache_file):
         if sent:
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+                _email_dedupe_mark(alert["cooldown_key"], now=now)
                 if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS:
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
     except Exception as e:
@@ -3020,6 +3044,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         for alert in alerts:
             if alert.get("cooldown_key"):
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+                _email_dedupe_mark(alert["cooldown_key"], now=now)
 
 
 def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:

@@ -8,13 +8,14 @@ import api
 
 
 @pytest.fixture(autouse=True)
-def _mock_common_stock_universe(monkeypatch):
+def _mock_common_stock_universe(monkeypatch, tmp_path):
     """Keep alert unit tests offline; individual asset-guard tests override this."""
     test_stocks = {
         "AAA", "BBB", "CCC", "DDD", "LATE", "RUNR", "MDRX", "REAL", "SKBL",
         "FRESH", "BOUNCE", "DROP", "FWRD", "SHORTY", "BADLONG", "BADRR",
         "MOMO", "ORB1", "DUP",
     }
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
 
 
@@ -75,6 +76,40 @@ def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
     assert row["Entry"] > row["StopLoss"]
     assert row["TP1"] > row["Entry"]
     assert row["TP2"] > row["TP1"]
+
+
+def test_biotech_alert_persistent_dedupe_survives_restart(tmp_path, monkeypatch):
+    api._EMAIL_SEND_LOG.clear()
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PFE"}, "unit"))
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, bypass_startup_cooldown=False: sent.append((subject, body)) or True)
+    cache_file = tmp_path / "biotech.json"
+    row = {
+        "Ticker": "PFE",
+        "Grade": "A",
+        "Score": 94,
+        "RVOL": 1.31,
+        "Preis": 26.48,
+        "Signal_Direction": "LONG",
+        "Entry": 26.48,
+        "StopLoss": 25.78,
+        "TP1": 27.71,
+        "TP2": 29.49,
+    }
+    cache_file.write_text(json.dumps({"cached_at": datetime.now().isoformat(), "results": [row]}))
+
+    api._check_and_alert("biotech", str(cache_file))
+    api._EMAIL_COOLDOWN.clear()  # Simulate server restart/deploy after the first mail.
+    api._check_and_alert("biotech", str(cache_file))
+
+    assert len(sent) == 1
+    dedupe = json.loads((tmp_path / "email_dedupe.json").read_text())
+    assert "biotech_PFE" in dedupe
+    state_after_8h = api._classify_alert_candidate("biotech", row, time.time() + api._EMAIL_COOLDOWN_SEC + 60)
+    assert state_after_8h["alertable_now"] is False
+    assert "persistent_dedupe_active" in state_after_8h["suppression_reasons"]
 
 
 def test_stock_alert_skip_reason_is_logged(tmp_path, monkeypatch):
