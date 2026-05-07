@@ -1122,6 +1122,14 @@ def _extract_alert_price(row: Dict[str, Any]) -> Any:
     return 0
 
 
+def _alert_get_any(row: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Read scanner rows safely across old UI/cache column names."""
+    for key in keys:
+        if key in row and row.get(key) not in (None, ""):
+            return row.get(key)
+    return default
+
+
 def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     sig = row.get("signal", {}) if isinstance(row, dict) else {}
     nested = sig if isinstance(sig, dict) else {}
@@ -2226,9 +2234,9 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
 
 def _extract_long_entry_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "change_pct": _alert_float(row.get("change_pct", row.get("Change_Pct", row.get("Change%", row.get("todaysChangePerc"))))),
-        "close_pos": _alert_float(row.get("close_pos", row.get("Close_Position", row.get("Close Position")))),
-        "open_to_current_pct": _alert_float(row.get("open_to_current_pct", row.get("Open_To_Current_Pct"))),
+        "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", "todaysChangePerc")),
+        "close_pos": _alert_float(_alert_get_any(row, "close_pos", "Close_Position", "Close Position", "Range_Pos", "Range Position")),
+        "open_to_current_pct": _alert_float(_alert_get_any(row, "open_to_current_pct", "Open_To_Current_Pct", "intraday_change_pct")),
         "latest_bar_change_pct": _alert_float(row.get("latest_bar_change_pct")),
         "latest_bar_close_pos": _alert_float(row.get("latest_bar_close_pos")),
         "extension_atr": _alert_float(row.get("Extension_ATR", row.get("extension_atr"))),
@@ -2319,9 +2327,9 @@ def _long_entry_quality(row: Dict[str, Any]) -> str:
 def _extract_bear_short_fields(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
     """Fields used to decide whether a bear row is still a tradeable short entry."""
     return {
-        "change_pct": _alert_float(row.get("change_pct", row.get("Change%", row.get("todaysChangePerc")))),
-        "close_pos": _alert_float(row.get("close_pos", row.get("Close Position"))),
-        "open_to_current_pct": _alert_float(row.get("open_to_current_pct", row.get("intraday_change_pct"))),
+        "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", "todaysChangePerc")),
+        "close_pos": _alert_float(_alert_get_any(row, "close_pos", "Close_Position", "Close Position", "Range_Pos", "Range Position")),
+        "open_to_current_pct": _alert_float(_alert_get_any(row, "open_to_current_pct", "Open_To_Current_Pct", "intraday_change_pct")),
         "latest_bar_change_pct": _alert_float(row.get("latest_bar_change_pct")),
         "latest_bar_close_pos": _alert_float(row.get("latest_bar_close_pos")),
         "rvol": _alert_float(row.get("rvol", row.get("RVOL"))),
@@ -2375,28 +2383,29 @@ def _bear_entry_quality(row: Dict[str, Any]) -> str:
     return "WATCH"
 
 
-def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
-    """Crash alert is informational and uses active-flush rules, not short-entry no-chase rules."""
-    block_reasons = set(row.get("short_block_reasons") or _bear_short_rule_reasons(row))
-    hard_blocks = block_reasons - {"drop_too_extended_no_chase"}
-    if hard_blocks:
-        return False
-
+def _bear_crash_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    """Crash alert is informational: active flush only, not a normal short-entry gate."""
+    reasons: List[str] = []
+    hard_blocks = set(_bear_short_rule_reasons(row)) - {"drop_too_extended_no_chase"}
+    reasons.extend(sorted(hard_blocks))
     fields = _extract_bear_short_fields(row)
     change = fields["change_pct"]
     close_pos = fields["close_pos"]
     open_to_current = fields["open_to_current_pct"]
     rvol = fields["rvol"]
-    if change is None or change > -10:
-        return False
-    if change <= -30:
-        return False
+    if change is None:
+        if "missing_current_drop" not in reasons:
+            reasons.append("missing_current_drop")
+    elif change > -10:
+        reasons.append("crash_drop_too_small")
+    elif change <= -30:
+        reasons.append("crash_drop_too_extended")
     if open_to_current is not None and open_to_current > 0.2:
-        return False
+        reasons.append("current_candle_green_reclaim")
     if close_pos is not None and close_pos > 0.35:
-        return False
+        reasons.append("crash_not_pressing_lows")
     if rvol is not None and rvol < 1.2:
-        return False
+        reasons.append("crash_rvol_below_threshold")
     latest_bar_change = fields["latest_bar_change_pct"]
     latest_bar_close_pos = fields["latest_bar_close_pos"]
     if (
@@ -2405,8 +2414,67 @@ def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
         and latest_bar_change > 0.15
         and latest_bar_close_pos > 0.55
     ):
-        return False
-    return True
+        reasons.append("latest_5m_green_reclaim")
+    return list(dict.fromkeys(reasons))
+
+
+def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
+    return not _bear_crash_rule_reasons(row)
+
+
+def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    now = now or time.time()
+    ticker = _extract_alert_ticker(row)
+    grade = _extract_alert_grade(row)
+    score = _alert_float(_extract_alert_score(row), 0) or 0
+    rvol = _extract_alert_rvol(row)
+    reasons: List[str] = []
+
+    if not ticker:
+        reasons.append("missing_ticker")
+    asset_exclusion_reason = None
+    if ticker:
+        common_stock_universe, common_stock_source = _load_common_stock_universe()
+        asset_exclusion_reason = _stock_alert_asset_exclusion_reason(
+            ticker,
+            common_stock_universe=common_stock_universe,
+            universe_source=common_stock_source,
+            require_reference=common_stock_universe is None,
+        )
+        if asset_exclusion_reason:
+            reasons.append("non_common_stock_product")
+    if grade not in _ALERT_TOP_GRADES:
+        reasons.append("grade_below_alert_threshold")
+    if score < _ALERT_MIN_SCORE:
+        reasons.append("score_below_alert_threshold")
+    reasons.extend(_bear_crash_rule_reasons(row))
+
+    levels = _alert_trade_levels(row)
+    if not levels.get("valid"):
+        reasons.append("invalid_trade_plan")
+        for err in levels.get("errors", [])[:2]:
+            reasons.append(f"trade_{err}")
+    elif not _alert_trade_plan_ok(row):
+        reasons.append("trade_rr_below_threshold")
+
+    dedupe_key = f"crash_stock_{datetime.now().strftime('%Y%m%d')}_{ticker}" if ticker else ""
+    dedupe_remaining = _email_dedupe_remaining(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now) if dedupe_key else 0
+    if dedupe_remaining > 0:
+        reasons.append("persistent_dedupe_active")
+
+    return {
+        "ticker": ticker,
+        "grade": grade,
+        "score": score,
+        "price": _extract_alert_price(row),
+        "rvol": rvol,
+        "cooldown_key": dedupe_key,
+        "persistent_dedupe_remaining_seconds": int(dedupe_remaining),
+        "asset_exclusion_reason": asset_exclusion_reason,
+        "alertable_now": not reasons,
+        "suppression_reasons": list(dict.fromkeys(reasons)),
+        **_alert_decision_from_reasons("crash", reasons),
+    }
 
 
 def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]:
@@ -2630,6 +2698,8 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
     grade_counts: Dict[str, int] = {}
     reason_counts: Dict[str, int] = {}
     alertable = []
+    crash_reason_counts: Dict[str, int] = {}
+    crash_alertable = []
     for row in rows:
         state = _classify_alert_candidate(scanner_name, row, now)
         grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
@@ -2637,12 +2707,18 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
             alertable.append(state)
         for reason in state["suppression_reasons"]:
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if scanner_name == "bear":
+            crash_state = _classify_crash_alert_candidate(row, now)
+            if crash_state["alertable_now"]:
+                crash_alertable.append(crash_state)
+            for reason in crash_state["suppression_reasons"]:
+                crash_reason_counts[reason] = crash_reason_counts.get(reason, 0) + 1
 
     cache_age = None
     if os.path.exists(cache_file):
         cache_age = int(max(0, time.time() - os.path.getmtime(cache_file)))
 
-    return {
+    audit = {
         "scanner": scanner_name,
         "cache_file": os.path.basename(cache_file),
         "cache_exists": os.path.exists(cache_file),
@@ -2653,6 +2729,13 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
         "alertable_preview": alertable[:10],
         "suppression_counts": reason_counts,
     }
+    if scanner_name == "bear":
+        audit.update({
+            "crash_alertable_now_count": len(crash_alertable),
+            "crash_alertable_preview": crash_alertable[:10],
+            "crash_suppression_counts": crash_reason_counts,
+        })
+    return audit
 
 
 def _alert_suppression_summary_for_rows(scanner_name: str, rows: List[Dict[str, Any]], now: Optional[float] = None) -> str:
@@ -2663,6 +2746,20 @@ def _alert_suppression_summary_for_rows(scanner_name: str, rows: List[Dict[str, 
         if not isinstance(row, dict):
             continue
         state = _classify_alert_candidate(scanner_name, row, now)
+        grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
+        for reason in state["suppression_reasons"]:
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+    return _format_alert_suppression_summary(suppressed, grade_counts)
+
+
+def _crash_alert_suppression_summary_for_rows(rows: List[Dict[str, Any]], now: Optional[float] = None) -> str:
+    now = now or time.time()
+    suppressed: Dict[str, int] = {}
+    grade_counts: Dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = _classify_crash_alert_candidate(row, now)
         grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
         for reason in state["suppression_reasons"]:
             suppressed[reason] = suppressed.get(reason, 0) + 1
@@ -2871,7 +2968,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "score": state["score"],
             "price": state["price"],
             "rvol": _alert_float(state["rvol"], 0) or 0,
-            "change_pct": _alert_float(row.get("Change_Pct", row.get("change_pct", row.get("Change%", 0))), 0) or 0,
+            "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", default=0), 0) or 0,
             "entry_quality": row.get("long_entry_quality", _long_entry_quality(row) if scanner_key in _LONG_ENTRY_ALERT_SCANNERS else ""),
             "strategy": strategy_name,
             "market_type": market_type,
@@ -5890,7 +5987,7 @@ def _bear_scan_wrapper() -> None:
                     "Crash Alert",
                     "skipped",
                     "no_active_crash_stock:"
-                    + _alert_suppression_summary_for_rows("bear", result.get("breakdown_stocks", [])),
+                    + _crash_alert_suppression_summary_for_rows(result.get("breakdown_stocks", [])),
                 )
 
             # V2.6b: Bear Summary Email — 1x pro Tag, nur wenn Grade S/A Signale dabei

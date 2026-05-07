@@ -365,6 +365,39 @@ def test_bear_crash_alert_allows_active_flush_despite_short_no_chase():
     assert api._bear_crash_alert_ok(fwrd_like) is True
 
 
+def test_bear_crash_audit_is_separate_from_regular_short_alert(tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    cache_file = tmp_path / "bear.json"
+    cache_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "breakdown_stocks": [
+            {
+                "ticker": "FWRD",
+                "grade": "S",
+                "score": 100,
+                "price": 16.5,
+                "Change %": -22.6,
+                "open_to_current_pct": -22.2,
+                "close_pos": 0.07,
+                "latest_bar_change_pct": 0.0,
+                "latest_bar_close_pos": 0.5,
+                "rvol": 4.4,
+                "entry": 16.4,
+                "stop": 17.2,
+                "tp1": 15.0,
+                "tp2": 14.0,
+            }
+        ],
+    }))
+
+    audit = api._build_alert_audit_for_cache("bear", str(cache_file))
+
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["drop_too_extended_no_chase"] == 1
+    assert audit["crash_alertable_now_count"] == 1
+    assert audit["crash_alertable_preview"][0]["ticker"] == "FWRD"
+
+
 def test_alert_decision_labels_wait_retest_instead_of_no_trade():
     state = api._alert_decision_from_reasons("stock_strategy", ["hard_extended_long_wait_retest"])
 
@@ -734,6 +767,24 @@ def test_extended_long_requires_fresh_intraday_state_for_continuation():
         "Signal_Direction": "LONG",
     }
 
+    assert api._long_entry_quality(row) == "WAIT_RETEST"
+
+
+def test_extended_long_legacy_change_column_uses_no_chase_gate():
+    row = {
+        "Ticker": "RUNR",
+        "Grade": "A",
+        "Score": 86,
+        "RVOL": 2.8,
+        "Price": 24.5,
+        "Change %": 18.0,
+        "Close Position": 0.91,
+        "Open_To_Current_Pct": 8.5,
+        "Extension_ATR": 4.5,
+        "Signal_Direction": "LONG",
+    }
+
+    assert "fresh_5m_state_missing_wait_retest" in api._long_entry_rule_reasons(row)
     assert api._long_entry_quality(row) == "WAIT_RETEST"
 
 
