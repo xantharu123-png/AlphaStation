@@ -559,12 +559,12 @@ def autotrader_scan_once(poly_key, config=None):
 
             # Entry/Stop/TP Berechnung
             breakout_level = range_high
-            stop_atr_mult = 1.2
             tp1_mult = 0.7 if grade == "C" else 1.0
             tp2_mult = 1.4 if grade == "C" else 2.0
 
             entry_price = round(range_high + atr_5 * 0.15, 2)  # Erhöht von 0.05 auf 0.15 für bessere Filtration
-            stop_price = round(range_high - atr_5 * stop_atr_mult, 2)
+            stop_buffer = max(atr_5 * 0.9, range_size * 0.10)
+            stop_price = round(range_high - stop_buffer, 2)
             tp1_price = round(range_high + range_size * tp1_mult, 2)
             tp2_price = round(range_high + range_size * tp2_mult, 2)
 
@@ -604,6 +604,10 @@ def autotrader_scan_once(poly_key, config=None):
                 "tp1": tp1_price,
                 "tp2": tp2_price,
                 "rr": rr,
+                "level_model": "bi_autotrader_structure_first_v2",
+                "stop_source": "range_high_retest_invalidation",
+                "tp1_source": "range_measured_move",
+                "tp2_source": "range_measured_move",
                 "range_pct": round(range_pct, 1),
                 "current_price": window[-1]["close"],
             })
@@ -1237,10 +1241,17 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 atr_5 = sum(true_ranges) / len(true_ranges) if true_ranges else (bars[-1]["high"] - bars[-1]["low"])
 
                 if direction == "long":
-                    candidate["Entry"] = round(range_high + atr_5 * 0.1, 2)
-                    candidate["StopLoss"] = round(range_high - atr_5 * 1.5, 2)
-                    candidate["TP1"] = round(range_high + range_size * 0.75, 2)
-                    candidate["TP2"] = round(range_high + range_size * 1.618, 2)
+                    breakout_buffer = max(atr_5 * 0.1, range_size * 0.02)
+                    invalidation_buffer = max(atr_5 * 0.9, range_size * 0.10)
+                    candidate["Entry"] = round(range_high + breakout_buffer, 2)
+                    candidate["StopLoss"] = round(range_high - invalidation_buffer, 2)
+                    _risk_long = max(0.01, candidate["Entry"] - candidate["StopLoss"])
+                    candidate["TP1"] = round(range_high + max(range_size * 0.75, _risk_long * 1.35), 2)
+                    candidate["TP2"] = round(range_high + max(range_size * 1.618, _risk_long * 2.25), 2)
+                    candidate["level_model"] = "bi_structure_first_v2"
+                    candidate["stop_source"] = "range_high_retest_invalidation"
+                    candidate["tp1_source"] = "range_extension"
+                    candidate["tp2_source"] = "range_extension"
                 else:
                     # V2.6b AUDIT: SHORT Entry — verbesserte Berechnung
                     _current = bars[-1]["close"]
@@ -1253,18 +1264,24 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                             rr_fail += 1
                             continue
                         candidate["Entry"] = round(_current, 2)
-                        candidate["StopLoss"] = round(min(range_high, _current + atr_5 * 1.5), 2)
+                        reclaim_stop = min(range_high, max(range_low + atr_5 * 0.75, _current + atr_5 * 1.2))
+                        candidate["StopLoss"] = round(reclaim_stop, 2)
+                        candidate["stop_source"] = "breakdown_reclaim_invalidation"
                     else:
                         # PULLBACK-SHORT: Preis nahe Range-High → Entry bei Resistance
                         candidate["Entry"] = round(range_high * 0.995, 2)
                         candidate["StopLoss"] = round(range_high + atr_5 * 0.5, 2)
+                        candidate["stop_source"] = "range_high_reclaim_invalidation"
                     risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])
-                    # TP basiert auf nächstem Support (Range-Low) statt fixem Multiplikator
-                    if candidate["Entry"] > range_low:
+                    # TP basiert auf Support/Range-Extensions, nicht auf reiner R:R-Optimierung.
+                    if candidate["Entry"] > range_low and (candidate["Entry"] - range_low) >= risk_short * 1.15:
                         candidate["TP1"] = round(range_low, 2)  # TP1 = Range-Low (logisches Ziel)
                     else:
-                        candidate["TP1"] = round(max(0.01, candidate["Entry"] - risk_short * 1.5), 2)
-                    candidate["TP2"] = round(max(0.01, min(range_low - range_size * 0.618, candidate["Entry"] - risk_short * 2.5)), 2)
+                        candidate["TP1"] = round(max(0.01, range_low - range_size * 0.272), 2)
+                    candidate["TP2"] = round(max(0.01, range_low - range_size * 0.618), 2)
+                    candidate["level_model"] = "bi_structure_first_v2"
+                    candidate["tp1_source"] = "range_low_support_or_extension"
+                    candidate["tp2_source"] = "range_extension"
 
                 _geometry = trade_geometry(
                     candidate.get("Entry"),
@@ -1273,24 +1290,6 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate.get("TP2"),
                     direction.upper(),
                 )
-                if not _geometry.get("valid"):
-                    _fallback_risk = None
-                    if direction == "long" and candidate.get("Entry", 0) > candidate.get("StopLoss", 0):
-                        _fallback_risk = candidate["Entry"] - candidate["StopLoss"]
-                        candidate["TP1"] = round(candidate["Entry"] + _fallback_risk * 1.5, 2)
-                        candidate["TP2"] = round(candidate["Entry"] + _fallback_risk * 2.5, 2)
-                    elif direction == "short" and candidate.get("StopLoss", 0) > candidate.get("Entry", 0):
-                        _fallback_risk = candidate["StopLoss"] - candidate["Entry"]
-                        candidate["TP1"] = round(max(0.01, candidate["Entry"] - _fallback_risk * 1.5), 2)
-                        candidate["TP2"] = round(max(0.01, candidate["Entry"] - _fallback_risk * 2.5), 2)
-                    if _fallback_risk:
-                        _geometry = trade_geometry(
-                            candidate.get("Entry"),
-                            candidate.get("StopLoss"),
-                            candidate.get("TP1"),
-                            candidate.get("TP2"),
-                            direction.upper(),
-                        )
                 if not _geometry.get("valid") or (_geometry.get("rr") is not None and _geometry["rr"] < 1.2):
                     rr_fail += 1
                     continue

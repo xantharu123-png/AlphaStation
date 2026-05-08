@@ -659,6 +659,42 @@ def test_estimated_trade_levels_do_not_pass_active_email_gate():
     assert api._alert_trade_plan_ok(row) is False
 
 
+def test_bear_structure_levels_are_native_and_can_pass_email_gate():
+    setup = api._build_bear_structure_trade_setup(
+        entry=17.33,
+        day_high=18.15,
+        day_low=16.72,
+        day_open=17.95,
+        ma20=18.05,
+        ma50=19.20,
+        low_20d=15.20,
+        low_60d=13.40,
+        change_pct=-6.5,
+    )
+    row = {
+        "ticker": "FWRD",
+        "grade": "S",
+        "score": 88,
+        "rvol": 2.1,
+        "price": 17.33,
+        "direction": "SHORT",
+        "change_pct": -6.5,
+        "open_to_current_pct": -4.0,
+        "close_pos": 0.18,
+        **setup,
+    }
+
+    levels = api._alert_trade_levels(row)
+    state = api._classify_alert_candidate("bear", row)
+
+    assert levels["valid"] is True
+    assert levels["native"] is True
+    assert levels["estimated"] is False
+    assert levels["direction"] == "SHORT"
+    assert state["alertable_now"] is True
+    assert "estimated_trade_plan" not in state["suppression_reasons"]
+
+
 def test_alert_trade_levels_reject_inverted_long_targets():
     levels = api._alert_trade_levels({
         "Ticker": "BADLONG",

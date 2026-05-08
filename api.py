@@ -2540,6 +2540,119 @@ def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]
         return {}
 
 
+def _build_bear_structure_trade_setup(
+    *,
+    entry: float,
+    day_high: float,
+    day_low: float,
+    day_open: float,
+    ma20: Optional[float] = None,
+    ma50: Optional[float] = None,
+    low_20d: Optional[float] = None,
+    low_60d: Optional[float] = None,
+    change_pct: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build a native short plan from reclaim invalidation and lower support.
+
+    This keeps Bear/Crash mails from using synthetic R-only targets while still
+    giving active flushes a concrete plan when structure is available.
+    """
+    try:
+        entry = float(entry or 0)
+        day_high = float(day_high or entry)
+        day_low = float(day_low or entry)
+        day_open = float(day_open or entry)
+    except (TypeError, ValueError):
+        return None
+    if entry <= 0:
+        return None
+
+    day_range = max(day_high - day_low, entry * 0.025)
+    buffer = max(day_range * 0.06, entry * 0.004)
+    min_risk = max(entry * 0.012, day_range * 0.12)
+    max_risk = entry * (0.10 if change_pct is not None and change_pct <= -10 else 0.08)
+
+    stop_candidates: List[tuple[float, str]] = []
+    if day_open > entry:
+        stop_candidates.append((day_open + buffer, "day_open_reclaim"))
+    if ma20 and entry < float(ma20) <= entry * 1.14:
+        stop_candidates.append((float(ma20) + buffer, "ma20_reclaim"))
+    if ma50 and entry < float(ma50) <= entry * 1.16:
+        stop_candidates.append((float(ma50) + buffer, "ma50_reclaim"))
+    if day_high > entry:
+        stop_candidates.append((day_high + buffer, "day_high_reclaim"))
+
+    stop = None
+    stop_source = "intraday_reclaim_zone"
+    for level, label in sorted(stop_candidates, key=lambda item: item[0] - entry):
+        risk_candidate = level - entry
+        if min_risk <= risk_candidate <= max_risk:
+            stop = level
+            stop_source = label
+            break
+    if stop is None:
+        fallback_risk = min(max(day_range * 0.35, entry * 0.025), max_risk)
+        if fallback_risk < min_risk:
+            return None
+        stop = entry + fallback_risk
+
+    risk = stop - entry
+    if risk <= 0:
+        return None
+
+    target_candidates: List[tuple[float, str]] = []
+    if 0 < day_low < entry:
+        target_candidates.append((day_low, "day_low_liquidity"))
+    if low_20d and 0 < float(low_20d) < entry:
+        target_candidates.append((float(low_20d), "20d_low_support"))
+    if low_60d and 0 < float(low_60d) < entry:
+        target_candidates.append((float(low_60d), "60d_low_support"))
+    target_candidates.extend([
+        (entry - day_range * 0.80, "intraday_measured_move"),
+        (entry - day_range * 1.30, "extended_measured_move"),
+    ])
+
+    def _pick_short_target(min_rr: float, max_below: float, fallback_rr: float, fallback_label: str) -> tuple[float, str]:
+        min_price = entry - risk * min_rr
+        valid = sorted(
+            {round(p, 6): label for p, label in target_candidates if 0 < p < max_below}.items(),
+            reverse=True,
+        )
+        for level, label in valid:
+            if level <= min_price:
+                return level, label
+        return max(0.01, entry - risk * fallback_rr), fallback_label
+
+    tp1, tp1_source = _pick_short_target(1.25, entry, 1.5, "measured_move_fallback")
+    tp2, tp2_source = _pick_short_target(2.10, tp1 - risk * 0.20, 2.5, "measured_move_fallback")
+    if tp2 >= tp1:
+        tp2 = max(0.01, tp1 - max(risk, day_range * 0.50))
+        tp2_source = "measured_move_fallback"
+
+    rr_tp1 = (entry - tp1) / risk if risk > 0 else 0
+    rr_tp2 = (entry - tp2) / risk if risk > 0 else 0
+    return {
+        "Entry": _round_trade_price(entry),
+        "StopLoss": _round_trade_price(stop),
+        "TP1": _round_trade_price(tp1),
+        "TP2": _round_trade_price(tp2),
+        "entry": _round_trade_price(entry),
+        "stop_loss": _round_trade_price(stop),
+        "tp1": _round_trade_price(tp1),
+        "tp2": _round_trade_price(tp2),
+        "Risk": _round_trade_price(risk),
+        "risk": _round_trade_price(risk),
+        "rr": round((rr_tp1 + rr_tp2) / 2, 2),
+        "rr_tp1": round(rr_tp1, 2),
+        "rr_tp2": round(rr_tp2, 2),
+        "level_model": "bear_structure_first_v1",
+        "trade_setup_source": "native_bear_structure",
+        "stop_source": stop_source,
+        "tp1_source": tp1_source,
+        "tp2_source": tp2_source,
+    }
+
+
 def _fetch_long_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]:
     """Same 5m state, used to block fading long mails without blocking continuation."""
     return _fetch_bear_latest_intraday_state(ticker)
@@ -3977,7 +4090,11 @@ def _build_structured_trade_setup(
     low_20d: Optional[float],
     range_pos: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Build realistic sidebar trade levels using structure, ATR and minimum R multiples."""
+    """Build realistic sidebar trade levels from invalidation and target structure.
+
+    The stop is placed behind a real invalidation level first. R:R is only used
+    afterwards as a quality filter, not as the reason for the stop/target.
+    """
     try:
         side = str(direction or "").upper()
         entry = float(entry or 0)
@@ -3990,7 +4107,7 @@ def _build_structured_trade_setup(
     if atr_value <= 0:
         atr_value = entry * 0.03
 
-    min_risk = max(entry * 0.025, atr_value * 0.75)
+    min_risk = max(entry * 0.015, atr_value * 0.45)
     buffer = max(entry * 0.003, atr_value * 0.10)
     warnings: List[str] = []
     notes: List[str] = []
@@ -4001,9 +4118,59 @@ def _build_structured_trade_setup(
     lo20 = float(low_20d or 0)
     range_size = hi20 - lo20 if hi20 > lo20 else 0.0
 
+    def _unique_levels(levels: List[tuple[float, str]], reverse: bool = False) -> List[tuple[float, str]]:
+        seen: Dict[float, str] = {}
+        for price, label in levels:
+            if price and price > 0:
+                seen.setdefault(round(float(price), 6), label)
+        return sorted(seen.items(), reverse=reverse)
+
+    def _select_long_target(
+        candidates: List[tuple[float, str]],
+        min_reward: float,
+        fallback: float,
+        fallback_label: str,
+    ) -> tuple[float, str]:
+        valid = _unique_levels([(p, l) for p, l in candidates if p > entry])
+        structural = [(p, l) for p, l in valid if "fallback" not in l.lower() and "atr" not in l.lower()]
+        synthetic = [(p, l) for p, l in valid if (p, l) not in structural]
+        for group in (structural, synthetic):
+            for price, label in group:
+                if price - entry >= min_reward:
+                    return price, label
+        return fallback, fallback_label
+
+    def _select_short_target(
+        candidates: List[tuple[float, str]],
+        min_reward: float,
+        fallback: float,
+        fallback_label: str,
+    ) -> tuple[float, str]:
+        valid = _unique_levels([(p, l) for p, l in candidates if 0 < p < entry], reverse=True)
+        structural = [(p, l) for p, l in valid if "fallback" not in l.lower() and "atr" not in l.lower()]
+        synthetic = [(p, l) for p, l in valid if (p, l) not in structural]
+        for group in (structural, synthetic):
+            for price, label in group:
+                if entry - price >= min_reward:
+                    return price, label
+        return max(0.01, fallback), fallback_label
+
     if side == "LONG":
-        raw_stop = support - buffer if 0 < support < entry else entry - max(atr_value * 1.2, entry * 0.03)
-        stop = min(raw_stop, entry - min_risk)
+        stop_candidates: List[tuple[float, str]] = []
+        if 0 < support < entry:
+            stop_candidates.append((support - buffer, "S1 invalidation"))
+        if 0 < lo20 < entry:
+            stop_candidates.append((lo20 - buffer, "20D low invalidation"))
+        stop_candidates.append((entry - max(atr_value * 1.2, entry * 0.03), "ATR invalidation fallback"))
+
+        selected_stop = None
+        stop_source = "ATR invalidation fallback"
+        for price, label in _unique_levels(stop_candidates, reverse=True):
+            if entry - price >= min_risk:
+                selected_stop = price
+                stop_source = label
+                break
+        stop = selected_stop if selected_stop is not None else entry - min_risk
         risk = entry - stop
         if risk <= 0:
             return None
@@ -4022,8 +4189,8 @@ def _build_structured_trade_setup(
         candidates.extend([
             (entry + atr_value * 2.0, "2 ATR"),
             (entry + atr_value * 3.5, "3.5 ATR"),
-            (entry + risk * 1.5, "1.5R minimum"),
-            (entry + risk * 2.5, "2.5R minimum"),
+            (entry + risk * 1.5, "measured move 1.5R fallback"),
+            (entry + risk * 2.5, "measured move 2.5R fallback"),
         ])
 
         near_barriers = [
@@ -4033,19 +4200,37 @@ def _build_structured_trade_setup(
         if near_barriers:
             warnings.append(f"Nahe Resistance ({', '.join(dict.fromkeys(near_barriers))}) - TP nicht zu eng setzen")
 
-        min_tp1 = entry + max(risk * 1.5, atr_value * 1.25, entry * 0.04)
-        min_tp2 = entry + max(risk * 2.5, atr_value * 2.5, entry * 0.07)
+        min_tp1 = entry + max(risk * 1.35, atr_value * 1.10, entry * 0.03)
+        min_tp2 = entry + max(risk * 2.25, atr_value * 2.20, entry * 0.055)
         if range_size > 0 and hi20 > entry and (hi20 - entry) < risk * 1.25:
             min_tp1 = max(min_tp1, hi20 + range_size * 0.272)
             min_tp2 = max(min_tp2, hi20 + range_size * 0.618)
-        valid = sorted({round(price, 6): label for price, label in candidates if price > entry}.items())
-        tp1 = next((price for price, _ in valid if price >= min_tp1), min_tp1)
-        tp2 = next((price for price, _ in valid if price >= min_tp2 and price > tp1 + risk * 0.25), min_tp2)
+        tp1, tp1_source = _select_long_target(candidates, min_tp1 - entry, min_tp1, "measured move fallback")
+        tp2, tp2_source = _select_long_target(
+            [(p, l) for p, l in candidates if p > tp1 + risk * 0.25],
+            min_tp2 - entry,
+            min_tp2,
+            "measured move fallback",
+        )
         if tp2 <= tp1:
             tp2 = tp1 + max(risk, atr_value, entry * 0.03)
+            tp2_source = "measured move fallback"
     else:
-        raw_stop = resistance + buffer if resistance > entry else entry + max(atr_value * 1.2, entry * 0.03)
-        stop = max(raw_stop, entry + min_risk)
+        stop_candidates = []
+        if resistance > entry:
+            stop_candidates.append((resistance + buffer, "R1 invalidation"))
+        if hi20 > entry:
+            stop_candidates.append((hi20 + buffer, "20D high invalidation"))
+        stop_candidates.append((entry + max(atr_value * 1.2, entry * 0.03), "ATR invalidation fallback"))
+
+        selected_stop = None
+        stop_source = "ATR invalidation fallback"
+        for price, label in _unique_levels(stop_candidates):
+            if price - entry >= min_risk:
+                selected_stop = price
+                stop_source = label
+                break
+        stop = selected_stop if selected_stop is not None else entry + min_risk
         risk = stop - entry
         if risk <= 0:
             return None
@@ -4064,8 +4249,8 @@ def _build_structured_trade_setup(
         candidates.extend([
             (entry - atr_value * 2.0, "2 ATR"),
             (entry - atr_value * 3.5, "3.5 ATR"),
-            (entry - risk * 1.5, "1.5R minimum"),
-            (entry - risk * 2.5, "2.5R minimum"),
+            (entry - risk * 1.5, "measured move 1.5R fallback"),
+            (entry - risk * 2.5, "measured move 2.5R fallback"),
         ])
 
         near_barriers = [
@@ -4075,16 +4260,21 @@ def _build_structured_trade_setup(
         if near_barriers:
             warnings.append(f"Nahe Support-Zone ({', '.join(dict.fromkeys(near_barriers))}) - TP nicht zu eng setzen")
 
-        min_tp1 = entry - max(risk * 1.5, atr_value * 1.25, entry * 0.04)
-        min_tp2 = entry - max(risk * 2.5, atr_value * 2.5, entry * 0.07)
+        min_tp1 = entry - max(risk * 1.35, atr_value * 1.10, entry * 0.03)
+        min_tp2 = entry - max(risk * 2.25, atr_value * 2.20, entry * 0.055)
         if range_size > 0 and 0 < lo20 < entry and (entry - lo20) < risk * 1.25:
             min_tp1 = min(min_tp1, lo20 - range_size * 0.272)
             min_tp2 = min(min_tp2, lo20 - range_size * 0.618)
-        valid = sorted({round(price, 6): label for price, label in candidates if 0 < price < entry}.items(), reverse=True)
-        tp1 = next((price for price, _ in valid if price <= min_tp1), min_tp1)
-        tp2 = next((price for price, _ in valid if price <= min_tp2 and price < tp1 - risk * 0.25), min_tp2)
+        tp1, tp1_source = _select_short_target(candidates, entry - min_tp1, min_tp1, "measured move fallback")
+        tp2, tp2_source = _select_short_target(
+            [(p, l) for p, l in candidates if p < tp1 - risk * 0.25],
+            entry - min_tp2,
+            min_tp2,
+            "measured move fallback",
+        )
         if tp2 >= tp1:
             tp2 = max(0.01, tp1 - max(risk, atr_value, entry * 0.03))
+            tp2_source = "measured move fallback"
 
     reward1 = abs(tp1 - entry)
     reward2 = abs(tp2 - entry)
@@ -4111,7 +4301,11 @@ def _build_structured_trade_setup(
         "rr_tp1": round(rr_tp1, 2),
         "rr_tp2": round(rr_tp2, 2),
         "risk": _round_trade_price(risk),
-        "model": "ATR + Struktur + min. 1.5R/2.5R",
+        "model": "Struktur-Invalidation + Zielzonen; R:R nur Filter",
+        "level_model": "structure_first_v2",
+        "stop_source": stop_source,
+        "tp1_source": tp1_source,
+        "tp2_source": tp2_source,
         "warnings": warnings,
         "notes": notes,
         "direction": side,
@@ -5783,6 +5977,8 @@ def _bear_scan_wrapper() -> None:
                         ma50 = 0
                         ma20_dist = 0
                         ma50_dist = 0
+                        low_20d = None
+                        low_60d = None
                         has_history = False
 
                         try:
@@ -5803,6 +5999,10 @@ def _bear_scan_wrapper() -> None:
 
                                     avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
                                     rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+                                    lows_20 = [b.get("l", b.get("c", 0)) for b in bars[1:21] if b.get("l", b.get("c", 0)) > 0]
+                                    lows_60 = [b.get("l", b.get("c", 0)) for b in bars[1:60] if b.get("l", b.get("c", 0)) > 0]
+                                    low_20d = min(lows_20) if lows_20 else None
+                                    low_60d = min(lows_60) if lows_60 else None
                         except Exception as e:
                             print(f"[Bear] History failed for {ticker_sym}: {e}")
 
@@ -5914,6 +6114,19 @@ def _bear_scan_wrapper() -> None:
                             "score_details": " | ".join(score_details),
                             "asset_check": "common_stock",
                         }
+                        trade_setup = _build_bear_structure_trade_setup(
+                            entry=price,
+                            day_high=day_high,
+                            day_low=day_low,
+                            day_open=day_open,
+                            ma20=ma20,
+                            ma50=ma50,
+                            low_20d=low_20d,
+                            low_60d=low_60d,
+                            change_pct=chg_pct,
+                        )
+                        if trade_setup:
+                            bear_row.update(trade_setup)
                         if score >= 55:
                             bear_row.update(_fetch_bear_latest_intraday_state(ticker_sym))
                         bear_row["short_block_reasons"] = _bear_short_rule_reasons(bear_row)
@@ -9024,24 +9237,67 @@ def _build_early_mover_long_setup(
         entry_quality = "THIN"
         warnings.extend(liquidity.get("reasons") or [])
 
-    risk_distance = max(setup_entry * risk_pct, range_24h * 0.25)
-    swing_stop = low_24h - max(range_24h * 0.05, setup_entry * 0.01)
-    stop = setup_entry - risk_distance
-    if low_24h < setup_entry and (setup_entry - swing_stop) <= setup_entry * 0.16:
-        stop = min(stop, swing_stop)
-    max_risk = setup_entry * 0.14
-    if setup_entry - stop > max_risk:
-        stop = setup_entry - max_risk
+    stop_buffer = max(range_24h * 0.035, setup_entry * 0.006)
+    min_stop_breathing_room = max(setup_entry * 0.012, range_24h * 0.08)
+    max_structure_risk = setup_entry * (0.16 if mcap and mcap < 20_000_000 else 0.14)
+    structure_supports = [
+        (low_24h + range_24h * 0.618, "fib_61_8_retest"),
+        (low_24h + range_24h * 0.500, "range_mid_retest"),
+        (low_24h + range_24h * 0.382, "fib_38_2_retest"),
+        (low_24h, "24h_swing_low"),
+    ]
+    stop = None
+    stop_source = "volatility_fallback"
+    for level, label in sorted(structure_supports, key=lambda item: setup_entry - item[0]):
+        if not (0 < level < setup_entry):
+            continue
+        proposed_stop = max(0.00000001, level - stop_buffer)
+        risk_candidate = setup_entry - proposed_stop
+        if risk_candidate >= min_stop_breathing_room and risk_candidate <= max_structure_risk:
+            stop = proposed_stop
+            stop_source = f"{label}_invalidation"
+            break
+
+    if stop is None:
+        risk_distance = max(setup_entry * risk_pct, range_24h * 0.25)
+        stop = max(0.00000001, setup_entry - min(risk_distance, max_structure_risk))
+        warnings.append("Kein sauberes Struktur-Stop-Level - nur mit bestaetigtem Retest handeln")
+
     if stop <= 0 or stop >= setup_entry:
         stop = setup_entry * (1 - risk_pct)
+        stop_source = "volatility_fallback"
 
     risk = max(setup_entry - stop, setup_entry * 0.01)
-    rr_tp1 = 1.8 if phase == 1 else 1.5
-    rr_tp2 = 3.2 if phase == 1 else 2.8
+
+    target_candidates = []
+    if high_24h > setup_entry:
+        target_candidates.append((high_24h, "24h_high_liquidity"))
+    target_candidates.extend([
+        (low_24h + range_24h * 1.272, "127_2_range_extension"),
+        (low_24h + range_24h * 1.618, "161_8_range_extension"),
+        (high_24h + range_24h * 0.272, "breakout_measured_move_127"),
+        (high_24h + range_24h * 0.618, "breakout_measured_move_161"),
+    ])
+
+    def _pick_crypto_long_target(min_rr: float, min_above: float, fallback_rr: float, fallback_label: str) -> tuple[float, str]:
+        min_price = setup_entry + risk * min_rr
+        for level, label in sorted({round(p, 10): l for p, l in target_candidates if p > min_above}.items()):
+            if level >= min_price:
+                return level, label
+        return setup_entry + risk * fallback_rr, fallback_label
+
+    tp1, tp1_source = _pick_crypto_long_target(1.35, setup_entry, 1.8 if phase == 1 else 1.5, "measured_move_fallback")
+    tp2_floor_rr = 2.6 if phase == 1 else 2.25
+    tp2_fallback_rr = 3.2 if phase == 1 else 2.8
     if mcap and mcap < 20_000_000:
-        rr_tp2 += 0.3
-    tp1 = setup_entry + risk * rr_tp1
-    tp2 = setup_entry + risk * rr_tp2
+        tp2_fallback_rr += 0.3
+    tp2, tp2_source = _pick_crypto_long_target(tp2_floor_rr, tp1 + risk * 0.25, tp2_fallback_rr, "measured_move_fallback")
+    if tp2 <= tp1:
+        tp2 = tp1 + max(risk, range_24h * 0.35)
+        tp2_source = "measured_move_fallback"
+
+    rr_tp1 = round((tp1 - setup_entry) / risk, 2) if risk > 0 else 0
+    rr_tp2 = round((tp2 - setup_entry) / risk, 2) if risk > 0 else 0
     live_entry = max(price, setup_entry)
     live_risk = max(live_entry - stop, risk)
     live_reward = ((tp1 - live_entry) + (tp2 - live_entry)) / 2
@@ -9095,7 +9351,11 @@ def _build_early_mover_long_setup(
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
         "live_rr": live_rr,
-        "model": "conditional long: TP1/TP2 blended",
+        "model": "structure-first conditional long: stop=invalidations, TP=targets, RR=filter",
+        "level_model": "crypto_structure_first_v2",
+        "stop_source": stop_source,
+        "tp1_source": tp1_source,
+        "tp2_source": tp2_source,
         "trade_action": trade_action,
         "action_label": action_label,
         "entry_status": entry_status,

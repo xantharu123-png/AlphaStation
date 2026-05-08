@@ -72,6 +72,31 @@ def test_early_mover_volume_spike_builds_conditional_long_setup(monkeypatch):
     assert row["btc_context"]["tailwind"] is True
 
 
+def test_early_mover_levels_are_structure_first_not_r_only():
+    setup = api._build_early_mover_long_setup(
+        {
+            "Price": 1.0,
+            "High24h": 1.05,
+            "Low24h": 0.90,
+            "MCap": 25_000_000,
+            "VolMCapRatio": 12,
+            "Change24h": 4.0,
+            "Change7d": 12.0,
+        },
+        phase=1,
+        score=86,
+        btc_24h=1.0,
+        btc_7d=2.0,
+    )
+
+    assert setup["level_model"] == "crypto_structure_first_v2"
+    assert "invalidation" in setup["stop_source"]
+    assert setup["tp1_source"] != "measured_move_fallback"
+    assert setup["entry"] > setup["stop_loss"]
+    assert setup["tp1"] > setup["entry"]
+    assert setup["rr_tp1"] >= 1.35
+
+
 def test_early_mover_filters_stables_wrapped_and_liquid_staking(monkeypatch):
     usde = _volume_coin(symbol="usde", coin_id="ethena-usde")
     usde["name"] = "Ethena USDe Stablecoin"
