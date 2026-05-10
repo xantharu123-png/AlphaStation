@@ -40,7 +40,7 @@ def test_negative_catalysts_semantic():
     for expected in ("clinical hold", "fda rejection", "trial failure", "missed endpoint"):
         if expected not in BIOTECH_NEGATIVE_CATALYSTS:
             failures.append(f"'{expected}' fehlt in NEGATIVE_CATALYSTS.")
-    return failures
+    assert failures == []
 
 
 # ── Test 2: Grade-Threshold-Logik ──
@@ -84,7 +84,7 @@ def test_grade_thresholds():
         actual = _apply_grade_logic(total, cat, readout, tech)
         if actual != expected:
             failures.append(f"{name}: erwartet {expected}, bekam {actual}")
-    return failures
+    assert failures == []
 
 
 # ── Test 3: Chart-Health-Penalty ──
@@ -112,7 +112,7 @@ def test_chart_health_penalty():
         actual = _apply_chart_health_penalty(total, health)
         if actual != expected:
             failures.append(f"{name}: erwartet {expected}, bekam {actual}")
-    return failures
+    assert failures == []
 
 
 # ── Test 4: min_required-Threshold ──
@@ -142,7 +142,7 @@ def test_min_required():
         actual = _apply_min_required(total, cat, readout)
         if actual != expected_pass:
             failures.append(f"{name}: erwartet pass={expected_pass}, bekam pass={actual}")
-    return failures
+    assert failures == []
 
 
 # ── Test 5: Kombinierter End-to-End-Flow ──
@@ -174,7 +174,7 @@ def test_full_pipeline():
             failures.append(f"{name}: erwartetes Grade={exp_grade}, bekam {act_grade} (score={act_score})")
         if act_score != exp_score:
             failures.append(f"{name}: erwarteter Score={exp_score}, bekam {act_score}")
-    return failures
+    assert failures == []
 
 
 # ── Runner ──

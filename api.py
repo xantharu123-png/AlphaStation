@@ -912,13 +912,81 @@ def _record_email_event(subject: str, status: str, reason: str = "") -> None:
         del _EMAIL_SEND_LOG[:-50]
 
 
+_ALERT_SUPPRESSION_LABELS = {
+    "missing_ticker": "Ticker fehlt",
+    "grade_below_alert_threshold": "Grade unter S/A/A+",
+    "score_below_alert_threshold": f"Score unter {_ALERT_MIN_SCORE}",
+    "rvol_below_alert_threshold": f"RVOL unter {_ALERT_MIN_RVOL}x",
+    "cooldown_active": "8h Mail-Cooldown aktiv",
+    "persistent_dedupe_active": "persistenter Mail-Dedupe aktiv",
+    "bearish_ticker_already_alerted": "Bear/Crash fuer diesen Ticker schon gemeldet",
+    "non_common_stock_product": "kein handelbarer Common Stock/ADR",
+    "invalid_trade_plan": "Entry/Stop/TP ungueltig",
+    "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
+    "trade_rr_below_threshold": "R:R unter Mindestwert",
+    "trade_missing_entry": "Entry fehlt",
+    "trade_missing_stop": "Stop fehlt",
+    "trade_missing_tp1": "TP1 fehlt",
+    "trade_wrong_direction": "Entry/Stop/TP passen nicht zur Richtung",
+    "trade_health_no_trade": "Trade-Health sagt nicht traden",
+    "trade_health_wait_for_retest": "Retest abwarten",
+    "trade_health_wait_for_trigger": "Execution-Trigger fehlt",
+    "trade_health_wait_for_continuation": "Continuation-Bestaetigung fehlt",
+    "trade_health_chase_risk": "Chase-Risiko zu hoch",
+    "trade_health_fakeout_risk": "Fakeout-Risiko zu hoch",
+    "trade_health_liquidity_risk": "Liquiditaets-/Slippage-Risiko zu hoch",
+    "latest_5m_red_fade": "Long: letzte 5m-Kerze faded",
+    "latest_5m_green_reclaim": "Short: letzte 5m-Kerze bounced/reclaimt",
+    "extended_long_fading_wait_retest": "Long erweitert und fading: Retest abwarten",
+    "hard_extended_long_wait_retest": "Long zu weit gelaufen: Retest abwarten",
+    "drop_too_extended_no_chase": "Short/Crash-Drop schon sehr erweitert",
+    "current_candle_green_reclaim": "Short: aktuelle Kerze reclaimed",
+    "not_closing_near_low": "Short: Kurs schliesst nicht nahe Tagestief",
+    "target_already_missed": "TP1 bereits verpasst",
+    "early_mover_action_not_alertable": "Crypto: nur Watch/Retest, kein Long-Jetzt",
+    "early_mover_no_chase": "Crypto: No-Chase",
+    "early_mover_late_to_tp1": "Crypto: zu nah/ueber TP1",
+    "early_mover_chased_from_entry": "Crypto: zu weit vom Entry",
+    "early_mover_retest_not_near_entry": "Crypto: Retest noch nicht nahe Entry",
+    "early_mover_btc_headwind": "Crypto: BTC-Gegenwind",
+    "early_mover_data_warning": "Crypto: Daten unvollstaendig/partial",
+    "early_mover_blowoff_turnover": "Crypto: Blowoff/Turnover-Risiko",
+    "early_mover_turnover_without_alpha": "Crypto: viel Umsatz ohne Alpha",
+    "no_fresh_5m_trigger": "kein frischer 5m/1m Trigger",
+    "micro_trigger_missing": "Pump/Dump: Micro-Crack fehlt",
+    "pump_continuation_risk": "Pump laeuft noch, Short zu frueh",
+    "safety_not_ok": "Safety-Check nicht OK",
+    "risk_too_wide": "Stop/Risk zu breit",
+    "not_new_listing_dump": "kein echter New-Listing-Dump",
+    "listing_age_not_tradeable": "Listing-Alter nicht im Trade-Fenster",
+    "crypto_strategy_watch_only": "Crypto-Strategie ist Watch-only",
+    "no_crypto_tradeable_signal": "kein tradebares Crypto-Signal",
+    "no_crypto_execution_trigger": "kein Crypto-Execution-Trigger",
+    "partial_crypto_data": "Crypto-Daten unvollstaendig",
+}
+
+
+def _alert_reason_label(reason: str) -> str:
+    reason = str(reason or "").strip()
+    if not reason:
+        return "Unbekannter Blocker"
+    return _ALERT_SUPPRESSION_LABELS.get(reason, reason.replace("_", " "))
+
+
+def _top_alert_reasons(reason_counts: Dict[str, int], max_items: int = 8) -> List[Dict[str, Any]]:
+    return [
+        {"reason": reason, "label": _alert_reason_label(reason), "count": count}
+        for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:max_items]
+    ]
+
+
 def _format_alert_suppression_summary(
     suppressed: Dict[str, int],
     grade_counts: Optional[Dict[str, int]] = None,
     max_items: int = 8,
 ) -> str:
     parts = [
-        f"{reason}={count}"
+        f"{reason}={count} ({_alert_reason_label(reason)})"
         for reason, count in sorted(suppressed.items(), key=lambda item: (-item[1], item[0]))[:max_items]
     ]
     summary = ", ".join(parts) if parts else "no_candidates"
@@ -2928,19 +2996,28 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
     rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file)
     now = time.time()
     grade_counts: Dict[str, int] = {}
+    decision_counts: Dict[str, int] = {}
     reason_counts: Dict[str, int] = {}
     alertable = []
+    watch_preview = []
     crash_reason_counts: Dict[str, int] = {}
+    crash_decision_counts: Dict[str, int] = {}
     crash_alertable = []
     for row in rows:
         state = _classify_alert_candidate(scanner_name, row, now)
         grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
+        decision = state.get("decision") or "UNKNOWN"
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
         if state["alertable_now"]:
             alertable.append(state)
+        elif len(watch_preview) < 10 and state.get("decision") in ("WATCH", "WAIT_RETEST", "WAIT_TRIGGER"):
+            watch_preview.append(state)
         for reason in state["suppression_reasons"]:
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
         if scanner_name == "bear":
             crash_state = _classify_crash_alert_candidate(row, now)
+            crash_decision = crash_state.get("decision") or "UNKNOWN"
+            crash_decision_counts[crash_decision] = crash_decision_counts.get(crash_decision, 0) + 1
             if crash_state["alertable_now"]:
                 crash_alertable.append(crash_state)
             for reason in crash_state["suppression_reasons"]:
@@ -2957,17 +3034,104 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
         "cache_age_seconds": cache_age,
         "rows_checked": len(rows),
         "grade_counts": grade_counts,
+        "decision_counts": decision_counts,
         "alertable_now_count": len(alertable),
         "alertable_preview": alertable[:10],
+        "watch_preview": watch_preview,
+        "mail_status": "SEND_NOW" if alertable else "NO_MAIL",
+        "mail_status_label": "Mail wuerde jetzt rausgehen" if alertable else "Keine Mail: Gates blockieren oder nur Watch",
         "suppression_counts": reason_counts,
+        "suppression_top": _top_alert_reasons(reason_counts),
+        "suppression_human": _format_alert_suppression_summary(reason_counts, grade_counts),
     }
     if scanner_name == "bear":
         audit.update({
             "crash_alertable_now_count": len(crash_alertable),
             "crash_alertable_preview": crash_alertable[:10],
+            "crash_decision_counts": crash_decision_counts,
             "crash_suppression_counts": crash_reason_counts,
+            "crash_suppression_top": _top_alert_reasons(crash_reason_counts),
+            "crash_mail_status": "SEND_NOW" if crash_alertable else "NO_MAIL",
+            "crash_mail_status_label": "Crash-Mail wuerde jetzt rausgehen" if crash_alertable else "Keine Crash-Mail: Gates blockieren oder Dedupe aktiv",
         })
     return audit
+
+
+def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    total_rows = 0
+    total_alertable = 0
+    total_crash_alertable = 0
+    aggregate_reasons: Dict[str, int] = {}
+    scanner_statuses = []
+    for name, audit in scanners.items():
+        if not isinstance(audit, dict):
+            continue
+        if audit.get("error"):
+            scanner_statuses.append({
+                "scanner": name,
+                "status": "ERROR",
+                "label": f"Audit-Fehler: {audit.get('error')}",
+            })
+            continue
+        rows = int(audit.get("rows_checked") or 0)
+        alertable = int(audit.get("alertable_now_count") or 0)
+        crash_alertable = int(audit.get("crash_alertable_now_count") or 0)
+        total_rows += rows
+        total_alertable += alertable
+        total_crash_alertable += crash_alertable
+        for counts_key in ("suppression_counts", "crash_suppression_counts"):
+            counts = audit.get(counts_key) or {}
+            if isinstance(counts, dict):
+                for reason, count in counts.items():
+                    aggregate_reasons[reason] = aggregate_reasons.get(reason, 0) + int(count or 0)
+        if alertable or crash_alertable:
+            status = "SEND_NOW"
+            label = f"{alertable + crash_alertable} Mail-Kandidat(en) jetzt"
+        elif rows == 0:
+            status = "NO_CANDIDATES"
+            label = "Keine aktuellen Kandidaten im Cache"
+        else:
+            status = "BLOCKED"
+            top = _top_alert_reasons(audit.get("suppression_counts") or {}, max_items=1)
+            label = top[0]["label"] if top else "Nur Watch/unter Alert-Gates"
+        scanner_statuses.append({
+            "scanner": name,
+            "status": status,
+            "label": label,
+            "rows_checked": rows,
+            "alertable_now_count": alertable,
+            "crash_alertable_now_count": crash_alertable,
+            "cache_age_seconds": audit.get("cache_age_seconds"),
+        })
+
+    email_status = _email_alert_status()
+    startup_cooldown = int(email_status.get("startup_cooldown_remaining_seconds") or 0)
+    configured = bool(email_status.get("configured"))
+    if not configured:
+        overall = "EMAIL_NOT_CONFIGURED"
+        next_step = "GMAIL_USER/GMAIL_APP_PASSWORD/ALERT_EMAIL pruefen."
+    elif startup_cooldown > 0:
+        overall = "STARTUP_COOLDOWN"
+        next_step = f"Noch {startup_cooldown}s Startup-Cooldown nach Restart."
+    elif total_alertable + total_crash_alertable > 0:
+        overall = "MAIL_READY"
+        next_step = "Mindestens ein Kandidat besteht alle Gates; Mail sollte beim naechsten Alert-Lauf kommen."
+    elif total_rows == 0:
+        overall = "NO_CANDIDATES"
+        next_step = "Scanner-Caches enthalten aktuell keine Kandidaten fuer Mail-Audit."
+    else:
+        overall = "ALL_BLOCKED_BY_GATES"
+        next_step = "Keine Mail ist korrekt: Score/Grade/Timing/R:R/Trade-Health/Dedupe blockt aktuell."
+
+    return {
+        "overall_status": overall,
+        "next_step": next_step,
+        "total_rows_checked": total_rows,
+        "total_alertable_now": total_alertable,
+        "total_crash_alertable_now": total_crash_alertable,
+        "top_blockers": _top_alert_reasons(aggregate_reasons, max_items=10),
+        "scanner_statuses": scanner_statuses,
+    }
 
 
 def _alert_suppression_summary_for_rows(scanner_name: str, rows: List[Dict[str, Any]], now: Optional[float] = None) -> str:
@@ -7076,6 +7240,7 @@ def get_email_alert_audit():
 
     return {
         "status": "ok",
+        "summary": _summarize_email_alert_audit(scanners),
         "email_alerts": _email_alert_status(),
         "common_stock_guard": _common_stock_guard_status(),
         "policy": {

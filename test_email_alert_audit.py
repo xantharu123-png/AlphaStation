@@ -42,6 +42,40 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert audit["suppression_counts"]["grade_below_alert_threshold"] == 1
     assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
     assert audit["suppression_counts"]["score_below_alert_threshold"] == 2
+    assert audit["mail_status"] == "SEND_NOW"
+    assert audit["decision_counts"]["TRADE_NOW"] == 1
+    top_by_reason = {item["reason"]: item for item in audit["suppression_top"]}
+    assert top_by_reason["score_below_alert_threshold"]["count"] == 2
+    assert "Score unter" in top_by_reason["score_below_alert_threshold"]["label"]
+    assert "score_below_alert_threshold=2" in audit["suppression_human"]
+    assert "Score unter" in audit["suppression_human"]
+
+
+def test_email_alert_audit_summary_explains_blockers(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_email_alert_status", lambda: {
+        "configured": True,
+        "startup_cooldown_remaining_seconds": 0,
+    })
+    blocked_file = tmp_path / "blocked.json"
+    blocked_file.write_text(json.dumps({
+        "cached_at": datetime.now().isoformat(),
+        "results": [
+            {"ticker": "BBB", "grade": "B", "score": 70, "rvol": 2.0, "price": 20},
+            {"ticker": "CCC", "grade": "A", "score": 79, "rvol": 2.0, "price": 30},
+        ],
+    }))
+
+    audit = api._build_alert_audit_for_cache("stock_strategy", str(blocked_file))
+    summary = api._summarize_email_alert_audit({"stock_strategy": audit})
+
+    assert summary["overall_status"] in {"ALL_BLOCKED_BY_GATES", "STARTUP_COOLDOWN"}
+    assert summary["total_rows_checked"] == 2
+    assert summary["total_alertable_now"] == 0
+    top_by_reason = {item["reason"]: item for item in summary["top_blockers"]}
+    assert top_by_reason["score_below_alert_threshold"]["count"] == 2
+    assert "Score unter" in top_by_reason["score_below_alert_threshold"]["label"]
+    assert summary["scanner_statuses"][0]["status"] == "BLOCKED"
 
 
 def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
