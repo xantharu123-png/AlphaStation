@@ -4359,7 +4359,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     </div>
                                     <div>
                                         <div className="scanner-mobile-label">RVOL</div>
-                                        <div className="scanner-mobile-value">{item.rvol?.toFixed(2) || '–'}</div>
+                                        <div className="scanner-mobile-value">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</div>
                                     </div>
                                 </div>
                             </button>
@@ -4389,7 +4389,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rsi?.toFixed(1)}</td>
-                                <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span></td>
                             </tr>
@@ -5459,7 +5459,7 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
                                 <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
-                                <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.cmf ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.cmf != null ? item.cmf.toFixed(3) : '–'}</td>
                                 <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : 'Neutral'}</span></td>
                                 <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal || '')}`}>{item.flow_signal || '–'}</span></td>
@@ -6956,7 +6956,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.volume ? (item.volume / 1000000).toFixed(2) + 'M' : '–'}</td>
-                                <td className="py-3 px-2 text-right">{item.rvol?.toFixed(2)}</td>
+                                <td className="py-3 px-2 text-right">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</td>
                                 <td className="py-3 px-2 text-right">{item.dollar_volume ? `$${(item.dollar_volume / 1000000).toFixed(2)}M` : '–'}</td>
                             </tr>
                         ))}
