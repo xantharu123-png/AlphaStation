@@ -214,6 +214,7 @@ def _sanitize_trade_health_messages(
     tactical_reasons: List[str],
     exclusion_reasons: List[str],
     *,
+    decision: str,
     vol_confirmed_bool: Optional[bool],
     chase_risk: str,
     fakeout_risk: str,
@@ -223,11 +224,21 @@ def _sanitize_trade_health_messages(
     cleaned: List[str] = []
     for msg in positives:
         lower = msg.lower()
+        if decision != "TRADEABLE" and "live r:r" in lower:
+            continue
+        if decision != "TRADEABLE" and (
+            "entry liegt nahe" in lower
+            or "close stark" in lower
+            or "relative volumenbestaetigung" in lower
+            or "breakout-volumen bestaetigt" in lower
+            or "vwap alignment passt" in lower
+        ):
+            continue
         if vol_confirmed_bool is False and (
             "relative volumenbestaetigung" in lower or "breakout-volumen bestaetigt" in lower
         ):
             continue
-        if chase_risk in {"HIGH", "CRITICAL"} and (
+        if chase_risk in {"MEDIUM", "HIGH", "CRITICAL"} and (
             "entry liegt nahe" in lower or "nicht gechased" in lower
         ):
             continue
@@ -536,6 +547,7 @@ def calculate_trade_health(
         warnings,
         tactical_reasons,
         exclusion_reasons,
+        decision=decision,
         vol_confirmed_bool=vol_confirmed_bool,
         chase_risk=chase_risk,
         fakeout_risk=fakeout_risk,

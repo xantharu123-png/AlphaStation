@@ -2812,8 +2812,20 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
     const normalizedSetupAction = String(setupAction || '').toUpperCase();
     const tradeSignal = cd.trade_signal || d.trade_signal || '';
+    const finalTradeDecision = String(tradeHealth?.decision || '').toUpperCase();
+    const finalNoTrade = finalTradeDecision === 'NO_TRADE';
+    const finalWaitRetest = finalTradeDecision === 'WAIT_FOR_RETEST';
+    const finalWaitTrigger = finalTradeDecision === 'WAIT_FOR_TRIGGER';
+    const finalWaitContinuation = finalTradeDecision === 'WAIT_FOR_CONTINUATION';
+    const finalWatchOnly = finalTradeDecision === 'WATCH_ONLY';
+    const finalTradeable = !tradeHealth || finalTradeDecision === 'TRADEABLE';
     const timingHeadline = (() => {
-        if (tradeSignal === 'JETZT_TRADEN') return 'JETZT TRADEN';
+        if (finalNoTrade) return 'NICHT TRADEN';
+        if (finalWaitRetest) return 'WARTEN AUF RETEST';
+        if (finalWaitTrigger) return 'TRIGGER FEHLT';
+        if (finalWaitContinuation) return 'WARTEN AUF FORTSETZUNG';
+        if (finalWatchOnly) return 'BEOBACHTEN';
+        if (tradeSignal === 'JETZT_TRADEN' && finalTradeable) return 'JETZT TRADEN';
         if (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_TRADE' || normalizedSetupAction === 'NO_LONG_CHASE') return 'NICHT TRADEN';
         if (normalizedSetupAction === 'WAIT_FOR_RETEST') return 'WARTEN AUF RETEST';
         if (normalizedSetupAction === 'WAIT_FOR_BTC_CONFIRMATION') return 'BTC BESTAETIGUNG FEHLT';
@@ -2824,18 +2836,18 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const rawEntryStatus = activeTradeSetup?.entry_status || cd.entry_status || '';
     const entryStatusDisplay = String(rawEntryStatus).toUpperCase() === 'BEOBACHTEN' ? '' : rawEntryStatus;
     const setupActionLabel = activeTradeSetup?.action_label || cd.signal_label || cd.action_label || timingHeadline || tradeSignal || setupAction || 'Setup';
-    const setupTone = tradeSignal === 'JETZT_TRADEN'
+    const setupTone = (tradeSignal === 'JETZT_TRADEN' && finalTradeable)
         ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-        : (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
+        : (finalNoTrade || tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
             ? 'bg-red-50 border-red-300 text-red-900'
-            : (tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
+            : (finalWaitRetest || finalWaitTrigger || finalWaitContinuation || tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
                 ? 'bg-amber-50 border-amber-300 text-amber-900'
                 : 'bg-sky-50 border-sky-300 text-sky-900';
-    const setupTitleTone = tradeSignal === 'JETZT_TRADEN'
+    const setupTitleTone = (tradeSignal === 'JETZT_TRADEN' && finalTradeable)
         ? 'text-emerald-800'
-        : (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
+        : (finalNoTrade || tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
             ? 'text-red-800'
-            : (tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
+            : (finalWaitRetest || finalWaitTrigger || finalWaitContinuation || tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
                 ? 'text-amber-800'
                 : 'text-sky-800';
     const viewDirection = (d.confluence?.direction || activeTradeSetup?.direction || cd.direction || '').toUpperCase();
@@ -2908,9 +2920,22 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const chase = tradeHealth.chase_risk ? `Chase ${riskLabel(tradeHealth.chase_risk)}` : null;
         return [score ? `${label} ${score}` : label, entry, fakeout, chase].filter(Boolean).join(' | ');
     })();
+    const executionRisk = (() => {
+        const risks = [tradeHealth?.chase_risk, tradeHealth?.fakeout_risk, tradeHealth?.liquidity_risk, cd.risk_level].map(r => String(r || '').toUpperCase());
+        if (risks.includes('CRITICAL')) return 'CRITICAL';
+        if (risks.includes('HIGH')) return 'HIGH';
+        if (risks.includes('MEDIUM')) return 'MEDIUM';
+        if (risks.includes('LOW')) return 'LOW';
+        return cd.risk_level || tradeHealth?.fakeout_risk || 'LOW';
+    })();
     const nextStepText = (() => {
         const action = String(setupAction || '').toUpperCase();
-        if (tradeSignal === 'JETZT_TRADEN') return 'Trigger bestaetigt - jetzt Spread/Chart pruefen.';
+        if (finalNoTrade) return 'Nicht handeln - Trade Health blockt dieses Setup.';
+        if (finalWaitRetest) return 'Auf Retest nahe Entry warten.';
+        if (finalWaitTrigger) return 'Auf frischen 5m/1m Trigger warten.';
+        if (finalWaitContinuation) return 'Erst neue Flag, VWAP-Hold oder Higher-Low handeln.';
+        if (finalWatchOnly) return 'Beobachten, noch kein Sofort-Entry.';
+        if (tradeSignal === 'JETZT_TRADEN' && finalTradeable) return 'Trigger bestaetigt - jetzt Spread/Chart pruefen.';
         if (tradeSignal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') return 'Nicht handeln - Bewegung ist zu weit gelaufen oder Setup ist ungueltig.';
         if (action === 'WAIT_FOR_RETEST') return 'Auf Retest nahe Entry warten.';
         if (action === 'WAIT_FOR_BTC_CONFIRMATION') return 'Warten bis BTC nicht mehr dagegen laeuft.';
@@ -2920,10 +2945,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     })();
     const reminderEligible = Boolean(
         activeTradeSetup &&
-        tradeSignal !== 'JETZT_TRADEN' &&
+        !(tradeSignal === 'JETZT_TRADEN' && finalTradeable) &&
         tradeSignal !== 'NICHT_TRADEN' &&
+        !finalNoTrade &&
+        !finalWatchOnly &&
         !['NO_TRADE', 'NO_LONG_CHASE', 'BEOBACHTEN', 'WATCH_ONLY'].includes(normalizedSetupAction) &&
         (
+            finalWaitRetest ||
+            finalWaitTrigger ||
+            finalWaitContinuation ||
             normalizedSetupAction.includes('WAIT') ||
             normalizedSetupAction.includes('TRIGGER') ||
             normalizedSetupAction.includes('RETEST') ||
@@ -3128,7 +3158,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         </div>
                         <div className="grid grid-cols-3 gap-2 rounded bg-white/60 p-2">
                             <div><span className="opacity-70">Live R:R</span><div className="font-semibold">{activeTradeSetup?.live_rr ?? cd.live_rr_ratio ?? '-'}</div></div>
-                            <div><span className="opacity-70">Risk</span><div className={`font-semibold ${riskTone(cd.risk_level || tradeHealth?.fakeout_risk)}`}>{cd.risk_level || tradeHealth?.fakeout_risk || 'LOW'}</div></div>
+                            <div><span className="opacity-70">Exec Risk</span><div className={`font-semibold ${riskTone(executionRisk)}`}>{executionRisk}</div></div>
                             <div><span className="opacity-70">BTC</span><div className="font-semibold">{activeTradeSetup?.btc_context?.tailwind === false ? 'Gegenwind' : activeTradeSetup?.btc_context?.tailwind === true || cd.btc_context?.tailwind ? 'Tailwind' : '-'}</div></div>
                         </div>
                         {(tradeHealthLine || marketContextLine || newsEventLine) && (

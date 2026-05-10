@@ -222,3 +222,29 @@ def test_high_rvol_does_not_contradict_unconfirmed_breakout_volume():
     assert "relative Volumenbestaetigung" not in positives
     assert "Breakout-Volumen nicht bestaetigt" in warnings
     assert "RVOL 3.1x hoch" in warnings
+
+
+def test_non_tradeable_health_does_not_show_trade_now_positives():
+    row = {
+        "ticker": "CHASED",
+        "direction": "LONG",
+        "current_price": 10.85,
+        "entry": 10.00,
+        "stop": 9.50,
+        "tp1": 11.80,
+        "tp2": 12.80,
+        "rvol": 2.8,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.82,
+        "dollar_volume": 15_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    positives = " | ".join(health["positives"])
+    assert health["decision"] != "TRADEABLE"
+    assert health["chase_risk"] in {"HIGH", "CRITICAL"}
+    assert "Live R:R" not in positives
+    assert "relative Volumenbestaetigung" not in positives
+    assert "Breakout-Volumen bestaetigt" not in positives
