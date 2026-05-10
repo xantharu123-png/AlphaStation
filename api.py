@@ -3343,6 +3343,13 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     now = time.time()
     alerts = []
     suppressed: Dict[str, int] = {}
+
+    def _fmt_pct(value: Any) -> str:
+        number = _alert_float(value)
+        if number is None:
+            return "-"
+        return f"{number:.1f}%"
+
     for entry in signals:
         if not isinstance(entry, dict):
             continue
@@ -3407,7 +3414,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}<br><span style="color:#999;font-size:11px">{a["stop_model"]}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">${a["tp1"]} / ${a["tp2"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R<br><span style="color:#999;font-size:11px">Micro {a["micro_score"]}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {a["btc_change"]}<br>Coin {a["coin_change"]}<br>Div {a["btc_divergence"]}</td></tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {_fmt_pct(a["btc_change"])}<br>Coin {_fmt_pct(a["coin_change"])}<br>Div {_fmt_pct(a["btc_divergence"])}</td></tr>'
         )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
     <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>

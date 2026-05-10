@@ -973,7 +973,13 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
                     "trade_category": "NEW_LISTING_DUMP",
                     "micro_required": True,
                     "micro_trigger_ok": True,
-                    "pump_data": {"micro_score": 75, "micro_trigger_ok": True},
+                    "pump_data": {
+                        "micro_score": 75,
+                        "micro_trigger_ok": True,
+                        "btc_change_pct": 1.2,
+                        "coin_change_pct": -4.4,
+                        "btc_divergence": -5.6,
+                    },
                     "exh_score": 85,
                 },
             },
@@ -1008,6 +1014,9 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
     assert len(sent) == 1
     assert "Pump & Dump" in sent[0][0]
     assert "WLD" in sent[0][1]
+    assert "BTC 1.2%" in sent[0][1]
+    assert "Coin -4.4%" in sent[0][1]
+    assert "Div -5.6%" in sent[0][1]
     assert "LOW" not in sent[0][1]
     assert "WATCH" not in sent[0][1]
     assert "RISK" not in sent[0][1]
