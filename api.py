@@ -826,6 +826,7 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
     "strategy_scan", "crypto_strategy", "early_movers", "new_listing",
 }
+_ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
@@ -1407,6 +1408,47 @@ def _alert_trade_plan_ok(
         return False
     rr = levels.get("rr")
     return not isinstance(rr, (int, float)) or rr >= min_rr
+
+
+def _alert_trade_health_reasons(row: Dict[str, Any], scanner_name: str) -> List[str]:
+    """Final execution-quality gate for actionable mails.
+
+    Scanner scores answer "interesting?". This guard answers "tradeable now?".
+    """
+    levels = _alert_trade_levels(row)
+    health_row = dict(row)
+    if levels.get("valid"):
+        health_row.setdefault("entry", levels.get("entry"))
+        health_row.setdefault("Entry", levels.get("entry"))
+        health_row.setdefault("stop_loss", levels.get("stop"))
+        health_row.setdefault("StopLoss", levels.get("stop"))
+        health_row.setdefault("tp1", levels.get("tp1"))
+        health_row.setdefault("TP1", levels.get("tp1"))
+        health_row.setdefault("tp2", levels.get("tp2"))
+        health_row.setdefault("TP2", levels.get("tp2"))
+        health_row.setdefault("direction", levels.get("direction"))
+    if "current_price" not in health_row:
+        health_row["current_price"] = _extract_alert_price(health_row)
+
+    health_scanner = {
+        "early_movers": "crypto_early_movers",
+        "crypto_strategy": "crypto_strategy",
+        "new_listing": "new_listing",
+    }.get(scanner_name, scanner_name)
+    health = calculate_trade_health(health_row, scanner_name=health_scanner)
+    decision = str(health.get("decision", "") or "").upper()
+    reasons: List[str] = []
+    if decision != "TRADEABLE":
+        reasons.append(f"trade_health_{decision.lower() or 'not_tradeable'}")
+    if int(health.get("health_score") or 0) < 80:
+        reasons.append("trade_health_score_below_80")
+    if str(health.get("chase_risk", "") or "").upper() in {"HIGH", "CRITICAL"}:
+        reasons.append("trade_health_chase_risk")
+    if str(health.get("fakeout_risk", "") or "").upper() in {"HIGH", "CRITICAL"}:
+        reasons.append("trade_health_fakeout_risk")
+    if str(health.get("liquidity_risk", "") or "").upper() == "CRITICAL":
+        reasons.append("trade_health_liquidity_risk")
+    return list(dict.fromkeys(reasons))
 
 
 def _median_float(values: List[Any], default: float = 0.0) -> float:
@@ -2509,6 +2551,7 @@ def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = 
         reasons.append("estimated_trade_plan")
     elif not _alert_trade_plan_ok(row):
         reasons.append("trade_rr_below_threshold")
+    reasons.extend(_alert_trade_health_reasons(row, "bear"))
 
     dedupe_key = f"crash_stock_{datetime.now().strftime('%Y%m%d')}_{ticker}" if ticker else ""
     dedupe_remaining = _email_dedupe_remaining(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now) if dedupe_key else 0
@@ -2703,6 +2746,11 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "hard_extended_long_wait_retest",
         "extended_long_fading_wait_retest",
         "early_mover_retest_not_near_entry",
+        "trade_health_wait_for_retest",
+    }
+    wait_trigger_markers = {
+        "trade_health_wait_for_trigger",
+        "trade_health_wait_for_continuation",
     }
     no_trade_markers = {
         "drop_too_extended_no_chase",
@@ -2721,6 +2769,10 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "estimated_trade_plan",
         "invalid_trade_plan",
         "trade_rr_below_threshold",
+        "trade_health_no_trade",
+        "trade_health_chase_risk",
+        "trade_health_fakeout_risk",
+        "trade_health_liquidity_risk",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
@@ -2734,6 +2786,12 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         return {
             "decision": "WAIT_RETEST",
             "decision_label": "Auf Retest warten",
+            "decision_reason": ", ".join(reasons[:4]),
+        }
+    if any(reason in wait_trigger_markers for reason in reasons):
+        return {
+            "decision": "WAIT_TRIGGER",
+            "decision_label": "Auf Trigger warten",
             "decision_reason": ", ".join(reasons[:4]),
         }
     return {
@@ -2803,6 +2861,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("estimated_trade_plan")
         elif not _alert_trade_plan_ok(row):
             reasons.append("trade_rr_below_threshold")
+    if scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
+        reasons.extend(_alert_trade_health_reasons(row, scanner_name))
 
     cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
     cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
@@ -3355,27 +3415,13 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             continue
         sig = entry.get("signal", {}) or {}
         fields = _extract_new_listing_signal_fields(entry)
-        score = _alert_float(_extract_alert_score(entry), 0) or 0
-        reasons = []
-        if fields["grade"] not in _ALERT_TOP_GRADES:
-            reasons.append("grade_below_alert_threshold")
-        if score < _ALERT_MIN_SCORE:
-            reasons.append("score_below_alert_threshold")
-        reasons.extend(_new_listing_rule_reasons(entry))
-        if not _alert_trade_plan_ok(entry, _NEW_LISTING_MIN_ALERT_RR):
-            reasons.append("invalid_trade_plan")
-        if reasons:
-            for reason in reasons:
+        state = _classify_alert_candidate("new_listing", entry, now)
+        if not state.get("alertable_now"):
+            for reason in state.get("suppression_reasons", []):
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         symbol = _display_crypto_contract_symbol(entry.get("symbol") or sig.get("symbol") or "")
-        cooldown_key = f"new_listing_{symbol}"
-        if _alert_cooldown_remaining(cooldown_key, now) > 0:
-            suppressed["cooldown_active"] = suppressed.get("cooldown_active", 0) + 1
-            continue
-        if _email_dedupe_active(cooldown_key, _EMAIL_COOLDOWN_SEC, now):
-            suppressed["persistent_dedupe_active"] = suppressed.get("persistent_dedupe_active", 0) + 1
-            continue
+        cooldown_key = state.get("cooldown_key") or f"new_listing_{symbol}"
         pump = sig.get("pump_data", {}) if isinstance(sig.get("pump_data", {}), dict) else {}
         alerts.append({
             "symbol": symbol,
@@ -3389,7 +3435,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "tp1": sig.get("tp1", 0),
             "tp2": sig.get("tp2", 0),
             "rr": fields["rr_effective"],
-            "exh_score": score,
+            "exh_score": state.get("score", 0),
             "micro_score": pump.get("micro_score", 0),
             "btc_change": pump.get("btc_change_pct", sig.get("btc_change_pct")),
             "coin_change": pump.get("coin_change_pct", sig.get("coin_change_pct")),
@@ -6208,11 +6254,10 @@ def _bear_scan_wrapper() -> None:
                 if not isinstance(bd, dict):
                     continue
                 _cs_ticker = bd.get("ticker", "")
-                _cs_grade = bd.get("grade", "")
                 _cs_chg = bd.get("change_pct", 0)
-                _cs_score = bd.get("score", 0)
-                # Nur Grade S/A + Drop >= -10% + Score >= 80, sonst kein Push-Short.
-                if _cs_grade not in ("S", "A") or _cs_chg > -10 or _cs_score < _ALERT_MIN_SCORE or not _bear_crash_alert_ok(bd) or not _alert_trade_plan_ok(bd):
+                _crash_state = _classify_crash_alert_candidate(bd)
+                # Nur echte, aktuelle Crash-Setups: zentraler Alert-Gate inklusive Asset, Plan und Trade-Health.
+                if _cs_chg > -10 or not _crash_state.get("alertable_now"):
                     continue
                 # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
                 _cs_tk_up = _cs_ticker.upper()
@@ -6285,7 +6330,10 @@ def _bear_scan_wrapper() -> None:
             _bd_rows = []
             _bear_summary_tickers = []
             for bd in result.get("breakdown_stocks", []):
-                if not isinstance(bd, dict) or bd.get("grade") not in ("S", "A") or bd.get("score", 0) < _ALERT_MIN_SCORE or not bd.get("alertable_short") or not _alert_trade_plan_ok(bd):
+                if not isinstance(bd, dict):
+                    continue
+                _bear_state = _classify_alert_candidate("bear", bd)
+                if not _bear_state.get("alertable_now"):
                     continue
                 _ticker_up = str(bd.get("ticker", "")).upper()
                 if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:

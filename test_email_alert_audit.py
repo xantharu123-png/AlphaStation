@@ -1372,7 +1372,10 @@ def test_early_mover_retest_alert_requires_near_entry():
     )
     far = dict(near, Symbol="FAR", distance_to_entry_r=0.9, risk_flags=["no_market_entry", "chased_from_entry"])
 
-    assert api._classify_alert_candidate("early_movers", near, 1_000_000.0)["alertable_now"] is True
+    near_state = api._classify_alert_candidate("early_movers", near, 1_000_000.0)
+    assert near_state["alertable_now"] is False
+    assert near_state["decision"] == "WAIT_RETEST"
+    assert "trade_health_wait_for_retest" in near_state["suppression_reasons"]
     far_state = api._classify_alert_candidate("early_movers", far, 1_000_000.0)
     assert far_state["alertable_now"] is False
     assert "early_mover_retest_not_near_entry" in far_state["suppression_reasons"]
@@ -1392,8 +1395,36 @@ def test_early_mover_zero_r_distance_stays_near_entry():
 
     state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
 
-    assert state["alertable_now"] is True
+    assert state["alertable_now"] is False
+    assert state["decision"] == "WAIT_RETEST"
+    assert "trade_health_wait_for_retest" in state["suppression_reasons"]
     assert "early_mover_retest_not_near_entry" not in state["suppression_reasons"]
+
+
+def test_stock_alert_trade_health_blocks_chased_live_entry():
+    row = {
+        "ticker": "MOMO",
+        "grade": "A",
+        "score": 90,
+        "rvol": 2.4,
+        "price": 11.7,
+        "current_price": 11.7,
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.2,
+        "TP1": 12.0,
+        "TP2": 12.4,
+        "DayHigh": 12.0,
+        "DayLow": 9.8,
+        "latest_bar_change_pct": 0.2,
+        "latest_bar_close_pos": 0.7,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "trade_health_chase_risk" in state["suppression_reasons"]
+    assert state["decision"] == "NO_TRADE"
 
 
 def test_early_mover_blocks_btc_headwind_and_partial_data():
