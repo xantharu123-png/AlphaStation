@@ -1402,6 +1402,21 @@ def test_early_mover_blocks_btc_headwind_and_partial_data():
     assert "early_mover_data_warning" in state["suppression_reasons"]
 
 
+def test_early_mover_blocks_extreme_turnover_without_alpha():
+    row = _early_mover_row(
+        Symbol="GALA",
+        Change24h=0.7,
+        VolMCapRatio=96.0,
+        btc_context={"btc_24h": 1.0, "alpha_24h": -0.3, "tailwind": True},
+        risk_flags=["turnover_without_alpha", "extreme_turnover_churn"],
+    )
+
+    state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "early_mover_turnover_without_alpha" in state["suppression_reasons"]
+
+
 def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
@@ -1423,6 +1438,7 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     assert "MAILME" in sent[0][1]
     assert "Entry" in sent[0][1]
     assert "BTC" in sent[0][1]
+    assert "V/MCap 8.5%" in sent[0][1]
     assert "5m_breakout_volume_confirmed" in sent[0][1]
 
 

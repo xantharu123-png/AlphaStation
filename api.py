@@ -841,6 +841,8 @@ _EARLY_MOVER_TRIGGER_CACHE_MAX = 1500
 _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
 _EARLY_MOVER_MIN_PERP_VOLUME_USD = 2_000_000
 _EARLY_MOVER_WARN_PERP_VOLUME_USD = 5_000_000
+_EARLY_MOVER_TURNOVER_WARN_PCT = 60.0
+_EARLY_MOVER_TURNOVER_CHURN_BLOCK_PCT = 90.0
 _EARLY_MOVER_MAX_SPREAD_BPS = 20.0
 _EARLY_MOVER_MIN_DEPTH_10BPS_USD = 5_000
 _EARLY_MOVER_MIN_DEPTH_25BPS_USD = 25_000
@@ -1276,6 +1278,8 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_chased_from_entry")
     if "very_high_volume_turnover" in risk_flags:
         reasons.append("early_mover_blowoff_turnover")
+    if risk_flags.intersection({"turnover_without_alpha", "extreme_turnover_churn"}):
+        reasons.append("early_mover_turnover_without_alpha")
     if risk_flags.intersection({"thin_perp_liquidity", "thin_orderbook", "market_impact_risk", "no_perp_execution_market"}):
         reasons.append("early_mover_execution_liquidity_too_thin")
     if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
@@ -1580,26 +1584,45 @@ def _early_mover_orderbook_liquidity(contract: str, exchange: str) -> Dict[str, 
 
 
 def _early_mover_trigger_profile(row: Dict[str, Any]) -> Dict[str, Any]:
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    btc = row.get("btc_context", setup.get("btc_context", {}))
+    btc_context = btc if isinstance(btc, dict) else {}
     action = str(row.get("trade_action", row.get("entry_status", "")) or "").upper()
     phase = _alert_float(row.get("phase", row.get("Phase")), 0) or 0
     change24 = _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0
     vol_mcap = _alert_float(row.get("VolMCapRatio", row.get("vol_mcap", row.get("Vol/MCap"))), 0) or 0
+    alpha_24h = _alert_float(row.get("BtcRelative24h", btc_context.get("alpha_24h")), 0) or 0
     distance_value = _alert_float(row.get("distance_to_entry_r"))
     distance_r = distance_value if distance_value is not None else 999
     risk_flags = [str(flag).lower() for flag in (row.get("risk_flags") or []) if flag is not None]
     fast_coin = bool(abs(change24) >= 8 or vol_mcap >= 35 or int(phase) == 2 or "breakout" in " ".join(risk_flags))
     near_retest = bool(action == "WAIT_FOR_RETEST" or distance_r <= _EARLY_MOVER_RETEST_MAX_DISTANCE_R)
+    turnover_without_alpha = bool(
+        vol_mcap >= _EARLY_MOVER_TURNOVER_CHURN_BLOCK_PCT
+        and alpha_24h <= 0
+        and change24 < 2.0
+    )
     return {
         "action": action,
         "fast_coin": fast_coin,
         "near_retest": near_retest,
         "change24": change24,
         "vol_mcap": vol_mcap,
+        "alpha_24h": alpha_24h,
         "distance_to_entry_r": distance_r,
+        "requires_5m_confirmation": turnover_without_alpha or "turnover_without_alpha" in risk_flags,
     }
 
 
 def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    if timeframe == "1m" and profile.get("requires_5m_confirmation"):
+        return {
+            "ok": False,
+            "reason": "requires_5m_confirmation_for_turnover_churn",
+            "timeframe": timeframe,
+            "execution_score": 0,
+        }
+
     min_bars = 12 if timeframe == "5m" else 18
     if not bars or len(bars) < min_bars:
         return {"ok": False, "reason": f"not_enough_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
@@ -1666,6 +1689,7 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         breakout_buffer = 1.0015 if timeframe == "5m" else 1.0008
         max_safe_candle = 5.0 if timeframe == "5m" else 2.6
         max_safe_range = 7.0 if timeframe == "5m" else 4.5
+        retest_reclaim = 1.0 if timeframe == "5m" else 1.0003
 
         breakout = last_close > prev_high * breakout_buffer and vol_ratio >= breakout_vol and close_pos >= 0.60
         vwap_reclaim = prev_close < vwap and last_close > vwap and vol_ratio >= breakout_vol and close_pos >= 0.58
@@ -1675,7 +1699,8 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             and risk
             and -0.10 <= (distance_r if distance_r is not None else 999) <= 0.35
             and last_low <= entry * (1.004 if timeframe == "5m" else 1.0025)
-            and last_close >= entry * 0.998
+            and last_close >= entry * retest_reclaim
+            and last_close > last_open
             and last_close >= vwap * 0.997
             and close_pos >= 0.55
             and vol_ratio >= hold_vol
@@ -1791,7 +1816,7 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
         return dict(cached["result"])
 
     checks: List[Tuple[str, int]] = [("5m", 36)]
-    if profile.get("fast_coin") or profile.get("near_retest"):
+    if (profile.get("fast_coin") or profile.get("near_retest")) and not profile.get("requires_5m_confirmation"):
         checks.append(("1m", 45))
 
     results = []
@@ -2235,7 +2260,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
             f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">TP1 {_format_alert_price(item["tp1"])}<br>TP2 {_format_alert_price(item["tp2"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt_num(item["live_rr"], "R", 2)}<br><span style="color:#777">Dist {_fmt_num(item["distance_r"], "R", 2)}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">24h {_fmt_num(item["change24"], "%")}<br>V/MCap {_fmt_num(item["vol_mcap"], "x")}<br>BTC {_fmt_num(item["btc_24h"], "%")} / Alpha {_fmt_num(item["alpha_24h"], "%")}</td></tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">24h {_fmt_num(item["change24"], "%")}<br>V/MCap {_fmt_num(item["vol_mcap"], "%")}<br>BTC {_fmt_num(item["btc_24h"], "%")} / Alpha {_fmt_num(item["alpha_24h"], "%")}</td></tr>'
         )
 
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
@@ -2248,7 +2273,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-        <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und bestaetigter adaptiver Exchange-Trigger. Ohne Execution-Bestaetigung bleibt es BEOBACHTEN.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, kein extremes Vol/MCap ohne Alpha, keine Partial-Daten, unverpasster TP1 und bestaetigter adaptiver Exchange-Trigger. Ohne Execution-Bestaetigung bleibt es BEOBACHTEN.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
@@ -2686,6 +2711,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "early_mover_late_to_tp1",
         "early_mover_chased_from_entry",
         "early_mover_blowoff_turnover",
+        "early_mover_turnover_without_alpha",
         "pump_continuation_risk",
         "safety_not_ok",
         "risk_too_wide",
@@ -9168,6 +9194,12 @@ def _build_early_mover_long_setup(
     c7d = float(entry.get("Change7d") or 0)
     alpha_24h = round(c24 - (btc_24h or 0), 2)
     alpha_7d = round(c7d - (btc_7d or 0), 2)
+    extreme_turnover = vol_mcap >= _EARLY_MOVER_TURNOVER_CHURN_BLOCK_PCT
+    turnover_without_alpha = bool(
+        extreme_turnover
+        and alpha_24h <= 0
+        and c24 < 2.0
+    )
 
     risk_pct = max(0.035, min(0.12, range_pct * 0.42))
     if mcap and mcap < 20_000_000:
@@ -9231,6 +9263,12 @@ def _build_early_mover_long_setup(
         entry_status = "WAIT_FOR_BTC_CONFIRMATION"
         entry_quality = "EXTENDED"
 
+    if turnover_without_alpha and trade_action in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+        trade_action = "WAIT_FOR_RETEST"
+        entry_status = "WAIT_FOR_RETEST"
+        entry_quality = "CHURN"
+        warnings.append("Vol/MCap extrem hoch ohne BTC-Alpha - erst 5m Retest/Reclaim abwarten")
+
     if liquidity.get("hard_block"):
         trade_action = "WAIT_FOR_LIQUIDITY"
         entry_status = "WAIT_FOR_LIQUIDITY"
@@ -9239,6 +9277,10 @@ def _build_early_mover_long_setup(
 
     stop_buffer = max(range_24h * 0.035, setup_entry * 0.006)
     min_stop_breathing_room = max(setup_entry * 0.012, range_24h * 0.08)
+    if extreme_turnover:
+        min_stop_breathing_room = max(min_stop_breathing_room, setup_entry * 0.025)
+    elif vol_mcap >= _EARLY_MOVER_TURNOVER_WARN_PCT:
+        min_stop_breathing_room = max(min_stop_breathing_room, setup_entry * 0.018)
     max_structure_risk = setup_entry * (0.16 if mcap and mcap < 20_000_000 else 0.14)
     structure_supports = [
         (low_24h + range_24h * 0.618, "fib_61_8_retest"),
@@ -9323,6 +9365,12 @@ def _build_early_mover_long_setup(
         risk_flags.append("btc_headwind")
     if distance_to_entry_r >= 0.75:
         risk_flags.append("chased_from_entry")
+    if extreme_turnover:
+        risk_flags.append("extreme_volume_turnover")
+    elif vol_mcap >= _EARLY_MOVER_TURNOVER_WARN_PCT:
+        risk_flags.append("high_volume_turnover")
+    if turnover_without_alpha:
+        risk_flags.extend(["turnover_without_alpha", "extreme_turnover_churn"])
     if vol_mcap > 100:
         risk_flags.append("very_high_volume_turnover")
     if entry.get("data_warning"):
@@ -10313,6 +10361,18 @@ def fetch_early_movers(_prefetched_perps=None):
 
             # Signal-Text basierend auf Phase — ehrlich und direkt
             alpha = c24 - btc_24h
+            if vm >= _EARLY_MOVER_TURNOVER_CHURN_BLOCK_PCT and alpha <= 0 and c24 < 2:
+                score = max(0, int(score) - 18)
+                risk_reasons.append("Vol/MCap extrem hoch ohne BTC-Alpha - Churn/Distribution moeglich")
+                if risk_level == "LOW":
+                    risk_level = "MEDIUM"
+                    risk_color = "#f59e0b"
+            elif vm >= _EARLY_MOVER_TURNOVER_WARN_PCT and alpha < 0 and c24 < 3:
+                score = max(0, int(score) - 10)
+                risk_reasons.append("Vol/MCap hoch, aber Coin schlaegt BTC nicht")
+                if risk_level == "LOW":
+                    risk_level = "MEDIUM"
+                    risk_color = "#f59e0b"
             if phase == 1:
                 if score >= 70:
                     signal_text = "BEOBACHTEN: Smart-Money-Akkumulation - Entry erst mit Execution-Trigger/Retest"

@@ -97,6 +97,32 @@ def test_early_mover_levels_are_structure_first_not_r_only():
     assert setup["rr_tp1"] >= 1.35
 
 
+def test_early_mover_extreme_turnover_without_alpha_is_wait_only():
+    setup = api._build_early_mover_long_setup(
+        {
+            "Price": 0.00413199,
+            "High24h": 0.00418,
+            "Low24h": 0.00392,
+            "MCap": 150_000_000,
+            "VolMCapRatio": 96.0,
+            "Change24h": 0.7,
+            "Change7d": 6.0,
+            "HasPerp": True,
+            "PerpVolume24h": 20_000_000,
+        },
+        phase=1,
+        score=81,
+        btc_24h=1.0,
+        btc_7d=2.0,
+    )
+
+    assert setup["trade_action"] == "WAIT_FOR_RETEST"
+    assert setup["entry_quality"] == "CHURN"
+    assert "turnover_without_alpha" in setup["risk_flags"]
+    assert "extreme_turnover_churn" in setup["risk_flags"]
+    assert setup["risk"] >= setup["entry"] * 0.024
+
+
 def test_early_mover_filters_stables_wrapped_and_liquid_staking(monkeypatch):
     usde = _volume_coin(symbol="usde", coin_id="ethena-usde")
     usde["name"] = "Ethena USDe Stablecoin"
@@ -275,6 +301,44 @@ def test_early_mover_adaptive_1m_trigger_confirms_fast_coin(monkeypatch):
     assert result["timeframe"] == "1m"
     assert result["execution_score"] >= 82
     assert result["reason"].startswith("adaptive_1m_")
+
+
+def test_early_mover_1m_retest_requires_close_above_entry():
+    row = {
+        "Symbol": "GALA",
+        "Change24h": 4.0,
+        "VolMCapRatio": 42.0,
+        "entry": 1.0,
+        "stop_loss": 0.96,
+        "tp1": 1.12,
+    }
+    bars = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(18)]
+    bars.append({"open": 0.998, "high": 1.001, "low": 0.997, "close": 0.9995, "volume": 2400})
+
+    result = api._score_early_mover_trigger_bars(row, bars, "1m", api._early_mover_trigger_profile(row))
+
+    assert result["ok"] is False
+    assert result["reason"] != "adaptive_1m_retest_hold"
+    assert "retest_hold" not in result.get("matched", [])
+
+
+def test_early_mover_turnover_churn_requires_5m_not_1m():
+    row = {
+        "Symbol": "GALA",
+        "Change24h": 0.7,
+        "VolMCapRatio": 96.0,
+        "BtcRelative24h": -0.3,
+        "entry": 1.0,
+        "stop_loss": 0.96,
+        "tp1": 1.12,
+    }
+    profile = api._early_mover_trigger_profile(row)
+
+    result = api._score_early_mover_trigger_bars(row, [{"open": 1, "high": 1.01, "low": 0.99, "close": 1, "volume": 1000}] * 45, "1m", profile)
+
+    assert profile["requires_5m_confirmation"] is True
+    assert result["ok"] is False
+    assert result["reason"] == "requires_5m_confirmation_for_turnover_churn"
 
 
 def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
