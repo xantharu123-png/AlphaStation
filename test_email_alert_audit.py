@@ -1594,7 +1594,7 @@ def test_early_mover_email_blocks_1m_only_trigger(tmp_path, monkeypatch):
 
     assert sent == []
     assert api._EMAIL_SEND_LOG[-1]["status"] == "skipped"
-    assert "early_mover_1m_trigger_watch_only" in api._EMAIL_SEND_LOG[-1]["reason"]
+    assert "early_mover_1m_trigger_disabled" in api._EMAIL_SEND_LOG[-1]["reason"]
 
 
 def test_early_mover_email_checks_realtime_trigger_when_cache_unconfirmed(tmp_path, monkeypatch):
@@ -1646,8 +1646,8 @@ def test_early_mover_signal_state_keeps_1m_trigger_as_wait():
     assert row["trade_signal"] == "WARTEN"
     assert row["entry_status"] == "WAIT_FOR_5M_CONFIRMATION"
     assert row["alertable_crypto"] is False
+    assert row["execution_trigger_ok"] is False
     assert "5m-Bestaetigung" in row["signal_label"]
-    assert row["execution_trigger_ok"] is True
 
 
 def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):

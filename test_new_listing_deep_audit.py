@@ -395,7 +395,7 @@ def test_micro_crack_trigger_can_create_tradeable_signal():
     assert _is_tradeable_short_signal(signal) is True
 
 
-def test_ultra_early_1m_crack_can_trigger_before_18_candles():
+def test_ultra_early_1m_crack_is_disabled():
     candles = _micro_crack_candles()[-12:]
     pump_data = {
         "ath": 130,
@@ -409,7 +409,8 @@ def test_ultra_early_1m_crack_can_trigger_before_18_candles():
     micro = calculate_micro_crack_trigger(candles, pump_data, timeframe="1m")
 
     assert micro["micro_timeframe"] == "1m"
-    assert "micro_not_enough_candles" not in micro["micro_warnings"]
+    assert micro["micro_trigger_ok"] is False
+    assert "one_minute_execution_disabled" in micro["micro_warnings"]
 
 
 def test_micro_crack_blocks_green_squeeze_without_first_crack():

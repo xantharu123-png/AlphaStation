@@ -274,7 +274,7 @@ def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
     assert "thin_book_10bps" in result["liquidity_reasons"]
 
 
-def test_early_mover_adaptive_1m_trigger_confirms_fast_coin(monkeypatch):
+def test_early_mover_adaptive_trigger_uses_only_5m(monkeypatch):
     api._EARLY_MOVER_TRIGGER_CACHE.clear()
     row = {
         "Symbol": "FAST",
@@ -289,7 +289,13 @@ def test_early_mover_adaptive_1m_trigger_confirms_fast_coin(monkeypatch):
     flat_5m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(36)]
     micro_1m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(44)]
     micro_1m.append({"open": 1.01, "high": 1.055, "low": 1.008, "close": 1.049, "volume": 2600})
-    monkeypatch.setattr(api, "fetch_candles_for", lambda symbol, exchange, timeframe="1h", count=50: micro_1m if timeframe == "1m" else flat_5m)
+    calls = []
+
+    def fake_fetch(symbol, exchange, timeframe="1h", count=50):
+        calls.append(timeframe)
+        return micro_1m if timeframe == "1m" else flat_5m
+
+    monkeypatch.setattr(api, "fetch_candles_for", fake_fetch)
     monkeypatch.setattr(api, "fetch_orderbook_for", lambda *args, **kwargs: {
         "bids": [(1.048, 50_000), (1.047, 50_000)],
         "asks": [(1.050, 50_000), (1.051, 50_000)],
@@ -297,13 +303,14 @@ def test_early_mover_adaptive_1m_trigger_confirms_fast_coin(monkeypatch):
 
     result = api._verify_early_mover_intraday_trigger(row)
 
-    assert result["ok"] is True
-    assert result["timeframe"] == "1m"
-    assert result["execution_score"] >= 82
-    assert result["reason"].startswith("adaptive_1m_")
+    assert result["ok"] is False
+    assert calls == ["5m"]
+    assert result["adaptive_checks"][0]["timeframe"] == "5m"
+    assert result["adaptive_checks"][0]["ok"] is False
+    assert result["adaptive_checks"][0]["reason"] == "no_fresh_5m_trigger"
 
 
-def test_early_mover_1m_retest_requires_close_above_entry():
+def test_early_mover_1m_retest_is_disabled():
     row = {
         "Symbol": "GALA",
         "Change24h": 4.0,
@@ -318,7 +325,7 @@ def test_early_mover_1m_retest_requires_close_above_entry():
     result = api._score_early_mover_trigger_bars(row, bars, "1m", api._early_mover_trigger_profile(row))
 
     assert result["ok"] is False
-    assert result["reason"] != "adaptive_1m_retest_hold"
+    assert result["reason"] == "execution_timeframe_disabled_use_5m"
     assert "retest_hold" not in result.get("matched", [])
 
 
@@ -338,7 +345,7 @@ def test_early_mover_turnover_churn_requires_5m_not_1m():
 
     assert profile["requires_5m_confirmation"] is True
     assert result["ok"] is False
-    assert result["reason"] == "requires_5m_confirmation_for_turnover_churn"
+    assert result["reason"] == "execution_timeframe_disabled_use_5m"
 
 
 def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
@@ -356,12 +363,19 @@ def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
     flat_5m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(36)]
     micro_1m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(44)]
     micro_1m.append({"open": 1.01, "high": 1.12, "low": 1.005, "close": 1.115, "volume": 4000})
-    monkeypatch.setattr(api, "fetch_candles_for", lambda symbol, exchange, timeframe="1h", count=50: micro_1m if timeframe == "1m" else flat_5m)
+    calls = []
+
+    def fake_fetch(symbol, exchange, timeframe="1h", count=50):
+        calls.append(timeframe)
+        return micro_1m if timeframe == "1m" else flat_5m
+
+    monkeypatch.setattr(api, "fetch_candles_for", fake_fetch)
 
     result = api._verify_early_mover_intraday_trigger(row)
 
     assert result["ok"] is False
-    assert result["reason"] in {"single_1m_candle_chase", "execution_score_below_threshold"}
+    assert calls == ["5m"]
+    assert result["reason"] == "no_fresh_5m_trigger"
 
 
 def test_multi_exchange_perps_prefers_binance_execution_liquidity(monkeypatch):

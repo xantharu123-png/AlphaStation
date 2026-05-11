@@ -2269,7 +2269,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                     setChartData({
                                         ...chartJson,
                                         source: 'CoinGecko Daily Context',
-                                        chart_note: 'Nur Tages-Kontext - kein 5m/1m Entry-Trigger',
+                                        chart_note: 'Nur Tages-Kontext - kein 5m Entry-Trigger',
                                     });
                                     cryptoSuccess = true;
                                     break;
@@ -2973,7 +2973,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const action = String(setupAction || '').toUpperCase();
         if (finalNoTrade) return 'Nicht handeln - Trade Health blockt dieses Setup.';
         if (finalWaitRetest) return 'Auf Retest nahe Entry warten.';
-        if (finalWaitTrigger) return 'Auf frischen 5m/1m Trigger warten.';
+        if (finalWaitTrigger) return 'Auf frischen 5m Trigger warten.';
         if (finalWaitContinuation) return 'Erst neue Flag, VWAP-Hold oder Higher-Low handeln.';
         if (finalWatchOnly) return 'Beobachten, noch kein Sofort-Entry.';
         if (tradeSignal === 'JETZT_TRADEN' && finalTradeable) return 'Trigger bestaetigt - jetzt Spread/Chart pruefen.';
@@ -2981,7 +2981,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         if (action === 'WAIT_FOR_RETEST') return 'Auf Retest nahe Entry warten.';
         if (action === 'WAIT_FOR_BTC_CONFIRMATION') return 'Warten bis BTC nicht mehr dagegen laeuft.';
         if (action === 'WAIT_FOR_CONTINUATION') return 'Erst neue Flag, VWAP-Hold oder Higher-Low handeln.';
-        if (action === 'LONG_TRIGGER') return 'Auf frischen 5m/1m Trigger warten.';
+        if (action === 'LONG_TRIGGER') return 'Auf frischen 5m Trigger warten.';
         return 'Beobachten, noch kein Sofort-Entry.';
     })();
     const reminderEligible = Boolean(
@@ -3224,7 +3224,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                     <div key={idx}>- {line}</div>
                                 ))}
                                 <div className="mt-2 opacity-80">
-                                    Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem 5m/1m Trigger oder sauberem Retest.
+                                    Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem 5m Trigger oder sauberem Retest.
                                 </div>
                             </div>
                         )}

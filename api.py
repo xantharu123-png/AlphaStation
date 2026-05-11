@@ -954,8 +954,10 @@ _ALERT_SUPPRESSION_LABELS = {
     "early_mover_turnover_without_alpha": "Crypto: viel Umsatz ohne Alpha",
     "early_mover_execution_liquidity_too_thin": "Crypto: Orderbuch/Perp-Liquiditaet zu duenn",
     "early_mover_live_rr_below_threshold": "Crypto: Live R:R unter Mindestwert",
-    "early_mover_1m_trigger_watch_only": "Crypto: 1m-Trigger nur Watch, Mail braucht 5m-Bestaetigung",
-    "no_fresh_5m_trigger": "kein frischer 5m/1m Trigger",
+    "early_mover_1m_trigger_disabled": "Crypto: 1m-Trigger deaktiviert, Trade braucht 5m-Bestaetigung",
+    "early_mover_1m_trigger_watch_only": "Crypto: 1m-Trigger deaktiviert, Trade braucht 5m-Bestaetigung",
+    "early_mover_execution_timeframe_disabled_use_5m": "Crypto: nur 5m-Execution-Trigger erlaubt",
+    "no_fresh_5m_trigger": "kein frischer 5m Trigger",
     "micro_trigger_missing": "Pump/Dump: Micro-Crack fehlt",
     "pump_continuation_risk": "Pump laeuft noch, Short zu frueh",
     "safety_not_ok": "Safety-Check nicht OK",
@@ -1736,15 +1738,16 @@ def _early_mover_trigger_profile(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str, profile: Dict[str, Any]) -> Dict[str, Any]:
-    if timeframe == "1m" and profile.get("requires_5m_confirmation"):
+    timeframe = str(timeframe or "").lower()
+    if timeframe != "5m":
         return {
             "ok": False,
-            "reason": "requires_5m_confirmation_for_turnover_churn",
+            "reason": "execution_timeframe_disabled_use_5m",
             "timeframe": timeframe,
             "execution_score": 0,
         }
 
-    min_bars = 12 if timeframe == "5m" else 18
+    min_bars = 12
     if not bars or len(bars) < min_bars:
         return {"ok": False, "reason": f"not_enough_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
 
@@ -1761,8 +1764,8 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         if len(clean) < min_bars:
             return {"ok": False, "reason": f"bad_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
 
-        recent_len = 24 if timeframe == "5m" else 30
-        window_len = 8 if timeframe == "5m" else 12
+        recent_len = 24
+        window_len = 8
         recent = clean[-recent_len:] if len(clean) >= recent_len else clean
         last = clean[-1]
         prev = clean[:-1]
@@ -1805,12 +1808,12 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
                 "last_close": round(last_close, 10),
             }
 
-        breakout_vol = 1.25 if timeframe == "5m" else 1.45
-        hold_vol = 1.10 if timeframe == "5m" else 1.25
-        breakout_buffer = 1.0015 if timeframe == "5m" else 1.0008
-        max_safe_candle = 5.0 if timeframe == "5m" else 2.6
-        max_safe_range = 7.0 if timeframe == "5m" else 4.5
-        retest_reclaim = 1.0 if timeframe == "5m" else 1.0003
+        breakout_vol = 1.25
+        hold_vol = 1.10
+        breakout_buffer = 1.0015
+        max_safe_candle = 5.0
+        max_safe_range = 7.0
+        retest_reclaim = 1.0
 
         breakout = last_close > prev_high * breakout_buffer and vol_ratio >= breakout_vol and close_pos >= 0.60
         vwap_reclaim = prev_close < vwap and last_close > vwap and vol_ratio >= breakout_vol and close_pos >= 0.58
@@ -1819,7 +1822,7 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             entry is not None
             and risk
             and -0.10 <= (distance_r if distance_r is not None else 999) <= 0.35
-            and last_low <= entry * (1.004 if timeframe == "5m" else 1.0025)
+            and last_low <= entry * 1.004
             and last_close >= entry * retest_reclaim
             and last_close > last_open
             and last_close >= vwap * 0.997
@@ -1888,7 +1891,7 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         elif candle_change_pct <= max_safe_candle:
             score += 6
 
-        threshold = 76 if timeframe == "5m" else 82
+        threshold = 76
         ok = bool(matched and score >= threshold)
         if ok:
             reason = f"adaptive_{timeframe}_{matched[0]}"
@@ -1930,15 +1933,13 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": "no_perp_chart_for_realtime_trigger"}
 
     profile = _early_mover_trigger_profile(row)
-    cache_key = f"{exchange}:{contract}:adaptive_v1"
+    cache_key = f"{exchange}:{contract}:adaptive_5m_v2"
     now = time.time()
     cached = _EARLY_MOVER_TRIGGER_CACHE.get(cache_key)
     if cached and now - cached.get("ts", 0) < _EARLY_MOVER_TRIGGER_TTL:
         return dict(cached["result"])
 
     checks: List[Tuple[str, int]] = [("5m", 36)]
-    if (profile.get("fast_coin") or profile.get("near_retest")) and not profile.get("requires_5m_confirmation"):
-        checks.append(("1m", 45))
 
     results = []
     for timeframe, count in checks:
@@ -1985,7 +1986,7 @@ def _early_mover_mail_trigger_block_reason(trigger_check: Optional[Dict[str, Any
         return f"early_mover_{reason}"
     timeframe = str(trigger_check.get("timeframe") or "").lower()
     if timeframe == "1m":
-        return "early_mover_1m_trigger_watch_only"
+        return "early_mover_1m_trigger_disabled"
     return None
 
 
@@ -1995,8 +1996,9 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     trigger_ok = bool(trigger_check.get("ok")) if isinstance(trigger_check, dict) else bool(row.get("execution_trigger_ok"))
     trigger_reason = str((trigger_check or {}).get("reason", "") or "")
     trigger_block_reason = _early_mover_mail_trigger_block_reason(trigger_check) if isinstance(trigger_check, dict) else None
+    effective_trigger_ok = bool(trigger_ok and not trigger_block_reason)
 
-    row["execution_trigger_ok"] = bool(trigger_ok)
+    row["execution_trigger_ok"] = effective_trigger_ok
     if isinstance(trigger_check, dict):
         row["intraday_trigger"] = trigger_check
         if trigger_check.get("execution_score") is not None:
@@ -2024,7 +2026,7 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["alertable_crypto"] = True
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and trigger_block_reason:
         row["trade_signal"] = "WARTEN"
-        row["signal_label"] = "Warten: 1m-Trigger ist nur Watch; fuer Trade-Mail/Trade braucht es 5m-Bestaetigung"
+        row["signal_label"] = "Warten: 1m-Trigger ist deaktiviert; Trade-Mail/Trade braucht 5m-Bestaetigung"
         row["signal_quality"] = "wait_trigger"
         row["entry_status"] = "WAIT_FOR_5M_CONFIRMATION"
         row["alertable_crypto"] = False
@@ -2412,7 +2414,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, kein extremes Vol/MCap ohne Alpha, keine Partial-Daten, unverpasster TP1 und bestaetigter adaptiver Exchange-Trigger. Ohne Execution-Bestaetigung bleibt es BEOBACHTEN.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, kein extremes Vol/MCap ohne Alpha, keine Partial-Daten, unverpasster TP1 und bestaetigter 5m-Exchange-Trigger. Ohne 5m-Bestaetigung bleibt es BEOBACHTEN.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
@@ -9460,7 +9462,7 @@ def _build_early_mover_long_setup(
     warnings = []
     notes = []
     trigger_conditions = [
-        "adaptiven Execution-Trigger abwarten (1m fuer schnelle Coins, sonst 5m)",
+        "5m Execution-Trigger abwarten",
         "kein Market-Buy in eine lange gruene Kerze",
         "BTC darf im Moment des Entries nicht hart abverkaufen",
     ]

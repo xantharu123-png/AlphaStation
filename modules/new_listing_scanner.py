@@ -94,8 +94,8 @@ CONFIG.update({
     "micro_crack_enabled": True,
     "micro_timeframe": "5m",
     "micro_candle_count": 72,
-    "ultra_micro_enabled": True,
-    "ultra_micro_timeframe": "1m",
+    "ultra_micro_enabled": False,
+    "ultra_micro_timeframe": "5m",
     "ultra_micro_candle_count": 45,
     "ultra_micro_max_age_hours": 6.0,
     "ultra_micro_min_score": 78,
@@ -1455,7 +1455,7 @@ def _close_position(candle):
 
 
 def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timeframe=None):
-    """1m/5m execution trigger for Pump & Dump shorts."""
+    """5m execution trigger for Pump & Dump shorts."""
     pump_data = pump_data or {}
     result = {
         "micro_trigger_ok": False,
@@ -1469,9 +1469,14 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
         "micro_current_price": 0,
         "micro_timeframe": timeframe or CONFIG.get("micro_timeframe", "5m"),
     }
-    tf = str(timeframe or CONFIG.get("micro_timeframe", "5m"))
-    min_candles = 9 if tf == str(CONFIG.get("ultra_micro_timeframe", "1m")) else 18
-    min_score = int(CONFIG.get("ultra_micro_min_score", CONFIG["micro_min_score"])) if tf == str(CONFIG.get("ultra_micro_timeframe", "1m")) else int(CONFIG["micro_min_score"])
+    tf = str(timeframe or CONFIG.get("micro_timeframe", "5m")).lower()
+    result["micro_timeframe"] = tf
+    if tf != "5m":
+        result["micro_warnings"].append("one_minute_execution_disabled")
+        return result
+
+    min_candles = 18
+    min_score = int(CONFIG["micro_min_score"])
 
     if not candles or len(candles) < min_candles:
         result["micro_warnings"].append("micro_not_enough_candles")
@@ -2388,8 +2393,8 @@ def run_new_listing_scanner():
                     )
                     micro_result = calculate_micro_crack_trigger(micro_candles, pump_data, ticker, timeframe=micro_tf)
 
-                    # Very fresh listings can dump before a 5m model has enough bars.
-                    # Use stricter 1m confirmation only for the first hours after listing.
+                    # Fresh listings can move quickly, but execution alerts still require
+                    # a completed 5m structure to reduce noise and false starts.
                     use_ultra = (
                         CONFIG.get("ultra_micro_enabled")
                         and is_new_source
