@@ -25,7 +25,7 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
         "results": [
-            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10, "direction": "LONG", "Entry": 10.0, "StopLoss": 9.5, "TP1": 10.8, "TP2": 11.3, "DayHigh": 10.4, "DayLow": 9.5},
+            {"ticker": "AAA", "grade": "A", "score": 82, "rvol": 1.2, "price": 10, "direction": "LONG", "Entry": 10.0, "StopLoss": 9.5, "TP1": 10.8, "TP2": 11.3, "DayHigh": 10.4, "DayLow": 9.5, "latest_bar_change_pct": 0.2, "latest_bar_close_pos": 0.76},
             {"ticker": "BBB", "grade": "B", "score": 62, "rvol": 3.0, "price": 20, "direction": "LONG", "DayHigh": 20.5, "DayLow": 19.0},
             {"ticker": "CCC", "grade": "S", "score": 90, "rvol": 0.2, "price": 30, "direction": "LONG", "DayHigh": 31.0, "DayLow": 28.0},
             {"ticker": "DDD", "grade": "A", "score": 72, "rvol": 1.2, "price": 40, "direction": "LONG", "DayHigh": 41.0, "DayLow": 39.0},
@@ -91,6 +91,8 @@ def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
             "Score": 86,
             "RVOL": 1.4,
             "Preis": 12.0,
+            "latest_bar_change_pct": 0.2,
+            "latest_bar_close_pos": 0.76,
             "Tech_Details": {
                 "support": 11.4,
                 "resistance": 12.8,
@@ -279,6 +281,8 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
                     "change_pct": -6.0,
                     "open_to_current_pct": -5.0,
                     "close_pos": 0.2,
+                    "latest_bar_change_pct": -0.2,
+                    "latest_bar_close_pos": 0.2,
                     "alertable_short": True,
                     "Entry": 12.0,
                     "StopLoss": 12.8,
@@ -346,6 +350,8 @@ def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
                 "change_pct": -7.0,
                 "open_to_current_pct": -6.4,
                 "close_pos": 0.12,
+                "latest_bar_change_pct": -0.2,
+                "latest_bar_close_pos": 0.18,
                 "Entry": 9.8,
                 "StopLoss": 10.3,
                 "TP1": 9.0,
@@ -715,6 +721,8 @@ def test_bear_structure_levels_are_native_and_can_pass_email_gate():
         "change_pct": -6.5,
         "open_to_current_pct": -4.0,
         "close_pos": 0.18,
+        "latest_bar_change_pct": -0.2,
+        "latest_bar_close_pos": 0.18,
         **setup,
     }
 
@@ -850,6 +858,8 @@ def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):
         "StopLoss": 11.8,
         "TP1": 13.4,
         "TP2": 14.0,
+        "latest_bar_change_pct": 0.2,
+        "latest_bar_close_pos": 0.76,
     }], "stocks")
 
     assert "stock_strategy_MOMO" not in api._EMAIL_COOLDOWN
@@ -871,6 +881,8 @@ def test_strategy_scan_dedupes_same_ticker_inside_one_mail(monkeypatch):
         "StopLoss": 11.8,
         "TP1": 13.4,
         "TP2": 14.0,
+        "latest_bar_change_pct": 0.2,
+        "latest_bar_close_pos": 0.76,
     }
 
     api._send_strategy_scan_alerts("Momentum Breakout Long", [dict(row), dict(row)], "stocks")
@@ -904,10 +916,12 @@ def test_bearish_dedupe_suppresses_duplicate_short_alerts(tmp_path, monkeypatch)
     short_row = {
         "Ticker": "DUP", "BI_Grade": "A", "BI_Score": 100, "RVOL": 1.4, "Preis": 12,
         "BI_Direction": "SHORT", "Entry": 12.0, "StopLoss": 12.6, "TP1": 11.1, "TP2": 10.5,
+        "latest_bar_change_pct": -0.2, "latest_bar_close_pos": 0.2,
     }
     long_row = {
         "Ticker": "DUP", "BI_Grade": "A", "BI_Score": 100, "RVOL": 1.4, "Preis": 12,
         "BI_Direction": "LONG", "Entry": 12.0, "StopLoss": 11.4, "TP1": 12.9, "TP2": 13.5,
+        "latest_bar_change_pct": 0.2, "latest_bar_close_pos": 0.76,
     }
 
     api._mark_bearish_stock_alert("DUP", now=now)

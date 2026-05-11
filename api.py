@@ -937,6 +937,8 @@ _ALERT_SUPPRESSION_LABELS = {
     "trade_health_liquidity_risk": "Liquiditaets-/Slippage-Risiko zu hoch",
     "latest_5m_red_fade": "Long: letzte 5m-Kerze faded",
     "latest_5m_green_reclaim": "Short: letzte 5m-Kerze bounced/reclaimt",
+    "fresh_5m_state_missing_wait_trigger": "Aktien: frische 5m-Bestaetigung fehlt",
+    "fresh_5m_state_missing_wait_retest": "Aktien: frische 5m-Bestaetigung fehlt, Retest abwarten",
     "extended_long_fading_wait_retest": "Long erweitert und fading: Retest abwarten",
     "hard_extended_long_wait_retest": "Long zu weit gelaufen: Retest abwarten",
     "drop_too_extended_no_chase": "Short/Crash-Drop schon sehr erweitert",
@@ -2487,6 +2489,8 @@ def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
 
     if latest_red_fade:
         reasons.append("latest_5m_red_fade")
+    if latest_missing:
+        reasons.append("fresh_5m_state_missing_wait_trigger")
     if intraday_red_fade:
         reasons.append("current_candle_red_fade")
     if not_holding_highs and (extended or latest_red_fade or intraday_red_fade):
@@ -2539,6 +2543,7 @@ def _bear_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
     latest_bar_change = fields["latest_bar_change_pct"]
     latest_bar_close_pos = fields["latest_bar_close_pos"]
     rvol = fields["rvol"]
+    latest_missing = latest_bar_change is None or latest_bar_close_pos is None
 
     if change is None:
         reasons.append("missing_current_drop")
@@ -2551,6 +2556,8 @@ def _bear_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("current_candle_green_reclaim")
     if close_pos is not None and close_pos > 0.45:
         reasons.append("not_closing_near_low")
+    if latest_missing:
+        reasons.append("fresh_5m_state_missing_wait_trigger")
     if (
         latest_bar_change is not None
         and latest_bar_close_pos is not None
@@ -2825,6 +2832,37 @@ def _fetch_long_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]
     return _fetch_bear_latest_intraday_state(ticker)
 
 
+def _stock_alert_is_short_context(scanner_name: str, row: Dict[str, Any], strategy_name: str = "") -> bool:
+    direction = str(row.get("Signal_Direction", row.get("direction", row.get("side", ""))) or "").lower()
+    strategy = str(strategy_name or row.get("strategy", row.get("Strategy", "")) or "").lower()
+    if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS:
+        return True
+    if "short" in direction or "bear" in direction or direction in {"sell", "put"}:
+        return True
+    return any(token in strategy for token in ("short", "bear", "distribution", "gap momentum short", "ma bounce short"))
+
+
+def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strategy_name: str = "") -> Dict[str, Any]:
+    """Attach fresh 5m state before any actionable stock mail decision."""
+    ticker = _extract_alert_ticker(row)
+    grade = _extract_alert_grade(row)
+    if not ticker or grade not in _ALERT_TOP_GRADES:
+        return row
+
+    enriched = dict(row)
+    if enriched.get("latest_bar_change_pct") is None or enriched.get("latest_bar_close_pos") is None:
+        enriched.update(_fetch_long_latest_intraday_state(ticker))
+
+    if _stock_alert_is_short_context(scanner_name, enriched, strategy_name):
+        enriched["short_block_reasons"] = _bear_short_rule_reasons(enriched)
+        enriched["entry_quality"] = _bear_entry_quality(enriched)
+        enriched["alertable_short"] = not enriched["short_block_reasons"]
+    elif scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+        enriched["long_entry_quality"] = _long_entry_quality(enriched)
+        enriched["alertable_long"] = not _long_entry_rule_reasons(enriched)
+    return enriched
+
+
 def _alert_cooldown_remaining(key: str, now: Optional[float] = None) -> int:
     now = now or time.time()
     last = _EMAIL_COOLDOWN.get(key)
@@ -2850,6 +2888,8 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
     wait_trigger_markers = {
         "trade_health_wait_for_trigger",
         "trade_health_wait_for_continuation",
+        "fresh_5m_state_missing_wait_trigger",
+        "fresh_5m_state_missing_wait_retest",
     }
     no_trade_markers = {
         "drop_too_extended_no_chase",
@@ -3274,7 +3314,9 @@ def _check_and_alert(scanner_name, cache_file):
         for r in results:
             if not isinstance(r, dict):
                 continue
-            if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+            if scanner_name in _STOCK_ALERT_SCANNERS:
+                r = _enrich_stock_alert_5m_state(scanner_name, r)
+            elif scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
                 ticker_probe = _extract_alert_ticker(r)
                 grade_probe = _extract_alert_grade(r)
                 if ticker_probe and grade_probe in _ALERT_TOP_GRADES:
@@ -3375,17 +3417,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             continue
         grade_for_counts = _extract_alert_grade(row) or "UNKNOWN"
         grade_counts[grade_for_counts] = grade_counts.get(grade_for_counts, 0) + 1
-        if scanner_key in _LONG_ENTRY_ALERT_SCANNERS:
-            ticker_probe = _extract_alert_ticker(row)
-            grade_probe = _extract_alert_grade(row)
-            direction_probe = str(row.get("Signal_Direction", row.get("direction", "")) or "").lower()
-            is_long_probe = "short" not in direction_probe and "short" not in strategy_name.lower()
-            if ticker_probe and grade_probe in _ALERT_TOP_GRADES and is_long_probe:
-                row = dict(row)
-                if "latest_bar_change_pct" not in row:
-                    row.update(_fetch_long_latest_intraday_state(ticker_probe))
-                row["long_entry_quality"] = _long_entry_quality(row)
-                row["alertable_long"] = not _long_entry_rule_reasons(row)
+        if scanner_key in _STOCK_ALERT_SCANNERS:
+            row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
         state = _classify_alert_candidate(scanner_key, row, now)
         if not state["alertable_now"]:
             for reason in state["suppression_reasons"]:
@@ -3442,7 +3475,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
     <th style="padding:8px;text-align:left">Entry / Stop / TP</th><th style="padding:8px;text-align:left">Timing</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE} und Grade S/A/A+; 8h Cooldown pro Ticker.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und frische 5m-Bestaetigung; 8h Cooldown pro Ticker.</p>
     </body></html>'''
     sent = _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
     if sent:
