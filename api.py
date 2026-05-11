@@ -952,6 +952,9 @@ _ALERT_SUPPRESSION_LABELS = {
     "early_mover_data_warning": "Crypto: Daten unvollstaendig/partial",
     "early_mover_blowoff_turnover": "Crypto: Blowoff/Turnover-Risiko",
     "early_mover_turnover_without_alpha": "Crypto: viel Umsatz ohne Alpha",
+    "early_mover_execution_liquidity_too_thin": "Crypto: Orderbuch/Perp-Liquiditaet zu duenn",
+    "early_mover_live_rr_below_threshold": "Crypto: Live R:R unter Mindestwert",
+    "early_mover_1m_trigger_watch_only": "Crypto: 1m-Trigger nur Watch, Mail braucht 5m-Bestaetigung",
     "no_fresh_5m_trigger": "kein frischer 5m/1m Trigger",
     "micro_trigger_missing": "Pump/Dump: Micro-Crack fehlt",
     "pump_continuation_risk": "Pump laeuft noch, Short zu frueh",
@@ -1313,6 +1316,9 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "partial_data": _alert_bool(row.get("partial_data", row.get("data_partial", False))),
         "data_warning": row.get("data_warning"),
         "btc_tailwind": _alert_bool(btc_context.get("tailwind"), True),
+        "change24": _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0,
+        "vol_mcap": _alert_float(row.get("VolMCapRatio", row.get("vol_mcap", row.get("Vol/MCap"))), 0) or 0,
+        "alpha_24h": _alert_float(row.get("BtcRelative24h", btc_context.get("alpha_24h")), 0) or 0,
         "risk_flags": [str(flag).lower() for flag in risk_flags],
     }
 
@@ -1347,7 +1353,12 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_chased_from_entry")
     if "very_high_volume_turnover" in risk_flags:
         reasons.append("early_mover_blowoff_turnover")
-    if risk_flags.intersection({"turnover_without_alpha", "extreme_turnover_churn"}):
+    raw_turnover_churn = (
+        fields["vol_mcap"] >= _EARLY_MOVER_TURNOVER_CHURN_BLOCK_PCT
+        and fields["alpha_24h"] <= 0
+        and fields["change24"] < 2.0
+    )
+    if raw_turnover_churn or risk_flags.intersection({"turnover_without_alpha", "extreme_turnover_churn"}):
         reasons.append("early_mover_turnover_without_alpha")
     if risk_flags.intersection({"thin_perp_liquidity", "thin_orderbook", "market_impact_risk", "no_perp_execution_market"}):
         reasons.append("early_mover_execution_liquidity_too_thin")
@@ -1968,11 +1979,22 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
     return dict(result)
 
 
+def _early_mover_mail_trigger_block_reason(trigger_check: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(trigger_check, dict) or not trigger_check.get("ok"):
+        reason = trigger_check.get("reason", "no_intraday_trigger") if isinstance(trigger_check, dict) else "no_intraday_trigger"
+        return f"early_mover_{reason}"
+    timeframe = str(trigger_check.get("timeframe") or "").lower()
+    if timeframe == "1m":
+        return "early_mover_1m_trigger_watch_only"
+    return None
+
+
 def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> None:
     """Expose a simple user-facing decision: observe, wait, no trade, or trade now."""
     action = str(row.get("trade_action", "") or "").upper()
     trigger_ok = bool(trigger_check.get("ok")) if isinstance(trigger_check, dict) else bool(row.get("execution_trigger_ok"))
     trigger_reason = str((trigger_check or {}).get("reason", "") or "")
+    trigger_block_reason = _early_mover_mail_trigger_block_reason(trigger_check) if isinstance(trigger_check, dict) else None
 
     row["execution_trigger_ok"] = bool(trigger_ok)
     if isinstance(trigger_check, dict):
@@ -1992,7 +2014,7 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
             row["risk_reasons"] = list(dict.fromkeys(reasons))
             row["risk_level"] = "HIGH"
 
-    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok:
+    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason:
         row["trade_signal"] = "JETZT_TRADEN"
         score_txt = f" Score {trigger_check.get('execution_score')}/100" if isinstance(trigger_check, dict) and trigger_check.get("execution_score") is not None else ""
         tf_txt = str(trigger_check.get("timeframe") or "adaptive") if isinstance(trigger_check, dict) else "adaptive"
@@ -2000,6 +2022,12 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["signal_quality"] = "tradeable"
         row["entry_status"] = "JETZT_TRADEN"
         row["alertable_crypto"] = True
+    elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and trigger_block_reason:
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: 1m-Trigger ist nur Watch; fuer Trade-Mail/Trade braucht es 5m-Bestaetigung"
+        row["signal_quality"] = "wait_trigger"
+        row["entry_status"] = "WAIT_FOR_5M_CONFIRMATION"
+        row["alertable_crypto"] = False
     elif action == "NO_LONG_CHASE":
         row["trade_signal"] = "NICHT_TRADEN"
         row["signal_label"] = "Nicht traden: Bewegung ist zu weit gelaufen"
@@ -2291,8 +2319,9 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
             continue
         seen_keys.add(key)
         trigger_check = _verify_early_mover_intraday_trigger(row)
-        if not trigger_check.get("ok"):
-            reason = f"early_mover_{trigger_check.get('reason', 'no_intraday_trigger')}"
+        trigger_block_reason = _early_mover_mail_trigger_block_reason(trigger_check)
+        if trigger_block_reason:
+            reason = trigger_block_reason
             suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}

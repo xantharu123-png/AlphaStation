@@ -1482,7 +1482,6 @@ def test_early_mover_blocks_extreme_turnover_without_alpha():
         Change24h=0.7,
         VolMCapRatio=96.0,
         btc_context={"btc_24h": 1.0, "alpha_24h": -0.3, "tailwind": True},
-        risk_flags=["turnover_without_alpha", "extreme_turnover_churn"],
     )
 
     state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
@@ -1577,6 +1576,27 @@ def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
     assert sent == []
 
 
+def test_early_mover_email_blocks_1m_only_trigger(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    api._EMAIL_SEND_LOG.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "adaptive_1m_retest_hold",
+        "timeframe": "1m",
+        "execution_score": 100,
+        "volume_ratio": 2.8,
+    })
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="GALA")]})
+
+    assert sent == []
+    assert api._EMAIL_SEND_LOG[-1]["status"] == "skipped"
+    assert "early_mover_1m_trigger_watch_only" in api._EMAIL_SEND_LOG[-1]["reason"]
+
+
 def test_early_mover_email_checks_realtime_trigger_when_cache_unconfirmed(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
@@ -1611,6 +1631,22 @@ def test_early_mover_signal_state_only_marks_trade_now_after_trigger():
 
     assert row["trade_signal"] == "JETZT_TRADEN"
     assert row["alertable_crypto"] is True
+
+
+def test_early_mover_signal_state_keeps_1m_trigger_as_wait():
+    row = _early_mover_row(execution_trigger_ok=False)
+
+    api._apply_early_mover_signal_state(row, {
+        "ok": True,
+        "reason": "adaptive_1m_retest_hold",
+        "timeframe": "1m",
+        "execution_score": 100,
+    })
+
+    assert row["trade_signal"] == "WARTEN"
+    assert row["entry_status"] == "WAIT_FOR_5M_CONFIRMATION"
+    assert row["alertable_crypto"] is False
+    assert "5m-Bestaetigung" in row["signal_label"]
     assert row["execution_trigger_ok"] is True
 
 
