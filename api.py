@@ -828,6 +828,7 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 }
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
 _NEW_LISTING_MIN_ALERT_RR = 1.5
+_NEW_LISTING_WATCH_MIN_SCORE = 45
 _NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
@@ -3535,6 +3536,9 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
                 "btc_divergence": _alert_float(pump.get("btc_divergence", sig.get("btc_divergence")), None),
                 "btc_context": str(pump.get("btc_short_context", sig.get("btc_short_context", "")) or ""),
                 "risk_flags": sig.get("risk_flags", entry.get("risk_flags", [])) if isinstance(sig.get("risk_flags", entry.get("risk_flags", [])), list) else [],
+                "title": entry.get("announcement_title", ""),
+                "url": entry.get("announcement_url", ""),
+                "listing_source": fields["listing_source"],
             })
 
     for item in payload.get("monitoring", []) or []:
@@ -3563,18 +3567,76 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             "btc_divergence": _alert_float(item.get("btc_divergence"), None),
             "btc_context": str(item.get("btc_short_context", "") or ""),
             "risk_flags": item.get("risk_flags", []) if isinstance(item.get("risk_flags", []), list) else [],
+            "title": item.get("announcement_title", ""),
+            "url": item.get("announcement_url", ""),
+            "listing_source": item.get("source", ""),
+        })
+
+    for ann in payload.get("announcement_watchlist", []) or []:
+        if not isinstance(ann, dict):
+            continue
+        symbol = _display_crypto_contract_symbol(ann.get("base") or "")
+        if not symbol:
+            continue
+        contracts = ann.get("matched_contracts", []) if isinstance(ann.get("matched_contracts", []), list) else []
+        exchange = ann.get("exchange", "")
+        if contracts:
+            exchange = contracts[0].get("exchange") or exchange
+        candidates.append({
+            "symbol": symbol,
+            "exchange": exchange,
+            "bucket": "announcement",
+            "grade": "WATCH",
+            "timing": ann.get("title", "Exchange listing announcement"),
+            "category": "ANNOUNCEMENT_WATCH",
+            "age": _alert_float(ann.get("age_hours"), None),
+            "pump_pct": 0,
+            "from_ath_pct": 0,
+            "exh_score": 0,
+            "rr": 0,
+            "btc_change": None,
+            "coin_change": None,
+            "btc_divergence": None,
+            "btc_context": "",
+            "risk_flags": ["announcement_watch", "wait_for_dump_trigger"],
+            "title": ann.get("title", ""),
+            "url": ann.get("url", ""),
+            "listing_source": ann.get("source", ""),
         })
 
     deduped: Dict[str, Dict[str, Any]] = {}
     for candidate in candidates:
         key = candidate["symbol"]
         old = deduped.get(key)
-        candidate_rank = (candidate["bucket"] == "signals", candidate["exh_score"] or 0, candidate["rr"] or 0)
-        old_rank = (old["bucket"] == "signals", old["exh_score"] or 0, old["rr"] or 0) if old else None
+        candidate_rank = (
+            candidate["bucket"] == "signals",
+            candidate["bucket"] in ("watchlist", "monitoring"),
+            candidate["bucket"] == "announcement",
+            candidate["exh_score"] or 0,
+            candidate["rr"] or 0,
+        )
+        old_rank = (
+            old["bucket"] == "signals",
+            old["bucket"] in ("watchlist", "monitoring"),
+            old["bucket"] == "announcement",
+            old["exh_score"] or 0,
+            old["rr"] or 0,
+        ) if old else None
         if old is None or candidate_rank > old_rank:
             deduped[key] = candidate
-    high_score = [c for c in deduped.values() if (c.get("exh_score") or 0) >= _ALERT_MIN_SCORE]
-    return sorted(high_score, key=lambda c: (c["bucket"] != "signals", -(c["exh_score"] or 0), -(c["rr"] or 0)))[:12]
+    visible = []
+    for c in deduped.values():
+        if c.get("bucket") == "announcement":
+            visible.append(c)
+            continue
+        score = c.get("exh_score") or 0
+        age = c.get("age")
+        if score >= _NEW_LISTING_WATCH_MIN_SCORE or (age is not None and age <= 24):
+            visible.append(c)
+    return sorted(
+        visible,
+        key=lambda c: (c["bucket"] == "announcement", c["bucket"] != "signals", -(c["exh_score"] or 0), c.get("age") or 999),
+    )[:12]
 
 
 def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
@@ -3602,9 +3664,13 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     rows = ""
     for c in candidates:
         risk = ", ".join(c["risk_flags"][:3]) if c["risk_flags"] else ""
+        title = str(c.get("title") or c.get("timing") or "")
+        if len(title) > 95:
+            title = title[:92] + "..."
+        link = f'<br><a href="{c.get("url")}" style="color:#2563eb">Quelle</a>' if c.get("url") else ""
         rows += (
-            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{c["symbol"]}</b><br><span style="color:#777">{c["exchange"]}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{c["category"]}<br><span style="color:#777">{c["timing"]}</span></td>'
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{c["symbol"]}</b><br><span style="color:#777">{c["exchange"]}</span>{link}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{c["category"]}<br><span style="color:#777">{title}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["age"], "h")}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["pump_pct"], "%")} / {_fmt(c["from_ath_pct"], "%")}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{c["grade"] or "-"} / {int(c["exh_score"] or 0)}</td>'
@@ -11335,6 +11401,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "exchange": entry.get("exchange", ""),
             "contract": raw_symbol,
             "price": pump.get("current_price", sig.get("entry", 0)),
+            "announcement_title": entry.get("announcement_title", ""),
+            "announcement_url": entry.get("announcement_url", ""),
+            "announcement_source": entry.get("announcement_source", ""),
             "change_24h": entry.get("change_24h", 0),
             "volume_24h": pump.get("volume_usd_24h", 0),
             "pump_pct": pump.get("pump_pct", 0),
@@ -11409,6 +11478,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "exchange": item.get("exchange", ""),
             "contract": raw_symbol,
             "price": item.get("price", 0),
+            "announcement_title": item.get("announcement_title", ""),
+            "announcement_url": item.get("announcement_url", ""),
+            "announcement_source": item.get("announcement_source", ""),
             "pump_pct": item.get("pump_pct", 0),
             "from_ath_pct": item.get("from_ath_pct", 0),
             "exhaustion_score": item.get("exh_score", 0),
@@ -11449,6 +11521,49 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "signal_quality": item.get("signal_quality", ""),
             "risk_flags": item.get("risk_flags", []),
             "source": "monitoring",
+        })
+
+    for ann in payload.get("announcement_watchlist", []) or []:
+        if not isinstance(ann, dict):
+            continue
+        base = _display_crypto_contract_symbol(ann.get("base") or "")
+        if not base:
+            continue
+        contracts = ann.get("matched_contracts", []) if isinstance(ann.get("matched_contracts", []), list) else []
+        exchange = ann.get("exchange", "")
+        contract = ""
+        if contracts:
+            exchange = contracts[0].get("exchange") or exchange
+            contract = contracts[0].get("symbol") or ""
+        flat.append({
+            "symbol": base,
+            "exchange": exchange,
+            "contract": contract,
+            "price": 0,
+            "pump_pct": 0,
+            "from_ath_pct": 0,
+            "exhaustion_score": 0,
+            "signal": "ANNOUNCEMENT WATCH",
+            "funding_rate": 0,
+            "grade": "WATCH",
+            "hours_tracked": ann.get("age_hours"),
+            "listing_age_hours": ann.get("age_hours"),
+            "listing_age_source": "announcement_time",
+            "listing_source": ann.get("source", ""),
+            "listing_trade_ok": False,
+            "trade_category": "ANNOUNCEMENT_WATCH",
+            "trade_action": "BEOBACHTEN",
+            "trade_signal": "BEOBACHTEN",
+            "signal_label": "Neues Listing beobachten",
+            "rr_effective": 0,
+            "risk_pct": 0,
+            "safety_ok": False,
+            "safety_warnings": ["announcement_only_wait_for_trigger"],
+            "risk_flags": ["announcement_watch", "wait_for_dump_trigger"],
+            "announcement_title": ann.get("title", ""),
+            "announcement_url": ann.get("url", ""),
+            "announcement_source": ann.get("source", ""),
+            "source": "announcement",
         })
 
     flat.sort(key=lambda r: (

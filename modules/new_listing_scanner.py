@@ -30,6 +30,7 @@ import json
 import time
 import logging
 import traceback
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -105,6 +106,7 @@ CONFIG.update({
     "micro_stop_buffer_pct": 1.5,
     "new_listing_short_min_age_hours": 1.0,
     "new_listing_short_max_age_hours": 72.0,
+    "announcement_watch_hours": 168.0,
     "btc_tailwind_risk_change_pct": 2.0,
     "btc_tailwind_min_divergence_pct": -5.0,
     "btc_tailwind_min_crack_pct": 8.0,
@@ -659,6 +661,137 @@ def fetch_candles_for(symbol, exchange, timeframe="1h", count=50):
         return fetch_cryptocom_candles(symbol, timeframe, count)
 
 
+def _clean_listing_base_symbol(symbol):
+    """Normalize an announcement or contract symbol to a tradable base coin."""
+    s = str(symbol or "").upper().strip()
+    s = re.sub(r"[^A-Z0-9_/-]", "", s)
+    for suffix in ("_USDT", "-USDT", "/USDT", "USDT", "_USDC", "-USDC", "/USDC", "USDC"):
+        if s.endswith(suffix) and len(s) > len(suffix):
+            s = s[: -len(suffix)]
+            break
+    return s.strip("_-/")
+
+
+def _extract_listing_symbols_from_title(title):
+    """Extract likely crypto symbols from exchange listing announcement titles."""
+    text = str(title or "")
+    if not text:
+        return []
+    # Stock/TradFi perps are exchange instruments, but not crypto new-listing shorts.
+    if re.search(r"\b(stock|tradfi|equity|shares?)\b", text, flags=re.I):
+        return []
+
+    symbols = []
+    symbols.extend(re.findall(r"\(([A-Z0-9]{2,24})\)", text))
+    symbols.extend(re.findall(r"\b([A-Z0-9]{2,24})(?:USDT|USDC)\b", text))
+
+    blocked = {"UTC", "VIP", "USD", "USDT", "USDC", "ETF", "ETP", "BTCUSD"}
+    out = []
+    seen = set()
+    for sym in symbols:
+        base = _clean_listing_base_symbol(sym)
+        if not base or base in blocked or base.isdigit():
+            continue
+        if base not in seen:
+            seen.add(base)
+            out.append(base)
+    return out
+
+
+def fetch_binance_listing_announcements(limit=20):
+    """Official Binance announcement feed for recent crypto listing/futures-launch notices."""
+    data = _api_get("https://www.binance.com/bapi/composite/v1/public/cms/article/list/query", {
+        "type": 1,
+        "catalogId": 48,
+        "pageNo": 1,
+        "pageSize": min(max(int(limit), 1), 50),
+    }, timeout=15)
+    announcements = []
+    catalogs = (data or {}).get("data", {}).get("catalogs", []) if isinstance(data, dict) else []
+    articles = catalogs[0].get("articles", []) if catalogs else []
+    for article in articles:
+        title = article.get("title", "")
+        if not re.search(r"\b(will list|futures will launch|will launch|initial listing|new listing)\b", title, flags=re.I):
+            continue
+        symbols = _extract_listing_symbols_from_title(title)
+        if not symbols:
+            continue
+        announcements.append({
+            "source": "binance_announcement",
+            "exchange": "binance",
+            "title": title,
+            "symbols": symbols,
+            "release_ms": int(article.get("releaseDate") or 0),
+            "url": f"https://www.binance.com/en/support/announcement/{article.get('code')}" if article.get("code") else "",
+        })
+    return announcements
+
+
+def fetch_bitget_listing_announcements(limit=10):
+    """Official Bitget announcements endpoint for recent spot/futures coin listings."""
+    data = _api_get("https://api.bitget.com/api/v2/public/annoucements", {
+        "annType": "coin_listings",
+        "language": "en_US",
+        "limit": min(max(int(limit), 1), 10),
+    }, timeout=15)
+    announcements = []
+    rows = data.get("data", []) if isinstance(data, dict) else []
+    for row in rows:
+        title = row.get("annTitle", "")
+        subtype = str(row.get("annSubType", "") or "").lower()
+        if subtype not in ("spot", "futures"):
+            continue
+        if not re.search(r"\b(to list|initial listing|new .*listing|launch|pre-market|pre-listing)\b", title, flags=re.I):
+            continue
+        symbols = _extract_listing_symbols_from_title(title)
+        if not symbols:
+            continue
+        announcements.append({
+            "source": "bitget_announcement",
+            "exchange": "bitget",
+            "title": title,
+            "symbols": symbols,
+            "release_ms": int(row.get("cTime") or 0),
+            "url": row.get("annUrl", ""),
+            "subtype": subtype,
+        })
+    return announcements
+
+
+def fetch_listing_announcements():
+    """Fetch and normalize recent new-listing announcements from supported exchanges."""
+    announcements = []
+    for fetcher in (fetch_binance_listing_announcements, fetch_bitget_listing_announcements):
+        try:
+            announcements.extend(fetcher())
+        except Exception as e:
+            log.warning(f"NLS announcement fetch error: {e}")
+
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=float(CONFIG.get("announcement_watch_hours", 168)))).timestamp() * 1000)
+    deduped = {}
+    for ann in announcements:
+        release_ms = int(ann.get("release_ms") or 0)
+        if release_ms and release_ms < cutoff_ms:
+            continue
+        for base in ann.get("symbols", []) or []:
+            key = f"{ann.get('source')}:{base}:{release_ms}"
+            if key not in deduped:
+                item = dict(ann)
+                item["base"] = base
+                deduped[key] = item
+    return sorted(deduped.values(), key=lambda item: int(item.get("release_ms") or 0), reverse=True)
+
+
+def _announcement_age_hours(announcement):
+    try:
+        release_ms = int(announcement.get("release_ms") or 0)
+    except (TypeError, ValueError):
+        release_ms = 0
+    if release_ms <= 0:
+        return None
+    return max(0, round((time.time() - (release_ms / 1000)) / 3600, 1))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LISTING DETECTION (Multi-Exchange Cache-Diff)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -777,6 +910,42 @@ def detect_new_listings():
     max_new_listing_age_hours = float(CONFIG.get("new_listing_short_max_age_hours", CONFIG.get("monitor_hours_max", 72)))
     cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=max_new_listing_age_hours)).timestamp() * 1000)
 
+    # Official exchange announcements catch listings that cache-diff/timestamps miss
+    # (spot, pre-market, or futures launch pages before the perp appears).
+    announcement_watchlist = fetch_listing_announcements()
+    perps_by_base = {}
+    for p in all_perps:
+        sym = p.get("symbol", "")
+        if _is_stock_token(sym):
+            continue
+        base = _clean_listing_base_symbol(p.get("base") or sym)
+        if base:
+            perps_by_base.setdefault(base, []).append(p)
+
+    for ann in announcement_watchlist:
+        base = ann.get("base") or ""
+        matching = perps_by_base.get(base, [])
+        preferred = [p for p in matching if p.get("exchange") == ann.get("exchange")]
+        matched = preferred or matching[:1]
+        ann["age_hours"] = _announcement_age_hours(ann)
+        ann["matched_contracts"] = [
+            {"exchange": p.get("exchange"), "symbol": p.get("symbol")}
+            for p in matched[:2]
+        ]
+        for p in matched[:2]:
+            sym = p.get("symbol", "")
+            if not sym or sym in known_new or _is_stock_token(sym):
+                continue
+            item = dict(p)
+            item["announcement_source"] = ann.get("source")
+            item["announcement_title"] = ann.get("title")
+            item["announcement_url"] = ann.get("url")
+            item["announcement_release_ms"] = ann.get("release_ms")
+            item["announcement_base"] = base
+            all_new.append(item)
+            known_new.add(sym)
+            log.info(f"NLS: {sym} via {ann.get('source')} announcement erkannt ({ann.get('title')})")
+
     # ── MEXC isNew-Flag als zuverlässige Erkennung ──
     # MEXC markiert kürzlich gelistete Coins mit isNew=True
     for p in all_perps:
@@ -828,7 +997,7 @@ def detect_new_listings():
     else:
         log.info(f"📋 NLS: Keine neuen Listings erkannt (Cache-Diff + Timestamp-Check)")
 
-    return all_new, all_perps
+    return all_new, all_perps, announcement_watchlist
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2272,6 +2441,7 @@ def run_new_listing_scanner():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "new_listings_detected": [],
         "pumps_detected": [],
+        "announcement_watchlist": [],
         "signals": [],
         "watchlist": [],
         "monitoring": [],
@@ -2280,11 +2450,46 @@ def run_new_listing_scanner():
 
     try:
         # ── Phase 1a: Neue Listings erkennen ──
-        new_listings, all_perps = detect_new_listings()
+        detected = detect_new_listings()
+        if len(detected) == 3:
+            new_listings, all_perps, announcement_watchlist = detected
+        else:
+            new_listings, all_perps = detected
+            announcement_watchlist = []
+        results["announcement_watchlist"] = announcement_watchlist[:30]
         for nl in new_listings:
             results["new_listings_detected"].append(nl["symbol"])
-            listing_ts = nl.get("onboard_date") or nl.get("create_time") or nl.get("launch_time")
-            add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"), listing_ts_ms=listing_ts, source="new_listing")
+            listing_ts = (
+                nl.get("onboard_date")
+                or nl.get("create_time")
+                or nl.get("launch_time")
+                or nl.get("announcement_release_ms")
+            )
+            monitoring = add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"), listing_ts_ms=listing_ts, source="new_listing")
+            key = _monitor_key(nl["symbol"], nl.get("exchange", "crypto.com"))
+            if key in monitoring and nl.get("announcement_source"):
+                announcement_listing_time = None
+                try:
+                    if nl.get("announcement_release_ms"):
+                        announcement_listing_time = datetime.fromtimestamp(
+                            int(nl.get("announcement_release_ms")) / 1000,
+                            tz=timezone.utc,
+                        ).isoformat()
+                except Exception:
+                    announcement_listing_time = None
+                monitoring[key].update({
+                    "source": "new_listing",
+                    "status": "monitoring",
+                    "listing_time": announcement_listing_time or monitoring[key].get("listing_time"),
+                    "listing_detection": "exchange_announcement",
+                    "listing_age_source_override": "announcement_time",
+                    "announcement_source": nl.get("announcement_source"),
+                    "announcement_title": nl.get("announcement_title"),
+                    "announcement_url": nl.get("announcement_url"),
+                    "announcement_release_ms": nl.get("announcement_release_ms"),
+                    "announcement_base": nl.get("announcement_base"),
+                })
+                save_monitoring_list(monitoring)
 
         # ── Phase 1b: Aktive Pumps erkennen (NEUER Erkennungsweg) ──
         try:
@@ -2338,7 +2543,10 @@ def run_new_listing_scanner():
                 is_new_source = source == "new_listing"
                 if is_new_source:
                     age_basis = mon_data.get("listing_time") or mon_data.get("detected_at")
-                    listing_age_source = "exchange_timestamp" if mon_data.get("listing_time") else "detected_at"
+                    listing_age_source = (
+                        mon_data.get("listing_age_source_override")
+                        or ("exchange_timestamp" if mon_data.get("listing_time") else "detected_at")
+                    )
                     try:
                         age_dt = datetime.fromisoformat(str(age_basis).replace("Z", "+00:00"))
                         listing_age_hours = max(0, (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600)
@@ -2364,6 +2572,9 @@ def run_new_listing_scanner():
                         "grade": "WAIT",
                         "timing": "Waiting for history",
                         "risk_flags": ["waiting_for_history"],
+                        "announcement_source": mon_data.get("announcement_source"),
+                        "announcement_title": mon_data.get("announcement_title"),
+                        "announcement_url": mon_data.get("announcement_url"),
                     })
                     continue
                 if mon_data.get("status") == "waiting_for_history":
@@ -2468,6 +2679,9 @@ def run_new_listing_scanner():
                         "timing": " Already dumped",
                         "hours_tracked": pump_data.get("hours_tracked", 0),
                         "risk_flags": ["already_dumped"],
+                        "announcement_source": mon_data.get("announcement_source"),
+                        "announcement_title": mon_data.get("announcement_title"),
+                        "announcement_url": mon_data.get("announcement_url"),
                     })
                     continue
 
@@ -2489,6 +2703,9 @@ def run_new_listing_scanner():
                     "listing_age_source": listing_age_source,
                     "listing_trade_ok": signal.get("listing_trade_ok", False),
                     "trade_category": signal.get("trade_category", "UNKNOWN"),
+                    "announcement_source": mon_data.get("announcement_source"),
+                    "announcement_title": mon_data.get("announcement_title"),
+                    "announcement_url": mon_data.get("announcement_url"),
                     "signal": signal,
                 }
 
@@ -2558,6 +2775,9 @@ def run_new_listing_scanner():
                     "listing_trade_ok": signal.get("listing_trade_ok", False),
                     "trade_category": signal.get("trade_category", "UNKNOWN"),
                     "hours_tracked": pump_data.get("hours_tracked", 0),
+                    "announcement_source": mon_data.get("announcement_source"),
+                    "announcement_title": mon_data.get("announcement_title"),
+                    "announcement_url": mon_data.get("announcement_url"),
                 })
 
             except Exception as e:

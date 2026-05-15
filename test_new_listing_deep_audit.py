@@ -2,6 +2,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from modules.new_listing_scanner import (
+    _clean_listing_base_symbol,
+    _extract_listing_symbols_from_title,
     _is_tradeable_short_signal,
     _monitor_key,
     calculate_micro_crack_trigger,
@@ -62,6 +64,13 @@ def _micro_crack_candles():
 
 def test_monitor_key_keeps_same_symbol_separate_by_exchange():
     assert _monitor_key("ABCUSDT", "mexc") != _monitor_key("ABCUSDT", "binance")
+
+
+def test_listing_announcement_symbol_parser_keeps_crypto_and_blocks_stock_titles():
+    assert _clean_listing_base_symbol("STARUSDT") == "STAR"
+    assert _extract_listing_symbols_from_title("Binance Futures Will Launch STARUSDT Perpetual Contracts") == ["STAR"]
+    assert _extract_listing_symbols_from_title("[Initial listing] Bitget to list Hooli (HOOLI) in the GameFi zone") == ["HOOLI"]
+    assert _extract_listing_symbols_from_title("Bitget Stock Futures will list NVDAUSDT shares") == []
 
 
 def test_cleanup_expires_new_listing_by_exchange_listing_time_not_detection_time():

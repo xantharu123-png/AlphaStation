@@ -1123,6 +1123,68 @@ def test_new_listing_pipeline_sends_daily_watch_when_no_short_now(monkeypatch):
     assert "JETZT SHORTEN" in sent[0][1]
 
 
+def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+
+    payload = {
+        "signals": [],
+        "watchlist": [],
+        "monitoring": [{
+            "symbol": "STARUSDT",
+            "exchange": "mexc",
+            "source": "new_listing",
+            "listing_age_hours": 18,
+            "trade_category": "NEW_LISTING_WATCH",
+            "timing": "Watch - waiting for first real dump trigger",
+            "grade": "C",
+            "exh_score": 67,
+            "pump_pct": 18,
+            "from_ath_pct": 4,
+            "rr_effective": 0,
+            "risk_flags": ["wait_for_dump_trigger"],
+        }],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert len(sent) == 1
+    assert "Crypto New Listing beobachten" in sent[0][0]
+    assert "STAR" in sent[0][1]
+    assert "SHORT NOW" not in sent[0][1]
+
+
+def test_new_listing_pipeline_sends_watch_for_exchange_announcement(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+
+    payload = {
+        "signals": [],
+        "watchlist": [],
+        "monitoring": [],
+        "announcement_watchlist": [{
+            "base": "HOOLI",
+            "exchange": "bitget",
+            "source": "bitget_announcement",
+            "title": "[Initial listing] Bitget to list Hooli (HOOLI) in the GameFi zone",
+            "url": "https://example.com/hooli",
+            "age_hours": 2,
+            "matched_contracts": [{"exchange": "bitget", "symbol": "HOOLIUSDT"}],
+        }],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert len(sent) == 1
+    assert "HOOLI" in sent[0][1]
+    assert "ANNOUNCEMENT_WATCH" in sent[0][1]
+    assert "Quelle" in sent[0][1]
+
+
 def test_new_listing_watch_ignores_active_pump_rows(monkeypatch):
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
