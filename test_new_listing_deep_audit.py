@@ -6,6 +6,7 @@ from modules.new_listing_scanner import (
     _extract_listing_symbols_from_title,
     _is_tradeable_short_signal,
     _monitor_key,
+    _parse_mexc_listing_announcements_html,
     calculate_micro_crack_trigger,
     check_safety,
     cleanup_monitoring,
@@ -70,7 +71,29 @@ def test_listing_announcement_symbol_parser_keeps_crypto_and_blocks_stock_titles
     assert _clean_listing_base_symbol("STARUSDT") == "STAR"
     assert _extract_listing_symbols_from_title("Binance Futures Will Launch STARUSDT Perpetual Contracts") == ["STAR"]
     assert _extract_listing_symbols_from_title("[Initial listing] Bitget to list Hooli (HOOLI) in the GameFi zone") == ["HOOLI"]
+    assert _extract_listing_symbols_from_title("First in Market: MEXC to List AURASOLUSDT Futures") == ["AURASOL"]
     assert _extract_listing_symbols_from_title("Bitget Stock Futures will list NVDAUSDT shares") == []
+    assert _extract_listing_symbols_from_title("MEXC to List JP225 Index Futures") == []
+
+
+def test_mexc_announcement_parser_extracts_crypto_and_filters_stock_futures():
+    html = '''
+    <div class="SearchResultItem_titleWrapper__XkpJZ">
+      <a title="First in Market: MEXC to List Hooli (HOOLI) USDT-M Futures on May 15, 2026, 11:20 (UTC)" href="/announcements/article/hooli"><h2>x</h2></a>
+      <time dateTime="2026-05-15T10:55:21.000Z"><span>about 8 hours ago</span></time>
+    </div>
+    <div class="SearchResultItem_titleWrapper__XkpJZ">
+      <a title="New Stock Futures Listings: CBRS USDT-M Futures to Launch on May 15 With 0-Fee Trading" href="/announcements/article/cbrs"><h2>x</h2></a>
+      <time dateTime="2026-05-15T03:26:12.000Z"><span>about 15 hours ago</span></time>
+    </div>
+    '''
+
+    rows = _parse_mexc_listing_announcements_html(html)
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "mexc_announcement"
+    assert rows[0]["symbols"] == ["HOOLI"]
+    assert rows[0]["url"].endswith("/announcements/article/hooli")
 
 
 def test_cleanup_expires_new_listing_by_exchange_listing_time_not_detection_time():

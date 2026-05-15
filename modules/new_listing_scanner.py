@@ -31,6 +31,7 @@ import time
 import logging
 import traceback
 import re
+import html as html_lib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -678,7 +679,7 @@ def _extract_listing_symbols_from_title(title):
     if not text:
         return []
     # Stock/TradFi perps are exchange instruments, but not crypto new-listing shorts.
-    if re.search(r"\b(stock|tradfi|equity|shares?)\b", text, flags=re.I):
+    if re.search(r"\b(stock|tradfi|equity|shares?|index|indices)\b", text, flags=re.I):
         return []
 
     symbols = []
@@ -758,10 +759,75 @@ def fetch_bitget_listing_announcements(limit=10):
     return announcements
 
 
+def _parse_mexc_listing_announcements_html(html, limit=20):
+    announcements = []
+    seen = set()
+    pattern = re.compile(
+        r'<div class="SearchResultItem_titleWrapper[^>]*>\s*'
+        r'<a[^>]+title="([^"]+)"[^>]+href="([^"]+)"[^>]*>.*?</a>\s*'
+        r'<time[^>]+dateTime="([^"]+)"',
+        flags=re.S,
+    )
+    for title, href, dt_text in pattern.findall(str(html or "")):
+        title = html_lib.unescape(re.sub(r"\s+", " ", title)).strip()
+        if not re.search(r"\b(to list|will list|initial listing|new listing|usdt-m futures|first in market|pre-market)\b", title, flags=re.I):
+            continue
+        symbols = _extract_listing_symbols_from_title(title)
+        if not symbols:
+            continue
+        try:
+            release_ms = int(datetime.fromisoformat(dt_text.replace("Z", "+00:00")).timestamp() * 1000)
+        except Exception:
+            release_ms = 0
+        href = html_lib.unescape(href)
+        if href.startswith("/"):
+            href = "https://www.mexc.fm" + href
+        key = (title, release_ms)
+        if key in seen:
+            continue
+        seen.add(key)
+        announcements.append({
+            "source": "mexc_announcement",
+            "exchange": "mexc",
+            "title": title,
+            "symbols": symbols,
+            "release_ms": release_ms,
+            "url": href,
+        })
+        if len(announcements) >= limit:
+            break
+    return announcements
+
+
+def fetch_mexc_listing_announcements(limit=20):
+    """Official MEXC announcement page for recent spot/futures coin listings."""
+    html = ""
+    for url in (
+        "https://www.mexc.fm/announcements/new-listings",
+        "https://www.mexc.co/announcements/new-listings",
+    ):
+        try:
+            if req:
+                resp = req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                if resp.status_code == 200 and "MEXC" in resp.text:
+                    html = resp.text
+                    break
+            else:
+                request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(request, timeout=15) as r:
+                    html = r.read().decode("utf-8", errors="ignore")
+                    break
+        except Exception as e:
+            log.warning(f"MEXC announcement fetch error {url}: {e}")
+    if not html:
+        return []
+    return _parse_mexc_listing_announcements_html(html, limit=limit)
+
+
 def fetch_listing_announcements():
     """Fetch and normalize recent new-listing announcements from supported exchanges."""
     announcements = []
-    for fetcher in (fetch_binance_listing_announcements, fetch_bitget_listing_announcements):
+    for fetcher in (fetch_binance_listing_announcements, fetch_bitget_listing_announcements, fetch_mexc_listing_announcements):
         try:
             announcements.extend(fetcher())
         except Exception as e:
