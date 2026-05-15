@@ -133,6 +133,8 @@ def test_biotech_alert_persistent_dedupe_survives_restart(tmp_path, monkeypatch)
         "StopLoss": 25.78,
         "TP1": 27.71,
         "TP2": 29.49,
+        "latest_bar_change_pct": 0.2,
+        "latest_bar_close_pos": 0.76,
     }
     cache_file.write_text(json.dumps({"cached_at": datetime.now().isoformat(), "results": [row]}))
 
@@ -310,7 +312,7 @@ def test_bear_alert_audit_blocks_overextended_green_reclaim(tmp_path):
             "breakdown_stocks": [{
                 "ticker": "SKBL",
                 "grade": "A",
-                "score": 59,
+                "score": 89,
                 "rvol": 3.4,
                 "price": 3.44,
                 "direction": "SHORT",
@@ -376,7 +378,7 @@ def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
             "breakdown_stocks": [{
                 "ticker": "BOUNCE",
                 "grade": "A",
-                "score": 66,
+                "score": 86,
                 "rvol": 2.1,
                 "price": 9.8,
                 "direction": "SHORT",

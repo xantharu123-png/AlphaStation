@@ -2972,13 +2972,22 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("score_below_alert_threshold")
     if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and (rvol is None or rvol < _ALERT_MIN_RVOL):
         reasons.append("rvol_below_alert_threshold")
-    if scanner_name == "new_listing":
+    base_blockers = {
+        "missing_ticker",
+        "non_common_stock_product",
+        "grade_below_alert_threshold",
+        "score_below_alert_threshold",
+        "rvol_below_alert_threshold",
+    }
+    base_actionable = not any(reason in reasons for reason in base_blockers)
+
+    if base_actionable and scanner_name == "new_listing":
         reasons.extend(_new_listing_rule_reasons(row))
-    if scanner_name in ("bear", "bi_short"):
+    if base_actionable and scanner_name in ("bear", "bi_short"):
         reasons.extend(_bear_short_rule_reasons(row))
-    if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+    if base_actionable and scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
-    if scanner_name == "crypto_strategy":
+    if base_actionable and scanner_name == "crypto_strategy":
         if not _CRYPTO_STRATEGY_ALERTS_ENABLED:
             reasons.append("crypto_strategy_watch_only")
         signal_quality = str(row.get("signal_quality", "") or "").lower()
@@ -2988,9 +2997,9 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("no_crypto_execution_trigger")
         if bool(row.get("partial_data") or row.get("data_partial")):
             reasons.append("partial_crypto_data")
-    if scanner_name == "early_movers":
+    if base_actionable and scanner_name == "early_movers":
         reasons.extend(_early_mover_long_rule_reasons(row))
-    if scanner_name in _ALERT_TRADE_PLAN_GUARD_SCANNERS:
+    if base_actionable and scanner_name in _ALERT_TRADE_PLAN_GUARD_SCANNERS:
         levels = _alert_trade_levels(row)
         if not levels.get("valid"):
             reasons.append("invalid_trade_plan")
@@ -3000,7 +3009,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("estimated_trade_plan")
         elif not _alert_trade_plan_ok(row):
             reasons.append("trade_rr_below_threshold")
-    if scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
+    if base_actionable and scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         reasons.extend(_alert_trade_health_reasons(row, scanner_name))
 
     cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
@@ -3075,6 +3084,8 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
     crash_decision_counts: Dict[str, int] = {}
     crash_alertable = []
     for row in rows:
+        if scanner_name in _STOCK_ALERT_SCANNERS:
+            row = _enrich_stock_alert_5m_state(scanner_name, row)
         state = _classify_alert_candidate(scanner_name, row, now)
         grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
         decision = state.get("decision") or "UNKNOWN"
