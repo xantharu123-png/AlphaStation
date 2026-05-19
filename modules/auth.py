@@ -608,6 +608,8 @@ def get_user_plan(token: str) -> str:
     if not payload:
         return "expired"
     email = payload.get("email", "")
+    if email in ADMIN_EMAILS:
+        return "elite"
     db = _load_users()
     user = db["users"].get(email)
     if not user:

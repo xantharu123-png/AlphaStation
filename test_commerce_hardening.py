@@ -41,6 +41,19 @@ def test_legacy_admin_bootstrap_restores_access_when_user_db_is_empty(monkeypatc
     assert "miroslav.mikulic@gmail.com" in auth._load_users()["users"]
 
 
+def test_admin_token_always_resolves_to_elite_limits(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "ADMIN_EMAILS", {"miroslav.mikulic@gmail.com"})
+    token = "admin-token"
+    monkeypatch.setattr(auth, "verify_token", lambda value: {"email": "miroslav.mikulic@gmail.com"} if value == token else None)
+
+    limits = auth.get_user_limits(token)
+
+    assert limits["plan"] == "elite"
+    assert limits["is_admin"] is True
+    assert limits["allowed_tabs"] is None
+
+
 def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp_path):
     _isolate_auth_store(monkeypatch, tmp_path)
 
