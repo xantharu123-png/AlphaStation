@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import modules.auth as auth
+import api
 
 
 def _isolate_auth_store(monkeypatch, tmp_path):
@@ -52,6 +53,12 @@ def test_admin_token_always_resolves_to_elite_limits(monkeypatch, tmp_path):
     assert limits["plan"] == "elite"
     assert limits["is_admin"] is True
     assert limits["allowed_tabs"] is None
+
+
+def test_deploy_health_endpoints_stay_public():
+    assert "/api/health" in api._PUBLIC_API_PATHS
+    assert "/api/system-health" in api._PUBLIC_API_PATHS
+    assert "/api/commercial-readiness" in api._PUBLIC_API_PATHS
 
 
 def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp_path):

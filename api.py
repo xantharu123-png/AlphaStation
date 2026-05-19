@@ -7061,6 +7061,8 @@ if os.path.isdir(_VENDOR_DIR):
 
 _PUBLIC_API_PATHS = {
     "/api/health",
+    "/api/system-health",
+    "/api/commercial-readiness",
     "/api/auth/register",
     "/api/auth/login",
     "/api/auth/plans",
