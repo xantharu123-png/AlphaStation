@@ -5410,8 +5410,37 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [breakdownStocks, setBreakdownStocks] = useState(scanCache.short_breakdown || []);
     const [isScanning, setIsScanning] = useState(scanCache.short_scanning || false);
+    const [shortMessage, setShortMessage] = useState('');
+    const [shortQuality, setShortQuality] = useState(null);
     const { sorted: sortedBreakdown, toggleSort: toggleBreakdownSort } = useSortable(breakdownStocks, 'change_pct');
     const pollTimeoutRef = useRef(null);
+
+    const applyBearResults = (data, fallbackMessage = '') => {
+        const bear = (data.data && data.data[0]) || {};
+        const breakdown = bear.breakdown_stocks || [];
+        const quality = data.data_quality || {};
+        const warnings = [
+            ...(data.warnings || []),
+            ...((quality && quality.warnings) || []),
+            ...((bear.diagnostics && bear.diagnostics.no_stock_reason) ? [bear.diagnostics.no_stock_reason] : []),
+        ].filter(Boolean);
+        setBreakdownStocks(breakdown);
+        updateScanCache('short_breakdown', breakdown);
+        setShortQuality(quality);
+        setShortMessage(breakdown.length === 0 ? (warnings[0] || fallbackMessage || 'Keine aktuellen Short-Aktien gefunden. Die Sicherheitsfilter haben alle Kandidaten entfernt oder der Markt liefert gerade keine verwertbaren Loser.') : '');
+        return { bear, breakdown };
+    };
+
+    const explainFailedResponse = async (response) => {
+        let detail = '';
+        try {
+            const body = await response.json();
+            detail = body.detail || body.message || '';
+        } catch (e) {}
+        if (response.status === 401) return 'Nicht eingeloggt oder Session abgelaufen. Bitte neu einloggen, dann Short-Scanner erneut starten.';
+        if (response.status === 403) return 'Dein aktueller Plan darf den Short-Scanner nicht nutzen.';
+        return `Short-Scanner konnte nicht geladen werden (${response.status})${detail ? `: ${detail}` : ''}`;
+    };
 
     // Cleanup polling on unmount
     useEffect(() => {
@@ -5425,9 +5454,9 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 const response = await fetch(`${API}/api/bear-results`);
                 if (response.ok) {
                     const data = await response.json();
-                    const bear = (data.data && data.data[0]) || {};
-                    setBreakdownStocks(bear.breakdown_stocks || []);
-                    updateScanCache('short_breakdown', bear.breakdown_stocks || []);
+                    applyBearResults(data);
+                } else {
+                    setShortMessage(await explainFailedResponse(response));
                 }
             } catch (err) { console.error('Error:', err); }
         };
@@ -5462,12 +5491,9 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         const res = await fetch(`${API}/api/bear-results`);
                         if (res.ok) {
                             const data = await res.json();
-                            const bear = (data.data && data.data[0]) || {};
-                            const breakdown = bear.breakdown_stocks || [];
+                            const { breakdown } = applyBearResults(data, 'Scan fertig, aber keine handelbaren Short-Aktien gefunden.');
                             const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
                             if (isNewData) {
-                                setBreakdownStocks(breakdown);
-                                updateScanCache('short_breakdown', breakdown);
                                 setIsScanning(false);
                                 updateScanCache('short_scanning', false);
                                 if (window.addToast) window.addToast(`Scan fertig: ${breakdown.length} Short-Kandidaten`, 'success');
@@ -5479,6 +5505,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 };
                 pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
             } else {
+                setShortMessage(await explainFailedResponse(response));
                 setIsScanning(false);
                 updateScanCache('short_scanning', false);
             }
@@ -5492,6 +5519,21 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="bear" />
+
+            {shortMessage && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 text-sm">
+                    <div className="font-semibold">Short-Scanner Diagnose</div>
+                    <div>{shortMessage}</div>
+                    {shortQuality?.diagnostics && (
+                        <div className="mt-2 text-xs text-amber-800">
+                            Kandidaten: {shortQuality.diagnostics.raw_candidates ?? 0} |
+                            ETFs/Produkte entfernt: {shortQuality.diagnostics.excluded_non_common ?? 0} |
+                            zu wenig Volumen: {shortQuality.diagnostics.dollar_volume_filtered ?? 0} |
+                            keine Historie: {shortQuality.diagnostics.history_missing ?? 0}
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 {(
@@ -5529,6 +5571,11 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             })}
                         </tbody>
                     </table>
+                )}
+                {sortedBreakdown.length === 0 && (
+                    <div className="text-center text-gray-500 py-8">
+                        Keine Short-Aktien in der aktuellen Liste. Wenn der Markt offen ist, starte einen Scan; sonst wartet der Scanner auf echte Breakdown-Daten.
+                    </div>
                 )}
             </div>
         </div>

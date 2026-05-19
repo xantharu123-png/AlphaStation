@@ -303,6 +303,27 @@ def test_bear_alert_audit_excludes_inverse_etfs(tmp_path):
     assert all(item["ticker"] != "LABD" for item in audit["alertable_preview"])
 
 
+def test_bear_quality_counts_nested_stock_rows_and_explains_empty_cache():
+    results = [{
+        "inverse_etfs": [{"ticker": "LABD"}],
+        "breakdown_stocks": [],
+        "diagnostics": {
+            "raw_candidates": 12,
+            "excluded_non_common": 5,
+            "dollar_volume_filtered": 4,
+            "history_missing": 3,
+            "processed_common_stocks": 0,
+        },
+    }]
+
+    quality = api._scan_quality_payload("bear", cache_age_seconds=60, results=results)
+
+    assert quality["result_count"] == 0
+    assert "Keine Treffer im Cache" in quality["warnings"]
+    assert any("keine echte Short-Aktie" in warning for warning in quality["warnings"])
+    assert quality["diagnostics"]["raw_candidates"] == 12
+
+
 def test_bear_alert_audit_blocks_overextended_green_reclaim(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "bear_late.json"

@@ -4000,26 +4000,79 @@ RISK_POLICY = {
 }
 
 
+def _effective_scan_result_count(scanner_name: str, results: List[Dict[str, Any]]) -> int:
+    """Count user-visible rows, not just top-level cache containers."""
+    if scanner_name == "bear":
+        total = 0
+        for container in results or []:
+            if isinstance(container, dict):
+                total += len([r for r in container.get("breakdown_stocks", []) or [] if isinstance(r, dict)])
+        return total
+    return len(results or [])
+
+
+def _bear_empty_warning_from_results(results: List[Dict[str, Any]]) -> str:
+    """Human-readable reason when the Bear/Short scanner has no stock rows."""
+    payload = next((item for item in results or [] if isinstance(item, dict)), {})
+    diag = payload.get("diagnostics", {}) if isinstance(payload, dict) else {}
+    if not diag:
+        return "Keine aktuellen Short-Aktien im Cache. Starte einen frischen Short-Scan."
+
+    raw = int(diag.get("raw_candidates", 0) or 0)
+    processed = int(diag.get("processed_common_stocks", 0) or 0)
+    excluded = int(diag.get("excluded_non_common", 0) or 0)
+    no_history = int(diag.get("history_missing", 0) or 0)
+    low_volume = int(diag.get("dollar_volume_filtered", 0) or 0)
+    weak_drop = int(diag.get("drop_filtered", 0) or 0)
+    invalid_price = int(diag.get("price_or_prev_close_filtered", 0) or 0)
+
+    if raw <= 0:
+        return "Keine aktuellen Loser vom Marktdaten-Endpoint. Das passiert ausserhalb der US-Session, bei Rate-Limits oder wenn gerade kein verwertbarer Drop vorliegt."
+    if excluded >= raw:
+        return f"{raw} Kandidaten gefunden, aber alle als ETF/ETP/nicht handelbare Aktienprodukte entfernt."
+    if processed <= 0:
+        blockers = []
+        if invalid_price:
+            blockers.append(f"{invalid_price} ohne sauberen Preis/Vortag")
+        if low_volume:
+            blockers.append(f"{low_volume} mit zu wenig Dollar-Volumen")
+        if weak_drop:
+            blockers.append(f"{weak_drop} ohne echten Breakdown")
+        if no_history:
+            blockers.append(f"{no_history} ohne genug Historie")
+        detail = ", ".join(blockers) if blockers else "alle durch Sicherheitsfilter entfernt"
+        return f"{raw} Kandidaten gefunden, aber keine echte Short-Aktie blieb uebrig: {detail}."
+    return "Short-Scan lief, aber nach Common-Stock-, Volumen-, History- und Breakdown-Filtern blieb keine handelbare Aktie uebrig."
+
+
 def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], results: List[Dict[str, Any]]) -> Dict[str, Any]:
     interval = _scan_status.get(scanner_name, {}).get("interval_min")
     stale_after = (interval * 60 * 2) if interval else None
     stale = bool(cache_age_seconds is not None and stale_after and cache_age_seconds > stale_after)
     warnings = []
+    effective_count = _effective_scan_result_count(scanner_name, results)
     if cache_age_seconds is None:
         warnings.append("Cache-Zeit unbekannt")
     elif stale:
         warnings.append(f"Cache alt: {cache_age_seconds}s")
-    if not results:
+    if not effective_count:
         warnings.append("Keine Treffer im Cache")
+        if scanner_name == "bear":
+            warnings.append(_bear_empty_warning_from_results(results))
+    diagnostics = None
+    if scanner_name == "bear":
+        first = next((item for item in results or [] if isinstance(item, dict)), {})
+        diagnostics = first.get("diagnostics") if isinstance(first, dict) else None
     return {
         "scanner": scanner_name,
         "data_source": SCAN_DATA_SOURCES.get(scanner_name, "Scanner cache"),
         "cache_age_seconds": cache_age_seconds,
         "cache_status": "unknown" if cache_age_seconds is None else ("stale" if stale else "fresh"),
-        "result_count": len(results),
+        "result_count": effective_count,
         "warnings": warnings,
         "exclusion_policy": SCAN_EXCLUSION_POLICIES["common"] + SCAN_EXCLUSION_POLICIES.get(scanner_name, []),
         "market_context": _get_market_context_snapshot().get("summary"),
+        "diagnostics": diagnostics,
     }
 
 
@@ -6202,7 +6255,23 @@ def _turtle_scan_wrapper() -> None:
 def _bear_scan_wrapper() -> None:
     """Run bear scanner in background — finds inverse ETF opportunities and breakdown stocks."""
     try:
-        result = {"inverse_etfs": [], "short_candidates": [], "breakdown_stocks": []}
+        result = {
+            "inverse_etfs": [],
+            "short_candidates": [],
+            "breakdown_stocks": [],
+            "diagnostics": {
+                "scanner": "bear",
+                "raw_candidates": 0,
+                "processed_common_stocks": 0,
+                "excluded_non_common": 0,
+                "price_or_prev_close_filtered": 0,
+                "dollar_volume_filtered": 0,
+                "drop_filtered": 0,
+                "history_missing": 0,
+                "history_fetch_errors": 0,
+                "extended_hours": False,
+            },
+        }
 
         # --- Section 1: Inverse ETF performance ---
         for ticker, (desc, underlying) in INVERSE_ETFS.items():
@@ -6284,17 +6353,22 @@ def _bear_scan_wrapper() -> None:
             losers = []
             _raw_tickers = []
             _is_extended_hours = False
+            _diagnostics = result.setdefault("diagnostics", {})
+            _diagnostics["losers_http_status"] = snap_resp.status_code
             if snap_resp.status_code == 200:
                 _raw_tickers = snap_resp.json().get("tickers", [])
+                _diagnostics["losers_endpoint_count"] = len(_raw_tickers)
 
             # V3.4: Wenn Losers-Endpoint wenig/keine Ergebnisse → Extended Hours
             # Full Snapshot holen und lastTrade vs day.close vergleichen
             if len(_raw_tickers) < 10:
                 print(f"[Bear] Losers endpoint nur {len(_raw_tickers)} Ticker — Extended Hours Modus")
                 _is_extended_hours = True
+                _diagnostics["extended_hours"] = True
                 try:
                     _full_snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
                     _full_resp = rate_limited_get(_full_snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
+                    _diagnostics["full_snapshot_http_status"] = _full_resp.status_code
                     if _full_resp.status_code == 200:
                         _all = _full_resp.json().get("tickers", [])
                         # Finde AH/PM Losers: lastTrade.p vs day.c (Regular Close)
@@ -6320,12 +6394,16 @@ def _bear_scan_wrapper() -> None:
                         print(f"[Bear] Extended Hours: {len(_raw_tickers)} AH/PM Losers gefunden")
                 except Exception as _ext_err:
                     print(f"[Bear] Extended Hours fetch failed: {_ext_err}")
+                    _diagnostics["extended_hours_error"] = str(_ext_err)
+
+            _diagnostics["raw_candidates"] = len(_raw_tickers)
 
             if _raw_tickers:
                 tickers = _raw_tickers
                 print(f"[Bear] Processing {len(tickers)} tickers (extended={_is_extended_hours})")
                 _common_stock_universe, _common_stock_source = _load_common_stock_universe()
                 _excluded_non_stock = 0
+                _diagnostics["common_stock_source"] = _common_stock_source
                 for t in tickers:
                     try:
                         day = t.get("day", {})
@@ -6340,12 +6418,15 @@ def _bear_scan_wrapper() -> None:
                             prev_close = prev.get("c", 0)
                             chg_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
                         if not price or not prev_close or price < 3:
+                            _diagnostics["price_or_prev_close_filtered"] = int(_diagnostics.get("price_or_prev_close_filtered", 0) or 0) + 1
                             continue
                         vol = day.get("v", 0)
                         dollar_vol = price * vol
                         if dollar_vol < 300_000 and not _is_extended_hours:
+                            _diagnostics["dollar_volume_filtered"] = int(_diagnostics.get("dollar_volume_filtered", 0) or 0) + 1
                             continue
                         if chg_pct > -3:
+                            _diagnostics["drop_filtered"] = int(_diagnostics.get("drop_filtered", 0) or 0) + 1
                             continue
                         day_open = day.get("o", 0) or prev_close
                         day_high = day.get("h", 0) or max(price, day_open)
@@ -6364,6 +6445,7 @@ def _bear_scan_wrapper() -> None:
                         )
                         if non_stock_reason:
                             _excluded_non_stock += 1
+                            _diagnostics["excluded_non_common"] = _excluded_non_stock
                             continue
                         rvol = 0
                         ma20 = 0
@@ -6398,9 +6480,11 @@ def _bear_scan_wrapper() -> None:
                                     low_60d = min(lows_60) if lows_60 else None
                         except Exception as e:
                             print(f"[Bear] History failed for {ticker_sym}: {e}")
+                            _diagnostics["history_fetch_errors"] = int(_diagnostics.get("history_fetch_errors", 0) or 0) + 1
 
                         # V2.2: Ohne History-Daten → überspringen (kein Blindflug)
                         if not has_history:
+                            _diagnostics["history_missing"] = int(_diagnostics.get("history_missing", 0) or 0) + 1
                             continue
 
                         # ── Scoring System (0-100) ──
@@ -6527,11 +6611,13 @@ def _bear_scan_wrapper() -> None:
                         bear_row["alertable_short"] = not bear_row["short_block_reasons"]
                         bear_row["crash_alert_ok"] = _bear_crash_alert_ok(bear_row)
                         losers.append(bear_row)
+                        _diagnostics["processed_common_stocks"] = int(_diagnostics.get("processed_common_stocks", 0) or 0) + 1
                     except Exception as e:
                         print(f"[Warning] Error processing breakdown stock: {e}")
                         continue
                 losers.sort(key=lambda x: x.get("score", 0), reverse=True)
                 result["breakdown_stocks"] = losers[:30]
+                _diagnostics["breakdown_count"] = len(result["breakdown_stocks"])
                 result["asset_filter"] = {
                     "source": _common_stock_source,
                     "excluded_non_common": _excluded_non_stock,
@@ -6539,8 +6625,13 @@ def _bear_scan_wrapper() -> None:
                 print(f"[Bear] Final breakdown_stocks: {len(losers[:30])} (excluded_non_common={_excluded_non_stock}, source={_common_stock_source})")
         except Exception as e:
             print(f"Breakdown stocks error: {e}")
+            result.setdefault("diagnostics", {})["breakdown_error"] = str(e)
 
-        # Only save if we got actual stock data — don't overwrite Friday's results on weekends
+        # Save the latest scan snapshot, including diagnostics when no stock passes filters.
+        result.setdefault("diagnostics", {})["breakdown_count"] = len(result.get("breakdown_stocks", []))
+        result.setdefault("diagnostics", {})["inverse_etf_count"] = len(result.get("inverse_etfs", []))
+        if not result.get("breakdown_stocks"):
+            result["diagnostics"]["no_stock_reason"] = _bear_empty_warning_from_results([result])
         has_stock_data = len(result.get("breakdown_stocks", [])) > 0 or len(result.get("inverse_etfs", [])) > 0
         if has_stock_data:
             save_cache_file(BEAR_CACHE, [result])
@@ -9503,9 +9594,10 @@ def get_bear_results():
 
     results = _decorate_scan_results(results, "bear", cache_age)
     quality = _scan_quality_payload("bear", cache_age, results)
+    result_count = _effective_scan_result_count("bear", results)
     return ScanResultsResponse(
         status="success",
-        count=len(results),
+        count=result_count,
         data=results,
         cached_at=cached_at,
         cache_age_seconds=cache_age,
