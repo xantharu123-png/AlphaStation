@@ -11,6 +11,8 @@ def _isolate_auth_store(monkeypatch, tmp_path):
 
 def test_auth_store_uses_sqlite_and_pbkdf2_passwords(monkeypatch, tmp_path):
     _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "HAS_JWT", True)
+    monkeypatch.setattr(auth, "create_token", lambda user_id, email, plan="free": f"token:{email}:{plan}")
 
     result = auth.register_user("pro@example.com", "very-secret", "Pro User")
     assert result["success"] is True
@@ -21,6 +23,22 @@ def test_auth_store_uses_sqlite_and_pbkdf2_passwords(monkeypatch, tmp_path):
     assert stored_hash.startswith("pbkdf2_sha256$")
     assert auth.login_user("pro@example.com", "very-secret")["success"] is True
     assert auth.login_user("pro@example.com", "wrong")["success"] is False
+
+
+def test_legacy_admin_bootstrap_restores_access_when_user_db_is_empty(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "HAS_JWT", True)
+    monkeypatch.setattr(auth, "ADMIN_EMAILS", {"miroslav.mikulic@gmail.com"})
+    monkeypatch.setattr(auth, "ADMIN_MASTER_KEY", "")
+    monkeypatch.setattr(auth, "ADMIN_MASTER_KEY_CONFIGURED", False)
+    monkeypatch.setattr(auth, "ALLOW_LEGACY_ADMIN_MASTER_KEY", True)
+    monkeypatch.setattr(auth, "create_token", lambda user_id, email, plan="free": f"token:{email}:{plan}")
+
+    result = auth.login_user("miroslav.mikulic@gmail.com", auth.LEGACY_ADMIN_MASTER_KEY)
+
+    assert result["success"] is True
+    assert result["user"]["plan"] == "elite"
+    assert "miroslav.mikulic@gmail.com" in auth._load_users()["users"]
 
 
 def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp_path):

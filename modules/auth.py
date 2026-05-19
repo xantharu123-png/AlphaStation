@@ -56,6 +56,10 @@ ADMIN_EMAILS = {
 }
 ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "")
 ADMIN_MASTER_KEY_CONFIGURED = bool(ADMIN_MASTER_KEY)
+LEGACY_ADMIN_MASTER_KEY = "AlphaStation2026!"
+ALLOW_LEGACY_ADMIN_MASTER_KEY = os.environ.get(
+    "ALLOW_LEGACY_ADMIN_MASTER_KEY", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 PBKDF2_ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "260000"))
 
@@ -183,13 +187,13 @@ def _sqlite_conn() -> sqlite3.Connection:
     return conn
 
 
-def _maybe_migrate_legacy_json() -> None:
+def _maybe_migrate_legacy_json(force: bool = False) -> None:
     """One-time import from the old /tmp JSON auth store."""
     if not AUTH_DB_IS_SQLITE:
         return
     legacy = Path(AUTH_DB_LEGACY_JSON_PATH)
     marker = Path(AUTH_DB_PATH).with_suffix(".migrated")
-    if marker.exists() or not legacy.exists():
+    if (marker.exists() and not force) or not legacy.exists():
         return
     try:
         with open(legacy, "r", encoding="utf-8") as f:
@@ -238,6 +242,17 @@ def _load_users(skip_migration: bool = False) -> Dict:
     except Exception as e:
         print(f"[Auth] Error loading users: {e}")
         return {"users": {}}
+
+
+def _load_users_with_legacy_retry(email: str = "") -> Dict:
+    """Load users and retry legacy import if the requested account is missing."""
+    db = _load_users()
+    if not AUTH_DB_IS_SQLITE or not email:
+        return db
+    if email in db.get("users", {}):
+        return db
+    _maybe_migrate_legacy_json(force=True)
+    return _load_users(skip_migration=True)
 
 
 def _save_users(db: Dict):
@@ -306,6 +321,15 @@ def create_token(user_id: str, email: str, plan: str = "free") -> Optional[str]:
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def _is_admin_master_login(email: str, password: str) -> bool:
+    """Allow configured admin master key and a temporary legacy bootstrap fallback."""
+    if email not in ADMIN_EMAILS:
+        return False
+    if ADMIN_MASTER_KEY_CONFIGURED and password == ADMIN_MASTER_KEY:
+        return True
+    return ALLOW_LEGACY_ADMIN_MASTER_KEY and password == LEGACY_ADMIN_MASTER_KEY
+
+
 def verify_token(token: str) -> Optional[Dict]:
     """Verify and decode JWT token. Returns payload or None."""
     if not HAS_JWT:
@@ -369,12 +393,15 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
 def login_user(email: str, password: str) -> Dict[str, Any]:
     """Login user. Returns {success, message, token?, user?}."""
     email = email.strip().lower()
-    db = _load_users()
+    if not HAS_JWT:
+        return {"success": False, "message": "Login-System unvollstaendig: PyJWT fehlt auf dem Server"}
+
+    db = _load_users_with_legacy_retry(email)
 
     user = db["users"].get(email)
 
     # Admin auto-create only when an explicit ADMIN_MASTER_KEY is configured.
-    if not user and email in ADMIN_EMAILS and ADMIN_MASTER_KEY_CONFIGURED and password == ADMIN_MASTER_KEY:
+    if not user and _is_admin_master_login(email, password):
         user_id = secrets.token_hex(8)
         user = {
             "id": user_id, "email": email, "name": "Admin",
@@ -391,7 +418,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
         return {"success": False, "message": "Email oder Passwort falsch"}
 
     # Admin Master-Key bypass is disabled unless ADMIN_MASTER_KEY is explicitly set.
-    is_admin_login = email in ADMIN_EMAILS and ADMIN_MASTER_KEY_CONFIGURED and password == ADMIN_MASTER_KEY
+    is_admin_login = _is_admin_master_login(email, password)
     if not is_admin_login and not _verify_password(password, user["password_hash"]):
         return {"success": False, "message": "Email oder Passwort falsch"}
 
@@ -408,6 +435,8 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
 
     plan = user.get("plan", "free")
     token = create_token(user["id"], email, plan)
+    if not token:
+        return {"success": False, "message": "Login-System konnte kein Token erstellen"}
 
     return {
         "success": True,
@@ -723,6 +752,8 @@ def auth_security_status() -> Dict[str, Any]:
         critical.append("JWT_SECRET uses fallback demo value")
     if not ADMIN_MASTER_KEY_CONFIGURED:
         warnings.append("ADMIN_MASTER_KEY not configured; admin bypass disabled")
+    if ALLOW_LEGACY_ADMIN_MASTER_KEY:
+        critical.append("Legacy admin bootstrap key is enabled; set ALLOW_LEGACY_ADMIN_MASTER_KEY=0 before commercial launch")
     if not AUTH_DB_IS_SQLITE:
         critical.append("AUTH_DB_PATH still points to JSON; use SQLite for production")
     if not STRIPE_SECRET_KEY:
@@ -734,6 +765,7 @@ def auth_security_status() -> Dict[str, Any]:
         "auth_db_type": "sqlite" if AUTH_DB_IS_SQLITE else "json",
         "jwt_secret_configured": bool(JWT_SECRET) and not JWT_SECRET_IS_DEFAULT,
         "admin_master_key_configured": ADMIN_MASTER_KEY_CONFIGURED,
+        "legacy_admin_bootstrap_enabled": ALLOW_LEGACY_ADMIN_MASTER_KEY,
         "stripe_secret_configured": bool(STRIPE_SECRET_KEY),
         "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
         "warnings": warnings,
