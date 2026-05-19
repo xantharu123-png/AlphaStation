@@ -38,7 +38,7 @@ from email.mime.multipart import MIMEMultipart
 
 from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -49,6 +49,9 @@ try:
         get_user_limits, check_tab_access, check_feature,
         create_checkout_session, create_billing_portal,
         handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
+        get_email_alert_recipients, get_user_alert_settings,
+        update_user_alert_settings, auth_security_status,
+        _load_users, _save_users,
         ADMIN_EMAILS, AUTH_DB_PATH,
     )
     HAS_AUTH = True
@@ -797,6 +800,23 @@ def _load_secrets():
     return secrets
 
 _SECRETS = _load_secrets()
+PUBLIC_APP_URL = (
+    os.environ.get("PUBLIC_APP_URL")
+    or os.environ.get("APP_BASE_URL")
+    or _SECRETS.get("PUBLIC_APP_URL")
+    or _SECRETS.get("APP_BASE_URL")
+    or "http://178.104.69.209:3000"
+).rstrip("/")
+COMMERCE_ENFORCE_AUTH = str(
+    os.environ.get("COMMERCE_ENFORCE_AUTH")
+    or _SECRETS.get("COMMERCE_ENFORCE_AUTH")
+    or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+ALERT_SEND_TO_SUBSCRIBERS = str(
+    os.environ.get("ALERT_SEND_TO_SUBSCRIBERS")
+    or _SECRETS.get("ALERT_SEND_TO_SUBSCRIBERS")
+    or "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 # Fix: POLYGON_KEY aus secrets.toml laden falls env var leer
 if not POLYGON_KEY:
@@ -875,13 +895,23 @@ def _email_alert_status() -> Dict[str, Any]:
     gmail_user = _SECRETS.get("GMAIL_USER", "")
     gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
     alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
+    platform_recipients = []
+    if ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
+        try:
+            platform_recipients = get_email_alert_recipients()
+        except Exception:
+            platform_recipients = []
+    configured_recipients = [addr for addr in str(alert_to).split(",") if addr.strip()]
     startup_remaining = max(0, int(_EMAIL_STARTUP_DELAY - (time.time() - _EMAIL_STARTUP_TIME)))
     return {
         "configured": bool(gmail_user and gmail_pass),
         "sender_configured": bool(gmail_user),
         "app_password_configured": bool(gmail_pass),
-        "recipient_configured": bool(alert_to),
-        "recipient_count": len([addr for addr in str(alert_to).split(",") if addr.strip()]),
+        "recipient_configured": bool(configured_recipients or platform_recipients),
+        "recipient_count": len(set([addr.strip().lower() for addr in configured_recipients if addr.strip()] + platform_recipients)),
+        "global_recipient_count": len(configured_recipients),
+        "subscriber_recipient_count": len(platform_recipients),
+        "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
         "scanner_cooldowns_seconds": {
@@ -3264,7 +3294,13 @@ def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False)
         print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
         _record_email_event(subject, "skipped", "missing_gmail_config")
         return False
-    recipients = [addr.strip() for addr in str(alert_to).split(",") if addr.strip()]
+    recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+    if ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
+        try:
+            recipients.extend(get_email_alert_recipients())
+        except Exception as exc:
+            print(f"[Alert] Subscriber recipients skipped: {exc}")
+    recipients = sorted(set(addr for addr in recipients if "@" in addr))
     if not recipients:
         print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         _record_email_event(subject, "skipped", "missing_recipient")
@@ -3275,6 +3311,7 @@ def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False)
             msg["From"] = f"TradingBot Alert <{gmail_user}>"
             msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
+            body_html = body_html + "<p style='color:#999;font-size:11px;margin-top:18px'>Automatischer Analyse-Alert. Keine Anlageberatung, keine Kauf-/Verkaufsempfehlung. Trading erfolgt eigenverantwortlich.</p>"
             plain = re.sub(r"<[^>]+>", "", body_html.replace("<br>", "\n").replace("</tr>", "\n"))
             msg.attach(MIMEText(plain, "plain", "utf-8"))
             msg.attach(MIMEText(body_html, "html", "utf-8"))
@@ -6992,10 +7029,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins = {
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://178.104.69.209:3000",
+    "http://178.104.69.209",
+}
+if PUBLIC_APP_URL:
+    _cors_origins.add(PUBLIC_APP_URL)
+for _origin in str(os.environ.get("CORS_ORIGINS", "") or _SECRETS.get("CORS_ORIGINS", "")).split(","):
+    _origin = _origin.strip().rstrip("/")
+    if _origin:
+        _cors_origins.add(_origin)
+
 # CORS middleware for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173", "http://178.104.69.209:3000", "http://178.104.69.209"],
+    allow_origins=sorted(_cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -7005,6 +7057,94 @@ _FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "frontend")
 _VENDOR_DIR = os.path.join(_FRONTEND_DIR, "vendor")
 if os.path.isdir(_VENDOR_DIR):
     app.mount("/vendor", StaticFiles(directory=_VENDOR_DIR), name="vendor")
+
+
+_PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/plans",
+    "/api/stripe/webhook",
+}
+_FEATURE_GATES = [
+    ("/api/ai-analysis", "has_ai_analysis"),
+    ("/api/orb", "has_orb_scanner"),
+    ("/api/run-backtest", "has_backtest"),
+    ("/api/backtest", "has_backtest"),
+]
+_TAB_GATES = [
+    ("/api/autotrader", "autotrader"),
+    ("/api/biotech", "biotech"),
+    ("/api/btc-divergenz", "btc-divergenz"),
+    ("/api/early-movers", "early-movers"),
+    ("/api/new-listing", "new-listing"),
+    ("/api/volume-spikes", "volume-spikes"),
+    ("/api/money-flow", "money-flow"),
+    ("/api/crash-monitor", "crash-monitor"),
+    ("/api/bear", "short-scanner"),
+    ("/api/bi-", "bi-scanner"),
+    ("/api/kalender", "kalender"),
+    ("/api/chart-data", "chart-analyse"),
+    ("/api/ticker-detail", "chart-analyse"),
+    ("/api/ticker-search", "chart-analyse"),
+    ("/api/strategies", "strategie-guide"),
+    ("/api/scan", "scanner"),
+]
+
+
+def _token_from_authorization(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    authorization = str(authorization).strip()
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return authorization
+
+
+def _commerce_gate_denial(path: str, token: str, payload: Dict[str, Any]) -> Optional[JSONResponse]:
+    email = str(payload.get("email", "")).lower()
+    if email in ADMIN_EMAILS:
+        return None
+    for prefix, feature in _FEATURE_GATES:
+        if path.startswith(prefix) and not check_feature(token, feature):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Plan upgrade required", "feature": feature, "upgrade_required": True},
+            )
+    for prefix, tab_id in _TAB_GATES:
+        if path.startswith(prefix) and not check_tab_access(token, tab_id):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Plan upgrade required", "tab": tab_id, "upgrade_required": True},
+            )
+    return None
+
+
+@app.middleware("http")
+async def commerce_auth_gate(request: Request, call_next):
+    """Optional production gate: set COMMERCE_ENFORCE_AUTH=1 to protect API data server-side."""
+    path = request.url.path
+    if not COMMERCE_ENFORCE_AUTH or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
+        return await call_next(request)
+    if path.startswith("/api/auth/") and path not in {
+        "/api/auth/me",
+        "/api/auth/checkout",
+        "/api/auth/billing-portal",
+        "/api/auth/alert-settings",
+    }:
+        return await call_next(request)
+    if not HAS_AUTH:
+        return JSONResponse(status_code=503, content={"detail": "Auth system not available"})
+    token = _token_from_authorization(request.headers.get("authorization"))
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "Login required"})
+    payload = verify_token(token)
+    if not payload:
+        return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
+    denial = _commerce_gate_denial(path, token, payload)
+    if denial:
+        return denial
+    return await call_next(request)
 
 
 # ── Serve Frontend (index.html) ──
@@ -7052,6 +7192,11 @@ class CheckoutRequest(BaseModel):
 
 class BillingPortalRequest(BaseModel):
     return_url: str = ""
+
+
+class AlertSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    alert_email: Optional[str] = None
 
 
 # ── Admin Models ──
@@ -7141,6 +7286,62 @@ async def api_get_me(authorization: str = Header(None)):
     }
 
 
+@app.get("/api/auth/alert-settings")
+async def api_get_alert_settings(authorization: str = Header(None)):
+    """Get per-user email alert settings."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return get_user_alert_settings(token)
+
+
+@app.put("/api/auth/alert-settings")
+async def api_update_alert_settings(req_body: AlertSettingsRequest, authorization: str = Header(None)):
+    """Update per-user email alert settings."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    result = update_user_alert_settings(token, enabled=req_body.enabled, alert_email=req_body.alert_email)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))
+    return result
+
+
+@app.get("/api/commercial-readiness")
+async def api_commercial_readiness():
+    """Operational checklist for paid-beta/commercial readiness."""
+    auth_status = auth_security_status() if HAS_AUTH else {"critical": ["Auth system not available"], "warnings": []}
+    critical = list(auth_status.get("critical", []))
+    warnings = list(auth_status.get("warnings", []))
+    if not PUBLIC_APP_URL.startswith("https://"):
+        warnings.append("PUBLIC_APP_URL is not HTTPS")
+    if not COMMERCE_ENFORCE_AUTH:
+        critical.append("COMMERCE_ENFORCE_AUTH is disabled; API data is not server-side paywalled")
+    if not ALERT_SEND_TO_SUBSCRIBERS:
+        warnings.append("ALERT_SEND_TO_SUBSCRIBERS disabled; paid users will not receive platform alerts")
+    return {
+        "status": "blocked" if critical else ("warning" if warnings else "ready"),
+        "commercial_ready": not critical,
+        "public_app_url": PUBLIC_APP_URL,
+        "commerce_enforce_auth": COMMERCE_ENFORCE_AUTH,
+        "alert_send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
+        "auth": auth_status,
+        "critical": critical,
+        "warnings": warnings,
+        "note": "Commercial readiness here covers technical gating/security only; legal, tax and data-license review still need human/legal approval.",
+    }
+
+
 @app.get("/api/auth/plans")
 async def api_get_plans():
     """Get available plans and pricing."""
@@ -7170,7 +7371,7 @@ async def api_create_checkout(req_body: CheckoutRequest, authorization: str = He
         raise HTTPException(status_code=401, detail="Invalid token")
 
     email = payload.get("email")
-    base_url = "http://178.104.69.209:3000"
+    base_url = PUBLIC_APP_URL
     checkout_url = create_checkout_session(
         email=email,
         plan=req_body.plan,
@@ -7195,7 +7396,7 @@ async def api_billing_portal(req_body: BillingPortalRequest, authorization: str 
         raise HTTPException(status_code=401, detail="Invalid token")
 
     email = payload.get("email")
-    return_url = req_body.return_url or "http://178.104.69.209:3000"
+    return_url = req_body.return_url or PUBLIC_APP_URL
     portal_url = create_billing_portal(email, return_url)
     if not portal_url:
         raise HTTPException(status_code=500, detail="Could not create billing portal")
@@ -14959,12 +15160,18 @@ def _require_admin(authorization: Optional[str]):
     return payload, email
 
 
+_ADMIN_DATA_DIR = Path(os.environ.get("ALPHA_DATA_DIR", Path(__file__).parent / "data_cache")) / "auth"
+_ADMIN_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_COUPON_PATH = _ADMIN_DATA_DIR / "alpha_station_coupons.json"
+_TICKET_PATH = _ADMIN_DATA_DIR / "alpha_station_tickets.json"
+
+
 def _load_coupons() -> Dict:
     """Load coupons from JSON file."""
-    coupon_path = "/tmp/alpha_station_coupons.json"
+    coupon_path = _COUPON_PATH
     if os.path.exists(coupon_path):
         try:
-            with open(coupon_path, "r") as f:
+            with open(coupon_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {"coupons": []}
@@ -14974,8 +15181,8 @@ def _load_coupons() -> Dict:
 def _save_coupons(data: Dict):
     """Save coupons to JSON file."""
     try:
-        coupon_path = "/tmp/alpha_station_coupons.json"
-        with open(coupon_path, "w") as f:
+        coupon_path = _COUPON_PATH
+        with open(coupon_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         print(f"[Error] Coupons speichern fehlgeschlagen: {e}")
@@ -14983,10 +15190,10 @@ def _save_coupons(data: Dict):
 
 def _load_tickets() -> Dict:
     """Load support tickets from JSON file."""
-    ticket_path = "/tmp/alpha_station_tickets.json"
+    ticket_path = _TICKET_PATH
     if os.path.exists(ticket_path):
         try:
-            with open(ticket_path, "r") as f:
+            with open(ticket_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {"tickets": [], "next_id": 1}
@@ -14996,8 +15203,8 @@ def _load_tickets() -> Dict:
 def _save_tickets(data: Dict):
     """Save support tickets to JSON file."""
     try:
-        ticket_path = "/tmp/alpha_station_tickets.json"
-        with open(ticket_path, "w") as f:
+        ticket_path = _TICKET_PATH
+        with open(ticket_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         print(f"[Error] Tickets speichern fehlgeschlagen: {e}")
@@ -15010,7 +15217,7 @@ def admin_list_users(authorization: Optional[str] = Header(None)):
     """List all users (admin only)."""
     _require_admin(authorization)
 
-    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    db = _load_users()
     users = []
 
     for email, user_data in db.get("users", {}).items():
@@ -15042,20 +15249,15 @@ def admin_update_user_plan(email: str, req_body: PlanUpdateRequest, authorizatio
         raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
 
     # Load and update database
-    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    db = _load_users()
 
     if email not in db.get("users", {}):
         raise HTTPException(status_code=404, detail="User not found")
 
     db["users"][email]["plan"] = plan
 
-    # Save database
-    try:
-        with open(AUTH_DB_PATH, "w") as f:
-            json.dump(db, f, indent=2)
-        return {"success": True, "message": f"Plan für {email} auf {plan} aktualisiert"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+    _save_users(db)
+    return {"success": True, "message": f"Plan für {email} auf {plan} aktualisiert"}
 
 
 @app.delete("/api/admin/users/{email}")
@@ -15066,20 +15268,15 @@ def admin_delete_user(email: str, authorization: Optional[str] = Header(None)):
     email = email.lower().strip()
 
     # Load database
-    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    db = _load_users()
 
     if email not in db.get("users", {}):
         raise HTTPException(status_code=404, detail="User not found")
 
     del db["users"][email]
 
-    # Save database
-    try:
-        with open(AUTH_DB_PATH, "w") as f:
-            json.dump(db, f, indent=2)
-        return {"success": True, "message": f"Benutzer {email} gelöscht"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+    _save_users(db)
+    return {"success": True, "message": f"Benutzer {email} gelöscht"}
 
 
 @app.get("/api/admin/stats")
@@ -15087,7 +15284,7 @@ def admin_get_stats(authorization: Optional[str] = Header(None)):
     """Get admin statistics (admin only)."""
     _require_admin(authorization)
 
-    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    db = _load_users()
     users = db.get("users", {})
 
     # Basic counts
@@ -15297,7 +15494,7 @@ def redeem_coupon(req_body: RedeemCouponRequest, authorization: Optional[str] = 
         raise HTTPException(status_code=400, detail="Coupon has reached max uses")
 
     # Load user database and update plan
-    db = json.loads(open(AUTH_DB_PATH).read()) if os.path.exists(AUTH_DB_PATH) else {"users": {}}
+    db = _load_users()
 
     if user_email not in db.get("users", {}):
         raise HTTPException(status_code=404, detail="User not found")
@@ -15308,19 +15505,13 @@ def redeem_coupon(req_body: RedeemCouponRequest, authorization: Optional[str] = 
     # Increment coupon uses
     coupon_data["coupons"][coupon_index]["uses"] += 1
 
-    # Save both
-    try:
-        with open(AUTH_DB_PATH, "w") as f:
-            json.dump(db, f, indent=2)
-        _save_coupons(coupon_data)
-
-        return {
-            "success": True,
-            "message": f"Plan auf {coupon['plan']} aktualisiert via Coupon {code}",
-            "new_plan": coupon["plan"],
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fehler beim Speichern: {str(e)}")
+    _save_users(db)
+    _save_coupons(coupon_data)
+    return {
+        "success": True,
+        "message": f"Plan auf {coupon['plan']} aktualisiert via Coupon {code}",
+        "new_plan": coupon["plan"],
+    }
 
 
 # ── Support Tickets ──

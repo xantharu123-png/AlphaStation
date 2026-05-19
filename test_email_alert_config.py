@@ -17,6 +17,7 @@ def test_email_config_can_be_loaded_from_environment(monkeypatch):
 
 
 def test_email_status_never_exposes_credentials(monkeypatch):
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
     monkeypatch.setattr(api, "_SECRETS", {
         "GMAIL_USER": "sender@example.com",
         "GMAIL_APP_PASSWORD": "secret-app-password",

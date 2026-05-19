@@ -561,6 +561,24 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const API_PORT = new URLSearchParams(window.location.search).get('api_port') || '8000';
 const API = window.location.protocol + '//' + window.location.hostname + ':' + API_PORT;
 
+const rawFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+    try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const token = localStorage.getItem('as_token');
+        const isAlphaApi = String(url).startsWith(`${API}/api/`);
+        const isPublicAuth = /\/api\/auth\/(login|register|plans)/.test(String(url)) || String(url).includes('/api/stripe/webhook');
+        if (token && isAlphaApi && !isPublicAuth) {
+            const nextInit = { ...init };
+            const headers = new Headers(nextInit.headers || {});
+            if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
+            nextInit.headers = headers;
+            return rawFetch(input, nextInit);
+        }
+    } catch (e) {}
+    return rawFetch(input, init);
+};
+
 // ══════════════════════════════════════════════════════════════
 // AUTH SYSTEM — Login, Register, Pricing, Feature Gating
 // ══════════════════════════════════════════════════════════════
@@ -679,7 +697,7 @@ function AuthPage({ onLogin, onRegister }) {
     const plans = [
         { id: 'basic', name: 'Basic', price: 29, features: ['4 Scanner Tabs', 'Scan alle 30 Minuten', '30 Ticker-Details pro Stunde', 'Breakdown Stocks Scanner', 'Crash Monitor'], cta: 'Basic starten' },
         { id: 'pro', name: 'Pro', price: 79, popular: true, features: ['Alle Scanner Tabs inkl. Biotech', 'Echtzeit-Scans alle 5 Min', 'Volle Sidebar-Chartanalyse', 'Email Alerts bei Signalen', 'Trade Setups (Entry/Stop/TP)', 'Unbegrenzte Ticker-Details', 'Money Flow & BI Scanner'], cta: 'Pro starten' },
-        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'Auto-Trader (IBKR)', 'ORB Scanner (Opening Range)', 'Backtesting Engine', 'API Access', 'Priority Support'], cta: 'Elite starten' },
+        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'Auto-Trader mit Broker-Anbindung', 'ORB Scanner (Opening Range)', 'Backtesting Engine', 'API Access', 'Priority Support'], cta: 'Elite starten' },
     ];
 
     const faqs = [
@@ -687,7 +705,7 @@ function AuthPage({ onLogin, onRegister }) {
         { q: 'Welche Märkte werden gescannt?', a: 'US Stocks (NYSE, NASDAQ), ETFs, und Krypto. Wir scannen über 8.000 Ticker in Echtzeit.' },
         { q: 'Kann ich jederzeit kündigen?', a: 'Ja, dein Abo ist monatlich kündbar. Kein Vertrag, keine versteckten Kosten.' },
         { q: 'Brauche ich Trading-Erfahrung?', a: 'Alpha Station richtet sich an aktive Trader. Grundkenntnisse in technischer Analyse sind hilfreich. Jedes Signal kommt mit Score, Grade und vollständiger Indikator-Analyse — so kannst du fundierte Entscheidungen treffen.' },
-        { q: 'Welche Datenquelle wird verwendet?', a: 'Wir nutzen Polygon.io für Echtzeit- und historische Marktdaten — dieselbe Quelle wie professionelle Hedgefonds.' },
+        { q: 'Welche Datenquelle wird verwendet?', a: 'Alpha Station nutzt professionelle Markt- und Chartdatenquellen. Im Produkt zeigen wir Datenstatus, Cache-Alter und Warnungen transparent an.' },
         { q: 'Was passiert nach den 24 Stunden?', a: 'Dein Trial läuft ab und du wählst einen Plan. Kein automatisches Abo — du entscheidest selbst, ob und welchen Plan du möchtest.' },
     ];
 
@@ -1057,7 +1075,7 @@ Mehr erfahren ↓
                                                 <div><span style={{ color: '#64748b' }}>Target</span><div style={{ fontWeight: 700, color: '#10b981' }}>${o.tp}</div></div>
                                                 <div><span style={{ color: '#64748b' }}>R:R</span><div style={{ fontWeight: 700, color: '#3b82f6' }}>{o.rr}x</div></div>
                                             </div>
-                                            <div style={{ fontSize: 9, color: '#475569', marginTop: 6 }}>{o.shares} Shares — Bracket Order via IBKR</div>
+                                            <div style={{ fontSize: 9, color: '#475569', marginTop: 6 }}>{o.shares} Shares — Bracket Order via Broker-Anbindung</div>
                                         </div>
                                     ))}
                                     {/* Stats bar */}
@@ -1074,17 +1092,17 @@ Mehr erfahren ↓
                                     <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}>NEU</span>
                                 </div>
                                 <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Auto-Trader — Vom Signal zum Trade</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 16 }}>Der Auto-Trader verbindet den BI Scanner direkt mit deinem Interactive Brokers Konto. Wenn ein Signal mit hohem Confluence-Score erkannt wird, platziert das System automatisch Bracket Orders — Entry, Stop-Loss und Take-Profit. Du wählst: Semi Auto (du bestätigst in TWS) oder Full Auto (Orders gehen sofort live). Position Sizing, Max Positionen, Tages-Verlustlimit und Cooldown-Perioden — alles konfigurierbar.</p>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 16 }}>Der Auto-Trader verbindet den BI Scanner mit einer Broker-Anbindung. Wenn ein Signal mit hohem Confluence-Score erkannt wird, kann das System Bracket Orders vorbereiten — Entry, Stop-Loss und Take-Profit. Du wählst: Semi Auto (du bestätigst) oder Full Auto (Orders gehen live). Position Sizing, Max Positionen, Tages-Verlustlimit und Cooldown-Perioden — alles konfigurierbar.</p>
                                 <div style={{ padding: '14px 18px', borderRadius: 12, background: 'linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02))', border: '1px solid rgba(16,185,129,0.2)', marginBottom: 20 }}>
-                                    <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Unser Backtest beweist:</div>
-                                    <div style={{ fontSize: 28, fontWeight: 800, color: '#10b981', lineHeight: 1.2 }}>+140% Gewinn in 12 Monaten</div>
-                                    <div style={{ fontSize: 14, color: '#f1f5f9', fontWeight: 600, marginTop: 4 }}>Das ist einmalig auf dem Markt.</div>
-                                    <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>Backtest-verifiziert — nur mit BI Scanner Signalen.*</div>
+                                    <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Strategien vor dem Einsatz prüfen:</div>
+                                    <div style={{ fontSize: 28, fontWeight: 800, color: '#10b981', lineHeight: 1.2 }}>Backtests & Live-Healthchecks</div>
+                                    <div style={{ fontSize: 14, color: '#f1f5f9', fontWeight: 600, marginTop: 4 }}>Keine Blackbox: Score, Risiko und Setup-Regeln bleiben sichtbar.</div>
+                                    <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>Backtests sind historische Simulationen und ersetzen keine Live-Ausführungskontrolle.*</div>
                                     <div style={{ fontSize: 10, color: '#475569', marginTop: 6, fontStyle: 'italic' }}>*Backtested Performance. Vergangene Ergebnisse sind keine Garantie für zukünftige Gewinne.</div>
                                 </div>
                                 <div style={{ display: 'flex', gap: 24 }}>
-                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>+140%</div><div style={{ fontSize: 12, color: '#64748b' }}>Backtest 12M</div></div>
-                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>IBKR</div><div style={{ fontSize: 12, color: '#64748b' }}>Broker Integration</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Risk</div><div style={{ fontSize: 12, color: '#64748b' }}>Stops & Limits</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Broker</div><div style={{ fontSize: 12, color: '#64748b' }}>Integration</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Semi / Full</div><div style={{ fontSize: 12, color: '#64748b' }}>Auto Modus</div></div>
                                 </div>
                             </div>
@@ -1301,7 +1319,7 @@ Mehr erfahren ↓
                         </div>
                     </div>
                     <div style={{ fontSize: 12, color: '#334155', lineHeight: 1.6 }}>
-                        Alpha Station bietet technische Marktanalysen und Handelsvorschläge. Dies stellt keine Anlageberatung dar. Alle Handelsentscheidungen erfolgen eigenverantwortlich. Vergangene Ergebnisse garantieren keine zukünftigen Gewinne.
+                        Alpha Station bietet technische Marktanalysen und regelbasierte Setup-Hinweise. Dies stellt keine Anlageberatung dar. Alle Handelsentscheidungen erfolgen eigenverantwortlich. Vergangene Ergebnisse garantieren keine zukünftigen Gewinne.
                     </div>
                     <p style={{ fontSize: 12, color: '#334155', marginTop: 8 }}>&copy; 2026 Alpha Station. Alle Rechte vorbehalten.</p>
                 </div>
@@ -1324,10 +1342,10 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Diese AGB gelten für die Nutzung der Plattform "Alpha Station" (nachfolgend "Dienst"), betrieben von Alpha Station (nachfolgend "Anbieter"). Mit der Registrierung akzeptiert der Nutzer diese AGB.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>2. Leistungsbeschreibung</p>
-                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner (inkl. BI Scanner mit 20+ Indikatoren), technische Chartanalysen, Pattern-Erkennung (Harmonic Patterns, Candlestick Patterns, Order Blocks, Liquidity Zones), Handelsvorschläge (Entry, Stop-Loss, Take-Profit) sowie Kryptowährungs-Scanner (Early Movers, Whale Tracking, Funding Rates) für US-amerikanische Wertpapiere (NYSE, NASDAQ) und Kryptowährungen. Der Elite-Plan beinhaltet zusätzlich einen Auto-Trader, der automatisiert oder semi-automatisiert Orders über Interactive Brokers (IBKR) platzieren kann. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren oder Kryptowährungen dar.</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner (inkl. BI Scanner mit 20+ Indikatoren), technische Chartanalysen, Pattern-Erkennung (Harmonic Patterns, Candlestick Patterns, Order Blocks, Liquidity Zones), technische Trade-Setups (Entry, Stop-Loss, Take-Profit) sowie Kryptowährungs-Scanner (Early Movers, Whale Tracking, Funding Rates) für US-amerikanische Wertpapiere (NYSE, NASDAQ) und Kryptowährungen. Der Elite-Plan beinhaltet zusätzlich einen Auto-Trader, der automatisiert oder semi-automatisiert Orders über eine Broker-Anbindung platzieren kann. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren oder Kryptowährungen dar.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>3. Haftungsausschluss & Risikohinweis</p>
-                                    <p style={{ marginBottom: 12 }}>Der Handel mit Wertpapieren und Kryptowährungen ist mit erheblichen Risiken verbunden und kann zum Totalverlust des eingesetzten Kapitals führen. Die vom Dienst bereitgestellten Analysen, Signale und Handelsvorschläge sind rein informativer Natur. Der Anbieter übernimmt keinerlei Haftung für Verluste, die aus Handelsentscheidungen resultieren, die auf Grundlage der bereitgestellten Informationen getroffen werden. Dies gilt ausdrücklich auch für den Auto-Trader: Automatisiert oder semi-automatisiert platzierte Orders erfolgen auf alleiniges Risiko des Nutzers. Der Anbieter übernimmt keine Haftung für technische Fehlfunktionen, Verbindungsabbrüche zum Broker, fehlerhafte Orderausführungen, Slippage oder sonstige Verluste, die durch die Nutzung des Auto-Traders entstehen. Vergangene Ergebnisse und Analysen sind keine Garantie für zukünftige Gewinne. Der Nutzer handelt stets auf eigenes Risiko und eigene Verantwortung.</p>
+                                    <p style={{ marginBottom: 12 }}>Der Handel mit Wertpapieren und Kryptowährungen ist mit erheblichen Risiken verbunden und kann zum Totalverlust des eingesetzten Kapitals führen. Die vom Dienst bereitgestellten Analysen, Signale und Setup-Hinweise sind rein informativer Natur. Der Anbieter übernimmt keinerlei Haftung für Verluste, die aus Handelsentscheidungen resultieren, die auf Grundlage der bereitgestellten Informationen getroffen werden. Dies gilt ausdrücklich auch für den Auto-Trader: Automatisiert oder semi-automatisiert platzierte Orders erfolgen auf alleiniges Risiko des Nutzers. Der Anbieter übernimmt keine Haftung für technische Fehlfunktionen, Verbindungsabbrüche zum Broker, fehlerhafte Orderausführungen, Slippage oder sonstige Verluste, die durch die Nutzung des Auto-Traders entstehen. Vergangene Ergebnisse und Analysen sind keine Garantie für zukünftige Gewinne. Der Nutzer handelt stets auf eigenes Risiko und eigene Verantwortung.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>4. Registrierung & Account</p>
                                     <p style={{ marginBottom: 12 }}>Für die Nutzung ist eine Registrierung mit gültiger Email-Adresse erforderlich. Der Nutzer ist für die Geheimhaltung seiner Zugangsdaten verantwortlich. Jeder Nutzer darf nur einen Account führen. Der Anbieter behält sich vor, Accounts bei Verstößen gegen diese AGB zu sperren oder zu löschen.</p>
@@ -1339,7 +1357,7 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Abonnements können jederzeit zum Ende des aktuellen Abrechnungszeitraums gekündigt werden. Die Kündigung erfolgt über das Stripe Billing Portal oder per Email. Bereits gezahlte Beträge werden nicht erstattet. Der $1 Trial endet automatisch nach 24 Stunden ohne weitere Verpflichtungen.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>7. Verfügbarkeit</p>
-                                    <p style={{ marginBottom: 12 }}>Der Anbieter bemüht sich um eine hohe Verfügbarkeit des Dienstes, garantiert jedoch keine ununterbrochene Erreichbarkeit. Wartungsarbeiten, technische Störungen oder Ausfälle der Datenquellen können die Verfügbarkeit beeinträchtigen. Insbesondere können Echtzeit-Daten durch Drittanbieter (Polygon.io) verzögert oder unvollständig sein.</p>
+                                    <p style={{ marginBottom: 12 }}>Der Anbieter bemüht sich um eine hohe Verfügbarkeit des Dienstes, garantiert jedoch keine ununterbrochene Erreichbarkeit. Wartungsarbeiten, technische Störungen oder Ausfälle der Datenquellen können die Verfügbarkeit beeinträchtigen. Insbesondere können Markt- und Echtzeit-Daten durch externe Datenanbieter verzögert oder unvollständig sein.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>8. Geistiges Eigentum</p>
                                     <p style={{ marginBottom: 12 }}>Alle Inhalte, Algorithmen, Scanner-Logiken und Darstellungen der Plattform sind urheberrechtlich geschützt. Das Kopieren, Weiterverbreiten oder kommerzielle Nutzen der Analysen, Signale oder Software ist ohne ausdrückliche Genehmigung untersagt.</p>
@@ -1348,10 +1366,10 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Der Nutzer verpflichtet sich, den Dienst nicht missbräuchlich zu nutzen. Insbesondere ist es untersagt: automatisierte Zugriffe (Bots, Scraping) ohne API-Berechtigung durchzuführen, den Dienst für illegale Zwecke zu verwenden, Sicherheitsmechanismen zu umgehen oder den Account an Dritte weiterzugeben.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>10. Auto-Trader</p>
-                                    <p style={{ marginBottom: 12 }}>Der Auto-Trader (verfügbar im Elite-Plan) ermöglicht die automatisierte oder semi-automatisierte Platzierung von Wertpapier-Orders über die Anbindung an Interactive Brokers (IBKR). Der Nutzer ist allein verantwortlich für: die korrekte Konfiguration des Auto-Traders (Position Size, Max Positionen, Stop-Loss Limits), die Sicherstellung einer funktionierenden IBKR-Verbindung, die Überwachung offener Positionen und die Einhaltung aller geltenden Handelsregeln und Regulierungen. Der Auto-Trader führt Orders basierend auf algorithmischen Signalen aus. Der Anbieter garantiert weder die Richtigkeit der Signale noch die fehlerfreie Ausführung von Orders. Der Nutzer sollte den Auto-Trader nicht unbeaufsichtigt im Full-Auto-Modus betreiben, sofern er die Risiken nicht vollständig versteht und akzeptiert. Der Anbieter empfiehlt den Semi-Auto-Modus, bei dem Orders in der IBKR Trader Workstation zur manuellen Bestätigung vorgelegt werden.</p>
+                                    <p style={{ marginBottom: 12 }}>Der Auto-Trader (verfügbar im Elite-Plan) ermöglicht die automatisierte oder semi-automatisierte Platzierung von Wertpapier-Orders über eine Broker-Anbindung. Der Nutzer ist allein verantwortlich für: die korrekte Konfiguration des Auto-Traders (Position Size, Max Positionen, Stop-Loss Limits), die Sicherstellung einer funktionierenden Broker-Verbindung, die Überwachung offener Positionen und die Einhaltung aller geltenden Handelsregeln und Regulierungen. Der Auto-Trader führt Orders basierend auf algorithmischen Signalen aus. Der Anbieter garantiert weder die Richtigkeit der Signale noch die fehlerfreie Ausführung von Orders. Der Nutzer sollte den Auto-Trader nicht unbeaufsichtigt im Full-Auto-Modus betreiben, sofern er die Risiken nicht vollständig versteht und akzeptiert. Der Anbieter empfiehlt den Semi-Auto-Modus, bei dem Orders zur manuellen Bestätigung vorgelegt werden.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>11. Kryptowährungen</p>
-                                    <p style={{ marginBottom: 12 }}>Alpha Station bietet Scanner und Analysen für Kryptowährungen an (Early Movers, Whale Tracking, Funding Rates, BTC-Divergenz). Kryptowährungen sind hochvolatile, spekulative Anlageinstrumente. Der Kryptowährungsmarkt ist weitgehend unreguliert und unterliegt extremen Preisschwankungen. Der Anbieter übernimmt keine Haftung für Verluste aus Kryptowährungs-Investments. Die bereitgestellten Daten stammen von Drittanbietern (CoinGecko, Exchanges) und können unvollständig, verzögert oder fehlerhaft sein.</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station bietet Scanner und Analysen für Kryptowährungen an (Early Movers, Whale Tracking, Funding Rates, BTC-Divergenz). Kryptowährungen sind hochvolatile, spekulative Anlageinstrumente. Der Kryptowährungsmarkt ist weitgehend unreguliert und unterliegt extremen Preisschwankungen. Der Anbieter übernimmt keine Haftung für Verluste aus Kryptowährungs-Investments. Die bereitgestellten Daten stammen von externen Datenquellen und Börsen und können unvollständig, verzögert oder fehlerhaft sein.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>12. Änderungen der AGB</p>
                                     <p style={{ marginBottom: 12 }}>Der Anbieter behält sich vor, diese AGB jederzeit anzupassen. Änderungen werden per Email mitgeteilt. Die fortgesetzte Nutzung nach Mitteilung gilt als Zustimmung.</p>
@@ -1378,7 +1396,7 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Die Daten werden ausschließlich zur Bereitstellung und Verbesserung des Dienstes, zur Abrechnung und Kontoverwaltung sowie für technische Sicherheit und Missbrauchsprävention verwendet.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>4. Drittanbieter</p>
-                                    <p style={{ marginBottom: 12 }}>Wir nutzen folgende Drittanbieter: Stripe (Zahlungsabwicklung, USA), Polygon.io (Aktien-Marktdaten, USA), CoinGecko (Kryptowährungs-Daten), Interactive Brokers (Broker-Anbindung für Auto-Trader, nur bei aktiver Nutzung durch den Nutzer). Durch die Nutzung dieser Dienste können Daten in die USA übertragen werden.</p>
+                                    <p style={{ marginBottom: 12 }}>Wir nutzen externe Dienstleister für Zahlungsabwicklung, Markt-/Chartdaten, Kryptowährungsdaten und optional für Broker-Anbindungen. Diese Dienstleister verarbeiten Daten nur soweit dies für Betrieb, Abrechnung, Datenauslieferung oder eine vom Nutzer aktivierte Funktion erforderlich ist. Je nach Anbieter können Daten in Länder außerhalb der Schweiz/EU übertragen werden.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>5. Speicherdauer</p>
                                     <p style={{ marginBottom: 12 }}>Personenbezogene Daten werden solange gespeichert, wie ein aktives Konto besteht. Nach Kontolöschung werden die Daten innerhalb von 30 Tagen gelöscht, sofern keine gesetzlichen Aufbewahrungspflichten bestehen.</p>
@@ -1404,7 +1422,7 @@ Mehr erfahren ↓
                                     </p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>Haftungshinweis</p>
-                                    <p style={{ marginBottom: 12 }}>Alpha Station stellt technische Analysetools für den Wertpapierhandel bereit. Der Dienst bietet keine Anlageberatung und keine Aufforderung zum Handel. Alle bereitgestellten Informationen, Analysen und Handelsvorschläge dienen ausschließlich zu Informationszwecken. Jede Investitionsentscheidung liegt in der alleinigen Verantwortung des Nutzers. Der Handel mit Wertpapieren birgt Risiken bis hin zum Totalverlust.</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station stellt technische Analysetools für den Wertpapierhandel bereit. Der Dienst bietet keine Anlageberatung und keine Aufforderung zum Handel. Alle bereitgestellten Informationen, Analysen und Setup-Hinweise dienen ausschließlich zu Informationszwecken. Jede Investitionsentscheidung liegt in der alleinigen Verantwortung des Nutzers. Der Handel mit Wertpapieren birgt Risiken bis hin zum Totalverlust.</p>
                                 </div>
                             </div>
                         )}
@@ -1481,7 +1499,7 @@ function PricingPage({ currentPlan, getToken }) {
     const plans = [
         { id: 'basic', name: 'Basic', price: 29, features: ['4 Scanner Tabs', 'Scan alle 30 Min', '30 Ticker-Details / Stunde', 'Breakdown Stocks'] },
         { id: 'pro', name: 'Pro', price: 79, popular: true, features: ['Alle Scanner Tabs', 'Echtzeit Scans (5 Min)', 'Volle Sidebar-Analyse', 'Email Alerts', 'Trade Setups (Entry/Stop/TP)', 'Unbegrenzte Ticker-Details'] },
-        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'Auto-Trader (IBKR)', 'ORB Scanner', 'Backtesting', 'API Access', 'Priority Support'] },
+        { id: 'elite', name: 'Elite', price: 149, features: ['Alles aus Pro', 'Auto-Trader mit Broker-Anbindung', 'ORB Scanner', 'Backtesting', 'API Access', 'Priority Support'] },
     ];
 
     const handleCheckout = async (planId) => {
@@ -1541,6 +1559,8 @@ function PricingPage({ currentPlan, getToken }) {
 // ── Account Page ──
 function AccountPage({ user, limits, getToken, onPlanChange }) {
     const [portalLoading, setPortalLoading] = useState(false);
+    const [alertSettings, setAlertSettings] = useState(null);
+    const [alertSaving, setAlertSaving] = useState(false);
 
     const openBillingPortal = async () => {
         setPortalLoading(true);
@@ -1561,6 +1581,48 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
             if (window.addToast) window.addToast('Verbindungsfehler', 'error');
         }
         setPortalLoading(false);
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadAlertSettings = async () => {
+            try {
+                const token = getToken();
+                if (!token) return;
+                const res = await fetch(`${API}/api/auth/alert-settings`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (res.ok && !cancelled) setAlertSettings(await res.json());
+            } catch (e) {}
+        };
+        loadAlertSettings();
+        return () => { cancelled = true; };
+    }, [getToken]);
+
+    const saveAlertSettings = async (patch) => {
+        setAlertSaving(true);
+        try {
+            const token = getToken();
+            const next = { ...(alertSettings || {}), ...patch };
+            const res = await fetch(`${API}/api/auth/alert-settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({
+                    enabled: next.email_alerts_enabled,
+                    alert_email: next.alert_email || user.email
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.settings) {
+                setAlertSettings(data.settings);
+                if (window.addToast) window.addToast('Alert-Einstellungen gespeichert', 'success');
+            } else if (window.addToast) {
+                window.addToast(data.detail || 'Alert-Einstellungen konnten nicht gespeichert werden', 'error');
+            }
+        } catch (e) {
+            if (window.addToast) window.addToast('Verbindungsfehler', 'error');
+        }
+        setAlertSaving(false);
     };
 
     const planColors = { free: '#64748b', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
@@ -1607,6 +1669,52 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                     <div>Backtesting: <span style={{ color: limits?.has_backtest ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_backtest ? 'Ja' : 'Nein'}</span></div>
                     <div>API Access: <span style={{ color: limits?.has_api_access ? '#10b981' : '#ef4444', fontWeight: 600 }}>{limits?.has_api_access ? 'Ja' : 'Nein'}</span></div>
                 </div>
+            </div>
+
+            {/* Alert Settings */}
+            <div className="card" style={{ padding: 24, marginBottom: 20, borderRadius: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 14 }}>
+                    <div>
+                        <div style={{ fontSize: 15, fontWeight: 700 }}>Signal-Mails</div>
+                        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>
+                            Nur aktive Pläne mit Email-Alerts erhalten Scanner-Digests.
+                        </div>
+                    </div>
+                    <button
+                        onClick={() => saveAlertSettings({ email_alerts_enabled: !(alertSettings?.email_alerts_enabled ?? true) })}
+                        disabled={alertSaving || !alertSettings?.has_email_alerts}
+                        style={{
+                            padding: '8px 12px',
+                            border: '1px solid #334155',
+                            borderRadius: 8,
+                            background: (alertSettings?.email_alerts_enabled ?? true) ? '#dcfce7' : '#fee2e2',
+                            color: (alertSettings?.email_alerts_enabled ?? true) ? '#166534' : '#991b1b',
+                            fontSize: 12,
+                            fontWeight: 800,
+                            cursor: alertSaving || !alertSettings?.has_email_alerts ? 'not-allowed' : 'pointer',
+                            opacity: !alertSettings?.has_email_alerts ? 0.55 : 1
+                        }}>
+                        {(alertSettings?.email_alerts_enabled ?? true) ? 'AKTIV' : 'AUS'}
+                    </button>
+                </div>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                    <input
+                        value={alertSettings?.alert_email || user.email || ''}
+                        disabled={!alertSettings?.has_email_alerts}
+                        onChange={e => setAlertSettings(prev => ({ ...(prev || {}), alert_email: e.target.value }))}
+                        placeholder="email@example.com"
+                        style={{ flex: 1, padding: '10px 12px', border: '1px solid var(--border-color)', borderRadius: 8, background: '#fff', fontSize: 13 }}
+                    />
+                    <button
+                        onClick={() => saveAlertSettings({})}
+                        disabled={alertSaving || !alertSettings?.has_email_alerts}
+                        style={{ padding: '10px 14px', border: 'none', borderRadius: 8, background: '#3b82f6', color: '#fff', fontSize: 13, fontWeight: 700, cursor: alertSaving ? 'wait' : 'pointer', opacity: !alertSettings?.has_email_alerts ? 0.55 : 1 }}>
+                        Speichern
+                    </button>
+                </div>
+                {!alertSettings?.has_email_alerts && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: '#f59e0b' }}>Email-Alerts sind in deinem aktuellen Plan nicht enthalten.</div>
+                )}
             </div>
 
             {/* Actions */}
@@ -2197,7 +2305,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         fetchData();
     }, [ticker, isCrypto]);
 
-    // Fetch chart data — Exchange-Crypto nutzt exchange-chart, CoinGecko-Crypto nutzt crypto-chart, Stocks nutzen Polygon
+    // Fetch chart data — Exchange-Crypto nutzt exchange-chart, fallback nutzt Daily-Krypto-Kontext, Stocks nutzen Chart-API
     // V2.8: AbortController verhindert Race Conditions bei schnellem Timeframe-Wechsel
     useEffect(() => {
         // Sofort alten Chart löschen → zeigt Loading-State
@@ -2226,7 +2334,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     let cryptoSuccess = false;
 
                     // Early Movers brauchen echte Intraday-Trigger. Wenn ein Perp-Match existiert,
-                    // nutzen wir zuerst Exchange-Candles statt CoinGecko-Daily-Kontext.
+                    // nutzen wir zuerst Exchange-Candles statt Daily-Kontext.
                     if (scannerData?.HasPerp && cryptoPerpSymbol && cryptoPerpExchange) {
                         try {
                             const res = await fetchWithTimeout(`${API}/api/exchange-chart?symbol=${encodeURIComponent(cryptoPerpSymbol)}&exchange=${encodeURIComponent(cryptoPerpExchange)}&timeframe=${timeframe}&count=160`, { signal }, 5000);
@@ -2247,7 +2355,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         }
                     }
 
-                    // Auto-Retry bei CoinGecko Rate Limiting (max 2 Versuche, schneller)
+                    // Auto-Retry bei Rate Limiting (max 2 Versuche, schneller)
                     // Abort-aware sleep: bricht sofort ab wenn Ticker wechselt
                     const abortableSleep = (ms) => new Promise((resolve) => {
                         const timer = setTimeout(resolve, ms);
@@ -2268,7 +2376,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 if (chartJson.candles && chartJson.candles.length > 0) {
                                     setChartData({
                                         ...chartJson,
-                                        source: 'CoinGecko Daily Context',
+                                        source: 'Daily Crypto Context',
                                         chart_note: 'Nur Tages-Kontext - kein 5m Entry-Trigger',
                                     });
                                     cryptoSuccess = true;
@@ -2283,7 +2391,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         }
                     }
                     if (!cryptoSuccess && !signal.aborted) {
-                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart voruebergehend nicht verfuegbar - CoinGecko Rate Limit' });
+                        setChartData({ ticker, timeframe: '1D', candles: [], error: 'Crypto-Chart voruebergehend nicht verfuegbar - Datenquelle rate-limited' });
                     }
                 } else {
                     const allOverlays = 'ema,vwap,sr,fib,patterns,vrvp';
@@ -3417,7 +3525,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 </>
                 )}
 
-                {/* Crypto Detail Panel (CoinGecko) */}
+                {/* Crypto Detail Panel */}
                 {isCrypto && !isExchangeCrypto && cd && (
                 <>
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
@@ -7311,7 +7419,7 @@ function AutoTraderTab() {
                             </span>
                         </div>
                         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                            BI Scanner → IBKR Bracket Orders {status?.market_hours ? '(Markt offen)' : '(Markt geschlossen)'}
+                            BI Scanner → Broker Bracket Orders {status?.market_hours ? '(Markt offen)' : '(Markt geschlossen)'}
                         </div>
                     </div>
                 </div>
@@ -7458,9 +7566,9 @@ function AutoTraderTab() {
                 )}
             </div>
 
-            {/* IBKR Hinweis */}
+            {/* Broker Hinweis */}
             <div style={{ padding: 14, borderRadius: 10, background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.15)', fontSize: 12, color: '#f59e0b' }}>
-                <strong>Hinweis:</strong> Der Auto-Trader benötigt eine aktive IBKR TWS/Gateway Verbindung auf dem Server. Ohne IBKR-Verbindung werden Signale erkannt, aber keine Orders platziert.
+                <strong>Hinweis:</strong> Der Auto-Trader benötigt eine aktive Broker-Gateway Verbindung auf dem Server. Ohne Broker-Verbindung werden Signale erkannt, aber keine Orders platziert.
             </div>
         </div>
     );

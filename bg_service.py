@@ -53,6 +53,12 @@ STATUS_FILE = DATA_DIR / "bg_status.json"
 sys.path.insert(0, str(BASE_DIR))
 
 from modules.trade_levels import normalize_alert_trade_levels
+try:
+    from modules.auth import get_email_alert_recipients
+    HAS_AUTH_ALERT_RECIPIENTS = True
+except Exception as _auth_alert_err:
+    HAS_AUTH_ALERT_RECIPIENTS = False
+    get_email_alert_recipients = None
 
 # ── Logging ──
 logging.basicConfig(
@@ -121,6 +127,7 @@ _EMAIL_CONFIG_KEYS = (
     "GMAIL_USER",
     "GMAIL_APP_PASSWORD",
     "ALERT_EMAIL",
+    "ALERT_SEND_TO_SUBSCRIBERS",
     "SMTP_HOST",
     "SMTP_PORT",
     "SMTP_SSL_PORT",
@@ -751,7 +758,14 @@ def _send_email_alert(subject, body_html, secrets):
     gmail_user = secrets.get("GMAIL_USER", "")
     gmail_pass = secrets.get("GMAIL_APP_PASSWORD", "")
     alert_to = secrets.get("ALERT_EMAIL", gmail_user)  # Default: an sich selbst
-    recipients = [addr.strip() for addr in str(alert_to).split(",") if addr.strip()]
+    recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+    send_to_subscribers = str(secrets.get("ALERT_SEND_TO_SUBSCRIBERS", os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"))).strip().lower() not in {"0", "false", "no", "off"}
+    if send_to_subscribers and HAS_AUTH_ALERT_RECIPIENTS and get_email_alert_recipients:
+        try:
+            recipients.extend(get_email_alert_recipients())
+        except Exception as exc:
+            log.warning(f"Subscriber-Alert-Empfaenger konnten nicht geladen werden: {exc}")
+    recipients = sorted(set(addr for addr in recipients if "@" in addr))
 
     if not gmail_user or not gmail_pass:
         log.warning("⚠️ E-Mail Alert: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt in secrets.toml")
@@ -768,6 +782,7 @@ def _send_email_alert(subject, body_html, secrets):
             msg["From"] = f"TradingBot Alert <{gmail_user}>"
             msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
+            body_html = body_html + "<p style='color:#999;font-size:11px;margin-top:18px'>Automatischer Analyse-Alert. Keine Anlageberatung, keine Kauf-/Verkaufsempfehlung. Trading erfolgt eigenverantwortlich.</p>"
 
             # Plain-Text Fallback
             plain = body_html.replace("<br>", "\n").replace("</tr>", "\n")

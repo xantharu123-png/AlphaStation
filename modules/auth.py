@@ -12,9 +12,11 @@ import os
 import json
 import time
 import hashlib
+import hmac
 import secrets
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 # JWT via PyJWT
@@ -34,12 +36,28 @@ except ImportError:
     print("[Auth] WARNING: stripe not installed — run: pip install stripe")
 
 # ── Config ──
-AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH", "/tmp/alpha_station_users.json")
-JWT_SECRET = os.environ.get("JWT_SECRET", "as_jwt_2026_alpha_station_prod_key_x9k2m")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DATA_DIR = Path(os.environ.get("ALPHA_DATA_DIR", _REPO_ROOT / "data_cache"))
+_AUTH_DIR = _DATA_DIR / "auth"
+_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+
+AUTH_DB_PATH = os.environ.get("AUTH_DB_PATH", str(_AUTH_DIR / "alpha_station_auth.sqlite"))
+AUTH_DB_LEGACY_JSON_PATH = os.environ.get("AUTH_DB_LEGACY_JSON_PATH", "/tmp/alpha_station_users.json")
+AUTH_DB_IS_SQLITE = not str(AUTH_DB_PATH).lower().endswith(".json")
+
+_JWT_DEFAULT_SECRET = "as_jwt_2026_alpha_station_prod_key_x9k2m"
+JWT_SECRET = os.environ.get("JWT_SECRET", _JWT_DEFAULT_SECRET)
+JWT_SECRET_IS_DEFAULT = JWT_SECRET == _JWT_DEFAULT_SECRET
 JWT_ALGORITHM = "HS256"
-ADMIN_EMAILS = {"miroslav.mikulic@gmail.com"}
-ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "AlphaStation2026!")
+ADMIN_EMAILS = {
+    email.strip().lower()
+    for email in os.environ.get("ADMIN_EMAILS", "miroslav.mikulic@gmail.com").split(",")
+    if email.strip()
+}
+ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "")
+ADMIN_MASTER_KEY_CONFIGURED = bool(ADMIN_MASTER_KEY)
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
+PBKDF2_ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "260000"))
 
 # Stripe config (set via environment variables)
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -145,38 +163,130 @@ SCANNER_TABS_BY_PLAN = {
 
 
 # ── User Database (JSON file-based, simple for now) ──
-def _load_users() -> Dict:
-    """Load user database from JSON file."""
-    if os.path.exists(AUTH_DB_PATH):
-        try:
-            with open(AUTH_DB_PATH, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {"users": {}}
-    return {"users": {}}
+def _sqlite_conn() -> sqlite3.Connection:
+    """Open the persistent auth database."""
+    db_path = Path(AUTH_DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            email TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _maybe_migrate_legacy_json() -> None:
+    """One-time import from the old /tmp JSON auth store."""
+    if not AUTH_DB_IS_SQLITE:
+        return
+    legacy = Path(AUTH_DB_LEGACY_JSON_PATH)
+    marker = Path(AUTH_DB_PATH).with_suffix(".migrated")
+    if marker.exists() or not legacy.exists():
+        return
+    try:
+        with open(legacy, "r", encoding="utf-8") as f:
+            legacy_db = json.load(f)
+        if not isinstance(legacy_db, dict) or not isinstance(legacy_db.get("users"), dict):
+            marker.write_text(datetime.utcnow().isoformat(), encoding="utf-8")
+            return
+        current = _load_users(skip_migration=True)
+        merged = current.get("users", {})
+        for email, user in legacy_db.get("users", {}).items():
+            if isinstance(user, dict) and email not in merged:
+                merged[email] = user
+        _save_users({"users": merged})
+        marker.write_text(datetime.utcnow().isoformat(), encoding="utf-8")
+        print(f"[Auth] Migrated legacy auth JSON to SQLite: {legacy}")
+    except Exception as exc:
+        print(f"[Auth] Legacy auth migration skipped: {exc}")
+
+
+def _load_users(skip_migration: bool = False) -> Dict:
+    """Load user database as {'users': {email: user_dict}}."""
+    if not AUTH_DB_IS_SQLITE:
+        if os.path.exists(AUTH_DB_PATH):
+            try:
+                with open(AUTH_DB_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) and isinstance(data.get("users"), dict) else {"users": {}}
+            except Exception:
+                return {"users": {}}
+        return {"users": {}}
+
+    if not skip_migration:
+        _maybe_migrate_legacy_json()
+    try:
+        with _sqlite_conn() as conn:
+            rows = conn.execute("SELECT email, data FROM users").fetchall()
+        users = {}
+        for row in rows:
+            try:
+                data = json.loads(row["data"])
+                if isinstance(data, dict):
+                    users[row["email"]] = data
+            except Exception:
+                continue
+        return {"users": users}
+    except Exception as e:
+        print(f"[Auth] Error loading users: {e}")
+        return {"users": {}}
 
 
 def _save_users(db: Dict):
-    """Save user database to JSON file."""
+    """Persist full user database."""
+    if not AUTH_DB_IS_SQLITE:
+        try:
+            Path(AUTH_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+            with open(AUTH_DB_PATH, "w", encoding="utf-8") as f:
+                json.dump(db, f, indent=2, default=str)
+        except Exception as e:
+            print(f"[Auth] Error saving users: {e}")
+        return
+
     try:
-        with open(AUTH_DB_PATH, "w") as f:
-            json.dump(db, f, indent=2, default=str)
+        users = db.get("users", {}) if isinstance(db, dict) else {}
+        now = datetime.utcnow().isoformat()
+        with _sqlite_conn() as conn:
+            existing = {row["email"] for row in conn.execute("SELECT email FROM users").fetchall()}
+            incoming = set(users.keys())
+            for email in sorted(existing - incoming):
+                conn.execute("DELETE FROM users WHERE email = ?", (email,))
+            for email, user in users.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO users(email, data, updated_at) VALUES (?, ?, ?)",
+                    (email, json.dumps(user, default=str), now),
+                )
+            conn.commit()
     except Exception as e:
         print(f"[Auth] Error saving users: {e}")
 
 
 def _hash_password(password: str) -> str:
-    """Hash password with salt using SHA-256."""
+    """Hash password with PBKDF2-HMAC-SHA256."""
     salt = secrets.token_hex(16)
-    hashed = hashlib.sha256((salt + password).encode()).hexdigest()
-    return f"{salt}:{hashed}"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest.hex()}"
 
 
 def _verify_password(password: str, stored_hash: str) -> bool:
-    """Verify password against stored hash."""
+    """Verify PBKDF2 hashes and legacy salted SHA-256 hashes."""
     try:
-        salt, hashed = stored_hash.split(":")
-        return hashlib.sha256((salt + password).encode()).hexdigest() == hashed
+        if stored_hash.startswith("pbkdf2_sha256$"):
+            _, iterations, salt, expected = stored_hash.split("$", 3)
+            digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(iterations))
+            return hmac.compare_digest(digest.hex(), expected)
+
+        salt, expected = stored_hash.split(":", 1)
+        digest = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+        return hmac.compare_digest(digest, expected)
     except Exception:
         return False
 
@@ -231,6 +341,8 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "plan": "expired",  # No access until $1 trial or plan purchase
         "stripe_customer_id": None,
         "stripe_subscription_id": None,
+        "alert_email": email,
+        "email_alerts_enabled": True,
         "created_at": datetime.utcnow().isoformat(),
         "last_login": datetime.utcnow().isoformat(),
         "trial_ends_at": None,
@@ -261,13 +373,14 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
 
     user = db["users"].get(email)
 
-    # Admin auto-create: falls Admin-Email noch nicht existiert, Account automatisch anlegen
-    if not user and email in ADMIN_EMAILS and password == ADMIN_MASTER_KEY:
+    # Admin auto-create only when an explicit ADMIN_MASTER_KEY is configured.
+    if not user and email in ADMIN_EMAILS and ADMIN_MASTER_KEY_CONFIGURED and password == ADMIN_MASTER_KEY:
         user_id = secrets.token_hex(8)
         user = {
             "id": user_id, "email": email, "name": "Admin",
             "password_hash": _hash_password(password),
             "plan": "elite", "stripe_customer_id": None, "stripe_subscription_id": None,
+            "alert_email": email, "email_alerts_enabled": True,
             "created_at": datetime.utcnow().isoformat(), "last_login": datetime.utcnow().isoformat(),
             "trial_ends_at": None,
         }
@@ -277,10 +390,14 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
     if not user:
         return {"success": False, "message": "Email oder Passwort falsch"}
 
-    # Admin Master-Key bypass
-    is_admin_login = email in ADMIN_EMAILS and password == ADMIN_MASTER_KEY
+    # Admin Master-Key bypass is disabled unless ADMIN_MASTER_KEY is explicitly set.
+    is_admin_login = email in ADMIN_EMAILS and ADMIN_MASTER_KEY_CONFIGURED and password == ADMIN_MASTER_KEY
     if not is_admin_login and not _verify_password(password, user["password_hash"]):
         return {"success": False, "message": "Email oder Passwort falsch"}
+
+    # Transparently upgrade legacy SHA-256 password hashes after a successful login.
+    if not is_admin_login and not str(user.get("password_hash", "")).startswith("pbkdf2_sha256$"):
+        user["password_hash"] = _hash_password(password)
 
     # Update last login + admin always gets elite
     user["last_login"] = datetime.utcnow().isoformat()
@@ -530,4 +647,96 @@ def get_user_limits(token: str) -> Dict:
         "has_backtest": features["has_backtest"],
         "has_api_access": features["has_api_access"],
         "max_ticker_detail_per_hour": features["max_ticker_detail_per_hour"],
+    }
+
+
+def get_email_alert_recipients() -> List[str]:
+    """Return unique alert recipients for active plans with email-alert access."""
+    recipients: List[str] = []
+    db = _load_users()
+    changed = False
+    for email, user in db.get("users", {}).items():
+        if not isinstance(user, dict):
+            continue
+        plan = user.get("plan", "expired")
+        if plan == "trial":
+            trial_ends = user.get("trial_ends_at")
+            try:
+                if trial_ends and datetime.utcnow() > datetime.fromisoformat(trial_ends):
+                    user["plan"] = "expired"
+                    changed = True
+                    continue
+            except Exception:
+                pass
+        features = get_plan_features(user.get("plan", "expired"))
+        if not features.get("has_email_alerts"):
+            continue
+        if user.get("email_alerts_enabled", True) is False:
+            continue
+        alert_email = str(user.get("alert_email") or email).strip().lower()
+        if "@" in alert_email:
+            recipients.append(alert_email)
+    if changed:
+        _save_users(db)
+    return sorted(set(recipients))
+
+
+def get_user_alert_settings(token: str) -> Dict[str, Any]:
+    payload = verify_token(token)
+    if not payload:
+        return {}
+    email = payload.get("email", "")
+    user = _load_users().get("users", {}).get(email, {})
+    return {
+        "email_alerts_enabled": user.get("email_alerts_enabled", True),
+        "alert_email": user.get("alert_email") or email,
+        "has_email_alerts": get_plan_features(get_user_plan(token)).get("has_email_alerts", False),
+    }
+
+
+def update_user_alert_settings(token: str, enabled: Optional[bool] = None, alert_email: Optional[str] = None) -> Dict[str, Any]:
+    payload = verify_token(token)
+    if not payload:
+        return {"success": False, "message": "Invalid token"}
+    email = payload.get("email", "")
+    db = _load_users()
+    user = db.get("users", {}).get(email)
+    if not user:
+        return {"success": False, "message": "User not found"}
+    if enabled is not None:
+        user["email_alerts_enabled"] = bool(enabled)
+    if alert_email is not None:
+        candidate = str(alert_email).strip().lower()
+        if candidate and "@" not in candidate:
+            return {"success": False, "message": "Invalid alert email"}
+        user["alert_email"] = candidate or email
+    db["users"][email] = user
+    _save_users(db)
+    return {"success": True, "settings": get_user_alert_settings(token)}
+
+
+def auth_security_status() -> Dict[str, Any]:
+    """Commercial-readiness snapshot for auth/billing storage and secrets."""
+    warnings = []
+    critical = []
+    if JWT_SECRET_IS_DEFAULT:
+        critical.append("JWT_SECRET uses fallback demo value")
+    if not ADMIN_MASTER_KEY_CONFIGURED:
+        warnings.append("ADMIN_MASTER_KEY not configured; admin bypass disabled")
+    if not AUTH_DB_IS_SQLITE:
+        critical.append("AUTH_DB_PATH still points to JSON; use SQLite for production")
+    if not STRIPE_SECRET_KEY:
+        warnings.append("STRIPE_SECRET_KEY not configured")
+    if not STRIPE_WEBHOOK_SECRET:
+        warnings.append("STRIPE_WEBHOOK_SECRET not configured")
+    return {
+        "auth_db_path": AUTH_DB_PATH,
+        "auth_db_type": "sqlite" if AUTH_DB_IS_SQLITE else "json",
+        "jwt_secret_configured": bool(JWT_SECRET) and not JWT_SECRET_IS_DEFAULT,
+        "admin_master_key_configured": ADMIN_MASTER_KEY_CONFIGURED,
+        "stripe_secret_configured": bool(STRIPE_SECRET_KEY),
+        "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
+        "warnings": warnings,
+        "critical": critical,
+        "commercial_ready": not critical,
     }
