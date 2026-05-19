@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import modules.auth as auth
 import api
@@ -59,6 +60,11 @@ def test_deploy_health_endpoints_stay_public():
     assert "/api/health" in api._PUBLIC_API_PATHS
     assert "/api/system-health" in api._PUBLIC_API_PATHS
     assert "/api/commercial-readiness" in api._PUBLIC_API_PATHS
+
+
+def test_auth_gate_allows_cors_preflight():
+    api_source = Path(__file__).with_name("api.py").read_text(encoding="utf-8")
+    assert 'request.method == "OPTIONS"' in api_source
 
 
 def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp_path):

@@ -7125,6 +7125,8 @@ def _commerce_gate_denial(path: str, token: str, payload: Dict[str, Any]) -> Opt
 @app.middleware("http")
 async def commerce_auth_gate(request: Request, call_next):
     """Optional production gate: set COMMERCE_ENFORCE_AUTH=1 to protect API data server-side."""
+    if request.method == "OPTIONS":
+        return await call_next(request)
     path = request.url.path
     if not COMMERCE_ENFORCE_AUTH or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
         return await call_next(request)
