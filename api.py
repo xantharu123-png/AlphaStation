@@ -829,6 +829,7 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_WATCH_MIN_SCORE = 45
+_NEW_LISTING_WATCH_MIN_PUMP_PCT = 15.0
 _NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
@@ -3572,38 +3573,6 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             "listing_source": item.get("source", ""),
         })
 
-    for ann in payload.get("announcement_watchlist", []) or []:
-        if not isinstance(ann, dict):
-            continue
-        symbol = _display_crypto_contract_symbol(ann.get("base") or "")
-        if not symbol:
-            continue
-        contracts = ann.get("matched_contracts", []) if isinstance(ann.get("matched_contracts", []), list) else []
-        exchange = ann.get("exchange", "")
-        if contracts:
-            exchange = contracts[0].get("exchange") or exchange
-        candidates.append({
-            "symbol": symbol,
-            "exchange": exchange,
-            "bucket": "announcement",
-            "grade": "WATCH",
-            "timing": ann.get("title", "Exchange listing announcement"),
-            "category": "ANNOUNCEMENT_WATCH",
-            "age": _alert_float(ann.get("age_hours"), None),
-            "pump_pct": 0,
-            "from_ath_pct": 0,
-            "exh_score": 0,
-            "rr": 0,
-            "btc_change": None,
-            "coin_change": None,
-            "btc_divergence": None,
-            "btc_context": "",
-            "risk_flags": ["announcement_watch", "wait_for_dump_trigger"],
-            "title": ann.get("title", ""),
-            "url": ann.get("url", ""),
-            "listing_source": ann.get("source", ""),
-        })
-
     deduped: Dict[str, Dict[str, Any]] = {}
     for candidate in candidates:
         key = candidate["symbol"]
@@ -3626,12 +3595,15 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             deduped[key] = candidate
     visible = []
     for c in deduped.values():
-        if c.get("bucket") == "announcement":
-            visible.append(c)
-            continue
         score = c.get("exh_score") or 0
-        age = c.get("age")
-        if score >= _NEW_LISTING_WATCH_MIN_SCORE or (age is not None and age <= 24):
+        pump_pct = c.get("pump_pct") or 0
+        from_ath_pct = c.get("from_ath_pct") or 0
+        watch_quality = (
+            score >= _NEW_LISTING_WATCH_MIN_SCORE
+            or from_ath_pct >= 3
+            or "micro_trigger_missing" in (c.get("risk_flags") or [])
+        )
+        if pump_pct >= _NEW_LISTING_WATCH_MIN_PUMP_PCT and watch_quality:
             visible.append(c)
     return sorted(
         visible,
@@ -3684,8 +3656,8 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
         suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine SHORT NOW Mail: " + ", ".join(f"{k}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
     <h2 style="color:#f97316">Crypto New Listing Beobachten</h2>
-    <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | Beobachtungsliste, noch kein Jetzt-Traden-Short</p>
-    <p style="color:#444">BTC-Divergenz ist hier Marktwind: BTC risk-on blockt nicht jeden New-Listing-Dump, aber wir warten auf echte Underperformance oder einen tieferen Crack.</p>
+    <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | Neue Listings mit Pump/Exhaustion, noch kein Jetzt-Traden-Short</p>
+    <p style="color:#444">Reine Listing-Ankuendigungen werden nur gespeichert und ueberwacht. Diese Mail kommt erst, wenn der neue Coin bereits gepumpt hat und ein Dump-/Crack-Setup beobachtbar wird.</p>
     {suppressed_text}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fff7ed"><th style="padding:8px;text-align:left">Coin</th>
@@ -3694,7 +3666,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC Kontext</th>
     <th style="padding:8px;text-align:left">Warnungen</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Beobachten-Mail maximal 1x taeglich. JETZT SHORTEN kommt separat nur bei Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Beobachten-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}% plus Watch-Qualitaet. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
     return _send_email_alert(f"Crypto New Listing beobachten: {len(candidates)} Coin(s)", body)
 

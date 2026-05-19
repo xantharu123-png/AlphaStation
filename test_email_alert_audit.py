@@ -1156,7 +1156,35 @@ def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monke
     assert "SHORT NOW" not in sent[0][1]
 
 
-def test_new_listing_pipeline_sends_watch_for_exchange_announcement(monkeypatch):
+def test_new_listing_pipeline_does_not_mail_unpumped_new_listing(monkeypatch):
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+
+    payload = {
+        "signals": [],
+        "watchlist": [],
+        "monitoring": [{
+            "symbol": "QUIETUSDT",
+            "exchange": "mexc",
+            "source": "new_listing",
+            "listing_age_hours": 6,
+            "trade_category": "NEW_LISTING_WATCH",
+            "timing": "Listed, still waiting for pump",
+            "grade": "C",
+            "exh_score": 60,
+            "pump_pct": 4,
+            "from_ath_pct": 0.5,
+            "risk_flags": ["pump_too_small"],
+        }],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert sent == []
+
+
+def test_new_listing_pipeline_does_not_mail_pure_exchange_announcement(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
@@ -1179,10 +1207,7 @@ def test_new_listing_pipeline_sends_watch_for_exchange_announcement(monkeypatch)
 
     api._send_new_listing_pipeline_alerts(payload)
 
-    assert len(sent) == 1
-    assert "HOOLI" in sent[0][1]
-    assert "ANNOUNCEMENT_WATCH" in sent[0][1]
-    assert "Quelle" in sent[0][1]
+    assert sent == []
 
 
 def test_new_listing_watch_ignores_active_pump_rows(monkeypatch):
