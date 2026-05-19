@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/home/tradingbot/app}"
 BRANCH="${BRANCH:-main}"
-HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/system-health}"
+HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 SERVICES="${SERVICES:-tradingbot-api tradingbot-frontend}"
 REQUESTED_VENV_DIR="${VENV_DIR:-}"
 INSTALL_DEPS="${INSTALL_DEPS:-auto}"
