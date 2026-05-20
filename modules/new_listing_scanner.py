@@ -858,6 +858,74 @@ def _announcement_age_hours(announcement):
     return max(0, round((time.time() - (release_ms / 1000)) / 3600, 1))
 
 
+def _announcement_exchange(announcement):
+    """Return the exchange named by an announcement source."""
+    exchange = str((announcement or {}).get("exchange") or "").strip().lower()
+    if exchange:
+        return exchange
+    source = str((announcement or {}).get("source") or "").strip().lower()
+    if source.endswith("_announcement"):
+        return source[: -len("_announcement")]
+    return source
+
+
+def _attach_announcement_contracts(announcement_watchlist, all_perps, is_stock_token_func=None):
+    """
+    Attach only same-exchange contracts to exchange announcements.
+
+    A Bitget headline is not proof that an existing MEXC contract with the same
+    base is the announced Bitget market. Cross-exchange matches stay
+    informational and must not become tradeable new-listing candidates.
+    """
+    is_stock_token_func = is_stock_token_func or (lambda _symbol: False)
+    perps_by_base = {}
+    for p in all_perps or []:
+        sym = p.get("symbol", "")
+        if is_stock_token_func(sym):
+            continue
+        base = _clean_listing_base_symbol(p.get("base") or sym)
+        if base:
+            perps_by_base.setdefault(base, []).append(p)
+
+    announcement_backed_new = []
+    for ann in announcement_watchlist or []:
+        base = ann.get("base") or ""
+        ann_exchange = _announcement_exchange(ann)
+        matching = perps_by_base.get(base, [])
+        same_exchange = [p for p in matching if str(p.get("exchange") or "").lower() == ann_exchange]
+        cross_exchange = [p for p in matching if str(p.get("exchange") or "").lower() != ann_exchange]
+
+        ann["age_hours"] = _announcement_age_hours(ann)
+        ann["matched_contracts"] = [
+            {"exchange": p.get("exchange"), "symbol": p.get("symbol")}
+            for p in same_exchange[:2]
+        ]
+        ann["cross_exchange_contracts"] = [
+            {"exchange": p.get("exchange"), "symbol": p.get("symbol")}
+            for p in cross_exchange[:4]
+        ]
+        ann["contract_confirmed"] = bool(same_exchange)
+        ann["tradable_contract_confirmed"] = bool(same_exchange)
+        if not same_exchange:
+            ann["watch_reason"] = "contract_not_live_on_announcement_exchange"
+            continue
+
+        for p in same_exchange[:2]:
+            item = dict(p)
+            item["announcement_source"] = ann.get("source")
+            item["announcement_exchange"] = ann_exchange
+            item["announcement_title"] = ann.get("title")
+            item["announcement_url"] = ann.get("url")
+            item["announcement_release_ms"] = ann.get("release_ms")
+            item["announcement_base"] = base
+            item["contract_confirmed"] = True
+            item["tradable_contract_confirmed"] = True
+            item["contract_confirmation"] = "same_exchange_announcement_contract"
+            announcement_backed_new.append(item)
+
+    return announcement_backed_new
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LISTING DETECTION (Multi-Exchange Cache-Diff)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -979,38 +1047,18 @@ def detect_new_listings():
     # Official exchange announcements catch listings that cache-diff/timestamps miss
     # (spot, pre-market, or futures launch pages before the perp appears).
     announcement_watchlist = fetch_listing_announcements()
-    perps_by_base = {}
-    for p in all_perps:
-        sym = p.get("symbol", "")
-        if _is_stock_token(sym):
+    announcement_new = _attach_announcement_contracts(
+        announcement_watchlist,
+        all_perps,
+        is_stock_token_func=_is_stock_token,
+    )
+    for item in announcement_new:
+        sym = item.get("symbol", "")
+        if not sym or sym in known_new or _is_stock_token(sym):
             continue
-        base = _clean_listing_base_symbol(p.get("base") or sym)
-        if base:
-            perps_by_base.setdefault(base, []).append(p)
-
-    for ann in announcement_watchlist:
-        base = ann.get("base") or ""
-        matching = perps_by_base.get(base, [])
-        preferred = [p for p in matching if p.get("exchange") == ann.get("exchange")]
-        matched = preferred or matching[:1]
-        ann["age_hours"] = _announcement_age_hours(ann)
-        ann["matched_contracts"] = [
-            {"exchange": p.get("exchange"), "symbol": p.get("symbol")}
-            for p in matched[:2]
-        ]
-        for p in matched[:2]:
-            sym = p.get("symbol", "")
-            if not sym or sym in known_new or _is_stock_token(sym):
-                continue
-            item = dict(p)
-            item["announcement_source"] = ann.get("source")
-            item["announcement_title"] = ann.get("title")
-            item["announcement_url"] = ann.get("url")
-            item["announcement_release_ms"] = ann.get("release_ms")
-            item["announcement_base"] = base
-            all_new.append(item)
-            known_new.add(sym)
-            log.info(f"NLS: {sym} via {ann.get('source')} announcement erkannt ({ann.get('title')})")
+        all_new.append(item)
+        known_new.add(sym)
+        log.info(f"NLS: {sym} via {item.get('announcement_source')} announcement erkannt ({item.get('announcement_title')})")
 
     # ── MEXC isNew-Flag als zuverlässige Erkennung ──
     # MEXC markiert kürzlich gelistete Coins mit isNew=True
@@ -2550,10 +2598,14 @@ def run_new_listing_scanner():
                     "listing_detection": "exchange_announcement",
                     "listing_age_source_override": "announcement_time",
                     "announcement_source": nl.get("announcement_source"),
+                    "announcement_exchange": nl.get("announcement_exchange"),
                     "announcement_title": nl.get("announcement_title"),
                     "announcement_url": nl.get("announcement_url"),
                     "announcement_release_ms": nl.get("announcement_release_ms"),
                     "announcement_base": nl.get("announcement_base"),
+                    "contract_confirmed": bool(nl.get("contract_confirmed")),
+                    "tradable_contract_confirmed": bool(nl.get("tradable_contract_confirmed")),
+                    "contract_confirmation": nl.get("contract_confirmation"),
                 })
                 save_monitoring_list(monitoring)
 

@@ -3553,6 +3553,10 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             fields = _extract_new_listing_signal_fields(entry)
             if fields["listing_source"] != "new_listing":
                 continue
+            if _new_listing_exchange_mismatch(entry):
+                continue
+            if entry.get("announcement_source") and "contract_confirmed" in entry and not _alert_bool(entry.get("contract_confirmed")):
+                continue
             symbol = _display_crypto_contract_symbol(entry.get("symbol") or sig.get("symbol") or "")
             if not symbol:
                 continue
@@ -3581,6 +3585,10 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
 
     for item in payload.get("monitoring", []) or []:
         if not isinstance(item, dict) or item.get("source") != "new_listing":
+            continue
+        if _new_listing_exchange_mismatch(item):
+            continue
+        if item.get("announcement_source") and "contract_confirmed" in item and not _alert_bool(item.get("contract_confirmed")):
             continue
         category = str(item.get("trade_category", "") or "")
         if category in ("ALREADY_DUMPED", "NEW_LISTING_EXPIRED"):
@@ -3634,11 +3642,11 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
     for c in deduped.values():
         score = c.get("exh_score") or 0
         pump_pct = c.get("pump_pct") or 0
-        from_ath_pct = c.get("from_ath_pct") or 0
+        flags = set(c.get("risk_flags") or [])
         watch_quality = (
             score >= _NEW_LISTING_WATCH_MIN_SCORE
-            or from_ath_pct >= 3
-            or "micro_trigger_missing" in (c.get("risk_flags") or [])
+            and "safety_failed" not in flags
+            and "early_crack_score_too_low" not in flags
         )
         if pump_pct >= _NEW_LISTING_WATCH_MIN_PUMP_PCT and watch_quality:
             visible.append(c)
@@ -3703,7 +3711,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC Kontext</th>
     <th style="padding:8px;text-align:left">Warnungen</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Beobachten-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}% plus Watch-Qualitaet. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Beobachten-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Watch-Score >= {_NEW_LISTING_WATCH_MIN_SCORE} und ohne Safety-Fail. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
     return _send_email_alert(f"Crypto New Listing beobachten: {len(candidates)} Coin(s)", body)
 
@@ -11648,6 +11656,25 @@ def _display_crypto_contract_symbol(symbol: str) -> str:
     return display or str(symbol or "").strip().upper()
 
 
+def _listing_announcement_exchange(value: Any) -> str:
+    """Normalize announcement source names to their exchange."""
+    source = str(value or "").strip().lower()
+    if source.endswith("_announcement"):
+        source = source[: -len("_announcement")]
+    return source
+
+
+def _new_listing_exchange_mismatch(row: Dict[str, Any]) -> bool:
+    """Block stale rows where a headline source and tradable contract disagree."""
+    ann_exchange = _listing_announcement_exchange(
+        row.get("announcement_exchange") or row.get("announcement_source")
+    )
+    trade_exchange = str(row.get("exchange") or "").strip().lower()
+    if not ann_exchange or not trade_exchange:
+        return False
+    return ann_exchange != trade_exchange
+
+
 def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert rich module results to the flat table shape used by the FastAPI UI."""
     flat = []
@@ -11673,6 +11700,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "announcement_title": entry.get("announcement_title", ""),
             "announcement_url": entry.get("announcement_url", ""),
             "announcement_source": entry.get("announcement_source", ""),
+            "announcement_exchange": entry.get("announcement_exchange", ""),
+            "contract_confirmed": entry.get("contract_confirmed"),
+            "tradable_contract_confirmed": entry.get("tradable_contract_confirmed"),
             "change_24h": entry.get("change_24h", 0),
             "volume_24h": pump.get("volume_usd_24h", 0),
             "pump_pct": pump.get("pump_pct", 0),
@@ -11750,6 +11780,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "announcement_title": item.get("announcement_title", ""),
             "announcement_url": item.get("announcement_url", ""),
             "announcement_source": item.get("announcement_source", ""),
+            "announcement_exchange": item.get("announcement_exchange", ""),
+            "contract_confirmed": item.get("contract_confirmed"),
+            "tradable_contract_confirmed": item.get("tradable_contract_confirmed"),
             "pump_pct": item.get("pump_pct", 0),
             "from_ath_pct": item.get("from_ath_pct", 0),
             "exhaustion_score": item.get("exh_score", 0),
@@ -11801,9 +11834,16 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
         contracts = ann.get("matched_contracts", []) if isinstance(ann.get("matched_contracts", []), list) else []
         exchange = ann.get("exchange", "")
         contract = ""
-        if contracts:
-            exchange = contracts[0].get("exchange") or exchange
-            contract = contracts[0].get("symbol") or ""
+        same_exchange_contracts = [
+            c for c in contracts
+            if str(c.get("exchange") or "").lower() == str(exchange or "").lower()
+        ]
+        if same_exchange_contracts:
+            contract = same_exchange_contracts[0].get("symbol") or ""
+        contract_confirmed = bool(same_exchange_contracts or ann.get("contract_confirmed"))
+        warnings = ["announcement_watch", "wait_for_dump_trigger"]
+        if not contract_confirmed:
+            warnings.append("contract_not_live_on_announcement_exchange")
         flat.append({
             "symbol": base,
             "exchange": exchange,
@@ -11820,6 +11860,9 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "listing_age_source": "announcement_time",
             "listing_source": ann.get("source", ""),
             "listing_trade_ok": False,
+            "contract_confirmed": contract_confirmed,
+            "tradable_contract_confirmed": contract_confirmed,
+            "cross_exchange_contracts": ann.get("cross_exchange_contracts", []),
             "trade_category": "ANNOUNCEMENT_WATCH",
             "trade_action": "BEOBACHTEN",
             "trade_signal": "BEOBACHTEN",
@@ -11827,8 +11870,8 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "rr_effective": 0,
             "risk_pct": 0,
             "safety_ok": False,
-            "safety_warnings": ["announcement_only_wait_for_trigger"],
-            "risk_flags": ["announcement_watch", "wait_for_dump_trigger"],
+            "safety_warnings": warnings,
+            "risk_flags": warnings,
             "announcement_title": ann.get("title", ""),
             "announcement_url": ann.get("url", ""),
             "announcement_source": ann.get("source", ""),

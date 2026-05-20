@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from modules.new_listing_scanner import (
+    _attach_announcement_contracts,
     _clean_listing_base_symbol,
     _extract_listing_symbols_from_title,
     _is_tradeable_short_signal,
@@ -94,6 +95,54 @@ def test_mexc_announcement_parser_extracts_crypto_and_filters_stock_futures():
     assert rows[0]["source"] == "mexc_announcement"
     assert rows[0]["symbols"] == ["HOOLI"]
     assert rows[0]["url"].endswith("/announcements/article/hooli")
+
+
+def test_listing_announcement_does_not_fallback_to_other_exchange_contract():
+    announcements = [{
+        "source": "bitget_announcement",
+        "exchange": "bitget",
+        "base": "UP",
+        "symbols": ["UP"],
+        "title": "Bitget to list Superform (UP)",
+        "release_ms": int(time.time() * 1000),
+    }]
+    perps = [{
+        "exchange": "mexc",
+        "symbol": "UP_USDT",
+        "base": "UP",
+    }]
+
+    backed_new = _attach_announcement_contracts(announcements, perps)
+
+    assert backed_new == []
+    assert announcements[0]["contract_confirmed"] is False
+    assert announcements[0]["matched_contracts"] == []
+    assert announcements[0]["cross_exchange_contracts"] == [{"exchange": "mexc", "symbol": "UP_USDT"}]
+    assert announcements[0]["watch_reason"] == "contract_not_live_on_announcement_exchange"
+
+
+def test_listing_announcement_creates_candidate_only_for_same_exchange_contract():
+    announcements = [{
+        "source": "bitget_announcement",
+        "exchange": "bitget",
+        "base": "UP",
+        "symbols": ["UP"],
+        "title": "Bitget to list Superform (UP)",
+        "release_ms": int(time.time() * 1000),
+    }]
+    perps = [
+        {"exchange": "mexc", "symbol": "UP_USDT", "base": "UP"},
+        {"exchange": "bitget", "symbol": "UPUSDT", "base": "UP"},
+    ]
+
+    backed_new = _attach_announcement_contracts(announcements, perps)
+
+    assert len(backed_new) == 1
+    assert backed_new[0]["exchange"] == "bitget"
+    assert backed_new[0]["symbol"] == "UPUSDT"
+    assert backed_new[0]["announcement_exchange"] == "bitget"
+    assert backed_new[0]["contract_confirmed"] is True
+    assert announcements[0]["matched_contracts"] == [{"exchange": "bitget", "symbol": "UPUSDT"}]
 
 
 def test_cleanup_expires_new_listing_by_exchange_listing_time_not_detection_time():

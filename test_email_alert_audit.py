@@ -1810,3 +1810,43 @@ def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
     assert reminders[0]["status"] == "triggered"
     assert reminders[0]["trigger_result"]["reason"] == "5m_breakout_volume_confirmed"
     assert sent and sent[0][2] is True
+
+
+def test_new_listing_watch_mail_blocks_cross_exchange_announcement_mismatch():
+    payload = {
+        "monitoring": [{
+            "symbol": "UP_USDT",
+            "exchange": "mexc",
+            "source": "new_listing",
+            "announcement_source": "bitget_announcement",
+            "announcement_title": "Bitget to list Superform (UP)",
+            "trade_category": "NEW_LISTING_WATCH",
+            "listing_age_hours": 20.1,
+            "pump_pct": 24.8,
+            "from_ath_pct": 3.7,
+            "exh_score": 55,
+            "rr_effective": 5.0,
+            "risk_flags": [],
+        }]
+    }
+
+    assert api._new_listing_watch_candidates(payload) == []
+
+
+def test_new_listing_watch_mail_requires_score_and_safety_ok():
+    payload = {
+        "monitoring": [{
+            "symbol": "LOW_USDT",
+            "exchange": "mexc",
+            "source": "new_listing",
+            "trade_category": "NEW_LISTING_WATCH",
+            "listing_age_hours": 20.1,
+            "pump_pct": 24.8,
+            "from_ath_pct": 3.7,
+            "exh_score": 21,
+            "rr_effective": 5.0,
+            "risk_flags": ["safety_failed", "early_crack_score_too_low", "micro_trigger_missing"],
+        }]
+    }
+
+    assert api._new_listing_watch_candidates(payload) == []

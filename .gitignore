@@ -12,4 +12,5 @@ live_page.png
 local_frontend.png
 tmp_*.html
 .codex_tmp_html_checks/
+.pytest_tmp/
 data_cache/auth/
