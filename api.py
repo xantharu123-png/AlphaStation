@@ -2024,6 +2024,94 @@ def _early_mover_mail_trigger_block_reason(trigger_check: Optional[Dict[str, Any
     return None
 
 
+def _early_mover_entry_score(row: Dict[str, Any]) -> int:
+    """Score whether this Early-Mover is actionable now, separate from setup quality."""
+    setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
+    action = str(row.get("trade_action", row.get("entry_status", "")) or "").upper()
+    signal = str(row.get("trade_signal", "") or "").upper()
+    entry_status = str(row.get("entry_status", "") or "").upper()
+    risk_level = str(row.get("risk_level", "") or "").upper()
+    flags = {str(flag).lower() for flag in (row.get("risk_flags") or [])}
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+
+    score = setup_score
+    if signal == "JETZT_TRADEN":
+        score += 8
+    elif action == "LONG_TRIGGER" or entry_status == "WAIT_FOR_TRIGGER":
+        score -= 38
+    elif action == "WAIT_FOR_RETEST" or entry_status == "WAIT_FOR_RETEST":
+        score -= 30
+    elif action == "WAIT_FOR_CONTINUATION":
+        score -= 42
+    elif action == "WAIT_FOR_LIQUIDITY":
+        score -= 50
+    elif action == "WAIT_FOR_BTC_CONFIRMATION":
+        score -= 45
+    elif action in ("NO_LONG_CHASE", "NO_TRADE") or signal == "NICHT_TRADEN":
+        score = min(score, 25)
+    elif signal in ("WARTEN", "BEOBACHTEN"):
+        score -= 22
+
+    if risk_level == "HIGH":
+        score -= 30
+    elif risk_level == "MEDIUM":
+        score -= 10
+
+    flag_penalties = {
+        "thin_orderbook": 35,
+        "market_impact_risk": 35,
+        "thin_perp_liquidity": 30,
+        "no_perp_execution_market": 28,
+        "turnover_without_alpha": 18,
+        "extreme_turnover_churn": 20,
+        "extreme_volume_turnover": 14,
+        "very_high_volume_turnover": 14,
+        "high_volume_turnover": 8,
+        "btc_headwind": 18,
+        "partial_crypto_data": 18,
+        "data_warning": 15,
+        "chased_from_entry": 16,
+        "overheated_phase3": 28,
+        "oi_snapshot_only": 6,
+    }
+    score -= sum(flag_penalties.get(flag, 0) for flag in flags)
+
+    live_rr = _alert_float(row.get("live_rr_ratio", setup.get("live_rr")), 0) or 0
+    if live_rr and live_rr < 1.5:
+        score -= 16
+    elif signal == "JETZT_TRADEN" and live_rr >= 2.0:
+        score += 4
+
+    distance_r = _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")), 0) or 0
+    if distance_r >= 0.75:
+        score -= 16
+    elif distance_r >= 0.35:
+        score -= 8
+
+    execution_score = _alert_float(row.get("execution_quality_score"), None)
+    if signal == "JETZT_TRADEN" and execution_score is not None:
+        score = max(score, int(setup_score * 0.55 + execution_score * 0.45))
+
+    return max(0, min(100, int(round(score))))
+
+
+def _early_mover_entry_score_label(row: Dict[str, Any]) -> str:
+    score = int(_alert_float(row.get("entry_score"), 0) or 0)
+    signal = str(row.get("trade_signal", "") or "").upper()
+    action = str(row.get("trade_action", "") or "").upper()
+    if signal == "JETZT_TRADEN":
+        return "ENTRY OK"
+    if action == "WAIT_FOR_RETEST":
+        return "RETEST WARTEN"
+    if action == "LONG_TRIGGER":
+        return "5M WARTEN"
+    if score >= 75:
+        return "FAST BEREIT"
+    if score >= 50:
+        return "WATCH"
+    return "NICHT BEREIT"
+
+
 def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> None:
     """Expose a simple user-facing decision: observe, wait, no trade, or trade now."""
     action = str(row.get("trade_action", "") or "").upper()
@@ -2106,6 +2194,9 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["signal_quality"] = "observe"
         row["entry_status"] = "BEOBACHTEN"
         row["alertable_crypto"] = False
+
+    row["entry_score"] = _early_mover_entry_score(row)
+    row["entry_score_label"] = _early_mover_entry_score_label(row)
 
 
 def _reminder_now() -> float:
@@ -9711,13 +9802,14 @@ EXCLUDED_CRYPTO_SYMBOLS = {
     "USDP", "PYUSD", "FRAX", "LUSD", "GUSD", "DOLA", "SUSD", "EUSD", "USDL",
     "USDY", "USDX", "EURC", "EUROC", "WBTC", "CBTC", "TBTC", "LBTC", "WETH",
     "WBNB", "STETH", "WSTETH", "RETH", "CBETH", "WBETH", "WEETH", "EZETH",
-    "METH", "RSETH", "SFRXETH", "FRXETH",
+    "METH", "RSETH", "SFRXETH", "FRXETH", "PAXG", "XAUT",
 }
 EXCLUDED_CRYPTO_TEXT_TERMS = (
     "stablecoin", "stable coin", "wrapped ", "bridged ", "liquid staked",
     "liquid-staked", "staked ether", "staked eth", "staked bitcoin",
     "staked btc", "staking ether", "staking eth", "tether", "usd coin",
-    "paypal usd", "binance usd", "frax", "ethena usde",
+    "paypal usd", "binance usd", "frax", "ethena usde", "pax gold",
+    "tether gold", "tokenized gold", "gold-backed", "gold backed",
 )
 PERP_OI_HISTORY_CACHE = "/tmp/early_movers_perp_oi_history.json"
 
@@ -9976,6 +10068,24 @@ def _build_early_mover_long_setup(
         tp2 = tp1 + max(risk, range_24h * 0.35)
         tp2_source = "measured_move_fallback"
 
+    min_tp1_pct = 0.055 if phase == 1 else 0.045
+    min_tp2_pct = 0.095 if phase == 1 else 0.075
+    if mcap and mcap < 20_000_000:
+        min_tp1_pct = max(min_tp1_pct, 0.065)
+        min_tp2_pct = max(min_tp2_pct, 0.11)
+    if vol_mcap >= _EARLY_MOVER_TURNOVER_WARN_PCT:
+        min_tp1_pct = max(min_tp1_pct, 0.06)
+        min_tp2_pct = max(min_tp2_pct, 0.10)
+
+    tp1_floor = setup_entry * (1 + min_tp1_pct)
+    tp2_floor = setup_entry * (1 + min_tp2_pct)
+    if tp1 < tp1_floor:
+        tp1 = tp1_floor
+        tp1_source = "minimum_momentum_target_floor"
+    if tp2 < max(tp2_floor, tp1 + risk * 0.75):
+        tp2 = max(tp2_floor, tp1 + risk * 0.75)
+        tp2_source = "minimum_momentum_target_floor"
+
     rr_tp1 = round((tp1 - setup_entry) / risk, 2) if risk > 0 else 0
     rr_tp2 = round((tp2 - setup_entry) / risk, 2) if risk > 0 else 0
     live_entry = max(price, setup_entry)
@@ -10042,6 +10152,10 @@ def _build_early_mover_long_setup(
         "stop_source": stop_source,
         "tp1_source": tp1_source,
         "tp2_source": tp2_source,
+        "target_floor_pct": {
+            "tp1": round(min_tp1_pct * 100, 2),
+            "tp2": round(min_tp2_pct * 100, 2),
+        },
         "trade_action": trade_action,
         "action_label": action_label,
         "entry_status": entry_status,
@@ -11111,6 +11225,7 @@ def fetch_early_movers(_prefetched_perps=None):
             setup_flags.append("oi_snapshot_only")
         entry.update({
             "direction": "LONG",
+            "setup_score": final_score,
             "entry": setup.get("entry"),
             "live_entry": entry.get("Price"),
             "stop_loss": setup.get("stop_loss"),
@@ -11139,7 +11254,14 @@ def fetch_early_movers(_prefetched_perps=None):
 
     # Sortierung: Score absteigend — Coins aus ALLEN Phasen mischen
     # (vorher: Phase 1 zuerst → bei 300+ Phase-1-Coins kamen Breakout/Überhitzt nie in Top 50)
-    all_unified = sorted(seen_symbols.values(), key=lambda x: -x["score"])
+    all_unified = sorted(
+        seen_symbols.values(),
+        key=lambda x: (
+            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(x.get("entry_score") or 0),
+            -int(x.get("setup_score") or x.get("score") or 0),
+        ),
+    )
 
     # Proportionale Auswahl: Jede Phase bekommt mindestens ihre Top-Coins
     # damit Breakout und Überhitzt IMMER sichtbar sind
@@ -11155,7 +11277,15 @@ def fetch_early_movers(_prefetched_perps=None):
     p1_coins = phase_1[:p1_slots]
 
     # Zusammenfügen: Phase 2+3 zuerst (wichtiger), dann Phase 1, jeweils nach Score
-    unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (1 if x["phase"] in (2, 3) else 2, -x["score"]))
+    unified = sorted(
+        p1_coins + p2_coins + p3_coins,
+        key=lambda x: (
+            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(x.get("entry_score") or 0),
+            1 if x["phase"] in (2, 3) else 2,
+            -int(x.get("setup_score") or x.get("score") or 0),
+        ),
+    )
 
     # Verify up to the top-1000 scored candidates before cutting the display list.
     trigger_checks = 0
@@ -11171,6 +11301,15 @@ def fetch_early_movers(_prefetched_perps=None):
         _apply_early_mover_signal_state(item, trigger_check)
 
     # Rebuild display selection after trigger checks so actionable rows can bubble up.
+    all_unified = sorted(
+        all_unified,
+        key=lambda x: (
+            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(x.get("entry_score") or 0),
+            1 if x["phase"] in (2, 3) else 2,
+            -int(x.get("setup_score") or x.get("score") or 0),
+        ),
+    )
     phase_1 = [c for c in all_unified if c["phase"] == 1]
     phase_2 = [c for c in all_unified if c["phase"] == 2]
     phase_3 = [c for c in all_unified if c["phase"] == 3]
@@ -11178,13 +11317,22 @@ def fetch_early_movers(_prefetched_perps=None):
     p3_coins = phase_3
     p1_slots = max(0, MAX_DISPLAY - len(p2_coins) - len(p3_coins))
     p1_coins = phase_1[:p1_slots]
-    unified = sorted(p1_coins + p2_coins + p3_coins, key=lambda x: (1 if x["phase"] in (2, 3) else 2, -x["score"]))
+    unified = sorted(
+        p1_coins + p2_coins + p3_coins,
+        key=lambda x: (
+            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(x.get("entry_score") or 0),
+            1 if x["phase"] in (2, 3) else 2,
+            -int(x.get("setup_score") or x.get("score") or 0),
+        ),
+    )
     unified = sorted(
         all_unified,
         key=lambda x: (
             0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(x.get("entry_score") or 0),
             1 if x["phase"] in (2, 3) else 2,
-            -x["score"],
+            -int(x.get("setup_score") or x.get("score") or 0),
         ),
     )[:MAX_DISPLAY]
 
@@ -11192,8 +11340,9 @@ def fetch_early_movers(_prefetched_perps=None):
         unified,
         key=lambda x: (
             0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(x.get("entry_score") or 0),
             1 if x["phase"] in (2, 3) else 2,
-            -x["score"],
+            -int(x.get("setup_score") or x.get("score") or 0),
         ),
     )
     p1_coins = [c for c in unified if c["phase"] == 1]

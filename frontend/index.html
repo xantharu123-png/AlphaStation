@@ -2987,14 +2987,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const timingHeadline = (() => {
         if (finalNoTrade) return 'NICHT TRADEN';
         if (finalWaitRetest) return 'WARTEN AUF RETEST';
-        if (finalWaitTrigger) return 'TRIGGER FEHLT';
+        if (finalWaitTrigger) return '5M TRIGGER WARTEN';
         if (finalWaitContinuation) return 'WARTEN AUF FORTSETZUNG';
         if (finalWatchOnly) return 'BEOBACHTEN';
         if (tradeSignal === 'JETZT_TRADEN' && finalTradeable) return 'JETZT TRADEN';
         if (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_TRADE' || normalizedSetupAction === 'NO_LONG_CHASE') return 'NICHT TRADEN';
         if (normalizedSetupAction === 'WAIT_FOR_RETEST') return 'WARTEN AUF RETEST';
         if (normalizedSetupAction === 'WAIT_FOR_BTC_CONFIRMATION') return 'BTC BESTAETIGUNG FEHLT';
-        if (normalizedSetupAction.includes('TRIGGER')) return 'TRIGGER FEHLT';
+        if (normalizedSetupAction.includes('TRIGGER')) return '5M TRIGGER WARTEN';
         if (normalizedSetupAction === 'WAIT_FOR_CONTINUATION') return 'WARTEN AUF FORTSETZUNG';
         return 'BEOBACHTEN';
     })();
@@ -5137,7 +5137,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [stats, setStats] = useState(scanCache.em_stats || null);
     const [isScanning, setIsScanning] = useState(false);
     const [phaseFilter, setPhaseFilter] = useState(0); // 0=alle, 1/2/3=Phase
-    const { sorted, toggleSort, sortKey } = useSortable(coins, 'score');
+    const { sorted, toggleSort, sortKey } = useSortable(coins, 'entry_score');
     const pollTimeoutRef = useRef(null);
 
     const formatPrice = (price) => {
@@ -5153,8 +5153,8 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
-        if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST', cls: 'signal-lightdiv' };
-        if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'TRIGGER FEHLT', cls: 'signal-abwarten' };
+        if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
+        if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: '5M WARTEN', cls: 'signal-abwarten' };
         if (action === 'WAIT_FOR_CONTINUATION') return { label: 'FORTSETZUNG', cls: 'signal-lightdiv' };
         if (signal === 'WARTEN' || action === 'WAIT_FOR_BTC_CONFIRMATION') return { label: 'WARTEN', cls: 'signal-lightdiv' };
         return { label: 'WATCH', cls: 'signal-abwarten' };
@@ -5181,7 +5181,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'LIQUIDITAET FEHLT', detail: 'Orderbuch/Perp zu duenn', cls: 'bg-yellow-100 text-yellow-800' };
         }
         if (action === 'LONG_TRIGGER') {
-            return { label: 'TRIGGER FEHLT', detail: 'Execution-Trigger fehlt', cls: 'bg-blue-100 text-blue-800' };
+            return { label: '5M TRIGGER WARTEN', detail: 'Noch kein 5m-Entry', cls: 'bg-blue-100 text-blue-800' };
         }
         if (signal === 'WARTEN') {
             return { label: 'WARTEN', detail: 'Noch keine Entry-Freigabe', cls: 'bg-yellow-100 text-yellow-800' };
@@ -5190,7 +5190,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     };
     const earlyRiskLabelMap = {
         observe_only_scanner: 'nur Beobachtung',
-        no_intraday_execution_trigger: '5m Trigger fehlt',
+        no_intraday_execution_trigger: '5m Entry abwarten',
         retest_trigger_missing: 'Retest fehlt',
         no_market_entry: 'kein Market-Entry',
         extreme_volume_turnover: 'extremer Umsatz',
@@ -5232,7 +5232,13 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const getSetupScoreTitle = (item) => {
         const raw = item.raw_score != null ? `Raw ${item.raw_score}` : 'Raw n/a';
         const source = item.source || 'Early Mover';
-        return `Setup Score = Chance/Staerke (${source}, ${raw}). Timing entscheidet, ob jetzt gehandelt wird.`;
+        return `Setup Score = Coin-Qualitaet (${source}, ${raw}). Entry Score = Handelsnaehe jetzt.`;
+    };
+    const targetPctFromEntry = (target, entry) => {
+        const t = Number(target);
+        const e = Number(entry);
+        if (!Number.isFinite(t) || !Number.isFinite(e) || e <= 0) return '';
+        return `+${(((t - e) / e) * 100).toFixed(1)}%`;
     };
 
     useEffect(() => {
@@ -5326,7 +5332,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                <b>Score/Grade</b> = Setup-Qualitaet. <b>Timing</b> = ob jetzt gehandelt wird. Ein S-Setup ist erst ein Trade, wenn Trigger oder Retest bestaetigt sind.
+                <b>Setup</b> = Coin-Qualitaet. <b>Entry</b> = ob jetzt gehandelt werden darf. Hoher Setup-Score ohne Entry-Score bedeutet: beobachten, nicht kaufen.
             </div>
 
             {/* Unified Phase Table */}
@@ -5340,7 +5346,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change24h')}>24h%{sortKey === 'Change24h' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change7d')}>7d%{sortKey === 'Change7d' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('VolMCapRatio')}>Vol/MCap{sortKey === 'VolMCapRatio' && ' \u2193'}</th>
-                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Score = Setup-Staerke, Timing = Handelsfreigabe jetzt" onClick={() => toggleSort('score')}>Setup / Timing{sortKey === 'score' && ' \u2193'}</th>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Setup = Coin-Staerke, Entry = Handelsfreigabe jetzt" onClick={() => toggleSort('entry_score')}>Setup / Entry{sortKey === 'entry_score' && ' \u2193'}</th>
                             <th className="text-left py-2 px-2">Aktion</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('entry')}>Entry{sortKey === 'entry' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2">TP1 / TP2</th>
@@ -5353,6 +5359,11 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const timing = timingBadge(item);
                             const actionView = actionBadge(item);
                             const primaryReason = getPrimaryEntryReason(item);
+                            const setupScore = item.setup_score ?? item.score ?? 0;
+                            const entryScore = item.entry_score ?? 0;
+                            const entryScoreClass = entryScore >= 80 ? 'signal-bullish' : entryScore >= 55 ? 'signal-lightdiv' : 'signal-abwarten';
+                            const tp1Pct = targetPctFromEntry(item.tp1, item.entry);
+                            const tp2Pct = targetPctFromEntry(item.tp2, item.entry);
                             return (
                             <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                 <td className="py-3 px-2 text-center" title={item.phase_label}>
@@ -5369,11 +5380,11 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className={`py-3 px-2 text-right ${(item.VolMCapRatio||0) > 100 ? 'color-negative font-bold' : (item.VolMCapRatio||0) > 60 ? 'text-yellow-600' : ''}`}>{item.VolMCapRatio ? `${item.VolMCapRatio.toFixed(0)}%` : '\u2014'}</td>
                                 <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | Entry-Risk ${item.risk_level || '-'}: ${getEntryRiskTitle(item)}`}>
                                     <div className="flex items-center justify-center gap-1">
-                                        <span className={`signal-badge ${item.score >= 70 ? 'signal-bullish' : item.score >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.grade || ''} {item.score}</span>
-                                        <span className={`signal-badge ${timing.cls}`}>{timing.label}</span>
+                                        <span className={`signal-badge ${setupScore >= 70 ? 'signal-bullish' : setupScore >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.grade || ''} {setupScore}</span>
+                                        <span className={`signal-badge ${entryScoreClass}`}>Entry {entryScore}</span>
                                     </div>
                                     <div className="text-[11px] text-gray-500 mt-1 max-w-[170px] truncate mx-auto">
-                                        Entry-Risk: <span className={item.risk_level === 'LOW' ? 'color-positive' : item.risk_level === 'MEDIUM' ? 'text-yellow-600' : 'color-negative'}>{item.risk_level || '-'}</span>
+                                        <span className={`font-semibold ${timing.cls}`}>{timing.label}</span> - Risk <span className={item.risk_level === 'LOW' ? 'color-positive' : item.risk_level === 'MEDIUM' ? 'text-yellow-600' : 'color-negative'}>{item.risk_level || '-'}</span>
                                     </div>
                                     {primaryReason && (
                                         <div className="text-[11px] text-amber-700 max-w-[170px] truncate mx-auto">
@@ -5389,7 +5400,13 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
                                 <td className="py-3 px-2 text-right text-xs">
-                                    {item.tp1 ? <><span className="color-positive">{formatPrice(item.tp1)}</span> / <span className="color-positive">{formatPrice(item.tp2)}</span></> : '\u2014'}
+                                    {item.tp1 ? (
+                                        <>
+                                            <div><span className="color-positive">{formatPrice(item.tp1)}</span> <span className="text-gray-400">{tp1Pct}</span></div>
+                                            <div><span className="color-positive">{formatPrice(item.tp2)}</span> <span className="text-gray-400">{tp2Pct}</span></div>
+                                            {item.trade_signal !== 'JETZT_TRADEN' && <div className="text-[10px] text-gray-400">Plan nach Trigger</div>}
+                                        </>
+                                    ) : '\u2014'}
                                 </td>
                                 <td className="py-3 px-2 text-center text-xs" title={item.btc_context ? `BTC 24h ${item.btc_context.btc_24h}% | Alpha ${item.btc_context.alpha_24h}%` : ''}>
                                     {item.btc_context ? <span className={item.btc_context.tailwind ? 'color-positive' : 'text-yellow-600'}>{item.btc_context.tailwind ? 'Tailwind' : 'Check'}</span> : '\u2014'}

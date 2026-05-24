@@ -135,6 +135,18 @@ def test_early_mover_filters_stables_wrapped_and_liquid_staking(monkeypatch):
     assert result["stats"]["excluded_assets"] >= 1
 
 
+def test_early_mover_filters_tokenized_gold_assets(monkeypatch):
+    paxg = _volume_coin(symbol="paxg", coin_id="pax-gold")
+    paxg["name"] = "PAX Gold"
+    monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), paxg])
+    monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
+
+    result = api.fetch_early_movers(_prefetched_perps={})
+
+    assert all(c["Symbol"] != "PAXG" for c in result["coins"])
+    assert result["stats"]["excluded_assets"] >= 1
+
+
 def test_early_mover_btc_headwind_blocks_active_long_trigger(monkeypatch):
     weak_btc = _btc(change_24h=-4.0, change_7d=-8.0)
     coin = _volume_coin(change_24h=3.5)
@@ -156,6 +168,8 @@ def test_early_mover_wait_states_keep_specific_timing_label():
     assert row["trade_signal"] == "WARTEN"
     assert row["entry_status"] == "WAIT_FOR_TRIGGER"
     assert "Trigger" in row["signal_label"]
+    assert row["entry_score"] < 60
+    assert row["entry_score_label"] == "5M WARTEN"
 
     retest = {"trade_action": "WAIT_FOR_RETEST"}
     api._apply_early_mover_signal_state(retest, {"ok": False, "reason": "no_fresh_5m_trigger"})
@@ -163,6 +177,29 @@ def test_early_mover_wait_states_keep_specific_timing_label():
     assert retest["trade_signal"] == "WARTEN"
     assert retest["entry_status"] == "WAIT_FOR_RETEST"
     assert "Retest" in retest["signal_label"]
+    assert retest["entry_score_label"] == "RETEST WARTEN"
+
+
+def test_early_mover_targets_have_meaningful_momentum_floor():
+    setup = api._build_early_mover_long_setup(
+        {
+            "Price": 6.14,
+            "High24h": 6.33,
+            "Low24h": 5.95,
+            "MCap": 150_000_000,
+            "VolMCapRatio": 16,
+            "Change24h": 1.0,
+            "Change7d": 3.9,
+        },
+        phase=1,
+        score=84,
+        btc_24h=0.2,
+        btc_7d=0.5,
+    )
+
+    assert setup["tp1"] >= round(setup["entry"] * 1.055, 4)
+    assert setup["tp2"] >= round(setup["entry"] * 1.095, 4)
+    assert setup["tp1_source"] == "minimum_momentum_target_floor"
 
 
 def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
