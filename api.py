@@ -1980,6 +1980,9 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
         try:
             bars = fetch_candles_for(str(contract), exchange, timeframe=timeframe, count=count)
             scored = _score_early_mover_trigger_bars(row, bars, timeframe, profile)
+            vrvp = _early_mover_vrvp_from_bars(bars)
+            if vrvp:
+                scored["vrvp"] = vrvp
         except Exception as exc:
             scored = {"ok": False, "reason": "trigger_fetch_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
         scored.update({"symbol": symbol, "contract": contract, "exchange": exchange})
@@ -2076,6 +2079,8 @@ def _early_mover_entry_score(row: Dict[str, Any]) -> int:
         "weak_structural_targets": 26,
     }
     score -= sum(flag_penalties.get(flag, 0) for flag in flags)
+    if "vrvp_target_confirmed" in flags:
+        score += 5
 
     live_rr = _alert_float(row.get("live_rr_ratio", setup.get("live_rr")), 0) or 0
     if live_rr and live_rr < 1.5:
@@ -2113,6 +2118,150 @@ def _early_mover_entry_score_label(row: Dict[str, Any]) -> str:
     return "NICHT BEREIT"
 
 
+def _early_mover_vrvp_from_bars(bars: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Build compact VRVP levels from exchange candles for target selection."""
+    if not bars or len(bars) < 20:
+        return None
+    ohlcv = []
+    for bar in bars:
+        high = _alert_float(bar.get("high"))
+        low = _alert_float(bar.get("low"))
+        close = _alert_float(bar.get("close"))
+        open_ = _alert_float(bar.get("open"), close)
+        volume = _alert_float(bar.get("volume"), 0) or 0
+        if high is None or low is None or close is None or high <= 0 or low <= 0 or high < low:
+            continue
+        ohlcv.append({"open": open_, "high": high, "low": low, "close": close, "volume": volume})
+    if len(ohlcv) < 20:
+        return None
+
+    profile = calculate_volume_profile(ohlcv, num_bins=18)
+    if not profile:
+        return None
+
+    levels = []
+
+    def _add_level(price: Any, source: str, weight: int) -> None:
+        number = _alert_float(price)
+        if number is None or number <= 0:
+            return
+        levels.append({
+            "price": _round_crypto_price(number),
+            "source": source,
+            "weight": weight,
+        })
+
+    _add_level(profile.get("vah"), "vrvp_vah_resistance", 90)
+    _add_level(profile.get("poc"), "vrvp_poc_acceptance", 85)
+    _add_level(profile.get("val"), "vrvp_val_support", 75)
+    for hvn in profile.get("hvns") or []:
+        _add_level(hvn.get("mid"), "vrvp_hvn_resistance", 80)
+    for lvn in profile.get("lvns") or []:
+        _add_level(lvn.get("high"), "vrvp_lvn_upper_edge", 65)
+
+    unique = {}
+    for level in levels:
+        key = round(float(level["price"]), 10)
+        if key not in unique or level["weight"] > unique[key]["weight"]:
+            unique[key] = level
+
+    return {
+        "poc": _round_crypto_price(profile.get("poc")),
+        "vah": _round_crypto_price(profile.get("vah")),
+        "val": _round_crypto_price(profile.get("val")),
+        "levels": sorted(unique.values(), key=lambda item: item["price"]),
+        "source": "exchange_vrvp_5m",
+    }
+
+
+def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str, Any]]) -> None:
+    """Use VRVP resistance/acceptance levels as TP candidates when they are valid."""
+    if not isinstance(vrvp, dict):
+        return
+    entry = _alert_float(row.get("entry"))
+    stop = _alert_float(row.get("stop_loss", row.get("stop")))
+    if entry is None or stop is None or entry <= 0 or stop <= 0 or stop >= entry:
+        return
+
+    risk = max(entry - stop, entry * 0.01)
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    target_req = setup.get("target_min_pct_required") if isinstance(setup.get("target_min_pct_required"), dict) else {}
+    min_tp1_pct = (_alert_float(target_req.get("tp1"), 5.5) or 5.5) / 100
+    min_tp2_pct = (_alert_float(target_req.get("tp2"), 9.5) or 9.5) / 100
+    min_tp1 = max(entry + risk * 1.35, entry * (1 + min_tp1_pct))
+    min_tp2 = max(entry + risk * 2.6, entry * (1 + min_tp2_pct))
+
+    levels = [
+        level for level in (vrvp.get("levels") or [])
+        if _alert_float(level.get("price")) is not None and _alert_float(level.get("price")) > entry
+    ]
+    if not levels:
+        return
+
+    valid_tp1 = [level for level in levels if (_alert_float(level.get("price")) or 0) >= min_tp1]
+    if not valid_tp1:
+        return
+    tp1_level = valid_tp1[0]
+    tp1 = _alert_float(tp1_level.get("price"))
+
+    valid_tp2 = [
+        level for level in levels
+        if (_alert_float(level.get("price")) or 0) >= max(min_tp2, (tp1 or 0) + risk * 0.25)
+    ]
+    tp2_level = valid_tp2[0] if valid_tp2 else None
+    current_tp2 = _alert_float(row.get("tp2"), 0) or 0
+    tp2 = _alert_float(tp2_level.get("price")) if tp2_level else current_tp2
+    if tp1 is None or tp2 is None or tp2 <= tp1:
+        return
+
+    current_tp1 = _alert_float(row.get("tp1"), 0) or 0
+    current_quality = str(row.get("target_quality") or setup.get("target_quality") or "").upper()
+    should_replace_tp1 = current_quality.startswith("WEAK") or current_tp1 <= 0 or tp1 < current_tp1 or str(row.get("tp1_source", "")).endswith("_too_close")
+    should_replace_tp2 = current_quality.startswith("WEAK") or current_tp2 <= 0 or tp2 < current_tp2 or str(row.get("tp2_source", "")).endswith("_too_close")
+    if not should_replace_tp1 and not should_replace_tp2:
+        return
+
+    if should_replace_tp1:
+        row["tp1"] = _round_crypto_price(tp1)
+        row["tp1_source"] = tp1_level.get("source") or "vrvp_resistance"
+    if should_replace_tp2:
+        row["tp2"] = _round_crypto_price(tp2)
+        row["tp2_source"] = (tp2_level or {}).get("source") or "vrvp_resistance"
+
+    new_tp1 = _alert_float(row.get("tp1"), tp1) or tp1
+    new_tp2 = _alert_float(row.get("tp2"), tp2) or tp2
+    rr_tp1 = round((new_tp1 - entry) / risk, 2)
+    rr_tp2 = round((new_tp2 - entry) / risk, 2)
+    live_entry = max(_alert_float(row.get("Price"), entry) or entry, entry)
+    live_risk = max(live_entry - stop, risk)
+    live_reward = ((new_tp1 - live_entry) + (new_tp2 - live_entry)) / 2
+    row.update({
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "risk_reward": round((rr_tp1 + rr_tp2) / 2, 2),
+        "live_rr_ratio": round(max(0.0, live_reward) / live_risk, 2) if live_risk > 0 else 0,
+        "target_quality": "STRUCTURAL_VRVP",
+        "vrvp_levels": vrvp,
+    })
+    flags = [str(flag) for flag in (row.get("risk_flags") or []) if str(flag) != "weak_structural_targets"]
+    row["risk_flags"] = list(dict.fromkeys(flags + ["vrvp_target_confirmed"]))
+
+    if setup:
+        setup.update({
+            "tp1": row.get("tp1"),
+            "tp2": row.get("tp2"),
+            "tp1_source": row.get("tp1_source"),
+            "tp2_source": row.get("tp2_source"),
+            "rr_tp1": rr_tp1,
+            "rr_tp2": rr_tp2,
+            "rr": row.get("risk_reward"),
+            "live_rr": row.get("live_rr_ratio"),
+            "target_quality": row.get("target_quality"),
+            "vrvp_levels": vrvp,
+        })
+        row["trade_setup"] = setup
+
+
 def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> None:
     """Expose a simple user-facing decision: observe, wait, no trade, or trade now."""
     action = str(row.get("trade_action", "") or "").upper()
@@ -2138,6 +2287,8 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
             reasons.append("Orderbuch zu duenn - kleiner Trade kann Kerze bewegen")
             row["risk_reasons"] = list(dict.fromkeys(reasons))
             row["risk_level"] = "HIGH"
+        if isinstance(trigger_check.get("vrvp"), dict):
+            _apply_early_mover_vrvp_targets(row, trigger_check.get("vrvp"))
 
     if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason:
         row["trade_signal"] = "JETZT_TRADEN"

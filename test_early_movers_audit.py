@@ -204,6 +204,44 @@ def test_early_mover_targets_are_structural_fib_levels_not_arbitrary_floors():
     assert "minimum_momentum_target_floor" not in (setup["tp1_source"], setup["tp2_source"])
 
 
+def test_early_mover_vrvp_can_upgrade_weak_targets():
+    row = {
+        "Symbol": "VRVP",
+        "Price": 10.0,
+        "trade_action": "LONG_TRIGGER",
+        "entry": 10.0,
+        "stop_loss": 9.50,
+        "tp1": 10.2,
+        "tp2": 10.35,
+        "tp1_source": "24h_high_liquidity_too_close",
+        "tp2_source": "breakout_measured_move_127_too_close",
+        "target_quality": "WEAK_STRUCTURAL_TARGETS",
+        "risk_flags": ["weak_structural_targets"],
+        "trade_setup": {
+            "target_quality": "WEAK_STRUCTURAL_TARGETS",
+            "target_min_pct_required": {"tp1": 5.5, "tp2": 9.5},
+        },
+    }
+    vrvp = {
+        "poc": 10.9,
+        "vah": 11.4,
+        "val": 9.8,
+        "levels": [
+            {"price": 10.8, "source": "vrvp_poc_acceptance", "weight": 85},
+            {"price": 11.4, "source": "vrvp_vah_resistance", "weight": 90},
+        ],
+    }
+
+    api._apply_early_mover_signal_state(row, {"ok": False, "reason": "no_fresh_5m_trigger", "vrvp": vrvp})
+
+    assert row["tp1"] == 10.8
+    assert row["tp2"] == 11.4
+    assert row["tp1_source"] == "vrvp_poc_acceptance"
+    assert row["target_quality"] == "STRUCTURAL_VRVP"
+    assert "weak_structural_targets" not in row["risk_flags"]
+    assert "vrvp_target_confirmed" in row["risk_flags"]
+
+
 def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
     coin = _volume_coin(symbol="whale", coin_id="whale-test", change_24h=2.0)
     coin["market_cap"] = 80_000_000
