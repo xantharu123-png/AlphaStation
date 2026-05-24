@@ -2073,6 +2073,7 @@ def _early_mover_entry_score(row: Dict[str, Any]) -> int:
         "chased_from_entry": 16,
         "overheated_phase3": 28,
         "oi_snapshot_only": 6,
+        "weak_structural_targets": 26,
     }
     score -= sum(flag_penalties.get(flag, 0) for flag in flags)
 
@@ -10047,26 +10048,26 @@ def _build_early_mover_long_setup(
     target_candidates.extend([
         (low_24h + range_24h * 1.272, "127_2_range_extension"),
         (low_24h + range_24h * 1.618, "161_8_range_extension"),
+        (low_24h + range_24h * 2.000, "200_0_range_extension"),
+        (low_24h + range_24h * 2.618, "261_8_range_extension"),
         (high_24h + range_24h * 0.272, "breakout_measured_move_127"),
         (high_24h + range_24h * 0.618, "breakout_measured_move_161"),
+        (high_24h + range_24h * 1.000, "breakout_measured_move_200"),
+        (high_24h + range_24h * 1.618, "breakout_measured_move_261"),
     ])
 
-    def _pick_crypto_long_target(min_rr: float, min_above: float, fallback_rr: float, fallback_label: str) -> tuple[float, str]:
-        min_price = setup_entry + risk * min_rr
-        for level, label in sorted({round(p, 10): l for p, l in target_candidates if p > min_above}.items()):
-            if level >= min_price:
-                return level, label
-        return setup_entry + risk * fallback_rr, fallback_label
+    unique_targets = sorted({round(p, 10): l for p, l in target_candidates if p > setup_entry}.items())
 
-    tp1, tp1_source = _pick_crypto_long_target(1.35, setup_entry, 1.8 if phase == 1 else 1.5, "measured_move_fallback")
-    tp2_floor_rr = 2.6 if phase == 1 else 2.25
-    tp2_fallback_rr = 3.2 if phase == 1 else 2.8
-    if mcap and mcap < 20_000_000:
-        tp2_fallback_rr += 0.3
-    tp2, tp2_source = _pick_crypto_long_target(tp2_floor_rr, tp1 + risk * 0.25, tp2_fallback_rr, "measured_move_fallback")
-    if tp2 <= tp1:
-        tp2 = tp1 + max(risk, range_24h * 0.35)
-        tp2_source = "measured_move_fallback"
+    def _pick_structural_crypto_long_target(min_rr: float, min_pct: float, min_above: float) -> tuple[float, str, bool]:
+        min_price = max(setup_entry + risk * min_rr, setup_entry * (1 + min_pct))
+        candidates = [(level, label) for level, label in unique_targets if level > min_above]
+        for level, label in candidates:
+            if level >= min_price:
+                return level, label, True
+        if candidates:
+            level, label = candidates[-1]
+            return level, f"{label}_too_close", False
+        return setup_entry, "no_structural_target", False
 
     min_tp1_pct = 0.055 if phase == 1 else 0.045
     min_tp2_pct = 0.095 if phase == 1 else 0.075
@@ -10077,14 +10078,21 @@ def _build_early_mover_long_setup(
         min_tp1_pct = max(min_tp1_pct, 0.06)
         min_tp2_pct = max(min_tp2_pct, 0.10)
 
-    tp1_floor = setup_entry * (1 + min_tp1_pct)
-    tp2_floor = setup_entry * (1 + min_tp2_pct)
-    if tp1 < tp1_floor:
-        tp1 = tp1_floor
-        tp1_source = "minimum_momentum_target_floor"
-    if tp2 < max(tp2_floor, tp1 + risk * 0.75):
-        tp2 = max(tp2_floor, tp1 + risk * 0.75)
-        tp2_source = "minimum_momentum_target_floor"
+    tp1, tp1_source, tp1_structural_ok = _pick_structural_crypto_long_target(1.35, min_tp1_pct, setup_entry)
+    tp2_floor_rr = 2.6 if phase == 1 else 2.25
+    tp2, tp2_source, tp2_structural_ok = _pick_structural_crypto_long_target(tp2_floor_rr, min_tp2_pct, tp1 + risk * 0.25)
+    if tp2 <= tp1:
+        tp2 = tp1
+        tp2_source = f"{tp2_source}_not_above_tp1"
+        tp2_structural_ok = False
+
+    target_quality = "STRUCTURAL" if tp1_structural_ok and tp2_structural_ok else "WEAK_STRUCTURAL_TARGETS"
+    if target_quality != "STRUCTURAL":
+        warnings.append("Strukturziele zu eng/fehlend - kein sauberer Early-Mover-Tradeplan")
+        if trade_action == "LONG_TRIGGER":
+            trade_action = "WAIT_FOR_RETEST"
+            entry_status = "WAIT_FOR_RETEST"
+            entry_quality = "TARGETS_TIGHT"
 
     rr_tp1 = round((tp1 - setup_entry) / risk, 2) if risk > 0 else 0
     rr_tp2 = round((tp2 - setup_entry) / risk, 2) if risk > 0 else 0
@@ -10121,6 +10129,8 @@ def _build_early_mover_long_setup(
         risk_flags.extend(["turnover_without_alpha", "extreme_turnover_churn"])
     if vol_mcap > 100:
         risk_flags.append("very_high_volume_turnover")
+    if target_quality != "STRUCTURAL":
+        risk_flags.append("weak_structural_targets")
     if entry.get("data_warning"):
         risk_flags.append("data_warning")
     risk_flags.extend(liquidity.get("flags") or [])
@@ -10152,7 +10162,8 @@ def _build_early_mover_long_setup(
         "stop_source": stop_source,
         "tp1_source": tp1_source,
         "tp2_source": tp2_source,
-        "target_floor_pct": {
+        "target_quality": target_quality,
+        "target_min_pct_required": {
             "tp1": round(min_tp1_pct * 100, 2),
             "tp2": round(min_tp2_pct * 100, 2),
         },
@@ -11235,6 +11246,9 @@ def fetch_early_movers(_prefetched_perps=None):
             "risk_reward": setup.get("rr"),
             "rr_tp1": setup.get("rr_tp1"),
             "rr_tp2": setup.get("rr_tp2"),
+            "tp1_source": setup.get("tp1_source"),
+            "tp2_source": setup.get("tp2_source"),
+            "target_quality": setup.get("target_quality"),
             "live_rr_ratio": setup.get("live_rr"),
             "distance_to_entry_r": setup.get("distance_to_entry_r"),
             "late_to_tp1": setup.get("late_to_tp1"),

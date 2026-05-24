@@ -5210,6 +5210,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         thin_orderbook: 'Orderbuch duenn',
         market_impact_risk: 'Market-Impact Risiko',
         chased_from_entry: 'zu weit vom Entry',
+        weak_structural_targets: 'Ziele zu eng',
     };
     const humanizeEntryRisk = (flag) => earlyRiskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
     const getEntryRiskReasons = (item) => {
@@ -5399,7 +5400,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={item.signal_label || actionView.detail}>{String(item.signal_label || actionView.detail).replace('Achtung beobachten: ', '')}</div>
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
-                                <td className="py-3 px-2 text-right text-xs">
+                                <td className="py-3 px-2 text-right text-xs" title={`TP1: ${item.tp1_source || '-'} | TP2: ${item.tp2_source || '-'} | ${item.target_quality || ''}`}>
                                     {item.tp1 ? (
                                         <>
                                             <div><span className="color-positive">{formatPrice(item.tp1)}</span> <span className="text-gray-400">{tp1Pct}</span></div>

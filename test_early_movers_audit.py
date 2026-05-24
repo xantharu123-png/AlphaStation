@@ -180,7 +180,7 @@ def test_early_mover_wait_states_keep_specific_timing_label():
     assert retest["entry_score_label"] == "RETEST WARTEN"
 
 
-def test_early_mover_targets_have_meaningful_momentum_floor():
+def test_early_mover_targets_are_structural_fib_levels_not_arbitrary_floors():
     setup = api._build_early_mover_long_setup(
         {
             "Price": 6.14,
@@ -199,7 +199,9 @@ def test_early_mover_targets_have_meaningful_momentum_floor():
 
     assert setup["tp1"] >= round(setup["entry"] * 1.055, 4)
     assert setup["tp2"] >= round(setup["entry"] * 1.095, 4)
-    assert setup["tp1_source"] == "minimum_momentum_target_floor"
+    assert setup["target_quality"] == "STRUCTURAL"
+    assert "extension" in setup["tp1_source"] or "measured_move" in setup["tp1_source"]
+    assert "minimum_momentum_target_floor" not in (setup["tp1_source"], setup["tp2_source"])
 
 
 def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
