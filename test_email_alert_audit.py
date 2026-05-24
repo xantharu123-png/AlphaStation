@@ -1140,8 +1140,10 @@ def test_new_listing_pipeline_sends_daily_watch_when_no_short_now(monkeypatch):
 
     assert len(sent) == 1
     assert "Crypto New Listing beobachten" in sent[0][0]
+    assert "NICHT SHORTEN" in sent[0][0]
     assert "BABY" in sent[0][1]
     assert "JETZT SHORTEN" in sent[0][1]
+    assert "Was jetzt tun?" in sent[0][1]
 
 
 def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monkeypatch):
@@ -1164,7 +1166,7 @@ def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monke
             "exh_score": 67,
             "pump_pct": 18,
             "from_ath_pct": 4,
-            "rr_effective": 0,
+            "rr_effective": 1.4,
             "risk_flags": ["wait_for_dump_trigger"],
         }],
     }
@@ -1174,6 +1176,7 @@ def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monke
     assert len(sent) == 1
     assert "Crypto New Listing beobachten" in sent[0][0]
     assert "STAR" in sent[0][1]
+    assert "Dump-Trigger abwarten" in sent[0][1]
     assert "SHORT NOW" not in sent[0][1]
 
 
@@ -1846,6 +1849,25 @@ def test_new_listing_watch_mail_requires_score_and_safety_ok():
             "exh_score": 21,
             "rr_effective": 5.0,
             "risk_flags": ["safety_failed", "early_crack_score_too_low", "micro_trigger_missing"],
+        }]
+    }
+
+    assert api._new_listing_watch_candidates(payload) == []
+
+
+def test_new_listing_watch_mail_blocks_low_rr_confusing_watch():
+    payload = {
+        "monitoring": [{
+            "symbol": "GENIUS_USDT",
+            "exchange": "binance",
+            "source": "new_listing",
+            "trade_category": "NEW_LISTING_WATCH",
+            "listing_age_hours": 60.9,
+            "pump_pct": 27.8,
+            "from_ath_pct": 15.3,
+            "exh_score": 72,
+            "rr_effective": 0.5,
+            "risk_flags": ["rr_too_low", "micro_trigger_missing"],
         }]
     }
 

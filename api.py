@@ -850,7 +850,19 @@ _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_WATCH_MIN_SCORE = 45
 _NEW_LISTING_WATCH_MIN_PUMP_PCT = 15.0
+_NEW_LISTING_WATCH_MIN_RR = 1.0
 _NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
+_NEW_LISTING_WATCH_BLOCK_FLAGS = {
+    "safety_failed",
+    "safety_not_ok",
+    "early_crack_score_too_low",
+    "rr_too_low",
+    "risk_too_wide",
+    "listing_age_expired",
+    "listing_age_not_tradeable",
+    "tp1_missed",
+    "tp2_missed",
+}
 _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
 _EARLY_MOVER_DIGEST_DEDUPE_SEC = 2 * 3600
@@ -995,7 +1007,18 @@ _ALERT_SUPPRESSION_LABELS = {
     "micro_trigger_missing": "Pump/Dump: Micro-Crack fehlt",
     "pump_continuation_risk": "Pump laeuft noch, Short zu frueh",
     "safety_not_ok": "Safety-Check nicht OK",
+    "safety_failed": "Safety-Check nicht OK",
     "risk_too_wide": "Stop/Risk zu breit",
+    "rr_too_low": "R:R zu schwach",
+    "early_crack_score_too_low": "Crack-Qualitaet zu schwach",
+    "wait_for_dump_trigger": "Dump-Trigger abwarten",
+    "btc_risk_on_wait_for_deeper_crack": "BTC risk-on: tieferen Crack abwarten",
+    "turn_not_confirmed": "Turn/Rejection nicht bestaetigt",
+    "no_first_crack": "erster Strukturbruch fehlt",
+    "crack_structure_weak": "Crack-Struktur zu schwach",
+    "listing_age_expired": "New-Listing-Fenster vorbei",
+    "tp1_missed": "TP1 bereits verpasst",
+    "tp2_missed": "TP2 bereits verpasst",
     "not_new_listing_dump": "kein echter New-Listing-Dump",
     "listing_age_not_tradeable": "Listing-Alter nicht im Trade-Fenster",
     "crypto_strategy_watch_only": "Crypto-Strategie ist Watch-only",
@@ -3885,11 +3908,12 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
     for c in deduped.values():
         score = c.get("exh_score") or 0
         pump_pct = c.get("pump_pct") or 0
+        rr = c.get("rr") or 0
         flags = set(c.get("risk_flags") or [])
         watch_quality = (
             score >= _NEW_LISTING_WATCH_MIN_SCORE
-            and "safety_failed" not in flags
-            and "early_crack_score_too_low" not in flags
+            and rr >= _NEW_LISTING_WATCH_MIN_RR
+            and not (flags & _NEW_LISTING_WATCH_BLOCK_FLAGS)
         )
         if pump_pct >= _NEW_LISTING_WATCH_MIN_PUMP_PCT and watch_quality:
             visible.append(c)
@@ -3921,42 +3945,73 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
         except (TypeError, ValueError):
             return str(value)
 
+    def _safe(value: Any) -> str:
+        return html.escape(str(value or ""), quote=True)
+
+    def _watch_action(c: Dict[str, Any]) -> Tuple[str, str]:
+        flags = set(c.get("risk_flags") or [])
+        if "btc_risk_on_wait_for_deeper_crack" in flags:
+            return "WARTEN", "BTC ist nicht klar bearish - tieferen 5m Crack abwarten."
+        if "micro_trigger_missing" in flags or "wait_for_dump_trigger" in flags:
+            return "WARTEN", "5m Strukturbruch/Rejection fehlt noch."
+        if "turn_not_confirmed" in flags or "crack_structure_weak" in flags:
+            return "WARTEN", "Turn/Rejection ist noch zu schwach."
+        return "BEOBACHTEN", "Nur auf Watchlist - Short-Freigabe fehlt."
+
+    def _missing_steps(c: Dict[str, Any]) -> str:
+        flags = set(c.get("risk_flags") or [])
+        priority = [
+            "micro_trigger_missing",
+            "wait_for_dump_trigger",
+            "btc_risk_on_wait_for_deeper_crack",
+            "turn_not_confirmed",
+            "crack_structure_weak",
+            "no_first_crack",
+            "pump_continuation_risk",
+        ]
+        labels = [_alert_reason_label(flag) for flag in priority if flag in flags]
+        if not labels:
+            labels = ["5m Crack/Rejection, Safety OK und R:R muessen fuer die Short-Mail passen"]
+        return "<br>".join(f"- {_safe(label)}" for label in labels[:4])
+
     rows = ""
     for c in candidates:
-        risk = ", ".join(c["risk_flags"][:3]) if c["risk_flags"] else ""
+        action, action_note = _watch_action(c)
         title = str(c.get("title") or c.get("timing") or "")
         if len(title) > 95:
             title = title[:92] + "..."
-        link = f'<br><a href="{c.get("url")}" style="color:#2563eb">Quelle</a>' if c.get("url") else ""
+        link = f'<br><a href="{_safe(c.get("url"))}" style="color:#2563eb">Quelle</a>' if c.get("url") else ""
+        why = (
+            f'Pump {_fmt(c["pump_pct"], "%")}, Abstand ATH {_fmt(c["from_ath_pct"], "%")}, '
+            "aber noch kein bestaetigter Short-Trigger."
+        )
         rows += (
-            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{c["symbol"]}</b><br><span style="color:#777">{c["exchange"]}</span>{link}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{c["category"]}<br><span style="color:#777">{title}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["age"], "h")}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["pump_pct"], "%")} / {_fmt(c["from_ath_pct"], "%")}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{c["grade"] or "-"} / {int(c["exh_score"] or 0)}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt(c["rr"], "R")}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {_fmt(c["btc_change"], "%")}<br>Coin {_fmt(c["coin_change"], "%")}<br>Div {_fmt(c["btc_divergence"], "%")}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{risk}</td></tr>'
+            f'<tr><td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top"><b>{_safe(c["symbol"])}</b><br><span style="color:#777">{_safe(c["exchange"])}</span>{link}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top"><span style="display:inline-block;background:#fee2e2;color:#991b1b;font-weight:700;border-radius:6px;padding:3px 7px">NICHT SHORTEN</span><br><b>{_safe(action)}</b><br><span style="color:#555">{_safe(action_note)}</span></td>'
+            f'<td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top">{_safe(why)}<br><span style="color:#777">Alter {_fmt(c["age"], "h")} | {_safe(title)}</span></td>'
+            f'<td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top"><b>{_safe(c["grade"] or "-")} / {int(c["exh_score"] or 0)}</b><br>{_fmt(c["rr"], "R")}<br><span style="color:#777">BTC {_fmt(c["btc_change"], "%")} | Coin {_fmt(c["coin_change"], "%")} | Div {_fmt(c["btc_divergence"], "%")}</span></td>'
+            f'<td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top;color:#92400e">{_missing_steps(c)}</td></tr>'
         )
 
     suppressed_text = ""
     if suppressed:
-        suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine SHORT NOW Mail: " + ", ".join(f"{k}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
+        suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine Jetzt-Short-Mail: " + ", ".join(f"{_safe(_alert_reason_label(k))}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
-    <h2 style="color:#f97316">Crypto New Listing Beobachten</h2>
-    <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | Neue Listings mit Pump/Exhaustion, noch kein Jetzt-Traden-Short</p>
-    <p style="color:#444">Reine Listing-Ankuendigungen werden nur gespeichert und ueberwacht. Diese Mail kommt erst, wenn der neue Coin bereits gepumpt hat und ein Dump-/Crack-Setup beobachtbar wird.</p>
+    <h2 style="color:#f97316">Crypto New Listing Watch - NICHT SHORTEN</h2>
+    <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | {len(candidates)} Coin(s) nur zur Beobachtung</p>
+    <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px;margin:12px 0;color:#7c2d12">
+      <b>Was jetzt tun?</b> Nicht shorten. Coin auf Watchlist lassen und auf die separate <b>Jetzt-Short-Mail</b> warten.
+      Diese Watch-Mail bedeutet nur: New Listing hat bereits gepumpt, aber 5m Crack/Rejection, Safety oder Timing sind noch nicht voll bestaetigt.
+    </div>
     {suppressed_text}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fff7ed"><th style="padding:8px;text-align:left">Coin</th>
-    <th style="padding:8px;text-align:left">Status</th><th style="padding:8px;text-align:left">Alter</th>
-    <th style="padding:8px;text-align:left">Pump/ATH</th><th style="padding:8px;text-align:left">Grade/Score</th>
-    <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC Kontext</th>
-    <th style="padding:8px;text-align:left">Warnungen</th></tr>
+    <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Warum im Blick</th>
+    <th style="padding:8px;text-align:left">Qualitaet</th><th style="padding:8px;text-align:left">Was fehlt</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Beobachten-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Watch-Score >= {_NEW_LISTING_WATCH_MIN_SCORE} und ohne Safety-Fail. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, R:R und New-Listing-Alter im Fenster.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Watch-Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
-    return _send_email_alert(f"Crypto New Listing beobachten: {len(candidates)} Coin(s)", body)
+    return _send_email_alert(f"Crypto New Listing beobachten - NICHT SHORTEN: {len(candidates)} Coin(s)", body)
 
 
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
