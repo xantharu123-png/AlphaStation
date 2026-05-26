@@ -399,8 +399,19 @@ def calculate_trade_health(
             fakeout_score -= 18
             warnings.append(f"ORB Zustand ist {breakout_state} statt aktivem Breakout")
         if _to_bool(_first(row, ["late_session", "is_late_orb_session"], False)):
-            fakeout_score -= 12
-            warnings.append("Spaetes ORB-Fenster - Edge reduziert")
+            entry_score -= 10
+            warnings.append("Spaetes ORB-Fenster - Edge reduziert, aber kein Fakeout-Signal")
+        recent_hold_pct = _to_float(_first(row, ["recent_hold_pct", "orb_recent_hold_pct"]))
+        if recent_hold_pct is not None:
+            if recent_hold_pct < 0.34:
+                fakeout_score -= 18
+                warnings.append("ORB Recent-Hold schwach - Breakout haelt nicht sauber")
+            elif recent_hold_pct >= 0.67:
+                positives.append("ORB Recent-Hold bestaetigt")
+        hold_pct = _to_float(_first(row, ["hold_pct", "orb_hold_pct"]))
+        if hold_pct is not None and hold_pct < 0.25:
+            fakeout_score -= 10
+            warnings.append("ORB Hold-Anteil schwach")
 
     partial_data = _to_bool(_first(row, ["partial_data"], False))
     data_warning = _first(row, ["data_warning", "warning", "Warnings"])
@@ -486,9 +497,8 @@ def calculate_trade_health(
         if context_penalty:
             if direction == "LONG":
                 entry_score -= context_penalty
-                fakeout_score -= max(4, int(context_penalty * 0.7))
             elif regime in {"RISK_OFF_LIGHT", "RISK_OFF", "PANIC"}:
-                fakeout_score -= max(3, int(context_penalty * 0.35))
+                entry_score -= max(2, int(context_penalty * 0.35))
                 positives.append("Risk-Off kann Short-Setups unterstuetzen, aber trotzdem nicht chasen")
             else:
                 entry_score -= max(2, int(context_penalty * 0.5))

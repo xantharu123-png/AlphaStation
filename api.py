@@ -12666,6 +12666,17 @@ def _orb_scanner_wrapper() -> None:
 
                 current_price = bars[-1].get("c", 0)
                 post_or = [b for b in bars if b.get("t", 0) >= or_end_ms]
+                latest_bar = bars[-1] if bars else {}
+                latest_open = float(latest_bar.get("o", current_price) or current_price or 0)
+                latest_high = float(latest_bar.get("h", current_price) or current_price or 0)
+                latest_low = float(latest_bar.get("l", current_price) or current_price or 0)
+                latest_close = float(latest_bar.get("c", current_price) or current_price or 0)
+                latest_range = max(latest_high - latest_low, 1e-9)
+                latest_close_pos = max(0.0, min(1.0, (latest_close - latest_low) / latest_range))
+                latest_body_top = max(latest_open, latest_close)
+                latest_body_bottom = min(latest_open, latest_close)
+                latest_upper_wick_pct = max(0.0, latest_high - latest_body_top) / latest_range * 100
+                latest_lower_wick_pct = max(0.0, latest_body_bottom - latest_low) / latest_range * 100
 
                 # ══════════════════════════════════════════════════════
                 # V3.0 REWRITE: Current-State Breakout Detection
@@ -12683,6 +12694,9 @@ def _orb_scanner_wrapper() -> None:
                 bars_above = sum(1 for b in post_or if b.get("c", 0) > or_high)
                 bars_below = sum(1 for b in post_or if b.get("c", 0) < or_low)
                 bars_inside = len(post_or) - bars_above - bars_below
+                recent_post_or = post_or[-3:] if post_or else []
+                recent_above = sum(1 for b in recent_post_or if b.get("c", 0) > or_high)
+                recent_below = sum(1 for b in recent_post_or if b.get("c", 0) < or_low)
 
                 # ── Schritt 1: Aktueller Preis bestimmt Richtung ──
                 if current_price > or_high:
@@ -12888,8 +12902,11 @@ def _orb_scanner_wrapper() -> None:
 
                 # 7. Holding Strength (0-5 Punkte)
                 hold_bars = bars_above if breakout_dir == "LONG" else bars_below
+                recent_hold_bars = recent_above if breakout_dir == "LONG" else recent_below
                 total_post = len(post_or) if post_or else 1
+                total_recent_post = len(recent_post_or) if recent_post_or else 1
                 hold_pct = hold_bars / total_post
+                recent_hold_pct = recent_hold_bars / total_recent_post
                 if hold_pct >= 0.8:
                     score += 5
                     score_details.append("Hold ✓")
@@ -12939,7 +12956,12 @@ def _orb_scanner_wrapper() -> None:
                     "atr_model": atr_model,
                     "vwap": round(vwap, 2), "direction": breakout_dir,
                     "breakout_state": breakout_state,
+                    "late_session": is_late_orb_session,
+                    "session_quality": session_quality,
                     "current_price": round(current_price, 2),
+                    "close_pos": round(latest_close_pos, 3),
+                    "upper_wick_pct": round(latest_upper_wick_pct, 1),
+                    "lower_wick_pct": round(latest_lower_wick_pct, 1),
                     "entry": entry, "live_entry": round(live_entry, 2), "stop": stop,
                     "invalidation_stop": invalidation_stop,
                     "target1": target1, "target2": target2,
@@ -12951,6 +12973,8 @@ def _orb_scanner_wrapper() -> None:
                     "entry_quality_score": entry_quality_score,
                     "late_to_tp1": late_to_tp1,
                     "vol_confirmed": breakout_confirmed,
+                    "hold_pct": round(hold_pct, 3),
+                    "recent_hold_pct": round(recent_hold_pct, 3),
                     "volume_scope": volume_scope,
                     "vwap_aligned": vwap_aligned,
                     "score": score, "grade": grade,

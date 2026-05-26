@@ -224,6 +224,84 @@ def test_high_rvol_does_not_contradict_unconfirmed_breakout_volume():
     assert "RVOL 3.1x hoch" in warnings
 
 
+def test_late_orb_session_does_not_pollute_fakeout_risk():
+    row = {
+        "ticker": "ORB",
+        "direction": "LONG",
+        "current_price": 10.05,
+        "entry": 10.00,
+        "stop": 9.50,
+        "tp1": 11.00,
+        "tp2": 12.00,
+        "rvol": 2.4,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.82,
+        "recent_hold_pct": 1.0,
+        "late_session": True,
+        "dollar_volume": 12_000_000,
+    }
+
+    health = calculate_trade_health(row, "orb")
+
+    assert health["fakeout_risk"] == "LOW"
+    assert any("kein Fakeout-Signal" in warning for warning in health["warnings"])
+
+
+def test_market_context_does_not_pollute_fakeout_risk():
+    row = {
+        "ticker": "NEWS",
+        "direction": "LONG",
+        "current_price": 10.05,
+        "entry": 10.00,
+        "stop": 9.50,
+        "tp1": 11.00,
+        "tp2": 12.00,
+        "rvol": 2.4,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.82,
+        "dollar_volume": 12_000_000,
+    }
+    market_context = {
+        "summary": {
+            "regime": "NEUTRAL",
+            "trade_mode": "SELECTIVE",
+            "headline_level": "HIGH",
+            "event_level": "LOW",
+        }
+    }
+
+    health = calculate_trade_health(row, "orb", market_context=market_context)
+
+    assert health["fakeout_risk"] == "LOW"
+    assert health["chase_risk"] in {"LOW", "MEDIUM"}
+
+
+def test_orb_recent_hold_and_wick_drive_real_fakeout_risk():
+    row = {
+        "ticker": "WICK",
+        "direction": "LONG",
+        "current_price": 10.05,
+        "entry": 10.00,
+        "stop": 9.50,
+        "tp1": 11.00,
+        "tp2": 12.00,
+        "rvol": 2.4,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.42,
+        "upper_wick_pct": 48,
+        "recent_hold_pct": 0.0,
+        "dollar_volume": 12_000_000,
+    }
+
+    health = calculate_trade_health(row, "orb")
+
+    assert health["fakeout_risk"] in {"HIGH", "CRITICAL"}
+    assert any("Recent-Hold" in warning for warning in health["warnings"])
+
+
 def test_non_tradeable_health_does_not_show_trade_now_positives():
     row = {
         "ticker": "CHASED",
