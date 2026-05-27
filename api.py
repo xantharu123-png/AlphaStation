@@ -4508,6 +4508,31 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
 
 def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
     """Decorate ORB container rows and the nested breakout/candidate rows."""
+    def _orb_trade_rank(row: Dict[str, Any]) -> tuple:
+        health = row.get("trade_health") or {}
+        decision = str(row.get("trade_decision") or health.get("decision") or "").upper()
+        entry_quality = str(row.get("entry_quality") or health.get("entry_quality") or "").upper()
+        decision_rank = {
+            "TRADEABLE": 0,
+            "WAIT_FOR_RETEST": 1,
+            "WAIT_FOR_CONTINUATION": 2,
+            "WAIT_FOR_TRIGGER": 3,
+            "WATCH_ONLY": 4,
+            "NO_TRADE": 9,
+        }.get(decision, 6)
+        entry_rank = {
+            "GOOD": 0,
+            "EXTENDED": 1,
+            "LATE": 2,
+            "CHASE": 4,
+        }.get(entry_quality, 3)
+        late_rank = 1 if row.get("late_to_tp1") else 0
+        score = _alert_float(row.get("score"), 0) or 0
+        health_score = _alert_float(row.get("trade_health_score") or health.get("health_score"), 0) or 0
+        live_rr = _alert_float(row.get("live_rr_ratio") or health.get("metrics", {}).get("live_rr"), 0) or 0
+        distance_r = _alert_float(row.get("distance_to_entry_r") or health.get("metrics", {}).get("distance_to_entry_r"), 999) or 999
+        return (decision_rank, entry_rank, late_rank, -health_score, -score, -live_rr, distance_r)
+
     decorated = _decorate_scan_results(results, "orb", cache_age_seconds)
     for payload in decorated:
         if not isinstance(payload, dict):
@@ -4515,7 +4540,15 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
         for list_key in ("breakouts", "failed_breakouts", "candidates"):
             rows = payload.get(list_key)
             if isinstance(rows, list):
-                payload[list_key] = _decorate_scan_results(rows, "orb", cache_age_seconds)
+                decorated_rows = _decorate_scan_results(rows, "orb", cache_age_seconds)
+                if list_key == "breakouts":
+                    decorated_rows = sorted(decorated_rows, key=_orb_trade_rank)
+                    payload["breakout_decision_counts"] = {
+                        "tradeable": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() == "TRADEABLE"),
+                        "wait": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() in {"WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION", "WAIT_FOR_TRIGGER", "WATCH_ONLY"}),
+                        "no_trade": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() == "NO_TRADE"),
+                    }
+                payload[list_key] = decorated_rows
     return decorated
 
 
