@@ -12081,6 +12081,16 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
     """Convert rich module results to the flat table shape used by the FastAPI UI."""
     flat = []
 
+    def _positive_float(*values: Any) -> float:
+        for value in values:
+            try:
+                numeric = float(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if numeric > 0:
+                return numeric
+        return 0.0
+
     def _append_signal(entry: Dict[str, Any], bucket: str) -> None:
         sig = entry.get("signal", {}) or {}
         pump = sig.get("pump_data", {}) or {}
@@ -12098,7 +12108,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "symbol": display_symbol,
             "exchange": entry.get("exchange", ""),
             "contract": raw_symbol,
-            "price": pump.get("current_price", sig.get("entry", 0)),
+            "price": _positive_float(pump.get("current_price"), pump.get("micro_current_price"), sig.get("entry")),
             "announcement_title": entry.get("announcement_title", ""),
             "announcement_url": entry.get("announcement_url", ""),
             "announcement_source": entry.get("announcement_source", ""),
@@ -12178,7 +12188,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "symbol": _display_crypto_contract_symbol(raw_symbol),
             "exchange": item.get("exchange", ""),
             "contract": raw_symbol,
-            "price": item.get("price", 0),
+            "price": _positive_float(item.get("price"), item.get("micro_current_price")),
             "announcement_title": item.get("announcement_title", ""),
             "announcement_url": item.get("announcement_url", ""),
             "announcement_source": item.get("announcement_source", ""),
@@ -12280,8 +12290,39 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "source": "announcement",
         })
 
+    def _dedupe_rank(row: Dict[str, Any]) -> tuple:
+        action = str(row.get("trade_action") or row.get("trade_signal") or "").upper()
+        category = str(row.get("trade_category") or "").upper()
+        source = str(row.get("source") or "").lower()
+        priority = 5
+        if action == "SHORT_NOW" or category == "NEW_LISTING_DUMP":
+            priority = 0
+        elif source == "watchlist":
+            priority = 1
+        elif source == "monitoring":
+            priority = 2
+        elif source == "announcement":
+            priority = 4
+        return (
+            priority,
+            0 if _positive_float(row.get("price")) > 0 else 1,
+            -float(row.get("exhaustion_score") or 0),
+            -float(row.get("pump_pct") or 0),
+        )
+
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    for row in flat:
+        key = (
+            str(row.get("symbol") or "").upper(),
+            str(row.get("exchange") or "").lower(),
+        )
+        if key not in deduped or _dedupe_rank(row) < _dedupe_rank(deduped[key]):
+            deduped[key] = row
+    flat = list(deduped.values())
+
     flat.sort(key=lambda r: (
         0 if str(r.get("signal", "")).startswith("SHORT") else 1,
+        1 if _positive_float(r.get("price")) <= 0 else 0,
         -float(r.get("exhaustion_score") or 0),
         -float(r.get("pump_pct") or 0),
     ))

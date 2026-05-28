@@ -7044,25 +7044,39 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     const pdTypeLabel = (item) => {
         const cat = item.trade_category || '';
         if (cat === 'NEW_LISTING_DUMP') return 'New Listing Dump';
-        if (cat === 'ACTIVE_PUMP_WATCH') return 'Active Pump beobachten';
+        if (cat === 'EXHAUSTION_WATCH') return 'Dump/Crack Watch';
+        if (cat === 'PUMP_RUNNING_WATCH' || cat === 'ACTIVE_PUMP_WATCH') return 'Pump laeuft - warten';
         if (cat === 'NEW_LISTING_TOO_EARLY') return 'Zu frueh';
         if (cat === 'NEW_LISTING_EXPIRED') return 'Alt/Beobachten';
+        if (cat === 'ALREADY_DUMPED') return 'Schon gedumpt';
+        if (cat === 'WAITING_FOR_HISTORY') return 'Daten fehlen';
         if (cat === 'UNKNOWN_LISTING_AGE') return 'Alter unklar';
+        if (cat === 'ANNOUNCEMENT_WATCH') return 'Listing Watch';
         if ((item.listing_source || '').toLowerCase() === 'new_listing') return 'New Listing';
         return 'Beobachten';
     };
     const pdTypeClass = (item) => {
         const cat = item.trade_category || '';
         if (cat === 'NEW_LISTING_DUMP') return 'signal-bearish';
-        if (cat === 'ACTIVE_PUMP_WATCH') return 'signal-lightdiv';
-        if (cat === 'NEW_LISTING_TOO_EARLY' || cat === 'UNKNOWN_LISTING_AGE') return 'signal-abwarten';
+        if (cat === 'EXHAUSTION_WATCH') return 'signal-lightdiv';
+        if (cat === 'PUMP_RUNNING_WATCH' || cat === 'ACTIVE_PUMP_WATCH') return 'signal-abwarten';
+        if (cat === 'NEW_LISTING_TOO_EARLY' || cat === 'UNKNOWN_LISTING_AGE' || cat === 'WAITING_FOR_HISTORY') return 'signal-abwarten';
+        if (cat === 'ALREADY_DUMPED') return 'signal-neutral';
         return 'signal-neutral';
+    };
+    const pdPrice = (value, digits = 4) => {
+        const n = Number(value || 0);
+        if (!Number.isFinite(n) || n <= 0) return '—';
+        return `$${n.toFixed(digits)}`;
     };
 
     return (
         <div className="space-y-6">
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
+            <div className="p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-800">
+                Pump & Dump ist nur bei <b>JETZT SHORTEN</b> ein Trade. Watch-Zeilen bedeuten: Setup beobachten, erst 5m-Crack/Rejection plus valide Live-Daten abwarten. Preis <b>—</b> heisst: keine verlässlichen Live-/Candle-Daten für diese Exchange-Zeile.
+            </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -7088,7 +7102,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>
                                 <td className="py-3 px-2">{item.exchange}</td>
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${pdTypeClass(item)}`} title={item.listing_age_hours != null ? `${item.listing_age_hours}h alt` : 'Alter unklar'}>{pdTypeLabel(item)}</span></td>
-                                <td className="py-3 px-2 text-right">${item.price?.toFixed(4)}</td>
+                                <td className="py-3 px-2 text-right">{pdPrice(item.price)}</td>
                                 <td className={`py-3 px-2 text-right font-semibold ${item.pump_pct > 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct ? `+${item.pump_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right color-negative">{item.from_ath_pct ? `-${item.from_ath_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>

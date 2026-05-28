@@ -285,10 +285,10 @@ def test_active_pump_detection_is_watch_only_even_with_crack():
         safety_warnings=[],
     )
 
-    assert signal["trade_category"] == "ACTIVE_PUMP_WATCH"
+    assert signal["trade_category"] == "EXHAUSTION_WATCH"
     assert signal["listing_trade_ok"] is False
     assert "active_pump_watch_only" in signal["risk_flags"]
-    assert "ACTIVE PUMP BEOBACHTEN" in signal["timing"]
+    assert "bereits gecrackt" in signal["timing"]
     assert signal["signal_quality"] == "watch_or_blocked"
     assert _is_tradeable_short_signal(signal) is False
 

@@ -1383,6 +1383,38 @@ def test_new_listing_alert_audit_blocks_active_pump_watch_rows(tmp_path):
     assert audit["suppression_counts"]["listing_age_not_tradeable"] == 1
 
 
+def test_new_listing_flatten_uses_monitoring_candle_price_and_dedupes_zero_rows():
+    payload = {
+        "monitoring": [
+            {
+                "symbol": "AZTECUSDT",
+                "exchange": "binance",
+                "price": 0,
+                "pump_pct": 11.2,
+                "from_ath_pct": 23.6,
+                "exh_score": 38,
+                "trade_category": "EXHAUSTION_WATCH",
+            },
+            {
+                "symbol": "AZTECUSDT",
+                "exchange": "binance",
+                "price": 0.02173,
+                "pump_pct": 11.2,
+                "from_ath_pct": 23.6,
+                "exh_score": 38,
+                "trade_category": "EXHAUSTION_WATCH",
+            },
+        ]
+    }
+
+    rows = api._flatten_new_listing_pipeline_results(payload)
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "AZTEC"
+    assert rows[0]["price"] == 0.02173
+    assert rows[0]["trade_category"] == "EXHAUSTION_WATCH"
+
+
 def test_new_listing_alert_audit_treats_string_false_as_false(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "string_bool_new_listing.json"

@@ -2089,7 +2089,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     if listing_info_missing:
         trade_category = "LISTING_INFO_MISSING"
     elif not is_new_listing_source:
-        trade_category = "ACTIVE_PUMP_WATCH"
+        trade_category = "EXHAUSTION_WATCH" if first_crack_ok else "PUMP_RUNNING_WATCH"
     elif not listing_age_known:
         trade_category = "UNKNOWN_LISTING_AGE"
     elif listing_too_early:
@@ -2115,7 +2115,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         timing = "[~] BEOBACHTEN - BTC risk-on, erst klare Underperformance/deeper crack abwarten"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not is_new_listing_source:
-        timing = "[~] ACTIVE PUMP BEOBACHTEN - kein New Listing, keine Short-Mail"
+        if first_crack_ok:
+            timing = "[~] BEOBACHTEN - Pump ist bereits gecrackt; nur Watch, kein New-Listing-Short"
+        else:
+            timing = "[~] BEOBACHTEN - Pump laeuft noch; erst Crack/Rejection abwarten"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not listing_age_known:
         timing = "[~] BEOBACHTEN - Listing-Alter unklar, keine Short-Mail"
@@ -2758,6 +2761,7 @@ def run_new_listing_scanner():
                 mon_data["last_check"] = datetime.now(timezone.utc).isoformat()
                 mon_data["pump_pct"] = pump_data.get("pump_pct", 0)
                 mon_data["from_ath_pct"] = pump_data.get("from_ath_pct", 0)
+                mon_data["price"] = pump_data.get("current_price", ticker.get("price", 0))
                 mon_data["safety_ok"] = safety_ok
                 mon_data["safety_warnings"] = safety_warnings[:5]
 
@@ -2791,6 +2795,7 @@ def run_new_listing_scanner():
                         "exh_score": exh_score,
                         "pump_pct": pump_data.get("pump_pct", 0),
                         "from_ath_pct": from_ath,
+                        "price": pump_data.get("current_price", ticker.get("price", 0)),
                         "volume_ratio": pump_data.get("vol_ratio", 0),
                         "safety_ok": safety_ok,
                         "grade": "SKIP",
@@ -2861,6 +2866,7 @@ def run_new_listing_scanner():
                     "exh_score": exh_score,
                     "pump_pct": pump_data.get("pump_pct", 0),
                     "from_ath_pct": pump_data.get("from_ath_pct", 0),
+                    "price": pump_data.get("current_price", ticker.get("price", 0)),
                     "volume_ratio": pump_data.get("vol_ratio", 0),
                     "safety_ok": safety_ok,
                     "safety_warnings": safety_warnings[:5],
