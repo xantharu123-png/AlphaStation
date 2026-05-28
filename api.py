@@ -4259,7 +4259,7 @@ SCAN_DATA_SOURCES = {
     "early_movers": "CoinGecko markets + exchange perp feeds",
     "crash_monitor": "Polygon indices/VIX + market breadth",
     "market_context": "Crash/Fear cache + Polygon news + economic calendar",
-    "btc_divergenz": "Polygon BTC/crypto-equity daily bars",
+    "btc_divergenz": "CoinGecko crypto markets + exchange perp context",
     "money_flow": "Polygon sector ETF bars",
     "new_listing": "Exchange PERP listings + orderbook/safety checks",
     "volume_spikes": "Polygon US stock gainers/losers snapshots",
@@ -11715,28 +11715,169 @@ def get_crash_monitor():
 # ── BTC Divergenz ──
 BTC_DIVERGENZ_CACHE = "/tmp/btc_divergenz_cache.json"
 
-def _btc_divergenz_wrapper() -> None:
-    """Compare BTC vs correlated assets for divergence signals."""
+def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
+    """Build crypto-only BTC divergence watch rows; no equities/ETFs belong here."""
+    coins = _fetch_coingecko_markets(pages=4)
+    if not coins:
+        return []
+
+    btc = next((c for c in coins if c.get("id") == "bitcoin" or str(c.get("symbol", "")).upper() == "BTC"), None)
+    if not btc:
+        return []
+
+    btc_24h = float(btc.get("price_change_percentage_24h") or 0)
+    btc_7d = float(btc.get("price_change_percentage_7d_in_currency") or btc.get("price_change_percentage_7d") or 0)
+    btc_14d = float(btc.get("price_change_percentage_14d_in_currency") or 0)
+    btc_regime = (
+        "RISK_OFF" if btc_24h <= -1.5 or btc_7d <= -4
+        else "STAGNANT" if abs(btc_24h) <= 1.5 and abs(btc_7d) <= 4
+        else "RISK_ON"
+    )
+    btc_weak_or_flat = btc_regime in ("RISK_OFF", "STAGNANT")
+
     try:
-        assets = [
-            # BTC nur als Referenz (wird NICHT in Ergebnisliste angezeigt)
-            ("X:BTCUSD", "BTC", "Bitcoin"),
-            # BTC-korrelierte Aktien — das ist was Trader interessiert
-            ("MSTR", "MSTR", "MicroStrategy"),
-            ("COIN", "COIN", "Coinbase"),
-            ("MARA", "MARA", "Marathon Digital"),
-            ("RIOT", "RIOT", "Riot Platforms"),
-            ("CLSK", "CLSK", "CleanSpark"),
-            ("BITF", "BITF", "Bitfarms"),
-            ("HUT", "HUT", "Hut 8 Mining"),
-            ("CIFR", "CIFR", "Cipher Mining"),
-            ("IREN", "IREN", "Iris Energy"),
-            ("BTDR", "BTDR", "Bitdeer Technologies"),
-            ("GBTC", "GBTC", "Grayscale BTC Trust"),
-            ("IBIT", "IBIT", "iShares Bitcoin Trust"),
-            ("ETHE", "ETHE", "Grayscale ETH Trust"),
-            ("BITO", "BITO", "ProShares BTC Strategy"),
-        ]
+        perp_data = fetch_multi_exchange_perps()
+    except Exception:
+        perp_data = {}
+
+    rows: List[Dict[str, Any]] = []
+    for coin in coins:
+        try:
+            cid = str(coin.get("id") or "")
+            symbol = str(coin.get("symbol") or "").upper().strip()
+            name = str(coin.get("name") or symbol)
+            if not symbol or symbol == "BTC" or _is_excluded_crypto_asset(symbol, cid, name):
+                continue
+
+            price = float(coin.get("current_price") or 0)
+            mcap = float(coin.get("market_cap") or 0)
+            volume = float(coin.get("total_volume") or 0)
+            if price <= 0 or mcap < 5_000_000 or volume < 250_000:
+                continue
+
+            change_1h = float(coin.get("price_change_percentage_1h_in_currency") or 0)
+            change_24h = float(coin.get("price_change_percentage_24h") or 0)
+            change_7d = float(coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0)
+            change_14d = float(coin.get("price_change_percentage_14d_in_currency") or 0)
+            alpha_24h = round(change_24h - btc_24h, 2)
+            alpha_7d = round(change_7d - btc_7d, 2)
+            alpha_14d = round(change_14d - btc_14d, 2)
+            vol_mcap = round((volume / mcap * 100), 2) if mcap > 0 else 0
+
+            perp_lookup = perp_data.get(symbol) or perp_data.get(f"1000{symbol}") or perp_data.get(f"10000{symbol}") or {}
+            has_perp = bool(perp_lookup)
+            contract = str(perp_lookup.get("best_contract_symbol") or (f"{symbol}USDT" if has_perp else ""))
+            exchange = str(perp_lookup.get("best_chart_exchange") or perp_lookup.get("best_exchange") or "").lower()
+
+            coin_explodes = change_24h >= 8 or change_7d >= 18
+            strong_alpha = alpha_24h >= 6 or alpha_7d >= 12
+            short_watch = btc_weak_or_flat and coin_explodes and strong_alpha
+            long_watch = btc_regime == "RISK_ON" and alpha_24h >= 4 and alpha_7d >= 8 and change_24h > 0 and vol_mcap <= 120
+            overheated = vol_mcap >= 100 or change_24h >= 25 or alpha_24h >= 18
+
+            score = 0
+            score += min(35, max(0, alpha_7d) * 1.2)
+            score += min(25, max(0, alpha_24h) * 2.0)
+            score += 18 if btc_regime == "RISK_OFF" else 12 if btc_regime == "STAGNANT" else 12 if long_watch else 0
+            if 2 <= vol_mcap <= 80:
+                score += 10
+            elif vol_mcap > 150:
+                score -= 12
+            if has_perp:
+                score += 10
+            if volume < 1_000_000:
+                score -= 10
+            score = max(0, min(100, int(round(score))))
+
+            if short_watch:
+                signal = "SHORT-WATCH HEISS" if overheated else "SHORT-WATCH"
+                trade_action = "WAIT_FOR_SHORT_TRIGGER"
+                signal_label = "BTC schwach/seitwaerts, Coin outperformt stark - Short-Setup abwarten"
+                bias = "SHORT"
+            elif long_watch:
+                signal = "LONG-WATCH"
+                trade_action = "WAIT_FOR_LONG_TRIGGER"
+                signal_label = "Coin zeigt relative Staerke bei BTC-Risk-On - Long-Setup abwarten"
+                bias = "LONG"
+            elif alpha_7d <= -10 and btc_regime != "RISK_OFF":
+                signal = "WEAK VS BTC"
+                trade_action = "BEOBACHTEN"
+                signal_label = "Coin underperformt BTC - kein Momentum-Long"
+                bias = "AVOID_LONG"
+            else:
+                signal = "NEUTRAL"
+                trade_action = "BEOBACHTEN"
+                signal_label = "Keine handelbare BTC-Divergenz"
+                bias = "NEUTRAL"
+
+            risk_flags = ["btc_divergence_watch_only", "requires_5m_trigger"]
+            if not has_perp:
+                risk_flags.append("no_perp_execution")
+            if overheated:
+                risk_flags.append("overheated_move")
+            if vol_mcap > 150:
+                risk_flags.append("extreme_turnover")
+
+            rows.append({
+                "ticker": symbol,
+                "symbol": symbol,
+                "name": name,
+                "price": _round_crypto_price(price),
+                "change_1h": round(change_1h, 2),
+                "change_1d": round(change_24h, 2),
+                "change_5d": round(change_7d, 2),
+                "change_7d": round(change_7d, 2),
+                "change_14d": round(change_14d, 2),
+                "div_1d": alpha_24h,
+                "div_5d": alpha_7d,
+                "alpha_24h": alpha_24h,
+                "alpha_7d": alpha_7d,
+                "alpha_14d": alpha_14d,
+                "btc_24h": round(btc_24h, 2),
+                "btc_7d": round(btc_7d, 2),
+                "btc_regime": btc_regime,
+                "vol_mcap": vol_mcap,
+                "market_cap": mcap,
+                "volume_24h": volume,
+                "has_perp": has_perp,
+                "contract": contract,
+                "exchange": exchange,
+                "best_exchange": perp_lookup.get("best_exchange", ""),
+                "funding_rate": perp_lookup.get("funding_rate", 0),
+                "oi_ratio": perp_lookup.get("oi_ratio", 0),
+                "score": score,
+                "grade": "S" if score >= 85 else "A" if score >= 75 else "B" if score >= 60 else "C" if score >= 45 else "D",
+                "signal": signal,
+                "trade_bias": bias,
+                "trade_action": trade_action,
+                "trade_signal": "BEOBACHTEN",
+                "entry_status": trade_action,
+                "signal_label": signal_label,
+                "signal_quality": "watch_only",
+                "execution_trigger_ok": False,
+                "risk_flags": risk_flags,
+                "scanner_note": "BTC-Divergenz ist ein Watch-/Bias-Scanner: kein Trade ohne 5m Trigger, Retest oder Rejection.",
+                "isCrypto": True,
+            })
+        except Exception as e:
+            print(f"[BTC-Div Warning] {e}")
+            continue
+
+    return sorted(
+        [r for r in rows if r.get("score", 0) >= 35 or r.get("signal") != "NEUTRAL"],
+        key=lambda r: (
+            0 if str(r.get("signal", "")).startswith("SHORT") else 1 if str(r.get("signal", "")).startswith("LONG") else 2,
+            -float(r.get("score") or 0),
+            -abs(float(r.get("alpha_7d") or 0)),
+        ),
+    )[:120]
+
+def _btc_divergenz_wrapper() -> None:
+    """Compare crypto coins/perps vs BTC; equities/ETFs are intentionally excluded."""
+    try:
+        save_cache_file(BTC_DIVERGENZ_CACHE, _build_crypto_btc_divergence_results())
+        return
+        assets = []
         results = []
 
         for sym, short, name in assets:
@@ -11883,8 +12024,6 @@ def _btc_divergenz_wrapper() -> None:
 
 @app.post("/api/btc-divergenz-scan")
 def trigger_btc_divergenz():
-    if not POLYGON_KEY:
-        raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
     _run_scan_safe("btc_divergenz", _btc_divergenz_wrapper)
     return {"status": "started", "message": "BTC Divergenz scan started"}
 
