@@ -278,6 +278,15 @@ def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), _volume_coin()])
     monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
     result = api.fetch_early_movers(_prefetched_perps=_perp())
+    for coin in result["coins"]:
+        if coin.get("Symbol") == "TVOL":
+            coin["alertable_crypto"] = True
+            coin["trade_signal"] = "JETZT_TRADEN"
+            coin["execution_trigger_ok"] = True
+            coin["entry_status"] = "TRIGGER_OK"
+            coin["signal_quality"] = "tradeable"
+            coin["grade"] = "S"
+            coin["score"] = 90
 
     decorated = api._decorate_early_mover_results([result], cache_age_seconds=15)
     row = decorated[0]["coins"][0]

@@ -22,7 +22,7 @@ def _orb_row(ticker, *, current, entry, stop, target1, target2, score=95, entry_
     }
 
 
-def test_orb_breakouts_sort_tradeable_before_wait_and_no_trade(monkeypatch):
+def test_orb_breakouts_keeps_only_tradeable_signals(monkeypatch):
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {"summary": {}})
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda: ({"GOOD", "WAIT", "NOPE"}, "test"))
     payload = [{
@@ -38,7 +38,10 @@ def test_orb_breakouts_sort_tradeable_before_wait_and_no_trade(monkeypatch):
     decorated = api._decorate_orb_results(payload, cache_age_seconds=3)[0]
     tickers = [row["ticker"] for row in decorated["breakouts"]]
 
-    assert tickers == ["GOOD", "WAIT", "NOPE"]
+    assert tickers == ["GOOD"]
     assert decorated["breakout_decision_counts"]["tradeable"] == 1
     assert decorated["breakout_decision_counts"]["wait"] == 1
     assert decorated["breakout_decision_counts"]["no_trade"] == 1
+    assert decorated["stats"]["breakouts_raw_count"] == 3
+    assert decorated["stats"]["breakouts_suppressed_watch_rows"] == 2
+    assert decorated["stats"]["visible_trade_signals"] == 1

@@ -898,6 +898,13 @@ _CRYPTO_STRATEGY_ALERTS_ENABLED = False
 _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys()) | {
     "SDS", "UDOW", "SVXY", "TVIX",
 }
+_SEND_WATCHLIST_EMAILS = False
+_SIGNAL_ONLY_SCANNERS = {
+    "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
+    "stock_strategy", "strategy_scan", "volume_spikes",
+    "early_movers", "new_listing", "btc_divergenz", "crypto_strategy",
+}
+_CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "new_listing", "btc_divergenz", "crypto_strategy"}
 
 print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
@@ -3924,6 +3931,9 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
 
 
 def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
+    if not _SEND_WATCHLIST_EMAILS:
+        _record_email_event("Crypto New Listing Watchlist", "skipped", "watchlist_emails_disabled_signal_only_mode")
+        return False
     now = now or time.time()
     candidates = _new_listing_watch_candidates(payload)
     if not candidates:
@@ -4314,6 +4324,19 @@ def _effective_scan_result_count(scanner_name: str, results: List[Dict[str, Any]
             if isinstance(container, dict):
                 total += len([r for r in container.get("breakdown_stocks", []) or [] if isinstance(r, dict)])
         return total
+    if scanner_name == "early_movers":
+        total = 0
+        for container in results or []:
+            if isinstance(container, dict):
+                total += len([r for r in container.get("coins", []) or [] if isinstance(r, dict)])
+        return total
+    if scanner_name == "orb":
+        total = 0
+        for container in results or []:
+            if isinstance(container, dict):
+                for key in ("breakouts", "failed_breakouts", "candidates"):
+                    total += len([r for r in container.get(key, []) or [] if isinstance(r, dict)])
+        return total
     return len(results or [])
 
 
@@ -4379,6 +4402,8 @@ def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], r
         "exclusion_policy": SCAN_EXCLUSION_POLICIES["common"] + SCAN_EXCLUSION_POLICIES.get(scanner_name, []),
         "market_context": _get_market_context_snapshot().get("summary"),
         "diagnostics": diagnostics,
+        "signal_only": scanner_name in _SIGNAL_ONLY_SCANNERS,
+        "signal_policy": "Nur echte Trade-Signale; Watch-/Warte-/Kontext-Zeilen werden aus Trading-Listen entfernt." if scanner_name in _SIGNAL_ONLY_SCANNERS else "Kontext-/Statusdaten",
     }
 
 
@@ -4506,6 +4531,126 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
     return decorated
 
 
+def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool:
+    """True only for rows that should be shown as actual trading signals."""
+    if not isinstance(row, dict):
+        return False
+
+    action = str(row.get("trade_action") or row.get("action") or "").upper()
+    signal = str(row.get("trade_signal") or row.get("signal") or row.get("Signal") or "").upper()
+    decision = str(row.get("trade_decision") or (row.get("trade_health") or {}).get("decision") or "").upper()
+    entry_status = str(row.get("entry_status") or "").upper()
+    signal_quality = str(row.get("signal_quality") or "").lower()
+    trade_category = str(row.get("trade_category") or "").upper()
+
+    explicit_trade = (
+        signal == "JETZT_TRADEN"
+        or action in {"SHORT_NOW", "LONG_NOW", "TRADE_NOW"}
+        or bool(row.get("alertable_crypto"))
+    )
+    wait_or_watch = (
+        "WATCH" in signal
+        or "WATCH" in action
+        or "BEOBACHTEN" in signal
+        or "BEOBACHTEN" in action
+        or signal in {"WARTEN", "WAIT"}
+        or action.startswith("WAIT_FOR_")
+        or entry_status.startswith("WAIT_FOR_")
+        or entry_status in {"WARTEN", "BEOBACHTEN"}
+        or signal_quality in {"observe", "wait", "wait_retest", "wait_trigger", "watch_or_blocked"}
+        or trade_category.endswith("_WATCH")
+        or trade_category in {"ANNOUNCEMENT_WATCH", "PUMP_RUNNING_WATCH", "ACTIVE_PUMP_WATCH", "EXHAUSTION_WATCH"}
+    )
+
+    if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+        return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
+
+    if wait_or_watch and not explicit_trade:
+        return False
+
+    if explicit_trade:
+        return _row_has_alert_quality(row, require_top_grade=False)
+
+    if decision == "TRADEABLE":
+        return _row_has_alert_quality(row, require_top_grade=True)
+
+    return False
+
+
+def _row_has_alert_quality(row: Dict[str, Any], require_top_grade: bool = True) -> bool:
+    """Keep weak/C-grade rows out of signal-only scanner lists."""
+    grade = _extract_alert_grade(row)
+    score = _alert_float(_extract_alert_score(row), None)
+    if grade and require_top_grade and grade not in _ALERT_TOP_GRADES:
+        return False
+    if score is not None and score < _ALERT_MIN_SCORE:
+        return False
+    return True
+
+
+def _filter_signal_rows(rows: List[Dict[str, Any]], scanner_name: str) -> Tuple[List[Dict[str, Any]], int]:
+    kept: List[Dict[str, Any]] = []
+    suppressed = 0
+    for row in rows or []:
+        if isinstance(row, dict) and _scanner_row_is_trade_signal(row, scanner_name):
+            kept.append(row)
+        else:
+            suppressed += 1
+    return kept, suppressed
+
+
+def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove watchlist/wait/context rows from user-facing scanner results."""
+    if scanner_name not in _SIGNAL_ONLY_SCANNERS:
+        return results
+
+    container_keys = {
+        "bear": ("breakdown_stocks",),
+        "orb": ("breakouts", "failed_breakouts", "candidates"),
+        "early_movers": ("coins",),
+    }.get(scanner_name)
+
+    if container_keys:
+        filtered_payloads: List[Dict[str, Any]] = []
+        for payload in results or []:
+            if not isinstance(payload, dict):
+                continue
+            payload = dict(payload)
+            stats = dict(payload.get("stats") or {})
+            total_suppressed = 0
+            total_visible = 0
+            for key in container_keys:
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    visible, suppressed = _filter_signal_rows(rows, scanner_name)
+                    payload[key] = visible
+                    stats[f"{key}_raw_count"] = len(rows)
+                    stats[f"{key}_suppressed_watch_rows"] = suppressed
+                    total_suppressed += suppressed
+                    total_visible += len(visible)
+            stats["signal_only"] = True
+            stats["visible_trade_signals"] = total_visible
+            stats["suppressed_watch_rows"] = total_suppressed
+            if scanner_name == "early_movers":
+                coins = payload.get("coins") if isinstance(payload.get("coins"), list) else []
+                stats["unified_count"] = len(coins)
+                stats["phase_1_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 1)
+                stats["phase_2_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 2)
+                stats["phase_3_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 3)
+                stats["trade_now_count"] = len(coins)
+            payload["stats"] = stats
+            filtered_payloads.append(payload)
+        return filtered_payloads
+
+    visible, suppressed = _filter_signal_rows(results, scanner_name)
+    for row in visible:
+        if isinstance(row, dict):
+            quality = row.setdefault("_quality", {})
+            quality["signal_only"] = True
+            quality["suppressed_watch_rows"] = suppressed
+    return visible
+
+
 def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
     """Decorate ORB container rows and the nested breakout/candidate rows."""
     def _orb_trade_rank(row: Dict[str, Any]) -> tuple:
@@ -4549,7 +4694,7 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
                         "no_trade": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() == "NO_TRADE"),
                     }
                 payload[list_key] = decorated_rows
-    return decorated
+    return _apply_signal_only_policy("orb", decorated)
 
 
 def _decorate_early_mover_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
@@ -4561,7 +4706,7 @@ def _decorate_early_mover_results(results: List[Dict[str, Any]], cache_age_secon
         rows = payload.get("coins")
         if isinstance(rows, list):
             payload["coins"] = _decorate_scan_results(rows, "early_movers", cache_age_seconds)
-    return decorated
+    return _apply_signal_only_policy("early_movers", decorated)
 
 
 def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
@@ -8001,7 +8146,7 @@ def get_email_alert_audit():
             "early_mover_min_rr": _EARLY_MOVER_MIN_ALERT_RR,
             "early_mover_retest_max_distance_r": _EARLY_MOVER_RETEST_MAX_DISTANCE_R,
             "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
-            "note": "Alerts are defensive: S/A/A+ only; B/watchlist rows stay visible in the UI but do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require LONG_TRIGGER or a nearby retest, BTC tailwind, fresh data, TP1 not missed and live R:R.",
+            "note": "Alerts are defensive: S/A/A+ only; watch/wait/context rows are suppressed from scanner signal lists and do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed 5m execution, BTC tailwind, fresh data, TP1 not missed and live R:R.",
         },
         "coverage": {
             "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers"],
@@ -9823,6 +9968,7 @@ def get_scan_results(
         elif "crypto" in market_type:
             scanner_name = "early_movers"
     results = _decorate_scan_results(results, scanner_name, cache_age)
+    results = _apply_signal_only_policy(scanner_name, results)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
 
     return ScanResultsResponse(
@@ -9890,6 +10036,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
 
     scanner_name = f"bi_{direction}"
     results = _decorate_scan_results(results, scanner_name, cache_age)
+    results = _apply_signal_only_policy(scanner_name, results)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     return ScanResultsResponse(
         status="success",
@@ -9932,6 +10079,7 @@ def get_bear_results():
             print(f"[Warning] {e}")
 
     results = _decorate_scan_results(results, "bear", cache_age)
+    results = _apply_signal_only_policy("bear", results)
     quality = _scan_quality_payload("bear", cache_age, results)
     result_count = _effective_scan_result_count("bear", results)
     return ScanResultsResponse(
@@ -9978,6 +10126,7 @@ def get_biotech_results():
             print(f"[Warning] {e}")
 
     results = _decorate_scan_results(results, "biotech", cache_age)
+    results = _apply_signal_only_policy("biotech", results)
     quality = _scan_quality_payload("biotech", cache_age, results)
     return ScanResultsResponse(
         status="success",
@@ -12038,6 +12187,7 @@ def get_btc_divergenz():
         except Exception as e:
             print(f"[Warning] {e}")
     decorated = _decorate_scan_results(results, "btc_divergenz", cache_age)
+    decorated = _apply_signal_only_policy("btc_divergenz", decorated)
     quality = _scan_quality_payload("btc_divergenz", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
@@ -12505,12 +12655,17 @@ def get_new_listing_results():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception as e:
             print(f"[Warning] {e}")
-    stats = {
-        "new_listings": len(results) if results else 0,
-        "exchanges_monitored": len(set(r.get("exchange", "") for r in results)) if results else 0,
-        "active_signals": len([r for r in results if r.get("signal", "").startswith("SHORT")]) if results else 0,
-    }
+    raw_count = len(results) if results else 0
     decorated = _decorate_scan_results(results, "new_listing", cache_age)
+    decorated = _apply_signal_only_policy("new_listing", decorated)
+    stats = {
+        "raw_rows": raw_count,
+        "new_listings": len(decorated) if decorated else 0,
+        "exchanges_monitored": len(set(r.get("exchange", "") for r in decorated)) if decorated else 0,
+        "active_signals": len([r for r in decorated if r.get("trade_signal") == "JETZT_TRADEN" or r.get("trade_action") == "SHORT_NOW"]) if decorated else 0,
+        "suppressed_watch_rows": max(0, raw_count - len(decorated or [])),
+        "signal_only": True,
+    }
     quality = _scan_quality_payload("new_listing", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "stats": stats, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
@@ -12643,6 +12798,7 @@ def get_volume_spikes():
         except Exception as e:
             print(f"[Warning] {e}")
     decorated = _decorate_scan_results(results, "volume_spikes", cache_age)
+    decorated = _apply_signal_only_policy("volume_spikes", decorated)
     quality = _scan_quality_payload("volume_spikes", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 

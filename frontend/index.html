@@ -3876,7 +3876,6 @@ function App() {
         { id: 'money-flow', label: 'Money Flow' },
         { id: 'kalender', label: 'Kalender' },
         { id: 'crash-monitor', label: 'Crash Monitor' },
-        { id: 'watchlist', label: 'Watchlist' },
         { id: 'backtest', label: 'Backtest' },
         { id: 'strategie-guide', label: 'Strategie Guide' },
         { id: 'new-listing', label: 'Pump & Dump' },
@@ -3928,7 +3927,6 @@ function App() {
                     { id: 'kalender', name: 'Kalender', desc: 'Earnings, IPOs, FDA Dates', svg: 'M3 3H21V21H3ZM7 7V17M12 10V17M17 5V17', color: '#3b82f6' },
                     { id: 'crash-monitor', name: 'Crash Monitor', desc: 'Markt-Risiko Überwachung', svg: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01', color: '#ef4444' },
                     { id: 'backtest', name: 'Backtest', desc: 'Strategien historisch testen', svg: 'M12 20V10M18 20V4M6 20V16', color: '#8b5cf6' },
-                    { id: 'watchlist', name: 'Watchlist', desc: 'Deine beobachteten Aktien', svg: 'M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z', color: '#f97316' },
                     { id: 'autotrader', name: 'Auto-Trader', desc: 'Automatisierte Trade-Ausführung', svg: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z', color: '#10b981' },
                 ]},
             ]
@@ -4342,7 +4340,6 @@ function App() {
                     {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'kalender' && <KalenderTab />}
                     {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                    {activeTab === 'watchlist' && <WatchlistTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
                     {activeTab === 'backtest' && <BacktestTab />}
                     {activeTab === 'strategie-guide' && <StrategieGuideTab />}
                     {activeTab === 'new-listing' && <NewListingTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
@@ -4404,10 +4401,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('scanner_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('scanner_results', items);
                 }
             } catch (err) { console.error('Error:', err); }
         };
@@ -4629,10 +4624,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 if (res.ok) {
                     const data = await res.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('bi_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('bi_results', items);
                 }
                 // Scan fertig → Polling stoppen
                 if (!scanRunning) {
@@ -4673,10 +4666,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('bi_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('bi_results', items);
                 }
                 // Auto-detect: Läuft gerade ein Scan? Dann Live-Polling starten
                 const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
@@ -4738,6 +4729,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         ))}
                     </tbody>
                 </table>
+                {sorted.length === 0 && <div className="text-center text-gray-400 py-8">Kein aktives Short-Signal. Listing-/Pump-Watch-Zeilen werden nicht mehr als Scanner-Ergebnis gezeigt.</div>}
             </div>
         </div>
     );
@@ -4747,7 +4739,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
-    const [catalystWatchlist, setCatalystWatchlist] = useState(scanCache.biotech_catalyst_watchlist || null);
+    const [catalystWatchlist] = useState(null);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollTimeoutRef = useRef(null);
 
@@ -4818,36 +4810,23 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('biotech_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('biotech_results', items);
                 }
             } catch (err) { console.error('Error:', err); }
         };
-        const fetchCatalystWatchlist = async () => {
-            try {
-                const response = await fetch(`${API}/api/biotech-catalyst-watchlist`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setCatalystWatchlist(data);
-                    updateScanCache('biotech_catalyst_watchlist', data);
-                }
-            } catch (err) { console.error('Catalyst watchlist error:', err); }
-        };
         fetchResults();
-        fetchCatalystWatchlist();
     }, []);
 
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="biotech" />
 
-            {catalystWatchlist && (
+            {false && catalystWatchlist && (
                 <div className="card border border-emerald-100 bg-emerald-50/60 p-5 rounded-lg">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
                         <div>
-                            <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">Catalyst Watchlist</div>
+                            <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">Catalyst Kontext</div>
                             <h3 className="text-lg font-bold text-gray-900 mt-1">
                                 Phase 2/3 & PDUFA Kontext
                                 <span className="ml-2 text-sm font-semibold text-emerald-700">{catalystWatchlist.count || 0} Events</span>
@@ -4982,6 +4961,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         })}
                     </tbody>
                 </table>
+                {sorted.length === 0 && <div className="text-center text-gray-400 py-8">Kein aktives Divergenz-Trade-Signal. Relative Staerke/Schwaeche ohne Entry-Trigger wird nicht mehr als Ergebnis gezeigt.</div>}
             </div>
         </div>
     );
@@ -5064,10 +5044,8 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('btc_divergenz_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('btc_divergenz_results', items);
                 }
             } catch (err) { console.error('Error:', err); }
         };
@@ -5103,7 +5081,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="btc_divergenz" />
             <div className="p-3 rounded-lg bg-orange-50 border border-orange-100 text-sm text-orange-900">
-                BTC-Divergenz scannt jetzt <b>Crypto-Coins/Perps</b>, keine Aktien/ETFs. SHORT-WATCH heisst: BTC schwach/seitwaerts, Coin uebertreibt relativ stark - erst 5m Rejection/Strukturbruch abwarten. LONG-WATCH heisst: Coin zeigt echte relative Staerke bei BTC-Risk-On.
+                Signal-Only Modus: BTC-Divergenz zeigt keine Watchliste mehr. Ein Coin erscheint hier erst, wenn relative Staerke/Schwaeche plus echter Entry-Trigger zu einem handelbaren Signal werden.
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -5270,12 +5248,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     const data = await response.json();
                     const em = (data.data && data.data[0]) || {};
                     const items = em.coins || [];
-                    if (items.length > 0) {
-                        setCoins(items);
-                        setStats(em.stats || null);
-                        updateScanCache('em_coins', items);
-                        updateScanCache('em_stats', em.stats);
-                    }
+                    setCoins(items);
+                    setStats(em.stats || null);
+                    updateScanCache('em_coins', items);
+                    updateScanCache('em_stats', em.stats);
                 }
             } catch (err) { console.error('Error fetching early movers:', err); }
         };
@@ -5348,7 +5324,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                <b>Setup</b> = Coin-Qualitaet. <b>Entry</b> = ob jetzt gehandelt werden darf. Hoher Setup-Score ohne Entry-Score bedeutet: beobachten, nicht kaufen.
+                Signal-Only Modus: Hier erscheinen nur Coins mit bestaetigtem 5m-Trigger, Entry/Stop/TP und Live-R:R. Wartelisten und reine Beobachtungen werden unterdrueckt.
             </div>
 
             {/* Unified Phase Table */}
@@ -5432,7 +5408,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         )})}
                     </tbody>
                 </table>
-                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Keine Ergebnisse{phaseFilter > 0 ? ` für Phase ${phaseFilter}` : ''} — starte einen Scan</div>}
+                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Kein aktives Trading-Signal{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Watch-/Warte-Coins werden nicht mehr als Signal gezeigt.</div>}
             </div>
 
         </div>
@@ -5635,10 +5611,8 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('moneyflow_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('moneyflow_results', items);
                 }
             } catch (err) { console.error('Error:', err); }
         };
@@ -6983,12 +6957,10 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        setStats(data.stats);
-                        updateScanCache('newlisting_results', items);
-                        updateScanCache('newlisting_stats', data.stats);
-                    }
+                    setResults(items);
+                    setStats(data.stats);
+                    updateScanCache('newlisting_results', items);
+                    updateScanCache('newlisting_stats', data.stats);
                 }
             } catch (err) { console.error('Error:', err); }
         };
@@ -7090,7 +7062,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
             <div className="p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-800">
-                Pump & Dump ist nur bei <b>JETZT SHORTEN</b> ein Trade. Watch-Zeilen bedeuten: Setup beobachten, erst 5m-Crack/Rejection plus valide Live-Daten abwarten. Preis <b>—</b> heisst: keine verlässlichen Live-/Candle-Daten für diese Exchange-Zeile.
+                Signal-Only Modus: Pump & Dump zeigt nur noch <b>JETZT SHORTEN</b> mit 5m-Crack/Rejection, Safety OK, Entry/Stop/TP und Live-R:R. Reine Listing-/Pump-Beobachtungen werden nicht mehr angezeigt oder gemailt.
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -7212,10 +7184,8 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
-                    if (items.length > 0) {
-                        setResults(items);
-                        updateScanCache('vs_results', items);
-                    }
+                    setResults(items);
+                    updateScanCache('vs_results', items);
                 }
             } catch (err) { console.error('Error:', err); }
         };

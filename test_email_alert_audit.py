@@ -1093,7 +1093,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
     assert "RISK" not in sent[0][1]
 
 
-def test_new_listing_pipeline_sends_daily_watch_when_no_short_now(monkeypatch):
+def test_new_listing_pipeline_does_not_send_watch_when_no_short_now(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
@@ -1138,15 +1138,10 @@ def test_new_listing_pipeline_sends_daily_watch_when_no_short_now(monkeypatch):
 
     api._send_new_listing_pipeline_alerts(payload)
 
-    assert len(sent) == 1
-    assert "Crypto New Listing beobachten" in sent[0][0]
-    assert "NICHT SHORTEN" in sent[0][0]
-    assert "BABY" in sent[0][1]
-    assert "JETZT SHORTEN" in sent[0][1]
-    assert "Was jetzt tun?" in sent[0][1]
+    assert sent == []
 
 
-def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monkeypatch):
+def test_new_listing_pipeline_does_not_send_low_score_watch_mail(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
@@ -1173,11 +1168,7 @@ def test_new_listing_pipeline_sends_watch_for_recent_low_score_new_listing(monke
 
     api._send_new_listing_pipeline_alerts(payload)
 
-    assert len(sent) == 1
-    assert "Crypto New Listing beobachten" in sent[0][0]
-    assert "STAR" in sent[0][1]
-    assert "Dump-Trigger abwarten" in sent[0][1]
-    assert "SHORT NOW" not in sent[0][1]
+    assert sent == []
 
 
 def test_new_listing_pipeline_does_not_mail_unpumped_new_listing(monkeypatch):
