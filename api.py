@@ -3569,6 +3569,80 @@ def _crash_alert_suppression_summary_for_rows(rows: List[Dict[str, Any]], now: O
     return _format_alert_suppression_summary(suppressed, grade_counts)
 
 
+def _extract_email_body_inner(body_html: str) -> str:
+    """Accept old full HTML mails and extract only the content for the branded shell."""
+    text = str(body_html or "")
+    match = re.search(r"<body[^>]*>(.*?)</body>", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        text = match.group(1)
+    text = re.sub(r"^\s*<html[^>]*>\s*", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"\s*</html>\s*$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # Keep legacy alert bodies from leaking the old product name.
+    text = text.replace("TradingBot Alert", "Alpha Station Alert")
+    text = text.replace("TradingBot", "Alpha Station")
+    return text.strip()
+
+
+def _brand_email_html(subject: str, body_html: str) -> str:
+    """Wrap every alert in the same Alpha Station email layout."""
+    safe_subject = html.escape(str(subject or "Alpha Station Alert"))
+    inner = _extract_email_body_inner(body_html)
+    timestamp = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    return f"""<!doctype html>
+<html>
+<body style="margin:0;padding:0;background:#0a0f1e;font-family:Arial,Helvetica,sans-serif;color:#111827">
+    <div style="display:none;max-height:0;overflow:hidden;color:transparent;opacity:0">Alpha Station Signal Update</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0a0f1e;padding:28px 12px">
+        <tr>
+            <td align="center">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:860px;border-collapse:collapse">
+                    <tr>
+                        <td style="padding:26px 28px;border-radius:22px 22px 0 0;background:#111827;background-image:linear-gradient(135deg,#111827 0%,#172554 56%,#312e81 100%);border:1px solid rgba(148,163,184,0.22);border-bottom:0">
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                                <tr>
+                                    <td style="vertical-align:middle">
+                                        <table role="presentation" cellpadding="0" cellspacing="0">
+                                            <tr>
+                                                <td style="width:44px;height:44px;border-radius:14px;background:#2563eb;background-image:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#ffffff;font-size:22px;font-weight:900;text-align:center;line-height:44px">A</td>
+                                                <td style="padding-left:12px">
+                                                    <div style="font-size:22px;line-height:1.1;font-weight:900;color:#f8fafc;letter-spacing:-0.4px">Alpha Station</div>
+                                                    <div style="font-size:12px;line-height:1.5;color:#93c5fd;letter-spacing:0.08em;text-transform:uppercase">Trading Intelligence</div>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                    <td align="right" style="vertical-align:middle">
+                                        <div style="display:inline-block;padding:7px 12px;border-radius:999px;background:rgba(16,185,129,0.13);border:1px solid rgba(52,211,153,0.32);color:#6ee7b7;font-size:12px;font-weight:800">Signal Mail</div>
+                                    </td>
+                                </tr>
+                            </table>
+                            <div style="margin-top:24px;font-size:26px;line-height:1.25;font-weight:900;color:#ffffff;letter-spacing:-0.5px">{safe_subject}</div>
+                            <div style="margin-top:7px;color:#cbd5e1;font-size:13px">{timestamp}</div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="background:#f8fafc;border-left:1px solid rgba(148,163,184,0.25);border-right:1px solid rgba(148,163,184,0.25);padding:0">
+                            <div style="padding:24px 28px">
+                                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;padding:22px;box-shadow:0 12px 36px rgba(15,23,42,0.08)">
+                                    {inner}
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding:20px 28px 24px;border-radius:0 0 22px 22px;background:#0f172a;border:1px solid rgba(148,163,184,0.22);border-top:0;color:#94a3b8;font-size:12px;line-height:1.7">
+                            <div style="font-weight:800;color:#e2e8f0;margin-bottom:4px">Alpha Station</div>
+                            <div>Automatischer Analyse-Alert. Keine Anlageberatung, keine Kauf-/Verkaufsempfehlung. Trading erfolgt eigenverantwortlich.</div>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+
+
 def _send_email_alert(
     subject,
     body_html,
@@ -3606,16 +3680,16 @@ def _send_email_alert(
         print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         _record_email_event(subject, "skipped", "missing_recipient")
         return False
+    branded_body_html = _brand_email_html(subject, body_html)
     for attempt in range(3):
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = f"TradingBot Alert <{gmail_user}>"
+            msg["From"] = f"Alpha Station Alert <{gmail_user}>"
             msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
-            body_html = body_html + "<p style='color:#999;font-size:11px;margin-top:18px'>Automatischer Analyse-Alert. Keine Anlageberatung, keine Kauf-/Verkaufsempfehlung. Trading erfolgt eigenverantwortlich.</p>"
-            plain = re.sub(r"<[^>]+>", "", body_html.replace("<br>", "\n").replace("</tr>", "\n"))
+            plain = re.sub(r"<[^>]+>", "", branded_body_html.replace("<br>", "\n").replace("</tr>", "\n"))
             msg.attach(MIMEText(plain, "plain", "utf-8"))
-            msg.attach(MIMEText(body_html, "html", "utf-8"))
+            msg.attach(MIMEText(branded_body_html, "html", "utf-8"))
             # Try port 587 (STARTTLS) first, fallback to 465 (SSL)
             try:
                 server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
