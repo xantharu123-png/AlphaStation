@@ -12509,12 +12509,28 @@ def get_btc_divergenz():
 
 # ── Money Flow (Sector Performance) ──
 MONEY_FLOW_CACHE = "/tmp/money_flow_cache.json"
+NARRATIVE_PULSE_CACHE = "/tmp/narrative_pulse_cache.json"
+NARRATIVE_PULSE_DEDUPE_SEC = 30 * 60 * 60
 
 SECTOR_ETFS = {
     "XLK": "Technologie", "XLF": "Finanzen", "XLV": "Gesundheit",
     "XLE": "Energie", "XLI": "Industrie", "XLY": "Konsum (zyklisch)",
     "XLP": "Konsum (defensiv)", "XLU": "Versorger", "XLRE": "Immobilien",
     "XLB": "Grundstoffe", "XLC": "Kommunikation",
+}
+
+NARRATIVE_PROXIES = {
+    "SMH": {"name": "Semiconductors", "examples": ["NVDA", "AMD", "AVGO", "MU", "QCOM", "TSM", "ASML", "MX"]},
+    "XBI": {"name": "Biotech", "examples": ["VKTX", "MRNA", "BIIB", "REGN", "VRTX", "CRSP"]},
+    "KRE": {"name": "Regional Banks", "examples": ["WAL", "ZION", "CFG", "KEY", "CMA", "RF"]},
+    "XRT": {"name": "Retail", "examples": ["WMT", "TGT", "COST", "M", "BBY", "ANF"]},
+    "XHB": {"name": "Homebuilders", "examples": ["DHI", "LEN", "PHM", "TOL", "KBH", "NVR"]},
+    "XOP": {"name": "Oil & Gas", "examples": ["XOM", "CVX", "OXY", "EOG", "DVN", "APA"]},
+    "XME": {"name": "Metals & Mining", "examples": ["FCX", "NUE", "CLF", "AA", "STLD", "X"]},
+    "GDX": {"name": "Gold Miners", "examples": ["NEM", "GOLD", "AEM", "KGC", "AU", "HMY"]},
+    "TAN": {"name": "Solar", "examples": ["FSLR", "ENPH", "SEDG", "RUN", "NXT", "ARRY"]},
+    "ARKK": {"name": "Speculative Growth", "examples": ["TSLA", "COIN", "ROKU", "HOOD", "PLTR", "SOFI"]},
+    "IYT": {"name": "Transports", "examples": ["UPS", "FDX", "UNP", "DAL", "UAL", "LUV"]},
 }
 
 
@@ -12542,50 +12558,220 @@ def _calculate_cmf(closes: List[float], highs: List[float], lows: List[float], v
     return 0
 
 
+def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, Any]]:
+    """Fetch recent daily performance for a sector/theme proxy or representative stock."""
+    if not ticker or not POLYGON_KEY:
+        return None
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
+    resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": limit, "sort": "desc"}, timeout=15)
+    if resp.status_code != 200:
+        return None
+    bars = resp.json().get("results", [])
+    if len(bars) < 2:
+        return None
+
+    close = float(bars[0].get("c", 0) or 0)
+    prev = float(bars[1].get("c", 0) or 0)
+    if close <= 0 or prev <= 0:
+        return None
+
+    idx_5 = min(5, len(bars) - 1)
+    idx_20 = min(20, len(bars) - 1)
+    base_5 = float(bars[idx_5].get("c", close) or close)
+    base_20 = float(bars[idx_20].get("c", close) or close)
+    vol = float(bars[0].get("v", 0) or 0)
+    vol_window = [float(b.get("v", 0) or 0) for b in bars[1:21]]
+    avg_vol = sum(vol_window) / len(vol_window) if vol_window else 0
+
+    closes = [float(b.get("c", 0) or 0) for b in reversed(bars)]
+    volumes = [float(b.get("v", 0) or 0) for b in reversed(bars)]
+    highs = [float(b.get("h", 0) or 0) for b in reversed(bars)]
+    lows = [float(b.get("l", 0) or 0) for b in reversed(bars)]
+    obv_values = calculate_obv(closes, volumes)
+    obv_change = 0.0
+    if len(obv_values) >= 6 and obv_values[-6] != 0:
+        obv_change = (obv_values[-1] - obv_values[-6]) / abs(obv_values[-6]) * 100
+
+    cmf = _calculate_cmf(closes, highs, lows, volumes, period=20)
+    return {
+        "ticker": ticker,
+        "price": round(close, 2),
+        "change_1d": round(((close - prev) / prev) * 100, 2),
+        "change_5d": round(((close - base_5) / base_5) * 100, 2) if base_5 > 0 else 0,
+        "change_20d": round(((close - base_20) / base_20) * 100, 2) if base_20 > 0 else 0,
+        "volume": vol,
+        "rvol": round(vol / avg_vol, 2) if avg_vol > 0 else 0,
+        "obv_change": round(obv_change, 2),
+        "cmf": cmf,
+    }
+
+
+def _narrative_score(row: Dict[str, Any]) -> float:
+    score = (
+        float(row.get("change_5d", 0) or 0) * 0.55
+        + float(row.get("change_20d", 0) or 0) * 0.25
+        + float(row.get("change_1d", 0) or 0) * 0.20
+    )
+    rvol = float(row.get("rvol", 0) or 0)
+    cmf = float(row.get("cmf", 0) or 0)
+    obv = float(row.get("obv_change", 0) or 0)
+    if rvol >= 1.3:
+        score += min(3.0, (rvol - 1.0) * 2.0)
+    if cmf > 0.10:
+        score += 1.5
+    elif cmf < -0.10:
+        score -= 1.5
+    if obv > 8:
+        score += 1.0
+    elif obv < -8:
+        score -= 1.0
+    return round(score, 2)
+
+
+def _narrative_bias(score: float) -> str:
+    if score >= 4:
+        return "BULLISCH"
+    if score <= -4:
+        return "BEARISCH"
+    return "NEUTRAL"
+
+
+def _narrative_representatives(tickers: List[str], direction: str, max_items: int = 3) -> List[Dict[str, Any]]:
+    reps: List[Dict[str, Any]] = []
+    for ticker in tickers[:8]:
+        try:
+            perf = _fetch_daily_proxy_perf(ticker, limit=25)
+            if perf:
+                reps.append({
+                    "ticker": ticker,
+                    "change_1d": perf.get("change_1d", 0),
+                    "change_5d": perf.get("change_5d", 0),
+                    "rvol": perf.get("rvol", 0),
+                })
+        except Exception as exc:
+            print(f"[Narrative] representative skip {ticker}: {exc}")
+    reverse = direction == "bull"
+    reps.sort(key=lambda item: (float(item.get("change_5d", 0) or 0), float(item.get("change_1d", 0) or 0)), reverse=reverse)
+    return reps[:max_items]
+
+
+def _build_narrative_pulse(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    enriched: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        score = _narrative_score(item)
+        item["narrative_score"] = score
+        item["bias"] = _narrative_bias(score)
+        enriched.append(item)
+
+    bullish = sorted(enriched, key=lambda x: x.get("narrative_score", 0), reverse=True)[:5]
+    bearish = sorted(enriched, key=lambda x: x.get("narrative_score", 0))[:5]
+
+    for item in bullish[:3]:
+        examples = item.get("examples") or []
+        item["representatives"] = _narrative_representatives(examples, "bull") if examples else []
+    for item in bearish[:3]:
+        examples = item.get("examples") or []
+        item["representatives"] = _narrative_representatives(examples, "bear") if examples else []
+
+    return {
+        "status": "success",
+        "generated_at": datetime.now().isoformat(),
+        "bullish": bullish,
+        "bearish": bearish,
+        "all": sorted(enriched, key=lambda x: x.get("narrative_score", 0), reverse=True),
+    }
+
+
+def _format_narrative_row(item: Dict[str, Any]) -> str:
+    reps = item.get("representatives") or []
+    rep_text = ", ".join(
+        f"{html.escape(str(rep.get('ticker', '')))} {float(rep.get('change_5d', 0) or 0):+.1f}%"
+        for rep in reps
+    ) or html.escape(", ".join(item.get("examples", [])[:3]) or "-")
+    color = "#059669" if float(item.get("narrative_score", 0) or 0) >= 0 else "#dc2626"
+    return (
+        "<tr>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(item.get('sector', item.get('narrative', ''))))}</b><br>"
+        f"<span style='color:#64748b'>{html.escape(str(item.get('ticker', '')))} Proxy</span></td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee;color:{color};font-weight:bold'>{float(item.get('narrative_score', 0) or 0):+.1f}</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('change_1d', 0) or 0):+.1f}%</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('change_5d', 0) or 0):+.1f}%</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('change_20d', 0) or 0):+.1f}%</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('rvol', 0) or 0):.1f}x</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(rep_text)}</td>"
+        "</tr>"
+    )
+
+
+def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = None) -> bool:
+    now = now or time.time()
+    utc_now = datetime.now(timezone.utc)
+    day_key = utc_now.strftime("%Y%m%d")
+    dedupe_key = f"narrative_pulse_daily_{day_key}"
+    if not _email_dedupe_claim(dedupe_key, NARRATIVE_PULSE_DEDUPE_SEC, now=now):
+        _record_email_event("Narrative Pulse Daily", "skipped", "daily_dedupe_active")
+        return False
+
+    bullish = payload.get("bullish", [])[:5]
+    bearish = payload.get("bearish", [])[:5]
+    if not bullish and not bearish:
+        _record_email_event("Narrative Pulse Daily", "skipped", "empty_payload")
+        return False
+
+    top_bull = bullish[0].get("sector", bullish[0].get("narrative", "-")) if bullish else "-"
+    top_bear = bearish[0].get("sector", bearish[0].get("narrative", "-")) if bearish else "-"
+    bull_rows = "".join(_format_narrative_row(item) for item in bullish)
+    bear_rows = "".join(_format_narrative_row(item) for item in bearish)
+    table_head = (
+        "<tr style='background:#f8fafc'><th style='padding:8px;text-align:left'>Narrativ</th>"
+        "<th style='padding:8px;text-align:left'>Score</th><th style='padding:8px;text-align:left'>1D</th>"
+        "<th style='padding:8px;text-align:left'>5D</th><th style='padding:8px;text-align:left'>20D</th>"
+        "<th style='padding:8px;text-align:left'>RVOL</th><th style='padding:8px;text-align:left'>Beispiele</th></tr>"
+    )
+    body = f"""<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto;color:#111827">
+    <h2 style="margin-bottom:4px">Alpha Station Narrative Pulse</h2>
+    <p style="color:#64748b;margin-top:0">{utc_now.strftime('%d.%m.%Y %H:%M')} UTC | Markt-Rotation, keine Einzeltrade-Freigabe.</p>
+    <p><b>Bullischstes Narrativ:</b> {html.escape(str(top_bull))}<br>
+    <b>Bearischstes Narrativ:</b> {html.escape(str(top_bear))}</p>
+    <h3 style="color:#059669">Bullischste Narrative</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">{table_head}{bull_rows}</table>
+    <h3 style="color:#dc2626;margin-top:22px">Bearischste Narrative</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">{table_head}{bear_rows}</table>
+    <p style="color:#64748b;font-size:12px;margin-top:18px">Score mischt 5D/20D/1D Performance, Aktivitaet, CMF und OBV. Das zeigt, wohin Kapital rotiert; Entries kommen weiterhin nur ueber die separaten Scanner mit Entry/Stop/TP.</p>
+    </body></html>"""
+    return _send_email_alert(f"Narrative Pulse: Bullisch {top_bull} | Bearisch {top_bear}", body)
+
+
 def _money_flow_wrapper() -> None:
     """Fetch sector ETF performance for money flow analysis."""
     try:
         sectors = []
-        for ticker, name in SECTOR_ETFS.items():
+        proxy_universe = {
+            **{ticker: {"name": name, "type": "sector", "examples": []} for ticker, name in SECTOR_ETFS.items()},
+            **{ticker: {"name": cfg["name"], "type": "theme", "examples": cfg.get("examples", [])} for ticker, cfg in NARRATIVE_PROXIES.items()},
+        }
+        for ticker, cfg in proxy_universe.items():
+            name = cfg["name"]
             try:
-                url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
-                if resp.status_code != 200:
+                perf = _fetch_daily_proxy_perf(ticker, limit=30)
+                if not perf:
                     continue
-                bars = resp.json().get("results", [])
-                if len(bars) < 2:
-                    continue
-                close = bars[0]["c"]
-                prev = bars[1]["c"]
-                chg_1d = ((close - prev) / prev) * 100
-                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
-                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
-
-                vol = bars[0].get("v", 0)
-                avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(len(bars)-1, 20) if len(bars) > 1 else 1
-                rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
-
-                # Fix 3a: On-Balance Volume (OBV) Trend
-                closes = [b["c"] for b in reversed(bars)]
-                volumes = [b.get("v", 0) for b in reversed(bars)]
-                obv_values = calculate_obv(closes, volumes)
-                if len(obv_values) >= 6:
-                    obv_change = (obv_values[-1] - obv_values[-6]) / abs(obv_values[-6]) * 100 if obv_values[-6] != 0 else 0
-                    price_change = (closes[-1] - closes[-6]) / closes[-6] * 100 if closes[-6] > 0 else 0
-                    if obv_change > 10 and price_change < 2:
-                        obv_signal = "ACCUMULATION"
-                    elif obv_change < -10 and price_change > -2:
-                        obv_signal = "DISTRIBUTION"
-                    else:
-                        obv_signal = "NEUTRAL"
+                close = perf["price"]
+                chg_1d = perf["change_1d"]
+                chg_5d = perf["change_5d"]
+                chg_20d = perf["change_20d"]
+                vol = perf["volume"]
+                rvol = perf["rvol"]
+                cmf = perf["cmf"]
+                obv_change = perf["obv_change"]
+                if obv_change > 10 and chg_5d < 2:
+                    obv_signal = "ACCUMULATION"
+                elif obv_change < -10 and chg_5d > -2:
+                    obv_signal = "DISTRIBUTION"
                 else:
-                    obv_change = 0
                     obv_signal = "NEUTRAL"
 
-                # Fix 3b: Chaikin Money Flow (CMF)
-                highs = [b.get("h", 0) for b in reversed(bars)]
-                lows = [b.get("l", 0) for b in reversed(bars)]
-                cmf = _calculate_cmf(closes, highs, lows, volumes, period=20)
                 if cmf > 0.1:
                     cmf_signal = "BUYING"
                 elif cmf < -0.1:
@@ -12604,13 +12790,19 @@ def _money_flow_wrapper() -> None:
                     flow = "NEUTRAL"
 
                 sectors.append({
-                    "ticker": ticker, "sector": name, "price": round(close, 2),
+                    "ticker": ticker, "sector": name, "narrative": name, "narrative_type": cfg.get("type", "sector"),
+                    "examples": cfg.get("examples", []),
+                    "price": round(close, 2),
                     "change_1d": round(chg_1d, 2), "change_5d": round(chg_5d, 2),
                     "change_20d": round(chg_20d, 2), "volume": vol, "rvol": rvol,
+                    "narrative_score": _narrative_score({
+                        "change_1d": chg_1d, "change_5d": chg_5d, "change_20d": chg_20d,
+                        "rvol": rvol, "cmf": cmf, "obv_change": obv_change,
+                    }),
                     "flow_signal": flow,
                     "trade_signal": "BEOBACHTEN",
                     "trade_action": "BEOBACHTEN",
-                    "signal_label": "Achtung beobachten: Aktien-Sektorflow, kein einzelnes Crypto-Entry-Signal",
+                    "signal_label": "Achtung beobachten: Marktrotation, kein Einzeltrade-Signal",
                     "execution_trigger_ok": False,
                     "obv_signal": obv_signal,
                     "obv_change": round(obv_change, 2),
@@ -12623,6 +12815,9 @@ def _money_flow_wrapper() -> None:
 
         sectors.sort(key=lambda x: x.get("change_5d", 0), reverse=True)
         save_cache_file(MONEY_FLOW_CACHE, sectors)
+        narrative_payload = _build_narrative_pulse(sectors)
+        save_cache_file(NARRATIVE_PULSE_CACHE, narrative_payload)
+        _send_narrative_pulse_email(narrative_payload)
     except Exception as e:
         print(f"Money flow error: {e}")
 
@@ -12647,6 +12842,25 @@ def get_money_flow():
     decorated = _decorate_scan_results(results, "money_flow", cache_age)
     quality = _scan_quality_payload("money_flow", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
+
+
+@app.get("/api/narrative-pulse")
+def get_narrative_pulse():
+    payload, cached_at = load_cache_file(NARRATIVE_PULSE_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except Exception as e:
+            print(f"[Warning] Error calculating narrative pulse cache age: {e}")
+    return {
+        "status": "success" if payload else "empty",
+        "data": payload or {},
+        "cached_at": cached_at,
+        "cache_age_seconds": cache_age,
+        "data_source": "Sector/theme proxy rotation + representative stock performance",
+        "note": "Narrative context only; entries still require scanner trade setup.",
+    }
 
 
 # ── New Listing Scanner ──
