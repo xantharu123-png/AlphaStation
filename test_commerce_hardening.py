@@ -98,10 +98,30 @@ def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
 
     token = "unit-token"
     monkeypatch.setattr(auth, "verify_token", lambda value: {"email": "elite@example.com"} if value == token else None)
-    updated = auth.update_user_alert_settings(token, enabled=False, alert_email="desk@example.com")
+    updated = auth.update_user_alert_settings(token, enabled=False, alert_email="desk@example.com", narrative_email_frequency="weekly")
 
     assert updated["success"] is True
     settings = auth.get_user_alert_settings(token)
     assert settings["email_alerts_enabled"] is False
     assert settings["alert_email"] == "desk@example.com"
+    assert settings["narrative_email_frequency"] == "weekly"
     assert settings["has_email_alerts"] is True
+
+
+def test_narrative_alert_recipients_respect_frequency(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+
+    for email, frequency in (
+        ("daily@example.com", "daily"),
+        ("twice@example.com", "twice_daily"),
+        ("off@example.com", "off"),
+    ):
+        assert auth.register_user(email, "secret", email.split("@")[0])["success"] is True
+        db = auth._load_users()
+        db["users"][email]["plan"] = "elite"
+        db["users"][email]["narrative_email_frequency"] = frequency
+        auth._save_users(db)
+
+    assert auth.get_email_alert_recipients("narrative_pulse", "daily") == ["daily@example.com"]
+    assert auth.get_email_alert_recipients("narrative_pulse", "twice_daily") == ["twice@example.com"]
+    assert "off@example.com" not in auth.get_email_alert_recipients("narrative_pulse")

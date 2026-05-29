@@ -3873,7 +3873,7 @@ function App() {
         { id: 'btc-divergenz', label: 'BTC-Divergenz' },
         { id: 'early-movers', label: 'Early Mover' },
         { id: 'short-scanner', label: 'Short Scanner' },
-        { id: 'money-flow', label: 'Money Flow' },
+        { id: 'money-flow', label: 'Sektoren' },
         { id: 'kalender', label: 'Kalender' },
         { id: 'crash-monitor', label: 'Crash Monitor' },
         { id: 'backtest', label: 'Backtest' },
@@ -3902,7 +3902,6 @@ function App() {
                     { id: 'scanner', name: 'Aktien Scanner', desc: 'Haupt-Scanner mit Grading', svg: 'M3 12L9 6L13 10L21 2M21 2H15M21 2V8', color: '#3b82f6' },
                     { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
                     { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
-                    { id: 'money-flow', name: 'Money Flow', desc: 'Institutionelle Bewegungen', svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6' },
                     { id: 'volume-spikes', name: 'Aktien Volume Spikes', desc: 'Ungewoehnliches Aktien-Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
                     { id: 'orb', name: 'ORB Scanner', desc: 'Opening Range Breakout', svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899' },
                 ]},
@@ -3926,6 +3925,7 @@ function App() {
                 { title: null, items: [
                     { id: 'kalender', name: 'Kalender', desc: 'Earnings, IPOs, FDA Dates', svg: 'M3 3H21V21H3ZM7 7V17M12 10V17M17 5V17', color: '#3b82f6' },
                     { id: 'crash-monitor', name: 'Crash Monitor', desc: 'Markt-Risiko Überwachung', svg: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01', color: '#ef4444' },
+                    { id: 'money-flow', name: 'Sektoren & Narrative', desc: 'Rotation, bullische/bearische Themen und Mail-Frequenz', svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#0ea5e9' },
                     { id: 'backtest', name: 'Backtest', desc: 'Strategien historisch testen', svg: 'M12 20V10M18 20V4M6 20V16', color: '#8b5cf6' },
                     { id: 'autotrader', name: 'Auto-Trader', desc: 'Automatisierte Trade-Ausführung', svg: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z', color: '#10b981' },
                 ]},
@@ -4337,7 +4337,7 @@ function App() {
                     {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                    {activeTab === 'money-flow' && <MoneyFlowTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'money-flow' && <SectorNarrativeTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} getToken={getToken} />}
                     {activeTab === 'kalender' && <KalenderTab />}
                     {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'backtest' && <BacktestTab />}
@@ -5716,6 +5716,290 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         ))}
                     </tbody>
                 </table>
+            </div>
+        </div>
+    );
+}
+
+// Sector Narrative Tab (Tools)
+function SectorNarrativeTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null, getToken = () => localStorage.getItem('as_token') }) {
+    const [results, setResults] = useState(scanCache.moneyflow_results || []);
+    const [narrative, setNarrative] = useState(scanCache.narrative_pulse || null);
+    const [narrativeMeta, setNarrativeMeta] = useState(scanCache.narrative_meta || {});
+    const [alertSettings, setAlertSettings] = useState(null);
+    const [settingsSaving, setSettingsSaving] = useState(false);
+    const [isScanning, setIsScanning] = useState(scanCache.moneyflow_scanning || false);
+    const { sorted, toggleSort } = useSortable(results, 'narrative_score');
+    const pollTimeoutRef = useRef(null);
+
+    const frequencyOptions = [
+        { value: 'off', label: 'Aus' },
+        { value: 'daily', label: 'Taeglich' },
+        { value: 'twice_daily', label: '2x taeglich' },
+        { value: 'weekly', label: 'Woechentlich' },
+    ];
+
+    const loadNarrativePulse = async () => {
+        try {
+            const response = await fetch(`${API}/api/narrative-pulse`);
+            if (response.ok) {
+                const data = await response.json();
+                const payload = data.data || {};
+                const meta = { cached_at: data.cached_at, cache_age_seconds: data.cache_age_seconds, note: data.note };
+                setNarrative(payload);
+                setNarrativeMeta(meta);
+                updateScanCache('narrative_pulse', payload);
+                updateScanCache('narrative_meta', meta);
+            }
+        } catch (err) { console.error('Narrative error:', err); }
+    };
+
+    const fetchResults = async () => {
+        try {
+            const response = await fetch(`${API}/api/money-flow-results`);
+            if (response.ok) {
+                const data = await response.json();
+                const items = data.data || [];
+                setResults(items);
+                updateScanCache('moneyflow_results', items);
+            }
+        } catch (err) { console.error('Error:', err); }
+        await loadNarrativePulse();
+    };
+
+    const loadAlertSettings = async () => {
+        try {
+            const token = getToken ? getToken() : localStorage.getItem('as_token');
+            if (!token) return;
+            const response = await fetch(`${API}/api/auth/alert-settings`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (response.ok) setAlertSettings(await response.json());
+        } catch (err) { console.error('Alert settings error:', err); }
+    };
+
+    useEffect(() => {
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
+    }, []);
+
+    useEffect(() => {
+        fetchResults();
+        loadAlertSettings();
+    }, []);
+
+    const saveNarrativeFrequency = async (frequency) => {
+        setSettingsSaving(true);
+        try {
+            const token = getToken ? getToken() : localStorage.getItem('as_token');
+            if (!token) throw new Error('missing token');
+            const next = { ...(alertSettings || {}), narrative_email_frequency: frequency };
+            setAlertSettings(next);
+            const response = await fetch(`${API}/api/auth/alert-settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({
+                    enabled: next.email_alerts_enabled,
+                    alert_email: next.alert_email,
+                    narrative_email_frequency: frequency
+                })
+            });
+            const data = await response.json();
+            if (response.ok && data.settings) {
+                setAlertSettings(data.settings);
+                if (window.addToast) window.addToast('Sektor-Mail gespeichert', 'success');
+            } else if (window.addToast) {
+                window.addToast(data.detail || 'Sektor-Mail konnte nicht gespeichert werden', 'error');
+            }
+        } catch (err) {
+            if (window.addToast) window.addToast('Sektor-Mail konnte nicht gespeichert werden', 'error');
+        }
+        setSettingsSaving(false);
+    };
+
+    const handleScan = async () => {
+        setIsScanning(true);
+        updateScanCache('moneyflow_scanning', true);
+        let prevCachedAt = null;
+        try {
+            const preCheck = await fetch(`${API}/api/money-flow-results`);
+            if (preCheck.ok) {
+                const preData = await preCheck.json();
+                prevCachedAt = preData.cached_at || null;
+            }
+        } catch(e) {}
+        try {
+            const response = await fetch(`${API}/api/money-flow-scan`, { method: 'POST' });
+            if (response.ok) {
+                if (window.addToast) window.addToast('Sektor-Scan gestartet...', 'info');
+                const pollResults = async (attempts = 0) => {
+                    if (attempts > 12) {
+                        setIsScanning(false);
+                        updateScanCache('moneyflow_scanning', false);
+                        if (window.addToast) window.addToast('Sektor-Scan dauert laenger...', 'info');
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`${API}/api/money-flow-results`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const items = data.data || [];
+                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewData) {
+                                setResults(items);
+                                updateScanCache('moneyflow_results', items);
+                                await loadNarrativePulse();
+                                setIsScanning(false);
+                                updateScanCache('moneyflow_scanning', false);
+                                if (window.addToast) window.addToast(`Sektor-Scan fertig: ${items.length} Themen`, 'success');
+                                return;
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
+                };
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000);
+            } else {
+                setIsScanning(false);
+                updateScanCache('moneyflow_scanning', false);
+            }
+        } catch (err) {
+            if (window.addToast) window.addToast('Sektor-Scan Fehler', 'error');
+            setIsScanning(false);
+            updateScanCache('moneyflow_scanning', false);
+        }
+    };
+
+    const getFlowSignalClass = (signal) => {
+        if ((signal || '').includes('ZUFLUSS')) return 'signal-bullish';
+        if ((signal || '').includes('ABFLUSS')) return 'signal-bearish';
+        return 'signal-neutral';
+    };
+    const formatPct = (value) => value == null ? '-' : `${Number(value).toFixed(2)}%`;
+    const formatScore = (value) => value == null ? '-' : Number(value).toFixed(1);
+    const formatCachedAt = (iso) => {
+        if (!iso) return 'noch kein Cache';
+        try { return new Date(iso).toLocaleString('de-DE'); } catch { return iso; }
+    };
+    const frequency = alertSettings?.narrative_email_frequency || 'daily';
+    const canEmail = alertSettings?.has_email_alerts !== false && (alertSettings?.email_alerts_enabled ?? true);
+
+    const NarrativePanel = ({ title, items, tone }) => (
+        <div className="card border border-gray-200 p-5 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-bold text-gray-900">{title}</h3>
+                <span className={`signal-badge ${tone === 'bull' ? 'signal-bullish' : 'signal-bearish'}`}>{tone === 'bull' ? 'LONG-Bias' : 'SHORT/Risk-Bias'}</span>
+            </div>
+            <div className="space-y-3">
+                {(items || []).slice(0, 5).map((item, idx) => {
+                    const reps = item.representatives || [];
+                    return (
+                        <div key={`${item.ticker || item.sector}-${idx}`} className="rounded-xl border border-gray-100 bg-white p-3">
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <div className="font-bold text-gray-900">{item.sector || item.narrative}</div>
+                                    <div className="text-xs text-gray-500">{item.ticker} Proxy | {item.bias || 'NEUTRAL'}</div>
+                                </div>
+                                <div className={`font-extrabold ${Number(item.narrative_score || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>
+                                    {formatScore(item.narrative_score)}
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-2 text-xs mt-3">
+                                <div><span className="text-gray-500">1D</span><div className={item.change_1d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_1d)}</div></div>
+                                <div><span className="text-gray-500">5D</span><div className={item.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_5d)}</div></div>
+                                <div><span className="text-gray-500">20D</span><div className={item.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_20d)}</div></div>
+                                <div><span className="text-gray-500">RVOL</span><div>{item.rvol != null ? `${Number(item.rvol).toFixed(2)}x` : '-'}</div></div>
+                            </div>
+                            {reps.length > 0 && (
+                                <div className="mt-3 text-xs text-gray-600">
+                                    Beispiele: {reps.map(rep => `${rep.ticker} ${Number(rep.change_5d || 0).toFixed(1)}%`).join(', ')}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+                {(!items || items.length === 0) && <div className="text-sm text-gray-500 py-6 text-center">Noch keine Narrative-Daten.</div>}
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="space-y-6">
+            <div className="card border border-blue-100 bg-blue-50 p-5 rounded-lg">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                        <h2 className="text-xl font-extrabold text-gray-900">Sektoren & Narrative</h2>
+                        <p className="text-sm text-blue-900 mt-1">
+                            Zeigt, welche Markt-Themen gerade Kapital anziehen oder verlieren. Das ist Kontext fuer Long/Short-Ideen, kein eigener Sofort-Trade.
+                        </p>
+                        <div className="text-xs text-blue-800 mt-2">Letztes Update: {formatCachedAt(narrativeMeta.cached_at)}</div>
+                    </div>
+                    <div className="rounded-xl border border-blue-200 bg-white p-3 min-w-[260px]">
+                        <label className="text-xs font-bold text-gray-700 block mb-2">Narrative-Mail</label>
+                        <select
+                            value={frequency}
+                            disabled={settingsSaving || !canEmail}
+                            onChange={e => saveNarrativeFrequency(e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white"
+                        >
+                            {frequencyOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                        <div className="text-xs text-gray-500 mt-2">
+                            {canEmail ? 'Waehle, wie oft du den Sektor-/Narrative-Pulse per Mail bekommst.' : 'Mail-Alerts sind im Account aus oder im Plan nicht aktiv.'}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="money_flow" />
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <NarrativePanel title="Bullischste Themen" items={narrative?.bullish || []} tone="bull" />
+                <NarrativePanel title="Bearischste Themen" items={narrative?.bearish || []} tone="bear" />
+            </div>
+
+            <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                    <h3 className="text-lg font-bold text-gray-900">Alle Sektoren & Themen</h3>
+                    <span className="text-xs text-gray-500">Nach Narrative-Score sortierbar</span>
+                </div>
+                <table className="w-full text-sm">
+                    <thead className="border-b border-gray-200">
+                        <tr>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('sector')}>Sektor/Thema</th>
+                            <th className="text-left py-2 px-2">Proxy</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('narrative_score')}>Score</th>
+                            <th className="text-right py-2 px-2">Preis</th>
+                            <th className="text-right py-2 px-2">1D%</th>
+                            <th className="text-right py-2 px-2">5D%</th>
+                            <th className="text-right py-2 px-2">20D%</th>
+                            <th className="text-right py-2 px-2">RVOL</th>
+                            <th className="text-right py-2 px-2">CMF</th>
+                            <th className="text-left py-2 px-2">OBV</th>
+                            <th className="text-left py-2 px-2">Signal</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sorted.map((item, idx) => {
+                            const ticker = item.ticker || item.etf;
+                            return (
+                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => ticker && onSelectTicker(ticker)}>
+                                    <td className="py-3 px-2 font-semibold">{item.sector || item.narrative}</td>
+                                    <td className="py-3 px-2">{ticker || '-'}</td>
+                                    <td className={`py-3 px-2 text-right font-bold ${Number(item.narrative_score || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatScore(item.narrative_score)}</td>
+                                    <td className="py-3 px-2 text-right">{item.price != null ? `$${Number(item.price).toFixed(2)}` : '-'}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_1d)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_5d)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_20d)}</td>
+                                    <td className="py-3 px-2 text-right">{item.rvol != null ? `${Number(item.rvol).toFixed(2)}x` : '-'}</td>
+                                    <td className={`py-3 px-2 text-right ${Number(item.cmf || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.cmf != null ? Number(item.cmf).toFixed(3) : '-'}</td>
+                                    <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : 'Neutral'}</span></td>
+                                    <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal || '')}`}>{item.flow_signal || '-'}</span></td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+                {sorted.length === 0 && <div className="text-center text-gray-500 py-8">Noch keine Sektor-Daten. Scan starten.</div>}
             </div>
         </div>
     );

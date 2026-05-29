@@ -62,6 +62,7 @@ ALLOW_LEGACY_ADMIN_MASTER_KEY = os.environ.get(
 ).strip().lower() not in {"0", "false", "no", "off"}
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 PBKDF2_ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "260000"))
+NARRATIVE_EMAIL_FREQUENCIES = {"off", "daily", "twice_daily", "weekly"}
 
 # Stripe config (set via environment variables)
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -367,6 +368,7 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "stripe_subscription_id": None,
         "alert_email": email,
         "email_alerts_enabled": True,
+        "narrative_email_frequency": "daily",
         "created_at": datetime.utcnow().isoformat(),
         "last_login": datetime.utcnow().isoformat(),
         "trial_ends_at": None,
@@ -408,6 +410,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "password_hash": _hash_password(password),
             "plan": "elite", "stripe_customer_id": None, "stripe_subscription_id": None,
             "alert_email": email, "email_alerts_enabled": True,
+            "narrative_email_frequency": "daily",
             "created_at": datetime.utcnow().isoformat(), "last_login": datetime.utcnow().isoformat(),
             "trial_ends_at": None,
         }
@@ -681,11 +684,32 @@ def get_user_limits(token: str) -> Dict:
     }
 
 
-def get_email_alert_recipients() -> List[str]:
+def _normalize_narrative_email_frequency(value: Any) -> str:
+    freq = str(value or "daily").strip().lower().replace("-", "_")
+    aliases = {
+        "aus": "off",
+        "off": "off",
+        "none": "off",
+        "daily": "daily",
+        "taeglich": "daily",
+        "taglich": "daily",
+        "twice": "twice_daily",
+        "twice_daily": "twice_daily",
+        "2x": "twice_daily",
+        "weekly": "weekly",
+        "woechentlich": "weekly",
+        "wochentlich": "weekly",
+    }
+    return aliases.get(freq, freq if freq in NARRATIVE_EMAIL_FREQUENCIES else "daily")
+
+
+def get_email_alert_recipients(alert_type: str = "", frequency: str = "") -> List[str]:
     """Return unique alert recipients for active plans with email-alert access."""
     recipients: List[str] = []
     db = _load_users()
     changed = False
+    alert_type = str(alert_type or "").strip().lower()
+    frequency = _normalize_narrative_email_frequency(frequency) if frequency else ""
     for email, user in db.get("users", {}).items():
         if not isinstance(user, dict):
             continue
@@ -704,6 +728,12 @@ def get_email_alert_recipients() -> List[str]:
             continue
         if user.get("email_alerts_enabled", True) is False:
             continue
+        if alert_type == "narrative_pulse":
+            user_frequency = _normalize_narrative_email_frequency(user.get("narrative_email_frequency", "daily"))
+            if user_frequency == "off":
+                continue
+            if frequency and user_frequency != frequency:
+                continue
         alert_email = str(user.get("alert_email") or email).strip().lower()
         if "@" in alert_email:
             recipients.append(alert_email)
@@ -721,11 +751,18 @@ def get_user_alert_settings(token: str) -> Dict[str, Any]:
     return {
         "email_alerts_enabled": user.get("email_alerts_enabled", True),
         "alert_email": user.get("alert_email") or email,
+        "narrative_email_frequency": _normalize_narrative_email_frequency(user.get("narrative_email_frequency", "daily")),
+        "narrative_email_frequency_options": ["off", "daily", "twice_daily", "weekly"],
         "has_email_alerts": get_plan_features(get_user_plan(token)).get("has_email_alerts", False),
     }
 
 
-def update_user_alert_settings(token: str, enabled: Optional[bool] = None, alert_email: Optional[str] = None) -> Dict[str, Any]:
+def update_user_alert_settings(
+    token: str,
+    enabled: Optional[bool] = None,
+    alert_email: Optional[str] = None,
+    narrative_email_frequency: Optional[str] = None,
+) -> Dict[str, Any]:
     payload = verify_token(token)
     if not payload:
         return {"success": False, "message": "Invalid token"}
@@ -741,6 +778,11 @@ def update_user_alert_settings(token: str, enabled: Optional[bool] = None, alert
         if candidate and "@" not in candidate:
             return {"success": False, "message": "Invalid alert email"}
         user["alert_email"] = candidate or email
+    if narrative_email_frequency is not None:
+        frequency = _normalize_narrative_email_frequency(narrative_email_frequency)
+        if frequency not in NARRATIVE_EMAIL_FREQUENCIES:
+            return {"success": False, "message": "Invalid narrative email frequency"}
+        user["narrative_email_frequency"] = frequency
     db["users"][email] = user
     _save_users(db)
     return {"success": True, "settings": get_user_alert_settings(token)}

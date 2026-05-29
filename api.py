@@ -3569,7 +3569,12 @@ def _crash_alert_suppression_summary_for_rows(rows: List[Dict[str, Any]], now: O
     return _format_alert_suppression_summary(suppressed, grade_counts)
 
 
-def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False):
+def _send_email_alert(
+    subject,
+    body_html,
+    bypass_startup_cooldown: bool = False,
+    recipient_emails: Optional[List[str]] = None,
+):
     """Sendet E-Mail Alert via Gmail SMTP."""
     if _email_has_blocked_etf_content(subject, body_html):
         print(f"[Alert] SKIP (ETF/ETP-Inhalt blockiert): {subject}")
@@ -3587,8 +3592,11 @@ def _send_email_alert(subject, body_html, bypass_startup_cooldown: bool = False)
         print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
         _record_email_event(subject, "skipped", "missing_gmail_config")
         return False
-    recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
-    if ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
+    if recipient_emails is not None:
+        recipients = [addr.strip().lower() for addr in recipient_emails if str(addr).strip()]
+    else:
+        recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+    if recipient_emails is None and ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
         try:
             recipients.extend(get_email_alert_recipients())
         except Exception as exc:
@@ -8091,6 +8099,7 @@ class BillingPortalRequest(BaseModel):
 class AlertSettingsRequest(BaseModel):
     enabled: Optional[bool] = None
     alert_email: Optional[str] = None
+    narrative_email_frequency: Optional[str] = None
 
 
 # ── Admin Models ──
@@ -8205,7 +8214,12 @@ async def api_update_alert_settings(req_body: AlertSettingsRequest, authorizatio
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    result = update_user_alert_settings(token, enabled=req_body.enabled, alert_email=req_body.alert_email)
+    result = update_user_alert_settings(
+        token,
+        enabled=req_body.enabled,
+        alert_email=req_body.alert_email,
+        narrative_email_frequency=req_body.narrative_email_frequency,
+    )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))
     return result
@@ -12511,6 +12525,11 @@ def get_btc_divergenz():
 MONEY_FLOW_CACHE = "/tmp/money_flow_cache.json"
 NARRATIVE_PULSE_CACHE = "/tmp/narrative_pulse_cache.json"
 NARRATIVE_PULSE_DEDUPE_SEC = 30 * 60 * 60
+NARRATIVE_PULSE_FREQUENCIES = {
+    "daily": {"label": "Taeglich", "ttl": 30 * 60 * 60},
+    "twice_daily": {"label": "2x taeglich", "ttl": 13 * 60 * 60},
+    "weekly": {"label": "Woechentlich", "ttl": 8 * 24 * 60 * 60},
+}
 
 SECTOR_ETFS = {
     "XLK": "Technologie", "XLF": "Finanzen", "XLV": "Gesundheit",
@@ -12704,14 +12723,30 @@ def _format_narrative_row(item: Dict[str, Any]) -> str:
     )
 
 
+def _narrative_pulse_bucket(frequency: str, utc_now: datetime) -> str:
+    frequency = str(frequency or "daily").strip().lower()
+    if frequency == "twice_daily":
+        bucket = "am" if utc_now.hour < 12 else "pm"
+        return f"{utc_now.strftime('%Y%m%d')}_{bucket}"
+    if frequency == "weekly":
+        iso = utc_now.isocalendar()
+        return f"{iso.year}_w{iso.week:02d}"
+    return utc_now.strftime("%Y%m%d")
+
+
+def _narrative_pulse_recipients(frequency: str) -> List[str]:
+    if not HAS_AUTH or not ALERT_SEND_TO_SUBSCRIBERS:
+        return []
+    try:
+        return get_email_alert_recipients("narrative_pulse", frequency)
+    except Exception as exc:
+        print(f"[Narrative] Recipient filter failed: {exc}")
+        return []
+
+
 def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = None) -> bool:
     now = now or time.time()
     utc_now = datetime.now(timezone.utc)
-    day_key = utc_now.strftime("%Y%m%d")
-    dedupe_key = f"narrative_pulse_daily_{day_key}"
-    if not _email_dedupe_claim(dedupe_key, NARRATIVE_PULSE_DEDUPE_SEC, now=now):
-        _record_email_event("Narrative Pulse Daily", "skipped", "daily_dedupe_active")
-        return False
 
     bullish = payload.get("bullish", [])[:5]
     bearish = payload.get("bearish", [])[:5]
@@ -12740,6 +12775,31 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
     <table style="width:100%;border-collapse:collapse;font-size:13px">{table_head}{bear_rows}</table>
     <p style="color:#64748b;font-size:12px;margin-top:18px">Score mischt 5D/20D/1D Performance, Aktivitaet, CMF und OBV. Das zeigt, wohin Kapital rotiert; Entries kommen weiterhin nur ueber die separaten Scanner mit Entry/Stop/TP.</p>
     </body></html>"""
+    sent_any = False
+    tried_filtered_recipients = False
+    for frequency, cfg in NARRATIVE_PULSE_FREQUENCIES.items():
+        recipients = _narrative_pulse_recipients(frequency)
+        if not recipients:
+            continue
+        tried_filtered_recipients = True
+        bucket = _narrative_pulse_bucket(frequency, utc_now)
+        dedupe_key = f"narrative_pulse_{frequency}_{bucket}"
+        if not _email_dedupe_claim(dedupe_key, int(cfg["ttl"]), now=now):
+            _record_email_event(f"Narrative Pulse {frequency}", "skipped", "frequency_dedupe_active")
+            continue
+        subject = f"Narrative Pulse ({cfg['label']}): Bullisch {top_bull} | Bearisch {top_bear}"
+        sent = _send_email_alert(subject, body, recipient_emails=recipients)
+        sent_any = bool(sent) or sent_any
+
+    if tried_filtered_recipients or (HAS_AUTH and ALERT_SEND_TO_SUBSCRIBERS):
+        return sent_any
+
+    # Fallback for single-user/no-auth deployments.
+    day_key = utc_now.strftime("%Y%m%d")
+    dedupe_key = f"narrative_pulse_daily_{day_key}"
+    if not _email_dedupe_claim(dedupe_key, NARRATIVE_PULSE_DEDUPE_SEC, now=now):
+        _record_email_event("Narrative Pulse Daily", "skipped", "daily_dedupe_active")
+        return False
     return _send_email_alert(f"Narrative Pulse: Bullisch {top_bull} | Bearisch {top_bear}", body)
 
 
