@@ -180,6 +180,7 @@ STOCK_STRATEGY_ORDER = [
     "Bull Flag",
     "Bear Flag",
     "Compression Breakout",
+    "Cup and Handle Breakout",
     "Trend Reversal",
     "MA Bounce Long",
     "MA Bounce Short",
@@ -329,6 +330,25 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
             description="Komprimierte Mehrtagesrange mit bestätigtem Ausbruch.",
             logic="Enger Aufbau + steigendes Interesse + Breakout-Tag = strukturierter Long-Kandidat.",
             merged_from=["Consolidation", "Consolidation Breakout", "Tight Range"],
+            display_group="Structure",
+        ),
+        "Cup and Handle Breakout": _clone_stock_strategy(
+            "Consolidation Breakout ",
+            filters={
+                "Change %": (-2.0, 12.0),
+                "RVOL": (0.8, 50.0),
+                "Close Position": (0.45, 1.0),
+                "Preis": (5.0, 100000.0),
+            },
+            description="Cup-and-Handle Breakout mit 1D-Struktur und frischer Breakout-Bestaetigung.",
+            logic="Runder 1D-Cup + kontrollierter Handle + Breakout ueber Lip mit Volumen = Long-Signal.",
+            min_dollar_volume=2_000_000,
+            needs_history=False,
+            needs_cup_handle=True,
+            history_days=180,
+            cup_handle_timeframe="1D",
+            confirmation_timeframe="4H/5m",
+            merged_from=["Cup and Handle"],
             display_group="Structure",
         ),
         "Trend Reversal": _clone_stock_strategy(
@@ -5766,6 +5786,282 @@ def _apply_harmonic_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, 
     return enriched
 
 
+def _bar_num(bar: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    for key in keys:
+        if key in bar:
+            try:
+                value = float(bar.get(key) or 0)
+            except (TypeError, ValueError):
+                value = default
+            if math.isfinite(value):
+                return value
+    return default
+
+
+def _calc_recent_atr(bars: List[Dict[str, Any]], period: int = 14) -> float:
+    if len(bars) < 2:
+        return 0.0
+    true_ranges: List[float] = []
+    recent = bars[-(period + 1):]
+    for idx in range(1, len(recent)):
+        high = _bar_num(recent[idx], "high", "h")
+        low = _bar_num(recent[idx], "low", "l")
+        prev_close = _bar_num(recent[idx - 1], "close", "c")
+        if high <= 0 or low <= 0:
+            continue
+        true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
+
+
+def _detect_cup_handle_breakout(
+    daily_bars: List[Dict[str, Any]],
+    current_price: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Strict daily Cup-and-Handle detector for actionable long breakouts only."""
+    cleaned = [
+        bar for bar in daily_bars
+        if _bar_num(bar, "high", "h") > 0 and _bar_num(bar, "low", "l") > 0 and _bar_num(bar, "close", "c") > 0
+    ]
+    if len(cleaned) < 70:
+        return None
+
+    bars = cleaned[-180:]
+    last = bars[-1]
+    price = float(current_price or _bar_num(last, "close", "c") or 0)
+    if price <= 0:
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    n = len(bars)
+    max_window = min(n, 170)
+
+    for window_len in range(max_window, 69, -10):
+        segment = bars[-window_len:]
+        min_handle = max(5, int(window_len * 0.07))
+        max_handle = min(24, max(min_handle, int(window_len * 0.22)))
+        for handle_len in range(min_handle, max_handle + 1):
+            cup = segment[:-handle_len]
+            handle = segment[-handle_len:]
+            if len(cup) < 45 or len(handle) < 5:
+                continue
+
+            cup_len = len(cup)
+            left = cup[:max(8, int(cup_len * 0.32))]
+            middle = cup[int(cup_len * 0.22):int(cup_len * 0.78)]
+            right = cup[int(cup_len * 0.62):]
+            if not left or not middle or not right:
+                continue
+
+            left_lip = max(_bar_num(bar, "high", "h") for bar in left)
+            right_lip = max(_bar_num(bar, "high", "h") for bar in right)
+            cup_lip = max(left_lip, right_lip)
+            bottom = min(_bar_num(bar, "low", "l") for bar in middle)
+            if cup_lip <= 0 or bottom <= 0 or bottom >= cup_lip:
+                continue
+
+            depth_abs = cup_lip - bottom
+            depth_pct = depth_abs / cup_lip * 100
+            if depth_pct < 10 or depth_pct > 45:
+                continue
+
+            lip_ratio = right_lip / left_lip if left_lip > 0 else 0
+            if lip_ratio < 0.86 or lip_ratio > 1.16:
+                continue
+
+            bottom_zone = bottom + depth_abs * 0.18
+            rounded_bottom_bars = sum(1 for bar in middle if _bar_num(bar, "low", "l") <= bottom_zone)
+            if rounded_bottom_bars < 3:
+                continue
+
+            handle_high = max(_bar_num(bar, "high", "h") for bar in handle)
+            handle_low = min(_bar_num(bar, "low", "l") for bar in handle)
+            handle_close = _bar_num(handle[-1], "close", "c")
+            handle_depth_pct = (cup_lip - handle_low) / cup_lip * 100
+            if handle_depth_pct < 1.0 or handle_depth_pct > min(16.0, depth_pct * 0.58):
+                continue
+            if handle_low <= bottom + depth_abs * 0.45:
+                continue
+            if handle_high > cup_lip * 1.08:
+                continue
+
+            close_pos = 0.5
+            last_high = _bar_num(last, "high", "h")
+            last_low = _bar_num(last, "low", "l")
+            if last_high > last_low:
+                close_pos = (handle_close - last_low) / (last_high - last_low)
+            breakout_confirmed = (
+                handle_close >= cup_lip * 1.002
+                or (last_high >= cup_lip * 1.006 and close_pos >= 0.65)
+            )
+            if not breakout_confirmed:
+                continue
+
+            extension_pct = (price - cup_lip) / cup_lip * 100
+            if extension_pct < -1.5 or extension_pct > 8.0:
+                continue
+
+            recent_volumes = [_bar_num(bar, "volume", "v") for bar in segment[-21:-1] if _bar_num(bar, "volume", "v") > 0]
+            last_volume = _bar_num(last, "volume", "v")
+            avg20_volume = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
+            rvol = last_volume / avg20_volume if avg20_volume > 0 and last_volume > 0 else 1.0
+            if rvol < 1.1 and extension_pct < 1.0:
+                continue
+
+            cup_volumes = [_bar_num(bar, "volume", "v") for bar in cup if _bar_num(bar, "volume", "v") > 0]
+            handle_volumes = [_bar_num(bar, "volume", "v") for bar in handle[:-1] if _bar_num(bar, "volume", "v") > 0]
+            cup_avg_volume = sum(cup_volumes) / len(cup_volumes) if cup_volumes else 0
+            handle_avg_volume = sum(handle_volumes) / len(handle_volumes) if handle_volumes else 0
+            handle_volume_contracts = bool(cup_avg_volume and handle_avg_volume and handle_avg_volume <= cup_avg_volume * 1.15)
+
+            atr = _calc_recent_atr(segment, 14)
+            if atr <= 0:
+                atr = max(depth_abs * 0.08, cup_lip * 0.02)
+
+            entry = cup_lip
+            stop = min(handle_low - atr * 0.20, cup_lip - depth_abs * 0.22)
+            stop = max(stop, bottom + depth_abs * 0.25)
+            if stop >= entry:
+                stop = handle_low - atr * 0.35
+            if stop <= 0 or stop >= entry:
+                continue
+
+            tp1 = entry + depth_abs * 0.50
+            tp2 = entry + depth_abs * 1.00
+            risk = entry - stop
+            blended_reward = ((tp1 - entry) * 0.5) + ((tp2 - entry) * 0.5)
+            rr = blended_reward / risk if risk > 0 else 0
+            live_rr = (((tp1 - price) * 0.5) + ((tp2 - price) * 0.5)) / (price - stop) if price > stop else 0
+            if rr < 1.8 or live_rr < 1.4:
+                continue
+
+            score = 50.0
+            if 12 <= depth_pct <= 32:
+                score += 15
+            elif depth_pct <= 40:
+                score += 8
+            score += max(0.0, 10.0 - abs(1.0 - lip_ratio) * 50.0)
+            if 3 <= handle_depth_pct <= 12:
+                score += 10
+            elif handle_depth_pct <= 16:
+                score += 5
+            if rvol >= 2.0:
+                score += 12
+            elif rvol >= 1.5:
+                score += 9
+            elif rvol >= 1.1:
+                score += 5
+            if extension_pct <= 2.5:
+                score += 10
+            elif extension_pct <= 5:
+                score += 5
+            if rr >= 2.5:
+                score += 8
+            elif rr >= 1.8:
+                score += 4
+            if handle_volume_contracts:
+                score += 6
+            if rounded_bottom_bars >= 5:
+                score += 4
+
+            score = int(_clamp_float(round(score), 0, 100))
+            if score < 80:
+                continue
+
+            match = {
+                "score": score,
+                "cup_depth_pct": round(depth_pct, 2),
+                "handle_depth_pct": round(handle_depth_pct, 2),
+                "cup_lip": _round_level_price(cup_lip),
+                "cup_bottom": _round_level_price(bottom),
+                "handle_low": _round_level_price(handle_low),
+                "entry": _round_level_price(entry),
+                "stop_loss": _round_level_price(stop),
+                "tp1": _round_level_price(tp1),
+                "tp2": _round_level_price(tp2),
+                "risk_reward": round(rr, 2),
+                "live_rr_ratio": round(live_rr, 2),
+                "extension_pct": round(extension_pct, 2),
+                "breakout_rvol": round(rvol, 2),
+                "handle_volume_contracts": handle_volume_contracts,
+                "cup_length": cup_len,
+                "handle_length": handle_len,
+                "timeframe": "1D",
+                "confirmation_timeframe": "4H/5m",
+            }
+            if not best or (match["score"], match["risk_reward"]) > (best["score"], best["risk_reward"]):
+                best = match
+
+    return best
+
+
+def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    daily_bars = candidate.get("_daily_bars", [])
+    liquidity_floor = max(int(strat.get("min_dollar_volume", 0) or 0), 2_000_000)
+    if float(candidate.get("Dollar_Volume", 0) or 0) < liquidity_floor:
+        return None
+
+    price = float(candidate.get("price", candidate.get("Preis", 0)) or 0)
+    setup = _detect_cup_handle_breakout(daily_bars, current_price=price)
+    if not setup:
+        return None
+
+    final_score = int(max(float(candidate.get("base_score", candidate.get("score", 0)) or 0) * 0.20, 0) + setup["score"] * 0.80)
+    final_score = int(_clamp_float(final_score, 0, 100))
+    grade = _strategy_score_to_grade(final_score)
+    if final_score < 80:
+        return None
+
+    enriched = dict(candidate)
+    trade_setup = {
+        "direction": "LONG",
+        "trade_action": "LONG_NOW",
+        "entry_status": "BREAKOUT_CONFIRMED",
+        "entry": setup["entry"],
+        "stop_loss": setup["stop_loss"],
+        "tp1": setup["tp1"],
+        "tp2": setup["tp2"],
+        "risk_reward": setup["risk_reward"],
+        "live_rr": setup["live_rr_ratio"],
+        "rr_model": "50/50 TP1/TP2 measured cup depth",
+        "source": "cup_handle_1d_breakout",
+    }
+    enriched.update({
+        "pattern": "Cup and Handle Breakout",
+        "pattern_type": "cup_handle_breakout",
+        "pattern_timeframe": setup["timeframe"],
+        "confirmation_timeframe": setup["confirmation_timeframe"],
+        "pattern_score": setup["score"],
+        "CupDepth%": setup["cup_depth_pct"],
+        "HandleDepth%": setup["handle_depth_pct"],
+        "Breakout_Level": setup["cup_lip"],
+        "Handle_Low": setup["handle_low"],
+        "Breakout_RVOL": setup["breakout_rvol"],
+        "entry": setup["entry"],
+        "Entry": setup["entry"],
+        "stop_loss": setup["stop_loss"],
+        "StopLoss": setup["stop_loss"],
+        "tp1": setup["tp1"],
+        "TP1": setup["tp1"],
+        "tp2": setup["tp2"],
+        "TP2": setup["tp2"],
+        "risk_reward": setup["risk_reward"],
+        "live_rr_ratio": setup["live_rr_ratio"],
+        "entry_distance_pct": setup["extension_pct"],
+        "target_model": "cup_depth_measured_move",
+        "trade_signal": "JETZT_TRADEN",
+        "trade_action": "LONG_NOW",
+        "entry_status": "BREAKOUT_CONFIRMED",
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "scanner_note": "Cup-and-Handle Breakout: 1D structure, 4H/5m execution confirmation empfohlen.",
+        "trade_setup": trade_setup,
+        "score": final_score,
+        "grade": grade,
+        "base_grade": grade,
+    })
+    return enriched
+
+
 def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Validate MA bounce setups with trend, structure and pullback quality."""
     daily_bars = candidate.get("_daily_bars", [])
@@ -5917,7 +6213,7 @@ def _apply_special_strategy_post_filter(
     """Upgrade strategy scans from pure snapshot filters to setup validation."""
     if not any(
         strat.get(flag)
-        for flag in ("needs_history", "needs_volume_profile", "needs_harmonic", "needs_ma")
+        for flag in ("needs_history", "needs_volume_profile", "needs_harmonic", "needs_ma", "needs_cup_handle")
     ):
         return candidates
 
@@ -5932,6 +6228,8 @@ def _apply_special_strategy_post_filter(
     candidate_limit = 220
     if strat.get("needs_harmonic"):
         candidate_limit = 120
+    elif strat.get("needs_cup_handle"):
+        candidate_limit = 180
     elif strat.get("needs_ma"):
         candidate_limit = 180
     elif strat.get("needs_volume_profile"):
@@ -5942,6 +6240,8 @@ def _apply_special_strategy_post_filter(
         min_history = max(min_history, 90)
     if strat.get("needs_harmonic"):
         min_history = max(min_history, 220)
+    if strat.get("needs_cup_handle"):
+        min_history = max(min_history, 180)
     if strat.get("needs_ma"):
         min_history = max(min_history, _get_max_ma_period(strat) + 12)
 
@@ -5968,6 +6268,10 @@ def _apply_special_strategy_post_filter(
                 continue
         if strat.get("needs_harmonic"):
             enriched = _apply_harmonic_strategy_filter(enriched, strat)
+            if not enriched:
+                continue
+        if strat.get("needs_cup_handle"):
+            enriched = _apply_cup_handle_strategy_filter(enriched, strat)
             if not enriched:
                 continue
         if strat.get("needs_ma"):
@@ -9721,7 +10025,7 @@ def list_strategies(market_type: str = Query("stocks", description="Market type:
     # Strip internal calculation details — users should not see filters, logic, thresholds
     # NO description — contains internal details; frontend has its own guide texts
     _safe_keys = {"stocks_only", "needs_history", "needs_harmonic",
-                  "needs_volume_profile", "needs_ma", "ma_type", "ma_period",
+                  "needs_volume_profile", "needs_ma", "needs_cup_handle", "ma_type", "ma_period",
                   "best_time", "best_pairs", "harmonic_direction",
                   "display_group", "merged_from", "canonical_name"}
     safe_strategies = {}
