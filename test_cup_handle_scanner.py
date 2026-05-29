@@ -47,7 +47,12 @@ def test_cup_handle_detector_rejects_chased_breakout():
     assert setup is None
 
 
-def test_cup_handle_strategy_filter_marks_confirmed_breakout_as_trade_now():
+def test_cup_handle_strategy_filter_marks_confirmed_breakout_as_trade_now(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_fetch_long_latest_intraday_state",
+        lambda ticker: {"latest_bar_change_pct": 0.22, "latest_bar_close_pos": 0.82},
+    )
     candidate = {
         "ticker": "CUPX",
         "price": 101.7,
@@ -67,6 +72,29 @@ def test_cup_handle_strategy_filter_marks_confirmed_breakout_as_trade_now():
     assert enriched["pattern_type"] == "cup_handle_breakout"
     assert enriched["score"] >= 80
     assert enriched["grade"] in {"S", "A"}
+    assert enriched["long_entry_quality"] == "TRADEABLE"
+
+
+def test_cup_handle_strategy_filter_rejects_missing_fresh_5m_trigger(monkeypatch):
+    monkeypatch.setattr(api, "_fetch_long_latest_intraday_state", lambda ticker: {})
+    candidate = {
+        "ticker": "CUPX",
+        "price": 101.7,
+        "Dollar_Volume": 8_000_000,
+        "base_score": 82,
+        "score": 82,
+        "_daily_bars": _cup_handle_bars(),
+    }
+
+    assert api._apply_cup_handle_strategy_filter(candidate, {"min_dollar_volume": 2_000_000}) is None
+
+
+def test_cup_handle_detector_rejects_missing_breakout_volume():
+    bars = _cup_handle_bars()
+    for bar in bars[-30:]:
+        bar["volume"] = 0
+
+    assert api._detect_cup_handle_breakout(bars, current_price=101.7) is None
 
 
 def test_cup_handle_strategy_is_visible_in_stock_menu():

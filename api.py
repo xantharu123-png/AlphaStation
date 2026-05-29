@@ -347,7 +347,7 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
             needs_cup_handle=True,
             history_days=180,
             cup_handle_timeframe="1D",
-            confirmation_timeframe="4H/5m",
+            confirmation_timeframe="5m",
             merged_from=["Cup and Handle"],
             display_group="Structure",
         ),
@@ -5903,8 +5903,10 @@ def _detect_cup_handle_breakout(
             recent_volumes = [_bar_num(bar, "volume", "v") for bar in segment[-21:-1] if _bar_num(bar, "volume", "v") > 0]
             last_volume = _bar_num(last, "volume", "v")
             avg20_volume = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
-            rvol = last_volume / avg20_volume if avg20_volume > 0 and last_volume > 0 else 1.0
-            if rvol < 1.1 and extension_pct < 1.0:
+            if avg20_volume <= 0 or last_volume <= 0:
+                continue
+            rvol = last_volume / avg20_volume
+            if rvol < 1.1:
                 continue
 
             cup_volumes = [_bar_num(bar, "volume", "v") for bar in cup if _bar_num(bar, "volume", "v") > 0]
@@ -5986,7 +5988,7 @@ def _detect_cup_handle_breakout(
                 "cup_length": cup_len,
                 "handle_length": handle_len,
                 "timeframe": "1D",
-                "confirmation_timeframe": "4H/5m",
+                "confirmation_timeframe": "5m",
             }
             if not best or (match["score"], match["risk_reward"]) > (best["score"], best["risk_reward"]):
                 best = match
@@ -6012,6 +6014,10 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         return None
 
     enriched = dict(candidate)
+    ticker = _extract_alert_ticker(enriched)
+    if ticker and (enriched.get("latest_bar_change_pct") is None or enriched.get("latest_bar_close_pos") is None):
+        enriched.update(_fetch_long_latest_intraday_state(ticker))
+
     trade_setup = {
         "direction": "LONG",
         "trade_action": "LONG_NOW",
@@ -6053,12 +6059,17 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         "entry_status": "BREAKOUT_CONFIRMED",
         "direction": "LONG",
         "Signal_Direction": "LONG",
-        "scanner_note": "Cup-and-Handle Breakout: 1D structure, 4H/5m execution confirmation empfohlen.",
+        "scanner_note": "Cup-and-Handle Breakout: 1D structure, fresh 5m execution trigger confirmed.",
         "trade_setup": trade_setup,
         "score": final_score,
         "grade": grade,
         "base_grade": grade,
     })
+    long_reasons = _long_entry_rule_reasons(enriched)
+    if long_reasons:
+        return None
+    enriched["long_entry_quality"] = _long_entry_quality(enriched)
+    enriched["alertable_long"] = True
     return enriched
 
 
