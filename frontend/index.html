@@ -5348,7 +5348,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                Signal-Only Modus: Hier erscheinen nur JETZT_TRADEN oder EXPLOSION_ARMED. Reine Watchlisten werden unterdrueckt; Armed heisst: Setup schreit nach Ausbruch, Entry aber erst bei 5m Breakout/Reclaim.
+                Trading-Modus: Hier erscheinen nur JETZT_TRADEN, EXPLOSION_ARMED oder hochwertige Trigger-Kandidaten. Breite Watchlisten werden unterdrueckt; ohne 5m-Bestaetigung bleibt es kein Blind-Entry.
             </div>
 
             {/* Unified Phase Table */}
@@ -5432,7 +5432,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         )})}
                     </tbody>
                 </table>
-                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Kein aktives Trading-Signal{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Watch-/Warte-Coins werden nicht mehr als Signal gezeigt.</div>}
+                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Kein aktives Trading-Signal{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Der Scanner hat keine sauberen Jetzt-/Armed-/Trigger-Kandidaten gefunden.</div>}
             </div>
 
         </div>

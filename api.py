@@ -904,6 +904,11 @@ _EARLY_MOVER_MIN_ARMED_SETUP_SCORE = 84
 _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE = 76
 _EARLY_MOVER_MIN_ARMED_LIVE_RR = 1.8
 _EARLY_MOVER_MAX_ARMED_DISTANCE_R = 0.35
+_EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE = 80
+_EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE = 72
+_EARLY_MOVER_VISIBLE_MIN_LIVE_RR = 1.45
+_EARLY_MOVER_VISIBLE_MAX_DISTANCE_R = 0.75
+_EARLY_MOVER_VISIBLE_LIMIT = 40
 _EARLY_MOVER_TRIGGER_CACHE_MAX = 1500
 _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
 _EARLY_MOVER_MIN_PERP_VOLUME_USD = 2_000_000
@@ -4977,6 +4982,73 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
     return decorated
 
 
+def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
+    """Show elite crypto trigger candidates without turning the tab into a watchlist.
+
+    This is deliberately stricter than "interesting coin" and looser than
+    "send a trade mail": the UI should not be empty when a coin is high quality
+    and close to a 5m trigger, but mails still require confirmed execution.
+    """
+    fields = _extract_early_mover_fields(row)
+    action = fields["trade_action"]
+    signal = str(row.get("trade_signal", "") or "").upper()
+    signal_quality = fields["signal_quality"]
+    flags = set(fields["risk_flags"])
+    grade = _extract_alert_grade(row)
+    setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
+    entry_score_value = _alert_float(row.get("entry_score"), None)
+    entry_score = int(entry_score_value if entry_score_value is not None else _early_mover_entry_score(row))
+    risk_level = str(row.get("risk_level", "") or "").upper()
+
+    if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+        return False
+    if signal in {"NICHT_TRADEN", "BEOBACHTEN"} and signal_quality == "observe":
+        return False
+    if signal_quality == "no_chase" or risk_level == "HIGH":
+        return False
+    if grade and grade not in _ALERT_TOP_GRADES:
+        return False
+    if setup_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE:
+        return False
+    if entry_score < _EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE:
+        return False
+    if fields["live_rr"] < _EARLY_MOVER_VISIBLE_MIN_LIVE_RR:
+        return False
+    if fields["distance_to_entry_r"] > _EARLY_MOVER_VISIBLE_MAX_DISTANCE_R:
+        return False
+
+    hard_flags = {
+        "overheated_phase3",
+        "btc_headwind",
+        "partial_crypto_data",
+        "data_warning",
+        "tp1_already_reached",
+        "chased_from_entry",
+        "very_high_volume_turnover",
+        "turnover_without_alpha",
+        "extreme_turnover_churn",
+        "thin_perp_liquidity",
+        "thin_orderbook",
+        "market_impact_risk",
+        "no_perp_execution_market",
+        "weak_structural_targets",
+    }
+    return not bool(flags.intersection(hard_flags))
+
+
+def _early_mover_visible_sort_key(row: Dict[str, Any]) -> tuple:
+    signal = str(row.get("trade_signal", "") or "").upper()
+    action = str(row.get("trade_action", "") or "").upper()
+    signal_rank = 0 if signal == "JETZT_TRADEN" else 1 if signal == "EXPLOSION_ARMED" or row.get("pre_breakout_armed") else 2
+    action_rank = 0 if action == "LONG_TRIGGER" else 1 if action == "WAIT_FOR_RETEST" else 3
+    return (
+        signal_rank,
+        action_rank,
+        -int(_alert_float(row.get("entry_score"), 0) or 0),
+        -int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0),
+    )
+
+
 def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool:
     """True only for rows that should be shown as actual trading signals."""
     if not isinstance(row, dict):
@@ -5017,9 +5089,14 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
         or trade_category in {"ANNOUNCEMENT_WATCH", "PUMP_RUNNING_WATCH", "ACTIVE_PUMP_WATCH", "EXHAUSTION_WATCH"}
     )
 
-    if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+    if scanner_name == "early_movers":
         if armed_trade_setup:
             return bool(_row_has_alert_quality(row, require_top_grade=False))
+        if explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False):
+            return True
+        return _early_mover_visible_candidate(row)
+
+    if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
         return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
 
     if wait_or_watch and not explicit_trade:
@@ -5080,9 +5157,15 @@ def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) 
                 rows = payload.get(key)
                 if isinstance(rows, list):
                     visible, suppressed = _filter_signal_rows(rows, scanner_name)
+                    visible_before_limit = len(visible)
+                    if scanner_name == "early_movers":
+                        visible = sorted(visible, key=_early_mover_visible_sort_key)[:_EARLY_MOVER_VISIBLE_LIMIT]
                     payload[key] = visible
                     stats[f"{key}_raw_count"] = len(rows)
                     stats[f"{key}_suppressed_watch_rows"] = suppressed
+                    if scanner_name == "early_movers":
+                        stats[f"{key}_visible_before_limit"] = visible_before_limit
+                        stats[f"{key}_trimmed_signal_rows"] = max(0, visible_before_limit - len(visible))
                     total_suppressed += suppressed
                     total_visible += len(visible)
             stats["signal_only"] = True
