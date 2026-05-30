@@ -464,6 +464,109 @@ def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
     assert result["reason"] == "no_fresh_5m_trigger"
 
 
+def _pre_breakout_bars():
+    bars = []
+    # Wider prior range, then a tight 5m coil near the highs.
+    for i in range(24):
+        base = 1.04 + (0.018 if i % 2 else -0.018)
+        bars.append({
+            "open": base,
+            "high": base + 0.035,
+            "low": base - 0.035,
+            "close": base + (0.006 if i % 3 == 0 else -0.003),
+            "volume": 1200,
+        })
+    for i in range(11):
+        base = 1.072 + i * 0.0007
+        bars.append({
+            "open": base,
+            "high": base + 0.006,
+            "low": base - 0.004,
+            "close": base + 0.002,
+            "volume": 760,
+        })
+    bars.append({"open": 1.081, "high": 1.087, "low": 1.079, "close": 1.084, "volume": 900})
+    return bars
+
+
+def _armed_row():
+    return {
+        "Symbol": "ARMED",
+        "Name": "Armed Coin",
+        "direction": "LONG",
+        "trade_action": "LONG_TRIGGER",
+        "setup_score": 90,
+        "score": 90,
+        "grade": "S",
+        "Price": 1.084,
+        "Change24h": 5.0,
+        "VolMCapRatio": 28.0,
+        "entry": 1.065,
+        "stop_loss": 1.00,
+        "tp1": 1.18,
+        "tp2": 1.26,
+        "live_rr_ratio": 2.4,
+        "distance_to_entry_r": 0.29,
+        "target_quality": "STRUCTURAL",
+        "risk_level": "LOW",
+        "risk_flags": [],
+        "btc_context": {"tailwind": True, "btc_24h": 1.0, "alpha_24h": 4.0},
+        "trade_setup": {
+            "trade_action": "LONG_TRIGGER",
+            "entry": 1.065,
+            "stop_loss": 1.00,
+            "tp1": 1.18,
+            "tp2": 1.26,
+            "live_rr": 2.4,
+            "distance_to_entry_r": 0.29,
+            "target_quality": "STRUCTURAL",
+        },
+    }
+
+
+def test_early_mover_detects_pre_breakout_coil_without_market_buy():
+    row = _armed_row()
+    result = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+
+    assert result["ok"] is False
+    assert result["reason"] == "no_fresh_5m_trigger"
+    assert result["pre_breakout_ok"] is True
+    assert result["pre_breakout_score"] >= api._EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE
+    assert "compression" in result["pre_breakout_reasons"]
+    assert result["near_range_high_pct"] <= 0.75
+
+
+def test_early_mover_armed_survives_signal_only_policy():
+    row = _armed_row()
+    trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    api._apply_early_mover_signal_state(row, trigger)
+
+    assert row["trade_signal"] == "EXPLOSION_ARMED"
+    assert row["pre_breakout_armed"] is True
+    filtered = api._apply_signal_only_policy("early_movers", [{"coins": [row], "stats": {"unified_count": 1}}])
+
+    assert len(filtered[0]["coins"]) == 1
+    assert filtered[0]["stats"]["explosion_armed_count"] == 1
+    assert filtered[0]["stats"]["trade_now_count"] == 0
+
+
+def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
+    row = _armed_row()
+    trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    api._apply_early_mover_signal_state(row, trigger)
+    row["intraday_trigger"] = trigger
+    sent = []
+
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    api._EMAIL_COOLDOWN.clear()
+
+    assert api._send_early_mover_armed_alerts({"coins": [row]}) is True
+    assert "Crypto Explosion Armed" in sent[0][0]
+    assert "noch kein Market-Buy" in sent[0][1]
+    assert api._send_early_mover_armed_alerts({"coins": [row]}) is False
+
+
 def test_multi_exchange_perps_prefers_binance_execution_liquidity(monkeypatch):
     monkeypatch.setattr(api, "fetch_mexc_funding_oi", lambda: {
         "FET": {

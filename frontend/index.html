@@ -5144,6 +5144,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const signal = String(item.trade_signal || '').toUpperCase();
         const action = String(item.trade_action || '').toUpperCase();
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
+        if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) return { label: 'ARMED', cls: 'signal-bullish' };
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
@@ -5157,6 +5158,9 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const action = String(item.trade_action || item.entry_status || '').toUpperCase();
         if (signal === 'JETZT_TRADEN') {
             return { label: 'JETZT TRADEN', detail: 'Execution bestaetigt', cls: 'bg-green-100 text-green-800' };
+        }
+        if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) {
+            return { label: 'AUSBRUCH BEREIT', detail: '5m Breakout/Reclaim abwarten', cls: 'bg-emerald-100 text-emerald-800' };
         }
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') {
             return { label: 'NICHT TRADEN', detail: 'Kein Entry', cls: 'bg-red-100 text-red-800' };
@@ -5204,6 +5208,9 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         market_impact_risk: 'Market-Impact Risiko',
         chased_from_entry: 'zu weit vom Entry',
         weak_structural_targets: 'Ziele zu eng',
+        pre_breakout_score_below_threshold: '5m Coil zu schwach',
+        not_pre_breakout_coil: 'kein echter Coil',
+        pre_breakout_armed: 'Ausbruch vorbereitet',
     };
     const humanizeEntryRisk = (flag) => earlyRiskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
     const getEntryRiskReasons = (item) => {
@@ -5317,6 +5324,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     {stats.unified_count || 0} angezeigt · {stats.market_universe_target || stats.total_coins || 1000} analysiert
                     {stats.intraday_trigger_checks != null ? ` · ${stats.intraday_trigger_checks}/${stats.intraday_trigger_scan_limit || 1000} Trigger geprüft` : ''}
                 </span>}
+                {stats && <span className="text-xs text-sky-600 ml-2">
+                    {stats.explosion_armed_count ? `Armed: ${stats.explosion_armed_count}` : ''}
+                    {stats.coins_suppressed_watch_rows ? ` · ${stats.coins_suppressed_watch_rows} Watch-Zeilen unterdrueckt` : ''}
+                </span>}
             </div>
             {stats?.data_warning && (
                 <div className="text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2">
@@ -5324,7 +5335,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                Signal-Only Modus: Hier erscheinen nur Coins mit bestaetigtem 5m-Trigger, Entry/Stop/TP und Live-R:R. Wartelisten und reine Beobachtungen werden unterdrueckt.
+                Signal-Only Modus: Hier erscheinen nur JETZT_TRADEN oder EXPLOSION_ARMED. Reine Watchlisten werden unterdrueckt; Armed heisst: Setup schreit nach Ausbruch, Entry aber erst bei 5m Breakout/Reclaim.
             </div>
 
             {/* Unified Phase Table */}
@@ -5353,7 +5364,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const primaryReason = getPrimaryEntryReason(item);
                             const setupScore = item.setup_score ?? item.score ?? 0;
                             const entryScore = item.entry_score ?? 0;
-                            const entryScoreClass = entryScore >= 80 ? 'signal-bullish' : entryScore >= 55 ? 'signal-lightdiv' : 'signal-abwarten';
+                            const entryScoreClass = item.pre_breakout_armed ? 'signal-bullish' : entryScore >= 80 ? 'signal-bullish' : entryScore >= 55 ? 'signal-lightdiv' : 'signal-abwarten';
                             const tp1Pct = targetPctFromEntry(item.tp1, item.entry);
                             const tp2Pct = targetPctFromEntry(item.tp2, item.entry);
                             return (

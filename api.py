@@ -887,11 +887,17 @@ _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
 _EARLY_MOVER_DIGEST_DEDUPE_SEC = 2 * 3600
 _EARLY_MOVER_DIGEST_KEY = "early_movers_long_digest"
+_EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC = 4 * 3600
+_EARLY_MOVER_ARMED_DIGEST_KEY = "early_movers_explosion_armed_digest"
 _EARLY_MOVER_MAX_EMAIL_ROWS = 5
 _EARLY_MOVER_TRIGGER_TTL = 180
 _EARLY_MOVER_MARKET_PAGES = 4  # 4 * 250 = Top-1000 CoinGecko universe
 _EARLY_MOVER_TRIGGER_SCAN_LIMIT = 1000
 _EARLY_MOVER_MAX_DISPLAY = 160
+_EARLY_MOVER_MIN_ARMED_SETUP_SCORE = 84
+_EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE = 76
+_EARLY_MOVER_MIN_ARMED_LIVE_RR = 1.8
+_EARLY_MOVER_MAX_ARMED_DISTANCE_R = 0.35
 _EARLY_MOVER_TRIGGER_CACHE_MAX = 1500
 _EARLY_MOVER_TRIGGER_CACHE: Dict[str, Dict[str, Any]] = {}
 _EARLY_MOVER_MIN_PERP_VOLUME_USD = 2_000_000
@@ -1975,6 +1981,61 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         elif candle_change_pct <= max_safe_candle:
             score += 6
 
+        last_12 = clean[-12:] if len(clean) >= 12 else clean
+        prior_24 = clean[-36:-12] if len(clean) >= 36 else clean[:-12]
+        recent_high = max(bar["high"] for bar in last_12)
+        recent_low = min(bar["low"] for bar in last_12)
+        recent_range_pct = ((recent_high - recent_low) / last_close * 100) if last_close else 0
+        prior_range_pct = 0.0
+        if prior_24:
+            prior_high = max(bar["high"] for bar in prior_24)
+            prior_low = min(bar["low"] for bar in prior_24)
+            prior_mid = _median_float([bar["close"] for bar in prior_24], last_close)
+            prior_range_pct = ((prior_high - prior_low) / max(prior_mid, 1e-9) * 100) if prior_mid else 0
+        near_range_high_pct = ((recent_high - last_close) / last_close * 100) if last_close else 999
+        first_half = last_12[: max(1, len(last_12) // 2)]
+        second_half = last_12[max(1, len(last_12) // 2):] or last_12
+        higher_lows = min(bar["low"] for bar in second_half) >= min(bar["low"] for bar in first_half) * 0.997
+        vwap_hold = last_close >= vwap * 0.997
+        compression = bool(prior_range_pct > 0 and recent_range_pct <= max(1.25, prior_range_pct * 0.72))
+        tight_coil = recent_range_pct <= max(2.2, min(4.0, abs(profile.get("change24", 0) or 0) * 0.35 + 1.2))
+        near_breakout = near_range_high_pct <= 0.75
+        previous_volume = _median_float([bar["volume"] for bar in prior_24], median_vol) if prior_24 else median_vol
+        recent_volume = _median_float([bar["volume"] for bar in last_12[:-1]], median_vol) if len(last_12) > 1 else median_vol
+        volume_dryup = bool(previous_volume > 0 and recent_volume <= previous_volume * 0.90)
+        volume_wake = bool(vol_ratio >= 0.85)
+        pre_score = 0
+        pre_reasons = []
+        if vwap_hold:
+            pre_score += 20
+            pre_reasons.append("vwap_hold")
+        if higher_lows:
+            pre_score += 18
+            pre_reasons.append("higher_lows")
+        if compression or tight_coil:
+            pre_score += 22
+            pre_reasons.append("compression")
+        if near_breakout:
+            pre_score += 18
+            pre_reasons.append("near_range_high")
+        if volume_dryup:
+            pre_score += 10
+            pre_reasons.append("volume_dryup")
+        if volume_wake:
+            pre_score += 10
+            pre_reasons.append("volume_wake")
+        if chase_candle or candle_change_pct >= max_safe_candle or range_pct >= max_safe_range:
+            pre_score -= 25
+            pre_reasons.append("anti_chase_block")
+        if distance_r is not None:
+            if distance_r <= _EARLY_MOVER_MAX_ARMED_DISTANCE_R:
+                pre_score += 8
+            elif distance_r > 0.65:
+                pre_score -= 20
+                pre_reasons.append("too_far_from_entry")
+        pre_score = int(round(max(0, min(pre_score, 100))))
+        pre_breakout_ok = bool(pre_score >= _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE)
+
         threshold = 76
         ok = bool(matched and score >= threshold)
         if ok:
@@ -2001,6 +2062,16 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             "candle_change_pct": round(candle_change_pct, 2),
             "range_pct": round(range_pct, 2),
             "distance_to_entry_r": round(distance_r, 2) if distance_r is not None else None,
+            "pre_breakout_ok": pre_breakout_ok,
+            "pre_breakout_score": pre_score,
+            "pre_breakout_reasons": pre_reasons,
+            "pre_breakout_reason": "5m_coil_near_breakout" if pre_breakout_ok else "pre_breakout_not_ready",
+            "recent_range_pct": round(recent_range_pct, 2),
+            "prior_range_pct": round(prior_range_pct, 2),
+            "near_range_high_pct": round(near_range_high_pct, 2),
+            "vwap_hold": vwap_hold,
+            "higher_lows": higher_lows,
+            "volume_dryup": volume_dryup,
         }
     except Exception as exc:
         return {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
@@ -2077,6 +2148,61 @@ def _early_mover_mail_trigger_block_reason(trigger_check: Optional[Dict[str, Any
     return None
 
 
+def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> Tuple[bool, List[str]]:
+    """True when the coin is a high-conviction pre-breakout setup, not a generic watch row."""
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    check = trigger_check if isinstance(trigger_check, dict) else row.get("intraday_trigger")
+    check = check if isinstance(check, dict) else {}
+    fields = _extract_early_mover_fields(row)
+    flags = set(fields.get("risk_flags") or [])
+    action = fields["trade_action"]
+    setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
+    pre_score = int(_alert_float(check.get("pre_breakout_score", row.get("pre_breakout_score")), 0) or 0)
+    reasons: List[str] = []
+
+    if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+        reasons.append("action_not_armed")
+    if bool(check.get("ok")):
+        reasons.append("already_trade_triggered")
+    if setup_score < _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
+        reasons.append("setup_score_below_armed_threshold")
+    if pre_score < _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE:
+        reasons.append("pre_breakout_score_below_threshold")
+    if str(row.get("risk_level", "") or "").upper() == "HIGH":
+        reasons.append("risk_high")
+    if fields["live_rr"] < _EARLY_MOVER_MIN_ARMED_LIVE_RR:
+        reasons.append("live_rr_below_armed_threshold")
+    if fields["distance_to_entry_r"] > _EARLY_MOVER_MAX_ARMED_DISTANCE_R:
+        reasons.append("too_far_from_entry_for_armed")
+    if not fields["btc_tailwind"]:
+        reasons.append("btc_not_tailwind")
+    if fields["partial_data"] or fields["data_warning"]:
+        reasons.append("data_not_clean")
+    if fields["late_to_tp1"]:
+        reasons.append("tp1_already_reached")
+    if str(row.get("target_quality", setup.get("target_quality", "")) or "").upper().startswith("WEAK"):
+        reasons.append("targets_not_structural")
+
+    hard_flags = {
+        "overheated_phase3",
+        "btc_headwind",
+        "data_warning",
+        "chased_from_entry",
+        "very_high_volume_turnover",
+        "turnover_without_alpha",
+        "extreme_turnover_churn",
+        "thin_perp_liquidity",
+        "thin_orderbook",
+        "market_impact_risk",
+        "no_perp_execution_market",
+        "weak_structural_targets",
+    }
+    for flag in sorted(flags.intersection(hard_flags)):
+        reasons.append(flag)
+
+    return not reasons, reasons
+
+
 def _early_mover_entry_score(row: Dict[str, Any]) -> int:
     """Score whether this Early-Mover is actionable now, separate from setup quality."""
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
@@ -2090,6 +2216,9 @@ def _early_mover_entry_score(row: Dict[str, Any]) -> int:
     score = setup_score
     if signal == "JETZT_TRADEN":
         score += 8
+    elif row.get("pre_breakout_armed"):
+        pre_score = _alert_float(row.get("pre_breakout_score"), 0) or 0
+        score = max(score - 12, int(setup_score * 0.72 + pre_score * 0.28))
     elif action == "LONG_TRIGGER" or entry_status == "WAIT_FOR_TRIGGER":
         score -= 38
     elif action == "WAIT_FOR_RETEST" or entry_status == "WAIT_FOR_RETEST":
@@ -2327,6 +2456,19 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
             row["execution_quality_score"] = trigger_check.get("execution_score")
         if trigger_check.get("timeframe"):
             row["execution_timeframe"] = trigger_check.get("timeframe")
+        if trigger_check.get("pre_breakout_score") is not None:
+            row["pre_breakout_score"] = trigger_check.get("pre_breakout_score")
+            row["pre_breakout_reason"] = trigger_check.get("pre_breakout_reason")
+            row["pre_breakout_reasons"] = trigger_check.get("pre_breakout_reasons", [])
+            row["pre_breakout_metrics"] = {
+                "recent_range_pct": trigger_check.get("recent_range_pct"),
+                "prior_range_pct": trigger_check.get("prior_range_pct"),
+                "near_range_high_pct": trigger_check.get("near_range_high_pct"),
+                "vwap_hold": trigger_check.get("vwap_hold"),
+                "higher_lows": trigger_check.get("higher_lows"),
+                "volume_dryup": trigger_check.get("volume_dryup"),
+                "volume_ratio": trigger_check.get("volume_ratio"),
+            }
         if isinstance(trigger_check.get("liquidity"), dict):
             row["execution_liquidity"] = trigger_check["liquidity"]
         if trigger_check.get("reason") == "thin_orderbook_market_impact":
@@ -2340,6 +2482,10 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         if isinstance(trigger_check.get("vrvp"), dict):
             _apply_early_mover_vrvp_targets(row, trigger_check.get("vrvp"))
 
+    armed_ok, armed_reasons = _early_mover_explosion_armed_state(row, trigger_check)
+    row["pre_breakout_armed"] = armed_ok
+    row["pre_breakout_block_reasons"] = armed_reasons
+
     if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason:
         row["trade_signal"] = "JETZT_TRADEN"
         score_txt = f" Score {trigger_check.get('execution_score')}/100" if isinstance(trigger_check, dict) and trigger_check.get("execution_score") is not None else ""
@@ -2348,6 +2494,13 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["signal_quality"] = "tradeable"
         row["entry_status"] = "JETZT_TRADEN"
         row["alertable_crypto"] = True
+    elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and armed_ok:
+        row["trade_signal"] = "EXPLOSION_ARMED"
+        score_txt = f" Score {row.get('pre_breakout_score')}/100" if row.get("pre_breakout_score") is not None else ""
+        row["signal_label"] = f"Explosion vorbereitet: 5m-Coil nahe Ausbruch, Entry erst bei Breakout/Reclaim{score_txt}"
+        row["signal_quality"] = "pre_breakout_armed"
+        row["entry_status"] = "PRE_BREAKOUT_ARMED"
+        row["alertable_crypto"] = False
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and trigger_block_reason:
         row["trade_signal"] = "WARTEN"
         row["signal_label"] = "Warten: 1m-Trigger ist deaktiviert; Trade-Mail/Trade braucht 5m-Bestaetigung"
@@ -2630,7 +2783,7 @@ def _stop_trade_reminder_loop() -> None:
     _trade_reminder_running = False
 
 
-def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
+def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     """Mail only active Early-Mover long/retest candidates; watch/no-chase rows stay UI-only."""
     now = time.time()
     candidates = []
@@ -2684,7 +2837,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
     if not candidates:
         if suppressed:
             _record_email_event("Crypto Early Mover LONG Alert", "skipped", f"no_active_long_setups:{suppressed}")
-        return
+        return False
     digest_remaining = _email_dedupe_remaining(_EARLY_MOVER_DIGEST_KEY, _EARLY_MOVER_DIGEST_DEDUPE_SEC, now)
     if digest_remaining > 0:
         _record_email_event(
@@ -2692,7 +2845,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
             "skipped",
             f"digest_cooldown_active:{digest_remaining}s candidates={len(candidates)}",
         )
-        return
+        return False
 
     def _fmt_num(value, suffix="", decimals=1, default="-"):
         number = _alert_float(value)
@@ -2749,6 +2902,114 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> None:
         for item in email_rows:
             _EMAIL_COOLDOWN[item["key"]] = now
             _email_dedupe_mark(item["key"], now=now)
+    return bool(sent)
+
+
+def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
+    """Mail only elite pre-breakout coils; this is not a broad watchlist."""
+    now = time.time()
+    digest_remaining = _email_dedupe_remaining(_EARLY_MOVER_ARMED_DIGEST_KEY, _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC, now)
+    if digest_remaining > 0:
+        _record_email_event("Crypto Explosion Armed Alert", "skipped", f"armed_digest_cooldown_active:{digest_remaining}s")
+        return False
+
+    candidates = []
+    suppressed: Dict[str, int] = {}
+    for row in _flatten_early_mover_rows(payload):
+        trigger = row.get("intraday_trigger") if isinstance(row.get("intraday_trigger"), dict) else None
+        armed_ok, armed_reasons = _early_mover_explosion_armed_state(row, trigger)
+        if not armed_ok:
+            for reason in armed_reasons[:4]:
+                suppressed[reason] = suppressed.get(reason, 0) + 1
+            continue
+        state = _classify_alert_candidate("early_movers", row, now)
+        grade = state.get("grade")
+        score = _alert_float(state.get("score"), 0) or 0
+        if grade not in _ALERT_TOP_GRADES or score < _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
+            suppressed["armed_grade_or_score_below_threshold"] = suppressed.get("armed_grade_or_score_below_threshold", 0) + 1
+            continue
+        symbol = state.get("ticker")
+        key = f"early_movers_armed_{symbol}"
+        if _email_dedupe_remaining(key, _EMAIL_COOLDOWN_SEC, now) > 0:
+            suppressed["armed_symbol_dedupe_active"] = suppressed.get("armed_symbol_dedupe_active", 0) + 1
+            continue
+        setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+        btc = row.get("btc_context", setup.get("btc_context", {}))
+        btc = btc if isinstance(btc, dict) else {}
+        trigger = trigger or {}
+        candidates.append({
+            "key": key,
+            "symbol": symbol,
+            "name": row.get("Name", row.get("name", "")),
+            "grade": grade,
+            "score": int(score),
+            "entry_score": row.get("entry_score"),
+            "pre_score": trigger.get("pre_breakout_score", row.get("pre_breakout_score")),
+            "price": row.get("Price", state.get("price")),
+            "entry": row.get("entry", setup.get("entry")),
+            "stop": row.get("stop_loss", row.get("stop", setup.get("stop_loss", setup.get("stop")))),
+            "tp1": row.get("tp1", setup.get("tp1")),
+            "tp2": row.get("tp2", setup.get("tp2")),
+            "live_rr": row.get("live_rr_ratio", setup.get("live_rr")),
+            "distance_r": row.get("distance_to_entry_r", setup.get("distance_to_entry_r")),
+            "exchange": row.get("PerpChartExchange", row.get("BestExchange", "")),
+            "contract": row.get("PerpChartSymbol", row.get("PerpMatchSymbol", "")),
+            "near_high": trigger.get("near_range_high_pct"),
+            "range_now": trigger.get("recent_range_pct"),
+            "range_prior": trigger.get("prior_range_pct"),
+            "vol_ratio": trigger.get("volume_ratio"),
+            "btc_24h": btc.get("btc_24h"),
+            "alpha_24h": btc.get("alpha_24h"),
+        })
+
+    if not candidates:
+        _record_email_event("Crypto Explosion Armed Alert", "skipped", f"no_armed_setups:{suppressed}")
+        return False
+
+    def _fmt(value, suffix="", decimals=2, default="-"):
+        number = _alert_float(value)
+        if number is None:
+            return default
+        return f"{number:.{decimals}f}{suffix}"
+
+    candidates.sort(key=lambda item: (
+        _alert_float(item.get("pre_score"), 0) or 0,
+        _alert_float(item.get("score"), 0) or 0,
+        _alert_float(item.get("live_rr"), 0) or 0,
+    ), reverse=True)
+    email_rows = candidates[:3]
+    rows = ""
+    for item in email_rows:
+        rows += (
+            f'<tr><td style="padding:10px;border-bottom:1px solid #e5e7eb"><b>{html.escape(str(item["symbol"]))}</b><br><span style="color:#64748b">{html.escape(str(item.get("name") or ""))}</span></td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb"><b>{html.escape(str(item["grade"]))} / {item["score"]}</b><br>Armed {_fmt(item.get("pre_score"), "/100", 0)}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">Preis {_format_alert_price(item["price"])}<br>Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">TP1 {_format_alert_price(item["tp1"])}<br>TP2 {_format_alert_price(item["tp2"])}<br>Live {_fmt(item.get("live_rr"), "R")}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">{html.escape(str(item.get("exchange") or ""))}<br>{html.escape(str(item.get("contract") or ""))}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">Range {_fmt(item.get("range_now"), "%")} vs {_fmt(item.get("range_prior"), "%")}<br>High-Dist {_fmt(item.get("near_high"), "%")}<br>Vol {_fmt(item.get("vol_ratio"), "x")}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">BTC {_fmt(item.get("btc_24h"), "%")}<br>Alpha {_fmt(item.get("alpha_24h"), "%")}</td></tr>'
+        )
+
+    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
+    <h2 style="color:#2563eb">Crypto Explosion Armed</h2>
+    <p style="color:#475569">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(email_rows)} Coin(s), die kurz vor einem moeglichen 5m-Ausbruch stehen</p>
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px;margin:12px 0;color:#1e3a8a">
+      <b>Wichtig:</b> Das ist noch kein Market-Buy. Entry erst, wenn die naechste 5m-Kerze den Ausbruch/Reclaim bestaetigt. Genau diese Mail soll dir sagen: Chart jetzt aktiv beobachten, nicht blind reinspringen.
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr style="background:#eff6ff"><th style="padding:8px;text-align:left">Coin</th><th style="padding:8px;text-align:left">Qualitaet</th>
+    <th style="padding:8px;text-align:left">Plan</th><th style="padding:8px;text-align:left">Ziele</th><th style="padding:8px;text-align:left">Venue</th>
+    <th style="padding:8px;text-align:left">5m Coil</th><th style="padding:8px;text-align:left">BTC</th></tr>
+    {rows}</table>
+    <p style="color:#94a3b8;font-size:12px;margin-top:20px">Armed-Mail maximal alle {_EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_EARLY_MOVER_MIN_ARMED_SETUP_SCORE}, 5m-Coil >= {_EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE}, Live R:R >= {_EARLY_MOVER_MIN_ARMED_LIVE_RR}, saubere Strukturziele, BTC Tailwind und keine harten Liquiditaets-/Chase-Blocker.</p>
+    </body></html>'''
+    sent = _send_email_alert(f"Crypto Explosion Armed: {len(email_rows)} Setup(s)", body)
+    if sent:
+        _email_dedupe_mark(_EARLY_MOVER_ARMED_DIGEST_KEY, now=now)
+        for item in email_rows:
+            _email_dedupe_mark(item["key"], now=now)
+            _EMAIL_COOLDOWN[item["key"]] = now
+    return bool(sent)
 
 
 def _extract_long_entry_fields(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -4650,6 +4911,15 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
         or action in {"SHORT_NOW", "LONG_NOW", "TRADE_NOW"}
         or bool(row.get("alertable_crypto"))
     )
+    armed_trade_setup = bool(
+        scanner_name == "early_movers"
+        and (
+            row.get("pre_breakout_armed")
+            or signal == "EXPLOSION_ARMED"
+            or entry_status == "PRE_BREAKOUT_ARMED"
+            or signal_quality == "pre_breakout_armed"
+        )
+    )
     wait_or_watch = (
         "WATCH" in signal
         or "WATCH" in action
@@ -4665,6 +4935,8 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
     )
 
     if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+        if armed_trade_setup:
+            return bool(_row_has_alert_quality(row, require_top_grade=False))
         return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
 
     if wait_or_watch and not explicit_trade:
@@ -4739,7 +5011,17 @@ def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) 
                 stats["phase_1_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 1)
                 stats["phase_2_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 2)
                 stats["phase_3_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 3)
-                stats["trade_now_count"] = len(coins)
+                stats["trade_now_count"] = sum(
+                    1 for c in coins
+                    if isinstance(c, dict) and str(c.get("trade_signal", "")).upper() == "JETZT_TRADEN"
+                )
+                stats["explosion_armed_count"] = sum(
+                    1 for c in coins
+                    if isinstance(c, dict) and (
+                        c.get("pre_breakout_armed")
+                        or str(c.get("trade_signal", "")).upper() == "EXPLOSION_ARMED"
+                    )
+                )
             payload["stats"] = stats
             filtered_payloads.append(payload)
         return filtered_payloads
@@ -12174,6 +12456,10 @@ def fetch_early_movers(_prefetched_perps=None):
         "intraday_trigger_scan_limit": _EARLY_MOVER_TRIGGER_SCAN_LIMIT,
         "market_universe_target": _EARLY_MOVER_MARKET_PAGES * 250,
         "trade_now_count": sum(1 for c in unified if c.get("trade_signal") == "JETZT_TRADEN"),
+        "explosion_armed_count": sum(
+            1 for c in unified
+            if c.get("pre_breakout_armed") or c.get("trade_signal") == "EXPLOSION_ARMED"
+        ),
     }
 
     return {
@@ -12199,7 +12485,9 @@ def _early_movers_wrapper() -> None:
         print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
               f"Phase 1: {s.get('phase_1_count', 0)}, Phase 2: {s.get('phase_2_count', 0)}, "
               f"Phase 3: {s.get('phase_3_count', 0)}")
-        _send_early_mover_long_alerts(result)
+        active_sent = _send_early_mover_long_alerts(result)
+        if not active_sent:
+            _send_early_mover_armed_alerts(result)
     except Exception as e:
         print(f"[Early Movers] Error: {e}")
 
