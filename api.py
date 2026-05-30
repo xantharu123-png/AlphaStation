@@ -8154,7 +8154,7 @@ def _init_scan_status_from_cache():
 
 _init_scan_status_from_cache()
 
-_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20}
+_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25}
 
 def _run_scan_safe(name, func, timeout_min=None):
     """Run a scan function safely in a background thread (non-blocking).
@@ -8232,6 +8232,23 @@ def _scheduler_loop():
     if HAS_NEW_LISTING_SCANNER:
         scan_tasks.append(("new_listing", _new_listing_wrapper))
     _heavy_names = {name for name, _ in heavy_scans}
+    _isolated_names = {"early_movers"}
+
+    def _wait_for_scan_completion(name: str, label: str) -> None:
+        """Some scanners need quiet network time; do not start noisy peers while they build signals."""
+        timeout_sec = max(60, int(_SCAN_TIMEOUTS.get(name, 10)) * 60)
+        print(f"[Scheduler] Warte auf {name} ({label})...")
+        _wait_start = time.time()
+        while _scheduler_running:
+            with _scan_lock:
+                still_running = bool(_scan_status.get(name, {}).get("running"))
+            if not still_running:
+                break
+            time.sleep(5 if name in _isolated_names else 10)
+            if time.time() - _wait_start > timeout_sec:
+                print(f"[Scheduler] {name} Timeout nach {int(timeout_sec / 60)}min - weiter")
+                break
+        print(f"[Scheduler] {name} fertig nach {int(time.time() - _wait_start)}s - naechster Scan")
 
     # ── Smart Startup: Nur Scans starten die keinen frischen Cache haben ──
     last_run_times = {}
@@ -8272,7 +8289,9 @@ def _scheduler_loop():
                 ).isoformat()
             # V2.2: Schwere Scans (bi_long, bi_short, biotech) WARTEN bis fertig
             # bevor der nächste startet — sonst teilen sich alle 200 calls/min
-            if name in _heavy_names:
+            if name in _isolated_names:
+                _wait_for_scan_completion(name, "isolierter Crypto-Trigger-Scan")
+            elif name in _heavy_names:
                 print(f"[Scheduler] Warte auf {name} (schwerer Scan)...")
                 _wait_start = time.time()
                 while _scan_status[name]["running"] and _scheduler_running:
@@ -8333,7 +8352,10 @@ def _scheduler_loop():
                     _scan_status[name]["next_run"] = datetime.fromtimestamp(
                         last_run_times[name] + interval_sec
                     ).isoformat()
-                time.sleep(2)  # Small stagger between scan launches
+                if name in _isolated_names:
+                    _wait_for_scan_completion(name, "isolierter Crypto-Trigger-Scan")
+                else:
+                    time.sleep(2)  # Small stagger between scan launches
         time.sleep(30)  # Check every 30 seconds
 
 

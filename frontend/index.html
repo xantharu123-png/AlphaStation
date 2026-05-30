@@ -5132,6 +5132,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [phaseFilter, setPhaseFilter] = useState(0); // 0=alle, 1/2/3=Phase
     const { sorted, toggleSort, sortKey } = useSortable(coins, 'entry_score');
     const pollTimeoutRef = useRef(null);
+    const lastLoadedCachedAtRef = useRef(scanCache.em_cached_at || null);
 
     const formatPrice = (price) => {
         if (price === null || price === undefined) return '–';
@@ -5246,24 +5247,36 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
-    // Load latest data on mount
+    const loadResults = async ({ force = false } = {}) => {
+        try {
+            const response = await fetch(`${API}/api/early-movers-results`);
+            if (response.ok) {
+                const data = await response.json();
+                const em = (data.data && data.data[0]) || {};
+                const nextCachedAt = data.cached_at || null;
+                if (!force && nextCachedAt && lastLoadedCachedAtRef.current === nextCachedAt) return;
+                const items = em.coins || [];
+                setCoins(items);
+                setStats(em.stats || null);
+                lastLoadedCachedAtRef.current = nextCachedAt;
+                updateScanCache('em_coins', items);
+                updateScanCache('em_stats', em.stats);
+                updateScanCache('em_cached_at', nextCachedAt);
+            }
+        } catch (err) { console.error('Error fetching early movers:', err); }
+    };
+
+    // Load latest data on mount.
+    useEffect(() => { loadResults({ force: true }); }, []);
+
+    // If the background scheduler finishes a new Early-Mover scan while this tab is open,
+    // refresh the result table automatically. Otherwise the header says "last scan X min"
+    // but the table can still show an older empty cache.
+    const schedulerLastRun = schedulerStatus?.scans?.early_movers?.last_run || null;
     useEffect(() => {
-        const fetchResults = async () => {
-            try {
-                const response = await fetch(`${API}/api/early-movers-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const em = (data.data && data.data[0]) || {};
-                    const items = em.coins || [];
-                    setCoins(items);
-                    setStats(em.stats || null);
-                    updateScanCache('em_coins', items);
-                    updateScanCache('em_stats', em.stats);
-                }
-            } catch (err) { console.error('Error fetching early movers:', err); }
-        };
-        fetchResults();
-    }, []);
+        if (!schedulerLastRun) return;
+        loadResults({ force: false });
+    }, [schedulerLastRun]);
 
     const handleScan = async () => {
         setIsScanning(true);
