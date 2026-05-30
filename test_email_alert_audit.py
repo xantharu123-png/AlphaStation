@@ -1,6 +1,7 @@
 import json
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +14,7 @@ def _mock_common_stock_universe(monkeypatch, tmp_path):
     test_stocks = {
         "AAA", "BBB", "CCC", "DDD", "LATE", "RUNR", "MDRX", "REAL", "SKBL",
         "FRESH", "BOUNCE", "DROP", "FWRD", "SHORTY", "BADLONG", "BADRR",
-        "MOMO", "ORB1", "DUP",
+        "MOMO", "ORB1", "DUP", "SSWP",
     }
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
@@ -863,6 +864,45 @@ def test_strategy_scan_email_includes_entry_stop_tp1_tp2(monkeypatch):
     assert "$11.9" in body
     assert "$13.4" in body
     assert "$14" in body
+
+
+def test_stock_strategy_sweep_is_scheduled_and_tracked():
+    source = Path("api.py").read_text(encoding="utf-8")
+    assert "_AUTO_STOCK_ALERT_STRATEGIES" in source
+    assert '("strategy_scan", _stock_strategy_alert_sweep_wrapper)' in source
+    assert '"strategy_scan": "/tmp/strategy_scan_cache.json"' in source
+    assert '"strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 30}' in source
+
+
+def test_strategy_sweep_email_keeps_row_strategy_name(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "SSWP",
+        "Strategy": "Gap Momentum Long",
+        "grade": "A",
+        "score": 92,
+        "RVOL": 2.6,
+        "Preis": 15.2,
+        "Change_Pct": 6.1,
+        "Signal_Direction": "LONG",
+        "change_pct": 6.1,
+        "close_pos": 0.84,
+        "latest_bar_change_pct": 0.18,
+        "latest_bar_close_pos": 0.76,
+        "trade_setup": {
+            "direction": "LONG",
+            "entry": 15.2,
+            "stop": 14.4,
+            "tp1": 16.5,
+            "tp2": 17.4,
+        },
+    }], "stocks")
+
+    assert len(sent) == 1
+    assert "Gap Momentum Long" in sent[0][1]
 
 
 def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):

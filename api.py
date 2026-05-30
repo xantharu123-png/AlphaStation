@@ -188,6 +188,12 @@ STOCK_STRATEGY_ORDER = [
     "Wyckoff Distribution",
 ]
 
+_AUTO_STOCK_ALERT_STRATEGIES = [
+    "Momentum Breakout Long",
+    "Gap Momentum Long",
+    "Gap Momentum Short",
+]
+
 STOCK_STRATEGY_ALIASES = {
     "Breakout Long": "Momentum Breakout Long",
     "Early Momentum": "Momentum Breakout Long",
@@ -4175,7 +4181,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     suppressed: Dict[str, int] = {}
     grade_counts: Dict[str, int] = {}
     seen_cooldown_keys = set()
-    for row in results[:25]:
+    for row in results[:50]:
         if not isinstance(row, dict):
             continue
         grade_for_counts = _extract_alert_grade(row) or "UNKNOWN"
@@ -4200,7 +4206,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "rvol": _alert_float(state["rvol"], 0) or 0,
             "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", default=0), 0) or 0,
             "entry_quality": row.get("long_entry_quality", _long_entry_quality(row) if scanner_key in _LONG_ENTRY_ALERT_SCANNERS else ""),
-            "strategy": strategy_name,
+            "strategy": row.get("Strategy") or row.get("strategy") or strategy_name,
             "market_type": market_type,
             "trade_plan_html": _format_alert_plan_html(row),
         })
@@ -6834,14 +6840,14 @@ def _biotech_scan_wrapper() -> None:
         traceback.print_exc()
 
 
-def _strategy_scan_wrapper(strategy_name: str) -> None:
+def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[Dict[str, Any]]:
     """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
     Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
     try:
         strat = STRATEGIES.get(strategy_name)
         if not strat:
             print(f"[Strategy Scan] Strategie '{strategy_name}' nicht gefunden")
-            return
+            return []
 
         filters = strat.get("filters", {})
         change_min, change_max = filters.get("Change %", (-999, 999))
@@ -7049,6 +7055,31 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
                         "grade": _strat_grade,
                         "mdr_tag": _mdr_label,
                     }
+                    _setup_direction = str(_score_meta.get("direction") or "").upper()
+                    if _setup_direction in ("LONG", "SHORT"):
+                        _trade_setup = _build_structured_trade_setup(
+                            _setup_direction,
+                            price,
+                            price * (prev_atr_pct / 100.0),
+                            day_low,
+                            day_high,
+                            day_high,
+                            day_low,
+                            close_pos * 100.0,
+                        )
+                        if _trade_setup:
+                            strategy_row.update({
+                                "Entry": _trade_setup["entry"],
+                                "StopLoss": _trade_setup["stop"],
+                                "TP1": _trade_setup["tp1"],
+                                "TP2": _trade_setup["tp2"],
+                                "entry": _trade_setup["entry"],
+                                "stop_loss": _trade_setup["stop"],
+                                "tp1": _trade_setup["tp1"],
+                                "tp2": _trade_setup["tp2"],
+                                "trade_setup": _trade_setup,
+                                "Trade_Setup_Source": "stock_strategy_structure",
+                            })
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
                         strategy_row.update(_fetch_long_latest_intraday_state(ticker))
                         strategy_row["long_entry_quality"] = _long_entry_quality(strategy_row)
@@ -7068,10 +7099,50 @@ def _strategy_scan_wrapper(strategy_name: str) -> None:
         save_cache_file(_strat_cache, results)
         save_cache_file(STRATEGY_SCAN_CACHE, results)  # Fallback für alte Clients
         print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer → {_strat_cache}")
-        _send_strategy_scan_alerts(strategy_name, results, "stocks")
+        if send_email:
+            _send_strategy_scan_alerts(strategy_name, results, "stocks")
+        return results
 
     except Exception as e:
         print(f"[Strategy Scan] Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def _stock_strategy_alert_sweep_wrapper() -> None:
+    """Run core stock strategy alerts automatically.
+
+    BI/Bear/Biotech/ORB already run on their own schedules. This sweep covers
+    the generic stock-strategy mails that otherwise only happen after a manual
+    strategy scan.
+    """
+    try:
+        all_rows: List[Dict[str, Any]] = []
+        summary = []
+        for strategy_name in _AUTO_STOCK_ALERT_STRATEGIES:
+            rows = _strategy_scan_wrapper(strategy_name, send_email=False) or []
+            summary.append({"strategy": strategy_name, "rows": len(rows)})
+            for row in rows[:25]:
+                if not isinstance(row, dict):
+                    continue
+                enriched = dict(row)
+                enriched.setdefault("Strategy", strategy_name)
+                enriched.setdefault("strategy", strategy_name)
+                all_rows.append(enriched)
+            time.sleep(1)
+
+        all_rows.sort(
+            key=lambda x: (
+                -float(x.get("score", x.get("Score", 0)) or 0),
+                -abs(float(x.get("Change_Pct", x.get("change_pct", 0)) or 0)),
+            )
+        )
+        save_cache_file(STRATEGY_SCAN_CACHE, all_rows[:100])
+        print(f"[Strategy Sweep] {len(all_rows)} Kandidaten aus {len(summary)} Strategien: {summary}")
+        _send_strategy_scan_alerts("Aktien Auto-Sweep", all_rows[:75], "stocks")
+    except Exception as e:
+        print(f"[Strategy Sweep] Fehler: {e}")
         import traceback
         traceback.print_exc()
 
@@ -8061,7 +8132,7 @@ _scan_status = {
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
-    "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
+    "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
 }
 SCAN_CACHE_MAP = {
     "bi_long": "/tmp/bi_cache_long.json",
@@ -8077,6 +8148,7 @@ SCAN_CACHE_MAP = {
     "volume_spikes": "/tmp/volume_spikes_cache.json",
     "orb": "/tmp/orb_scan_results.json",
     "turtle": "/tmp/turtle_scan_cache.json",
+    "strategy_scan": "/tmp/strategy_scan_cache.json",
 }
 _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
@@ -8219,6 +8291,7 @@ def _scheduler_loop():
         ("money_flow", _money_flow_wrapper),
         ("orb", _orb_scanner_wrapper),
         ("bear", _bear_scan_wrapper),  # V2.5: Bear ist light (~30 API-Calls), nicht heavy
+        ("strategy_scan", _stock_strategy_alert_sweep_wrapper),
         ("turtle", _turtle_scan_wrapper),  # ~80 API-Calls (Snapshot + Bars)
     ]
     heavy_scans = [
@@ -8933,7 +9006,7 @@ def get_email_alert_audit():
             "note": "Alerts are defensive: S/A/A+ only; watch/wait/context rows are suppressed from scanner signal lists and do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed 5m execution, BTC tailwind, fresh data, TP1 not missed and live R:R; the separate Explosion-Armed digest is only for elite 5m coils and still checks orderbook/slippage at send time.",
         },
         "coverage": {
-            "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers"],
+            "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers", "strategy_scan"],
             "manual_scan_alerts": ["stock_strategy"],
             "watch_only_crypto_no_trade_email": ["crypto_strategy", "btc_divergenz"],
             "informational_no_trade_email": ["btc_divergenz", "money_flow", "crash_monitor"],
