@@ -964,6 +964,7 @@ def _email_alert_status() -> Dict[str, Any]:
             "biotech": _BIOTECH_ALERT_DEDUPE_SEC,
             "crash_stock": _CRASH_ALERT_DEDUPE_SEC,
             "early_mover_digest": _EARLY_MOVER_DIGEST_DEDUPE_SEC,
+            "early_mover_armed_digest": _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC,
         },
         "min_alert_score": _ALERT_MIN_SCORE,
         "dedupe": _email_dedupe_status(),
@@ -1130,6 +1131,10 @@ def _email_dedupe_ttl_for_key(key: str) -> int:
         return _CRASH_ALERT_DEDUPE_SEC
     if key == _EARLY_MOVER_DIGEST_KEY:
         return _EARLY_MOVER_DIGEST_DEDUPE_SEC
+    if key == _EARLY_MOVER_ARMED_DIGEST_KEY:
+        return _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC
+    if key.startswith("early_movers_armed_"):
+        return _EMAIL_COOLDOWN_SEC
     if key.startswith("biotech_"):
         return _BIOTECH_ALERT_DEDUPE_SEC
     return _EMAIL_COOLDOWN_SEC
@@ -2203,6 +2208,23 @@ def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optio
     return not reasons, reasons
 
 
+def _early_mover_armed_orderbook_block_reason(row: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Armed alerts still need a tradable perp book; otherwise the mail creates FOMO in illiquid names."""
+    contract = row.get("PerpChartSymbol") or row.get("PerpMatchSymbol")
+    exchange = _normalize_crypto_exchange(row.get("PerpChartExchange") or row.get("BestExchange"))
+    if not contract or not exchange:
+        return "no_perp_execution_market", {}
+
+    liquidity = _early_mover_orderbook_liquidity(str(contract), exchange)
+    row["armed_orderbook_liquidity"] = liquidity
+    if liquidity.get("ok"):
+        return None, liquidity
+
+    reasons = liquidity.get("reasons") if isinstance(liquidity.get("reasons"), list) else []
+    reason = reasons[0] if reasons else liquidity.get("reason", "orderbook_not_ok")
+    return f"armed_orderbook_{reason}", liquidity
+
+
 def _early_mover_entry_score(row: Dict[str, Any]) -> int:
     """Score whether this Early-Mover is actionable now, separate from setup quality."""
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
@@ -2933,6 +2955,10 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
         if _email_dedupe_remaining(key, _EMAIL_COOLDOWN_SEC, now) > 0:
             suppressed["armed_symbol_dedupe_active"] = suppressed.get("armed_symbol_dedupe_active", 0) + 1
             continue
+        orderbook_block, orderbook_liquidity = _early_mover_armed_orderbook_block_reason(row)
+        if orderbook_block:
+            suppressed[orderbook_block] = suppressed.get(orderbook_block, 0) + 1
+            continue
         setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
         btc = row.get("btc_context", setup.get("btc_context", {}))
         btc = btc if isinstance(btc, dict) else {}
@@ -2958,6 +2984,8 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
             "range_now": trigger.get("recent_range_pct"),
             "range_prior": trigger.get("prior_range_pct"),
             "vol_ratio": trigger.get("volume_ratio"),
+            "spread_bps": orderbook_liquidity.get("spread_bps"),
+            "depth_10bps": orderbook_liquidity.get("depth_10bps_min_usd"),
             "btc_24h": btc.get("btc_24h"),
             "alpha_24h": btc.get("alpha_24h"),
         })
@@ -2985,7 +3013,7 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
             f'<td style="padding:10px;border-bottom:1px solid #e5e7eb"><b>{html.escape(str(item["grade"]))} / {item["score"]}</b><br>Armed {_fmt(item.get("pre_score"), "/100", 0)}</td>'
             f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">Preis {_format_alert_price(item["price"])}<br>Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
             f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">TP1 {_format_alert_price(item["tp1"])}<br>TP2 {_format_alert_price(item["tp2"])}<br>Live {_fmt(item.get("live_rr"), "R")}</td>'
-            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">{html.escape(str(item.get("exchange") or ""))}<br>{html.escape(str(item.get("contract") or ""))}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">{html.escape(str(item.get("exchange") or ""))}<br>{html.escape(str(item.get("contract") or ""))}<br>Spread {_fmt(item.get("spread_bps"), "bps", 1)}<br>Depth10 {_compact_usd(item.get("depth_10bps"))}</td>'
             f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">Range {_fmt(item.get("range_now"), "%")} vs {_fmt(item.get("range_prior"), "%")}<br>High-Dist {_fmt(item.get("near_high"), "%")}<br>Vol {_fmt(item.get("vol_ratio"), "x")}</td>'
             f'<td style="padding:10px;border-bottom:1px solid #e5e7eb">BTC {_fmt(item.get("btc_24h"), "%")}<br>Alpha {_fmt(item.get("alpha_24h"), "%")}</td></tr>'
         )
@@ -3669,6 +3697,8 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
     crash_reason_counts: Dict[str, int] = {}
     crash_decision_counts: Dict[str, int] = {}
     crash_alertable = []
+    armed_reason_counts: Dict[str, int] = {}
+    armed_alertable = []
     for row in rows:
         if scanner_name in _STOCK_ALERT_SCANNERS:
             row = _enrich_stock_alert_5m_state(scanner_name, row)
@@ -3690,6 +3720,33 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
                 crash_alertable.append(crash_state)
             for reason in crash_state["suppression_reasons"]:
                 crash_reason_counts[reason] = crash_reason_counts.get(reason, 0) + 1
+        if scanner_name == "early_movers":
+            trigger = row.get("intraday_trigger") if isinstance(row.get("intraday_trigger"), dict) else None
+            armed_ok, armed_reasons = _early_mover_explosion_armed_state(row, trigger)
+            if armed_ok:
+                armed_grade = state.get("grade")
+                armed_score = _alert_float(state.get("score"), 0) or 0
+                if armed_grade in _ALERT_TOP_GRADES and armed_score >= _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
+                    armed_alertable.append({
+                        "ticker": state.get("ticker"),
+                        "grade": armed_grade,
+                        "score": int(armed_score),
+                        "price": state.get("price"),
+                        "entry": row.get("entry"),
+                        "stop": row.get("stop_loss", row.get("stop")),
+                        "tp1": row.get("tp1"),
+                        "tp2": row.get("tp2"),
+                        "pre_breakout_score": (trigger or {}).get("pre_breakout_score", row.get("pre_breakout_score")),
+                        "live_rr": row.get("live_rr_ratio"),
+                        "distance_to_entry_r": row.get("distance_to_entry_r"),
+                        "mail_type": "EXPLOSION_ARMED",
+                        "note": "Armed-Mail prueft Orderbook/Slippage erst direkt beim Senden.",
+                    })
+                else:
+                    armed_reason_counts["armed_grade_or_score_below_threshold"] = armed_reason_counts.get("armed_grade_or_score_below_threshold", 0) + 1
+            else:
+                for reason in armed_reasons[:4]:
+                    armed_reason_counts[reason] = armed_reason_counts.get(reason, 0) + 1
 
     cache_age = None
     if os.path.exists(cache_file):
@@ -3722,6 +3779,15 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
             "crash_mail_status": "SEND_NOW" if crash_alertable else "NO_MAIL",
             "crash_mail_status_label": "Crash-Mail wuerde jetzt rausgehen" if crash_alertable else "Keine Crash-Mail: Gates blockieren oder Dedupe aktiv",
         })
+    if scanner_name == "early_movers":
+        audit.update({
+            "armed_alertable_now_count": len(armed_alertable),
+            "armed_alertable_preview": armed_alertable[:10],
+            "armed_suppression_counts": armed_reason_counts,
+            "armed_suppression_top": _top_alert_reasons(armed_reason_counts),
+            "armed_mail_status": "ARMED_READY" if armed_alertable else "NO_ARMED_MAIL",
+            "armed_mail_status_label": "Explosion-Armed-Mail moeglich; Sendelauf prueft noch Orderbook/Slippage" if armed_alertable else "Keine Armed-Mail: Coil/BTC/R:R/Targets/Gates blockieren",
+        })
     return audit
 
 
@@ -3729,6 +3795,7 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
     total_rows = 0
     total_alertable = 0
     total_crash_alertable = 0
+    total_armed_alertable = 0
     aggregate_reasons: Dict[str, int] = {}
     scanner_statuses = []
     for name, audit in scanners.items():
@@ -3744,10 +3811,12 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
         rows = int(audit.get("rows_checked") or 0)
         alertable = int(audit.get("alertable_now_count") or 0)
         crash_alertable = int(audit.get("crash_alertable_now_count") or 0)
+        armed_alertable = int(audit.get("armed_alertable_now_count") or 0)
         total_rows += rows
         total_alertable += alertable
         total_crash_alertable += crash_alertable
-        for counts_key in ("suppression_counts", "crash_suppression_counts"):
+        total_armed_alertable += armed_alertable
+        for counts_key in ("suppression_counts", "crash_suppression_counts", "armed_suppression_counts"):
             counts = audit.get(counts_key) or {}
             if isinstance(counts, dict):
                 for reason, count in counts.items():
@@ -3755,6 +3824,9 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
         if alertable or crash_alertable:
             status = "SEND_NOW"
             label = f"{alertable + crash_alertable} Mail-Kandidat(en) jetzt"
+        elif armed_alertable:
+            status = "ARMED_READY"
+            label = f"{armed_alertable} Explosion-Armed Kandidat(en); kein Market-Buy, Orderbook-Check im Sendelauf"
         elif rows == 0:
             status = "NO_CANDIDATES"
             label = "Keine aktuellen Kandidaten im Cache"
@@ -3769,6 +3841,7 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
             "rows_checked": rows,
             "alertable_now_count": alertable,
             "crash_alertable_now_count": crash_alertable,
+            "armed_alertable_now_count": armed_alertable,
             "cache_age_seconds": audit.get("cache_age_seconds"),
         })
 
@@ -3784,6 +3857,9 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
     elif total_alertable + total_crash_alertable > 0:
         overall = "MAIL_READY"
         next_step = "Mindestens ein Kandidat besteht alle Gates; Mail sollte beim naechsten Alert-Lauf kommen."
+    elif total_armed_alertable > 0:
+        overall = "ARMED_READY"
+        next_step = "Crypto Armed-Kandidaten vorhanden; Mail kommt, wenn Armed-Digest-Dedupe und Orderbook-Check frei sind."
     elif total_rows == 0:
         overall = "NO_CANDIDATES"
         next_step = "Scanner-Caches enthalten aktuell keine Kandidaten fuer Mail-Audit."
@@ -3797,6 +3873,7 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
         "total_rows_checked": total_rows,
         "total_alertable_now": total_alertable,
         "total_crash_alertable_now": total_crash_alertable,
+        "total_armed_alertable_now": total_armed_alertable,
         "top_blockers": _top_alert_reasons(aggregate_reasons, max_items=10),
         "scanner_statuses": scanner_statuses,
     }
@@ -8831,7 +8908,7 @@ def get_email_alert_audit():
             "early_mover_min_rr": _EARLY_MOVER_MIN_ALERT_RR,
             "early_mover_retest_max_distance_r": _EARLY_MOVER_RETEST_MAX_DISTANCE_R,
             "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
-            "note": "Alerts are defensive: S/A/A+ only; watch/wait/context rows are suppressed from scanner signal lists and do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed 5m execution, BTC tailwind, fresh data, TP1 not missed and live R:R.",
+            "note": "Alerts are defensive: S/A/A+ only; watch/wait/context rows are suppressed from scanner signal lists and do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed 5m execution, BTC tailwind, fresh data, TP1 not missed and live R:R; the separate Explosion-Armed digest is only for elite 5m coils and still checks orderbook/slippage at send time.",
         },
         "coverage": {
             "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers"],
