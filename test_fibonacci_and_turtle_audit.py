@@ -64,7 +64,9 @@ def test_turtle_decoration_syncs_stale_score_and_grade():
 
     decorated = _decorate_scan_results([row], "turtle", cache_age_seconds=30)[0]
 
-    assert decorated["score"] == 79
-    assert decorated["grade"] == "A"
+    assert decorated["setup_score"] == 79
+    assert decorated["score"] == 45
+    assert decorated["trade_signal"] == "NICHT_TRADEN"
+    assert "invalid_trade_plan" in decorated["scanner_suppression_reasons"]
     assert decorated["raw_score"] == 95
     assert any("Turtle-Score gedeckelt" in warning for warning in decorated["_quality"]["warnings"])

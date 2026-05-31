@@ -42,13 +42,13 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert audit["grade_counts"]["S"] == 1
     assert audit["suppression_counts"]["grade_below_alert_threshold"] == 1
     assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
-    assert audit["suppression_counts"]["score_below_alert_threshold"] == 2
+    assert audit["suppression_counts"]["score_below_alert_threshold"] == 3
     assert audit["mail_status"] == "SEND_NOW"
     assert audit["decision_counts"]["TRADE_NOW"] == 1
     top_by_reason = {item["reason"]: item for item in audit["suppression_top"]}
-    assert top_by_reason["score_below_alert_threshold"]["count"] == 2
+    assert top_by_reason["score_below_alert_threshold"]["count"] == 3
     assert "Score unter" in top_by_reason["score_below_alert_threshold"]["label"]
-    assert "score_below_alert_threshold=2" in audit["suppression_human"]
+    assert "score_below_alert_threshold=3" in audit["suppression_human"]
     assert "Score unter" in audit["suppression_human"]
 
 
@@ -1592,7 +1592,14 @@ def test_early_mover_alert_audit_flattens_coins_and_allows_long_trigger(tmp_path
         "cached_at": datetime.now().isoformat(),
         "results": [{
             "coins": [
-                _early_mover_row(),
+                _early_mover_row(
+                    trade_signal="JETZT_TRADEN",
+                    signal_quality="tradeable",
+                    execution_trigger_ok=True,
+                    execution_quality_score=92,
+                    alertable_crypto=True,
+                    entry_score=88,
+                ),
                 _early_mover_row(Symbol="CHASE", trade_action="NO_LONG_CHASE", signal_quality="no_chase", risk_flags=["overheated_phase3"]),
             ],
         }],
@@ -1621,8 +1628,8 @@ def test_early_mover_retest_alert_requires_near_entry():
 
     near_state = api._classify_alert_candidate("early_movers", near, 1_000_000.0)
     assert near_state["alertable_now"] is False
-    assert near_state["decision"] == "WAIT_RETEST"
-    assert "trade_health_wait_for_retest" in near_state["suppression_reasons"]
+    assert near_state["decision"] == "NO_TRADE"
+    assert "score_below_alert_threshold" in near_state["suppression_reasons"]
     far_state = api._classify_alert_candidate("early_movers", far, 1_000_000.0)
     assert far_state["alertable_now"] is False
     assert "early_mover_retest_not_near_entry" in far_state["suppression_reasons"]
@@ -1643,8 +1650,8 @@ def test_early_mover_zero_r_distance_stays_near_entry():
     state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
 
     assert state["alertable_now"] is False
-    assert state["decision"] == "WAIT_RETEST"
-    assert "trade_health_wait_for_retest" in state["suppression_reasons"]
+    assert state["decision"] == "NO_TRADE"
+    assert "score_below_alert_threshold" in state["suppression_reasons"]
     assert "early_mover_retest_not_near_entry" not in state["suppression_reasons"]
 
 
@@ -1672,6 +1679,63 @@ def test_stock_alert_trade_health_blocks_chased_live_entry():
     assert state["alertable_now"] is False
     assert "trade_health_chase_risk" in state["suppression_reasons"]
     assert state["decision"] == "NO_TRADE"
+
+
+def test_stock_alert_score_is_capped_when_fresh_5m_trigger_is_missing():
+    row = {
+        "ticker": "RUNR",
+        "grade": "S",
+        "score": 96,
+        "rvol": 2.8,
+        "price": 24.5,
+        "current_price": 24.5,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 18.0,
+        "close_pos": 0.91,
+        "Extension_ATR": 4.5,
+        "Entry": 24.5,
+        "StopLoss": 23.6,
+        "TP1": 25.9,
+        "TP2": 26.8,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert state["score"] < api._ALERT_MIN_SCORE
+    assert "score_below_alert_threshold" in state["suppression_reasons"]
+
+
+def test_stock_alert_score_keeps_clean_confirmed_continuation_alertable():
+    row = {
+        "ticker": "RUNR",
+        "grade": "A",
+        "score": 90,
+        "rvol": 2.8,
+        "price": 24.5,
+        "current_price": 24.5,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 18.0,
+        "close_pos": 0.91,
+        "open_to_current_pct": 8.5,
+        "latest_bar_change_pct": 0.35,
+        "latest_bar_close_pos": 0.82,
+        "Extension_ATR": 4.5,
+        "Entry": 24.5,
+        "StopLoss": 23.6,
+        "TP1": 25.9,
+        "TP2": 26.8,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "dollar_volume": 12_000_000,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is True
+    assert state["score"] >= api._ALERT_MIN_SCORE
 
 
 def test_early_mover_blocks_btc_headwind_and_partial_data():

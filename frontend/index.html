@@ -5136,7 +5136,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 
     const formatPrice = (price) => {
         if (price === null || price === undefined) return '–';
-        return price >= 1 ? `$${price.toFixed(2)}` : `$${price.toFixed(4)}`;
+        if (price >= 100) return `$${price.toFixed(2)}`;
+        if (price >= 1) return `$${price.toFixed(4)}`;
+        if (price >= 0.01) return `$${price.toFixed(6)}`;
+        return `$${price.toFixed(8)}`;
     };
 
     const phaseIcon = (p) => p === 1 ? '\u{1F7E2}' : p === 2 ? '\u{1F7E1}' : '\u{1F534}';
@@ -5145,7 +5148,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const signal = String(item.trade_signal || '').toUpperCase();
         const action = String(item.trade_action || '').toUpperCase();
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
-        if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) return { label: 'ARMED', cls: 'signal-bullish' };
+        if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) return { label: 'WATCH', cls: 'signal-abwarten' };
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
@@ -5161,7 +5164,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'JETZT TRADEN', detail: 'Execution bestaetigt', cls: 'bg-green-100 text-green-800' };
         }
         if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) {
-            return { label: 'BREAKOUT-WATCH', detail: 'Kein Entry: 5m Breakout/Reclaim abwarten', cls: 'bg-emerald-100 text-emerald-800' };
+            return { label: 'KEIN TRADE', detail: 'Nur Watch: erst nach bestaetigtem 5m Trigger handeln', cls: 'bg-amber-100 text-amber-800' };
         }
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') {
             return { label: 'NICHT TRADEN', detail: 'Kein Entry', cls: 'bg-red-100 text-red-800' };
@@ -5209,14 +5212,33 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         market_impact_risk: 'Market-Impact Risiko',
         chased_from_entry: 'zu weit vom Entry',
         weak_structural_targets: 'Ziele zu eng',
+        duplicate_targets: 'TP1/TP2 ungueltig',
+        targets_too_close: 'Ziele zu nah',
+        invalid_target_plan: 'Tradeplan ungueltig',
         pre_breakout_score_below_threshold: '5m Coil zu schwach',
         not_pre_breakout_coil: 'kein echter Coil',
         pre_breakout_armed: 'Breakout-Watch',
     };
+    const waitOnlyEntryReasons = new Set([
+        'observe_only_scanner',
+        'no_intraday_execution_trigger',
+        'requires_5m_trigger',
+        'no_market_entry',
+        'micro_trigger_missing',
+        'pre_breakout_armed',
+        'not_pre_breakout_coil',
+        'pre_breakout_score_below_threshold',
+    ]);
+    const isConfirmedEarlyTrade = (item) => {
+        const signal = String(item.trade_signal || '').toUpperCase();
+        return signal === 'JETZT_TRADEN' && !!(item.execution_trigger_ok || item.alertable_crypto || String(item.signal_quality || '').toLowerCase() === 'tradeable');
+    };
     const humanizeEntryRisk = (flag) => earlyRiskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
     const getEntryRiskReasons = (item) => {
         const reasons = Array.isArray(item.risk_reasons) ? item.risk_reasons : [];
-        return reasons.length > 0 ? reasons : (Array.isArray(item.risk_flags) ? item.risk_flags : []);
+        const fallback = reasons.length > 0 ? reasons : (Array.isArray(item.risk_flags) ? item.risk_flags : []);
+        if (!isConfirmedEarlyTrade(item)) return fallback;
+        return fallback.filter(reason => !waitOnlyEntryReasons.has(String(reason || '').toLowerCase()));
     };
     const getPrimaryEntryReason = (item) => {
         const reasons = getEntryRiskReasons(item);
@@ -5338,7 +5360,6 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     {stats.intraday_trigger_checks != null ? ` · ${stats.intraday_trigger_checks}/${stats.intraday_trigger_scan_limit || 1000} Trigger geprüft` : ''}
                 </span>}
                 {stats && <span className="text-xs text-sky-600 ml-2">
-                    {stats.explosion_armed_count ? `Armed: ${stats.explosion_armed_count}` : ''}
                     {stats.coins_suppressed_watch_rows ? ` · ${stats.coins_suppressed_watch_rows} Watch-Zeilen unterdrueckt` : ''}
                 </span>}
             </div>
@@ -5348,7 +5369,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                Trading-Modus: Hier erscheinen nur JETZT_TRADEN, EXPLOSION_ARMED oder hochwertige Trigger-Kandidaten. Breite Watchlisten werden unterdrueckt; ohne 5m-Bestaetigung bleibt es kein Blind-Entry.
+                Trading-Modus: Hier erscheinen nur bestaetigte JETZT_TRADEN-Signale. Watch/Armed/Retest ohne 5m-Bestaetigung werden unterdrueckt, damit kein FOMO-Entry entsteht.
             </div>
 
             {/* Unified Phase Table */}
@@ -5374,6 +5395,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         {filtered.map((item, idx) => {
                             const timing = timingBadge(item);
                             const actionView = actionBadge(item);
+                            const confirmedTrade = isConfirmedEarlyTrade(item);
                             const primaryReason = getPrimaryEntryReason(item);
                             const setupScore = item.setup_score ?? item.score ?? 0;
                             const explosionScore = item.explosion_score ?? null;
@@ -5416,7 +5438,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <span className={`px-2 py-1 rounded font-semibold ${actionView.cls}`}>
                                         {actionView.label}
                                     </span>
-                                    <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={item.signal_label || actionView.detail}>{String(item.signal_label || actionView.detail).replace('Achtung beobachten: ', '')}</div>
+                                    <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={confirmedTrade ? actionView.detail : (item.signal_label || actionView.detail)}>{String(confirmedTrade ? actionView.detail : (item.signal_label || actionView.detail)).replace('Achtung beobachten: ', '')}</div>
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
                                 <td className="py-3 px-2 text-right text-xs" title={`TP1: ${item.tp1_source || '-'} | TP2: ${item.tp2_source || '-'} | ${item.target_quality || ''}`}>
@@ -5436,7 +5458,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         )})}
                     </tbody>
                 </table>
-                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Kein aktives Trading-Signal{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Der Scanner hat keine sauberen Jetzt-/Armed-/Trigger-Kandidaten gefunden.</div>}
+                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Kein bestaetigtes JETZT_TRADEN-Signal{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Watch-/Armed-Kandidaten werden absichtlich nicht als Trade angezeigt.</div>}
             </div>
 
         </div>

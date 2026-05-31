@@ -246,6 +246,76 @@ def test_early_mover_vrvp_can_upgrade_weak_targets():
     assert "vrvp_target_confirmed" in row["risk_flags"]
 
 
+def test_early_mover_duplicate_targets_are_downgraded_and_not_alertable():
+    row = {
+        "Symbol": "ZEN",
+        "grade": "S",
+        "score": 86,
+        "setup_score": 86,
+        "direction": "LONG",
+        "trade_action": "LONG_TRIGGER",
+        "trade_signal": "WARTEN",
+        "signal_quality": "wait_trigger",
+        "risk_level": "LOW",
+        "risk_flags": [],
+        "entry": 5.84,
+        "stop_loss": 5.62,
+        "tp1": 6.21,
+        "tp2": 6.21,
+        "target_quality": "STRUCTURAL",
+        "risk_reward": 2.0,
+        "live_rr_ratio": 2.0,
+        "distance_to_entry_r": 0,
+        "btc_context": {"tailwind": True},
+        "trade_setup": {
+            "entry": 5.84,
+            "stop_loss": 5.62,
+            "tp1": 6.21,
+            "tp2": 6.21,
+            "target_quality": "STRUCTURAL",
+            "risk_flags": [],
+        },
+    }
+
+    api._apply_early_mover_signal_state(row, {
+        "ok": True,
+        "reason": "adaptive_5m_retest_hold",
+        "timeframe": "5m",
+        "execution_score": 92,
+    })
+
+    assert row["trade_signal"] == "WARTEN"
+    assert row["trade_action"] == "WAIT_FOR_RETEST"
+    assert row["alertable_crypto"] is False
+    assert "duplicate_targets" in row["risk_flags"]
+    assert "weak_structural_targets" in row["risk_flags"]
+    assert api._scanner_row_is_trade_signal(row, "early_movers") is False
+
+    state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
+    assert "early_mover_weak_targets" in state["suppression_reasons"]
+
+
+def test_early_mover_build_never_returns_identical_tp1_tp2():
+    setup = api._build_early_mover_long_setup(
+        {
+            "Price": 5.84,
+            "High24h": 6.21,
+            "Low24h": 5.62,
+            "MCap": 150_000_000,
+            "VolMCapRatio": 9,
+            "Change24h": 1.5,
+            "Change7d": -4.3,
+        },
+        phase=1,
+        score=86,
+        btc_24h=0.5,
+        btc_7d=0.2,
+    )
+
+    assert setup["tp2"] > setup["tp1"]
+    assert setup["tp2"] - setup["tp1"] >= max(setup["entry"] * 0.018, setup["risk"] * 0.45)
+
+
 def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
     coin = _volume_coin(symbol="whale", coin_id="whale-test", change_24h=2.0)
     coin["market_cap"] = 80_000_000
@@ -650,7 +720,7 @@ def test_early_mover_detects_pre_breakout_coil_without_market_buy():
     assert result["near_range_high_pct"] <= 0.75
 
 
-def test_early_mover_armed_survives_signal_only_policy():
+def test_early_mover_armed_is_not_shown_as_trade_signal():
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
     trigger = _with_good_htf_context(trigger)
@@ -660,8 +730,8 @@ def test_early_mover_armed_survives_signal_only_policy():
     assert row["pre_breakout_armed"] is True
     filtered = api._apply_signal_only_policy("early_movers", [{"coins": [row], "stats": {"unified_count": 1}}])
 
-    assert len(filtered[0]["coins"]) == 1
-    assert filtered[0]["stats"]["explosion_armed_count"] == 1
+    assert filtered[0]["coins"] == []
+    assert filtered[0]["stats"]["explosion_armed_count"] == 0
     assert filtered[0]["stats"]["trade_now_count"] == 0
 
 
@@ -731,6 +801,22 @@ def test_early_mover_armed_digest_disabled_by_default(monkeypatch, tmp_path):
         "asks": [(1.0841, 500_000), (1.0845, 500_000), (1.0850, 500_000)],
     })
     api._EMAIL_COOLDOWN.clear()
+
+    assert api._send_early_mover_armed_alerts({"coins": [row]}) is False
+    assert sent == []
+
+
+def test_early_mover_armed_digest_stays_disabled_even_if_env_flag_enabled(monkeypatch, tmp_path):
+    row = _armed_row()
+    trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
+    api._apply_early_mover_signal_state(row, trigger)
+    row["intraday_trigger"] = trigger
+    sent = []
+
+    monkeypatch.setattr(api, "_EARLY_MOVER_SEND_ARMED_EMAILS", True)
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
 
     assert api._send_early_mover_armed_alerts({"coins": [row]}) is False
     assert sent == []
