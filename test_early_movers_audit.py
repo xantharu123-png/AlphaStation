@@ -323,6 +323,31 @@ def test_early_mover_intraday_trigger_checks_more_than_top_30(monkeypatch):
     assert result["stats"]["market_universe_target"] == 1000
 
 
+def test_early_mover_market_sweep_checks_non_special_perp_coin(monkeypatch):
+    sleepy = _volume_coin(symbol="sleep", coin_id="sleepy", change_24h=0.4)
+    sleepy["market_cap"] = 500_000_000
+    sleepy["total_volume"] = 2_000_000
+    sleepy["price_change_percentage_7d_in_currency"] = 1.0
+    sleepy["price_change_percentage_14d_in_currency"] = 0.5
+    sleepy["price_change_percentage_30d_in_currency"] = 1.2
+
+    checked = []
+    monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), sleepy])
+    monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
+    monkeypatch.setattr(
+        api,
+        "_verify_early_mover_intraday_trigger",
+        lambda row: checked.append(row["Symbol"]) or {"ok": False, "reason": "test_no_trigger"},
+    )
+
+    result = api.fetch_early_movers(_prefetched_perps=_perp("SLEEP"))
+
+    assert "SLEEP" in checked
+    assert result["stats"]["market_sweep_candidates"] == 1
+    assert result["stats"]["intraday_trigger_checks"] == 1
+    assert result["stats"]["intraday_trigger_scope"] == "all_chartable_top_1000"
+
+
 def test_early_mover_thin_perp_liquidity_blocks_trade_signal(monkeypatch):
     morpho = _volume_coin(symbol="morpho", coin_id="morpho", change_24h=4.0)
     morpho["market_cap"] = 1_300_000_000

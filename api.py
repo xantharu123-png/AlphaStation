@@ -12216,6 +12216,7 @@ def fetch_early_movers(_prefetched_perps=None):
     volume_spikes = []
     micro_caps = []
     whale_accumulations = []
+    market_sweep = []
     excluded_assets = 0
 
     for coin in all_coins:
@@ -12299,6 +12300,53 @@ def fetch_early_movers(_prefetched_perps=None):
                 "OI_ChangePct": perp_info.get("oi_change_pct") if perp_info else None,
                 "OI_HistoryAgeSeconds": perp_info.get("oi_history_age_seconds") if perp_info else None,
             }
+
+            # Market Sweep: every chartable Top-1000 coin reaches the 5m
+            # execution check. Specialised scanners can still override the
+            # score/source, but they are no longer the admission ticket.
+            chart_exchange = base_entry.get("PerpChartExchange") or base_entry.get("BestExchange")
+            chart_contract = base_entry.get("PerpChartSymbol") or base_entry.get("PerpMatchSymbol")
+            if has_perp and chart_exchange and chart_contract:
+                alpha_24h = change_24h - btc_24h
+                sweep_score = 25
+                sweep_score += 12
+                if vol_24h >= 25_000_000:
+                    sweep_score += 12
+                elif vol_24h >= 10_000_000:
+                    sweep_score += 10
+                elif vol_24h >= 2_000_000:
+                    sweep_score += 7
+                elif vol_24h >= 500_000:
+                    sweep_score += 4
+                if 1 <= vol_mcap_ratio <= 60:
+                    sweep_score += 8
+                elif 60 < vol_mcap_ratio <= 120:
+                    sweep_score += 3
+                elif vol_mcap_ratio > 120:
+                    sweep_score -= 10
+                if -2 <= change_24h <= 8:
+                    sweep_score += 8
+                elif 8 < change_24h <= 14:
+                    sweep_score += 3
+                elif change_24h > 20:
+                    sweep_score -= 12
+                if alpha_24h >= 2:
+                    sweep_score += 7
+                elif alpha_24h < -3:
+                    sweep_score -= 7
+                if 0 <= change_7d <= 25:
+                    sweep_score += 5
+                elif change_7d > 80:
+                    sweep_score -= 8
+                if is_trending:
+                    sweep_score += 3
+                if initial_phase == 3:
+                    sweep_score -= 12
+
+                entry = dict(base_entry)
+                entry["MarketSweepScore"] = max(5, min(82, int(sweep_score)))
+                entry["Signal"] = "Market Sweep - 5m execution scan"
+                market_sweep.append(entry)
 
             # 1. VOLUME SPIKE DETECTOR (MCap >$10M, Vol >$500k — kleinere sind manipulierbar)
             if mcap > 10_000_000 and vol_24h > 500_000:
@@ -12648,6 +12696,7 @@ def fetch_early_movers(_prefetched_perps=None):
     volume_spikes.sort(key=lambda x: x.get("EarlyScore", 0), reverse=True)
     micro_caps.sort(key=lambda x: x.get("DegenScore", 0), reverse=True)
     whale_accumulations.sort(key=lambda x: x.get("WhaleScore", 0), reverse=True)
+    market_sweep.sort(key=lambda x: x.get("MarketSweepScore", 0), reverse=True)
 
     # ═══════════════════════════════════════════════════════════════════
     # UNIFIED LIST: Alle 3 Strategien → eine Liste mit Phase-Klassifikation
@@ -12781,6 +12830,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     unified_entry["sources"] = _old_sources
                     seen_symbols[sym] = unified_entry
 
+    _add_to_unified(market_sweep, "Market Sweep", "MarketSweepScore")
     _add_to_unified(volume_spikes, "Volume Spike", "EarlyScore")
     _add_to_unified(micro_caps, "Micro-Cap", "DegenScore")
     _add_to_unified(whale_accumulations, "Perp Positioning", "WhaleScore")
@@ -12879,17 +12929,33 @@ def fetch_early_movers(_prefetched_perps=None):
         ),
     )
 
-    # Verify up to the top-1000 scored candidates before cutting the display list.
+    # Verify every chartable Top-1000 coin before cutting the display list.
     trigger_checks = 0
     trigger_eligible = 0
+    trigger_no_chart = 0
+    trigger_reason_counts = {}
+    trigger_ok_examples = []
     trigger_pool = all_unified[:_EARLY_MOVER_TRIGGER_SCAN_LIMIT]
     for item in trigger_pool:
-        if str(item.get("trade_action", "")).upper() not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+        contract = item.get("PerpChartSymbol") or item.get("PerpMatchSymbol")
+        exchange = _normalize_crypto_exchange(item.get("PerpChartExchange") or item.get("BestExchange"))
+        if not contract or not exchange:
+            trigger_no_chart += 1
             _apply_early_mover_signal_state(item)
             continue
         trigger_eligible += 1
         trigger_check = _verify_early_mover_intraday_trigger(item)
         trigger_checks += 1
+        reason = str(trigger_check.get("reason", "unknown") if isinstance(trigger_check, dict) else "unknown")
+        trigger_reason_counts[reason] = trigger_reason_counts.get(reason, 0) + 1
+        if isinstance(trigger_check, dict) and trigger_check.get("ok") and len(trigger_ok_examples) < 8:
+            trigger_ok_examples.append({
+                "symbol": item.get("Symbol"),
+                "exchange": exchange,
+                "reason": reason,
+                "execution_score": trigger_check.get("execution_score"),
+                "timeframe": trigger_check.get("timeframe"),
+            })
         _apply_early_mover_signal_state(item, trigger_check)
 
     # Rebuild display selection after trigger checks so actionable rows can bubble up.
@@ -12958,8 +13024,13 @@ def fetch_early_movers(_prefetched_perps=None):
         "partial_data": _CG_MARKETS_STATUS.get("partial", False),
         "intraday_trigger_checks": trigger_checks,
         "intraday_trigger_eligible": trigger_eligible,
+        "intraday_trigger_no_chart": trigger_no_chart,
+        "intraday_trigger_reason_counts": trigger_reason_counts,
+        "intraday_trigger_ok_examples": trigger_ok_examples,
         "intraday_trigger_scan_limit": _EARLY_MOVER_TRIGGER_SCAN_LIMIT,
+        "intraday_trigger_scope": "all_chartable_top_1000",
         "market_universe_target": _EARLY_MOVER_MARKET_PAGES * 250,
+        "market_sweep_candidates": len(market_sweep),
         "trade_now_count": sum(1 for c in unified if c.get("trade_signal") == "JETZT_TRADEN"),
         "explosion_armed_count": sum(
             1 for c in unified
