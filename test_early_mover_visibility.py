@@ -20,9 +20,9 @@ def _candidate(symbol="COIN", score=86, entry_score=76, action="LONG_TRIGGER", s
     }
 
 
-def test_early_mover_high_quality_wait_candidate_is_hidden_until_5m_confirms():
+def test_early_mover_high_quality_wait_candidate_is_visible_as_scored_candidate():
     row = _candidate()
-    assert api._scanner_row_is_trade_signal(row, "early_movers") is False
+    assert api._scanner_row_is_trade_signal(row, "early_movers") is True
 
 
 def test_early_mover_confirmed_trade_candidate_is_visible():
@@ -109,7 +109,7 @@ def test_early_mover_hard_liquidity_risk_stays_hidden():
     assert api._scanner_row_is_trade_signal(row, "early_movers") is False
 
 
-def test_early_mover_pre_breakout_coil_is_hidden_until_trade_trigger():
+def test_early_mover_pre_breakout_coil_is_visible_as_candidate_until_trade_trigger():
     row = _candidate(symbol="COIL", score=88, entry_score=8, action="LONG_TRIGGER", signal="WARTEN")
     row.update({
         "Change24h": 4.4,
@@ -148,7 +148,7 @@ def test_early_mover_pre_breakout_coil_is_hidden_until_trade_trigger():
 
     assert row["trade_signal"] == "EXPLOSION_ARMED"
     assert row["explosion_score"] >= api._ALERT_MIN_SCORE
-    assert api._scanner_row_is_trade_signal(row, "early_movers") is False
+    assert api._scanner_row_is_trade_signal(row, "early_movers") is True
 
 
 def test_early_mover_hard_btc_dump_still_blocks_long_visibility():

@@ -5360,7 +5360,8 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     {stats.intraday_trigger_checks != null ? ` · ${stats.intraday_trigger_checks}/${stats.intraday_trigger_scan_limit || 1000} Trigger geprüft` : ''}
                 </span>}
                 {stats && <span className="text-xs text-sky-600 ml-2">
-                    {stats.coins_suppressed_watch_rows ? ` · ${stats.coins_suppressed_watch_rows} Watch-Zeilen unterdrueckt` : ''}
+                    {stats.coins_suppressed_watch_rows ? ` · ${stats.coins_suppressed_watch_rows} schwache/blocked Kandidaten unterdrueckt` : ''}
+                    {stats.trade_now_count != null ? ` · ${stats.trade_now_count} jetzt tradebar` : ''}
                 </span>}
             </div>
             {stats?.data_warning && (
@@ -5369,7 +5370,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 </div>
             )}
             <div className="text-xs rounded-lg border border-sky-100 bg-sky-50 text-sky-800 px-3 py-2">
-                Trading-Modus: Hier erscheinen nur bestaetigte JETZT_TRADEN-Signale. Watch/Armed/Retest ohne 5m-Bestaetigung werden unterdrueckt, damit kein FOMO-Entry entsteht.
+                Analyse-Modus: Die Liste zeigt wieder starke Early-Mover-Kandidaten mit Grade, Setup-Score und Entry-Score. JETZT TRADEN heisst bestaetigter Entry; WARTEN/RETEST/WATCH ist nur Vorbereitung, nicht blind kaufen.
             </div>
 
             {/* Unified Phase Table */}
@@ -5383,7 +5384,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change24h')}>24h%{sortKey === 'Change24h' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change7d')}>7d%{sortKey === 'Change7d' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('VolMCapRatio')}>Vol/MCap{sortKey === 'VolMCapRatio' && ' \u2193'}</th>
-                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Setup = Coin-Staerke, Entry = Handelsfreigabe jetzt" onClick={() => toggleSort('entry_score')}>Setup / Entry{sortKey === 'entry_score' && ' \u2193'}</th>
+                            <th className="text-center py-2 px-2 sortable-header cursor-pointer" title="Grade/Setup = Coin-Staerke, Entry = Handelsfreigabe jetzt" onClick={() => toggleSort('entry_score')}>Grade / Scores{sortKey === 'entry_score' && ' \u2193'}</th>
                             <th className="text-left py-2 px-2">Aktion</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('entry')}>Entry{sortKey === 'entry' && ' \u2193'}</th>
                             <th className="text-right py-2 px-2">TP1 / TP2</th>
@@ -5458,7 +5459,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         )})}
                     </tbody>
                 </table>
-                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Kein bestaetigtes JETZT_TRADEN-Signal{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Watch-/Armed-Kandidaten werden absichtlich nicht als Trade angezeigt.</div>}
+                {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Keine ausreichend guten Early-Mover-Kandidaten{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Schwache, illiquide oder geblockte Coins werden weiter unterdrueckt.</div>}
             </div>
 
         </div>

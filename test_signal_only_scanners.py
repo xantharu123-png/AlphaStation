@@ -6,22 +6,37 @@ import api
 ROOT = Path(__file__).resolve().parent
 
 
-def test_early_mover_signal_only_hides_wait_rows():
+def test_early_mover_signal_only_shows_scored_candidates_and_confirmed_trades():
+    shared_trade_plan = {
+        "direction": "LONG",
+        "risk_level": "LOW",
+        "risk_flags": [],
+        "live_rr_ratio": 2.2,
+        "distance_to_entry_r": 0.1,
+        "btc_context": {"tailwind": True},
+    }
     payload = {
         "coins": [
             {
+                **shared_trade_plan,
                 "Symbol": "WAIT",
                 "trade_signal": "WARTEN",
                 "trade_action": "WAIT_FOR_RETEST",
                 "grade": "S",
                 "score": 98,
+                "setup_score": 98,
+                "entry_score": 74,
             },
             {
+                **shared_trade_plan,
                 "Symbol": "GO",
                 "trade_signal": "JETZT_TRADEN",
                 "trade_action": "LONG_TRIGGER",
                 "grade": "S",
                 "score": 88,
+                "setup_score": 88,
+                "entry_score": 88,
+                "execution_quality_score": 92,
                 "alertable_crypto": True,
             },
         ],
@@ -30,9 +45,10 @@ def test_early_mover_signal_only_hides_wait_rows():
 
     filtered = api._apply_signal_only_policy("early_movers", [payload])
 
-    assert [row["Symbol"] for row in filtered[0]["coins"]] == ["GO"]
-    assert filtered[0]["stats"]["suppressed_watch_rows"] == 1
-    assert filtered[0]["stats"]["visible_trade_signals"] == 1
+    assert [row["Symbol"] for row in filtered[0]["coins"]] == ["GO", "WAIT"]
+    assert filtered[0]["stats"]["suppressed_watch_rows"] == 0
+    assert filtered[0]["stats"]["visible_candidates"] == 2
+    assert filtered[0]["stats"]["trade_now_count"] == 1
 
 
 def test_stock_signal_only_requires_tradeable_and_top_grade():

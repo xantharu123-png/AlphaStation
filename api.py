@@ -5792,6 +5792,8 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
 
     if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
         return False
+    if setup_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE and grade not in _ALERT_TOP_GRADES and explosion_score < _ALERT_MIN_SCORE:
+        return False
     if signal in {"NICHT_TRADEN", "BEOBACHTEN"} and signal_quality == "observe":
         return False
     if signal_quality == "no_chase" or risk_level == "HIGH":
@@ -5850,7 +5852,12 @@ def _early_mover_visible_sort_key(row: Dict[str, Any]) -> tuple:
 
 
 def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool:
-    """True only for rows that should be shown as actual trading signals."""
+    """True for rows that should survive the user-facing scanner filter.
+
+    For most signal-only scanners this means an actual trade signal. Early
+    Movers are intentionally split: the tab should show elite scored candidates,
+    while the mail gate remains stricter and only sends confirmed entries.
+    """
     if not isinstance(row, dict):
         return False
 
@@ -5890,9 +5897,7 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
     )
 
     if scanner_name == "early_movers":
-        if explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False):
-            return True
-        return False
+        return _early_mover_visible_candidate(row)
 
     if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
         return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
@@ -5971,6 +5976,11 @@ def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) 
             stats["suppressed_watch_rows"] = total_suppressed
             if scanner_name == "early_movers":
                 coins = payload.get("coins") if isinstance(payload.get("coins"), list) else []
+                stats["visible_candidates"] = total_visible
+                stats["confirmed_trade_signals"] = sum(
+                    1 for c in coins
+                    if isinstance(c, dict) and str(c.get("trade_signal", "")).upper() == "JETZT_TRADEN"
+                )
                 stats["unified_count"] = len(coins)
                 stats["phase_1_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 1)
                 stats["phase_2_count"] = sum(1 for c in coins if isinstance(c, dict) and c.get("phase") == 2)

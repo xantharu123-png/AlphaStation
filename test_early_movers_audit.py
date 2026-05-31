@@ -357,6 +357,7 @@ def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):
             coin["alertable_crypto"] = True
             coin["trade_signal"] = "JETZT_TRADEN"
             coin["execution_trigger_ok"] = True
+            coin["execution_quality_score"] = 92
             coin["entry_status"] = "TRIGGER_OK"
             coin["signal_quality"] = "tradeable"
             coin["grade"] = "S"
@@ -760,7 +761,7 @@ def test_early_mover_detects_pre_breakout_coil_without_market_buy():
     assert result["near_range_high_pct"] <= 0.75
 
 
-def test_early_mover_armed_is_not_shown_as_trade_signal():
+def test_early_mover_armed_is_shown_as_scored_candidate_not_trade_now():
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
     trigger = _with_good_htf_context(trigger)
@@ -770,8 +771,9 @@ def test_early_mover_armed_is_not_shown_as_trade_signal():
     assert row["pre_breakout_armed"] is True
     filtered = api._apply_signal_only_policy("early_movers", [{"coins": [row], "stats": {"unified_count": 1}}])
 
-    assert filtered[0]["coins"] == []
-    assert filtered[0]["stats"]["explosion_armed_count"] == 0
+    assert filtered[0]["coins"] == [row]
+    assert filtered[0]["stats"]["visible_candidates"] == 1
+    assert filtered[0]["stats"]["explosion_armed_count"] == 1
     assert filtered[0]["stats"]["trade_now_count"] == 0
 
 
