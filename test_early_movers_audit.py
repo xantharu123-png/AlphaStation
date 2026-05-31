@@ -459,6 +459,46 @@ def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
     assert "thin_book_10bps" in result["liquidity_reasons"]
 
 
+def test_early_mover_verified_5m_trigger_is_blocked_by_4h_spike_rejection(monkeypatch):
+    api._EARLY_MOVER_TRIGGER_CACHE.clear()
+    row = {
+        "Symbol": "ASTER",
+        "PerpChartSymbol": "ASTERUSDT",
+        "PerpChartExchange": "binance",
+        "Change24h": 0.8,
+        "VolMCapRatio": 18.0,
+        "entry": 1.0,
+        "stop_loss": 0.94,
+        "tp1": 1.16,
+        "tp2": 1.24,
+        "target_quality": "STRUCTURAL",
+        "btc_context": {"tailwind": True},
+    }
+    five_min = [{"open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for _ in range(35)]
+    five_min.append({"open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1400})
+    four_hour = [{"open": 0.66, "high": 0.69, "low": 0.64, "close": 0.67, "volume": 1000} for _ in range(40)]
+    four_hour.extend([
+        {"open": 0.67, "high": 0.78, "low": 0.66, "close": 0.755, "volume": 8000},
+        {"open": 0.755, "high": 0.765, "low": 0.725, "close": 0.735, "volume": 5000},
+        {"open": 0.735, "high": 0.737, "low": 0.720, "close": 0.721, "volume": 4200},
+    ])
+
+    def fake_fetch(symbol, exchange, timeframe="1h", count=50):
+        return four_hour if timeframe == "4h" else five_min
+
+    monkeypatch.setattr(api, "fetch_candles_for", fake_fetch)
+    monkeypatch.setattr(api, "fetch_orderbook_for", lambda *args, **kwargs: {
+        "bids": [(1.006, 100_000), (1.005, 100_000)],
+        "asks": [(1.008, 100_000), (1.009, 100_000)],
+    })
+
+    result = api._verify_early_mover_intraday_trigger(row)
+
+    assert result["ok"] is False
+    assert result["reason"] in {"htf_current_bar_rejecting", "htf_pullback_after_spike", "htf_two_red_after_spike"}
+    assert result["htf_execution_context"]["ok"] is False
+
+
 def test_early_mover_adaptive_trigger_uses_only_5m(monkeypatch):
     api._EARLY_MOVER_TRIGGER_CACHE.clear()
     row = {

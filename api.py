@@ -1075,6 +1075,11 @@ _ALERT_SUPPRESSION_LABELS = {
     "early_mover_execution_liquidity_too_thin": "Crypto: Orderbuch/Perp-Liquiditaet zu duenn",
     "early_mover_live_rr_below_threshold": "Crypto: Live R:R unter Mindestwert",
     "early_mover_weak_targets": "Crypto: Zielzonen zu eng/ungueltig",
+    "early_mover_htf_current_bar_rejecting": "Crypto: 4H-Kerze rejected gerade",
+    "early_mover_htf_pullback_after_spike": "Crypto: 4H-Pullback nach Spike",
+    "early_mover_htf_two_red_after_spike": "Crypto: zwei rote 4H-Kerzen nach Spike",
+    "early_mover_htf_lower_high_after_sweep": "Crypto: 4H Lower-High nach Sweep",
+    "early_mover_htf_active_red_candle": "Crypto: aktive rote 4H-Kerze",
     "early_mover_1m_trigger_disabled": "Crypto: 1m-Trigger deaktiviert, Trade braucht 5m-Bestaetigung",
     "early_mover_1m_trigger_watch_only": "Crypto: 1m-Trigger deaktiviert, Trade braucht 5m-Bestaetigung",
     "early_mover_execution_timeframe_disabled_use_5m": "Crypto: nur 5m-Execution-Trigger erlaubt",
@@ -2425,6 +2430,79 @@ def _early_mover_htf_armed_context(row: Dict[str, Any], bars: List[Dict[str, Any
     }
 
 
+def _early_mover_htf_execution_context(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str = "4h") -> Dict[str, Any]:
+    """Block live long entries when the higher timeframe is rejecting a spike.
+
+    A 5m retest can briefly look valid while the 4h candle is actively selling
+    off from a liquidity sweep. In that situation the correct action is wait,
+    not JETZT_TRADEN.
+    """
+    timeframe = str(timeframe or "4h").lower()
+    clean = []
+    for bar in bars or []:
+        try:
+            open_ = float(bar["open"])
+            high = float(bar["high"])
+            low = float(bar["low"])
+            close = float(bar["close"])
+            if open_ > 0 and close > 0 and high > low:
+                clean.append({"open": open_, "high": high, "low": low, "close": close})
+        except Exception:
+            continue
+
+    if len(clean) < 8:
+        return {
+            "ok": False,
+            "reason": "htf_execution_context_missing",
+            "timeframe": timeframe,
+            "bar_count": len(clean),
+        }
+
+    recent = clean[-8:]
+    last = recent[-1]
+    prev = recent[-2]
+    recent_high = max(bar["high"] for bar in recent)
+    recent_low = min(bar["low"] for bar in recent)
+    last_close = last["close"]
+    last_open = last["open"]
+    last_high = last["high"]
+    last_low = last["low"]
+    last_close_pos = (last_close - last_low) / max(last_high - last_low, 1e-9)
+    last_change_pct = ((last_close - last_open) / last_open * 100) if last_open else 0
+    pullback_from_high_pct = ((recent_high - last_close) / last_close * 100) if last_close else 999
+    bounce_from_low_pct = ((last_close - recent_low) / recent_low * 100) if recent_low else 0
+    prev_red = prev["close"] < prev["open"]
+    last_red = last_close < last_open
+    lower_high = last_high < prev["high"] * 0.998
+    lower_close = last_close < prev["close"] * 0.998
+
+    reasons = []
+    if last_red and last_close_pos <= 0.35 and pullback_from_high_pct >= 1.5:
+        reasons.append("htf_current_bar_rejecting")
+    if pullback_from_high_pct >= 3.0 and last_red and lower_close:
+        reasons.append("htf_pullback_after_spike")
+    if prev_red and last_red and pullback_from_high_pct >= 2.0:
+        reasons.append("htf_two_red_after_spike")
+    if pullback_from_high_pct >= 4.5 and lower_high and lower_close:
+        reasons.append("htf_lower_high_after_sweep")
+    if last_change_pct <= -2.2 and last_close_pos <= 0.45:
+        reasons.append("htf_active_red_candle")
+
+    return {
+        "ok": not reasons,
+        "reason": "htf_execution_context_ok" if not reasons else reasons[0],
+        "reasons": reasons,
+        "timeframe": timeframe,
+        "pullback_from_high_pct": round(pullback_from_high_pct, 2),
+        "bounce_from_low_pct": round(bounce_from_low_pct, 2),
+        "last_bar_change_pct": round(last_change_pct, 2),
+        "last_bar_close_pos": round(last_close_pos, 2),
+        "last_bar_red": last_red,
+        "lower_high": lower_high,
+        "lower_close": lower_close,
+    }
+
+
 def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
     """Confirm Early-Mover mail candidates with adaptive exchange execution candles."""
     symbol = _extract_alert_ticker(row)
@@ -2453,6 +2531,22 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
             vrvp = _early_mover_vrvp_from_bars(completed_bars)
             if vrvp:
                 scored["vrvp"] = vrvp
+            if scored.get("ok"):
+                try:
+                    htf_bars = fetch_candles_for(str(contract), exchange, timeframe="4h", count=48)
+                    execution_context = _early_mover_htf_execution_context(row, htf_bars, "4h")
+                except Exception as htf_exc:
+                    execution_context = {
+                        "ok": False,
+                        "reason": "htf_execution_context_fetch_failed",
+                        "detail": str(htf_exc)[:120],
+                        "timeframe": "4h",
+                    }
+                scored["htf_execution_context"] = execution_context
+                if not execution_context.get("ok"):
+                    scored["ok"] = False
+                    scored["reason"] = execution_context.get("reason") or "htf_execution_rejecting"
+                    scored["htf_rejection_reasons"] = execution_context.get("reasons", [])
             if scored.get("pre_breakout_ok"):
                 try:
                     htf_bars = fetch_candles_for(str(contract), exchange, timeframe="4h", count=48)
