@@ -714,7 +714,7 @@ def test_early_mover_armed_downgrades_when_entry_risk_is_high():
     assert "entry_score_below_armed_threshold" in row["pre_breakout_block_reasons"]
 
 
-def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
+def test_early_mover_armed_digest_disabled_by_default(monkeypatch, tmp_path):
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
     trigger = _with_good_htf_context(trigger)
@@ -722,6 +722,7 @@ def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
     row["intraday_trigger"] = trigger
     sent = []
 
+    monkeypatch.setattr(api, "_EARLY_MOVER_SEND_ARMED_EMAILS", False)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "HAS_NEW_LISTING_SCANNER", True)
@@ -731,11 +732,8 @@ def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
     })
     api._EMAIL_COOLDOWN.clear()
 
-    assert api._send_early_mover_armed_alerts({"coins": [row]}) is True
-    assert "Crypto Explosion Armed" in sent[0][0]
-    assert "noch kein Market-Buy" in sent[0][1]
-    assert "Depth10" in sent[0][1]
     assert api._send_early_mover_armed_alerts({"coins": [row]}) is False
+    assert sent == []
 
 
 def test_early_mover_armed_digest_blocks_thin_orderbook(monkeypatch, tmp_path):
@@ -746,6 +744,7 @@ def test_early_mover_armed_digest_blocks_thin_orderbook(monkeypatch, tmp_path):
     row["intraday_trigger"] = trigger
     sent = []
 
+    monkeypatch.setattr(api, "_EARLY_MOVER_SEND_ARMED_EMAILS", True)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "HAS_NEW_LISTING_SCANNER", True)
@@ -759,7 +758,8 @@ def test_early_mover_armed_digest_blocks_thin_orderbook(monkeypatch, tmp_path):
     assert sent == []
 
 
-def test_early_mover_alert_audit_reports_armed_candidates(tmp_path):
+def test_early_mover_alert_audit_reports_armed_watch_but_no_mail_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_EARLY_MOVER_SEND_ARMED_EMAILS", False)
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
     trigger = _with_good_htf_context(trigger)
@@ -775,10 +775,12 @@ def test_early_mover_alert_audit_reports_armed_candidates(tmp_path):
     audit = api._build_alert_audit_for_cache("early_movers", str(cache_file))
     summary = api._summarize_email_alert_audit({"early_movers": audit})
 
-    assert audit["armed_alertable_now_count"] == 1
-    assert audit["armed_alertable_preview"][0]["ticker"] == "ARMED"
-    assert summary["total_armed_alertable_now"] == 1
-    assert summary["overall_status"] in {"ARMED_READY", "STARTUP_COOLDOWN", "EMAIL_NOT_CONFIGURED"}
+    assert audit["armed_watch_count"] == 1
+    assert audit["armed_watch_preview"][0]["ticker"] == "ARMED"
+    assert audit["armed_alertable_now_count"] == 0
+    assert audit["armed_mail_status"] == "DISABLED"
+    assert summary["total_armed_alertable_now"] == 0
+    assert summary["overall_status"] in {"ALL_BLOCKED_BY_GATES", "STARTUP_COOLDOWN", "EMAIL_NOT_CONFIGURED"}
 
 
 def test_multi_exchange_perps_prefers_binance_execution_liquidity(monkeypatch):

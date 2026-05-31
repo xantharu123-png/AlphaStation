@@ -843,6 +843,11 @@ ALERT_SEND_TO_SUBSCRIBERS = str(
     or _SECRETS.get("ALERT_SEND_TO_SUBSCRIBERS")
     or "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
+_EARLY_MOVER_SEND_ARMED_EMAILS = str(
+    os.environ.get("EARLY_MOVER_SEND_ARMED_EMAILS")
+    or _SECRETS.get("EARLY_MOVER_SEND_ARMED_EMAILS")
+    or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Fix: POLYGON_KEY aus secrets.toml laden falls env var leer
 if not POLYGON_KEY:
@@ -968,6 +973,7 @@ def _email_alert_status() -> Dict[str, Any]:
         "global_recipient_count": len(configured_recipients),
         "subscriber_recipient_count": len(platform_recipients),
         "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
+        "crypto_armed_watch_mails_enabled": _EARLY_MOVER_SEND_ARMED_EMAILS,
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
         "scanner_cooldowns_seconds": {
@@ -3311,6 +3317,14 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
 
 def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
     """Mail only elite pre-breakout coils; this is not a broad watchlist."""
+    if not _EARLY_MOVER_SEND_ARMED_EMAILS:
+        _record_email_event(
+            "Crypto Explosion Armed Alert",
+            "skipped",
+            "armed_watch_mail_disabled_trade_signals_only",
+        )
+        return False
+
     now = time.time()
     digest_remaining = _email_dedupe_remaining(_EARLY_MOVER_ARMED_DIGEST_KEY, _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC, now)
     if digest_remaining > 0:
@@ -4175,13 +4189,29 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
             "crash_mail_status_label": "Crash-Mail wuerde jetzt rausgehen" if crash_alertable else "Keine Crash-Mail: Gates blockieren oder Dedupe aktiv",
         })
     if scanner_name == "early_movers":
+        armed_mail_enabled = bool(_EARLY_MOVER_SEND_ARMED_EMAILS)
         audit.update({
-            "armed_alertable_now_count": len(armed_alertable),
-            "armed_alertable_preview": armed_alertable[:10],
+            "armed_watch_count": len(armed_alertable),
+            "armed_watch_preview": armed_alertable[:10],
+            "armed_alertable_now_count": len(armed_alertable) if armed_mail_enabled else 0,
+            "armed_alertable_preview": armed_alertable[:10] if armed_mail_enabled else [],
             "armed_suppression_counts": armed_reason_counts,
             "armed_suppression_top": _top_alert_reasons(armed_reason_counts),
-            "armed_mail_status": "ARMED_READY" if armed_alertable else "NO_ARMED_MAIL",
-            "armed_mail_status_label": "Explosion-Armed-Mail moeglich; Sendelauf prueft noch Orderbook/Slippage" if armed_alertable else "Keine Armed-Mail: Coil/BTC/R:R/Targets/Gates blockieren",
+            "armed_mail_status": (
+                "ARMED_READY"
+                if armed_mail_enabled and armed_alertable
+                else "DISABLED"
+                if armed_alertable
+                else "NO_ARMED_MAIL"
+            ),
+            "armed_mail_status_label": (
+                "Explosion-Armed-Mail moeglich; Sendelauf prueft noch Orderbook/Slippage"
+                if armed_mail_enabled and armed_alertable
+                else "Armed-Watch-Mails sind deaktiviert; Mails nur fuer bestaetigte Trade-Signale."
+                if armed_alertable
+                else "Keine Armed-Mail: Coil/BTC/R:R/Targets/Gates blockieren"
+            ),
+            "armed_mail_enabled": armed_mail_enabled,
         })
     return audit
 
