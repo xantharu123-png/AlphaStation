@@ -1872,6 +1872,93 @@ def _early_mover_trigger_profile(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _timeframe_seconds(timeframe: str) -> Optional[int]:
+    tf = str(timeframe or "").strip().lower()
+    return {
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
+    }.get(tf)
+
+
+def _candle_epoch_seconds(bar: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(bar, dict):
+        return None
+    for key in ("timestamp", "open_time", "openTime", "time", "t", "ts", "start"):
+        value = bar.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, str) and not value.replace(".", "", 1).isdigit():
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            ts = float(value)
+        except Exception:
+            continue
+        if ts <= 0:
+            continue
+        if ts > 1_000_000_000_000_000:
+            ts = ts / 1_000_000_000
+        elif ts > 10_000_000_000:
+            ts = ts / 1000
+        return ts
+    return None
+
+
+def _completed_candles_only(
+    bars: List[Dict[str, Any]],
+    timeframe: str,
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Use only closed candles for execution checks.
+
+    Live 5m bars can start bullish/bearish and then completely reverse before close.
+    Trigger, no-chase and alert gates therefore must ignore the still-forming bar.
+    """
+    if not bars:
+        return []
+    seconds = _timeframe_seconds(timeframe)
+    if not seconds:
+        return list(bars)
+    now_value = float(now_ts if now_ts is not None else time.time())
+    latest_ts = _candle_epoch_seconds(bars[-1])
+    if latest_ts is not None and latest_ts + seconds > now_value:
+        return list(bars[:-1])
+    return list(bars)
+
+
+def _early_mover_execution_threshold(matched: List[str], profile: Dict[str, Any]) -> int:
+    """Adaptive 5m trigger threshold by setup type.
+
+    A clean retest/hold should not need the same score as a raw momentum breakout.
+    The hard filters above still block chase candles, bad R-distance and thin books.
+    """
+    if not matched:
+        return 999
+    thresholds = []
+    if "retest_hold" in matched:
+        thresholds.append(64)
+    if "higher_low_vwap_hold" in matched:
+        thresholds.append(64)
+    if "vwap_reclaim" in matched:
+        thresholds.append(70)
+    if "breakout" in matched:
+        thresholds.append(72)
+    if "trend_continuation" in matched:
+        thresholds.append(70)
+    threshold = min(thresholds) if thresholds else 76
+    if profile.get("fast_coin") and (profile.get("alpha_24h") or 0) >= 2:
+        threshold -= 3
+    if profile.get("requires_5m_confirmation"):
+        threshold = max(threshold, 70)
+    return max(62, min(78, int(threshold)))
+
+
 def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     timeframe = str(timeframe or "").lower()
     if timeframe != "5m":
@@ -1883,8 +1970,17 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         }
 
     min_bars = 12
+    original_bar_count = len(bars or [])
+    bars = _completed_candles_only(bars or [], timeframe)
+    dropped_open_bar = bool(original_bar_count and len(bars) < original_bar_count)
     if not bars or len(bars) < min_bars:
-        return {"ok": False, "reason": f"not_enough_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
+        return {
+            "ok": False,
+            "reason": f"not_enough_{timeframe}_candles",
+            "timeframe": timeframe,
+            "execution_score": 0,
+            "dropped_open_candle": dropped_open_bar,
+        }
 
     try:
         clean = []
@@ -1895,7 +1991,11 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             close = float(bar["close"])
             volume = float(bar.get("volume", 0) or 0)
             if open_ > 0 and close > 0 and high > low:
-                clean.append({"open": open_, "high": high, "low": low, "close": close, "volume": max(volume, 0)})
+                cleaned_bar = {"open": open_, "high": high, "low": low, "close": close, "volume": max(volume, 0)}
+                timestamp = _candle_epoch_seconds(bar)
+                if timestamp is not None:
+                    cleaned_bar["timestamp"] = timestamp
+                clean.append(cleaned_bar)
         if len(clean) < min_bars:
             return {"ok": False, "reason": f"bad_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
 
@@ -2081,7 +2181,7 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         pre_score = int(round(max(0, min(pre_score, 100))))
         pre_breakout_ok = bool(pre_score >= _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE)
 
-        threshold = 76
+        threshold = _early_mover_execution_threshold(matched, profile)
         ok = bool(matched and score >= threshold)
         if ok:
             reason = f"adaptive_{timeframe}_{matched[0]}"
@@ -2092,15 +2192,19 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         else:
             reason = "execution_score_below_threshold"
 
+        last_timestamp = _candle_epoch_seconds(last)
         return {
             "ok": ok,
             "reason": reason,
             "symbol": _extract_alert_ticker(row),
             "timeframe": timeframe,
             "execution_score": int(round(max(0, min(score, 100)))),
+            "execution_threshold": threshold if threshold < 999 else None,
             "execution_model": "adaptive_execution_v1",
             "matched": matched,
             "last_close": round(last_close, 10),
+            "last_candle_timestamp": int(last_timestamp) if last_timestamp is not None else None,
+            "dropped_open_candle": dropped_open_bar,
             "vwap": round(vwap, 10),
             "volume_ratio": round(vol_ratio, 2),
             "close_pos": round(close_pos, 2),
@@ -2145,8 +2249,9 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
     for timeframe, count in checks:
         try:
             bars = fetch_candles_for(str(contract), exchange, timeframe=timeframe, count=count)
+            completed_bars = _completed_candles_only(bars or [], timeframe)
             scored = _score_early_mover_trigger_bars(row, bars, timeframe, profile)
-            vrvp = _early_mover_vrvp_from_bars(bars)
+            vrvp = _early_mover_vrvp_from_bars(completed_bars)
             if vrvp:
                 scored["vrvp"] = vrvp
         except Exception as exc:
@@ -2768,15 +2873,18 @@ def _fetch_recent_stock_5m_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
             return []
         bars = resp.json().get("results", []) or []
         cleaned = []
-        for bar in bars[-limit:]:
-            cleaned.append({
+        for bar in bars:
+            cleaned_bar = {
                 "open": float(bar.get("o", 0) or 0),
                 "high": float(bar.get("h", 0) or 0),
                 "low": float(bar.get("l", 0) or 0),
                 "close": float(bar.get("c", 0) or 0),
                 "volume": float(bar.get("v", 0) or 0),
-            })
-        return cleaned
+                "timestamp": bar.get("t"),
+            }
+            if cleaned_bar["open"] > 0 and cleaned_bar["close"] > 0 and cleaned_bar["high"] >= cleaned_bar["low"]:
+                cleaned.append(cleaned_bar)
+        return _completed_candles_only(cleaned, "5m")[-limit:]
     except Exception as exc:
         print(f"[Reminder] stock bars error {ticker}: {exc}")
         return []
@@ -3438,23 +3546,14 @@ def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]
     if not ticker or not POLYGON_KEY:
         return {}
     try:
-        try:
-            from zoneinfo import ZoneInfo
-            today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-        except Exception:
-            today_et = datetime.utcnow().strftime("%Y-%m-%d")
-        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/5/minute/{today_et}/{today_et}"
-        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "desc", "limit": 3}, timeout=10)
-        if resp.status_code != 200:
-            return {}
-        bars = resp.json().get("results", [])
+        bars = _fetch_recent_stock_5m_bars(ticker, limit=24)
         if not bars:
             return {}
-        bar = bars[0]
-        open_ = bar.get("o", 0) or 0
-        high = bar.get("h", 0) or 0
-        low = bar.get("l", 0) or 0
-        close = bar.get("c", 0) or 0
+        bar = bars[-1]
+        open_ = bar.get("open", 0) or 0
+        high = bar.get("high", 0) or 0
+        low = bar.get("low", 0) or 0
+        close = bar.get("close", 0) or 0
         if not open_ or not close:
             return {}
         change_pct = ((close - open_) / open_) * 100
@@ -3462,7 +3561,7 @@ def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]
         return {
             "latest_bar_change_pct": round(change_pct, 2),
             "latest_bar_close_pos": round(close_pos, 3),
-            "latest_bar_timestamp": bar.get("t"),
+            "latest_bar_timestamp": bar.get("timestamp"),
         }
     except Exception:
         return {}
@@ -3706,6 +3805,20 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         nl_fields = _extract_new_listing_signal_fields(row)
         if nl_fields["grade"]:
             grade = nl_fields["grade"]
+    elif scanner_name == "early_movers":
+        signal = str(row.get("trade_signal", "") or "").upper()
+        entry_score = _alert_float(row.get("entry_score"), None)
+        if entry_score is None:
+            entry_score = _early_mover_entry_score(row)
+        execution_score = _alert_float(row.get("execution_quality_score"), None)
+        explosion_score = _alert_float(row.get("explosion_score"), None)
+        score_candidates = [score, entry_score]
+        if signal == "JETZT_TRADEN" and execution_score is not None:
+            score_candidates.append(execution_score)
+        if signal == "EXPLOSION_ARMED" and explosion_score is not None:
+            score_candidates.append(explosion_score)
+        score = max(_alert_float(value, 0) or 0 for value in score_candidates)
+        grade, _ = _score_grade_for_value(score)
 
     if not ticker:
         reasons.append("missing_ticker")
@@ -5139,7 +5252,11 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
         return False
     if signal_quality == "no_chase" or risk_level == "HIGH":
         return False
-    if signal == "EXPLOSION_ARMED" or row.get("pre_breakout_armed"):
+    execution_score = _alert_float(row.get("execution_quality_score"), None)
+    if signal == "JETZT_TRADEN":
+        if entry_score < _EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE and (execution_score is None or execution_score < _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE):
+            return False
+    elif signal == "EXPLOSION_ARMED" or row.get("pre_breakout_armed"):
         if explosion_score < _ALERT_MIN_SCORE:
             return False
     elif grade and grade not in _ALERT_TOP_GRADES:
@@ -7320,7 +7437,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         _strat_cache = _strategy_cache_path(strategy_name)
         save_cache_file(_strat_cache, results)
         save_cache_file(STRATEGY_SCAN_CACHE, results)  # Fallback für alte Clients
-        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer → {_strat_cache}")
+        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
         if send_email:
             _send_strategy_scan_alerts(strategy_name, results, "stocks")
         return results

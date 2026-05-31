@@ -422,6 +422,29 @@ def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
     assert audit["suppression_counts"]["latest_5m_green_reclaim"] == 1
 
 
+def test_stock_latest_intraday_state_ignores_unfinished_5m_candle(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            now_ms = int(time.time() * 1000)
+            return {
+                "results": [
+                    {"t": now_ms - 900_000, "o": 10.0, "h": 10.2, "l": 9.9, "c": 10.05, "v": 1000},
+                    {"t": now_ms - 360_000, "o": 10.0, "h": 10.0, "l": 9.6, "c": 9.7, "v": 1800},
+                    {"t": now_ms - 60_000, "o": 9.7, "h": 10.2, "l": 9.7, "c": 10.15, "v": 9000},
+                ]
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: FakeResponse())
+
+    state = api._fetch_bear_latest_intraday_state("DROP")
+
+    assert state["latest_bar_change_pct"] < 0
+    assert state["latest_bar_close_pos"] < 0.4
+
+
 def test_bear_crash_alert_requires_current_sell_pressure():
     late_reclaim = {
         "ticker": "SKBL",

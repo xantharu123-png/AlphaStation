@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime
 
 import api
@@ -416,6 +417,55 @@ def test_early_mover_1m_retest_is_disabled():
     assert result["ok"] is False
     assert result["reason"] == "execution_timeframe_disabled_use_5m"
     assert "retest_hold" not in result.get("matched", [])
+
+
+def test_early_mover_5m_retest_hold_uses_adaptive_threshold():
+    row = {
+        "Symbol": "RETEST",
+        "Change24h": 4.0,
+        "BtcRelative24h": 2.2,
+        "VolMCapRatio": 22.0,
+        "entry": 1.0,
+        "stop_loss": 0.94,
+        "tp1": 1.16,
+        "btc_context": {"tailwind": False, "btc_24h": 0.2, "btc_7d": -4.0, "alpha_24h": 2.2},
+    }
+    bars = [{"open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for _ in range(35)]
+    bars.append({"open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1200})
+
+    result = api._score_early_mover_trigger_bars(row, bars, "5m", api._early_mover_trigger_profile(row))
+
+    assert result["ok"] is True
+    assert result["reason"] == "adaptive_5m_retest_hold"
+    assert result["execution_threshold"] <= 64
+    assert result["execution_score"] >= result["execution_threshold"]
+
+
+def test_early_mover_5m_trigger_ignores_unfinished_live_candle():
+    row = {
+        "Symbol": "RETEST",
+        "Change24h": 4.0,
+        "BtcRelative24h": 2.2,
+        "VolMCapRatio": 22.0,
+        "entry": 1.0,
+        "stop_loss": 0.94,
+        "tp1": 1.16,
+        "btc_context": {"tailwind": False, "btc_24h": 0.2, "btc_7d": -4.0, "alpha_24h": 2.2},
+    }
+    now = int(time.time())
+    start = now - 37 * 300 - 20
+    bars = [
+        {"timestamp": start + i * 300, "open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000}
+        for i in range(35)
+    ]
+    bars.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1200})
+    bars.append({"timestamp": now - 60, "open": 1.035, "high": 1.04, "low": 0.90, "close": 0.91, "volume": 8000})
+
+    result = api._score_early_mover_trigger_bars(row, bars, "5m", api._early_mover_trigger_profile(row))
+
+    assert result["ok"] is True
+    assert result["dropped_open_candle"] is True
+    assert result["reason"] == "adaptive_5m_retest_hold"
 
 
 def test_early_mover_turnover_churn_requires_5m_not_1m():

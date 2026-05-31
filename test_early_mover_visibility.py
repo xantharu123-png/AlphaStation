@@ -95,3 +95,25 @@ def test_early_mover_hard_btc_dump_still_blocks_long_visibility():
 
     assert row["trade_signal"] != "EXPLOSION_ARMED"
     assert api._scanner_row_is_trade_signal(row, "early_movers") is False
+
+
+def test_early_mover_confirmed_5m_trigger_uses_execution_score_not_old_daily_score():
+    row = _candidate(symbol="LIVE", score=59, entry_score=77, action="LONG_TRIGGER", signal="JETZT_TRADEN")
+    row.update({
+        "grade": "B",
+        "signal_quality": "tradeable",
+        "execution_trigger_ok": True,
+        "execution_quality_score": 100,
+        "risk_flags": ["requires_5m_trigger"],
+        "entry": 1.00,
+        "stop_loss": 0.94,
+        "tp1": 1.13,
+        "tp2": 1.22,
+        "Price": 1.01,
+        "btc_context": {"tailwind": True, "btc_24h": 0.8, "btc_7d": -1.0, "alpha_24h": 3.0},
+    })
+
+    assert api._scanner_row_is_trade_signal(row, "early_movers") is True
+    state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
+    assert "grade_below_alert_threshold" not in state["suppression_reasons"]
+    assert "score_below_alert_threshold" not in state["suppression_reasons"]
