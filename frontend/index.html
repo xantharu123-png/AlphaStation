@@ -5376,6 +5376,10 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const actionView = actionBadge(item);
                             const primaryReason = getPrimaryEntryReason(item);
                             const setupScore = item.setup_score ?? item.score ?? 0;
+                            const explosionScore = item.explosion_score ?? null;
+                            const isArmed = String(item.trade_signal || '').toUpperCase() === 'EXPLOSION_ARMED' || item.pre_breakout_armed;
+                            const mainScore = isArmed && explosionScore != null ? explosionScore : setupScore;
+                            const mainScoreLabel = isArmed ? 'X' : (item.grade || '');
                             const entryScore = item.entry_score ?? 0;
                             const entryScoreClass = item.pre_breakout_armed ? 'signal-bullish' : entryScore >= 80 ? 'signal-bullish' : entryScore >= 55 ? 'signal-lightdiv' : 'signal-abwarten';
                             const tp1Pct = targetPctFromEntry(item.tp1, item.entry);
@@ -5396,7 +5400,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className={`py-3 px-2 text-right ${(item.VolMCapRatio||0) > 100 ? 'color-negative font-bold' : (item.VolMCapRatio||0) > 60 ? 'text-yellow-600' : ''}`}>{item.VolMCapRatio ? `${item.VolMCapRatio.toFixed(0)}%` : '\u2014'}</td>
                                 <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | Entry-Risk ${item.risk_level || '-'}: ${getEntryRiskTitle(item)}`}>
                                     <div className="flex items-center justify-center gap-1">
-                                        <span className={`signal-badge ${setupScore >= 70 ? 'signal-bullish' : setupScore >= 40 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.grade || ''} {setupScore}</span>
+                                        <span className={`signal-badge ${mainScore >= 80 ? 'signal-bullish' : mainScore >= 55 ? 'signal-lightdiv' : 'signal-neutral'}`} title={isArmed ? `Explosion Score ${explosionScore} | Setup ${setupScore}` : undefined}>{mainScoreLabel} {mainScore}</span>
                                         <span className={`signal-badge ${entryScoreClass}`}>Entry {entryScore}</span>
                                     </div>
                                     <div className="text-[11px] text-gray-500 mt-1 max-w-[170px] truncate mx-auto">

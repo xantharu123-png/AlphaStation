@@ -1262,6 +1262,19 @@ def _alert_float(value: Any, default: Optional[float] = None) -> Optional[float]
     return val
 
 
+def _score_grade_for_value(score_value: Any) -> Tuple[str, str]:
+    score = _alert_float(score_value, 0) or 0
+    if score >= 80:
+        return "S", "Excellent"
+    if score >= 60:
+        return "A", "Stark"
+    if score >= 40:
+        return "B", "Solide"
+    if score >= 25:
+        return "C", "Schwach"
+    return "D", "Uninteressant"
+
+
 def _alert_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -1411,6 +1424,10 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(risk_flags, list):
         risk_flags = [str(risk_flags)] if risk_flags else []
     distance_to_entry_r = _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")))
+    btc_24h = _alert_float(btc_context.get("btc_24h"), 0) or 0
+    btc_7d = _alert_float(btc_context.get("btc_7d"), 0) or 0
+    alpha_24h = _alert_float(row.get("BtcRelative24h", btc_context.get("alpha_24h")), 0) or 0
+    change24 = _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0
     return {
         "direction": str(row.get("direction", setup.get("direction", "")) or "").upper(),
         "trade_action": str(row.get("trade_action", setup.get("trade_action", "")) or "").upper(),
@@ -1424,11 +1441,23 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "partial_data": _alert_bool(row.get("partial_data", row.get("data_partial", False))),
         "data_warning": row.get("data_warning"),
         "btc_tailwind": _alert_bool(btc_context.get("tailwind"), True),
-        "change24": _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0,
+        "btc_24h": btc_24h,
+        "btc_7d": btc_7d,
+        "btc_hard_headwind": bool(btc_24h <= -3.0 or btc_7d <= -7.0),
+        "change24": change24,
         "vol_mcap": _alert_float(row.get("VolMCapRatio", row.get("vol_mcap", row.get("Vol/MCap"))), 0) or 0,
-        "alpha_24h": _alert_float(row.get("BtcRelative24h", btc_context.get("alpha_24h")), 0) or 0,
+        "alpha_24h": alpha_24h,
         "risk_flags": [str(flag).lower() for flag in risk_flags],
     }
+
+
+def _early_mover_btc_allows_long(fields: Dict[str, Any]) -> bool:
+    """BTC may be neutral/choppy, but not in a hard dump unless the setup is only watched."""
+    if fields.get("btc_hard_headwind"):
+        return False
+    if fields.get("btc_tailwind"):
+        return True
+    return (fields.get("alpha_24h") or 0) >= 1.0 and (fields.get("change24") or 0) >= 1.0
 
 
 def _early_mover_alert_key(row: Dict[str, Any], ticker: Optional[str] = None) -> str:
@@ -1451,7 +1480,7 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_action_not_alertable")
     if fields["signal_quality"] == "no_chase" or "overheated_phase3" in risk_flags:
         reasons.append("early_mover_no_chase")
-    if not fields["btc_tailwind"] or "btc_headwind" in risk_flags:
+    if not _early_mover_btc_allows_long(fields):
         reasons.append("early_mover_btc_headwind")
     if fields["partial_data"] or fields["data_warning"] or "data_warning" in risk_flags:
         reasons.append("early_mover_data_warning")
@@ -2164,9 +2193,91 @@ def _early_mover_mail_trigger_block_reason(trigger_check: Optional[Dict[str, Any
     return None
 
 
+def _early_mover_explosion_score(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> int:
+    """Score the pre-breakout coil itself, independent from broad daily setup score."""
+    check = trigger_check if isinstance(trigger_check, dict) else row.get("intraday_trigger")
+    check = check if isinstance(check, dict) else {}
+    fields = _extract_early_mover_fields(row)
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    flags = set(fields.get("risk_flags") or [])
+
+    setup_score = _alert_float(row.get("setup_score", row.get("score")), 0) or 0
+    pre_score = _alert_float(check.get("pre_breakout_score", row.get("pre_breakout_score")), 0) or 0
+    live_rr = fields["live_rr"]
+    distance_r = fields["distance_to_entry_r"]
+    risk_level = str(row.get("risk_level", "") or "").upper()
+    target_quality = str(row.get("target_quality", setup.get("target_quality", "")) or "").upper()
+    alpha_24h = fields["alpha_24h"]
+
+    score = pre_score * 0.58 + min(setup_score, 100) * 0.18
+    if live_rr >= 2.5:
+        score += 10
+    elif live_rr >= 1.8:
+        score += 7
+    elif live_rr >= _EARLY_MOVER_VISIBLE_MIN_LIVE_RR:
+        score += 4
+    else:
+        score -= 12
+
+    if distance_r <= 0.25:
+        score += 8
+    elif distance_r <= _EARLY_MOVER_MAX_ARMED_DISTANCE_R:
+        score += 5
+    elif distance_r <= _EARLY_MOVER_VISIBLE_MAX_DISTANCE_R:
+        score += 1
+    else:
+        score -= 18
+
+    btc_ok = _early_mover_btc_allows_long(fields)
+    if fields["btc_tailwind"]:
+        score += 5
+    elif btc_ok:
+        score += 2
+    else:
+        score -= 16
+    if alpha_24h >= 2:
+        score += 4
+    elif alpha_24h < -2:
+        score -= 5
+
+    if target_quality == "STRUCTURAL":
+        score += 5
+    elif target_quality.startswith("WEAK"):
+        score -= 6
+
+    if risk_level == "MEDIUM":
+        score -= 5
+    elif risk_level == "HIGH":
+        score -= 30
+
+    penalty_map = {
+        "perp_liquidity_watch": 5,
+        "weak_structural_targets": 4,
+        "high_volume_turnover": 5,
+        "extreme_volume_turnover": 9,
+        "very_high_volume_turnover": 13,
+        "turnover_without_alpha": 20,
+        "extreme_turnover_churn": 20,
+        "chased_from_entry": 18,
+        "btc_headwind": 3 if btc_ok else 18,
+        "btc_caution": 3,
+        "partial_crypto_data": 20,
+        "data_warning": 20,
+        "thin_perp_liquidity": 30,
+        "thin_orderbook": 30,
+        "market_impact_risk": 30,
+        "no_perp_execution_market": 35,
+        "overheated_phase3": 35,
+    }
+    for flag, penalty in penalty_map.items():
+        if flag in flags:
+            score -= penalty
+
+    return int(round(max(0, min(100, score))))
+
+
 def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> Tuple[bool, List[str]]:
     """True when the coin is a high-conviction pre-breakout setup, not a generic watch row."""
-    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
     check = trigger_check if isinstance(trigger_check, dict) else row.get("intraday_trigger")
     check = check if isinstance(check, dict) else {}
     fields = _extract_early_mover_fields(row)
@@ -2174,34 +2285,35 @@ def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optio
     action = fields["trade_action"]
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
     pre_score = int(_alert_float(check.get("pre_breakout_score", row.get("pre_breakout_score")), 0) or 0)
+    explosion_score = _early_mover_explosion_score(row, check)
     reasons: List[str] = []
 
     if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
         reasons.append("action_not_armed")
     if bool(check.get("ok")):
         reasons.append("already_trade_triggered")
-    if setup_score < _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
-        reasons.append("setup_score_below_armed_threshold")
+    if setup_score < 45:
+        reasons.append("setup_score_too_weak_for_armed")
     if pre_score < _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE:
         reasons.append("pre_breakout_score_below_threshold")
+    if explosion_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE:
+        reasons.append("explosion_score_below_threshold")
     if str(row.get("risk_level", "") or "").upper() == "HIGH":
         reasons.append("risk_high")
-    if fields["live_rr"] < _EARLY_MOVER_MIN_ARMED_LIVE_RR:
+    if fields["live_rr"] < _EARLY_MOVER_VISIBLE_MIN_LIVE_RR:
         reasons.append("live_rr_below_armed_threshold")
-    if fields["distance_to_entry_r"] > _EARLY_MOVER_MAX_ARMED_DISTANCE_R:
+    if fields["distance_to_entry_r"] > _EARLY_MOVER_VISIBLE_MAX_DISTANCE_R:
         reasons.append("too_far_from_entry_for_armed")
-    if not fields["btc_tailwind"]:
+    btc_ok = _early_mover_btc_allows_long(fields)
+    if not btc_ok:
         reasons.append("btc_not_tailwind")
     if fields["partial_data"] or fields["data_warning"]:
         reasons.append("data_not_clean")
     if fields["late_to_tp1"]:
         reasons.append("tp1_already_reached")
-    if str(row.get("target_quality", setup.get("target_quality", "")) or "").upper().startswith("WEAK"):
-        reasons.append("targets_not_structural")
 
     hard_flags = {
         "overheated_phase3",
-        "btc_headwind",
         "data_warning",
         "chased_from_entry",
         "very_high_volume_turnover",
@@ -2211,8 +2323,9 @@ def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optio
         "thin_orderbook",
         "market_impact_risk",
         "no_perp_execution_market",
-        "weak_structural_targets",
     }
+    if not btc_ok:
+        hard_flags.add("btc_headwind")
     for flag in sorted(flags.intersection(hard_flags)):
         reasons.append(flag)
 
@@ -2238,6 +2351,7 @@ def _early_mover_armed_orderbook_block_reason(row: Dict[str, Any]) -> Tuple[Opti
 
 def _early_mover_entry_score(row: Dict[str, Any]) -> int:
     """Score whether this Early-Mover is actionable now, separate from setup quality."""
+    fields = _extract_early_mover_fields(row)
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
     action = str(row.get("trade_action", row.get("entry_status", "")) or "").upper()
     signal = str(row.get("trade_signal", "") or "").upper()
@@ -2290,7 +2404,12 @@ def _early_mover_entry_score(row: Dict[str, Any]) -> int:
         "oi_snapshot_only": 6,
         "weak_structural_targets": 26,
     }
-    score -= sum(flag_penalties.get(flag, 0) for flag in flags)
+    btc_ok = _early_mover_btc_allows_long(fields)
+    for flag in flags:
+        if flag == "btc_headwind" and btc_ok:
+            score -= 3
+            continue
+        score -= flag_penalties.get(flag, 0)
     if "vrvp_target_confirmed" in flags:
         score += 5
 
@@ -2516,6 +2635,11 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
             _apply_early_mover_vrvp_targets(row, trigger_check.get("vrvp"))
 
     armed_ok, armed_reasons = _early_mover_explosion_armed_state(row, trigger_check)
+    explosion_score = _early_mover_explosion_score(row, trigger_check)
+    explosion_grade, explosion_grade_label = _score_grade_for_value(explosion_score)
+    row["explosion_score"] = explosion_score
+    row["explosion_grade"] = explosion_grade
+    row["explosion_grade_label"] = explosion_grade_label
     row["pre_breakout_armed"] = armed_ok
     row["pre_breakout_block_reasons"] = armed_reasons
 
@@ -2529,7 +2653,7 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["alertable_crypto"] = True
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and armed_ok:
         row["trade_signal"] = "EXPLOSION_ARMED"
-        score_txt = f" Score {row.get('pre_breakout_score')}/100" if row.get("pre_breakout_score") is not None else ""
+        score_txt = f" Score {explosion_score}/100" if explosion_score is not None else ""
         row["signal_label"] = f"Explosion vorbereitet: 5m-Coil nahe Ausbruch, Entry erst bei Breakout/Reclaim{score_txt}"
         row["signal_quality"] = "pre_breakout_armed"
         row["entry_status"] = "PRE_BREAKOUT_ARMED"
@@ -2956,10 +3080,15 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         state = _classify_alert_candidate("early_movers", row, now)
-        grade = state.get("grade")
-        score = _alert_float(state.get("score"), 0) or 0
-        if grade not in _ALERT_TOP_GRADES or score < _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
-            suppressed["armed_grade_or_score_below_threshold"] = suppressed.get("armed_grade_or_score_below_threshold", 0) + 1
+        explosion_score = int(_alert_float(row.get("explosion_score"), None) if _alert_float(row.get("explosion_score"), None) is not None else _early_mover_explosion_score(row, trigger))
+        explosion_grade, _ = _score_grade_for_value(explosion_score)
+        if explosion_grade not in _ALERT_TOP_GRADES or explosion_score < _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
+            suppressed["armed_explosion_score_below_threshold"] = suppressed.get("armed_explosion_score_below_threshold", 0) + 1
+            continue
+        setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+        target_quality = str(row.get("target_quality", setup.get("target_quality", "")) or "").upper()
+        if target_quality.startswith("WEAK"):
+            suppressed["armed_targets_not_structural"] = suppressed.get("armed_targets_not_structural", 0) + 1
             continue
         symbol = state.get("ticker")
         key = f"early_movers_armed_{symbol}"
@@ -2970,7 +3099,6 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
         if orderbook_block:
             suppressed[orderbook_block] = suppressed.get(orderbook_block, 0) + 1
             continue
-        setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
         btc = row.get("btc_context", setup.get("btc_context", {}))
         btc = btc if isinstance(btc, dict) else {}
         trigger = trigger or {}
@@ -2978,8 +3106,9 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
             "key": key,
             "symbol": symbol,
             "name": row.get("Name", row.get("name", "")),
-            "grade": grade,
-            "score": int(score),
+            "grade": explosion_grade,
+            "score": explosion_score,
+            "setup_score": row.get("setup_score", row.get("score")),
             "entry_score": row.get("entry_score"),
             "pre_score": trigger.get("pre_breakout_score", row.get("pre_breakout_score")),
             "price": row.get("Price", state.get("price")),
@@ -3735,13 +3864,16 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
             trigger = row.get("intraday_trigger") if isinstance(row.get("intraday_trigger"), dict) else None
             armed_ok, armed_reasons = _early_mover_explosion_armed_state(row, trigger)
             if armed_ok:
-                armed_grade = state.get("grade")
-                armed_score = _alert_float(state.get("score"), 0) or 0
+                armed_score = _alert_float(row.get("explosion_score"), None)
+                if armed_score is None:
+                    armed_score = _early_mover_explosion_score(row, trigger)
+                armed_grade, _ = _score_grade_for_value(int(armed_score))
                 if armed_grade in _ALERT_TOP_GRADES and armed_score >= _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
                     armed_alertable.append({
                         "ticker": state.get("ticker"),
                         "grade": armed_grade,
                         "score": int(armed_score),
+                        "setup_score": row.get("setup_score", row.get("score")),
                         "price": state.get("price"),
                         "entry": row.get("entry"),
                         "stop": row.get("stop_loss", row.get("stop")),
@@ -4998,6 +5130,7 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
     entry_score_value = _alert_float(row.get("entry_score"), None)
     entry_score = int(entry_score_value if entry_score_value is not None else _early_mover_entry_score(row))
+    explosion_score = int(_alert_float(row.get("explosion_score"), None) if _alert_float(row.get("explosion_score"), None) is not None else _early_mover_explosion_score(row))
     risk_level = str(row.get("risk_level", "") or "").upper()
 
     if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
@@ -5006,11 +5139,17 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
         return False
     if signal_quality == "no_chase" or risk_level == "HIGH":
         return False
-    if grade and grade not in _ALERT_TOP_GRADES:
+    if signal == "EXPLOSION_ARMED" or row.get("pre_breakout_armed"):
+        if explosion_score < _ALERT_MIN_SCORE:
+            return False
+    elif grade and grade not in _ALERT_TOP_GRADES:
         return False
-    if setup_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE:
+    elif setup_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE:
         return False
-    if entry_score < _EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE:
+    elif entry_score < _EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE and explosion_score < _ALERT_MIN_SCORE:
+        return False
+
+    if not _early_mover_btc_allows_long(fields):
         return False
     if fields["live_rr"] < _EARLY_MOVER_VISIBLE_MIN_LIVE_RR:
         return False
@@ -5019,7 +5158,6 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
 
     hard_flags = {
         "overheated_phase3",
-        "btc_headwind",
         "partial_crypto_data",
         "data_warning",
         "tp1_already_reached",
@@ -5031,7 +5169,6 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
         "thin_orderbook",
         "market_impact_risk",
         "no_perp_execution_market",
-        "weak_structural_targets",
     }
     return not bool(flags.intersection(hard_flags))
 
@@ -5044,6 +5181,8 @@ def _early_mover_visible_sort_key(row: Dict[str, Any]) -> tuple:
     return (
         signal_rank,
         action_rank,
+        -int(_alert_float(row.get("explosion_score"), 0) or 0),
+        -int(_alert_float(row.get("pre_breakout_score"), 0) or 0),
         -int(_alert_float(row.get("entry_score"), 0) or 0),
         -int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0),
     )
@@ -5091,7 +5230,7 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
 
     if scanner_name == "early_movers":
         if armed_trade_setup:
-            return bool(_row_has_alert_quality(row, require_top_grade=False))
+            return int(_alert_float(row.get("explosion_score"), None) if _alert_float(row.get("explosion_score"), None) is not None else _early_mover_explosion_score(row)) >= _ALERT_MIN_SCORE
         if explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False):
             return True
         return _early_mover_visible_candidate(row)
@@ -11445,8 +11584,10 @@ def _build_early_mover_long_setup(
     risk_flags = []
     if phase == 3:
         risk_flags.append("overheated_phase3")
-    if btc_block or btc_warn:
+    if btc_block or (btc_warn and alpha_24h < 1.0):
         risk_flags.append("btc_headwind")
+    elif btc_warn:
+        risk_flags.append("btc_caution")
     if distance_to_entry_r >= 0.75:
         risk_flags.append("chased_from_entry")
     if extreme_turnover:
@@ -12404,15 +12545,7 @@ def fetch_early_movers(_prefetched_perps=None):
             break
 
     def _grade_for_score(score_value):
-        if score_value >= 80:
-            return "S", "Excellent"
-        if score_value >= 60:
-            return "A", "Stark"
-        if score_value >= 40:
-            return "B", "Solide"
-        if score_value >= 25:
-            return "C", "Schwach"
-        return "D", "Uninteressant"
+        return _score_grade_for_value(score_value)
 
     def _add_to_unified(entries, source_name, score_key):
         for entry in entries:
