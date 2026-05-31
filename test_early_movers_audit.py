@@ -693,6 +693,27 @@ def test_early_mover_armed_requires_elite_setup_score():
     assert "setup_score_below_armed_threshold" in row["pre_breakout_block_reasons"]
 
 
+def test_early_mover_armed_downgrades_when_entry_risk_is_high():
+    row = _armed_row()
+    row.update({
+        "setup_score": 100,
+        "score": 100,
+        "risk_level": "MEDIUM",
+        "risk_flags": ["high_volume_turnover", "perp_liquidity_watch", "oi_snapshot_only"],
+        "distance_to_entry_r": 0.55,
+    })
+    row["trade_setup"]["distance_to_entry_r"] = 0.55
+    trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
+    trigger["pre_breakout_score"] = 96
+    api._apply_early_mover_signal_state(row, trigger)
+
+    assert row["trade_signal"] == "WARTEN"
+    assert row["pre_breakout_armed"] is False
+    assert row["entry_score"] < api._EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE
+    assert "entry_score_below_armed_threshold" in row["pre_breakout_block_reasons"]
+
+
 def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))

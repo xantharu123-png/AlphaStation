@@ -5398,13 +5398,13 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className={`py-3 px-2 text-right font-semibold ${(item.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change24h ? `${item.Change24h > 0 ? '+' : ''}${item.Change24h.toFixed(1)}%` : '\u2014'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.Change7d||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change7d ? `${item.Change7d > 0 ? '+' : ''}${item.Change7d.toFixed(1)}%` : '\u2014'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.VolMCapRatio||0) > 100 ? 'color-negative font-bold' : (item.VolMCapRatio||0) > 60 ? 'text-yellow-600' : ''}`}>{item.VolMCapRatio ? `${item.VolMCapRatio.toFixed(0)}%` : '\u2014'}</td>
-                                <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | Entry-Risk ${item.risk_level || '-'}: ${getEntryRiskTitle(item)}`}>
+                                <td className="py-3 px-2 text-center" title={`${getSetupScoreTitle(item)} | Setup-Risk ${item.risk_level || '-'} | Entry: ${getEntryRiskTitle(item)}`}>
                                     <div className="flex items-center justify-center gap-1">
                                         <span className={`signal-badge ${mainScore >= 80 ? 'signal-bullish' : mainScore >= 55 ? 'signal-lightdiv' : 'signal-neutral'}`} title={isArmed ? `Explosion Score ${explosionScore} | Setup ${setupScore}` : undefined}>{mainScoreLabel} {mainScore}</span>
                                         <span className={`signal-badge ${entryScoreClass}`}>Entry {entryScore}</span>
                                     </div>
                                     <div className="text-[11px] text-gray-500 mt-1 max-w-[170px] truncate mx-auto">
-                                        <span className={`font-semibold ${timing.cls}`}>{timing.label}</span> - Risk <span className={item.risk_level === 'LOW' ? 'color-positive' : item.risk_level === 'MEDIUM' ? 'text-yellow-600' : 'color-negative'}>{item.risk_level || '-'}</span>
+                                        <span className={`font-semibold ${timing.cls}`}>{timing.label}</span> - Setup-Risk <span className={item.risk_level === 'LOW' ? 'color-positive' : item.risk_level === 'MEDIUM' ? 'text-yellow-600' : 'color-negative'}>{item.risk_level || '-'}</span>
                                     </div>
                                     {primaryReason && (
                                         <div className="text-[11px] text-amber-700 max-w-[170px] truncate mx-auto">

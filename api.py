@@ -2617,6 +2617,7 @@ def _early_mover_entry_score(row: Dict[str, Any]) -> int:
         "thin_orderbook": 35,
         "market_impact_risk": 35,
         "thin_perp_liquidity": 30,
+        "perp_liquidity_watch": 8,
         "no_perp_execution_market": 28,
         "turnover_without_alpha": 18,
         "extreme_turnover_churn": 20,
@@ -2940,6 +2941,17 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["alertable_crypto"] = False
 
     row["entry_score"] = _early_mover_entry_score(row)
+    if row.get("trade_signal") == "EXPLOSION_ARMED" and row["entry_score"] < _EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE:
+        reasons = list(row.get("pre_breakout_block_reasons") or [])
+        reasons.append("entry_score_below_armed_threshold")
+        row["pre_breakout_armed"] = False
+        row["pre_breakout_block_reasons"] = list(dict.fromkeys(reasons))
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: Breakout-Watch blockiert, Entry-Risk ist zu hoch"
+        row["signal_quality"] = "wait_trigger"
+        row["entry_status"] = "WAIT_FOR_TRIGGER"
+        row["alertable_crypto"] = False
+        row["entry_score"] = _early_mover_entry_score(row)
     row["entry_score_label"] = _early_mover_entry_score_label(row)
 
 
