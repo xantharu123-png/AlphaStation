@@ -37,6 +37,35 @@ def test_early_mover_confirmed_trade_candidate_is_visible():
     assert api._scanner_row_is_trade_signal(row, "early_movers") is True
 
 
+def test_early_mover_trade_health_no_trade_overrides_trade_now():
+    row = _candidate(symbol="HBAR", signal="JETZT_TRADEN", entry_score=83)
+    row.update({
+        "signal_quality": "tradeable",
+        "execution_trigger_ok": True,
+        "alertable_crypto": True,
+        "trade_decision": "NO_TRADE",
+        "trade_decision_label": "No Trade",
+        "trade_health": {
+            "decision": "NO_TRADE",
+            "decision_label": "No Trade",
+            "health_score": 62,
+        },
+        "trade_setup": {
+            "trade_action": "LONG_TRIGGER",
+            "entry_status": "JETZT_TRADEN",
+        },
+    })
+
+    api._apply_trade_health_final_signal(row, "early_movers")
+
+    assert row["trade_signal"] == "NICHT_TRADEN"
+    assert row["trade_action"] == "NO_TRADE"
+    assert row["entry_status"] == "NO_TRADE"
+    assert row["alertable_crypto"] is False
+    assert row["execution_trigger_ok"] is False
+    assert api._scanner_row_is_trade_signal(row, "early_movers") is False
+
+
 def test_early_mover_confirmed_trade_clears_stale_wait_flags():
     row = _candidate(symbol="ZEN", score=86, entry_score=80, action="LONG_TRIGGER", signal="WARTEN")
     row.update({

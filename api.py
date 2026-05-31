@@ -5553,6 +5553,78 @@ def _attach_trade_health(item: Dict[str, Any], scanner_name: str, market_context
     return health
 
 
+def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) -> None:
+    """Make the central Trade Health decision the final user-facing state.
+
+    Scanner-specific logic may mark a setup as JETZT_TRADEN before the global
+    health pass recalculates chase/fakeout/entry risk from current price.
+    The UI must never show "JETZT TRADEN" when Trade Health says wait/no-trade.
+    """
+    if scanner_name != "early_movers":
+        return
+    health = item.get("trade_health") if isinstance(item.get("trade_health"), dict) else {}
+    decision = str(item.get("trade_decision") or health.get("decision") or "").upper()
+    if not decision or decision == "TRADEABLE":
+        return
+
+    label = health.get("decision_label") or item.get("trade_decision_label") or decision
+    flags = item.get("risk_flags") if isinstance(item.get("risk_flags"), list) else []
+    reasons = item.get("risk_reasons") if isinstance(item.get("risk_reasons"), list) else []
+
+    if decision == "NO_TRADE":
+        item["trade_signal"] = "NICHT_TRADEN"
+        item["entry_status"] = "NO_TRADE"
+        item["trade_action"] = "NO_TRADE"
+        item["signal_quality"] = "no_trade_health"
+        item["signal_label"] = f"Nicht traden: {label}"
+        item["alertable_crypto"] = False
+        item["execution_trigger_ok"] = False
+        flags.append("trade_health_no_trade")
+        reasons.append("Trade Health blockt dieses Setup")
+    elif decision == "WAIT_FOR_RETEST":
+        item["trade_signal"] = "WARTEN"
+        item["entry_status"] = "WAIT_FOR_RETEST"
+        item["trade_action"] = "WAIT_FOR_RETEST"
+        item["signal_quality"] = "wait_retest"
+        item["signal_label"] = f"Warten: {label}"
+        item["alertable_crypto"] = False
+        flags.append("trade_health_wait_for_retest")
+    elif decision == "WAIT_FOR_TRIGGER":
+        item["trade_signal"] = "WARTEN"
+        item["entry_status"] = "WAIT_FOR_TRIGGER"
+        item["trade_action"] = "WAIT_FOR_TRIGGER"
+        item["signal_quality"] = "wait_trigger"
+        item["signal_label"] = f"Warten: {label}"
+        item["alertable_crypto"] = False
+        flags.append("trade_health_wait_for_trigger")
+    elif decision == "WAIT_FOR_CONTINUATION":
+        item["trade_signal"] = "WARTEN"
+        item["entry_status"] = "WAIT_FOR_CONTINUATION"
+        item["trade_action"] = "WAIT_FOR_CONTINUATION"
+        item["signal_quality"] = "wait_continuation"
+        item["signal_label"] = f"Warten: {label}"
+        item["alertable_crypto"] = False
+        flags.append("trade_health_wait_for_continuation")
+    elif decision == "WATCH_ONLY":
+        item["trade_signal"] = "BEOBACHTEN"
+        item["entry_status"] = "BEOBACHTEN"
+        item["trade_action"] = "BEOBACHTEN"
+        item["signal_quality"] = "observe"
+        item["signal_label"] = f"Beobachten: {label}"
+        item["alertable_crypto"] = False
+        flags.append("trade_health_watch_only")
+
+    item["risk_flags"] = list(dict.fromkeys(flags))
+    if reasons:
+        item["risk_reasons"] = list(dict.fromkeys(reasons))
+    setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
+    if setup is not None:
+        setup["trade_action"] = item.get("trade_action")
+        setup["entry_status"] = item.get("entry_status")
+        setup["signal_label"] = item.get("signal_label")
+        setup["alertable_crypto"] = False
+
+
 def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[str, Any]:
     """Classify one scanner row for the table itself, not just for email.
 
@@ -5749,6 +5821,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         warnings.extend(health.get("warnings") or [])
         exclusion_reasons = health.get("exclusion_reasons") or []
         _apply_scanner_result_trade_state(item, scanner_name)
+        _apply_trade_health_final_signal(item, scanner_name)
         if item.get("scanner_decision_label"):
             why.append(f"Scanner-Aktion: {item.get('scanner_decision_label')} ({item.get('trade_score')}/100)")
         if item.get("scanner_suppression_reasons"):
@@ -5784,12 +5857,15 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
     signal_quality = fields["signal_quality"]
     flags = set(fields["risk_flags"])
     grade = _extract_alert_grade(row)
+    decision = str(row.get("trade_decision") or (row.get("trade_health") or {}).get("decision") or "").upper()
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
     entry_score_value = _alert_float(row.get("entry_score"), None)
     entry_score = int(entry_score_value if entry_score_value is not None else _early_mover_entry_score(row))
     explosion_score = int(_alert_float(row.get("explosion_score"), None) if _alert_float(row.get("explosion_score"), None) is not None else _early_mover_explosion_score(row))
     risk_level = str(row.get("risk_level", "") or "").upper()
 
+    if decision == "NO_TRADE":
+        return False
     if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
         return False
     if setup_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE and grade not in _ALERT_TOP_GRADES and explosion_score < _ALERT_MIN_SCORE:
