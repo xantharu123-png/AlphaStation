@@ -604,6 +604,40 @@ def _armed_row():
     }
 
 
+def _with_good_htf_context(trigger):
+    trigger = dict(trigger)
+    trigger["htf_context"] = {
+        "armed_ok": True,
+        "reason": "htf_context_ok",
+        "timeframe": "4h",
+        "recent_change_pct": 1.2,
+        "near_recent_high_pct": 0.4,
+        "consecutive_green": 1,
+    }
+    return trigger
+
+
+def _extended_4h_rebound_bars():
+    bars = []
+    price = 1.0
+    for i in range(22):
+        open_ = price
+        close = price * (1 + (0.004 if i % 2 else -0.002))
+        high = max(open_, close) * 1.006
+        low = min(open_, close) * 0.994
+        bars.append({"open": open_, "high": high, "low": low, "close": close, "volume": 1000})
+        price = close
+    for _ in range(10):
+        open_ = price
+        close = price * 1.012
+        high = close * 1.004
+        low = open_ * 0.997
+        bars.append({"open": open_, "high": high, "low": low, "close": close, "volume": 1300})
+        price = close
+    bars.append({"open": price, "high": price * 1.003, "low": price * 0.985, "close": price * 0.99, "volume": 1200})
+    return bars
+
+
 def test_early_mover_detects_pre_breakout_coil_without_market_buy():
     row = _armed_row()
     result = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
@@ -619,6 +653,7 @@ def test_early_mover_detects_pre_breakout_coil_without_market_buy():
 def test_early_mover_armed_survives_signal_only_policy():
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
     api._apply_early_mover_signal_state(row, trigger)
 
     assert row["trade_signal"] == "EXPLOSION_ARMED"
@@ -630,9 +665,38 @@ def test_early_mover_armed_survives_signal_only_policy():
     assert filtered[0]["stats"]["trade_now_count"] == 0
 
 
+def test_early_mover_armed_blocks_extended_4h_rebound():
+    row = _armed_row()
+    trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    htf_context = api._early_mover_htf_armed_context(row, _extended_4h_rebound_bars(), "4h")
+    trigger["htf_context"] = htf_context
+    if not htf_context["armed_ok"]:
+        trigger["pre_breakout_ok"] = False
+        trigger["pre_breakout_reason"] = htf_context["reason"]
+    api._apply_early_mover_signal_state(row, trigger)
+
+    assert htf_context["armed_ok"] is False
+    assert "htf_move_already_extended" in htf_context["reasons"]
+    assert row["trade_signal"] != "EXPLOSION_ARMED"
+    assert "not_pre_breakout_coil" in row["pre_breakout_block_reasons"]
+
+
+def test_early_mover_armed_requires_elite_setup_score():
+    row = _armed_row()
+    row["setup_score"] = 66
+    row["score"] = 66
+    trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
+    api._apply_early_mover_signal_state(row, trigger)
+
+    assert row["trade_signal"] != "EXPLOSION_ARMED"
+    assert "setup_score_below_armed_threshold" in row["pre_breakout_block_reasons"]
+
+
 def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
     api._apply_early_mover_signal_state(row, trigger)
     row["intraday_trigger"] = trigger
     sent = []
@@ -656,6 +720,7 @@ def test_early_mover_armed_digest_sends_once(monkeypatch, tmp_path):
 def test_early_mover_armed_digest_blocks_thin_orderbook(monkeypatch, tmp_path):
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
     api._apply_early_mover_signal_state(row, trigger)
     row["intraday_trigger"] = trigger
     sent = []
@@ -676,6 +741,7 @@ def test_early_mover_armed_digest_blocks_thin_orderbook(monkeypatch, tmp_path):
 def test_early_mover_alert_audit_reports_armed_candidates(tmp_path):
     row = _armed_row()
     trigger = api._score_early_mover_trigger_bars(row, _pre_breakout_bars(), "5m", api._early_mover_trigger_profile(row))
+    trigger = _with_good_htf_context(trigger)
     api._apply_early_mover_signal_state(row, trigger)
     row["intraday_trigger"] = trigger
 

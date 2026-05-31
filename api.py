@@ -2131,6 +2131,14 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         recent_high = max(bar["high"] for bar in last_12)
         recent_low = min(bar["low"] for bar in last_12)
         recent_range_pct = ((recent_high - recent_low) / last_close * 100) if last_close else 0
+        recent_open = last_12[0]["open"] if last_12 else last_open
+        recent_change_pct = ((last_close - recent_open) / recent_open * 100) if recent_open else 0
+        consecutive_green = 0
+        for bar in reversed(last_12):
+            if bar["close"] > bar["open"]:
+                consecutive_green += 1
+            else:
+                break
         prior_range_pct = 0.0
         if prior_24:
             prior_high = max(bar["high"] for bar in prior_24)
@@ -2149,6 +2157,7 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         recent_volume = _median_float([bar["volume"] for bar in last_12[:-1]], median_vol) if len(last_12) > 1 else median_vol
         volume_dryup = bool(previous_volume > 0 and recent_volume <= previous_volume * 0.90)
         volume_wake = bool(vol_ratio >= 0.85)
+        recent_extension = bool(recent_change_pct >= 5.0 or (consecutive_green >= 6 and recent_change_pct >= 3.0))
         pre_score = 0
         pre_reasons = []
         if vwap_hold:
@@ -2169,6 +2178,9 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         if volume_wake:
             pre_score += 10
             pre_reasons.append("volume_wake")
+        if recent_extension:
+            pre_score -= 22
+            pre_reasons.append("recent_5m_run_already_extended")
         if chase_candle or candle_change_pct >= max_safe_candle or range_pct >= max_safe_range:
             pre_score -= 25
             pre_reasons.append("anti_chase_block")
@@ -2179,7 +2191,16 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
                 pre_score -= 20
                 pre_reasons.append("too_far_from_entry")
         pre_score = int(round(max(0, min(pre_score, 100))))
-        pre_breakout_ok = bool(pre_score >= _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE)
+        pre_structure_ok = bool(
+            vwap_hold
+            and higher_lows
+            and (compression or tight_coil)
+            and near_breakout
+            and not recent_extension
+        )
+        pre_breakout_ok = bool(pre_score >= _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE and pre_structure_ok)
+        if pre_score >= _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE and not pre_structure_ok:
+            pre_reasons.append("pre_breakout_structure_incomplete")
 
         threshold = _early_mover_execution_threshold(matched, profile)
         ok = bool(matched and score >= threshold)
@@ -2216,6 +2237,8 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             "pre_breakout_reasons": pre_reasons,
             "pre_breakout_reason": "5m_coil_near_breakout" if pre_breakout_ok else "pre_breakout_not_ready",
             "recent_range_pct": round(recent_range_pct, 2),
+            "recent_change_pct": round(recent_change_pct, 2),
+            "consecutive_green_5m": consecutive_green,
             "prior_range_pct": round(prior_range_pct, 2),
             "near_range_high_pct": round(near_range_high_pct, 2),
             "vwap_hold": vwap_hold,
@@ -2224,6 +2247,79 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         }
     except Exception as exc:
         return {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
+
+
+def _early_mover_htf_armed_context(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str = "4h") -> Dict[str, Any]:
+    """Gate EXPLOSION_ARMED with higher-timeframe context.
+
+    A 5m coil after a long 4h rebound is not "shortly before breakout"; it is
+    often the place where late longs provide exit liquidity. This check only
+    affects pre-breakout/armed state, not confirmed 5m trade triggers.
+    """
+    timeframe = str(timeframe or "4h").lower()
+    clean = []
+    for bar in _completed_candles_only(bars or [], timeframe):
+        try:
+            open_ = float(bar["open"])
+            high = float(bar["high"])
+            low = float(bar["low"])
+            close = float(bar["close"])
+            if open_ > 0 and close > 0 and high > low:
+                clean.append({"open": open_, "high": high, "low": low, "close": close})
+        except Exception:
+            continue
+
+    if len(clean) < 10:
+        return {"armed_ok": False, "reason": "htf_not_enough_bars", "timeframe": timeframe, "bar_count": len(clean)}
+
+    recent = clean[-8:]
+    prior = clean[-32:-8] if len(clean) >= 40 else clean[:-8]
+    last_close = recent[-1]["close"]
+    recent_open = recent[0]["open"]
+    recent_high = max(bar["high"] for bar in recent)
+    recent_low = min(bar["low"] for bar in recent)
+    recent_change_pct = ((last_close - recent_open) / recent_open * 100) if recent_open else 0
+    recent_range_pct = ((recent_high - recent_low) / last_close * 100) if last_close else 999
+    near_recent_high_pct = ((recent_high - last_close) / last_close * 100) if last_close else 999
+    green_count = sum(1 for bar in recent if bar["close"] > bar["open"])
+    consecutive_green = 0
+    for bar in reversed(recent):
+        if bar["close"] > bar["open"]:
+            consecutive_green += 1
+        else:
+            break
+
+    prior_range_pct = 0.0
+    if prior:
+        prior_high = max(bar["high"] for bar in prior)
+        prior_low = min(bar["low"] for bar in prior)
+        prior_mid = _median_float([bar["close"] for bar in prior], last_close)
+        prior_range_pct = ((prior_high - prior_low) / max(prior_mid, 1e-9) * 100) if prior_mid else 0
+
+    reasons = []
+    if recent_change_pct >= 6.0:
+        reasons.append("htf_move_already_extended")
+    if consecutive_green >= 4 or (green_count >= 6 and recent_change_pct >= 4.0):
+        reasons.append("htf_green_run_extended")
+    if near_recent_high_pct > 1.2:
+        reasons.append("not_near_4h_breakout_level")
+    if recent_range_pct > 7.0 and recent_change_pct > 3.0:
+        reasons.append("htf_not_compressed")
+    if prior_range_pct and recent_range_pct > max(6.0, prior_range_pct * 0.95) and recent_change_pct > 2.5:
+        reasons.append("htf_range_not_tightening")
+
+    return {
+        "armed_ok": not reasons,
+        "reason": "htf_context_ok" if not reasons else reasons[0],
+        "reasons": reasons,
+        "timeframe": timeframe,
+        "recent_change_pct": round(recent_change_pct, 2),
+        "recent_range_pct": round(recent_range_pct, 2),
+        "near_recent_high_pct": round(near_recent_high_pct, 2),
+        "green_count_8": green_count,
+        "consecutive_green": consecutive_green,
+        "prior_range_pct": round(prior_range_pct, 2),
+    }
 
 
 def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -2254,6 +2350,24 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
             vrvp = _early_mover_vrvp_from_bars(completed_bars)
             if vrvp:
                 scored["vrvp"] = vrvp
+            if scored.get("pre_breakout_ok"):
+                try:
+                    htf_bars = fetch_candles_for(str(contract), exchange, timeframe="4h", count=48)
+                    htf_context = _early_mover_htf_armed_context(row, htf_bars, "4h")
+                except Exception as htf_exc:
+                    htf_context = {
+                        "armed_ok": False,
+                        "reason": "htf_context_fetch_failed",
+                        "detail": str(htf_exc)[:120],
+                        "timeframe": "4h",
+                    }
+                scored["htf_context"] = htf_context
+                if not htf_context.get("armed_ok"):
+                    scored["pre_breakout_ok"] = False
+                    scored["pre_breakout_reason"] = htf_context.get("reason") or "htf_context_not_ready"
+                    reasons = list(scored.get("pre_breakout_reasons") or [])
+                    reasons.extend(htf_context.get("reasons") or [htf_context.get("reason")])
+                    scored["pre_breakout_reasons"] = list(dict.fromkeys([r for r in reasons if r]))
         except Exception as exc:
             scored = {"ok": False, "reason": "trigger_fetch_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
         scored.update({"symbol": symbol, "contract": contract, "exchange": exchange})
@@ -2390,6 +2504,7 @@ def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optio
     action = fields["trade_action"]
     setup_score = int(_alert_float(row.get("setup_score", row.get("score")), 0) or 0)
     pre_score = int(_alert_float(check.get("pre_breakout_score", row.get("pre_breakout_score")), 0) or 0)
+    pre_ok = bool(check.get("pre_breakout_ok", row.get("pre_breakout_armed_candidate", False)))
     explosion_score = _early_mover_explosion_score(row, check)
     reasons: List[str] = []
 
@@ -2397,10 +2512,17 @@ def _early_mover_explosion_armed_state(row: Dict[str, Any], trigger_check: Optio
         reasons.append("action_not_armed")
     if bool(check.get("ok")):
         reasons.append("already_trade_triggered")
-    if setup_score < 45:
-        reasons.append("setup_score_too_weak_for_armed")
+    if setup_score < _EARLY_MOVER_MIN_ARMED_SETUP_SCORE:
+        reasons.append("setup_score_below_armed_threshold")
     if pre_score < _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE:
         reasons.append("pre_breakout_score_below_threshold")
+    if not pre_ok:
+        reasons.append("not_pre_breakout_coil")
+    htf_context = check.get("htf_context") if isinstance(check.get("htf_context"), dict) else row.get("htf_context")
+    if not isinstance(htf_context, dict):
+        reasons.append("htf_context_missing")
+    elif not htf_context.get("armed_ok", False):
+        reasons.append(htf_context.get("reason") or "htf_context_not_ready")
     if explosion_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE:
         reasons.append("explosion_score_below_threshold")
     if str(row.get("risk_level", "") or "").upper() == "HIGH":
@@ -2717,15 +2839,20 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
             row["pre_breakout_score"] = trigger_check.get("pre_breakout_score")
             row["pre_breakout_reason"] = trigger_check.get("pre_breakout_reason")
             row["pre_breakout_reasons"] = trigger_check.get("pre_breakout_reasons", [])
+            row["pre_breakout_armed_candidate"] = bool(trigger_check.get("pre_breakout_ok"))
             row["pre_breakout_metrics"] = {
                 "recent_range_pct": trigger_check.get("recent_range_pct"),
+                "recent_change_pct": trigger_check.get("recent_change_pct"),
                 "prior_range_pct": trigger_check.get("prior_range_pct"),
                 "near_range_high_pct": trigger_check.get("near_range_high_pct"),
                 "vwap_hold": trigger_check.get("vwap_hold"),
                 "higher_lows": trigger_check.get("higher_lows"),
                 "volume_dryup": trigger_check.get("volume_dryup"),
                 "volume_ratio": trigger_check.get("volume_ratio"),
+                "consecutive_green_5m": trigger_check.get("consecutive_green_5m"),
             }
+        if isinstance(trigger_check.get("htf_context"), dict):
+            row["htf_context"] = trigger_check.get("htf_context")
         if isinstance(trigger_check.get("liquidity"), dict):
             row["execution_liquidity"] = trigger_check["liquidity"]
         if trigger_check.get("reason") == "thin_orderbook_market_impact":
@@ -2759,7 +2886,7 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and armed_ok:
         row["trade_signal"] = "EXPLOSION_ARMED"
         score_txt = f" Score {explosion_score}/100" if explosion_score is not None else ""
-        row["signal_label"] = f"Explosion vorbereitet: 5m-Coil nahe Ausbruch, Entry erst bei Breakout/Reclaim{score_txt}"
+        row["signal_label"] = f"Breakout-Watch: 5m/4h-Coil bestaetigt, Entry erst bei Breakout/Reclaim{score_txt}"
         row["signal_quality"] = "pre_breakout_armed"
         row["entry_status"] = "PRE_BREAKOUT_ARMED"
         row["alertable_crypto"] = False

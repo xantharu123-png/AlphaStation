@@ -50,8 +50,8 @@ def test_early_mover_hard_liquidity_risk_stays_hidden():
     assert api._scanner_row_is_trade_signal(row, "early_movers") is False
 
 
-def test_early_mover_pre_breakout_coil_is_visible_without_daily_score_overfit():
-    row = _candidate(symbol="COIL", score=58, entry_score=8, action="LONG_TRIGGER", signal="WARTEN")
+def test_early_mover_pre_breakout_coil_is_visible_with_elite_setup_and_htf_context():
+    row = _candidate(symbol="COIL", score=88, entry_score=8, action="LONG_TRIGGER", signal="WARTEN")
     row.update({
         "Change24h": 4.4,
         "BtcRelative24h": 3.2,
@@ -67,9 +67,11 @@ def test_early_mover_pre_breakout_coil_is_visible_without_daily_score_overfit():
         "reason": "no_fresh_5m_trigger",
         "timeframe": "5m",
         "pre_breakout_score": 96,
+        "pre_breakout_ok": True,
         "pre_breakout_reason": "5m_coil_near_breakout",
         "pre_breakout_reasons": ["vwap_hold", "higher_lows", "compression", "near_range_high"],
         "execution_score": 48,
+        "htf_context": {"armed_ok": True, "reason": "htf_context_ok", "timeframe": "4h"},
     }
 
     api._apply_early_mover_signal_state(row, trigger)

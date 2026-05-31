@@ -5161,7 +5161,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'JETZT TRADEN', detail: 'Execution bestaetigt', cls: 'bg-green-100 text-green-800' };
         }
         if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) {
-            return { label: 'AUSBRUCH BEREIT', detail: '5m Breakout/Reclaim abwarten', cls: 'bg-emerald-100 text-emerald-800' };
+            return { label: 'BREAKOUT-WATCH', detail: 'Kein Entry: 5m Breakout/Reclaim abwarten', cls: 'bg-emerald-100 text-emerald-800' };
         }
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') {
             return { label: 'NICHT TRADEN', detail: 'Kein Entry', cls: 'bg-red-100 text-red-800' };
@@ -5211,7 +5211,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         weak_structural_targets: 'Ziele zu eng',
         pre_breakout_score_below_threshold: '5m Coil zu schwach',
         not_pre_breakout_coil: 'kein echter Coil',
-        pre_breakout_armed: 'Ausbruch vorbereitet',
+        pre_breakout_armed: 'Breakout-Watch',
     };
     const humanizeEntryRisk = (flag) => earlyRiskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
     const getEntryRiskReasons = (item) => {
