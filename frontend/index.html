@@ -3057,6 +3057,66 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         early_mover_no_chase: 'nicht hinterherjagen',
     };
     const humanizeRiskFlag = (flag) => riskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
+    const humanizeLevelSource = (source) => {
+        const raw = String(source || '').trim();
+        if (!raw) return '-';
+        const clean = raw
+            .toLowerCase()
+            .replace('_too_close', '')
+            .replace('_projected_extension_no_clean_structure', '');
+        const map = {
+            '24h_high_liquidity': '24h Hoch / Liquiditaet',
+            '127_2_range_extension': 'Fib 127.2% aus 24h-Range',
+            '161_8_range_extension': 'Fib 161.8% aus 24h-Range',
+            '200_0_range_extension': 'Fib 200% aus 24h-Range',
+            '261_8_range_extension': 'Fib 261.8% aus 24h-Range',
+            'breakout_measured_move_127': 'Measured Move 127%',
+            'breakout_measured_move_161': 'Measured Move 161%',
+            'breakout_measured_move_200': 'Measured Move 200%',
+            'breakout_measured_move_261': 'Measured Move 261%',
+            'vrvp_vah_resistance': 'VRVP VAH Widerstand',
+            'vrvp_poc_acceptance': 'VRVP POC Akzeptanz',
+            'vrvp_hvn_resistance': 'VRVP HVN Widerstand',
+            'vrvp_lvn_upper_edge': 'VRVP LVN Kante',
+            'vrvp_val_support': 'VRVP VAL Support',
+            'fib_61_8_retest_invalidation': 'Stop unter Fib 61.8 Retest',
+            'range_mid_retest_invalidation': 'Stop unter Range-Mitte',
+            'fib_38_2_retest_invalidation': 'Stop unter Fib 38.2 Retest',
+            '24h_swing_low_invalidation': 'Stop unter 24h Low',
+            'volatility_fallback': 'Volatilitaets-Fallback',
+        };
+        return map[clean] || raw.replaceAll('_', ' ');
+    };
+    const levelRiskFlags = [
+        ...(Array.isArray(cd.risk_flags) ? cd.risk_flags : []),
+        ...(Array.isArray(activeTradeSetup?.risk_flags) ? activeTradeSetup.risk_flags : []),
+    ].map(flag => String(flag || '').toLowerCase());
+    const targetQualityRaw = activeTradeSetup?.target_quality || cd.target_quality || d.target_quality || '';
+    const targetQualityKey = String(targetQualityRaw || '').toUpperCase();
+    const targetWeak = targetQualityKey.startsWith('WEAK') || levelRiskFlags.some(flag => ['weak_structural_targets', 'targets_too_close', 'duplicate_targets', 'target_plan_invalid'].includes(flag));
+    const targetVrvp = targetQualityKey.includes('VRVP') || levelRiskFlags.includes('vrvp_target_confirmed');
+    const targetStructural = targetQualityKey === 'STRUCTURAL';
+    const targetQualityLabel = targetWeak
+        ? 'Zielzonen schwach'
+        : targetVrvp
+            ? 'VRVP/Volume-Profile bestaetigt'
+            : targetStructural
+                ? 'Strukturziele OK'
+                : 'Zielquelle pruefen';
+    const targetQualityTone = targetWeak
+        ? 'text-amber-700'
+        : targetVrvp
+            ? 'text-cyan-700'
+            : targetStructural
+                ? 'text-emerald-700'
+                : 'text-gray-600';
+    const targetQualityBoxTone = targetWeak
+        ? 'border-amber-200 bg-amber-50 text-amber-900'
+        : targetVrvp
+            ? 'border-cyan-200 bg-cyan-50 text-cyan-900'
+            : targetStructural
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                : 'border-gray-200 bg-gray-50 text-gray-700';
     const compactRiskText = (flags = []) => {
         const list = Array.isArray(flags) ? flags : [];
         const clean = list.map(humanizeRiskFlag).filter(Boolean);
@@ -3318,8 +3378,24 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div className="grid grid-cols-4 gap-2 mb-2">
                             <div><span className="opacity-70">Entry</span><div className="font-semibold">{formatSidebarPrice(activeTradeSetup?.entry ?? cd.entry)}</div></div>
                             <div><span className="opacity-70">Stop</span><div className="font-semibold text-red-700">{formatSidebarPrice(activeTradeSetup?.stop_loss ?? cd.stop_loss)}</div></div>
-                            <div><span className="opacity-70">TP1</span><div className="font-semibold text-emerald-700">{formatSidebarPrice(activeTradeSetup?.tp1 ?? cd.tp1)}</div></div>
-                            <div><span className="opacity-70">TP2</span><div className="font-semibold text-emerald-700">{formatSidebarPrice(activeTradeSetup?.tp2 ?? cd.tp2)}</div></div>
+                            <div><span className="opacity-70">TP1</span><div className={`font-semibold ${targetQualityTone}`}>{formatSidebarPrice(activeTradeSetup?.tp1 ?? cd.tp1)}</div></div>
+                            <div><span className="opacity-70">TP2</span><div className={`font-semibold ${targetQualityTone}`}>{formatSidebarPrice(activeTradeSetup?.tp2 ?? cd.tp2)}</div></div>
+                        </div>
+                        <div className={`mb-2 rounded border p-2 ${targetQualityBoxTone}`}>
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold">{targetQualityLabel}</span>
+                                {targetWeak && <span className="text-[10px] font-bold uppercase">nur Plan/Watch</span>}
+                            </div>
+                            <div className="mt-1 grid grid-cols-3 gap-2 text-[11px]">
+                                <div><span className="opacity-70">Stop</span><div className="font-semibold">{humanizeLevelSource(activeTradeSetup?.stop_source ?? cd.stop_source)}</div></div>
+                                <div><span className="opacity-70">TP1</span><div className="font-semibold">{humanizeLevelSource(activeTradeSetup?.tp1_source ?? cd.tp1_source)}</div></div>
+                                <div><span className="opacity-70">TP2</span><div className="font-semibold">{humanizeLevelSource(activeTradeSetup?.tp2_source ?? cd.tp2_source)}</div></div>
+                            </div>
+                            {targetWeak && (
+                                <div className="mt-1 text-[11px]">
+                                    TP1/TP2 sind rechnerische Range/Fib-Projektionen oder zu nahe beieinander. Kein Blind-Entry ohne frischen 5m Trigger und sichtbare Struktur/VRVP-Reaktion.
+                                </div>
+                            )}
                         </div>
                         <div className="grid grid-cols-3 gap-2 rounded bg-white/60 p-2">
                             <div><span className="opacity-70">Live R:R</span><div className="font-semibold">{activeTradeSetup?.live_rr ?? cd.live_rr_ratio ?? '-'}</div></div>
@@ -3713,6 +3789,16 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 {(activeTradeSetup.rr_tp1 || activeTradeSetup.rr_tp2) && (
                                     <div>TP-R: <span className="font-semibold">TP1 {activeTradeSetup.rr_tp1 || '-'}R / TP2 {activeTradeSetup.rr_tp2 || '-'}R</span></div>
                                 )}
+                            </div>
+                        )}
+                        {(activeTradeSetup.stop_source || activeTradeSetup.tp1_source || activeTradeSetup.tp2_source || activeTradeSetup.target_quality) && (
+                            <div className={`mt-2 rounded border p-2 ${targetQualityBoxTone}`}>
+                                <div className="font-semibold">{targetQualityLabel}</div>
+                                <div className="mt-1 grid grid-cols-3 gap-2 text-[11px]">
+                                    <div><span className="opacity-70">Stop</span><div>{humanizeLevelSource(activeTradeSetup.stop_source)}</div></div>
+                                    <div><span className="opacity-70">TP1</span><div>{humanizeLevelSource(activeTradeSetup.tp1_source)}</div></div>
+                                    <div><span className="opacity-70">TP2</span><div>{humanizeLevelSource(activeTradeSetup.tp2_source)}</div></div>
+                                </div>
                             </div>
                         )}
                         {activeTradeSetup.warnings && activeTradeSetup.warnings.length > 0 && (
@@ -5264,6 +5350,43 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (!Number.isFinite(t) || !Number.isFinite(e) || e <= 0) return '';
         return `+${(((t - e) / e) * 100).toFixed(1)}%`;
     };
+    const targetQualityTone = (quality, flags = []) => {
+        const q = String(quality || '').toUpperCase();
+        const f = Array.isArray(flags) ? flags.map(flag => String(flag || '').toLowerCase()) : [];
+        if (q.includes('WEAK') || f.some(flag => ['weak_structural_targets', 'targets_too_close', 'duplicate_targets', 'target_plan_invalid'].includes(flag))) return 'text-amber-700';
+        if (q.includes('VRVP')) return 'text-cyan-700';
+        if (q === 'STRUCTURAL') return 'text-emerald-700';
+        return 'text-gray-600';
+    };
+    const targetQualityLabel = (quality, flags = []) => {
+        const q = String(quality || '').toUpperCase();
+        const f = Array.isArray(flags) ? flags.map(flag => String(flag || '').toLowerCase()) : [];
+        if (q.includes('WEAK') || f.some(flag => ['weak_structural_targets', 'targets_too_close', 'duplicate_targets', 'target_plan_invalid'].includes(flag))) return 'Zielzonen schwach';
+        if (q.includes('VRVP') || f.includes('vrvp_target_confirmed')) return 'VRVP/Volume-Profile Ziel';
+        if (q === 'STRUCTURAL') return 'Strukturziel';
+        return 'Zielquelle unklar';
+    };
+    const humanizeTargetSource = (source) => {
+        const s = String(source || '').toLowerCase();
+        const map = {
+            '24h_high_liquidity': '24h Hoch / Liquiditaet',
+            '127_2_range_extension': 'Fib 127.2% aus 24h-Range',
+            '161_8_range_extension': 'Fib 161.8% aus 24h-Range',
+            '200_0_range_extension': 'Fib 200% aus 24h-Range',
+            '261_8_range_extension': 'Fib 261.8% aus 24h-Range',
+            'breakout_measured_move_127': 'Measured Move 127%',
+            'breakout_measured_move_161': 'Measured Move 161%',
+            'breakout_measured_move_200': 'Measured Move 200%',
+            'breakout_measured_move_261': 'Measured Move 261%',
+            'vrvp_vah_resistance': 'VRVP VAH',
+            'vrvp_poc_acceptance': 'VRVP POC',
+            'vrvp_hvn_resistance': 'VRVP HVN',
+            'vrvp_lvn_upper_edge': 'VRVP LVN Kante',
+            'vrvp_val_support': 'VRVP VAL',
+        };
+        const clean = s.replace('_too_close', '').replace('_projected_extension_no_clean_structure', '');
+        return map[clean] || String(source || '-').replaceAll('_', ' ');
+    };
 
     useEffect(() => {
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
@@ -5407,6 +5530,9 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const entryScoreClass = item.pre_breakout_armed ? 'signal-bullish' : entryScore >= 80 ? 'signal-bullish' : entryScore >= 55 ? 'signal-lightdiv' : 'signal-abwarten';
                             const tp1Pct = targetPctFromEntry(item.tp1, item.entry);
                             const tp2Pct = targetPctFromEntry(item.tp2, item.entry);
+                            const itemTargetFlags = Array.isArray(item.risk_flags) ? item.risk_flags : [];
+                            const targetTone = targetQualityTone(item.target_quality, itemTargetFlags);
+                            const targetLabel = targetQualityLabel(item.target_quality, itemTargetFlags);
                             return (
                             <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
                                 <td className="py-3 px-2 text-center" title={item.phase_label}>
@@ -5442,11 +5568,12 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <div className="text-[11px] text-gray-500 mt-1 max-w-[180px] truncate" title={confirmedTrade ? actionView.detail : (item.signal_label || actionView.detail)}>{String(confirmedTrade ? actionView.detail : (item.signal_label || actionView.detail)).replace('Achtung beobachten: ', '')}</div>
                                 </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.entry ? formatPrice(item.entry) : '\u2014'}</td>
-                                <td className="py-3 px-2 text-right text-xs" title={`TP1: ${item.tp1_source || '-'} | TP2: ${item.tp2_source || '-'} | ${item.target_quality || ''}`}>
+                                <td className="py-3 px-2 text-right text-xs" title={`TP1: ${humanizeTargetSource(item.tp1_source)} | TP2: ${humanizeTargetSource(item.tp2_source)} | ${targetLabel}`}>
                                     {item.tp1 ? (
                                         <>
-                                            <div><span className="color-positive">{formatPrice(item.tp1)}</span> <span className="text-gray-400">{tp1Pct}</span></div>
-                                            <div><span className="color-positive">{formatPrice(item.tp2)}</span> <span className="text-gray-400">{tp2Pct}</span></div>
+                                            <div><span className={`font-semibold ${targetTone}`}>{formatPrice(item.tp1)}</span> <span className="text-gray-400">{tp1Pct}</span></div>
+                                            <div><span className={`font-semibold ${targetTone}`}>{formatPrice(item.tp2)}</span> <span className="text-gray-400">{tp2Pct}</span></div>
+                                            <div className={`text-[10px] ${targetTone}`}>{targetLabel}</div>
                                             {item.trade_signal !== 'JETZT_TRADEN' && <div className="text-[10px] text-gray-400">Plan nach Trigger</div>}
                                         </>
                                     ) : '\u2014'}
