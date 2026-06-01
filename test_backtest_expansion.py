@@ -17,6 +17,13 @@ def test_backtest_strategy_list_contains_scanner_and_crypto_profiles():
     assert crypto["requires_ticker"] is False
 
 
+def test_public_stock_strategy_backtest_aliases_match_internal_rules():
+    assert api.BACKTEST_STRATEGY_ALIASES["Momentum Breakout Long"] == "Breakout Long"
+    assert api.BACKTEST_STRATEGY_ALIASES["Gap Momentum Long"] == "Gap Up Momentum"
+    assert api.BACKTEST_STRATEGY_ALIASES["Gap Momentum Short"] == "Gap Down Short"
+    assert api.BACKTEST_STRATEGY_ALIASES["Momentum Breakout Long"] in api.BACKTEST_RULES
+
+
 def test_scanner_backtest_normalization_keeps_key_metrics():
     raw = {
         "summary": {

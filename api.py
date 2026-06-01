@@ -220,6 +220,12 @@ STOCK_STRATEGY_ALIASES = {
     "Wyckoff Distribution ⬇": "Wyckoff Distribution",
 }
 
+BACKTEST_STRATEGY_ALIASES = {
+    "Momentum Breakout Long": "Breakout Long",
+    "Gap Momentum Long": "Gap Up Momentum",
+    "Gap Momentum Short": "Gap Down Short",
+}
+
 STOCK_STRATEGY_HIDDEN = {
     "Penny Rockets",
     "Dip Buy",
@@ -17792,6 +17798,8 @@ def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"
 def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
     """Run backtest — supports indicator strategies + all BACKTEST_STRATEGY_RULES."""
     try:
+        requested_strategy = strategy
+        strategy = BACKTEST_STRATEGY_ALIASES.get(strategy, strategy)
         # Fetch daily bars from Polygon
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": months * 22 + 60, "sort": "desc"})
@@ -18155,7 +18163,10 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             t["type"] += " (offen)"
             trades.append(t)
 
-        return _backtest_stats(trades, ticker, strategy, months)
+        stats = _backtest_stats(trades, ticker, strategy, months)
+        if requested_strategy != strategy:
+            stats["requested_strategy"] = requested_strategy
+        return stats
 
     except Exception as e:
         return {"error": str(e), "ticker": ticker, "strategy": strategy}
