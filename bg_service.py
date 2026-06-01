@@ -1697,6 +1697,10 @@ def _run_strategy_scanner(poly_key, secrets):
 
     Nutzt Polygon Snapshot API (wie _run_bi_scanner) und wendet Strategie-Filter an.
     """
+    log.info("Strategie-Scanner: legacy bg mailer uebersprungen; FastAPI strategy_scan ist authoritative")
+    _update_status("strategy_scan", "skipped", "FastAPI strategy_scan owns strategy mails")
+    return
+
     _clear_scan_cache("strategies")
     import requests as req
     log.info("📊 Strategie-Scanner (stündlich)...")

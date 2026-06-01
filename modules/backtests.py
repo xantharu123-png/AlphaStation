@@ -1015,8 +1015,8 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             tp1_price = entry_price + risk * tp1_rr
             tp2_price = entry_price + risk * tp2_rr
 
-            # R:R Minimum Check
-            rr = tp1_rr  # Per Definition >= 1.5
+            # R:R Minimum Check: use the same blended TP1/TP2 model as alerts.
+            rr = (tp1_rr + tp2_rr) / 2.0
             if rr < 1.5:
                 continue
 
@@ -1211,6 +1211,7 @@ def simulate_trade(bars, signal_idx, strategy):
     stop_pct = strategy["stop_pct"]
     tp1_rr = strategy["tp1_rr"]
     tp2_rr = strategy["tp2_rr"]
+    target_rr = (float(tp1_rr) + float(tp2_rr)) / 2.0
     max_hold = strategy["max_hold_days"]
     
     signal_day = bars[signal_idx]
@@ -1253,10 +1254,12 @@ def simulate_trade(bars, signal_idx, strategy):
         stop_price = entry_price - risk
         tp1_price = entry_price + risk * tp1_rr
         tp2_price = entry_price + risk * tp2_rr
+        blended_target_price = entry_price + risk * target_rr
     else:  # short
         stop_price = entry_price + risk
         tp1_price = entry_price - risk * tp1_rr
         tp2_price = entry_price - risk * tp2_rr
+        blended_target_price = entry_price - risk * target_rr
     
     # === TRADE SIMULIEREN ===
     exit_price = None
@@ -1290,10 +1293,10 @@ def simulate_trade(bars, signal_idx, strategy):
                 exit_date = bar["date"]
                 break
             
-            # TP2 Check (nur wenn TP1 schon in VORHERIGEM Bar getroffen)
-            if tp1_hit and bar["high"] >= tp2_price:
-                exit_price = tp2_price
-                exit_reason = "TP2"
+            # Target Check: blended TP1/TP2 expected reward, matching live gating.
+            if tp1_hit and bar["high"] >= blended_target_price:
+                exit_price = blended_target_price
+                exit_reason = "BLENDED_TP"
                 exit_date = bar["date"]
                 break
             
@@ -1316,10 +1319,10 @@ def simulate_trade(bars, signal_idx, strategy):
                 exit_date = bar["date"]
                 break
             
-            # TP2 Check (nur wenn TP1 schon in VORHERIGEM Bar getroffen)
-            if tp1_hit and bar["low"] <= tp2_price:
-                exit_price = tp2_price
-                exit_reason = "TP2"
+            # Target Check: blended TP1/TP2 expected reward, matching live gating.
+            if tp1_hit and bar["low"] <= blended_target_price:
+                exit_price = blended_target_price
+                exit_reason = "BLENDED_TP"
                 exit_date = bar["date"]
                 break
             
@@ -1358,8 +1361,10 @@ def simulate_trade(bars, signal_idx, strategy):
         "stop_price": round(stop_price, 2),
         "tp1_price": round(tp1_price, 2),
         "tp2_price": round(tp2_price, 2),
+        "blended_target_price": round(blended_target_price, 2),
         "exit_price": round(exit_price, 2),
         "exit_reason": exit_reason,
+        "target_model": "blended_tp1_tp2",
         "pnl_pct": round(pnl_pct, 2),
         "r_multiple": round(r_multiple, 2),
         "bars_held": bars_held,

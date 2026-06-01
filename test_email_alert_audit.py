@@ -1699,10 +1699,13 @@ def test_early_mover_alert_audit_flattens_coins_and_allows_long_trigger(tmp_path
 def test_early_mover_retest_alert_requires_near_entry():
     near = _early_mover_row(
         Symbol="RETEST",
+        _alert_horizon="intraday",
         trade_action="WAIT_FOR_RETEST",
         execution_trigger_ok=False,
         entry_status="WAIT_FOR_RETEST",
         entry_quality="EXTENDED",
+        entry_score=88,
+        execution_quality_score=88,
         distance_to_entry_r=0.2,
         risk_flags=["no_market_entry"],
     )
@@ -1721,10 +1724,13 @@ def test_early_mover_retest_alert_requires_near_entry():
 def test_early_mover_zero_r_distance_stays_near_entry():
     row = _early_mover_row(
         Symbol="ZERO",
+        _alert_horizon="intraday",
         trade_action="WAIT_FOR_RETEST",
         execution_trigger_ok=False,
         entry_status="WAIT_FOR_RETEST",
         entry_quality="EXTENDED",
+        entry_score=88,
+        execution_quality_score=88,
         distance_to_entry_r=0,
         risk_flags=["no_market_entry"],
     )

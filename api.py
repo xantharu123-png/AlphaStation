@@ -1566,6 +1566,12 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
     reasons: List[str] = []
     action = fields["trade_action"]
     risk_flags = set(fields["risk_flags"])
+    row_horizon_value = row.get("_alert_horizon")
+    row_horizon_explicit = row_horizon_value not in (None, "")
+    horizon = _normalize_trade_horizon_value(row_horizon_value if row_horizon_explicit else _DEFAULT_TRADE_HORIZON)
+    require_intraday_trigger = horizon in {"intraday", "both"} and (
+        row_horizon_explicit or _scanner_uses_intraday_horizon("early_movers")
+    )
 
     if fields["direction"] and fields["direction"] != "LONG":
         reasons.append("early_mover_not_long")
@@ -1596,10 +1602,10 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_weak_targets")
     if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
         reasons.append("early_mover_live_rr_below_threshold")
-    if risk_flags.intersection({"no_market_entry", "no_intraday_execution_trigger", "micro_trigger_missing"}):
+    if require_intraday_trigger and risk_flags.intersection({"no_market_entry", "no_intraday_execution_trigger", "micro_trigger_missing"}):
         reasons.append("early_mover_wait_entry_confirmation")
     # Swing mails do not require 5m. Intraday mode performs a fresh exchange
-    # trigger check before sending.
+    # trigger check before sending and only then treats missing 5m as a blocker.
     if action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
         reasons.append("early_mover_retest_not_near_entry")
     return reasons
@@ -1748,7 +1754,11 @@ def _alert_trade_health_reasons(row: Dict[str, Any], scanner_name: str) -> List[
         "crypto_strategy": "crypto_strategy",
         "new_listing": "new_listing",
     }.get(scanner_name, scanner_name)
-    health = calculate_trade_health(health_row, scanner_name=health_scanner)
+    try:
+        market_context = _get_market_context_snapshot()
+    except Exception:
+        market_context = None
+    health = calculate_trade_health(health_row, scanner_name=health_scanner, market_context=market_context)
     decision = str(health.get("decision", "") or "").upper()
     reasons: List[str] = []
     horizon = _normalize_trade_horizon_value(row.get("_alert_horizon", _DEFAULT_TRADE_HORIZON))
@@ -1791,7 +1801,11 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
         health_row.setdefault("direction", levels.get("direction"))
     health_row.setdefault("current_price", _extract_alert_price(health_row))
 
-    health = calculate_trade_health(health_row, scanner_name=scanner_name)
+    try:
+        market_context = _get_market_context_snapshot()
+    except Exception:
+        market_context = None
+    health = calculate_trade_health(health_row, scanner_name=scanner_name, market_context=market_context)
     health_score = int(_alert_float(health.get("health_score"), 0) or 0)
     entry_score = int(_alert_float(health.get("entry_quality_score"), 0) or 0)
     fakeout_score = int(_alert_float(health.get("fakeout_risk_score"), 0) or 0)
@@ -4347,16 +4361,16 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
             "decision_label": "Nicht traden",
             "decision_reason": ", ".join(reasons[:4]),
         }
-    if any(reason in wait_retest_markers or reason.endswith("wait_retest") for reason in reasons):
-        return {
-            "decision": "WAIT_RETEST",
-            "decision_label": "Auf Retest warten",
-            "decision_reason": ", ".join(reasons[:4]),
-        }
     if any(reason in wait_trigger_markers for reason in reasons):
         return {
             "decision": "WAIT_TRIGGER",
             "decision_label": "Auf Trigger warten",
+            "decision_reason": ", ".join(reasons[:4]),
+        }
+    if any(reason in wait_retest_markers or reason.endswith("wait_retest") for reason in reasons):
+        return {
+            "decision": "WAIT_RETEST",
+            "decision_label": "Auf Retest warten",
             "decision_reason": ", ".join(reasons[:4]),
         }
     return {
@@ -5748,7 +5762,7 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
     health pass recalculates chase/fakeout/entry risk from current price.
     The UI must never show "JETZT TRADEN" when Trade Health says wait/no-trade.
     """
-    if scanner_name != "early_movers":
+    if scanner_name not in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         return
     health = item.get("trade_health") if isinstance(item.get("trade_health"), dict) else {}
     decision = str(item.get("trade_decision") or health.get("decision") or "").upper()
@@ -5758,6 +5772,17 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
     label = health.get("decision_label") or item.get("trade_decision_label") or decision
     flags = item.get("risk_flags") if isinstance(item.get("risk_flags"), list) else []
     reasons = item.get("risk_reasons") if isinstance(item.get("risk_reasons"), list) else []
+    scanner_decision = str(item.get("scanner_decision") or "").upper()
+    if scanner_decision == "NO_TRADE" and decision in {
+        "WAIT_FOR_RETEST",
+        "WAIT_FOR_TRIGGER",
+        "WAIT_FOR_CONTINUATION",
+        "WATCH_ONLY",
+    }:
+        decision = "NO_TRADE"
+        label = item.get("scanner_decision_label") or "Nicht traden"
+    item["trade_decision"] = decision
+    item["trade_decision_label"] = label
 
     if decision == "NO_TRADE":
         item["trade_signal"] = "NICHT_TRADEN"
@@ -5765,8 +5790,9 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
         item["trade_action"] = "NO_TRADE"
         item["signal_quality"] = "no_trade_health"
         item["signal_label"] = f"Nicht traden: {label}"
-        item["alertable_crypto"] = False
-        item["execution_trigger_ok"] = False
+        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+            item["alertable_crypto"] = False
+            item["execution_trigger_ok"] = False
         flags.append("trade_health_no_trade")
         reasons.append("Trade Health blockt dieses Setup")
     elif decision == "WAIT_FOR_RETEST":
@@ -5775,7 +5801,8 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
         item["trade_action"] = "WAIT_FOR_RETEST"
         item["signal_quality"] = "wait_retest"
         item["signal_label"] = f"Warten: {label}"
-        item["alertable_crypto"] = False
+        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+            item["alertable_crypto"] = False
         flags.append("trade_health_wait_for_retest")
     elif decision == "WAIT_FOR_TRIGGER":
         item["trade_signal"] = "WARTEN"
@@ -5783,7 +5810,8 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
         item["trade_action"] = "WAIT_FOR_TRIGGER"
         item["signal_quality"] = "wait_trigger"
         item["signal_label"] = f"Warten: {label}"
-        item["alertable_crypto"] = False
+        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+            item["alertable_crypto"] = False
         flags.append("trade_health_wait_for_trigger")
     elif decision == "WAIT_FOR_CONTINUATION":
         item["trade_signal"] = "WARTEN"
@@ -5791,7 +5819,8 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
         item["trade_action"] = "WAIT_FOR_CONTINUATION"
         item["signal_quality"] = "wait_continuation"
         item["signal_label"] = f"Warten: {label}"
-        item["alertable_crypto"] = False
+        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+            item["alertable_crypto"] = False
         flags.append("trade_health_wait_for_continuation")
     elif decision == "WATCH_ONLY":
         item["trade_signal"] = "BEOBACHTEN"
@@ -5799,7 +5828,8 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
         item["trade_action"] = "BEOBACHTEN"
         item["signal_quality"] = "observe"
         item["signal_label"] = f"Beobachten: {label}"
-        item["alertable_crypto"] = False
+        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+            item["alertable_crypto"] = False
         flags.append("trade_health_watch_only")
 
     item["risk_flags"] = list(dict.fromkeys(flags))
@@ -5807,10 +5837,13 @@ def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) ->
         item["risk_reasons"] = list(dict.fromkeys(reasons))
     setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
     if setup is not None:
+        setup["trade_decision"] = item.get("trade_decision")
+        setup["trade_decision_label"] = item.get("trade_decision_label")
         setup["trade_action"] = item.get("trade_action")
         setup["entry_status"] = item.get("entry_status")
         setup["signal_label"] = item.get("signal_label")
-        setup["alertable_crypto"] = False
+        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+            setup["alertable_crypto"] = False
 
 
 def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -7154,6 +7187,93 @@ def _fetch_strategy_daily_history(
     return daily_bars
 
 
+def _strategy_daily_history_metrics(
+    daily_bars: List[Dict[str, Any]],
+    *,
+    price: float,
+    day_open: float,
+    day_high: float,
+    day_low: float,
+    day_volume: float,
+) -> Dict[str, Any]:
+    """Return swing-quality metrics from completed daily bars.
+
+    Snapshot data is fast, but not enough for swing scans. These metrics make
+    strategy scores and levels use the same 20D/50D structure a trader sees.
+    """
+    parsed: List[Dict[str, float]] = []
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for bar in daily_bars or []:
+        try:
+            close = float(bar.get("close", bar.get("c", 0)) or 0)
+            high = float(bar.get("high", bar.get("h", close)) or close)
+            low = float(bar.get("low", bar.get("l", close)) or close)
+            open_ = float(bar.get("open", bar.get("o", close)) or close)
+            volume = float(bar.get("volume", bar.get("v", 0)) or 0)
+            date = str(bar.get("date", "") or "")
+        except (TypeError, ValueError):
+            continue
+        if close <= 0 or high <= 0 or low <= 0 or high < low:
+            continue
+        parsed.append({"open": open_, "high": high, "low": low, "close": close, "volume": volume, "date": date})
+
+    completed = parsed
+    if completed and completed[-1].get("date") == today_str:
+        completed = completed[:-1]
+
+    vols20 = [b["volume"] for b in completed[-20:] if b.get("volume", 0) > 0]
+    avg_vol20 = sum(vols20) / len(vols20) if vols20 else 0.0
+    rvol20 = min(round(float(day_volume or 0) / avg_vol20, 2), 50.0) if avg_vol20 > 0 else None
+
+    highs20 = [b["high"] for b in completed[-20:] if b.get("high", 0) > 0]
+    lows20 = [b["low"] for b in completed[-20:] if b.get("low", 0) > 0]
+    highs50 = [b["high"] for b in completed[-50:] if b.get("high", 0) > 0]
+    lows50 = [b["low"] for b in completed[-50:] if b.get("low", 0) > 0]
+    high_20d = max(highs20) if highs20 else float(day_high or price or 0)
+    low_20d = min(lows20) if lows20 else float(day_low or price or 0)
+    high_50d = max(highs50) if highs50 else high_20d
+    low_50d = min(lows50) if lows50 else low_20d
+
+    true_ranges: List[float] = []
+    atr_bars = completed[-15:]
+    for idx, bar in enumerate(atr_bars):
+        prev_close = atr_bars[idx - 1]["close"] if idx > 0 else bar["close"]
+        true_ranges.append(max(
+            bar["high"] - bar["low"],
+            abs(bar["high"] - prev_close),
+            abs(bar["low"] - prev_close),
+        ))
+    atr14 = sum(true_ranges[-14:]) / min(len(true_ranges), 14) if true_ranges else max(float(price or 0) * 0.03, 0.01)
+    atr_pct = max(0.1, atr14 / price * 100) if price > 0 else 2.5
+
+    support_candidates = [float(day_low or 0)] + [b["low"] for b in completed[-50:]]
+    resistance_candidates = [float(day_high or 0)] + [b["high"] for b in completed[-50:]]
+    support_candidates = [level for level in support_candidates if 0 < level < price]
+    resistance_candidates = [level for level in resistance_candidates if level > price]
+    support_1 = max(support_candidates) if support_candidates else low_20d
+    resistance_1 = min(resistance_candidates) if resistance_candidates else high_20d
+
+    swing_high = max(high_50d, high_20d, float(day_high or 0), price)
+    swing_low = min(level for level in [low_50d, low_20d, float(day_low or price), price] if level > 0)
+    range_pos = ((price - swing_low) / (swing_high - swing_low) * 100) if swing_high > swing_low else 50.0
+
+    return {
+        "history_ok": len(completed) >= 20,
+        "avg_vol20": avg_vol20,
+        "rvol20": rvol20,
+        "atr14": atr14,
+        "atr_pct": atr_pct,
+        "high_20d": high_20d,
+        "low_20d": low_20d,
+        "high_50d": high_50d,
+        "low_50d": low_50d,
+        "support_1": support_1,
+        "resistance_1": resistance_1,
+        "range_pos": _clamp_float(range_pos, 0.0, 100.0, 50.0),
+        "completed_bars": len(completed),
+    }
+
+
 def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Validate multi-day pattern strategies with real daily history."""
     if analyze_multi_day_pattern is None:
@@ -8026,6 +8146,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         common_stock_universe, common_stock_source = _load_common_stock_universe()
         session_name, _session_label = get_current_trading_session()
         _use_extended_prices = session_name in ("Pre-Market", "After-Hours")
+        history_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         for t in _all_snapshot_tickers:
                 try:
@@ -8060,14 +8181,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if not price or not prev_close:
                         continue
 
-                    volume = day.get("v", 0)
-                    prev_vol = prev.get("v", 0)
-                    # RVOL: prev_vol muss realistisch sein (>1000 Shares), sonst = 1.0
-                    if prev_vol > 1000:
-                        rvol = round(volume / prev_vol, 2)
-                        rvol = min(rvol, 50.0)  # Cap bei 50x — darüber = Datenfehler
-                    else:
-                        rvol = 1.0  # Kein zuverlässiger Vergleich → neutral
+                    volume = float(day.get("v", 0) or 0)
                     dollar_vol = volume * price
 
                     # Close Position: Extended-Preise in die Range einbeziehen und clampen.
@@ -8084,7 +8198,38 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
                     prev_open = prev.get("o", prev_close_regular)
                     vortag_pct = ((prev_close_regular - prev_open) / prev_open * 100) if prev_open > 0 else 0
-                    prev_atr_pct = _snapshot_atr_pct(day, prev, price)
+
+                    # Cheap filters first; only then fetch 1D history for true 20D RVOL,
+                    # ATR14 and swing structure. This avoids Vortags-RVOL false positives.
+                    if not (change_min <= change_pct <= change_max):
+                        continue
+                    if not (price_min <= price <= price_max):
+                        continue
+                    if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                        continue
+                    if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
+                        continue
+                    if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
+                        continue
+                    if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
+                        continue
+
+                    daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
+                    history_metrics = _strategy_daily_history_metrics(
+                        daily_bars,
+                        price=price,
+                        day_open=day_open,
+                        day_high=day_high,
+                        day_low=day_low,
+                        day_volume=volume,
+                    )
+                    rvol = history_metrics.get("rvol20")
+                    rvol_source = "20D_avg_volume"
+                    if rvol is None:
+                        prev_vol = float(prev.get("v", 0) or 0)
+                        rvol = min(round(volume / prev_vol, 2), 50.0) if prev_vol > 1000 else 1.0
+                        rvol_source = "fallback_prev_day_volume"
+                    prev_atr_pct = float(history_metrics.get("atr_pct") or _snapshot_atr_pct(day, prev, price))
 
                     # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
                     # übersprungen (Day2/3 Runner haben niedrigen RVOL weil Vortag auch hoch war)
@@ -8101,20 +8246,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     # Konsistenz-halber gleiche Filter-Regel).
                     _is_mdr = _is_true_mdr or _is_day1_blowout
 
-                    # Filter anwenden
-                    if not (change_min <= change_pct <= change_max):
-                        continue
-                    if not (price_min <= price <= price_max):
-                        continue
                     if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
-                        continue
-                    if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
-                        continue
-                    if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
-                        continue
-                    if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
-                        continue
-                    if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
                         continue
 
                     # Scoring: ATR-/Wick-aware statt "je groesser der Move desto besser".
@@ -8133,6 +8265,10 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         day_low=day_low,
                         prev_atr_pct=prev_atr_pct,
                     )
+                    if not history_metrics.get("history_ok"):
+                        _strat_score = min(_strat_score, 74)
+                    if rvol_source != "20D_avg_volume":
+                        _strat_score = min(_strat_score, 76)
 
                     # Grade (verschärft — konsistent mit Krypto-Scanner)
                     _strat_grade = _strategy_score_to_grade(_strat_score)
@@ -8185,11 +8321,19 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "volume": volume,
                         "RVOL": rvol,
                         "rvol": rvol,
+                        "RVOL_Source": rvol_source,
+                        "AvgVol20": round(history_metrics.get("avg_vol20") or 0),
                         "Dollar_Volume": round(dollar_vol),
                         "Prev_Close": round(prev_close, 2),
                         "Day_Open": round(day_open, 2),
                         "Day_High": round(day_high, 2),
                         "Day_Low": round(day_low, 2),
+                        "High_20D": _round_trade_price(history_metrics.get("high_20d") or day_high),
+                        "Low_20D": _round_trade_price(history_metrics.get("low_20d") or day_low),
+                        "High_50D": _round_trade_price(history_metrics.get("high_50d") or day_high),
+                        "Low_50D": _round_trade_price(history_metrics.get("low_50d") or day_low),
+                        "Support_1": _round_trade_price(history_metrics.get("support_1") or day_low),
+                        "Resistance_1": _round_trade_price(history_metrics.get("resistance_1") or day_high),
                         "Close_Position": round(close_pos, 2),
                         "close_pos": round(close_pos, 2),
                         "open_to_current_pct": round(((price - day_open) / day_open * 100), 2) if day_open > 0 else None,
@@ -8197,6 +8341,10 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "gap_pct": round(gap_pct, 2),
                         "Vortag_Pct": round(vortag_pct, 2),
                         "ATR_Pct": _score_meta.get("atr_pct"),
+                        "ATR14": _round_trade_price(history_metrics.get("atr14") or price * prev_atr_pct / 100.0),
+                        "Swing_Range_Pos": round(history_metrics.get("range_pos") or close_pos * 100.0, 1),
+                        "History_Bars": history_metrics.get("completed_bars"),
+                        "History_OK": bool(history_metrics.get("history_ok")),
                         "Extension_ATR": _score_meta.get("extension_atr"),
                         "Setup_Score": _score_meta.get("setup_score"),
                         "Upper_Wick_Pct": _score_meta.get("upper_wick_pct"),
@@ -8215,12 +8363,12 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         _trade_setup = _build_structured_trade_setup(
                             _setup_direction,
                             price,
-                            price * (prev_atr_pct / 100.0),
-                            day_low,
-                            day_high,
-                            day_high,
-                            day_low,
-                            close_pos * 100.0,
+                            float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                            float(history_metrics.get("support_1") or day_low),
+                            float(history_metrics.get("resistance_1") or day_high),
+                            float(history_metrics.get("high_20d") or day_high),
+                            float(history_metrics.get("low_20d") or day_low),
+                            float(history_metrics.get("range_pos") or close_pos * 100.0),
                         )
                         if _trade_setup:
                             strategy_row.update({
@@ -8233,7 +8381,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                                 "tp1": _trade_setup["tp1"],
                                 "tp2": _trade_setup["tp2"],
                                 "trade_setup": _trade_setup,
-                                "Trade_Setup_Source": "stock_strategy_structure",
+                                "Trade_Setup_Source": "stock_strategy_20d_structure",
                             })
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
                         strategy_row["entry_quality"] = "SWING_SETUP"
@@ -18048,6 +18196,8 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             direction = rule.get("direction", "long")
             stop_pct = rule.get("stop_pct", 0.05)
             tp1_rr = rule.get("tp1_rr", 1.5)
+            tp2_rr = rule.get("tp2_rr", tp1_rr)
+            target_rr = (float(tp1_rr) + float(tp2_rr)) / 2.0
             max_hold = rule.get("max_hold_days", 5)
             entry_type = rule.get("entry", "next_open")
             min_price = rule.get("min_price", 1.0)
@@ -18066,27 +18216,35 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     risk = abs(entry_p * stop_pct)
 
                     if direction == "short":
-                        # Short: stop above entry, TP below
+                        # Short: stop above entry, blended TP1/TP2 target below.
                         stop_price = entry_p * (1 + stop_pct)
-                        tp_price = entry_p - risk * tp1_rr
+                        tp_price = entry_p - risk * target_rr
                         if highs[i] >= stop_price:
                             trades.append(_make_trade(position["entry_date"], entry_p, dates[i], stop_price, "short"))
                             position = None
                             continue
                         if lows[i] <= tp_price:
-                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], tp_price, "short"))
+                            trade = _make_trade(position["entry_date"], entry_p, dates[i], tp_price, "short")
+                            trade["target_model"] = "blended_tp1_tp2"
+                            trade["tp1_rr"] = tp1_rr
+                            trade["tp2_rr"] = tp2_rr
+                            trades.append(trade)
                             position = None
                             continue
                     else:
-                        # Long: stop below entry, TP above
+                        # Long: stop below entry, blended TP1/TP2 target above.
                         stop_price = entry_p * (1 - stop_pct)
-                        tp_price = entry_p + risk * tp1_rr
+                        tp_price = entry_p + risk * target_rr
                         if lows[i] <= stop_price:
                             trades.append(_make_trade(position["entry_date"], entry_p, dates[i], stop_price, "long"))
                             position = None
                             continue
                         if highs[i] >= tp_price:
-                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], tp_price, "long"))
+                            trade = _make_trade(position["entry_date"], entry_p, dates[i], tp_price, "long")
+                            trade["target_model"] = "blended_tp1_tp2"
+                            trade["tp1_rr"] = tp1_rr
+                            trade["tp2_rr"] = tp2_rr
+                            trades.append(trade)
                             position = None
                             continue
 

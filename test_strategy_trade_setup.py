@@ -1,4 +1,10 @@
-from api import _build_structured_trade_setup
+from api import (
+    _apply_trade_health_final_signal,
+    _build_structured_trade_setup,
+    _early_mover_long_rule_reasons,
+    _strategy_daily_history_metrics,
+)
+from modules.backtests import simulate_trade
 
 
 def test_momentum_sidebar_targets_do_not_use_tiny_one_r_targets():
@@ -41,3 +47,106 @@ def test_short_sidebar_targets_respect_minimum_r_and_support_barriers():
     assert setup["rr_tp1"] >= 1.5
     assert setup["rr_tp2"] >= 2.5
     assert any("Support" in warning for warning in setup["warnings"])
+
+
+def test_strategy_rvol_uses_completed_20d_average_not_previous_day_only():
+    bars = []
+    for idx in range(20):
+        bars.append({
+            "date": f"2026-04-{idx + 1:02d}",
+            "open": 10 + idx * 0.02,
+            "high": 10.6 + idx * 0.02,
+            "low": 9.7 + idx * 0.02,
+            "close": 10.2 + idx * 0.02,
+            "volume": 100_000,
+        })
+    bars[-1]["volume"] = 1_000_000
+
+    metrics = _strategy_daily_history_metrics(
+        bars,
+        price=11.0,
+        day_open=10.8,
+        day_high=11.2,
+        day_low=10.6,
+        day_volume=200_000,
+    )
+
+    assert metrics["history_ok"] is True
+    assert metrics["avg_vol20"] == 145_000
+    assert metrics["rvol20"] == 1.38
+    assert metrics["support_1"] < 11.0
+    assert metrics["resistance_1"] > 11.0
+
+
+def test_trade_health_final_state_overrides_stock_scanner_now_signal():
+    row = {
+        "Ticker": "TEST",
+        "trade_signal": "JETZT_TRADEN",
+        "entry_status": "JETZT_TRADEN",
+        "trade_action": "LONG_NOW",
+        "risk_flags": [],
+        "risk_reasons": [],
+        "trade_decision": "NO_TRADE",
+        "trade_decision_label": "No Trade",
+        "trade_health": {"decision": "NO_TRADE", "decision_label": "No Trade"},
+        "trade_setup": {"trade_action": "LONG_NOW", "entry_status": "JETZT_TRADEN"},
+    }
+
+    _apply_trade_health_final_signal(row, "stock_strategy")
+
+    assert row["trade_signal"] == "NICHT_TRADEN"
+    assert row["entry_status"] == "NO_TRADE"
+    assert row["trade_action"] == "NO_TRADE"
+    assert row["trade_setup"]["trade_action"] == "NO_TRADE"
+    assert row["trade_setup"]["trade_decision"] == "NO_TRADE"
+
+
+def test_early_mover_swing_does_not_require_5m_but_intraday_does(monkeypatch):
+    row = {
+        "_alert_horizon": "swing",
+        "direction": "LONG",
+        "trade_action": "LONG_TRIGGER",
+        "entry_status": "LONG_TRIGGER",
+        "signal_quality": "tradeable",
+        "score": 88,
+        "grade": "S",
+        "entry": 10.0,
+        "stop_loss": 9.4,
+        "tp1": 11.4,
+        "tp2": 12.2,
+        "live_rr_ratio": 2.4,
+        "distance_to_entry_r": 0,
+        "risk_flags": ["no_intraday_execution_trigger"],
+        "btc_context": {"tailwind": True, "btc_24h": 0.4, "btc_7d": 1.1, "alpha_24h": 2.0},
+        "target_quality": "STRUCTURAL",
+    }
+
+    monkeypatch.setattr("api._scanner_uses_intraday_horizon", lambda scanner_name: True)
+
+    assert "early_mover_wait_entry_confirmation" not in _early_mover_long_rule_reasons(row)
+
+    row["_alert_horizon"] = "intraday"
+    assert "early_mover_wait_entry_confirmation" in _early_mover_long_rule_reasons(row)
+
+
+def test_backtest_simulation_uses_blended_tp1_tp2_target():
+    bars = [
+        {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
+        {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
+        {"date": "2026-01-03", "open": 106, "high": 111, "low": 104, "close": 110},
+    ]
+    strategy = {
+        "direction": "long",
+        "entry": "at_close",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.0,
+        "tp2_rr": 3.0,
+        "max_hold_days": 3,
+    }
+
+    trade = simulate_trade(bars, 0, strategy)
+
+    assert trade is not None
+    assert trade["target_model"] == "blended_tp1_tp2"
+    assert trade["exit_reason"] == "BLENDED_TP"
+    assert trade["r_multiple"] == 2.0

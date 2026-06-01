@@ -3019,7 +3019,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const activeTradeSetup = cd.trade_setup || d.trade_setup || null;
     const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
     const normalizedSetupAction = String(setupAction || '').toUpperCase();
-    const tradeSignal = cd.trade_signal || d.trade_signal || '';
+    const tradeSignal = String(cd.trade_signal || d.trade_signal || '').toUpperCase();
     const finalTradeDecision = String(tradeHealth?.decision || '').toUpperCase();
     const finalNoTrade = finalTradeDecision === 'NO_TRADE';
     const finalWaitRetest = finalTradeDecision === 'WAIT_FOR_RETEST';
