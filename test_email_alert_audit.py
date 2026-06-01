@@ -180,7 +180,7 @@ def test_stock_alert_skip_reason_is_logged(tmp_path, monkeypatch):
     assert "score_below_alert_threshold" in api._EMAIL_SEND_LOG[-1]["reason"]
 
 
-def test_long_alert_audit_blocks_extended_fading_move(tmp_path):
+def test_stock_strategy_swing_audit_does_not_block_on_latest_5m_fade(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "long_fade.json"
     cache_file.write_text(json.dumps({
@@ -204,11 +204,11 @@ def test_long_alert_audit_blocks_extended_fading_move(tmp_path):
 
     assert audit["rows_checked"] == 1
     assert audit["alertable_now_count"] == 0
-    assert audit["suppression_counts"]["latest_5m_red_fade"] == 1
-    assert audit["suppression_counts"]["extended_long_fading_wait_retest"] == 1
+    assert "latest_5m_red_fade" not in audit["suppression_counts"]
+    assert "extended_long_fading_wait_retest" not in audit["suppression_counts"]
 
 
-def test_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
+def test_intraday_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "long_continuation.json"
     row = {
@@ -237,7 +237,7 @@ def test_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
         "results": [row],
     }))
 
-    audit = api._build_alert_audit_for_cache("stock_strategy", str(cache_file))
+    audit = api._build_alert_audit_for_cache("bi_long", str(cache_file))
 
     assert audit["rows_checked"] == 1
     assert audit["alertable_now_count"] == 1
@@ -963,6 +963,43 @@ def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeyp
     assert "Swing-Setup: mehrtaegiger Plan" in body
     assert "Intraday-5m/1m-Trigger werden separat gebaut" in body
     assert "frische 5m-Bestaetigung" not in body
+
+
+def test_stock_strategy_swing_email_does_not_fetch_or_require_5m(monkeypatch):
+    row = {
+        "Ticker": "SWNG",
+        "grade": "A",
+        "score": 90,
+        "RVOL": 2.1,
+        "Preis": 12.3,
+        "current_price": 12.3,
+        "Signal_Direction": "LONG",
+        "change_pct": 4.2,
+        "close_pos": 0.82,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "dollar_volume": 8_000_000,
+        "trade_setup": {
+            "direction": "LONG",
+            "entry": 12.3,
+            "stop": 11.8,
+            "tp1": 13.2,
+            "tp2": 14.0,
+        },
+    }
+    monkeypatch.setattr(
+        api,
+        "_fetch_long_latest_intraday_state",
+        lambda ticker: (_ for _ in ()).throw(AssertionError("Swing stock strategy must not fetch 5m bars")),
+    )
+
+    enriched = api._enrich_stock_alert_5m_state("stock_strategy", row, "Momentum Breakout Long")
+    state = api._classify_alert_candidate("stock_strategy", enriched, 1_000_000.0)
+
+    assert enriched["entry_quality"] == "SWING_SETUP"
+    assert "latest_bar_change_pct" not in enriched
+    assert "latest_5m_red_fade" not in state["suppression_reasons"]
+    assert "fresh_5m_state_missing_wait_retest" not in state["suppression_reasons"]
 
 
 def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):
@@ -1718,7 +1755,7 @@ def test_stock_alert_trade_health_blocks_chased_live_entry():
     assert state["decision"] == "NO_TRADE"
 
 
-def test_stock_alert_score_is_capped_when_fresh_5m_trigger_is_missing():
+def test_intraday_long_alert_score_is_capped_when_fresh_5m_trigger_is_missing():
     row = {
         "ticker": "RUNR",
         "grade": "S",
@@ -1737,14 +1774,14 @@ def test_stock_alert_score_is_capped_when_fresh_5m_trigger_is_missing():
         "TP2": 26.8,
     }
 
-    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+    state = api._classify_alert_candidate("bi_long", row, 1_000_000.0)
 
     assert state["alertable_now"] is False
     assert state["score"] < api._ALERT_MIN_SCORE
     assert "score_below_alert_threshold" in state["suppression_reasons"]
 
 
-def test_stock_alert_score_keeps_clean_confirmed_continuation_alertable():
+def test_intraday_stock_alert_score_keeps_clean_confirmed_continuation_alertable():
     row = {
         "ticker": "RUNR",
         "grade": "A",
@@ -1769,7 +1806,7 @@ def test_stock_alert_score_keeps_clean_confirmed_continuation_alertable():
         "dollar_volume": 12_000_000,
     }
 
-    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+    state = api._classify_alert_candidate("bi_long", row, 1_000_000.0)
 
     assert state["alertable_now"] is True
     assert state["score"] >= api._ALERT_MIN_SCORE

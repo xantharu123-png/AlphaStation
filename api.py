@@ -941,8 +941,9 @@ _TRADE_REMINDER_LOCK = threading.Lock()
 _trade_reminder_running = False
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
+_SWING_STOCK_STRATEGY_ALERT_SCANNERS = {"stock_strategy", "strategy_scan"}
 _LONG_ENTRY_ALERT_SCANNERS = {
-    "bi_long", "biotech", "stock_strategy", "strategy_scan", "turtle", "volume_spikes"
+    "bi_long", "biotech", "turtle", "volume_spikes"
 }
 _STOCK_EMAIL_ASSET_GUARD_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "stock_strategy", "strategy_scan"
@@ -1708,9 +1709,9 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
     """Turn a stock scanner setup score into a real trade-now score.
 
     Stock scanners can be correct that a symbol is interesting while the current
-    entry is still late, fading, missing a fresh 5m state, or using weak levels.
-    Mail decisions should therefore be capped by execution quality, not by the
-    raw setup score alone.
+    entry is still late, fading, or using weak levels. Generic stock-strategy
+    alerts are swing setups, so 1m/5m candles must not be a hard gate there.
+    Intraday scanners can still cap by their dedicated trigger quality.
     """
     raw_score = _alert_float(_extract_alert_score(row), 0) or 0
     levels = _alert_trade_levels(row)
@@ -1754,6 +1755,10 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
         long_reasons = _long_entry_rule_reasons(row)
         if long_reasons:
             score = min(score, 69 if any(reason.endswith("wait_retest") for reason in long_reasons) else 55)
+    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+        swing_reasons = _stock_swing_rule_reasons(row)
+        if swing_reasons:
+            score = min(score, 45 if "swing_hard_extended_no_chase" in swing_reasons else 69)
     if scanner_name in ("bear", "bi_short"):
         short_reasons = _bear_short_rule_reasons(row)
         if short_reasons:
@@ -3773,6 +3778,39 @@ def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    """Daily/swing timing gate for generic stock strategy alerts.
+
+    Swing strategy mails must not depend on 1m/5m candles. They still need a
+    sane entry location, so we gate them with daily extension, ATR stretch and
+    whether the move is holding its range.
+    """
+    direction = str(row.get("Signal_Direction", row.get("direction", "")) or "").lower()
+    if "short" in direction:
+        return []
+    fields = _extract_long_entry_fields(row)
+    reasons: List[str] = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    extension_atr = fields["extension_atr"]
+
+    extended = (change is not None and change >= 12.0) or (extension_atr is not None and extension_atr >= 4.0)
+    hard_extended = (change is not None and change >= 25.0) or (extension_atr is not None and extension_atr >= 6.0)
+    fading_daily = open_to_current is not None and open_to_current < -0.5
+    not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
+
+    if hard_extended:
+        reasons.append("swing_hard_extended_no_chase")
+    elif extended:
+        reasons.append("swing_extended_wait_retest")
+    if fading_daily:
+        reasons.append("swing_current_candle_fading")
+    if not_holding_highs and (extended or fading_daily):
+        reasons.append("swing_not_holding_highs_after_move")
+    return reasons
+
+
 def _long_entry_quality(row: Dict[str, Any]) -> str:
     reasons = _long_entry_rule_reasons(row)
     if reasons:
@@ -4103,13 +4141,18 @@ def _stock_alert_is_short_context(scanner_name: str, row: Dict[str, Any], strate
 
 
 def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strategy_name: str = "") -> Dict[str, Any]:
-    """Attach fresh 5m state before any actionable stock mail decision."""
+    """Attach fresh 5m state only for scanner types that truly trade intraday timing."""
     ticker = _extract_alert_ticker(row)
     grade = _extract_alert_grade(row)
     if not ticker or grade not in _ALERT_TOP_GRADES:
         return row
 
     enriched = dict(row)
+    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+        enriched.setdefault("entry_quality", "SWING_SETUP")
+        enriched.setdefault("swing_timeframe", "daily_swing")
+        return enriched
+
     if enriched.get("latest_bar_change_pct") is None or enriched.get("latest_bar_close_pos") is None:
         enriched.update(_fetch_long_latest_intraday_state(ticker))
 
@@ -4143,6 +4186,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "hard_extended_long_wait_retest",
         "extended_long_fading_wait_retest",
         "not_holding_highs_after_up_move",
+        "swing_extended_wait_retest",
+        "swing_current_candle_fading",
+        "swing_not_holding_highs_after_move",
         "early_mover_retest_not_near_entry",
         "trade_health_wait_for_retest",
     }
@@ -4174,6 +4220,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "trade_health_chase_risk",
         "trade_health_fakeout_risk",
         "trade_health_liquidity_risk",
+        "swing_hard_extended_no_chase",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
@@ -4275,6 +4322,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.extend(_bear_short_rule_reasons(row))
     if quality_gate_actionable and scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
+    if quality_gate_actionable and scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+        reasons.extend(_stock_swing_rule_reasons(row))
     if base_actionable and scanner_name == "crypto_strategy":
         if not _CRYPTO_STRATEGY_ALERTS_ENABLED:
             reasons.append("crypto_strategy_watch_only")
@@ -4890,7 +4939,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "price": state["price"],
             "rvol": _alert_float(state["rvol"], 0) or 0,
             "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", default=0), 0) or 0,
-            "entry_quality": row.get("long_entry_quality", _long_entry_quality(row) if scanner_key in _LONG_ENTRY_ALERT_SCANNERS else ""),
+            "entry_quality": row.get("entry_quality") or row.get("long_entry_quality") or ("SWING_SETUP" if scanner_key in _SWING_STOCK_STRATEGY_ALERT_SCANNERS else ""),
             "strategy": row.get("Strategy") or row.get("strategy") or strategy_name,
             "market_type": market_type,
             "trade_plan_html": _format_alert_plan_html(row),
@@ -8060,9 +8109,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                                 "Trade_Setup_Source": "stock_strategy_structure",
                             })
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
-                        strategy_row.update(_fetch_long_latest_intraday_state(ticker))
-                        strategy_row["long_entry_quality"] = _long_entry_quality(strategy_row)
-                        strategy_row["alertable_long"] = not _long_entry_rule_reasons(strategy_row)
+                        strategy_row["entry_quality"] = "SWING_SETUP"
+                        strategy_row["swing_timeframe"] = "daily_swing"
                     results.append(strategy_row)
                 except Exception as item_err:
                     print(f"[Strategy Scan] {strategy_name}: skip {t.get('ticker', '?')} ({item_err})")
