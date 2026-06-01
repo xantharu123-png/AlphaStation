@@ -4918,10 +4918,22 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["entry_quality"]}</td></tr>'
         )
-    label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie"
+    label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie Swing"
+    horizon_note = (
+        "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind Struktur-Level; "
+        "nicht als Intraday-Scalp oder sofortiger Minuten-TP interpretieren."
+        if market_type == "stocks"
+        else "Crypto Strategie-Alert: nur mit bestaetigtem Exchange-Trigger handeln."
+    )
+    trigger_note = (
+        "Intraday-5m/1m-Trigger werden separat gebaut und gemailt."
+        if market_type == "stocks"
+        else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
+    )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
     <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
+    <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
     <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
@@ -4929,7 +4941,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
     <th style="padding:8px;text-align:left">Entry / Stop / TP</th><th style="padding:8px;text-align:left">Timing</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und frische 5m-Bestaetigung; 8h Cooldown pro Ticker.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
     sent = _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
     if sent:

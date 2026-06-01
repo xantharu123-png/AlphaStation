@@ -928,6 +928,43 @@ def test_strategy_sweep_email_keeps_row_strategy_name(monkeypatch):
     assert "Gap Momentum Long" in sent[0][1]
 
 
+def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SWNG"}, "unit"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "SWNG",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 90,
+        "RVOL": 2.1,
+        "Preis": 12.3,
+        "Change_Pct": 4.2,
+        "Signal_Direction": "LONG",
+        "change_pct": 4.2,
+        "close_pos": 0.82,
+        "latest_bar_change_pct": 0.12,
+        "latest_bar_close_pos": 0.72,
+        "trade_setup": {
+            "direction": "LONG",
+            "entry": 12.3,
+            "stop": 11.8,
+            "tp1": 13.2,
+            "tp2": 14.0,
+        },
+    }], "stocks")
+
+    assert len(sent) == 1
+    subject, body = sent[0]
+    assert "Aktien Strategie Swing" in subject
+    assert "Swing-Setup: mehrtaegiger Plan" in body
+    assert "Intraday-5m/1m-Trigger werden separat gebaut" in body
+    assert "frische 5m-Bestaetigung" not in body
+
+
 def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: False)
