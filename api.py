@@ -949,6 +949,10 @@ _STOCK_EMAIL_ASSET_GUARD_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "stock_strategy", "strategy_scan"
 }
 _STOCK_ALERT_SCANNERS = set(_STOCK_EMAIL_ASSET_GUARD_SCANNERS) | {"turtle", "volume_spikes"}
+_INTRADAY_ONLY_SCANNERS = {"orb"}
+_STOCK_SWING_ALERT_SCANNERS = set(_STOCK_ALERT_SCANNERS) - _INTRADAY_ONLY_SCANNERS
+_TRADE_HORIZON_OPTIONS = {"swing", "intraday", "both"}
+_DEFAULT_TRADE_HORIZON = os.environ.get("ALPHA_TRADE_HORIZON_DEFAULT", "swing")
 _CRYPTO_STRATEGY_ALERTS_ENABLED = False
 _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys()) | {
     "SDS", "UDOW", "SVXY", "TVIX",
@@ -969,6 +973,43 @@ _DISPLAY_ONLY_SUPPRESSION_REASONS = {
     "persistent_dedupe_active",
     "bearish_ticker_already_alerted",
 }
+
+
+def _normalize_trade_horizon_value(value: Any) -> str:
+    raw = str(value or "swing").strip().lower().replace("-", "_")
+    aliases = {
+        "swing": "swing",
+        "swingtrading": "swing",
+        "swing_trading": "swing",
+        "daily": "swing",
+        "intraday": "intraday",
+        "daytrade": "intraday",
+        "daytrading": "intraday",
+        "day_trading": "intraday",
+        "5m": "intraday",
+        "both": "both",
+        "beides": "both",
+        "all": "both",
+        "alle": "both",
+    }
+    return aliases.get(raw, raw if raw in _TRADE_HORIZON_OPTIONS else "swing")
+
+
+def _scanner_uses_swing_horizon(scanner_name: str) -> bool:
+    """Default scanner/mail horizon.
+
+    The product default is swing trading. ORB remains intraday-only by design:
+    opening-range edge is not a swing setup.
+    """
+    if scanner_name in _INTRADAY_ONLY_SCANNERS:
+        return False
+    return _normalize_trade_horizon_value(_DEFAULT_TRADE_HORIZON) in {"swing", "both"}
+
+
+def _scanner_uses_intraday_horizon(scanner_name: str) -> bool:
+    if scanner_name in _INTRADAY_ONLY_SCANNERS:
+        return True
+    return _normalize_trade_horizon_value(_DEFAULT_TRADE_HORIZON) in {"intraday", "both"}
 
 print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
@@ -995,6 +1036,7 @@ def _email_alert_status() -> Dict[str, Any]:
         "global_recipient_count": len(configured_recipients),
         "subscriber_recipient_count": len(platform_recipients),
         "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
+        "default_trade_horizon": _normalize_trade_horizon_value(_DEFAULT_TRADE_HORIZON),
         "crypto_armed_watch_mails_enabled": False,
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
@@ -1060,6 +1102,15 @@ _ALERT_SUPPRESSION_LABELS = {
     "fresh_5m_state_missing_wait_retest": "Aktien: frische 5m-Bestaetigung fehlt, Retest abwarten",
     "extended_long_fading_wait_retest": "Long erweitert und fading: Retest abwarten",
     "hard_extended_long_wait_retest": "Long zu weit gelaufen: Retest abwarten",
+    "swing_hard_extended_no_chase": "Swing: Bewegung zu weit gelaufen",
+    "swing_extended_wait_retest": "Swing: Bewegung erweitert, Retest abwarten",
+    "swing_current_candle_fading": "Swing: Tageskerze faded",
+    "swing_not_holding_highs_after_move": "Swing: haelt Ausbruchshochs nicht",
+    "swing_short_not_down_enough": "Swing-Short: Abwaertsimpuls zu schwach",
+    "swing_short_extended_wait_retest": "Swing-Short: Drop erweitert, Pullback/Rejection abwarten",
+    "swing_short_drop_too_extended_no_chase": "Swing-Short: Drop zu weit gelaufen",
+    "swing_short_current_candle_reclaim": "Swing-Short: Tageskerze reclaimed",
+    "swing_short_not_closing_weak": "Swing-Short: Close nicht schwach genug",
     "drop_too_extended_no_chase": "Short/Crash-Drop schon sehr erweitert",
     "current_candle_green_reclaim": "Short: aktuelle Kerze reclaimed",
     "not_closing_near_low": "Short: Kurs schliesst nicht nahe Tagestief",
@@ -1539,8 +1590,10 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_weak_targets")
     if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
         reasons.append("early_mover_live_rr_below_threshold")
-    # Email delivery performs a fresh exchange-trigger check before sending.
-    # Do not block here just because the cached scan row was not pre-confirmed.
+    if risk_flags.intersection({"no_market_entry", "no_intraday_execution_trigger", "micro_trigger_missing"}):
+        reasons.append("early_mover_wait_entry_confirmation")
+    # Swing mails do not require 5m. Intraday mode performs a fresh exchange
+    # trigger check before sending.
     if action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
         reasons.append("early_mover_retest_not_near_entry")
     return reasons
@@ -1692,9 +1745,13 @@ def _alert_trade_health_reasons(row: Dict[str, Any], scanner_name: str) -> List[
     health = calculate_trade_health(health_row, scanner_name=health_scanner)
     decision = str(health.get("decision", "") or "").upper()
     reasons: List[str] = []
-    if decision != "TRADEABLE":
+    horizon = _normalize_trade_horizon_value(row.get("_alert_horizon", _DEFAULT_TRADE_HORIZON))
+    swing_early_mover = scanner_name == "early_movers" and horizon == "swing"
+    soft_swing_wait = swing_early_mover and decision in {"WAIT_FOR_RETEST", "WAIT_FOR_TRIGGER", "WAIT_FOR_CONTINUATION", "WATCH_ONLY"}
+
+    if decision != "TRADEABLE" and not soft_swing_wait:
         reasons.append(f"trade_health_{decision.lower() or 'not_tradeable'}")
-    if int(health.get("health_score") or 0) < 80:
+    if int(health.get("health_score") or 0) < 80 and not soft_swing_wait:
         reasons.append("trade_health_score_below_80")
     if str(health.get("chase_risk", "") or "").upper() in {"HIGH", "CRITICAL"}:
         reasons.append("trade_health_chase_risk")
@@ -1751,15 +1808,19 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
     if not levels.get("valid") or levels.get("estimated"):
         score = min(score, 45)
 
-    if scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+    swing_stock_mode = scanner_name in _STOCK_SWING_ALERT_SCANNERS and _scanner_uses_swing_horizon(scanner_name)
+    short_context = _stock_alert_is_short_context(scanner_name, row)
+
+    if swing_stock_mode:
+        swing_reasons = _stock_swing_short_rule_reasons(row) if short_context else _stock_swing_rule_reasons(row)
+        if swing_reasons:
+            no_chase = {"swing_hard_extended_no_chase", "swing_short_drop_too_extended_no_chase"}
+            score = min(score, 45 if any(reason in no_chase for reason in swing_reasons) else 69)
+    elif scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         long_reasons = _long_entry_rule_reasons(row)
         if long_reasons:
             score = min(score, 69 if any(reason.endswith("wait_retest") for reason in long_reasons) else 55)
-    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
-        swing_reasons = _stock_swing_rule_reasons(row)
-        if swing_reasons:
-            score = min(score, 45 if "swing_hard_extended_no_chase" in swing_reasons else 69)
-    if scanner_name in ("bear", "bi_short"):
+    if not swing_stock_mode and scanner_name in ("bear", "bi_short"):
         short_reasons = _bear_short_rule_reasons(row)
         if short_reasons:
             if "drop_too_extended_no_chase" in short_reasons:
@@ -2875,7 +2936,7 @@ def _early_mover_entry_score_label(row: Dict[str, Any]) -> str:
     if action == "WAIT_FOR_RETEST":
         return "RETEST WARTEN"
     if action == "LONG_TRIGGER":
-        return "5M WARTEN"
+        return "ENTRY WARTEN"
     if score >= 75:
         return "FAST BEREIT"
     if score >= 50:
@@ -3261,15 +3322,15 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and armed_ok:
         row["trade_signal"] = "EXPLOSION_ARMED"
         score_txt = f" Score {explosion_score}/100" if explosion_score is not None else ""
-        row["signal_label"] = f"Breakout-Watch: 5m/4h-Coil bestaetigt, Entry erst bei Breakout/Reclaim{score_txt}"
+        row["signal_label"] = f"Breakout-Watch: Swing-Struktur passt, Entry erst bei Breakout/Reclaim{score_txt}"
         row["signal_quality"] = "pre_breakout_armed"
         row["entry_status"] = "PRE_BREAKOUT_ARMED"
         row["alertable_crypto"] = False
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and trigger_block_reason:
         row["trade_signal"] = "WARTEN"
-        row["signal_label"] = "Warten: 1m-Trigger ist deaktiviert; Trade-Mail/Trade braucht 5m-Bestaetigung"
+        row["signal_label"] = "Warten: Entry-Bestaetigung fehlt; kein Market-Buy"
         row["signal_quality"] = "wait_trigger"
-        row["entry_status"] = "WAIT_FOR_5M_CONFIRMATION"
+        row["entry_status"] = "WAIT_FOR_TRIGGER"
         row["alertable_crypto"] = False
     elif action == "NO_LONG_CHASE":
         row["trade_signal"] = "NICHT_TRADEN"
@@ -3564,19 +3625,32 @@ def _stop_trade_reminder_loop() -> None:
 
 
 def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
-    """Mail only active Early-Mover long/retest candidates; watch/no-chase rows stay UI-only."""
+    """Mail swing Early-Mover long/retest candidates; no-chase rows stay UI-only."""
     now = time.time()
+    swing_mode = _scanner_uses_swing_horizon("early_movers")
     candidates = []
     suppressed: Dict[str, int] = {}
     seen_keys = set()
 
     for row in _flatten_early_mover_rows(payload):
-        trigger_check = _verify_early_mover_intraday_trigger(row)
-        trigger_block_reason = _early_mover_mail_trigger_block_reason(trigger_check)
-        if trigger_block_reason:
-            suppressed[trigger_block_reason] = suppressed.get(trigger_block_reason, 0) + 1
-            continue
-        _apply_early_mover_signal_state(row, trigger_check)
+        trigger_check: Dict[str, Any] = {
+            "ok": False,
+            "reason": "swing_structure_plan",
+            "timeframe": "swing",
+            "execution_score": row.get("entry_score"),
+        }
+        if swing_mode:
+            row = dict(row)
+            row["_alert_horizon"] = "swing"
+            row.setdefault("signal_label", "Crypto Swing-Setup: Struktur/Entry-Zone passt, kein 5m-Zwang.")
+            row.setdefault("signal_quality", "swing_setup")
+        else:
+            trigger_check = _verify_early_mover_intraday_trigger(row)
+            trigger_block_reason = _early_mover_mail_trigger_block_reason(trigger_check)
+            if trigger_block_reason:
+                suppressed[trigger_block_reason] = suppressed.get(trigger_block_reason, 0) + 1
+                continue
+            _apply_early_mover_signal_state(row, trigger_check)
 
         state = _classify_alert_candidate("early_movers", row, now)
         if not state["alertable_now"]:
@@ -3613,6 +3687,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "trigger": trigger_check,
             "execution_score": trigger_check.get("execution_score"),
             "execution_timeframe": trigger_check.get("timeframe"),
+            "horizon": "SWING" if swing_mode else "INTRADAY",
         })
 
     if not candidates:
@@ -3650,13 +3725,13 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
         action = html.escape(str(item["action"] or "LONG"))
         exchange = html.escape(str(item["exchange"] or ""))
         trigger = item.get("trigger", {}) if isinstance(item.get("trigger"), dict) else {}
-        trigger_text = html.escape(str(trigger.get("reason", "execution_trigger")))
+        trigger_text = html.escape("Swing-Struktur" if item.get("horizon") == "SWING" else str(trigger.get("reason", "execution_trigger")))
         exec_score = _fmt_num(item.get("execution_score"), "/100", 0)
-        exec_tf = html.escape(str(item.get("execution_timeframe") or trigger.get("timeframe") or "adaptive"))
+        exec_tf = html.escape(str(item.get("execution_timeframe") or trigger.get("timeframe") or "swing"))
         volume_ratio = _fmt_num(trigger.get("volume_ratio"), "x", 2)
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange} {exec_tf}</span><br><span style="color:#059669">{trigger_text} ({volume_ratio}, EQ {exec_score})</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange} {exec_tf}</span><br><span style="color:#059669">{trigger_text}{"" if item.get("horizon") == "SWING" else f" ({volume_ratio}, EQ {exec_score})"}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item["grade"]))} / {html.escape(str(item["score"]))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
@@ -3667,7 +3742,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
 
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
     <h2 style="color:#059669">Crypto Early Mover LONG Digest</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {len(email_rows)} von {len(candidates)} aktiven Long/Retest Setup(s)</p>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {len(email_rows)} von {len(candidates)} Crypto-Swing Long/Retest Setup(s)</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
@@ -3675,7 +3750,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
     <th style="padding:8px;text-align:left">Kontext</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, kein extremes Vol/MCap ohne Alpha, keine Partial-Daten, unverpasster TP1 und bestaetigter 5m-Exchange-Trigger. Ohne 5m-Bestaetigung bleibt es BEOBACHTEN.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Swing-Default: Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und saubere Strukturziele. Intraday-5m ist optionaler separater Modus, nicht Pflicht fuer diese Swing-Mail.</p>
     </body></html>'''
     sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
     if sent:
@@ -3809,6 +3884,37 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     if not_holding_highs and (extended or fading_daily):
         reasons.append("swing_not_holding_highs_after_move")
     return reasons
+
+
+def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
+    """Daily/swing timing gate for bearish stock scanners.
+
+    A short swing can start after a weak close or failed breakdown, but it should
+    not blindly chase a completed one-day collapse or short into a green reclaim.
+    """
+    fields = _extract_bear_short_fields(row)
+    reasons: List[str] = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    rvol = fields["rvol"]
+
+    if change is None:
+        reasons.append("missing_current_drop")
+    elif change > -2.0:
+        reasons.append("swing_short_not_down_enough")
+    elif change <= -22.0:
+        reasons.append("swing_short_drop_too_extended_no_chase")
+    elif change <= -12.0:
+        reasons.append("swing_short_extended_wait_retest")
+
+    if open_to_current is not None and open_to_current > 0.5:
+        reasons.append("swing_short_current_candle_reclaim")
+    if close_pos is not None and close_pos > 0.55:
+        reasons.append("swing_short_not_closing_weak")
+    if rvol is not None and rvol < 0.7:
+        reasons.append("rvol_below_bear_threshold")
+    return list(dict.fromkeys(reasons))
 
 
 def _long_entry_quality(row: Dict[str, Any]) -> str:
@@ -4148,7 +4254,7 @@ def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strateg
         return row
 
     enriched = dict(row)
-    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+    if scanner_name in _STOCK_SWING_ALERT_SCANNERS and _scanner_uses_swing_horizon(scanner_name):
         enriched.setdefault("entry_quality", "SWING_SETUP")
         enriched.setdefault("swing_timeframe", "daily_swing")
         return enriched
@@ -4189,6 +4295,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_extended_wait_retest",
         "swing_current_candle_fading",
         "swing_not_holding_highs_after_move",
+        "swing_short_extended_wait_retest",
+        "swing_short_current_candle_reclaim",
+        "swing_short_not_closing_weak",
         "early_mover_retest_not_near_entry",
         "trade_health_wait_for_retest",
     }
@@ -4198,6 +4307,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "fresh_5m_state_missing_wait_trigger",
         "fresh_5m_state_missing_wait_retest",
         "current_candle_red_fade",
+        "early_mover_wait_entry_confirmation",
     }
     no_trade_markers = {
         "drop_too_extended_no_chase",
@@ -4221,6 +4331,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "trade_health_fakeout_risk",
         "trade_health_liquidity_risk",
         "swing_hard_extended_no_chase",
+        "swing_short_drop_too_extended_no_chase",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
@@ -4270,7 +4381,12 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             entry_score = _early_mover_entry_score(row)
         execution_score = _alert_float(row.get("execution_quality_score"), None)
         explosion_score = _alert_float(row.get("explosion_score"), None)
-        if signal == "JETZT_TRADEN":
+        horizon = _normalize_trade_horizon_value(row.get("_alert_horizon", _DEFAULT_TRADE_HORIZON))
+        if horizon == "swing" and _scanner_uses_swing_horizon("early_movers"):
+            # Swing crypto mails are setup/structure alerts. They must not depend
+            # on a fresh 5m trigger, but they still need a clean entry score.
+            score = min(_alert_float(score, 0) or 0, max(_alert_float(entry_score, 0) or 0, 80))
+        elif signal == "JETZT_TRADEN":
             score = _early_mover_trade_score(row)
         elif signal == "EXPLOSION_ARMED" and explosion_score is not None:
             score = min(_alert_float(explosion_score, 0) or 0, _alert_float(entry_score, 0) or 0)
@@ -4318,12 +4434,16 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
 
     if base_actionable and scanner_name == "new_listing":
         reasons.extend(_new_listing_rule_reasons(row))
-    if quality_gate_actionable and scanner_name in ("bear", "bi_short"):
+    swing_stock_mode = scanner_name in _STOCK_SWING_ALERT_SCANNERS and _scanner_uses_swing_horizon(scanner_name)
+    if quality_gate_actionable and swing_stock_mode:
+        if _stock_alert_is_short_context(scanner_name, row):
+            reasons.extend(_stock_swing_short_rule_reasons(row))
+        else:
+            reasons.extend(_stock_swing_rule_reasons(row))
+    elif quality_gate_actionable and scanner_name in ("bear", "bi_short"):
         reasons.extend(_bear_short_rule_reasons(row))
-    if quality_gate_actionable and scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
+    if quality_gate_actionable and not swing_stock_mode and scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
-    if quality_gate_actionable and scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
-        reasons.extend(_stock_swing_rule_reasons(row))
     if base_actionable and scanner_name == "crypto_strategy":
         if not _CRYPTO_STRATEGY_ALERTS_ENABLED:
             reasons.append("crypto_strategy_watch_only")
@@ -4726,6 +4846,7 @@ def _send_email_alert(
     body_html,
     bypass_startup_cooldown: bool = False,
     recipient_emails: Optional[List[str]] = None,
+    trade_horizon: str = "swing",
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
     if _email_has_blocked_etf_content(subject, body_html):
@@ -4750,7 +4871,7 @@ def _send_email_alert(
         recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
     if recipient_emails is None and ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
         try:
-            recipients.extend(get_email_alert_recipients())
+            recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon))
         except Exception as exc:
             print(f"[Alert] Subscriber recipients skipped: {exc}")
     recipients = sorted(set(addr for addr in recipients if "@" in addr))
@@ -4975,7 +5096,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         else "Crypto Strategie-Alert: nur mit bestaetigtem Exchange-Trigger handeln."
     )
     trigger_note = (
-        "Intraday-5m/1m-Trigger werden separat gebaut und gemailt."
+        "Intraday-Trigger sind optional und gehoeren in den separaten Intraday-Modus, nicht in diese Swing-Mail."
         if market_type == "stocks"
         else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
     )
@@ -9655,6 +9776,8 @@ class AlertSettingsRequest(BaseModel):
     enabled: Optional[bool] = None
     alert_email: Optional[str] = None
     narrative_email_frequency: Optional[str] = None
+    trade_alert_horizon: Optional[str] = None
+    scanner_trade_horizon: Optional[str] = None
 
 
 # ── Admin Models ──
@@ -9774,6 +9897,8 @@ async def api_update_alert_settings(req_body: AlertSettingsRequest, authorizatio
         enabled=req_body.enabled,
         alert_email=req_body.alert_email,
         narrative_email_frequency=req_body.narrative_email_frequency,
+        trade_alert_horizon=req_body.trade_alert_horizon,
+        scanner_trade_horizon=req_body.scanner_trade_horizon,
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))

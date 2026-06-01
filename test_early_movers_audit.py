@@ -173,7 +173,7 @@ def test_early_mover_wait_states_keep_specific_timing_label():
     assert row["entry_status"] == "WAIT_FOR_TRIGGER"
     assert "Trigger" in row["signal_label"]
     assert row["entry_score"] < 60
-    assert row["entry_score_label"] == "5M WARTEN"
+    assert row["entry_score_label"] == "ENTRY WARTEN"
 
     retest = {"trade_action": "WAIT_FOR_RETEST"}
     api._apply_early_mover_signal_state(retest, {"ok": False, "reason": "no_fresh_5m_trigger"})

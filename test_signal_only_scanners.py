@@ -118,7 +118,7 @@ def test_stock_strategy_swing_results_use_daily_state_not_5m(monkeypatch, tmp_pa
     assert [row["ticker"] for row in filtered] == ["RUNR"]
 
 
-def test_intraday_stock_signal_scanners_cap_raw_score_without_fresh_trigger(monkeypatch, tmp_path):
+def test_stock_signal_scanners_default_to_swing_without_fresh_5m_gate(monkeypatch, tmp_path):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"RAW"}, "unit"))
@@ -131,10 +131,11 @@ def test_intraday_stock_signal_scanners_cap_raw_score_without_fresh_trigger(monk
         "current_price": 20.0,
         "direction": "LONG",
         "Signal_Direction": "LONG",
-        "change_pct": 14.0,
-        "Change_Pct": 14.0,
+        "change_pct": 5.0,
+        "Change_Pct": 5.0,
         "close_pos": 0.88,
-        "open_to_current_pct": 5.0,
+        "open_to_current_pct": 2.0,
+        "Extension_ATR": 1.5,
         "DayHigh": 20.4,
         "DayLow": 18.5,
         "Entry": 20.0,
@@ -148,10 +149,10 @@ def test_intraday_stock_signal_scanners_cap_raw_score_without_fresh_trigger(monk
         decorated = api._decorate_scan_results([row], scanner_name, 10)
 
         assert decorated[0]["raw_score"] == 98
-        assert decorated[0]["score"] < 80
-        assert decorated[0]["trade_signal"] != "JETZT_TRADEN"
-        assert "fresh_5m_state_missing_wait_trigger" in decorated[0]["scanner_suppression_reasons"]
-        assert api._apply_signal_only_policy(scanner_name, decorated) == []
+        assert decorated[0]["score"] >= 80
+        assert decorated[0]["trade_signal"] == "JETZT_TRADEN"
+        assert "fresh_5m_state_missing_wait_trigger" not in decorated[0]["scanner_suppression_reasons"]
+        assert [r["ticker"] for r in api._apply_signal_only_policy(scanner_name, decorated)] == ["RAW"]
 
 
 def test_stock_swing_strategy_scanners_do_not_cap_for_missing_5m(monkeypatch, tmp_path):

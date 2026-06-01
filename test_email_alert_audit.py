@@ -177,7 +177,7 @@ def test_stock_alert_skip_reason_is_logged(tmp_path, monkeypatch):
     assert api._EMAIL_SEND_LOG[-1]["status"] == "skipped"
     assert api._EMAIL_SEND_LOG[-1]["subject"] == "bi_long Stock Alert"
     assert "no_alertable_stock_setups" in api._EMAIL_SEND_LOG[-1]["reason"]
-    assert "score_below_alert_threshold" in api._EMAIL_SEND_LOG[-1]["reason"]
+    assert "grade_below_alert_threshold" in api._EMAIL_SEND_LOG[-1]["reason"]
 
 
 def test_stock_strategy_swing_audit_does_not_block_on_latest_5m_fade(tmp_path):
@@ -208,8 +208,10 @@ def test_stock_strategy_swing_audit_does_not_block_on_latest_5m_fade(tmp_path):
     assert "extended_long_fading_wait_retest" not in audit["suppression_counts"]
 
 
-def test_intraday_long_alert_audit_allows_clean_momentum_continuation(tmp_path):
+def test_intraday_long_alert_audit_allows_clean_momentum_continuation(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"RUNR"}, "unit"))
     cache_file = tmp_path / "long_continuation.json"
     row = {
         "ticker": "RUNR",
@@ -351,9 +353,9 @@ def test_bear_alert_audit_blocks_overextended_green_reclaim(tmp_path):
 
     assert audit["rows_checked"] == 1
     assert audit["alertable_now_count"] == 0
-    assert audit["suppression_counts"]["drop_too_extended_no_chase"] == 1
-    assert audit["suppression_counts"]["current_candle_green_reclaim"] == 1
-    assert audit["suppression_counts"]["not_closing_near_low"] == 1
+    assert audit["suppression_counts"]["swing_short_drop_too_extended_no_chase"] == 1
+    assert audit["suppression_counts"]["swing_short_current_candle_reclaim"] == 1
+    assert audit["suppression_counts"]["swing_short_not_closing_weak"] == 1
 
 
 def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
@@ -391,8 +393,9 @@ def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
     assert audit["alertable_preview"][0]["ticker"] == "FRESH"
 
 
-def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
+def test_bear_swing_alert_audit_ignores_latest_5m_reclaim_when_daily_state_is_weak(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BOUNCE"}, "unit"))
     cache_file = tmp_path / "bear_5m_reclaim.json"
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
@@ -411,6 +414,11 @@ def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
                 "close_pos": 0.12,
                 "latest_bar_change_pct": 0.42,
                 "latest_bar_close_pos": 0.82,
+                "Entry": 9.8,
+                "StopLoss": 10.3,
+                "TP1": 9.0,
+                "TP2": 8.55,
+                "dollar_volume": 12_000_000,
             }],
         }],
     }))
@@ -418,8 +426,8 @@ def test_bear_alert_audit_blocks_latest_5m_green_reclaim(tmp_path):
     audit = api._build_alert_audit_for_cache("bear", str(cache_file))
 
     assert audit["rows_checked"] == 1
-    assert audit["alertable_now_count"] == 0
-    assert audit["suppression_counts"]["latest_5m_green_reclaim"] == 1
+    assert audit["alertable_now_count"] == 1
+    assert "latest_5m_green_reclaim" not in audit["suppression_counts"]
 
 
 def test_stock_latest_intraday_state_ignores_unfinished_5m_candle(monkeypatch):
@@ -527,7 +535,7 @@ def test_bear_crash_audit_is_separate_from_regular_short_alert(tmp_path):
     audit = api._build_alert_audit_for_cache("bear", str(cache_file))
 
     assert audit["alertable_now_count"] == 0
-    assert audit["suppression_counts"]["drop_too_extended_no_chase"] == 1
+    assert audit["suppression_counts"]["swing_short_drop_too_extended_no_chase"] == 1
     assert audit["crash_alertable_now_count"] == 1
     assert audit["crash_alertable_preview"][0]["ticker"] == "FWRD"
 
@@ -961,7 +969,7 @@ def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeyp
     subject, body = sent[0]
     assert "Aktien Strategie Swing" in subject
     assert "Swing-Setup: mehrtaegiger Plan" in body
-    assert "Intraday-5m/1m-Trigger werden separat gebaut" in body
+    assert "Intraday-Trigger sind optional" in body
     assert "frische 5m-Bestaetigung" not in body
 
 
@@ -1111,8 +1119,8 @@ def test_bi_short_alert_blocks_late_crash_chase():
 
     assert state["alertable_now"] is False
     assert state["decision"] == "NO_TRADE"
-    assert "drop_too_extended_no_chase" in state["suppression_reasons"]
-    assert "latest_5m_green_reclaim" in state["suppression_reasons"]
+    assert "swing_short_drop_too_extended_no_chase" in state["suppression_reasons"]
+    assert "latest_5m_green_reclaim" not in state["suppression_reasons"]
 
 
 def test_extended_long_requires_fresh_intraday_state_for_continuation():
@@ -1643,7 +1651,7 @@ def _early_mover_row(**overrides):
         "distance_to_entry_r": 0,
         "late_to_tp1": False,
         "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
-        "risk_flags": ["requires_5m_trigger"],
+        "risk_flags": [],
         "trade_setup": {
             "trade_action": "LONG_TRIGGER",
             "entry": 1.25,
@@ -1702,8 +1710,8 @@ def test_early_mover_retest_alert_requires_near_entry():
 
     near_state = api._classify_alert_candidate("early_movers", near, 1_000_000.0)
     assert near_state["alertable_now"] is False
-    assert near_state["decision"] == "NO_TRADE"
-    assert "score_below_alert_threshold" in near_state["suppression_reasons"]
+    assert near_state["decision"] == "WAIT_TRIGGER"
+    assert "early_mover_wait_entry_confirmation" in near_state["suppression_reasons"]
     far_state = api._classify_alert_candidate("early_movers", far, 1_000_000.0)
     assert far_state["alertable_now"] is False
     assert "early_mover_retest_not_near_entry" in far_state["suppression_reasons"]
@@ -1724,8 +1732,8 @@ def test_early_mover_zero_r_distance_stays_near_entry():
     state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
 
     assert state["alertable_now"] is False
-    assert state["decision"] == "NO_TRADE"
-    assert "score_below_alert_threshold" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_TRIGGER"
+    assert "early_mover_wait_entry_confirmation" in state["suppression_reasons"]
     assert "early_mover_retest_not_near_entry" not in state["suppression_reasons"]
 
 
@@ -1781,7 +1789,9 @@ def test_intraday_long_alert_score_is_capped_when_fresh_5m_trigger_is_missing():
     assert "score_below_alert_threshold" in state["suppression_reasons"]
 
 
-def test_intraday_stock_alert_score_keeps_clean_confirmed_continuation_alertable():
+def test_intraday_stock_alert_score_keeps_clean_confirmed_continuation_alertable(monkeypatch):
+    monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"RUNR"}, "unit"))
     row = {
         "ticker": "RUNR",
         "grade": "A",
@@ -1844,11 +1854,6 @@ def test_early_mover_blocks_extreme_turnover_without_alpha():
 def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
-    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
-        "ok": True,
-        "reason": "5m_breakout_volume_confirmed",
-        "volume_ratio": 1.6,
-    })
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
 
@@ -1863,7 +1868,7 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     assert "Entry" in sent[0][1]
     assert "BTC" in sent[0][1]
     assert "V/MCap 8.5%" in sent[0][1]
-    assert "5m_breakout_volume_confirmed" in sent[0][1]
+    assert "Swing-Struktur" in sent[0][1]
 
 
 def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch):
@@ -1914,6 +1919,7 @@ def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
 
 def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": False,
@@ -1930,6 +1936,7 @@ def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
 def test_early_mover_email_blocks_1m_only_trigger(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     api._EMAIL_SEND_LOG.clear()
+    monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -1950,6 +1957,7 @@ def test_early_mover_email_blocks_1m_only_trigger(tmp_path, monkeypatch):
 
 def test_early_mover_email_checks_realtime_trigger_when_cache_unconfirmed(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -1995,10 +2003,10 @@ def test_early_mover_signal_state_keeps_1m_trigger_as_wait():
     })
 
     assert row["trade_signal"] == "WARTEN"
-    assert row["entry_status"] == "WAIT_FOR_5M_CONFIRMATION"
+    assert row["entry_status"] == "WAIT_FOR_TRIGGER"
     assert row["alertable_crypto"] is False
     assert row["execution_trigger_ok"] is False
-    assert "5m-Bestaetigung" in row["signal_label"]
+    assert "Entry-Bestaetigung" in row["signal_label"]
 
 
 def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):

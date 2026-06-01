@@ -1625,7 +1625,10 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                 body: JSON.stringify({
                     enabled: next.email_alerts_enabled,
-                    alert_email: next.alert_email || user.email
+                    alert_email: next.alert_email || user.email,
+                    narrative_email_frequency: next.narrative_email_frequency,
+                    trade_alert_horizon: next.trade_alert_horizon || 'swing',
+                    scanner_trade_horizon: next.scanner_trade_horizon || 'swing'
                 })
             });
             const data = await res.json();
@@ -1730,6 +1733,46 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                 </div>
                 {!alertSettings?.has_email_alerts && (
                     <div style={{ marginTop: 10, fontSize: 12, color: '#f59e0b' }}>Email-Alerts sind in deinem aktuellen Plan nicht enthalten.</div>
+                )}
+                {alertSettings?.has_email_alerts && (
+                    <div style={{ marginTop: 16, display: 'grid', gap: 14 }}>
+                        {[
+                            ['trade_alert_horizon', 'Signal-Mail Modus', 'Welche Trade-Mails du erhalten willst. Swing ist Standard; Intraday ist separat.'],
+                            ['scanner_trade_horizon', 'Scanner Default', 'Voreinstellung fuer manuelle Scanner-Ansicht und kuenftige Scan-Filter.']
+                        ].map(([key, title, help]) => (
+                            <div key={key} style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 10, background: '#f8fafc' }}>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 3 }}>{title}</div>
+                                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>{help}</div>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    {[
+                                        ['swing', 'Swing'],
+                                        ['intraday', 'Intraday'],
+                                        ['both', 'Beides']
+                                    ].map(([value, label]) => {
+                                        const active = (alertSettings?.[key] || 'swing') === value;
+                                        return (
+                                            <button
+                                                key={value}
+                                                onClick={() => saveAlertSettings({ [key]: value })}
+                                                disabled={alertSaving}
+                                                style={{
+                                                    padding: '7px 11px',
+                                                    border: `1px solid ${active ? '#2563eb' : '#cbd5e1'}`,
+                                                    borderRadius: 999,
+                                                    background: active ? '#dbeafe' : '#fff',
+                                                    color: active ? '#1d4ed8' : '#475569',
+                                                    fontSize: 12,
+                                                    fontWeight: 800,
+                                                    cursor: alertSaving ? 'wait' : 'pointer'
+                                                }}>
+                                                {label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
                 )}
             </div>
 
@@ -2393,7 +2436,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                     setChartData({
                                         ...chartJson,
                                         source: 'Daily Crypto Context',
-                                        chart_note: 'Nur Tages-Kontext - kein 5m Entry-Trigger',
+                                        chart_note: 'Nur Tages-Kontext - Entry-Trigger separat pruefen',
                                     });
                                     cryptoSuccess = true;
                                     break;
@@ -2987,14 +3030,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const timingHeadline = (() => {
         if (finalNoTrade) return 'NICHT TRADEN';
         if (finalWaitRetest) return 'WARTEN AUF RETEST';
-        if (finalWaitTrigger) return '5M TRIGGER WARTEN';
+        if (finalWaitTrigger) return 'ENTRY WARTEN';
         if (finalWaitContinuation) return 'WARTEN AUF FORTSETZUNG';
         if (finalWatchOnly) return 'BEOBACHTEN';
         if (tradeSignal === 'JETZT_TRADEN' && finalTradeable) return 'JETZT TRADEN';
         if (tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_TRADE' || normalizedSetupAction === 'NO_LONG_CHASE') return 'NICHT TRADEN';
         if (normalizedSetupAction === 'WAIT_FOR_RETEST') return 'WARTEN AUF RETEST';
         if (normalizedSetupAction === 'WAIT_FOR_BTC_CONFIRMATION') return 'BTC BESTAETIGUNG FEHLT';
-        if (normalizedSetupAction.includes('TRIGGER')) return '5M TRIGGER WARTEN';
+        if (normalizedSetupAction.includes('TRIGGER')) return 'ENTRY WARTEN';
         if (normalizedSetupAction === 'WAIT_FOR_CONTINUATION') return 'WARTEN AUF FORTSETZUNG';
         return 'BEOBACHTEN';
     })();
@@ -3032,7 +3075,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const modeIcon = sidebarMode === 'normal' ? '⬜' : sidebarMode === 'wide' ? '◻️' : '⬛';
     const riskLabelMap = {
         observe_only_scanner: 'nur Beobachtung',
-        no_intraday_execution_trigger: '5m Trigger fehlt',
+        no_intraday_execution_trigger: 'Entry-Bestaetigung fehlt',
         retest_trigger_missing: 'Retest fehlt',
         no_market_entry: 'kein Market-Entry',
         extreme_volume_turnover: 'extremer Umsatz',
@@ -3157,7 +3200,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const action = String(setupAction || '').toUpperCase();
         if (finalNoTrade) return 'Nicht handeln - Trade Health blockt dieses Setup.';
         if (finalWaitRetest) return 'Auf Retest nahe Entry warten.';
-        if (finalWaitTrigger) return 'Auf frischen 5m Trigger warten.';
+        if (finalWaitTrigger) return 'Auf Entry-Bestaetigung oder Retest warten.';
         if (finalWaitContinuation) return 'Erst neue Flag, VWAP-Hold oder Higher-Low handeln.';
         if (finalWatchOnly) return 'Beobachten, noch kein Sofort-Entry.';
         if (tradeSignal === 'JETZT_TRADEN' && finalTradeable) return 'Trigger bestaetigt - jetzt Spread/Chart pruefen.';
@@ -3165,7 +3208,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         if (action === 'WAIT_FOR_RETEST') return 'Auf Retest nahe Entry warten.';
         if (action === 'WAIT_FOR_BTC_CONFIRMATION') return 'Warten bis BTC nicht mehr dagegen laeuft.';
         if (action === 'WAIT_FOR_CONTINUATION') return 'Erst neue Flag, VWAP-Hold oder Higher-Low handeln.';
-        if (action === 'LONG_TRIGGER') return 'Auf frischen 5m Trigger warten.';
+        if (action === 'LONG_TRIGGER') return 'Auf Entry-Bestaetigung oder Retest warten.';
         return 'Beobachten, noch kein Sofort-Entry.';
     })();
     const reminderEligible = Boolean(
@@ -3190,7 +3233,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         const lines = Array.isArray(raw) && raw.length
             ? raw
             : [
-                '5m higher-low oder VWAP-Hold abwarten',
+                'Entry-Bestaetigung, Reclaim oder VWAP-Hold abwarten',
                 'kein Market-Buy in eine lange gruene Kerze',
                 'BTC darf im Entry-Moment nicht hart abverkaufen',
             ];
@@ -3393,7 +3436,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             </div>
                             {targetWeak && (
                                 <div className="mt-1 text-[11px]">
-                                    TP1/TP2 sind rechnerische Range/Fib-Projektionen oder zu nahe beieinander. Kein Blind-Entry ohne frischen 5m Trigger und sichtbare Struktur/VRVP-Reaktion.
+                                    TP1/TP2 sind rechnerische Range/Fib-Projektionen oder zu nahe beieinander. Kein Blind-Entry ohne Entry-Bestaetigung und sichtbare Struktur/VRVP-Reaktion.
                                 </div>
                             )}
                         </div>
@@ -3424,7 +3467,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                     <div key={idx}>- {line}</div>
                                 ))}
                                 <div className="mt-2 opacity-80">
-                                    Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigtem 5m Trigger oder sauberem Retest.
+                                    Early Movers ist long-only. JETZT_TRADEN erst mit bestaetigter Entry-Struktur oder sauberem Retest.
                                 </div>
                             </div>
                         )}
@@ -5237,7 +5280,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const action = String(item.trade_action || '').toUpperCase();
         if (decision === 'NO_TRADE') return { label: 'NO TRADE', cls: 'signal-bearish' };
         if (decision === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
-        if (decision === 'WAIT_FOR_TRIGGER') return { label: '5M WARTEN', cls: 'signal-abwarten' };
+        if (decision === 'WAIT_FOR_TRIGGER') return { label: 'ENTRY WARTEN', cls: 'signal-abwarten' };
         if (decision === 'WAIT_FOR_CONTINUATION') return { label: 'FORTSETZUNG', cls: 'signal-lightdiv' };
         if (decision === 'WATCH_ONLY') return { label: 'WATCH', cls: 'signal-abwarten' };
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
@@ -5245,7 +5288,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
-        if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: '5M WARTEN', cls: 'signal-abwarten' };
+        if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'ENTRY WARTEN', cls: 'signal-abwarten' };
         if (action === 'WAIT_FOR_CONTINUATION') return { label: 'FORTSETZUNG', cls: 'signal-lightdiv' };
         if (signal === 'WARTEN' || action === 'WAIT_FOR_BTC_CONFIRMATION') return { label: 'WARTEN', cls: 'signal-lightdiv' };
         return { label: 'WATCH', cls: 'signal-abwarten' };
@@ -5262,7 +5305,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'WARTEN AUF RETEST', detail: decisionLabel || 'Retest nahe Entry abwarten', cls: 'bg-amber-100 text-amber-800' };
         }
         if (decision === 'WAIT_FOR_TRIGGER') {
-            return { label: '5M TRIGGER WARTEN', detail: decisionLabel || 'Execution-Trigger fehlt noch', cls: 'bg-blue-100 text-blue-800' };
+            return { label: 'ENTRY WARTEN', detail: decisionLabel || 'Entry-Bestaetigung fehlt noch', cls: 'bg-blue-100 text-blue-800' };
         }
         if (decision === 'WAIT_FOR_CONTINUATION') {
             return { label: 'FORTSETZUNG FEHLT', detail: decisionLabel || 'Neue Flag/VWAP-Hold abwarten', cls: 'bg-amber-100 text-amber-800' };
@@ -5274,7 +5317,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'JETZT TRADEN', detail: 'Execution bestaetigt', cls: 'bg-green-100 text-green-800' };
         }
         if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) {
-            return { label: 'KEIN TRADE', detail: 'Nur Watch: erst nach bestaetigtem 5m Trigger handeln', cls: 'bg-amber-100 text-amber-800' };
+            return { label: 'KEIN TRADE', detail: 'Nur Watch: erst nach sauberem Entry-Trigger handeln', cls: 'bg-amber-100 text-amber-800' };
         }
         if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE' || action === 'NO_TRADE') {
             return { label: 'NICHT TRADEN', detail: 'Kein Entry', cls: 'bg-red-100 text-red-800' };
@@ -5292,7 +5335,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             return { label: 'LIQUIDITAET FEHLT', detail: 'Orderbuch/Perp zu duenn', cls: 'bg-yellow-100 text-yellow-800' };
         }
         if (action === 'LONG_TRIGGER') {
-            return { label: '5M TRIGGER WARTEN', detail: 'Noch kein 5m-Entry', cls: 'bg-blue-100 text-blue-800' };
+            return { label: 'ENTRY WARTEN', detail: 'Noch keine Entry-Bestaetigung', cls: 'bg-blue-100 text-blue-800' };
         }
         if (signal === 'WARTEN') {
             return { label: 'WARTEN', detail: 'Noch keine Entry-Freigabe', cls: 'bg-yellow-100 text-yellow-800' };
@@ -5301,7 +5344,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     };
     const earlyRiskLabelMap = {
         observe_only_scanner: 'nur Beobachtung',
-        no_intraday_execution_trigger: '5m Entry abwarten',
+        no_intraday_execution_trigger: 'Entry abwarten',
         retest_trigger_missing: 'Retest fehlt',
         no_market_entry: 'kein Market-Entry',
         extreme_volume_turnover: 'extremer Umsatz',
@@ -5325,7 +5368,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         duplicate_targets: 'TP1/TP2 ungueltig',
         targets_too_close: 'Ziele zu nah',
         invalid_target_plan: 'Tradeplan ungueltig',
-        pre_breakout_score_below_threshold: '5m Coil zu schwach',
+        pre_breakout_score_below_threshold: 'Entry-Setup zu schwach',
         not_pre_breakout_coil: 'kein echter Coil',
         pre_breakout_armed: 'Breakout-Watch',
     };

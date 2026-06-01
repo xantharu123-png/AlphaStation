@@ -63,6 +63,7 @@ ALLOW_LEGACY_ADMIN_MASTER_KEY = os.environ.get(
 JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
 PBKDF2_ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "260000"))
 NARRATIVE_EMAIL_FREQUENCIES = {"off", "daily", "twice_daily", "weekly"}
+TRADE_HORIZON_OPTIONS = {"swing", "intraday", "both"}
 
 # Stripe config (set via environment variables)
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -369,6 +370,8 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "alert_email": email,
         "email_alerts_enabled": True,
         "narrative_email_frequency": "daily",
+        "trade_alert_horizon": "swing",
+        "scanner_trade_horizon": "swing",
         "created_at": datetime.utcnow().isoformat(),
         "last_login": datetime.utcnow().isoformat(),
         "trial_ends_at": None,
@@ -411,6 +414,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "plan": "elite", "stripe_customer_id": None, "stripe_subscription_id": None,
             "alert_email": email, "email_alerts_enabled": True,
             "narrative_email_frequency": "daily",
+            "trade_alert_horizon": "swing", "scanner_trade_horizon": "swing",
             "created_at": datetime.utcnow().isoformat(), "last_login": datetime.utcnow().isoformat(),
             "trial_ends_at": None,
         }
@@ -703,13 +707,35 @@ def _normalize_narrative_email_frequency(value: Any) -> str:
     return aliases.get(freq, freq if freq in NARRATIVE_EMAIL_FREQUENCIES else "daily")
 
 
-def get_email_alert_recipients(alert_type: str = "", frequency: str = "") -> List[str]:
+def _normalize_trade_horizon(value: Any) -> str:
+    horizon = str(value or "swing").strip().lower().replace("-", "_")
+    aliases = {
+        "swing": "swing",
+        "swingtrading": "swing",
+        "swing_trading": "swing",
+        "daily": "swing",
+        "mehrtagig": "swing",
+        "intraday": "intraday",
+        "daytrade": "intraday",
+        "daytrading": "intraday",
+        "day_trading": "intraday",
+        "5m": "intraday",
+        "both": "both",
+        "beides": "both",
+        "all": "both",
+        "alle": "both",
+    }
+    return aliases.get(horizon, horizon if horizon in TRADE_HORIZON_OPTIONS else "swing")
+
+
+def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "") -> List[str]:
     """Return unique alert recipients for active plans with email-alert access."""
     recipients: List[str] = []
     db = _load_users()
     changed = False
     alert_type = str(alert_type or "").strip().lower()
     frequency = _normalize_narrative_email_frequency(frequency) if frequency else ""
+    trade_horizon = _normalize_trade_horizon(trade_horizon) if trade_horizon else ""
     for email, user in db.get("users", {}).items():
         if not isinstance(user, dict):
             continue
@@ -734,6 +760,10 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "") -> Lis
                 continue
             if frequency and user_frequency != frequency:
                 continue
+        if trade_horizon and alert_type != "narrative_pulse":
+            user_horizon = _normalize_trade_horizon(user.get("trade_alert_horizon", "swing"))
+            if user_horizon != "both" and user_horizon != trade_horizon:
+                continue
         alert_email = str(user.get("alert_email") or email).strip().lower()
         if "@" in alert_email:
             recipients.append(alert_email)
@@ -753,6 +783,9 @@ def get_user_alert_settings(token: str) -> Dict[str, Any]:
         "alert_email": user.get("alert_email") or email,
         "narrative_email_frequency": _normalize_narrative_email_frequency(user.get("narrative_email_frequency", "daily")),
         "narrative_email_frequency_options": ["off", "daily", "twice_daily", "weekly"],
+        "trade_alert_horizon": _normalize_trade_horizon(user.get("trade_alert_horizon", "swing")),
+        "scanner_trade_horizon": _normalize_trade_horizon(user.get("scanner_trade_horizon", "swing")),
+        "trade_horizon_options": ["swing", "intraday", "both"],
         "has_email_alerts": get_plan_features(get_user_plan(token)).get("has_email_alerts", False),
     }
 
@@ -762,6 +795,8 @@ def update_user_alert_settings(
     enabled: Optional[bool] = None,
     alert_email: Optional[str] = None,
     narrative_email_frequency: Optional[str] = None,
+    trade_alert_horizon: Optional[str] = None,
+    scanner_trade_horizon: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = verify_token(token)
     if not payload:
@@ -783,6 +818,16 @@ def update_user_alert_settings(
         if frequency not in NARRATIVE_EMAIL_FREQUENCIES:
             return {"success": False, "message": "Invalid narrative email frequency"}
         user["narrative_email_frequency"] = frequency
+    if trade_alert_horizon is not None:
+        horizon = _normalize_trade_horizon(trade_alert_horizon)
+        if horizon not in TRADE_HORIZON_OPTIONS:
+            return {"success": False, "message": "Invalid trade alert horizon"}
+        user["trade_alert_horizon"] = horizon
+    if scanner_trade_horizon is not None:
+        horizon = _normalize_trade_horizon(scanner_trade_horizon)
+        if horizon not in TRADE_HORIZON_OPTIONS:
+            return {"success": False, "message": "Invalid scanner trade horizon"}
+        user["scanner_trade_horizon"] = horizon
     db["users"][email] = user
     _save_users(db)
     return {"success": True, "settings": get_user_alert_settings(token)}

@@ -87,6 +87,24 @@ def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp
     assert auth._load_users()["users"]["expiredtrial@example.com"]["plan"] == "expired"
 
 
+def test_trade_alert_recipients_respect_swing_intraday_horizon(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+
+    for email, horizon in (
+        ("swing@example.com", "swing"),
+        ("intraday@example.com", "intraday"),
+        ("both@example.com", "both"),
+    ):
+        assert auth.register_user(email, "secret", email.split("@")[0])["success"] is True
+        db = auth._load_users()
+        db["users"][email]["plan"] = "elite"
+        db["users"][email]["trade_alert_horizon"] = horizon
+        auth._save_users(db)
+
+    assert auth.get_email_alert_recipients(trade_horizon="swing") == ["both@example.com", "swing@example.com"]
+    assert auth.get_email_alert_recipients(trade_horizon="intraday") == ["both@example.com", "intraday@example.com"]
+
+
 def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
     _isolate_auth_store(monkeypatch, tmp_path)
 
@@ -98,13 +116,22 @@ def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
 
     token = "unit-token"
     monkeypatch.setattr(auth, "verify_token", lambda value: {"email": "elite@example.com"} if value == token else None)
-    updated = auth.update_user_alert_settings(token, enabled=False, alert_email="desk@example.com", narrative_email_frequency="weekly")
+    updated = auth.update_user_alert_settings(
+        token,
+        enabled=False,
+        alert_email="desk@example.com",
+        narrative_email_frequency="weekly",
+        trade_alert_horizon="both",
+        scanner_trade_horizon="intraday",
+    )
 
     assert updated["success"] is True
     settings = auth.get_user_alert_settings(token)
     assert settings["email_alerts_enabled"] is False
     assert settings["alert_email"] == "desk@example.com"
     assert settings["narrative_email_frequency"] == "weekly"
+    assert settings["trade_alert_horizon"] == "both"
+    assert settings["scanner_trade_horizon"] == "intraday"
     assert settings["has_email_alerts"] is True
 
 
