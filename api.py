@@ -855,6 +855,11 @@ _EARLY_MOVER_SEND_ARMED_EMAILS = str(
     or _SECRETS.get("EARLY_MOVER_SEND_ARMED_EMAILS")
     or "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
+_NEW_LISTING_SEND_DUMP_WATCH_EMAILS = str(
+    os.environ.get("NEW_LISTING_SEND_DUMP_WATCH_EMAILS")
+    or _SECRETS.get("NEW_LISTING_SEND_DUMP_WATCH_EMAILS")
+    or "1"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Fix: POLYGON_KEY aus secrets.toml laden falls env var leer
 if not POLYGON_KEY:
@@ -886,7 +891,7 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 }
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
 _NEW_LISTING_MIN_ALERT_RR = 1.5
-_NEW_LISTING_WATCH_MIN_SCORE = 45
+_NEW_LISTING_WATCH_MIN_SCORE = 70
 _NEW_LISTING_WATCH_MIN_PUMP_PCT = 15.0
 _NEW_LISTING_WATCH_MIN_RR = 1.0
 _NEW_LISTING_WATCH_DEDUPE_SEC = 20 * 3600
@@ -965,7 +970,6 @@ _ALERT_EMAIL_MAX_ROWS = 10
 _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys()) | {
     "SDS", "UDOW", "SVXY", "TVIX",
 }
-_SEND_WATCHLIST_EMAILS = False
 _SIGNAL_ONLY_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
     "stock_strategy", "strategy_scan", "volume_spikes",
@@ -1112,7 +1116,8 @@ def _email_alert_status() -> Dict[str, Any]:
         "subscriber_recipient_count": len(platform_recipients),
         "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
         "default_trade_horizon": _normalize_trade_horizon_value(_DEFAULT_TRADE_HORIZON),
-        "crypto_armed_watch_mails_enabled": False,
+        "crypto_armed_watch_mails_enabled": _EARLY_MOVER_SEND_ARMED_EMAILS,
+        "new_listing_dump_watch_mails_enabled": _NEW_LISTING_SEND_DUMP_WATCH_EMAILS,
         "startup_cooldown_remaining_seconds": startup_remaining,
         "cooldown_entries": len(_EMAIL_COOLDOWN),
         "scanner_cooldowns_seconds": {
@@ -4761,7 +4766,7 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
             "crash_mail_status_label": "Crash-Mail wuerde jetzt rausgehen" if crash_alertable else "Keine Crash-Mail: Gates blockieren oder Dedupe aktiv",
         })
     if scanner_name == "early_movers":
-        armed_mail_enabled = False
+        armed_mail_enabled = bool(_EARLY_MOVER_SEND_ARMED_EMAILS)
         audit.update({
             "armed_watch_count": len(armed_alertable),
             "armed_watch_preview": armed_alertable[:10],
@@ -4782,6 +4787,29 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
                 else "Keine Armed-Mail: Watch/Armed ist kein bestaetigtes Trade-Signal"
             ),
             "armed_mail_enabled": armed_mail_enabled,
+        })
+    if scanner_name == "new_listing":
+        raw_rows, _ = load_cache_file(cache_file, max_age_hours=24)
+        dump_watch_candidates = _new_listing_watch_candidates({"monitoring": raw_rows})
+        dump_watch_enabled = bool(_NEW_LISTING_SEND_DUMP_WATCH_EMAILS)
+        audit.update({
+            "dump_watch_mails_enabled": dump_watch_enabled,
+            "dump_watch_candidate_count": len(dump_watch_candidates),
+            "dump_watch_preview": dump_watch_candidates[:10],
+            "dump_watch_mail_status": (
+                "DUMP_WATCH_READY"
+                if dump_watch_enabled and dump_watch_candidates
+                else "DISABLED"
+                if dump_watch_candidates
+                else "NO_DUMP_WATCH"
+            ),
+            "dump_watch_mail_status_label": (
+                "New-Listing-Dump-Watch-Mail moeglich; Short-Mail kommt separat erst bei bestaetigtem 5m Crack/Rejection."
+                if dump_watch_enabled and dump_watch_candidates
+                else "New-Listing-Dump-Watch-Mails sind deaktiviert."
+                if dump_watch_candidates
+                else "Keine Dump-Watch-Mail: keine gepumpten New Listings mit ausreichender Safety/Qualitaet."
+            ),
         })
     return audit
 
@@ -5322,7 +5350,10 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             })
 
     for item in payload.get("monitoring", []) or []:
-        if not isinstance(item, dict) or item.get("source") != "new_listing":
+        if not isinstance(item, dict):
+            continue
+        listing_source = item.get("source") if item.get("source") == "new_listing" else item.get("listing_source")
+        if listing_source != "new_listing":
             continue
         if _new_listing_exchange_mismatch(item):
             continue
@@ -5353,7 +5384,7 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             "risk_flags": item.get("risk_flags", []) if isinstance(item.get("risk_flags", []), list) else [],
             "title": item.get("announcement_title", ""),
             "url": item.get("announcement_url", ""),
-            "listing_source": item.get("source", ""),
+            "listing_source": listing_source,
         })
 
     deduped: Dict[str, Dict[str, Any]] = {}
@@ -5381,9 +5412,11 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
         score = c.get("exh_score") or 0
         pump_pct = c.get("pump_pct") or 0
         rr = c.get("rr") or 0
+        grade = str(c.get("grade") or "").upper()
         flags = set(c.get("risk_flags") or [])
         watch_quality = (
-            score >= _NEW_LISTING_WATCH_MIN_SCORE
+            grade in _ALERT_TOP_GRADES
+            and score >= _NEW_LISTING_WATCH_MIN_SCORE
             and rr >= _NEW_LISTING_WATCH_MIN_RR
             and not (flags & _NEW_LISTING_WATCH_BLOCK_FLAGS)
         )
@@ -5396,20 +5429,20 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
 
 
 def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
-    if not _SEND_WATCHLIST_EMAILS:
-        _record_email_event("Crypto New Listing Watchlist", "skipped", "watchlist_emails_disabled_signal_only_mode")
+    if not _NEW_LISTING_SEND_DUMP_WATCH_EMAILS:
+        _record_email_event("Crypto New Listing Dump-Watch", "skipped", "new_listing_dump_watch_emails_disabled")
         return False
     now = now or time.time()
     candidates = _new_listing_watch_candidates(payload)
     if not candidates:
-        _record_email_event("Crypto New Listing Watchlist", "skipped", "no_new_listing_watch_candidates")
+        _record_email_event("Crypto New Listing Dump-Watch", "skipped", "no_new_listing_dump_watch_candidates")
         return False
 
     watch_dt = datetime.fromtimestamp(now, timezone.utc)
     day_key = watch_dt.strftime("%Y%m%d")
     dedupe_key = f"new_listing_watch_{day_key}"
     if not _email_dedupe_claim(dedupe_key, _NEW_LISTING_WATCH_DEDUPE_SEC, now=now):
-        _record_email_event("Crypto New Listing Watchlist", "skipped", "daily_watchlist_dedupe_active")
+        _record_email_event("Crypto New Listing Dump-Watch", "skipped", "daily_dump_watch_dedupe_active")
         return False
 
     def _fmt(value, suffix="", default="-"):
@@ -5431,7 +5464,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
             return "WARTEN", "5m Strukturbruch/Rejection fehlt noch."
         if "turn_not_confirmed" in flags or "crack_structure_weak" in flags:
             return "WARTEN", "Turn/Rejection ist noch zu schwach."
-        return "BEOBACHTEN", "Nur auf Watchlist - Short-Freigabe fehlt."
+        return "BEOBACHTEN", "Nur beobachten - Short-Freigabe fehlt."
 
     def _missing_steps(c: Dict[str, Any]) -> str:
         flags = set(c.get("risk_flags") or [])
@@ -5472,11 +5505,11 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     if suppressed:
         suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine Jetzt-Short-Mail: " + ", ".join(f"{_safe(_alert_reason_label(k))}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
-    <h2 style="color:#f97316">Crypto New Listing Watch - NICHT SHORTEN</h2>
+    <h2 style="color:#f97316">Crypto New Listing Dump-Watch - NICHT SHORTEN</h2>
     <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | {len(candidates)} Coin(s) nur zur Beobachtung</p>
     <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px;margin:12px 0;color:#7c2d12">
-      <b>Was jetzt tun?</b> Nicht shorten. Coin auf Watchlist lassen und auf die separate <b>Jetzt-Short-Mail</b> warten.
-      Diese Watch-Mail bedeutet nur: New Listing hat bereits gepumpt, aber 5m Crack/Rejection, Safety oder Timing sind noch nicht voll bestaetigt.
+      <b>Was jetzt tun?</b> Nicht shorten. Chart aktiv beobachten und auf die separate <b>Jetzt-Short-Mail</b> warten.
+      Diese Dump-Watch-Mail bedeutet nur: New Listing hat bereits gepumpt, aber 5m Crack/Rejection, Safety oder Timing sind noch nicht voll bestaetigt.
     </div>
     {suppressed_text}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -5484,9 +5517,9 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Warum im Blick</th>
     <th style="padding:8px;text-align:left">Qualitaet</th><th style="padding:8px;text-align:left">Was fehlt</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Watch-Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Dump-Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
-    return _send_email_alert(f"Crypto New Listing beobachten - NICHT SHORTEN: {len(candidates)} Coin(s)", body)
+    return _send_email_alert(f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN", body)
 
 
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
@@ -10478,6 +10511,7 @@ def get_email_alert_status():
             "Short-Ticker wurde bereits bearish gemeldet; Crash hat Vorrang vor Bear/BI-Short.",
             "Mail wurde wegen ETF/ETP-Inhalt geblockt.",
             "Pump-&-Dump: kein aktives SHORT-now Signal mit Safety OK, unverpassten Targets und R:R >= 1.5.",
+            "New Listing Dump-Watch: keine gepumpten neuen Coins mit Safety/Qualitaet oder taeglicher Dedupe ist aktiv.",
             "Gmail SMTP/Test-Mail ist fehlgeschlagen.",
         ],
         "timestamp": datetime.now().isoformat(),

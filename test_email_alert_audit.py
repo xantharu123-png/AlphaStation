@@ -1355,11 +1355,12 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
     assert "RISK" not in sent[0][1]
 
 
-def test_new_listing_pipeline_does_not_send_watch_when_no_short_now(monkeypatch):
+def test_new_listing_pipeline_sends_dump_watch_when_no_short_now(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+    monkeypatch.setattr(api, "_NEW_LISTING_SEND_DUMP_WATCH_EMAILS", True)
 
     payload = {
         "signals": [],
@@ -1400,7 +1401,43 @@ def test_new_listing_pipeline_does_not_send_watch_when_no_short_now(monkeypatch)
 
     api._send_new_listing_pipeline_alerts(payload)
 
+    assert len(sent) == 1
+    assert "Crypto New Listing Dump-Watch" in sent[0][0]
+    assert "NICHT SHORTEN" in sent[0][0]
+    assert "BABY" in sent[0][1]
+    assert "Chart aktiv beobachten" in sent[0][1]
+
+
+def test_new_listing_dump_watch_can_be_disabled(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    events = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_record_email_event", lambda subject, status, reason="": events.append((subject, status, reason)))
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
+    monkeypatch.setattr(api, "_NEW_LISTING_SEND_DUMP_WATCH_EMAILS", False)
+
+    payload = {
+        "signals": [],
+        "monitoring": [{
+            "symbol": "BABYUSDT",
+            "exchange": "mexc",
+            "source": "new_listing",
+            "listing_age_hours": 18,
+            "trade_category": "NEW_LISTING_WATCH",
+            "grade": "A",
+            "exh_score": 84,
+            "pump_pct": 90,
+            "from_ath_pct": 3,
+            "rr_effective": 2.0,
+            "risk_flags": [],
+        }],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
     assert sent == []
+    assert events[-1] == ("Crypto New Listing Dump-Watch", "skipped", "new_listing_dump_watch_emails_disabled")
 
 
 def test_new_listing_pipeline_does_not_send_low_score_watch_mail(monkeypatch):
