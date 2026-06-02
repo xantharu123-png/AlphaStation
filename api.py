@@ -90,6 +90,7 @@ from modules.data_fetchers import (
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import normalize_alert_trade_levels
+from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
 
 try:
     from modules.backtests import run_bi_v2_backtest, run_biotech_backtest
@@ -960,6 +961,7 @@ _STOCK_SWING_ALERT_SCANNERS = set(_STOCK_ALERT_SCANNERS) - _INTRADAY_ONLY_SCANNE
 _TRADE_HORIZON_OPTIONS = {"swing", "intraday", "both"}
 _DEFAULT_TRADE_HORIZON = os.environ.get("ALPHA_TRADE_HORIZON_DEFAULT", "swing")
 _CRYPTO_STRATEGY_ALERTS_ENABLED = False
+_ALERT_EMAIL_MAX_ROWS = 10
 _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys()) | {
     "SDS", "UDOW", "SVXY", "TVIX",
 }
@@ -979,6 +981,73 @@ _DISPLAY_ONLY_SUPPRESSION_REASONS = {
     "persistent_dedupe_active",
     "bearish_ticker_already_alerted",
 }
+
+
+def _stock_trade_email_status(now_utc: Optional[datetime] = None) -> Dict[str, Any]:
+    """Return whether actionable US-stock trade mails may be sent now.
+
+    `get_current_trading_session()` intentionally returns "Regular" at night so
+    the UI can show last regular-session data. Mail gates need the stricter
+    exchange-calendar truth: only regular NYSE/Nasdaq hours count.
+    """
+    try:
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        # Prefer the existing official exchange calendar, including holidays
+        # and early closes, when it is available in the fully loaded module.
+        calendar_fn = globals().get("_build_exchange_calendar_status")
+        if callable(calendar_fn):
+            for exchange in calendar_fn(now_utc):
+                if exchange.get("code") == "US":
+                    if exchange.get("is_open"):
+                        return {
+                            "allowed": True,
+                            "session": "US_REGULAR",
+                            "reason": f"US regular session open ({exchange.get('now_local')} ET)",
+                            "market_time": exchange.get("now_local"),
+                        }
+                    reason = exchange.get("closed_reason") or "US market closed"
+                    next_open = exchange.get("next_open_zurich") or exchange.get("next_open_local")
+                    if next_open:
+                        reason = f"{reason}; next open {next_open}"
+                    return {
+                        "allowed": False,
+                        "session": "CLOSED",
+                        "reason": reason,
+                        "market_time": exchange.get("now_local"),
+                    }
+
+        from zoneinfo import ZoneInfo
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        allowed = now_et.weekday() < 5 and market_open <= now_et < market_close
+        return {
+            "allowed": allowed,
+            "session": "US_REGULAR" if allowed else "CLOSED",
+            "reason": f"{'US regular session open' if allowed else 'US market closed'} ({now_et.strftime('%H:%M')} ET)",
+            "market_time": now_et.strftime("%H:%M"),
+        }
+    except Exception as exc:
+        return {
+            "allowed": False,
+            "session": "UNKNOWN",
+            "reason": f"US market-session check failed: {exc}",
+            "market_time": None,
+        }
+
+
+def _stock_trade_email_allowed(scanner_name: str) -> Tuple[bool, str]:
+    status = _stock_trade_email_status()
+    if status.get("allowed"):
+        return True, str(status.get("reason") or "US regular session open")
+    reason = str(status.get("reason") or "US market closed")
+    _record_email_event(f"{scanner_name} Stock Alert", "skipped", f"us_market_closed:{reason}")
+    print(f"[Alert] {scanner_name}: SKIP stock trade mail outside US regular session ({reason})")
+    return False, reason
 
 
 def _normalize_trade_horizon_value(value: Any) -> str:
@@ -1688,6 +1757,59 @@ def _alert_trade_levels(row: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _humanize_alert_level_source(value: Any) -> str:
+    """Short user-facing label for where mail levels came from."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    text = raw.replace("_", " ").replace("-", " ")
+    normalized = text.lower()
+    replacements = {
+        "vrvp": "VRVP",
+        "poc": "POC",
+        "vah": "VAH",
+        "val": "VAL",
+        "hvn": "HVN",
+        "lvn": "LVN",
+        "atr": "ATR",
+        "vwap": "VWAP",
+        "ema": "EMA",
+        "ma20": "MA20",
+        "ma50": "MA50",
+        "tp1": "TP1",
+        "tp2": "TP2",
+    }
+    for src, dst in replacements.items():
+        text = re.sub(rf"\b{re.escape(src)}\b", dst, text, flags=re.IGNORECASE)
+    if "measured move" in normalized:
+        text = "Measured Move"
+    elif "fallback" in normalized and "measured" not in normalized:
+        text = text.replace("fallback", "Fallback")
+    elif "range" in normalized:
+        text = text.replace("range", "Range")
+    elif "invalidation" in normalized:
+        text = text.replace("invalidation", "Invalidation")
+    return text[:90]
+
+
+def _alert_level_source_line(row: Dict[str, Any]) -> str:
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    stop_source = setup.get("stop_source") or row.get("stop_source")
+    tp1_source = setup.get("tp1_source") or row.get("tp1_source")
+    tp2_source = setup.get("tp2_source") or row.get("tp2_source")
+    parts = []
+    if stop_source:
+        parts.append(f"Stop: {_humanize_alert_level_source(stop_source)}")
+    if tp1_source:
+        parts.append(f"TP1: {_humanize_alert_level_source(tp1_source)}")
+    if tp2_source:
+        parts.append(f"TP2: {_humanize_alert_level_source(tp2_source)}")
+    if not parts:
+        return ""
+    safe = html.escape(" | ".join(parts))
+    return f'<br><span style="color:#64748b;font-size:11px">Level-Quelle: {safe}</span>'
+
+
 def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
@@ -1702,6 +1824,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     tp2 = _format_alert_price(levels.get("tp2"))
     rr = levels.get("rr")
     rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    level_source_text = _alert_level_source_line(row)
     source_text = (
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
         if levels.get("estimated") else ""
@@ -1711,6 +1834,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
         f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b></span>'
         f'{rr_text}'
+        f'{level_source_text}'
         f'{source_text}'
     )
 
@@ -3027,56 +3151,36 @@ def _early_mover_trade_score(row: Dict[str, Any]) -> int:
 
 def _early_mover_vrvp_from_bars(bars: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Build compact VRVP levels from exchange candles for target selection."""
-    if not bars or len(bars) < 20:
-        return None
-    ohlcv = []
-    for bar in bars:
-        high = _alert_float(bar.get("high"))
-        low = _alert_float(bar.get("low"))
-        close = _alert_float(bar.get("close"))
-        open_ = _alert_float(bar.get("open"), close)
-        volume = _alert_float(bar.get("volume"), 0) or 0
-        if high is None or low is None or close is None or high <= 0 or low <= 0 or high < low:
-            continue
-        ohlcv.append({"open": open_, "high": high, "low": low, "close": close, "volume": volume})
-    if len(ohlcv) < 20:
-        return None
-
-    profile = calculate_volume_profile(ohlcv, num_bins=18)
+    current = _alert_float((bars or [{}])[-1].get("close")) if bars else None
+    profile = build_vrvp_structure(
+        bars or [],
+        current,
+        "LONG",
+        timeframe="5m",
+        num_bins=18,
+        min_bars=20,
+        lookback=96,
+    )
     if not profile:
         return None
 
     levels = []
 
-    def _add_level(price: Any, source: str, weight: int) -> None:
-        number = _alert_float(price)
-        if number is None or number <= 0:
-            return
+    for level in (profile.get("resistances") or []) + (profile.get("supports") or []):
+        price = _alert_float(level.get("price"))
+        if price is None or price <= 0:
+            continue
         levels.append({
-            "price": _round_crypto_price(number),
-            "source": source,
-            "weight": weight,
+            "price": _round_crypto_price(price),
+            "source": str(level.get("source") or "vrvp_level").lower().replace(" ", "_"),
+            "weight": int((_alert_float(level.get("weight"), 1) or 1) * 40),
         })
-
-    _add_level(profile.get("vah"), "vrvp_vah_resistance", 90)
-    _add_level(profile.get("poc"), "vrvp_poc_acceptance", 85)
-    _add_level(profile.get("val"), "vrvp_val_support", 75)
-    for hvn in profile.get("hvns") or []:
-        _add_level(hvn.get("mid"), "vrvp_hvn_resistance", 80)
-    for lvn in profile.get("lvns") or []:
-        _add_level(lvn.get("high"), "vrvp_lvn_upper_edge", 65)
-
-    unique = {}
-    for level in levels:
-        key = round(float(level["price"]), 10)
-        if key not in unique or level["weight"] > unique[key]["weight"]:
-            unique[key] = level
 
     return {
         "poc": _round_crypto_price(profile.get("poc")),
         "vah": _round_crypto_price(profile.get("vah")),
         "val": _round_crypto_price(profile.get("val")),
-        "levels": sorted(unique.values(), key=lambda item: item["price"]),
+        "levels": sorted(levels, key=lambda item: item["price"]),
         "source": "exchange_vrvp_5m",
     }
 
@@ -4489,6 +4593,17 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     if quality_gate_actionable and scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         reasons.extend(_alert_trade_health_reasons(row, scanner_name))
 
+    if quality_gate_actionable and scanner_name in (_STOCK_ALERT_SCANNERS - _SWING_STOCK_STRATEGY_ALERT_SCANNERS):
+        entry_quality_text = str(
+            row.get("entry_quality")
+            or row.get("long_entry_quality")
+            or row.get("short_entry_quality")
+            or ""
+        ).upper()
+        non_trade_quality_markers = ("WATCH", "WAIT", "NO_CHASE", "RECLAIM", "FADE", "LATE", "CHASE")
+        if entry_quality_text and any(marker in entry_quality_text for marker in non_trade_quality_markers):
+            reasons.append("entry_quality_watch_only")
+
     cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
     cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
     cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
@@ -4949,6 +5064,10 @@ def _check_and_alert(scanner_name, cache_file):
         if not isinstance(results, list):
             print(f"[Alert] {scanner_name}: Cache hat kein gültiges results-Array")
             return
+        if scanner_name in _STOCK_ALERT_SCANNERS:
+            allowed, _reason = _stock_trade_email_allowed(scanner_name)
+            if not allowed:
+                return
         print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
         # V2.6: Grade-Schwellen VERSCHÄRFT — nur noch hochkarätige Setups
         # BI: S/A (kein B mehr!), Biotech: A (hat kein S)
@@ -5051,6 +5170,17 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     if not results:
         return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
+    if market_type == "stocks":
+        market_status = _stock_trade_email_status()
+        if not market_status.get("allowed"):
+            reason = str(market_status.get("reason") or "US market closed")
+            print(f"[Alert] Aktien Strategie - {strategy_name}: SKIP stock strategy mail outside US regular session ({reason})")
+            _record_email_event(
+                f"Aktien Strategie Alert - {strategy_name}",
+                "skipped",
+                f"stock_market_closed_before_strategy_mail:{reason}",
+            )
+            return
     now = time.time()
     alerts = []
     suppressed: Dict[str, int] = {}
@@ -5096,7 +5226,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         return
 
     rows = ""
-    for a in alerts[:10]:
+    email_alerts = alerts[:_ALERT_EMAIL_MAX_ROWS]
+    for a in email_alerts:
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
@@ -5120,9 +5251,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if market_type == "stocks"
         else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
     )
+    count_text = f"{len(email_alerts)} von {len(alerts)}" if len(alerts) > len(email_alerts) else str(len(alerts))
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {count_text} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
@@ -5133,9 +5265,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
-    sent = _send_email_alert(f"{label}: {len(alerts)} Top-Setup(s) - {strategy_name}", body)
+    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body)
     if sent:
-        for alert in alerts:
+        for alert in email_alerts:
             if alert.get("cooldown_key"):
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
@@ -8043,6 +8175,7 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
 
     changed = 0
     valid_after = 0
+    history_cache: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -8080,6 +8213,25 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
         )
         if not setup:
             continue
+        ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
+        if ticker:
+            daily_bars = _fetch_strategy_daily_history(ticker, 90, history_cache)
+            vrvp = build_vrvp_structure(
+                daily_bars,
+                price,
+                "LONG",
+                timeframe="1D",
+                num_bins=24,
+                min_bars=30,
+                lookback=90,
+            )
+            setup = apply_vrvp_to_trade_setup(
+                setup,
+                vrvp,
+                direction="LONG",
+                asset_type="stock_swing",
+                atr=atr,
+            )
 
         row["direction"] = "LONG"
         row["Signal_Direction"] = "LONG"
@@ -8088,7 +8240,10 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
         row["TP1"] = setup["tp1"]
         row["TP2"] = setup["tp2"]
         row["trade_setup"] = setup
-        row["Trade_Setup_Source"] = "biotech_daily_structure"
+        row["Trade_Setup_Source"] = "biotech_daily_vrvp_structure" if setup.get("vrvp_applied") else "biotech_daily_structure"
+        row["VRVP_POC"] = setup.get("vrvp_poc")
+        row["VRVP_VAH"] = setup.get("vrvp_vah")
+        row["VRVP_VAL"] = setup.get("vrvp_val")
         changed += 1
         if _alert_trade_levels(row).get("valid"):
             valid_after += 1
@@ -8371,6 +8526,22 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             float(history_metrics.get("range_pos") or close_pos * 100.0),
                         )
                         if _trade_setup:
+                            _vrvp = build_vrvp_structure(
+                                daily_bars,
+                                price,
+                                _setup_direction,
+                                timeframe="1D",
+                                num_bins=24,
+                                min_bars=30,
+                                lookback=90,
+                            )
+                            _trade_setup = apply_vrvp_to_trade_setup(
+                                _trade_setup,
+                                _vrvp,
+                                direction=_setup_direction,
+                                asset_type="stock_swing",
+                                atr=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                            )
                             strategy_row.update({
                                 "Entry": _trade_setup["entry"],
                                 "StopLoss": _trade_setup["stop"],
@@ -8381,7 +8552,11 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                                 "tp1": _trade_setup["tp1"],
                                 "tp2": _trade_setup["tp2"],
                                 "trade_setup": _trade_setup,
-                                "Trade_Setup_Source": "stock_strategy_20d_structure",
+                                "Trade_Setup_Source": "stock_strategy_20d_vrvp_structure" if _trade_setup.get("vrvp_applied") else "stock_strategy_20d_structure",
+                                "VRVP_POC": _trade_setup.get("vrvp_poc"),
+                                "VRVP_VAH": _trade_setup.get("vrvp_vah"),
+                                "VRVP_VAL": _trade_setup.get("vrvp_val"),
+                                "VRVP_Timeframe": _trade_setup.get("vrvp_timeframe"),
                             })
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
                         strategy_row["entry_quality"] = "SWING_SETUP"
@@ -9068,12 +9243,14 @@ def _bear_scan_wrapper() -> None:
                         low_20d = None
                         low_60d = None
                         has_history = False
+                        history_bars: List[Dict[str, Any]] = []
 
                         try:
                             url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_sym}/range/1/day/2024-01-01/2099-12-31"
                             resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc"})
                             if resp.status_code == 200:
                                 bars = resp.json().get("results", [])
+                                history_bars = bars if isinstance(bars, list) else []
                                 if len(bars) >= 21:
                                     has_history = True
                                     ma20 = sum(b.get("c", 0) for b in bars[1:21]) / 20
@@ -9216,6 +9393,23 @@ def _bear_scan_wrapper() -> None:
                             change_pct=chg_pct,
                         )
                         if trade_setup:
+                            bear_vrvp = build_vrvp_structure(
+                                history_bars,
+                                price,
+                                "SHORT",
+                                timeframe="1D",
+                                num_bins=24,
+                                min_bars=30,
+                                lookback=60,
+                            )
+                            trade_setup = apply_vrvp_to_trade_setup(
+                                trade_setup,
+                                bear_vrvp,
+                                direction="SHORT",
+                                asset_type="stock_swing",
+                                atr=max(day_high - day_low, price * 0.025),
+                            )
+                            trade_setup["trade_setup_source"] = "native_bear_vrvp_structure" if trade_setup.get("vrvp_applied") else trade_setup.get("trade_setup_source", "native_bear_structure")
                             bear_row.update(trade_setup)
                         if score >= 55:
                             bear_row.update(_fetch_bear_latest_intraday_state(ticker_sym))
@@ -9300,7 +9494,17 @@ def _bear_scan_wrapper() -> None:
             else:
                 _crash_dedupe_keys = []
 
-            if _crash_stocks:
+            _stock_bear_mail_status = _stock_trade_email_status()
+            _stock_bear_mail_allowed = bool(_stock_bear_mail_status.get("allowed"))
+            _stock_bear_mail_reason = str(_stock_bear_mail_status.get("reason") or "US market closed")
+            if _crash_stocks and not _stock_bear_mail_allowed:
+                _record_email_event(
+                    "Crash Alert",
+                    "skipped",
+                    f"stock_market_closed_before_crash_mail:{_stock_bear_mail_reason}",
+                )
+
+            if _crash_stocks and _stock_bear_mail_allowed:
                 _crash_ck = f"crash_summary_{datetime.now().strftime('%Y%m%d')}"
                 if _crash_ck not in _EMAIL_COOLDOWN:
                     _crash_rows = ""
@@ -9371,7 +9575,14 @@ def _bear_scan_wrapper() -> None:
                     f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                 )
             _total_signals = len(_bd_rows)
-            if _total_signals > 0:
+            if _total_signals > 0 and not _stock_bear_mail_allowed:
+                _record_email_event(
+                    "Bear Scanner Alert",
+                    "skipped",
+                    f"stock_market_closed_before_bear_mail:{_stock_bear_mail_reason}",
+                )
+
+            if _total_signals > 0 and _stock_bear_mail_allowed:
                 _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
                 if _bear_ck not in _EMAIL_COOLDOWN:
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Aktien-Shorts</p>"
@@ -15650,6 +15861,47 @@ def _orb_scanner_wrapper() -> None:
                     reward_blended = 0.5 * (entry - target1) + 0.5 * (entry - target2)
                     distance_to_entry_r = (entry - current_price) / risk if risk > 0 else 0
                     late_to_tp1 = current_price <= target1
+
+                _orb_vrvp = build_vrvp_structure(
+                    bars,
+                    current_price,
+                    breakout_dir,
+                    timeframe="5m",
+                    num_bins=18,
+                    min_bars=12,
+                    lookback=78,
+                )
+                _orb_setup = apply_vrvp_to_trade_setup(
+                    {
+                        "entry": entry,
+                        "stop": stop,
+                        "target1": target1,
+                        "target2": target2,
+                        "direction": breakout_dir,
+                        "level_model": "orb_range_projection",
+                        "tp1_source": "OR measured move",
+                        "tp2_source": "OR measured move",
+                        "stop_source": "OR midpoint tactical stop",
+                    },
+                    _orb_vrvp,
+                    direction=breakout_dir,
+                    asset_type="stock_intraday_orb",
+                    atr=or_size,
+                )
+                entry = _orb_setup.get("entry", entry)
+                stop = _orb_setup.get("stop", stop)
+                target1 = _orb_setup.get("target1", _orb_setup.get("tp1", target1))
+                target2 = _orb_setup.get("target2", _orb_setup.get("tp2", target2))
+                if breakout_dir == "LONG":
+                    risk = entry - stop
+                    reward_blended = 0.5 * (target1 - entry) + 0.5 * (target2 - entry)
+                    distance_to_entry_r = (current_price - entry) / risk if risk > 0 else 0
+                    late_to_tp1 = current_price >= target1
+                else:
+                    risk = stop - entry
+                    reward_blended = 0.5 * (entry - target1) + 0.5 * (entry - target2)
+                    distance_to_entry_r = (entry - current_price) / risk if risk > 0 else 0
+                    late_to_tp1 = current_price <= target1
                 rr_ratio = round(reward_blended / risk, 2) if risk > 0 else 0
                 if breakout_dir == "LONG":
                     live_entry = max(float(current_price), float(entry))
@@ -15832,6 +16084,14 @@ def _orb_scanner_wrapper() -> None:
                     "entry": entry, "live_entry": round(live_entry, 2), "stop": stop,
                     "invalidation_stop": invalidation_stop,
                     "target1": target1, "target2": target2,
+                    "trade_setup": _orb_setup,
+                    "vrvp_applied": _orb_setup.get("vrvp_applied", False),
+                    "vrvp_poc": _orb_setup.get("vrvp_poc"),
+                    "vrvp_vah": _orb_setup.get("vrvp_vah"),
+                    "vrvp_val": _orb_setup.get("vrvp_val"),
+                    "tp1_source": _orb_setup.get("tp1_source"),
+                    "tp2_source": _orb_setup.get("tp2_source"),
+                    "stop_source": _orb_setup.get("stop_source"),
                     "rr_ratio": rr_ratio,
                     "live_rr_ratio": live_rr_ratio,
                     "rr_model": "50/50 TP1/TP2",
@@ -15896,6 +16156,7 @@ def _orb_scanner_wrapper() -> None:
                     f'<td style="padding:8px;border-bottom:1px solid #eee">'
                     f'Entry ${b["entry"]}<br>Stop <span style="color:#dc2626">${b["stop"]}</span><br>'
                     f'TP1/TP2 <span style="color:#059669">${b["target1"]} / ${b["target2"]}</span>'
+                    f'{_alert_level_source_line(b)}'
                     f'</td></tr>'
                 )
             body = f'''<html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto">

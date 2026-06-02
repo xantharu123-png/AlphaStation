@@ -35,6 +35,8 @@ import html as html_lib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
+
 try:
     import requests as req
 except ImportError:
@@ -1200,6 +1202,16 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         "prior_3_low_broken": bool(prior_3_low and current_price < prior_3_low),
         "lower_high_confirmed": bool(last_candle["high"] < prior_6_high and current_price < recent_rejection_high),
         "bars_since_ath": bars_since_ath,
+        "vrvp_bars": [
+            {
+                "open": c.get("open", c.get("close", 0)),
+                "high": c.get("high", c.get("close", 0)),
+                "low": c.get("low", c.get("close", 0)),
+                "close": c.get("close", 0),
+                "volume": c.get("volume_usd", c.get("volume", 0)),
+            }
+            for c in candles[-72:]
+        ],
     }
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1947,6 +1959,42 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         stop_model = "micro_crack_stop"
     tp1 = ath * (1 - CONFIG["tp1_from_ath_pct"] / 100)
     tp2 = ath * (1 - CONFIG["tp2_from_ath_pct"] / 100)
+    tp1_source = "ath_dump_projection"
+    tp2_source = "ath_dump_projection"
+
+    vrvp = build_vrvp_structure(
+        pump_data.get("vrvp_bars") or [],
+        entry,
+        "SHORT",
+        timeframe="1h_listing",
+        num_bins=18,
+        min_bars=12,
+        lookback=72,
+    )
+    setup = apply_vrvp_to_trade_setup(
+        {
+            "entry": entry,
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "direction": "SHORT",
+            "level_model": "new_listing_ath_projection",
+            "stop_source": stop_model,
+            "tp1_source": tp1_source,
+            "tp2_source": tp2_source,
+        },
+        vrvp,
+        direction="SHORT",
+        asset_type="crypto_short",
+        atr=max(0.00000001, ath - current) if ath > current else current * 0.08,
+    )
+    entry = _to_float(setup.get("entry")) or entry
+    stop = _to_float(setup.get("stop")) or stop
+    tp1 = _to_float(setup.get("tp1")) or tp1
+    tp2 = _to_float(setup.get("tp2")) or tp2
+    stop_model = str(setup.get("stop_source") or stop_model)
+    tp1_source = str(setup.get("tp1_source") or tp1_source)
+    tp2_source = str(setup.get("tp2_source") or tp2_source)
 
     risk = max(0, stop - entry)
     reward1 = max(0, entry - tp1)
@@ -2217,6 +2265,13 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "stop_model": stop_model,
         "tp1": round(tp1, 6),
         "tp2": round(tp2, 6),
+        "tp1_source": tp1_source,
+        "tp2_source": tp2_source,
+        "trade_setup": setup,
+        "vrvp_applied": setup.get("vrvp_applied", False),
+        "vrvp_poc": setup.get("vrvp_poc"),
+        "vrvp_vah": setup.get("vrvp_vah"),
+        "vrvp_val": setup.get("vrvp_val"),
         "rr1": rr1,
         "rr2": rr2,
         "rr_effective": rr_effective,

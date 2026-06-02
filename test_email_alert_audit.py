@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,7 +9,7 @@ import api
 
 
 @pytest.fixture(autouse=True)
-def _mock_common_stock_universe(monkeypatch, tmp_path):
+def _mock_common_stock_universe(monkeypatch, tmp_path, request):
     """Keep alert unit tests offline; individual asset-guard tests override this."""
     test_stocks = {
         "AAA", "BBB", "CCC", "DDD", "LATE", "RUNR", "MDRX", "REAL", "SKBL",
@@ -18,6 +18,12 @@ def _mock_common_stock_universe(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
+    if "stock_trade_email_status" not in request.node.name:
+        monkeypatch.setattr(api, "_stock_trade_email_status", lambda *args, **kwargs: {
+            "allowed": True,
+            "session": "US_REGULAR",
+            "reason": "unit-test market open",
+        })
 
 
 def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
@@ -50,6 +56,117 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert "Score unter" in top_by_reason["score_below_alert_threshold"]["label"]
     assert "score_below_alert_threshold=3" in audit["suppression_human"]
     assert "Score unter" in audit["suppression_human"]
+
+
+def test_stock_trade_email_status_blocks_closed_us_market():
+    status = api._stock_trade_email_status(datetime(2026, 6, 2, 5, 1, tzinfo=timezone.utc))
+
+    assert status["allowed"] is False
+    assert status["session"] in {"CLOSED", "UNKNOWN"}
+    assert "open" in status["reason"].lower() or "geschlossen" in status["reason"].lower() or "closed" in status["reason"].lower()
+
+
+def test_stock_trade_email_status_allows_regular_us_market():
+    status = api._stock_trade_email_status(datetime(2026, 6, 2, 14, 0, tzinfo=timezone.utc))
+
+    assert status["allowed"] is True
+    assert status["session"] == "US_REGULAR"
+
+
+def test_stock_strategy_mail_skips_when_us_market_closed(monkeypatch):
+    sent_subjects = []
+    skipped = []
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda *args, **kwargs: {
+        "allowed": False,
+        "reason": "US market closed unit-test",
+        "session": "CLOSED",
+    })
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent_subjects.append(subject) or True)
+    monkeypatch.setattr(api, "_record_email_event", lambda subject, status, reason=None: skipped.append((subject, status, reason)))
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "AAA",
+        "ticker": "AAA",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 90,
+        "Preis": 10.0,
+        "RVOL": 2.0,
+        "Change_Pct": 4.0,
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.5,
+        "TP1": 11.0,
+        "TP2": 12.0,
+    }], "stocks")
+
+    assert sent_subjects == []
+    assert any(item[1] == "skipped" and "stock_market_closed" in str(item[2]) for item in skipped)
+
+
+def test_stock_mail_blocks_watch_quality_rows(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"FULC"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+
+    state = api._classify_alert_candidate("bear", {
+        "Ticker": "FULC",
+        "grade": "S",
+        "score": 88,
+        "RVOL": 6.1,
+        "change_pct": -7.2,
+        "close_pos": 0.2,
+        "entry_quality": "WATCH",
+        "trade_setup": {
+            "direction": "SHORT",
+            "entry": 6.42,
+            "stop": 6.85,
+            "tp1": 5.88,
+            "tp2": 5.35,
+        },
+    }, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "entry_quality_watch_only" in state["suppression_reasons"]
+
+
+def test_strategy_email_only_cooldowns_visible_rows(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({f"R{i:02d}" for i in range(12)}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+
+    rows = []
+    for idx in range(12):
+        ticker = f"R{idx:02d}"
+        rows.append({
+            "Ticker": ticker,
+            "grade": "A",
+            "score": 90,
+            "RVOL": 2.0,
+            "Preis": 10.0 + idx,
+            "current_price": 10.0 + idx,
+            "change_pct": 3.5,
+            "close_pos": 0.8,
+            "Signal_Direction": "LONG",
+            "trade_setup": {
+                "direction": "LONG",
+                "entry": 10.0 + idx,
+                "stop": 9.5 + idx,
+                "tp1": 10.75 + idx,
+                "tp2": 11.0 + idx,
+            },
+        })
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", rows, "stocks")
+
+    assert sent
+    assert "Top 10 von 12" in sent[0][0]
+    assert "Top 10 von 12" in sent[0][1]
+    assert "R09" in sent[0][1]
+    assert "R10" not in sent[0][1]
+    assert "stock_strategy_R09" in api._EMAIL_COOLDOWN
+    assert "stock_strategy_R10" not in api._EMAIL_COOLDOWN
 
 
 def test_email_alert_audit_summary_explains_blockers(tmp_path, monkeypatch):

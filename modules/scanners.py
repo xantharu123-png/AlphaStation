@@ -27,6 +27,7 @@ from modules.helpers import is_spac
 from modules.patterns import analyze_breakout_imminent, analyze_candles
 from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
 from modules.trade_levels import trade_geometry
+from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
 
 # AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
 try:
@@ -1282,6 +1283,46 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["level_model"] = "bi_structure_first_v2"
                     candidate["tp1_source"] = "range_low_support_or_extension"
                     candidate["tp2_source"] = "range_extension"
+
+                _vrvp = build_vrvp_structure(
+                    all_bars,
+                    candidate.get("Entry"),
+                    direction.upper(),
+                    timeframe="1D",
+                    num_bins=24,
+                    min_bars=30,
+                    lookback=90,
+                )
+                _setup = apply_vrvp_to_trade_setup(
+                    {
+                        "Entry": candidate.get("Entry"),
+                        "StopLoss": candidate.get("StopLoss"),
+                        "TP1": candidate.get("TP1"),
+                        "TP2": candidate.get("TP2"),
+                        "direction": direction.upper(),
+                        "level_model": candidate.get("level_model"),
+                        "stop_source": candidate.get("stop_source"),
+                        "tp1_source": candidate.get("tp1_source"),
+                        "tp2_source": candidate.get("tp2_source"),
+                    },
+                    _vrvp,
+                    direction=direction.upper(),
+                    asset_type="stock_swing",
+                    atr=atr_5,
+                )
+                candidate["Entry"] = _setup.get("Entry", candidate.get("Entry"))
+                candidate["StopLoss"] = _setup.get("StopLoss", candidate.get("StopLoss"))
+                candidate["TP1"] = _setup.get("TP1", candidate.get("TP1"))
+                candidate["TP2"] = _setup.get("TP2", candidate.get("TP2"))
+                candidate["trade_setup"] = _setup
+                candidate["level_model"] = _setup.get("level_model", candidate.get("level_model"))
+                candidate["stop_source"] = _setup.get("stop_source", candidate.get("stop_source"))
+                candidate["tp1_source"] = _setup.get("tp1_source", candidate.get("tp1_source"))
+                candidate["tp2_source"] = _setup.get("tp2_source", candidate.get("tp2_source"))
+                candidate["vrvp_applied"] = _setup.get("vrvp_applied", False)
+                candidate["VRVP_POC"] = _setup.get("vrvp_poc")
+                candidate["VRVP_VAH"] = _setup.get("vrvp_vah")
+                candidate["VRVP_VAL"] = _setup.get("vrvp_val")
 
                 _geometry = trade_geometry(
                     candidate.get("Entry"),

@@ -30,6 +30,7 @@ import threading
 import traceback
 import smtplib
 import re
+import html
 import atexit
 import fcntl
 import tempfile
@@ -278,6 +279,57 @@ def _alert_trade_levels(row):
     )
 
 
+def _humanize_alert_level_source(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    text = raw.replace("_", " ").replace("-", " ")
+    normalized = text.lower()
+    for src, dst in {
+        "vrvp": "VRVP",
+        "poc": "POC",
+        "vah": "VAH",
+        "val": "VAL",
+        "hvn": "HVN",
+        "lvn": "LVN",
+        "atr": "ATR",
+        "vwap": "VWAP",
+        "ema": "EMA",
+        "ma20": "MA20",
+        "ma50": "MA50",
+        "tp1": "TP1",
+        "tp2": "TP2",
+    }.items():
+        text = re.sub(rf"\b{re.escape(src)}\b", dst, text, flags=re.IGNORECASE)
+    if "measured move" in normalized:
+        text = "Measured Move"
+    elif "fallback" in normalized and "measured" not in normalized:
+        text = text.replace("fallback", "Fallback")
+    elif "range" in normalized:
+        text = text.replace("range", "Range")
+    elif "invalidation" in normalized:
+        text = text.replace("invalidation", "Invalidation")
+    return text[:90]
+
+
+def _alert_level_source_line(row):
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    stop_source = setup.get("stop_source") or row.get("stop_source")
+    tp1_source = setup.get("tp1_source") or row.get("tp1_source")
+    tp2_source = setup.get("tp2_source") or row.get("tp2_source")
+    parts = []
+    if stop_source:
+        parts.append(f"Stop: {_humanize_alert_level_source(stop_source)}")
+    if tp1_source:
+        parts.append(f"TP1: {_humanize_alert_level_source(tp1_source)}")
+    if tp2_source:
+        parts.append(f"TP2: {_humanize_alert_level_source(tp2_source)}")
+    if not parts:
+        return ""
+    safe = html.escape(" | ".join(parts))
+    return f'<br><span style="color:#64748b;font-size:11px">Level-Quelle: {safe}</span>'
+
+
 def _format_alert_plan_html(row):
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
@@ -288,6 +340,7 @@ def _format_alert_plan_html(row):
         )
     rr = levels.get("rr")
     rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    level_source_text = _alert_level_source_line(row)
     source_text = (
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
         if levels.get("estimated") else ""
@@ -297,6 +350,7 @@ def _format_alert_plan_html(row):
         f'Stop <b style="color:#dc2626">{_format_alert_price(levels.get("stop"))}</b><br>'
         f'TP1/TP2 <b style="color:#059669">{_format_alert_price(levels.get("tp1"))} / {_format_alert_price(levels.get("tp2"))}</b>'
         f'{rr_text}'
+        f'{level_source_text}'
         f'{source_text}'
     )
 
