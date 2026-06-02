@@ -974,9 +974,9 @@ _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys(
 _SIGNAL_ONLY_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
     "stock_strategy", "strategy_scan", "volume_spikes",
-    "early_movers", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy",
+    "early_movers", "crypto_trade_signals", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy",
 }
-_CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy"}
+_CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "crypto_trade_signals", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy"}
 _STOCK_RESULT_TRADE_STATE_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
     "stock_strategy", "strategy_scan", "volume_spikes",
@@ -5766,6 +5766,7 @@ SCAN_DATA_SOURCES = {
     "bear": "Polygon gainers/losers + bearish scanner",
     "biotech": "Polygon + biotech catalyst scanner",
     "early_movers": "CoinGecko markets + exchange perp feeds",
+    "crypto_trade_signals": "Combined crypto direction engine: exchange-native long breakouts + new-listing/pump short cracks",
     "crypto_explosion": "Exchange-native perpetual futures: Bybit/Binance/MEXC/Bitget + 5m/15m/4h candles",
     "crash_monitor": "Polygon indices/VIX + market breadth",
     "market_context": "Crash/Fear cache + Polygon news + economic calendar",
@@ -5791,6 +5792,12 @@ SCAN_EXCLUSION_POLICIES = {
     "early_movers": [
         "Flag partial CoinGecko scans and rate-limit fallbacks.",
         "Separate early accumulation, breakout and overheated/chased phase.",
+    ],
+    "crypto_trade_signals": [
+        "Return one visible decision per coin: LONG, SHORT, WAIT or NO_TRADE.",
+        "Use the long breakout/reclaim engine for explosion candidates.",
+        "Use the new-listing/pump exhaustion engine for short crack candidates.",
+        "Resolve long/short conflicts before display so one coin cannot show contradictory actions.",
     ],
     "crypto_explosion": [
         "Scan exchange-native perpetual markets for compression near breakout levels.",
@@ -6371,6 +6378,11 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
     if scanner_name == "crypto_explosion":
         score = _alert_float(row.get("explosion_score", row.get("score")), 0) or 0
         return bool(signal in {"JETZT_TRADEN", "EXPLOSION_ARMED"} and score >= 70 and signal != "ZU_SPAET")
+
+    if scanner_name == "crypto_trade_signals":
+        action = str(row.get("trade_action") or row.get("decision") or "").upper()
+        score = _alert_float(row.get("trade_score", row.get("score")), 0) or 0
+        return bool(action in {"JETZT_LONG", "JETZT_SHORT", "LONG_ARMED", "SHORT_WATCH"} and score >= 55)
 
     if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
         return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
@@ -9676,12 +9688,14 @@ def _bear_scan_wrapper() -> None:
 # Runs all scans automatically at defined intervals (like old Streamlit version)
 _scheduler_running = False
 CRYPTO_EXPLOSION_CACHE = "/tmp/crypto_explosion_cache.json"
+CRYPTO_TRADE_SIGNALS_CACHE = "/tmp/crypto_trade_signals_cache.json"
 _scan_status = {
     "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
     "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
     "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 240},
     "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "crypto_trade_signals": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "crypto_explosion": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "market_context": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
@@ -9699,6 +9713,7 @@ SCAN_CACHE_MAP = {
     "bear": "/tmp/bear_scanner_cache.json",
     "biotech": "/tmp/alpha_biotech_cache.json",
     "early_movers": "/tmp/early_movers_cache.json",
+    "crypto_trade_signals": CRYPTO_EXPLOSION_CACHE,
     "crypto_explosion": CRYPTO_EXPLOSION_CACHE,
     "crash_monitor": "/tmp/crash_monitor_cache.json",
     "market_context": "/tmp/market_context_cache.json",
@@ -9786,7 +9801,7 @@ def _init_scan_status_from_cache():
 
 _init_scan_status_from_cache()
 
-_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25, "crypto_explosion": 25}
+_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25, "crypto_trade_signals": 30, "crypto_explosion": 25}
 
 def _run_scan_safe(name, func, timeout_min=None):
     """Run a scan function safely in a background thread (non-blocking).
@@ -16212,6 +16227,291 @@ def get_new_listing_results():
 
 
 # ── Volume Spikes Scanner ──
+def _crypto_trade_to_float(value: Any, default: float = 0.0) -> float:
+    return _alert_float(value, default) or default
+
+
+def _crypto_trade_grade(score: float) -> str:
+    if score >= 88:
+        return "S"
+    if score >= 80:
+        return "A"
+    if score >= 70:
+        return "B"
+    if score >= 55:
+        return "C"
+    return "D"
+
+
+def _crypto_trade_cache_age(cached_at: Optional[str]) -> Optional[int]:
+    if not cached_at:
+        return None
+    try:
+        return int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+    except Exception:
+        return None
+
+
+def _crypto_trade_max_cached_at(*values: Optional[str]) -> Optional[str]:
+    parsed = []
+    for value in values:
+        if not value:
+            continue
+        try:
+            parsed.append((datetime.fromisoformat(value), value))
+        except Exception:
+            continue
+    if not parsed:
+        return None
+    return max(parsed, key=lambda item: item[0])[1]
+
+
+def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return None
+    symbol = str(row.get("Symbol") or row.get("symbol") or "").upper()
+    if not symbol:
+        return None
+    signal = str(row.get("trade_signal") or "").upper()
+    if signal not in {"JETZT_TRADEN", "EXPLOSION_ARMED"}:
+        return None
+    score = _crypto_trade_to_float(row.get("explosion_score", row.get("score")), 0)
+    entry_score = _crypto_trade_to_float(row.get("entry_score"), score)
+    action = "JETZT_LONG" if signal == "JETZT_TRADEN" else "LONG_ARMED"
+    price = _crypto_trade_to_float(row.get("Price", row.get("price")), 0)
+    return {
+        **row,
+        "Symbol": symbol,
+        "symbol": symbol,
+        "direction": "LONG",
+        "strategy": "Explosion Long",
+        "scanner_source": "crypto_explosion",
+        "trade_action": action,
+        "trade_signal": "JETZT_TRADEN" if action == "JETZT_LONG" else "WARTEN",
+        "signal_label": "Jetzt Long: 5m Breakout/Reclaim bestaetigt" if action == "JETZT_LONG" else "Long vorbereitet: 5m Breakout/Reclaim abwarten",
+        "decision": action,
+        "Price": price,
+        "price": price,
+        "score": int(round(score)),
+        "trade_score": int(round(score)),
+        "entry_score": int(round(entry_score)),
+        "Grade": row.get("Grade") or row.get("grade") or _crypto_trade_grade(score),
+        "grade": row.get("grade") or row.get("Grade") or _crypto_trade_grade(score),
+        "move_pct": _crypto_trade_to_float(row.get("Change24h"), 0),
+        "risk_reward": _crypto_trade_to_float(row.get("risk_reward", row.get("live_rr_ratio")), 0),
+        "direction_reason": "Compression/Reclaim/Breakout-Engine",
+        "isCrypto": True,
+        "isExchangeCrypto": True,
+    }
+
+
+def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return None
+    symbol = str(row.get("symbol") or row.get("Symbol") or "").upper()
+    if not symbol:
+        return None
+    action_raw = str(row.get("trade_action") or row.get("trade_signal") or row.get("signal") or "").upper()
+    category = str(row.get("trade_category") or "").upper()
+    is_short_now = action_raw == "SHORT_NOW" or action_raw.startswith("SHORT") or (
+        str(row.get("trade_signal") or "").upper() == "JETZT_TRADEN" and category == "NEW_LISTING_DUMP"
+    )
+    useful_short_watch = category in {"NEW_LISTING_DUMP", "EXHAUSTION_WATCH", "PUMP_RUNNING_WATCH", "ACTIVE_PUMP_WATCH"}
+    if not is_short_now and not useful_short_watch:
+        return None
+    score = _crypto_trade_to_float(row.get("exhaustion_score", row.get("raw_score")), 0)
+    entry_score = _crypto_trade_to_float(row.get("timing_quality", row.get("micro_score")), score)
+    action = "JETZT_SHORT" if is_short_now else "SHORT_WATCH"
+    price = _crypto_trade_to_float(row.get("price", row.get("micro_current_price")), 0)
+    return {
+        **row,
+        "Symbol": symbol,
+        "symbol": symbol,
+        "direction": "SHORT",
+        "strategy": "Pump/Dump Short",
+        "scanner_source": "new_listing",
+        "trade_action": action,
+        "trade_signal": "JETZT_TRADEN" if action == "JETZT_SHORT" else "WARTEN",
+        "signal_label": "Jetzt Short: 5m Crack/Rejection bestaetigt" if action == "JETZT_SHORT" else "Short vorbereitet: Pump/Exhaustion beobachten",
+        "decision": action,
+        "Price": price,
+        "price": price,
+        "score": int(round(score)),
+        "trade_score": int(round(score)),
+        "entry_score": int(round(entry_score)),
+        "Grade": row.get("grade") or row.get("Grade") or _crypto_trade_grade(score),
+        "grade": row.get("grade") or row.get("Grade") or _crypto_trade_grade(score),
+        "move_pct": _crypto_trade_to_float(row.get("pump_pct"), 0),
+        "drawdown_from_high_pct": _crypto_trade_to_float(row.get("from_ath_pct"), 0),
+        "risk_reward": _crypto_trade_to_float(row.get("rr_effective", row.get("risk_reward")), 0),
+        "direction_reason": "New-Listing/Pump-Exhaustion-Engine",
+        "isCrypto": True,
+        "isExchangeCrypto": True,
+    }
+
+
+def _crypto_trade_action_rank(row: Dict[str, Any]) -> int:
+    action = str(row.get("trade_action") or row.get("decision") or "").upper()
+    if action in {"JETZT_LONG", "JETZT_SHORT"}:
+        return 0
+    if action in {"LONG_ARMED", "SHORT_WATCH"}:
+        return 1
+    return 2
+
+
+def _crypto_trade_prefer_candidate(candidate: Dict[str, Any], current: Dict[str, Any]) -> bool:
+    cand_rank = _crypto_trade_action_rank(candidate)
+    cur_rank = _crypto_trade_action_rank(current)
+    if cand_rank != cur_rank:
+        return cand_rank < cur_rank
+    cand_dir = candidate.get("direction")
+    cur_dir = current.get("direction")
+    if cand_dir != cur_dir:
+        if candidate.get("trade_action") == "JETZT_SHORT":
+            return True
+        if current.get("trade_action") == "JETZT_SHORT":
+            return False
+        if candidate.get("trade_action") == "JETZT_LONG" and current.get("trade_action") != "JETZT_SHORT":
+            return True
+        if current.get("trade_action") == "JETZT_LONG" and candidate.get("trade_action") != "JETZT_SHORT":
+            return False
+        cand_pump = _crypto_trade_to_float(candidate.get("move_pct"), 0)
+        cand_dd = _crypto_trade_to_float(candidate.get("drawdown_from_high_pct"), 0)
+        cur_pump = _crypto_trade_to_float(current.get("move_pct"), 0)
+        cur_dd = _crypto_trade_to_float(current.get("drawdown_from_high_pct"), 0)
+        if candidate.get("direction") == "SHORT" and (cand_pump >= 25 or cand_dd >= 8):
+            return True
+        if current.get("direction") == "SHORT" and (cur_pump >= 25 or cur_dd >= 8):
+            return False
+    cand_score = _crypto_trade_to_float(candidate.get("entry_score"), 0) + _crypto_trade_to_float(candidate.get("trade_score"), 0) * 0.7
+    cur_score = _crypto_trade_to_float(current.get("entry_score"), 0) + _crypto_trade_to_float(current.get("trade_score"), 0) * 0.7
+    if abs(cand_score - cur_score) > 3:
+        return cand_score > cur_score
+    return _crypto_trade_to_float(candidate.get("risk_reward"), 0) > _crypto_trade_to_float(current.get("risk_reward"), 0)
+
+
+def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for row in long_rows or []:
+        normalized = _normalize_crypto_long_signal(row)
+        if normalized:
+            candidates.append(normalized)
+    for row in short_rows or []:
+        normalized = _normalize_crypto_short_signal(row)
+        if normalized:
+            candidates.append(normalized)
+    selected: Dict[str, Dict[str, Any]] = {}
+    suppressed_by_symbol: Dict[str, List[str]] = {}
+    for candidate in candidates:
+        symbol = str(candidate.get("Symbol") or candidate.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        existing = selected.get(symbol)
+        if not existing:
+            selected[symbol] = candidate
+            continue
+        loser = existing
+        if _crypto_trade_prefer_candidate(candidate, existing):
+            selected[symbol] = candidate
+        else:
+            loser = candidate
+        if loser.get("direction") != selected[symbol].get("direction"):
+            suppressed_by_symbol.setdefault(symbol, []).append(
+                f"{loser.get('direction')} {loser.get('trade_action')} unterdrueckt"
+            )
+    rows = list(selected.values())
+    for row in rows:
+        symbol = str(row.get("Symbol") or row.get("symbol") or "").upper()
+        if suppressed_by_symbol.get(symbol):
+            row["conflict_note"] = "; ".join(suppressed_by_symbol[symbol][:2])
+            warnings = list(row.get("warnings") or row.get("risk_flags") or [])
+            warnings.append("opposite_crypto_engine_suppressed")
+            row["warnings"] = warnings
+            row["risk_flags"] = warnings
+    rows.sort(key=lambda row: (
+        _crypto_trade_action_rank(row),
+        0 if row.get("direction") == "LONG" else 1,
+        -_crypto_trade_to_float(row.get("entry_score"), 0),
+        -_crypto_trade_to_float(row.get("trade_score"), 0),
+        -_crypto_trade_to_float(row.get("risk_reward"), 0),
+    ))
+    return rows[:120]
+
+
+def _build_crypto_trade_signals_from_caches() -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str], Optional[int], List[str]]:
+    long_raw, long_cached_at = load_cache_file(CRYPTO_EXPLOSION_CACHE)
+    short_raw, short_cached_at = load_cache_file(NEW_LISTING_CACHE)
+    long_age = _crypto_trade_cache_age(long_cached_at)
+    short_age = _crypto_trade_cache_age(short_cached_at)
+    long_rows = _decorate_scan_results(long_raw or [], "crypto_explosion", long_age)
+    long_rows = _apply_signal_only_policy("crypto_explosion", long_rows)
+    short_rows, short_stats = _decorate_new_listing_display_results(short_raw or [], short_age)
+    merged = _merge_crypto_trade_signals(long_rows, short_rows)
+    cached_at = _crypto_trade_max_cached_at(long_cached_at, short_cached_at)
+    cache_age = _crypto_trade_cache_age(cached_at)
+    warnings = []
+    if not long_cached_at:
+        warnings.append("Long-Engine Cache fehlt")
+    if not short_cached_at:
+        warnings.append("Short-Engine Cache fehlt")
+    stats = {
+        "result_count": len(merged),
+        "long_count": sum(1 for row in merged if row.get("direction") == "LONG"),
+        "short_count": sum(1 for row in merged if row.get("direction") == "SHORT"),
+        "trade_now_count": sum(1 for row in merged if row.get("trade_action") in {"JETZT_LONG", "JETZT_SHORT"}),
+        "long_trade_now_count": sum(1 for row in merged if row.get("trade_action") == "JETZT_LONG"),
+        "short_trade_now_count": sum(1 for row in merged if row.get("trade_action") == "JETZT_SHORT"),
+        "wait_count": sum(1 for row in merged if row.get("trade_action") in {"LONG_ARMED", "SHORT_WATCH"}),
+        "long_cache_age_seconds": long_age,
+        "short_cache_age_seconds": short_age,
+        "short_visible_rows": short_stats.get("visible_rows", 0),
+        "scanner_note": "Ein Coin bekommt genau eine sichtbare Richtung. Konflikte werden vor Anzeige aufgeloest.",
+    }
+    return merged, stats, cached_at, cache_age, warnings
+
+
+def _crypto_trade_signals_wrapper() -> None:
+    """Run both crypto direction engines and cache a unified trader-facing decision list."""
+    try:
+        print("[Crypto Signals] Starting combined long/short crypto scan...")
+        _crypto_explosion_wrapper()
+        if HAS_NEW_LISTING_SCANNER:
+            _new_listing_wrapper()
+        rows, stats, _, _, warnings = _build_crypto_trade_signals_from_caches()
+        save_cache_file(CRYPTO_TRADE_SIGNALS_CACHE, rows)
+        print(f"[Crypto Signals] Done: {stats.get('result_count', 0)} rows ({stats.get('long_count', 0)} long / {stats.get('short_count', 0)} short), warnings={warnings}")
+    except Exception as exc:
+        print(f"[Crypto Signals] Error: {exc}")
+        traceback.print_exc()
+
+
+@app.post("/api/crypto-trade-signals-scan")
+def trigger_crypto_trade_signals_scan():
+    _run_scan_safe("crypto_trade_signals", _crypto_trade_signals_wrapper)
+    return {"status": "started", "message": "Crypto Trade Signals scan started"}
+
+
+@app.get("/api/crypto-trade-signals-results")
+def get_crypto_trade_signals_results():
+    rows, stats, cached_at, cache_age, source_warnings = _build_crypto_trade_signals_from_caches()
+    quality = _scan_quality_payload("crypto_trade_signals", cache_age, rows)
+    quality["signal_policy"] = (
+        "Unified crypto direction scanner: LONG from explosion/reclaim, SHORT from pump/new-listing crack. "
+        "Watch-only rows are preparation; mails should use trade_now rows."
+    )
+    warnings = list(dict.fromkeys([*(source_warnings or []), *(quality.get("warnings") or [])]))
+    return {
+        "status": "success",
+        "data": rows,
+        "stats": stats,
+        "cached_at": cached_at,
+        "cache_age_seconds": cache_age,
+        "data_quality": quality,
+        "warnings": warnings,
+        "exclusion_policy": quality["exclusion_policy"],
+    }
+
+
 VOLUME_SPIKES_CACHE = "/tmp/volume_spikes_cache.json"
 
 def _volume_spikes_wrapper() -> None:

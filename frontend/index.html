@@ -2091,7 +2091,7 @@ function SchedulerStatusLegacy({ status }) {
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_explosion: 'Crypto Explosion', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes' };
 
     return (
         <div className="flex items-center gap-2">
@@ -2136,7 +2136,7 @@ function SchedulerStatus({ status }) {
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
     const staleCount = scanEntries.filter(([_, s]) => ['stale', 'missing', 'error'].includes(s.cache_health)).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_explosion: 'Crypto Explosion', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Pump & Dump', volume_spikes: 'Volume Spikes', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
     const healthLabels = {
         ok: ['OK', 'text-green-600'],
         stale: ['Alt', 'text-amber-600'],
@@ -4001,14 +4001,13 @@ function App() {
         { id: 'biotech', label: 'Biotech' },
         { id: 'btc-divergenz', label: 'BTC-Divergenz' },
         { id: 'early-movers', label: 'Early Mover' },
-        { id: 'crypto-explosion', label: 'Explosion' },
+        { id: 'crypto-signals', label: 'Crypto Signals' },
         { id: 'short-scanner', label: 'Short Scanner' },
         { id: 'money-flow', label: 'Sektoren' },
         { id: 'kalender', label: 'Kalender' },
         { id: 'crash-monitor', label: 'Crash Monitor' },
         { id: 'backtest', label: 'Backtest' },
         { id: 'strategie-guide', label: 'Strategie Guide' },
-        { id: 'new-listing', label: 'Pump & Dump' },
         { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'orb', label: 'ORB Scanner' },
         { id: 'autotrader', label: 'Auto-Trader' },
@@ -4067,8 +4066,7 @@ function App() {
                 { title: null, items: [
                     { id: 'btc-divergenz', name: 'BTC-Divergenz', desc: 'Altcoins vs BTC Relative Strength', svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316' },
                     { id: 'early-movers', name: 'Early Mover', desc: 'Phase 1/2/3 — Accumulation, Breakout & Risiko', svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#10b981' },
-                    { id: 'crypto-explosion', name: 'Explosion', desc: 'Exchange-Perps kurz vor 5m-Ausbruch', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#06b6d4' },
-                    { id: 'new-listing', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale', svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444' },
+                    { id: 'crypto-signals', name: 'Crypto Signals', desc: 'Ein Scanner: Long-Explosion oder Short-Pump-Dump', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#06b6d4' },
                 ]},
             ]
         },
@@ -4467,14 +4465,13 @@ function App() {
                     {activeTab === 'biotech' && <BiotechTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                    {activeTab === 'crypto-explosion' && <CryptoExplosionTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'crypto-signals' && <CryptoTradeSignalsTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'short-scanner' && <ShortScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'money-flow' && <SectorNarrativeTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} getToken={getToken} />}
                     {activeTab === 'kalender' && <KalenderTab />}
                     {activeTab === 'crash-monitor' && <CrashMonitorTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'backtest' && <BacktestTab />}
                     {activeTab === 'strategie-guide' && <StrategieGuideTab />}
-                    {activeTab === 'new-listing' && <NewListingTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'autotrader' && <AutoTraderTab />}
@@ -5665,14 +5662,14 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     );
 }
 
-// Crypto Explosion Tab
-function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [items, setItems] = useState(scanCache.crypto_explosion_items || []);
-    const [stats, setStats] = useState(scanCache.crypto_explosion_stats || null);
+// Unified Crypto Signals Tab
+function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+    const [items, setItems] = useState(scanCache.crypto_trade_signals_items || []);
+    const [stats, setStats] = useState(scanCache.crypto_trade_signals_stats || null);
     const [isScanning, setIsScanning] = useState(false);
     const { sorted, toggleSort, sortKey } = useSortable(items, 'entry_score');
     const pollTimeoutRef = useRef(null);
-    const lastLoadedCachedAtRef = useRef(scanCache.crypto_explosion_cached_at || null);
+    const lastLoadedCachedAtRef = useRef(scanCache.crypto_trade_signals_cached_at || null);
 
     const formatPrice = (price) => {
         const p = Number(price);
@@ -5689,9 +5686,11 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
         return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
     };
     const statusView = (item) => {
-        const signal = String(item.trade_signal || '').toUpperCase();
-        if (signal === 'JETZT_TRADEN') return { label: 'JETZT TRADEN', cls: 'bg-green-100 text-green-800', detail: '5m Breakout bestaetigt' };
-        if (signal === 'EXPLOSION_ARMED') return { label: 'AUSBRUCH BEREIT', cls: 'bg-cyan-100 text-cyan-800', detail: 'Kein Market-Buy: 5m Breakout/Reclaim abwarten' };
+        const action = String(item.trade_action || item.decision || '').toUpperCase();
+        if (action === 'JETZT_LONG') return { label: 'JETZT LONG', cls: 'bg-green-100 text-green-800', detail: '5m Breakout/Reclaim bestaetigt' };
+        if (action === 'JETZT_SHORT') return { label: 'JETZT SHORT', cls: 'bg-red-100 text-red-800', detail: '5m Crack/Rejection bestaetigt' };
+        if (action === 'LONG_ARMED') return { label: 'LONG BEREIT', cls: 'bg-cyan-100 text-cyan-800', detail: 'Kein Market-Buy: 5m Breakout/Reclaim abwarten' };
+        if (action === 'SHORT_WATCH') return { label: 'SHORT WATCH', cls: 'bg-amber-100 text-amber-800', detail: 'Pump/Exhaustion: Strukturbruch abwarten' };
         return { label: 'WARTEN', cls: 'bg-amber-100 text-amber-800', detail: item.signal_label || 'Noch kein Signal' };
     };
     const targetSource = (item) => {
@@ -5707,22 +5706,22 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
         const nextStats = data.stats || null;
         setItems(nextItems);
         setStats(nextStats);
-        updateScanCache('crypto_explosion_items', nextItems);
-        updateScanCache('crypto_explosion_stats', nextStats);
-        updateScanCache('crypto_explosion_cached_at', data.cached_at || null);
+        updateScanCache('crypto_trade_signals_items', nextItems);
+        updateScanCache('crypto_trade_signals_stats', nextStats);
+        updateScanCache('crypto_trade_signals_cached_at', data.cached_at || null);
         lastLoadedCachedAtRef.current = data.cached_at || null;
         return nextItems;
     };
 
     const loadResults = async ({ force = false } = {}) => {
         try {
-            const response = await fetch(`${API}/api/crypto-explosion-results`);
+            const response = await fetch(`${API}/api/crypto-trade-signals-results`);
             if (!response.ok) return;
             const data = await response.json();
             if (!force && data.cached_at && lastLoadedCachedAtRef.current === data.cached_at) return;
             applyResults(data);
         } catch (err) {
-            console.error('Error fetching crypto explosion:', err);
+            console.error('Error fetching crypto trade signals:', err);
         }
     };
 
@@ -5731,7 +5730,7 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
-    const schedulerLastRun = schedulerStatus?.scans?.crypto_explosion?.last_run || null;
+    const schedulerLastRun = schedulerStatus?.scans?.crypto_trade_signals?.last_run || schedulerStatus?.scans?.crypto_explosion?.last_run || schedulerStatus?.scans?.new_listing?.last_run || null;
     useEffect(() => {
         if (!schedulerLastRun) return;
         loadResults({ force: false });
@@ -5741,27 +5740,27 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
         setIsScanning(true);
         let prevCachedAt = null;
         try {
-            const preCheck = await fetch(`${API}/api/crypto-explosion-results`);
+            const preCheck = await fetch(`${API}/api/crypto-trade-signals-results`);
             if (preCheck.ok) prevCachedAt = (await preCheck.json()).cached_at || null;
         } catch(e) {}
         try {
-            const response = await fetch(`${API}/api/crypto-explosion-scan`, { method: 'POST' });
+            const response = await fetch(`${API}/api/crypto-trade-signals-scan`, { method: 'POST' });
             if (!response.ok) {
                 setIsScanning(false);
-                if (window.addToast) window.addToast('Explosion Scan konnte nicht gestartet werden', 'error');
+                if (window.addToast) window.addToast('Crypto Signals Scan konnte nicht gestartet werden', 'error');
                 return;
             }
-            if (window.addToast) window.addToast('Crypto Explosion Scan gestartet...', 'info');
+            if (window.addToast) window.addToast('Crypto Signals Scan gestartet...', 'info');
             const pollResults = async (attempts = 0) => {
                 if (attempts > 18) { setIsScanning(false); return; }
                 try {
-                    const res = await fetch(`${API}/api/crypto-explosion-results`);
+                    const res = await fetch(`${API}/api/crypto-trade-signals-results`);
                     if (res.ok) {
                         const data = await res.json();
                         if (data.cached_at && data.cached_at !== prevCachedAt) {
                             const nextItems = applyResults(data);
                             setIsScanning(false);
-                            if (window.addToast) window.addToast(`Scan fertig: ${nextItems.length} Explosion-Kandidaten`, 'success');
+                            if (window.addToast) window.addToast(`Scan fertig: ${nextItems.length} Crypto-Signale`, 'success');
                             return;
                         }
                     }
@@ -5772,21 +5771,23 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
         } catch (err) {
             console.error(err);
             setIsScanning(false);
-            if (window.addToast) window.addToast('Explosion Scan-Fehler', 'error');
+            if (window.addToast) window.addToast('Crypto Signals Scan-Fehler', 'error');
         }
     };
 
     return (
         <div className="space-y-6">
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="crypto_explosion" />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="crypto_trade_signals" />
             <div className="text-xs rounded-lg border border-cyan-100 bg-cyan-50 text-cyan-900 px-3 py-2">
-                Explosion Scanner: prueft Exchange-Perps auf Coil/Compression nahe Breakout. <b>AUSBRUCH BEREIT</b> ist Beobachtung; <b>JETZT TRADEN</b> erst nach frischem 5m Breakout/Reclaim.
+                Crypto Signals: ein Coin bekommt genau eine Richtung. <b>JETZT LONG</b> kommt aus frischem 5m Breakout/Reclaim, <b>JETZT SHORT</b> aus bestaetigtem Pump/New-Listing-Crack. Watch/Armed ist Vorbereitung, kein Blind-Entry.
             </div>
             {stats && (
                 <div className="flex gap-3 flex-wrap text-xs text-gray-500">
                     <span>{stats.result_count || items.length} Kandidaten</span>
+                    <span>{stats.long_count || 0} Long</span>
+                    <span>{stats.short_count || 0} Short</span>
                     <span>{stats.trade_now_count || 0} jetzt tradebar</span>
-                    <span>{stats.armed_count || 0} armed</span>
+                    <span>{stats.wait_count || 0} Watch/Armed</span>
                     {stats.scanner_note && <span>{stats.scanner_note}</span>}
                 </div>
             )}
@@ -5795,6 +5796,7 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
                     <thead className="border-b border-gray-200">
                         <tr>
                             <th className="text-left py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Symbol')}>Coin{sortKey === 'Symbol' && ' ↓'}</th>
+                            <th className="text-center py-2 px-2">Richtung</th>
                             <th className="text-left py-2 px-2">Exchange</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Price')}>Preis{sortKey === 'Price' && ' ↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header cursor-pointer" onClick={() => toggleSort('Change24h')}>24h{sortKey === 'Change24h' && ' ↓'}</th>
@@ -5803,31 +5805,35 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
                             <th className="text-right py-2 px-2">Entry / Stop</th>
                             <th className="text-right py-2 px-2">TP1 / TP2</th>
                             <th className="text-left py-2 px-2">Levelquelle</th>
-                            <th className="text-center py-2 px-2">5m / BTC</th>
+                            <th className="text-center py-2 px-2">Kontext</th>
                         </tr>
                     </thead>
                     <tbody>
                         {sorted.map((item, idx) => {
                             const view = statusView(item);
                             return (
-                                <tr key={`${item.exchange}-${item.contract}-${idx}`} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, isExchangeCrypto: true, ...item})}>
+                                <tr key={`${item.direction}-${item.exchange}-${item.contract || item.Symbol}-${idx}`} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol || item.symbol, isCrypto: true, isExchangeCrypto: true, ...item})}>
                                     <td className="py-3 px-2">
-                                        <div className="font-semibold">{item.Symbol}</div>
-                                        <div className="text-xs text-gray-400">{item.phase_label || 'Compression'}</div>
+                                        <div className="font-semibold">{item.Symbol || item.symbol}</div>
+                                        <div className="text-xs text-gray-400">{item.strategy || item.phase_label || 'Crypto Signal'}</div>
+                                    </td>
+                                    <td className="py-3 px-2 text-center">
+                                        <span className={`text-xs px-2 py-1 rounded font-semibold ${item.direction === 'SHORT' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>{item.direction}</span>
                                     </td>
                                     <td className="py-3 px-2"><span className="text-xs px-2 py-1 rounded bg-blue-100 text-blue-800">{item.BestExchange || item.exchange}</span></td>
                                     <td className="py-3 px-2 text-right font-semibold">{formatPrice(item.Price)}</td>
-                                    <td className={`py-3 px-2 text-right font-semibold ${(item.Change24h || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.Change24h)}</td>
+                                    <td className={`py-3 px-2 text-right font-semibold ${(item.move_pct ?? item.Change24h ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.move_pct ?? item.Change24h)}</td>
                                     <td className="py-3 px-2 text-center">
                                         <div className="flex gap-1 justify-center">
-                                            <span className={`signal-badge ${(item.explosion_score || 0) >= 88 ? 'signal-bullish' : (item.explosion_score || 0) >= 80 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.Grade || item.grade} {item.explosion_score || item.score}</span>
+                                            <span className={`signal-badge ${(item.trade_score || item.score || 0) >= 88 ? 'signal-bullish' : (item.trade_score || item.score || 0) >= 80 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.Grade || item.grade} {item.trade_score || item.score}</span>
                                             <span className="signal-badge signal-abwarten">Entry {item.entry_score || 0}</span>
                                         </div>
                                         <div className="text-[11px] text-gray-500 mt-1">{item.risk_level || 'LOW'} Risk</div>
                                     </td>
                                     <td className="py-3 px-2">
                                         <span className={`px-2 py-1 rounded font-semibold ${view.cls}`}>{view.label}</span>
-                                        <div className="text-[11px] text-gray-500 mt-1 max-w-[220px] truncate" title={item.signal_label}>{view.detail}</div>
+                                        <div className="text-[11px] text-gray-500 mt-1 max-w-[220px] truncate" title={item.signal_label || view.detail}>{view.detail}</div>
+                                        {item.conflict_note && <div className="text-[11px] text-amber-700 mt-1 max-w-[220px] truncate" title={item.conflict_note}>{item.conflict_note}</div>}
                                     </td>
                                     <td className="py-3 px-2 text-right text-xs">
                                         <div>Entry <b>{formatPrice(item.entry)}</b></div>
@@ -5843,15 +5849,15 @@ function CryptoExplosionTab({ onSelectTicker, scanCache = {}, updateScanCache = 
                                         {item.breakout_level && <div className="text-gray-500">Breakout {formatPrice(item.breakout_level)}</div>}
                                     </td>
                                     <td className="py-3 px-2 text-center text-xs">
-                                        <div>Vol {item.volume_ratio_5m || 0}x</div>
-                                        <div className={item.btc_context?.tailwind ? 'color-positive' : 'text-yellow-600'}>{item.btc_context?.tailwind ? 'BTC OK' : 'BTC Check'}</div>
+                                        <div>{item.direction_reason || 'Signal Engine'}</div>
+                                        <div className={item.btc_context?.tailwind || item.btc_context_ok ? 'color-positive' : 'text-yellow-600'}>{item.btc_context?.tailwind || item.btc_context_ok ? 'BTC OK' : 'BTC Check'}</div>
                                     </td>
                                 </tr>
                             );
                         })}
                     </tbody>
                 </table>
-                {sorted.length === 0 && <div className="text-center text-gray-400 py-8">Keine echten Explosion-Kandidaten. Das ist besser als FOMO: zu spaete Pumps und unbestätigte Watchlist-Zeilen werden unterdrueckt.</div>}
+                {sorted.length === 0 && <div className="text-center text-gray-400 py-8">Kein sauberes Crypto Long/Short Signal. Das ist besser als FOMO: widerspruechliche, zu spaete oder unbestaetigte Setups werden unterdrueckt.</div>}
             </div>
         </div>
     );
