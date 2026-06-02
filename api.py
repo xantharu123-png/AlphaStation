@@ -28,6 +28,7 @@ import smtplib
 import threading
 import html
 import uuid
+import traceback
 from copy import deepcopy
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime, timedelta, timezone
@@ -973,9 +974,9 @@ _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys(
 _SIGNAL_ONLY_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
     "stock_strategy", "strategy_scan", "volume_spikes",
-    "early_movers", "new_listing", "btc_divergenz", "crypto_strategy",
+    "early_movers", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy",
 }
-_CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "new_listing", "btc_divergenz", "crypto_strategy"}
+_CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy"}
 _STOCK_RESULT_TRADE_STATE_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
     "stock_strategy", "strategy_scan", "volume_spikes",
@@ -5765,6 +5766,7 @@ SCAN_DATA_SOURCES = {
     "bear": "Polygon gainers/losers + bearish scanner",
     "biotech": "Polygon + biotech catalyst scanner",
     "early_movers": "CoinGecko markets + exchange perp feeds",
+    "crypto_explosion": "Exchange-native perpetual futures: Bybit/Binance/MEXC/Bitget + 5m/15m/4h candles",
     "crash_monitor": "Polygon indices/VIX + market breadth",
     "market_context": "Crash/Fear cache + Polygon news + economic calendar",
     "btc_divergenz": "CoinGecko crypto markets + exchange perp context",
@@ -5789,6 +5791,11 @@ SCAN_EXCLUSION_POLICIES = {
     "early_movers": [
         "Flag partial CoinGecko scans and rate-limit fallbacks.",
         "Separate early accumulation, breakout and overheated/chased phase.",
+    ],
+    "crypto_explosion": [
+        "Scan exchange-native perpetual markets for compression near breakout levels.",
+        "No market entry without fresh 5m confirmation; late vertical moves are suppressed.",
+        "Use VRVP/structure levels for stops and targets where candle volume is available.",
     ],
     "new_listing": [
         "Reject missed TP zones and unsafe liquidity/orderbook conditions.",
@@ -6360,6 +6367,10 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
 
     if scanner_name == "early_movers":
         return _early_mover_visible_candidate(row)
+
+    if scanner_name == "crypto_explosion":
+        score = _alert_float(row.get("explosion_score", row.get("score")), 0) or 0
+        return bool(signal in {"JETZT_TRADEN", "EXPLOSION_ARMED"} and score >= 70 and signal != "ZU_SPAET")
 
     if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
         return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
@@ -9664,12 +9675,14 @@ def _bear_scan_wrapper() -> None:
 # ── Background Scheduler ──
 # Runs all scans automatically at defined intervals (like old Streamlit version)
 _scheduler_running = False
+CRYPTO_EXPLOSION_CACHE = "/tmp/crypto_explosion_cache.json"
 _scan_status = {
     "bi_long": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
     "bi_short": {"running": False, "last_run": None, "next_run": None, "interval_min": 180},
     "bear": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "biotech": {"running": False, "last_run": None, "next_run": None, "interval_min": 240},
     "early_movers": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "crypto_explosion": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "crash_monitor": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "market_context": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "btc_divergenz": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
@@ -9686,6 +9699,7 @@ SCAN_CACHE_MAP = {
     "bear": "/tmp/bear_scanner_cache.json",
     "biotech": "/tmp/alpha_biotech_cache.json",
     "early_movers": "/tmp/early_movers_cache.json",
+    "crypto_explosion": CRYPTO_EXPLOSION_CACHE,
     "crash_monitor": "/tmp/crash_monitor_cache.json",
     "market_context": "/tmp/market_context_cache.json",
     "btc_divergenz": "/tmp/btc_divergenz_cache.json",
@@ -9772,7 +9786,7 @@ def _init_scan_status_from_cache():
 
 _init_scan_status_from_cache()
 
-_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25}
+_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25, "crypto_explosion": 25}
 
 def _run_scan_safe(name, func, timeout_min=None):
     """Run a scan function safely in a background thread (non-blocking).
@@ -9829,6 +9843,7 @@ def _scheduler_loop():
     # V2.2: Scans in LEICHT (Snapshot, 1-2 API Calls) und SCHWER (tausende Calls) aufteilen
     # Leichte Scans starten parallel, schwere NACHEINANDER (teilen sich 200 calls/min)
     light_scans = [
+        ("crypto_explosion", _crypto_explosion_wrapper),
         ("early_movers", _early_movers_wrapper),
         ("crash_monitor", _crash_monitor_wrapper),
         ("market_context", _market_context_wrapper),
@@ -9851,7 +9866,7 @@ def _scheduler_loop():
     if HAS_NEW_LISTING_SCANNER:
         scan_tasks.append(("new_listing", _new_listing_wrapper))
     _heavy_names = {name for name, _ in heavy_scans}
-    _isolated_names = {"early_movers"}
+    _isolated_names = {"early_movers", "crypto_explosion"}
 
     def _wait_for_scan_completion(name: str, label: str) -> None:
         """Some scanners need quiet network time; do not start noisy peers while they build signals."""
@@ -11859,10 +11874,67 @@ def get_crypto_chart(
 
 
 # ── Exchange-spezifischer Chart-Endpoint (NLS Coins) ──────────────────────────
+def _fetch_bybit_candles(symbol: str, timeframe: str = "5m", count: int = 120) -> List[Dict[str, Any]]:
+    """Fetch Bybit USDT perpetual candles and normalize to the app candle shape."""
+    interval_map = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
+    interval = interval_map.get(str(timeframe or "5m").lower(), "5")
+    contract = str(symbol or "").upper().replace("_", "")
+    if contract and not contract.endswith("USDT"):
+        contract = f"{contract}USDT"
+    if not contract:
+        return []
+    try:
+        response = req.get(
+            "https://api.bybit.com/v5/market/kline",
+            params={"category": "linear", "symbol": contract, "interval": interval, "limit": min(max(int(count or 120), 2), 1000)},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            return []
+        payload = response.json()
+        if int(payload.get("retCode", -1)) != 0:
+            return []
+        rows = payload.get("result", {}).get("list", []) or []
+        bars = []
+        for row in reversed(rows):
+            try:
+                ts = int(float(row[0]) / 1000)
+                open_ = float(row[1])
+                high = float(row[2])
+                low = float(row[3])
+                close = float(row[4])
+                volume = float(row[5] or 0)
+                turnover = float(row[6] or 0)
+                if close <= 0 or high <= 0 or low <= 0:
+                    continue
+                bars.append({
+                    "timestamp": ts,
+                    "open": open_,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
+                    "turnover": turnover,
+                })
+            except Exception:
+                continue
+        return bars
+    except Exception as exc:
+        print(f"[Bybit candles] {contract} {timeframe}: {exc}")
+        return []
+
+
+def _fetch_exchange_candles_any(symbol: str, exchange: str, timeframe: str = "5m", count: int = 120) -> List[Dict[str, Any]]:
+    exchange_key = str(exchange or "").lower().replace("-", "_").replace(" ", "_")
+    if exchange_key in {"bybit", "bybit_linear"}:
+        return _fetch_bybit_candles(symbol, timeframe=timeframe, count=count)
+    return fetch_candles_for(symbol, exchange, timeframe=timeframe, count=count)
+
+
 @app.get("/api/exchange-chart")
 def get_exchange_chart(
     symbol: str = Query(..., description="Contract symbol (e.g. BTCUSDT, SXTUSDT)"),
-    exchange: str = Query(..., description="Exchange name (binance, mexc, bitget, crypto_com)"),
+    exchange: str = Query(..., description="Exchange name (binance, mexc, bitget, bybit, crypto_com)"),
     timeframe: str = Query("1h", description="Timeframe (1m, 5m, 15m, 1h, 4h, 1d)"),
     count: int = Query(100, description="Number of candles"),
 ):
@@ -11886,7 +11958,7 @@ def get_exchange_chart(
         if timeframe == "1W":
             limit = min(count * 7, 500)
 
-        bars = fetch_candles_for(symbol, exchange, timeframe=tf, count=limit)
+        bars = _fetch_exchange_candles_any(symbol, exchange, timeframe=tf, count=limit)
         if not bars or len(bars) < 2:
             raise HTTPException(status_code=404, detail=f"No chart data for '{symbol}' on {exchange}")
 
@@ -14306,6 +14378,616 @@ def get_early_movers():
 
 # ── Crash Monitor (VIX + Market Breadth) + Fear Score ──
 # Note: _crash_monitor_wrapper is defined later with fear score functionality
+CRYPTO_EXPLOSION_MAX_CHART_CHECKS = int(os.environ.get("CRYPTO_EXPLOSION_MAX_CHART_CHECKS", "1000") or "1000")
+CRYPTO_EXPLOSION_MIN_TURNOVER_USD = float(os.environ.get("CRYPTO_EXPLOSION_MIN_TURNOVER_USD", "1500000") or "1500000")
+
+
+def _ce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        val = float(value)
+        if math.isnan(val) or math.isinf(val):
+            return default
+        return val
+    except Exception:
+        return default
+
+
+def _ce_round_price(value: Any) -> float:
+    price = _ce_float(value, 0.0)
+    if abs(price) >= 100:
+        return round(price, 2)
+    if abs(price) >= 10:
+        return round(price, 3)
+    if abs(price) >= 1:
+        return round(price, 4)
+    if abs(price) >= 0.01:
+        return round(price, 6)
+    return round(price, 8)
+
+
+def _ce_base_from_contract(contract: str) -> str:
+    text = str(contract or "").upper().replace("_", "").replace("-", "")
+    for suffix in ("USDT", "USD"):
+        if text.endswith(suffix):
+            return text[:-len(suffix)]
+    return text
+
+
+def _ce_http_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12) -> Any:
+    try:
+        response = req.get(url, params=params, timeout=timeout)
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except Exception as exc:
+        print(f"[Crypto Explosion] HTTP error {url}: {exc}")
+        return None
+
+
+def _ce_normalized_row(
+    *,
+    exchange: str,
+    contract: str,
+    price: Any,
+    change_24h: Any = 0.0,
+    turnover_usd: Any = 0.0,
+    high_24h: Any = 0.0,
+    low_24h: Any = 0.0,
+    open_interest: Any = 0.0,
+    funding_rate: Any = 0.0,
+    spread_pct: Any = None,
+) -> Optional[Dict[str, Any]]:
+    base = _ce_base_from_contract(contract)
+    if not base or _crypto_asset_exclusion_reason(base, base.lower(), base):
+        return None
+    px = _ce_float(price)
+    if px <= 0:
+        return None
+    change = _ce_float(change_24h)
+    turnover = _ce_float(turnover_usd)
+    if turnover < CRYPTO_EXPLOSION_MIN_TURNOVER_USD and abs(change) < 3.0:
+        return None
+    high = _ce_float(high_24h)
+    low = _ce_float(low_24h)
+    range_pos = 0.5
+    if high > low > 0:
+        range_pos = max(0.0, min(1.0, (px - low) / (high - low)))
+    cheap_rank = (
+        min(38.0, math.log10(max(turnover, 1.0)) * 5.0)
+        + min(30.0, abs(change) * 1.8)
+        + (18.0 if 0.48 <= range_pos <= 0.96 else 6.0)
+    )
+    return {
+        "exchange": exchange,
+        "BestExchange": exchange.title(),
+        "contract": contract,
+        "Symbol": base,
+        "symbol": base,
+        "Price": px,
+        "price": px,
+        "Change24h": change,
+        "turnover_24h_usd": turnover,
+        "high_24h": high,
+        "low_24h": low,
+        "open_interest": _ce_float(open_interest),
+        "funding_rate": _ce_float(funding_rate),
+        "spread_pct": _ce_float(spread_pct, 0.0) if spread_pct is not None else None,
+        "_cheap_rank": cheap_rank,
+        "range_position_24h": round(range_pos, 3),
+        "HasPerp": True,
+        "isCrypto": True,
+        "isExchangeCrypto": True,
+        "source": f"{exchange} perp top/mover feed",
+    }
+
+
+def _fetch_bybit_perp_rows() -> List[Dict[str, Any]]:
+    payload = _ce_http_json("https://api.bybit.com/v5/market/tickers", {"category": "linear"})
+    rows = []
+    for item in (payload or {}).get("result", {}).get("list", []) or []:
+        contract = str(item.get("symbol") or "").upper()
+        if not contract.endswith("USDT"):
+            continue
+        bid = _ce_float(item.get("bid1Price"))
+        ask = _ce_float(item.get("ask1Price"))
+        last = _ce_float(item.get("lastPrice"))
+        spread = ((ask - bid) / last) * 100 if bid > 0 and ask > bid and last > 0 else None
+        row = _ce_normalized_row(
+            exchange="bybit",
+            contract=contract,
+            price=item.get("lastPrice"),
+            change_24h=_ce_float(item.get("price24hPcnt")) * 100,
+            turnover_usd=item.get("turnover24h"),
+            high_24h=item.get("highPrice24h"),
+            low_24h=item.get("lowPrice24h"),
+            open_interest=item.get("openInterest"),
+            funding_rate=_ce_float(item.get("fundingRate")) * 100,
+            spread_pct=spread,
+        )
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _fetch_binance_perp_rows() -> List[Dict[str, Any]]:
+    tickers = _ce_http_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
+    funding_rows = _ce_http_json("https://fapi.binance.com/fapi/v1/premiumIndex") or []
+    funding_by_symbol = {
+        str(item.get("symbol") or "").upper(): _ce_float(item.get("lastFundingRate")) * 100
+        for item in funding_rows if isinstance(item, dict)
+    }
+    rows = []
+    for item in tickers or []:
+        contract = str(item.get("symbol") or "").upper()
+        if not contract.endswith("USDT"):
+            continue
+        row = _ce_normalized_row(
+            exchange="binance",
+            contract=contract,
+            price=item.get("lastPrice"),
+            change_24h=item.get("priceChangePercent"),
+            turnover_usd=item.get("quoteVolume"),
+            high_24h=item.get("highPrice"),
+            low_24h=item.get("lowPrice"),
+            funding_rate=funding_by_symbol.get(contract, 0.0),
+        )
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _fetch_mexc_perp_rows() -> List[Dict[str, Any]]:
+    payload = _ce_http_json("https://contract.mexc.com/api/v1/contract/ticker")
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    rows = []
+    for item in data or []:
+        contract = str(item.get("symbol") or "").upper()
+        if not contract.endswith("_USDT"):
+            continue
+        row = _ce_normalized_row(
+            exchange="mexc",
+            contract=contract,
+            price=item.get("lastPrice"),
+            change_24h=_ce_float(item.get("riseFallRate")) * 100,
+            turnover_usd=item.get("amount24"),
+            high_24h=item.get("high24Price"),
+            low_24h=item.get("low24Price"),
+            open_interest=item.get("holdVol"),
+            funding_rate=_ce_float(item.get("fundingRate")) * 100,
+        )
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _fetch_bitget_perp_rows() -> List[Dict[str, Any]]:
+    payload = _ce_http_json("https://api.bitget.com/api/v2/mix/market/tickers", {"productType": "USDT-FUTURES"})
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    rows = []
+    for item in data or []:
+        contract = str(item.get("symbol") or "").upper()
+        if not contract.endswith("USDT"):
+            continue
+        change_raw = _ce_float(item.get("change24h"))
+        row = _ce_normalized_row(
+            exchange="bitget",
+            contract=contract,
+            price=item.get("lastPr") or item.get("last"),
+            change_24h=change_raw * (100 if abs(change_raw) <= 5 else 1),
+            turnover_usd=item.get("quoteVolume") or item.get("usdtVolume"),
+            high_24h=item.get("high24h"),
+            low_24h=item.get("low24h"),
+            funding_rate=_ce_float(item.get("fundingRate")) * 100,
+        )
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _fetch_crypto_explosion_universe() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    sources = [
+        ("bybit", _fetch_bybit_perp_rows),
+        ("binance", _fetch_binance_perp_rows),
+        ("mexc", _fetch_mexc_perp_rows),
+        ("bitget", _fetch_bitget_perp_rows),
+    ]
+    rows: List[Dict[str, Any]] = []
+    by_exchange: Dict[str, int] = {}
+    for exchange, func in sources:
+        try:
+            got = func()
+        except Exception as exc:
+            print(f"[Crypto Explosion] {exchange} universe failed: {exc}")
+            got = []
+        by_exchange[exchange] = len(got)
+        rows.extend(got)
+    rows = sorted(rows, key=lambda x: x.get("_cheap_rank", 0), reverse=True)
+    seen = set()
+    unique = []
+    for row in rows:
+        key = (row.get("exchange"), row.get("contract"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique, {"by_exchange": by_exchange, "universe_count": len(unique)}
+
+
+def _ce_completed_bars(bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    parsed = []
+    for b in bars or []:
+        close = _ce_float(b.get("close", b.get("c")))
+        high = _ce_float(b.get("high", b.get("h", close)))
+        low = _ce_float(b.get("low", b.get("l", close)))
+        open_ = _ce_float(b.get("open", b.get("o", close)))
+        volume = _ce_float(b.get("volume", b.get("v", 0)))
+        ts = int(_ce_float(b.get("timestamp", b.get("t", 0))))
+        if close <= 0 or high <= 0 or low <= 0 or high < low:
+            continue
+        parsed.append({"timestamp": ts, "open": open_, "high": high, "low": low, "close": close, "volume": volume})
+    return parsed
+
+
+def _ce_median(values: List[float], default: float = 0.0) -> float:
+    vals = sorted([v for v in values if isinstance(v, (int, float)) and v >= 0])
+    if not vals:
+        return default
+    mid = len(vals) // 2
+    return float(vals[mid]) if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
+def _ce_atr(bars: List[Dict[str, Any]], lookback: int = 14) -> float:
+    if len(bars) < 2:
+        return 0.0
+    trs = []
+    for i in range(max(1, len(bars) - lookback), len(bars)):
+        prev = bars[i - 1]["close"]
+        b = bars[i]
+        trs.append(max(b["high"] - b["low"], abs(b["high"] - prev), abs(b["low"] - prev)))
+    return sum(trs) / len(trs) if trs else 0.0
+
+
+def _ce_green_streak(bars: List[Dict[str, Any]]) -> Tuple[int, float]:
+    streak = 0
+    start_open = None
+    for b in reversed(bars or []):
+        if b["close"] > b["open"]:
+            streak += 1
+            start_open = b["open"]
+        else:
+            break
+    last_close = bars[-1]["close"] if bars else 0
+    move = ((last_close - start_open) / start_open * 100) if start_open and start_open > 0 else 0.0
+    return streak, move
+
+
+_CE_BTC_CONTEXT_CACHE = {"ts": 0.0, "btc_24h": 0.0}
+
+
+def _get_crypto_btc_context(symbol: str, coin_change_24h: float = 0.0) -> Dict[str, Any]:
+    try:
+        if time.time() - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 120:
+            btc_change = _ce_float(_CE_BTC_CONTEXT_CACHE.get("btc_24h"))
+        else:
+            markets = _fetch_coingecko_markets(pages=1)
+            btc = next((c for c in markets if str(c.get("symbol", "")).upper() == "BTC"), None)
+            btc_change = _ce_float((btc or {}).get("price_change_percentage_24h"))
+            _CE_BTC_CONTEXT_CACHE.update({"ts": time.time(), "btc_24h": btc_change})
+    except Exception:
+        btc_change = 0.0
+    alpha = coin_change_24h - btc_change
+    return {
+        "btc_24h": round(btc_change, 2),
+        "coin_24h": round(coin_change_24h, 2),
+        "alpha_24h": round(alpha, 2),
+        "tailwind": btc_change >= -1.25 or alpha >= 4.0,
+    }
+
+
+def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[str, Any]], bars15_raw: List[Dict[str, Any]], bars4h_raw: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    bars5 = _ce_completed_bars(bars5_raw)
+    bars15 = _ce_completed_bars(bars15_raw)
+    bars4h = _ce_completed_bars(bars4h_raw)
+    if len(bars5) < 50 or len(bars15) < 24:
+        return None
+
+    price = bars5[-1]["close"]
+    row["Price"] = row["price"] = price
+    last5 = bars5[-1]
+    prior5 = bars5[:-1]
+    prior15 = bars15[:-1] if len(bars15) > 1 else bars15
+    local_high = max(b["high"] for b in prior5[-72:])
+    local_low = min(b["low"] for b in prior5[-72:])
+    range15_high = max(b["high"] for b in prior15[-48:])
+    range15_low = min(b["low"] for b in prior15[-48:])
+    breakout_level = max(local_high, range15_high)
+    range_low = min(local_low, range15_low)
+    if breakout_level <= 0 or range_low <= 0 or breakout_level <= range_low:
+        return None
+
+    atr5 = _ce_atr(bars5, 18)
+    atr_pct = (atr5 / price * 100) if price > 0 else 0.0
+    med_vol = _ce_median([b["volume"] for b in prior5[-48:]], default=0.0)
+    vol_ratio = (last5["volume"] / med_vol) if med_vol > 0 else 0.0
+    close_pos = (last5["close"] - last5["low"]) / max(last5["high"] - last5["low"], price * 0.0001)
+    last_bar_change = ((last5["close"] - last5["open"]) / last5["open"] * 100) if last5["open"] > 0 else 0.0
+    distance_to_breakout_pct = ((breakout_level - price) / price * 100) if price > 0 else 999.0
+    breakout_reclaim_pct = ((price - breakout_level) / price * 100) if price > 0 else -999.0
+    compression_range_pct = ((breakout_level - range_low) / price * 100) if price > 0 else 999.0
+    range_position = (price - range_low) / max(breakout_level - range_low, price * 0.0001)
+    high_24h = _ce_float(row.get("high_24h"))
+    change24 = _ce_float(row.get("Change24h"))
+    funding_pct = _ce_float(row.get("funding_rate"))
+    turnover = _ce_float(row.get("turnover_24h_usd"))
+    spread_pct = _ce_float(row.get("spread_pct"), 0.0)
+    htf_streak, htf_streak_move = _ce_green_streak(bars4h[-8:]) if len(bars4h) >= 8 else (0, 0.0)
+    recent_5m_move = ((price - bars5[-12]["close"]) / bars5[-12]["close"] * 100) if len(bars5) >= 12 and bars5[-12]["close"] > 0 else 0.0
+
+    too_late_reasons = []
+    if change24 >= 35:
+        too_late_reasons.append("24h move already too extended")
+    if htf_streak >= 4 and htf_streak_move >= 12:
+        too_late_reasons.append("4h green-streak already extended")
+    if recent_5m_move >= 12 and close_pos < 0.55:
+        too_late_reasons.append("5m vertical move is fading")
+    if breakout_reclaim_pct > 5.5:
+        too_late_reasons.append("price already far above breakout level")
+    if funding_pct >= 0.08 and change24 >= 12:
+        too_late_reasons.append("crowded funding after pump")
+
+    liquidity_score = 20 if turnover >= 50_000_000 else 16 if turnover >= 15_000_000 else 11 if turnover >= 5_000_000 else 6
+    if spread_pct and spread_pct > 0.08:
+        liquidity_score = max(0, liquidity_score - 5)
+
+    compression_score = 0
+    if 1.2 <= compression_range_pct <= 8.0 and 0.55 <= range_position <= 1.08:
+        compression_score += 18
+    elif compression_range_pct <= 12.0 and 0.70 <= range_position <= 1.10:
+        compression_score += 12
+    compression_score += 8 if atr_pct <= 0.9 else 5 if atr_pct <= 1.8 else 0
+
+    trigger_ok = (
+        price > breakout_level * 1.0015
+        and vol_ratio >= 1.45
+        and close_pos >= 0.62
+        and last_bar_change > 0
+        and not too_late_reasons
+    )
+    armed_ok = (
+        -1.25 <= distance_to_breakout_pct <= 1.25
+        and compression_score >= 14
+        and not too_late_reasons
+    )
+    if not trigger_ok and not armed_ok:
+        return None
+
+    trigger_score = (28 if trigger_ok else 12) + min(18, max(0, vol_ratio - 1.0) * 7) + (8 if close_pos >= 0.75 else 4 if close_pos >= 0.6 else 0)
+    btc_context = _get_crypto_btc_context(_ce_base_from_contract(row.get("contract", "")), change24)
+    btc_penalty = 0 if btc_context.get("tailwind") else 7
+    funding_penalty = 8 if funding_pct >= 0.08 else 4 if funding_pct >= 0.04 else 0
+    late_penalty = min(26, len(too_late_reasons) * 10)
+    explosion_score = int(max(0, min(100, 28 + liquidity_score + compression_score + trigger_score - btc_penalty - funding_penalty - late_penalty)))
+    entry_score = int(max(0, min(100, (92 if trigger_ok else 58) + min(8, vol_ratio * 2) - btc_penalty - funding_penalty - late_penalty)))
+    if explosion_score < 70:
+        return None
+
+    entry = price if trigger_ok else max(price, breakout_level * 1.001)
+    last_swing_low = min(b["low"] for b in bars5[-18:])
+    vrvp = build_vrvp_structure(bars4h[-60:] or bars15[-96:], entry, "LONG", timeframe="4H", num_bins=24, min_bars=20)
+    supports = [_ce_float(level.get("price")) for level in (vrvp or {}).get("supports", []) if _ce_float(level.get("price")) > 0]
+    support_candidates = [p for p in supports + [last_swing_low, range_low, breakout_level - max(atr5, entry * 0.006)] if 0 < p < entry]
+    nearest_support = max(support_candidates) if support_candidates else entry - max(atr5 * 1.6, entry * 0.018)
+    stop = nearest_support - max(entry * 0.004, atr5 * 0.25)
+    min_stop_distance = max(entry * 0.009, atr5 * 1.1)
+    if entry - stop < min_stop_distance:
+        stop = entry - min_stop_distance
+    risk = entry - stop
+    if risk <= 0:
+        return None
+
+    measured_move = breakout_level - range_low
+    raw_tp1 = max(
+        entry + risk * 1.8,
+        breakout_level + max(measured_move * 0.272, entry * 0.025),
+        high_24h if high_24h > entry * 1.025 else 0,
+    )
+    raw_tp2 = max(raw_tp1 + risk * 0.9, breakout_level + max(measured_move * 0.618, entry * 0.045), entry + risk * 2.7)
+    setup = {
+        "direction": "LONG",
+        "entry": entry,
+        "stop": stop,
+        "tp1": raw_tp1,
+        "tp2": raw_tp2,
+        "level_model": "breakout_structure_v1",
+        "tp1_source": "range/24h-high structure",
+        "tp2_source": "measured move structure",
+        "stop_source": "nearest support/VRVP invalidation",
+    }
+    setup = apply_vrvp_to_trade_setup(setup, vrvp, direction="LONG", asset_type="crypto", atr=atr5)
+    entry = _ce_float(setup.get("entry"))
+    stop = _ce_float(setup.get("stop"))
+    tp1 = _ce_float(setup.get("tp1"))
+    tp2 = _ce_float(setup.get("tp2"))
+    risk = entry - stop
+    if risk <= 0 or tp1 <= entry or tp2 <= tp1:
+        return None
+    rr_tp1 = (tp1 - entry) / risk
+    rr_tp2 = (tp2 - entry) / risk
+    rr = (rr_tp1 + rr_tp2) / 2
+    if rr < 1.45:
+        return None
+
+    trade_signal = "JETZT_TRADEN" if trigger_ok else "EXPLOSION_ARMED"
+    risk_level = "LOW"
+    risk_reasons = []
+    if turnover < 5_000_000:
+        risk_level = "MEDIUM"
+        risk_reasons.append("perp volume only medium")
+    if spread_pct and spread_pct > 0.08:
+        risk_level = "MEDIUM"
+        risk_reasons.append("spread above ideal")
+    if not btc_context.get("tailwind"):
+        risk_level = "MEDIUM"
+        risk_reasons.append("BTC not supportive")
+    if funding_pct >= 0.08:
+        risk_level = "HIGH"
+        risk_reasons.append("funding crowded")
+    if not trigger_ok:
+        risk_reasons.append("wait for 5m breakout confirmation")
+
+    grade = "S" if explosion_score >= 88 else "A" if explosion_score >= 80 else "B"
+    return {
+        **row,
+        "ticker": row.get("Symbol"),
+        "Price": _ce_round_price(price),
+        "price": price,
+        "Change24h": round(change24, 2),
+        "grade": grade,
+        "Grade": grade,
+        "score": explosion_score,
+        "explosion_score": explosion_score,
+        "setup_score": explosion_score,
+        "entry_score": entry_score,
+        "trade_signal": trade_signal,
+        "trade_action": "LONG_NOW" if trigger_ok else "WAIT_FOR_BREAKOUT",
+        "trade_decision": "TRADEABLE" if trigger_ok else "WAIT_FOR_TRIGGER",
+        "trade_decision_label": "5m Breakout bestaetigt" if trigger_ok else "5m Breakout/Reclaim abwarten",
+        "signal_label": "Frischer 5m Breakout bestaetigt" if trigger_ok else "Kurz vor Ausbruch; kein Market-Buy vor 5m Breakout",
+        "phase": 2 if trigger_ok else 1,
+        "phase_label": "Breakout confirmed" if trigger_ok else "Compression/coil near breakout",
+        "entry": _ce_round_price(entry),
+        "stop": _ce_round_price(stop),
+        "stop_loss": _ce_round_price(stop),
+        "tp1": _ce_round_price(tp1),
+        "tp2": _ce_round_price(tp2),
+        "risk_reward": round(rr, 2),
+        "live_rr_ratio": round(rr, 2),
+        "rr_tp1": round(rr_tp1, 2),
+        "rr_tp2": round(rr_tp2, 2),
+        "atr5_pct": round(atr_pct, 3),
+        "volume_ratio_5m": round(vol_ratio, 2),
+        "close_pos_5m": round(close_pos, 2),
+        "distance_to_breakout_pct": round(distance_to_breakout_pct, 2),
+        "compression_range_pct": round(compression_range_pct, 2),
+        "breakout_level": _ce_round_price(breakout_level),
+        "range_low": _ce_round_price(range_low),
+        "risk_level": risk_level,
+        "risk_reasons": risk_reasons,
+        "risk_flags": risk_reasons,
+        "btc_context": btc_context,
+        "target_quality": setup.get("target_quality", "STRUCTURAL"),
+        "tp1_source": setup.get("tp1_source"),
+        "tp2_source": setup.get("tp2_source"),
+        "stop_source": setup.get("stop_source"),
+        "level_model": setup.get("level_model"),
+        "vrvp_applied": setup.get("vrvp_applied"),
+        "vrvp_timeframe": setup.get("vrvp_timeframe"),
+        "vrvp_poc": setup.get("vrvp_poc"),
+        "vrvp_vah": setup.get("vrvp_vah"),
+        "vrvp_val": setup.get("vrvp_val"),
+        "reasons": [
+            f"5m volume {vol_ratio:.2f}x vs median",
+            f"price {'reclaimed' if trigger_ok else 'near'} breakout level {breakout_level:.6g}",
+            f"compression range {compression_range_pct:.1f}%",
+        ],
+        "warnings": risk_reasons,
+        "alertable_crypto": bool(trigger_ok and risk_level != "HIGH" and rr >= 1.5),
+        "execution_trigger_ok": bool(trigger_ok),
+    }
+
+
+def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    universe, stats = _fetch_crypto_explosion_universe()
+    max_checks = max(50, min(CRYPTO_EXPLOSION_MAX_CHART_CHECKS, 1600))
+    results: List[Dict[str, Any]] = []
+    reason_counts: Dict[str, int] = {}
+    checked = 0
+    for row in universe[:max_checks]:
+        checked += 1
+        contract = row.get("contract")
+        exchange = row.get("exchange")
+        try:
+            bars5 = _fetch_exchange_candles_any(contract, exchange, timeframe="5m", count=140)
+            bars15 = _fetch_exchange_candles_any(contract, exchange, timeframe="15m", count=96)
+            bars4h = _fetch_exchange_candles_any(contract, exchange, timeframe="4h", count=72)
+            scored = _score_crypto_explosion_candidate(row, bars5, bars15, bars4h)
+            if scored:
+                results.append(scored)
+        except Exception as exc:
+            key = f"{exchange}_chart_error"
+            reason_counts[key] = reason_counts.get(key, 0) + 1
+            print(f"[Crypto Explosion] {exchange}:{contract} error: {exc}")
+
+    results = sorted(
+        results,
+        key=lambda r: (
+            0 if r.get("trade_signal") == "JETZT_TRADEN" else 1,
+            -int(r.get("entry_score") or 0),
+            -int(r.get("explosion_score") or 0),
+            -float(r.get("turnover_24h_usd") or 0),
+        ),
+    )[:80]
+    stats.update({
+        "chart_checked": checked,
+        "max_chart_checks": max_checks,
+        "result_count": len(results),
+        "trade_now_count": sum(1 for r in results if r.get("trade_signal") == "JETZT_TRADEN"),
+        "armed_count": sum(1 for r in results if r.get("trade_signal") == "EXPLOSION_ARMED"),
+        "reason_counts": reason_counts,
+        "scanner_note": "Exchange-native breakout scanner; ARMED is not a market buy.",
+    })
+    return results, stats
+
+
+def _crypto_explosion_wrapper() -> None:
+    try:
+        print("[Crypto Explosion] Starting exchange-native scan...")
+        rows, stats = _run_crypto_explosion_scan()
+        save_cache_file(CRYPTO_EXPLOSION_CACHE, rows)
+        print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks")
+    except Exception as exc:
+        print(f"[Crypto Explosion] Error: {exc}")
+        traceback.print_exc()
+
+
+@app.post("/api/crypto-explosion-scan")
+def trigger_crypto_explosion_scan():
+    _run_scan_safe("crypto_explosion", _crypto_explosion_wrapper)
+    return {"status": "started", "message": "Crypto Explosion scan started"}
+
+
+@app.get("/api/crypto-explosion-results")
+def get_crypto_explosion_results():
+    results, cached_at = load_cache_file(CRYPTO_EXPLOSION_CACHE)
+    cache_age = None
+    if cached_at:
+        try:
+            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+        except Exception as exc:
+            print(f"[Warning] {exc}")
+    decorated = _decorate_scan_results(results, "crypto_explosion", cache_age)
+    decorated = _apply_signal_only_policy("crypto_explosion", decorated)
+    quality = _scan_quality_payload("crypto_explosion", cache_age, decorated)
+    stats = {
+        "result_count": len(decorated),
+        "trade_now_count": sum(1 for r in decorated if r.get("trade_signal") == "JETZT_TRADEN"),
+        "armed_count": sum(1 for r in decorated if r.get("trade_signal") == "EXPLOSION_ARMED"),
+        "scanner_note": "ARMED bedeutet: beobachten und erst bei 5m Breakout/Reclaim handeln.",
+    }
+    return {
+        "status": "success",
+        "data": decorated,
+        "stats": stats,
+        "cached_at": cached_at,
+        "cache_age_seconds": cache_age,
+        "data_quality": quality,
+        "warnings": quality["warnings"],
+        "exclusion_policy": quality["exclusion_policy"],
+    }
+
+
 CRASH_MONITOR_CACHE = "/tmp/crash_monitor_cache.json"
 
 
