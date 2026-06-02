@@ -7593,7 +7593,12 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
             <div className="p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-800">
-                Signal-Only Modus: Pump & Dump zeigt nur noch <b>JETZT SHORTEN</b> mit 5m-Crack/Rejection, Safety OK, Entry/Stop/TP und Live-R:R. Reine Listing-/Pump-Beobachtungen werden nicht mehr angezeigt oder gemailt.
+                Analyse-Modus: <b>JETZT SHORTEN</b> steht nur bei bestaetigtem Crack/Rejection. Darunter erscheinen sinnvolle Dump-/Crack-Watch-Kandidaten mit live Preis/Pump-Kontext; reine Listing-Ankuendigungen ohne Trade-Daten bleiben ausgeblendet und werden nicht als Signal gemailt.
+                {stats && (
+                    <div className="mt-2 text-xs text-blue-700">
+                        Sichtbar: {stats.new_listings || 0} | Short-ready: {stats.tradeable_short_signals || 0} | Watch: {stats.visible_watch_rows || 0} | Rohdaten: {stats.raw_rows || 0} | Ausgeblendete Ankuendigungen: {stats.hidden_announcement_rows || 0}
+                    </div>
+                )}
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -7615,6 +7620,13 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         </tr>
                     </thead>
                     <tbody>
+                        {sorted.length === 0 && (
+                            <tr>
+                                <td colSpan="12" className="py-10 px-2 text-center text-gray-400">
+                                    Keine Pump-&-Dump-Kandidaten mit Live-Preis und verwertbarer Pump/Crack-Struktur im Cache. Reine Listing-Ankuendigungen werden hier bewusst nicht als Signal angezeigt.
+                                </td>
+                            </tr>
+                        )}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker({ticker: item.symbol, isCrypto: true, isExchangeCrypto: true, exchange: item.exchange, contract: item.contract, ...item})}>
                                 <td className="py-3 px-2 font-semibold">{item.symbol}</td>

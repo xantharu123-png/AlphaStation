@@ -15361,6 +15361,111 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
     return flat
 
 
+def _new_listing_display_keep(row: Dict[str, Any]) -> bool:
+    """Keep useful Pump & Dump analysis rows without turning announcements into noise."""
+    if not isinstance(row, dict):
+        return False
+
+    action = str(row.get("trade_action") or row.get("trade_signal") or "").upper()
+    signal = str(row.get("signal") or row.get("trade_signal") or "").upper()
+    category = str(row.get("trade_category") or "").upper()
+    source = str(row.get("source") or "").lower()
+
+    if action == "SHORT_NOW" or signal.startswith("SHORT"):
+        return True
+
+    # Pure exchange headlines without live price/structure are stored for
+    # monitoring, but they are not useful as a trader-facing Pump & Dump row.
+    if source == "announcement" or category == "ANNOUNCEMENT_WATCH":
+        return False
+
+    price = _alert_float(row.get("price") or row.get("micro_current_price"), 0) or 0
+    if price <= 0:
+        return False
+
+    pump_pct = _alert_float(row.get("pump_pct"), 0) or 0
+    from_ath_pct = _alert_float(row.get("from_ath_pct"), 0) or 0
+    exhaustion_score = _alert_float(row.get("exhaustion_score") or row.get("raw_score"), 0) or 0
+    useful_category = category in {
+        "NEW_LISTING_DUMP",
+        "EXHAUSTION_WATCH",
+        "PUMP_RUNNING_WATCH",
+        "ACTIVE_PUMP_WATCH",
+        "NEW_LISTING_TOO_EARLY",
+        "WAITING_FOR_HISTORY",
+        "UNKNOWN_LISTING_AGE",
+    }
+    useful_source = source in {"signals", "watchlist", "monitoring"}
+    return bool((useful_category or useful_source) and (pump_pct >= 8 or from_ath_pct >= 5 or exhaustion_score >= 25))
+
+
+def _new_listing_display_sort_key(row: Dict[str, Any]) -> tuple:
+    action = str(row.get("trade_action") or row.get("trade_signal") or "").upper()
+    signal = str(row.get("signal") or row.get("trade_signal") or "").upper()
+    category = str(row.get("trade_category") or "").upper()
+    source = str(row.get("source") or "").lower()
+    grade = str(row.get("grade") or "").upper()
+    grade_rank = {"S": 0, "A+": 1, "A": 2, "B": 3, "C": 4, "D": 5}.get(grade, 6)
+
+    if action == "SHORT_NOW" or signal.startswith("SHORT"):
+        state_rank = 0
+    elif category == "NEW_LISTING_DUMP":
+        state_rank = 1
+    elif category in {"EXHAUSTION_WATCH", "PUMP_RUNNING_WATCH", "ACTIVE_PUMP_WATCH"}:
+        state_rank = 2
+    elif source == "monitoring":
+        state_rank = 3
+    else:
+        state_rank = 4
+
+    price_rank = 0 if (_alert_float(row.get("price") or row.get("micro_current_price"), 0) or 0) > 0 else 1
+    score = _alert_float(row.get("exhaustion_score") or row.get("raw_score"), 0) or 0
+    pump_pct = _alert_float(row.get("pump_pct"), 0) or 0
+    from_ath_pct = _alert_float(row.get("from_ath_pct"), 0) or 0
+    rr = _alert_float(row.get("rr_effective"), 0) or 0
+    return (state_rank, price_rank, grade_rank, -score, -pump_pct, -from_ath_pct, -rr)
+
+
+def _decorate_new_listing_display_results(
+    results: List[Dict[str, Any]],
+    cache_age_seconds: Optional[int],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Decorate Pump & Dump rows for UI analysis without applying signal-only collapse."""
+    raw_rows = [r for r in (results or []) if isinstance(r, dict)]
+    decorated = _decorate_scan_results(raw_rows, "new_listing", cache_age_seconds)
+    visible: List[Dict[str, Any]] = []
+    hidden_announcements = 0
+    hidden_low_quality = 0
+
+    for row in decorated:
+        source = str(row.get("source") or "").lower()
+        category = str(row.get("trade_category") or "").upper()
+        if _new_listing_display_keep(row):
+            quality = row.setdefault("_quality", {})
+            quality["signal_only"] = False
+            quality["display_mode"] = "pump_dump_analysis"
+            visible.append(row)
+        elif source == "announcement" or category == "ANNOUNCEMENT_WATCH":
+            hidden_announcements += 1
+        else:
+            hidden_low_quality += 1
+
+    visible.sort(key=_new_listing_display_sort_key)
+    visible_tradeable = sum(
+        1 for row in visible
+        if str(row.get("trade_action") or "").upper() == "SHORT_NOW"
+        or str(row.get("signal") or "").upper().startswith("SHORT")
+    )
+    stats = {
+        "visible_rows": len(visible),
+        "tradeable_short_signals": visible_tradeable,
+        "visible_watch_rows": max(0, len(visible) - visible_tradeable),
+        "hidden_announcement_rows": hidden_announcements,
+        "hidden_low_quality_rows": hidden_low_quality,
+    }
+    return visible, stats
+
+
 def _new_listing_wrapper() -> None:
     """Run the full Pump & Dump scanner pipeline and cache flat UI results."""
     if not HAS_NEW_LISTING_SCANNER:
@@ -15399,17 +15504,28 @@ def get_new_listing_results():
         except Exception as e:
             print(f"[Warning] {e}")
     raw_count = len(results) if results else 0
-    decorated = _decorate_scan_results(results, "new_listing", cache_age)
-    decorated = _apply_signal_only_policy("new_listing", decorated)
+    decorated, display_stats = _decorate_new_listing_display_results(results, cache_age)
     stats = {
         "raw_rows": raw_count,
         "new_listings": len(decorated) if decorated else 0,
         "exchanges_monitored": len(set(r.get("exchange", "") for r in decorated)) if decorated else 0,
-        "active_signals": len([r for r in decorated if r.get("trade_signal") == "JETZT_TRADEN" or r.get("trade_action") == "SHORT_NOW"]) if decorated else 0,
-        "suppressed_watch_rows": max(0, raw_count - len(decorated or [])),
-        "signal_only": True,
+        "active_signals": display_stats.get("tradeable_short_signals", 0),
+        "tradeable_short_signals": display_stats.get("tradeable_short_signals", 0),
+        "visible_watch_rows": display_stats.get("visible_watch_rows", 0),
+        "hidden_announcement_rows": display_stats.get("hidden_announcement_rows", 0),
+        "hidden_low_quality_rows": display_stats.get("hidden_low_quality_rows", 0),
+        "suppressed_watch_rows": 0,
+        "signal_only": False,
+        "display_mode": "pump_dump_analysis",
     }
     quality = _scan_quality_payload("new_listing", cache_age, decorated)
+    quality["signal_only"] = False
+    quality["signal_policy"] = (
+        "Pump & Dump Analyse: Short-ready Zeilen zuerst, danach sinnvolle Dump-/Crack-Watch-Kandidaten. "
+        "Reine Listing-Ankuendigungen ohne live Preis/Struktur bleiben ausgeblendet; Mail-Gates bleiben strenger."
+    )
+    if raw_count and not decorated:
+        quality["warnings"].append("Rohdaten vorhanden, aber nur Ankuendigungen oder zu schwache Pump-/Dump-Kandidaten.")
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "stats": stats, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 

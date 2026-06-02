@@ -1705,6 +1705,44 @@ def test_new_listing_flatten_uses_monitoring_candle_price_and_dedupes_zero_rows(
     assert rows[0]["trade_category"] == "EXHAUSTION_WATCH"
 
 
+def test_new_listing_ui_keeps_dump_watch_but_hides_pure_announcements():
+    rows = [
+        {
+            "symbol": "WATCH",
+            "exchange": "mexc",
+            "price": 1.25,
+            "pump_pct": 28,
+            "from_ath_pct": 12,
+            "exhaustion_score": 46,
+            "trade_category": "EXHAUSTION_WATCH",
+            "source": "monitoring",
+            "trade_action": "BEOBACHTEN",
+            "trade_signal": "BEOBACHTEN",
+            "grade": "C",
+        },
+        {
+            "symbol": "HEADLINE",
+            "exchange": "bitget",
+            "price": 0,
+            "pump_pct": 0,
+            "from_ath_pct": 0,
+            "exhaustion_score": 0,
+            "trade_category": "ANNOUNCEMENT_WATCH",
+            "source": "announcement",
+            "trade_action": "BEOBACHTEN",
+            "trade_signal": "BEOBACHTEN",
+            "grade": "WATCH",
+        },
+    ]
+
+    visible, stats = api._decorate_new_listing_display_results(rows, cache_age_seconds=10)
+
+    assert [row["symbol"] for row in visible] == ["WATCH"]
+    assert stats["visible_watch_rows"] == 1
+    assert stats["tradeable_short_signals"] == 0
+    assert stats["hidden_announcement_rows"] == 1
+
+
 def test_new_listing_alert_audit_treats_string_false_as_false(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "string_bool_new_listing.json"
