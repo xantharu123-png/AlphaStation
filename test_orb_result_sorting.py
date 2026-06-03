@@ -42,3 +42,9 @@ def test_orb_breakouts_keeps_all_rows_visible_and_sorts_tradeable_first(monkeypa
     assert decorated["breakout_decision_counts"]["tradeable"] == 1
     assert decorated["breakout_decision_counts"]["wait"] == 1
     assert decorated["breakout_decision_counts"]["no_trade"] == 1
+    nope = next(row for row in decorated["breakouts"] if row["ticker"] == "NOPE")
+    assert nope["trade_decision"] == "NO_TRADE"
+    assert nope["entry_quality_raw"] == "GOOD"
+    assert nope["entry_quality"] == "BLOCKED"
+    assert nope["entry_badge_label"] == "Blockiert"
+    assert "Entry GOOD" not in nope["score_details"]

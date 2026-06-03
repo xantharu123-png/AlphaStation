@@ -8047,6 +8047,17 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     const gradeColor = (g) => ({ S: 'text-yellow-500 font-bold', A: 'text-green-500 font-bold', B: 'text-blue-500', C: 'text-gray-500' }[g] || 'text-gray-400');
     const dirEmoji = (d) => d === 'LONG' ? '⬆️' : d === 'SHORT' ? '⬇️' : '🔄';
     const formatAge = (s) => s == null ? '—' : s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}min` : `${Math.floor(s/3600)}h`;
+    const orbEntryBadgeLabel = (b) => b?.entry_badge_label || (b?.entry_quality ? `Entry ${b.entry_quality}` : '');
+    const orbEntryBadgeClass = (b) => {
+        const decision = String(b?.trade_decision || b?.trade_health?.decision || '').toUpperCase();
+        const tone = String(b?.entry_badge_tone || '').toLowerCase();
+        if (tone === 'danger' || decision === 'NO_TRADE') return 'bg-red-100 text-red-700';
+        if (tone === 'warning') return 'bg-yellow-100 text-yellow-700';
+        const q = String(b?.entry_quality || '').toUpperCase();
+        if (q === 'GOOD') return 'bg-green-100 text-green-700';
+        if (q === 'EXTENDED' || q === 'LATE') return 'bg-yellow-100 text-yellow-700';
+        return 'bg-red-100 text-red-700';
+    };
 
     const orbDecisionRank = (b) => {
         const d = String(b?.trade_decision || b?.trade_health?.decision || '').toUpperCase();
@@ -8156,7 +8167,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                     <span className="ml-2 text-sm">{dirEmoji(b.direction)} {b.direction}</span>
                                     {b.vol_confirmed && <span className="ml-1 text-xs text-green-600">🔊 Vol✓</span>}
                                     {b.vwap_aligned && <span className="ml-1 text-xs text-blue-500">VWAP✓</span>}
-                                    {b.entry_quality && <span className={`ml-1 text-xs px-1.5 py-0.5 rounded ${b.entry_quality === 'GOOD' ? 'bg-green-100 text-green-700' : b.entry_quality === 'EXTENDED' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>Entry {b.entry_quality}</span>}
+                                    {orbEntryBadgeLabel(b) && <span className={`ml-1 text-xs px-1.5 py-0.5 rounded ${orbEntryBadgeClass(b)}`}>{orbEntryBadgeLabel(b)}</span>}
                                     {b.trade_health && <span className={`ml-1 text-xs px-1.5 py-0.5 rounded ${b.trade_health.decision === 'TRADEABLE' ? 'bg-emerald-100 text-emerald-700' : b.trade_health.decision === 'NO_TRADE' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{b.trade_health.decision_label || b.trade_health.decision}</span>}
                                     {b.late_to_tp1 && <span className="ml-1 text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">TP1 hit</span>}
                                 </div>

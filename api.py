@@ -6595,6 +6595,42 @@ def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) 
     return visible
 
 
+def _normalize_orb_display_state(row: Dict[str, Any]) -> None:
+    """Prevent ORB rows from showing a positive entry badge when final state is blocked."""
+    health = row.get("trade_health") if isinstance(row.get("trade_health"), dict) else {}
+    decision = str(row.get("trade_decision") or health.get("decision") or "").upper()
+    raw_entry_quality = str(row.get("entry_quality") or health.get("entry_quality") or "").upper()
+    if raw_entry_quality and "entry_quality_raw" not in row:
+        row["entry_quality_raw"] = raw_entry_quality
+
+    if decision == "NO_TRADE":
+        label = row.get("trade_decision_label") or health.get("decision_label") or "No Trade"
+        row["entry_quality"] = "BLOCKED"
+        row["entry_quality_label"] = "Blockiert"
+        row["entry_badge_label"] = "Blockiert"
+        row["entry_badge_tone"] = "danger"
+        row["orb_display_state"] = "NO_TRADE"
+        details = [
+            part.strip()
+            for part in str(row.get("score_details") or "").split("|")
+            if part.strip()
+        ]
+        details = [part for part in details if part.upper() != "ENTRY GOOD"]
+        details.append(f"NO TRADE: {label}")
+        row["score_details"] = " | ".join(dict.fromkeys(details))
+        return
+
+    if decision in {"WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION", "WAIT_FOR_TRIGGER", "WATCH_ONLY"}:
+        row["entry_badge_label"] = "Warten"
+        row["entry_badge_tone"] = "warning"
+        row["orb_display_state"] = decision
+        return
+
+    if raw_entry_quality:
+        row["entry_badge_label"] = f"Entry {raw_entry_quality}"
+        row["entry_badge_tone"] = "good" if raw_entry_quality == "GOOD" else "warning" if raw_entry_quality in {"EXTENDED", "LATE"} else "danger"
+
+
 def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
     """Decorate ORB container rows and the nested breakout/candidate rows."""
     def _orb_trade_rank(row: Dict[str, Any]) -> tuple:
@@ -6630,6 +6666,9 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
             rows = payload.get(list_key)
             if isinstance(rows, list):
                 decorated_rows = _decorate_scan_results(rows, "orb", cache_age_seconds)
+                for row in decorated_rows:
+                    if isinstance(row, dict):
+                        _normalize_orb_display_state(row)
                 if list_key == "breakouts":
                     decorated_rows = sorted(decorated_rows, key=_orb_trade_rank)
                     payload["breakout_decision_counts"] = {
