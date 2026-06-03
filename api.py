@@ -275,9 +275,9 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         "Momentum Breakout Long": _clone_stock_strategy(
             "Breakout Long",
             filters={
-                "Change %": (3.0, 200.0),
-                "RVOL": (1.8, 100.0),
-                "Close Position": (0.62, 1.0),
+                "Change %": (2.0, 200.0),
+                "RVOL": (1.2, 100.0),
+                "Close Position": (0.55, 1.0),
                 "Preis": (5.0, 100000.0),
             },
             description="Konsolidierter Momentum-Scanner für Breakout-, Early- und Whale-Setups.",
@@ -503,7 +503,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 2
+STOCK_STRATEGY_CACHE_VERSION = 3
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -7535,10 +7535,12 @@ def _strategy_daily_history_metrics(
     avg_vol20 = sum(vols20) / len(vols20) if vols20 else 0.0
     rvol20 = min(round(float(day_volume or 0) / avg_vol20, 2), 50.0) if avg_vol20 > 0 else None
 
+    highs10 = [b["high"] for b in completed[-10:] if b.get("high", 0) > 0]
     highs20 = [b["high"] for b in completed[-20:] if b.get("high", 0) > 0]
     lows20 = [b["low"] for b in completed[-20:] if b.get("low", 0) > 0]
     highs50 = [b["high"] for b in completed[-50:] if b.get("high", 0) > 0]
     lows50 = [b["low"] for b in completed[-50:] if b.get("low", 0) > 0]
+    high_10d = max(highs10) if highs10 else float(day_high or price or 0)
     high_20d = max(highs20) if highs20 else float(day_high or price or 0)
     low_20d = min(lows20) if lows20 else float(day_low or price or 0)
     high_50d = max(highs50) if highs50 else high_20d
@@ -7598,6 +7600,7 @@ def _strategy_daily_history_metrics(
 
     change_5d = _change_from_completed(5)
     change_20d = _change_from_completed(20)
+    breakout_10d_pct = ((price - high_10d) / high_10d * 100) if high_10d > 0 else None
     breakout_20d_pct = ((price - high_20d) / high_20d * 100) if high_20d > 0 else None
     breakout_50d_pct = ((price - high_50d) / high_50d * 100) if high_50d > 0 else None
     ema20_distance_pct = ((price - ema20) / ema20 * 100) if ema20 and ema20 > 0 else None
@@ -7609,6 +7612,7 @@ def _strategy_daily_history_metrics(
         "rvol20": rvol20,
         "atr14": atr14,
         "atr_pct": atr_pct,
+        "high_10d": high_10d,
         "high_20d": high_20d,
         "low_20d": low_20d,
         "high_50d": high_50d,
@@ -7623,6 +7627,7 @@ def _strategy_daily_history_metrics(
         "rsi14": rsi14,
         "change_5d": change_5d,
         "change_20d": change_20d,
+        "breakout_10d_pct": breakout_10d_pct,
         "breakout_20d_pct": breakout_20d_pct,
         "breakout_50d_pct": breakout_50d_pct,
         "ema20_distance_pct": ema20_distance_pct,
@@ -7654,29 +7659,63 @@ def _stock_momentum_breakout_gate(
     ema20 = _alert_float(history_metrics.get("ema20"))
     ema50 = _alert_float(history_metrics.get("ema50"))
     rsi14 = _alert_float(history_metrics.get("rsi14"))
+    high10 = _alert_float(history_metrics.get("high_10d"))
     high20 = _alert_float(history_metrics.get("high_20d"))
+    breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
     breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
     change5d = _alert_float(history_metrics.get("change_5d"))
+    range_pos = _alert_float(history_metrics.get("range_pos"))
 
-    if change_pct < 2.5:
-        reasons.append("daily_momentum_too_small")
-    if rvol < 1.5:
-        reasons.append("rvol_below_breakout_threshold")
-    if close_pos < 0.58:
-        reasons.append("daily_close_not_near_high")
-    if ema20 and price <= ema20:
+    near_20d_breakout = bool(high20 and breakout20 is not None and breakout20 >= -0.25)
+    near_10d_breakout = bool(high10 and breakout10 is not None and breakout10 >= -0.15)
+    holds_20d_breakout = bool(
+        near_20d_breakout
+        and change_pct >= 1.0
+        and rvol >= 1.05
+        and close_pos >= 0.52
+    )
+    holds_10d_breakout = bool(
+        near_10d_breakout
+        and change_pct >= 1.5
+        and rvol >= 1.15
+        and close_pos >= 0.55
+    )
+    range_breakout = bool(
+        range_pos is not None
+        and range_pos >= 78
+        and change_pct >= 2.0
+        and rvol >= 1.25
+        and close_pos >= 0.58
+    )
+    trend_reclaim = bool(
+        ema20
+        and price > ema20
+        and (not ema50 or price > ema50 or ema20 >= ema50)
+        and change_pct >= 2.0
+        and rvol >= 1.35
+        and close_pos >= 0.62
+    )
+
+    if not (holds_20d_breakout or holds_10d_breakout or range_breakout or trend_reclaim):
+        if change_pct < 1.0:
+            reasons.append("daily_momentum_too_small")
+        if rvol < 1.05:
+            reasons.append("rvol_below_breakout_threshold")
+        if close_pos < 0.52:
+            reasons.append("daily_close_not_near_high")
+
+    if ema20 and price <= ema20 and not (holds_10d_breakout or holds_20d_breakout):
         reasons.append("price_below_ema20")
-    if ema20 and ema50 and price <= ema50 and ema20 < ema50:
+    if ema20 and ema50 and price <= ema50 and ema20 < ema50 and not holds_20d_breakout:
         reasons.append("no_ema20_50_trend_reclaim")
     if rsi14 is not None and rsi14 < 45:
         reasons.append("rsi_too_weak_for_momentum")
-    if rsi14 is not None and rsi14 > 78:
+    if rsi14 is not None and rsi14 > 90 and not holds_20d_breakout:
         reasons.append("rsi_overheated")
 
-    holds_20d_breakout = bool(high20 and breakout20 is not None and breakout20 >= -0.25)
-    if not holds_20d_breakout:
-        reasons.append("no_20d_breakout_hold")
-    if change5d is not None and change5d < -8 and not holds_20d_breakout:
+    if not (holds_20d_breakout or holds_10d_breakout or range_breakout or trend_reclaim):
+        reasons.append("no_momentum_breakout_structure")
+    if change5d is not None and change5d < -8 and not (holds_10d_breakout or holds_20d_breakout or trend_reclaim):
         reasons.append("bounce_after_recent_selloff")
 
     return not reasons, reasons
@@ -8726,6 +8765,21 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         for _reason in _momentum_block_reasons:
                             _reject(f"momentum:{_reason}")
                         continue
+                    _breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
+                    _breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
+                    _range_pos = _alert_float(history_metrics.get("range_pos"))
+                    _ema20_metric = _alert_float(history_metrics.get("ema20"))
+                    _ema50_metric = _alert_float(history_metrics.get("ema50"))
+                    if _breakout20 is not None and _breakout20 >= -0.25:
+                        _momentum_breakout_type = "20D_HIGH_BREAKOUT"
+                    elif _breakout10 is not None and _breakout10 >= -0.15:
+                        _momentum_breakout_type = "10D_HIGH_BREAKOUT"
+                    elif _range_pos is not None and _range_pos >= 78:
+                        _momentum_breakout_type = "RANGE_BREAKOUT"
+                    elif _ema20_metric and price > _ema20_metric and (not _ema50_metric or price > _ema50_metric or _ema20_metric >= _ema50_metric):
+                        _momentum_breakout_type = "TREND_RECLAIM"
+                    else:
+                        _momentum_breakout_type = "MOMENTUM_BREAKOUT"
 
                     # Scoring: ATR-/Wick-aware statt "je groesser der Move desto besser".
                     _strat_score, _score_meta = _score_strategy_candidate(
@@ -8807,6 +8861,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "Day_High": round(day_high, 2),
                         "Day_Low": round(day_low, 2),
                         "High_20D": _round_trade_price(history_metrics.get("high_20d") or day_high),
+                        "High_10D": _round_trade_price(history_metrics.get("high_10d") or day_high),
                         "Low_20D": _round_trade_price(history_metrics.get("low_20d") or day_low),
                         "High_50D": _round_trade_price(history_metrics.get("high_50d") or day_high),
                         "Low_50D": _round_trade_price(history_metrics.get("low_50d") or day_low),
@@ -8829,11 +8884,13 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "EMA200": _round_trade_price(history_metrics.get("ema200")) if history_metrics.get("ema200") else None,
                         "Change_5D": round(history_metrics.get("change_5d"), 2) if history_metrics.get("change_5d") is not None else None,
                         "Change_20D": round(history_metrics.get("change_20d"), 2) if history_metrics.get("change_20d") is not None else None,
+                        "Breakout_10D_Pct": round(history_metrics.get("breakout_10d_pct"), 2) if history_metrics.get("breakout_10d_pct") is not None else None,
                         "Breakout_20D_Pct": round(history_metrics.get("breakout_20d_pct"), 2) if history_metrics.get("breakout_20d_pct") is not None else None,
                         "Breakout_50D_Pct": round(history_metrics.get("breakout_50d_pct"), 2) if history_metrics.get("breakout_50d_pct") is not None else None,
                         "EMA20_Distance_Pct": round(history_metrics.get("ema20_distance_pct"), 2) if history_metrics.get("ema20_distance_pct") is not None else None,
                         "EMA50_Distance_Pct": round(history_metrics.get("ema50_distance_pct"), 2) if history_metrics.get("ema50_distance_pct") is not None else None,
                         "Momentum_Breakout_Gate": "passed",
+                        "Momentum_Breakout_Type": _momentum_breakout_type,
                         "Extension_ATR": _score_meta.get("extension_atr"),
                         "Setup_Score": _score_meta.get("setup_score"),
                         "Upper_Wick_Pct": _score_meta.get("upper_wick_pct"),
