@@ -7547,6 +7547,42 @@ def _strategy_daily_history_metrics(
     swing_low = min(level for level in [low_50d, low_20d, float(day_low or price), price] if level > 0)
     range_pos = ((price - swing_low) / (swing_high - swing_low) * 100) if swing_high > swing_low else 50.0
 
+    active_bars = list(completed)
+    if price > 0:
+        active_bars.append({
+            "open": float(day_open or price),
+            "high": max(float(day_high or price), price),
+            "low": min(float(day_low or price), price),
+            "close": float(price),
+            "volume": float(day_volume or 0),
+            "date": today_str,
+        })
+
+    active_closes = [b["close"] for b in active_bars if b.get("close", 0) > 0]
+    ema20 = ema50 = ema200 = None
+    if active_closes:
+        ema20_series = calculate_ema_series(active_closes, 20)
+        ema50_series = calculate_ema_series(active_closes, 50)
+        ema200_series = calculate_ema_series(active_closes, 200)
+        ema20 = next((v for v in reversed(ema20_series) if v is not None), None)
+        ema50 = next((v for v in reversed(ema50_series) if v is not None), None)
+        ema200 = next((v for v in reversed(ema200_series) if v is not None), None)
+
+    rsi14 = calculate_rsi_from_bars(active_bars[-40:], 14) if len(active_bars) >= 15 else None
+
+    def _change_from_completed(days_back: int) -> Optional[float]:
+        if len(completed) < days_back:
+            return None
+        base = float(completed[-days_back]["close"] or 0)
+        return ((price - base) / base * 100) if base > 0 else None
+
+    change_5d = _change_from_completed(5)
+    change_20d = _change_from_completed(20)
+    breakout_20d_pct = ((price - high_20d) / high_20d * 100) if high_20d > 0 else None
+    breakout_50d_pct = ((price - high_50d) / high_50d * 100) if high_50d > 0 else None
+    ema20_distance_pct = ((price - ema20) / ema20 * 100) if ema20 and ema20 > 0 else None
+    ema50_distance_pct = ((price - ema50) / ema50 * 100) if ema50 and ema50 > 0 else None
+
     return {
         "history_ok": len(completed) >= 20,
         "avg_vol20": avg_vol20,
@@ -7561,7 +7597,69 @@ def _strategy_daily_history_metrics(
         "resistance_1": resistance_1,
         "range_pos": _clamp_float(range_pos, 0.0, 100.0, 50.0),
         "completed_bars": len(completed),
+        "ema20": ema20,
+        "ema50": ema50,
+        "ema200": ema200,
+        "rsi14": rsi14,
+        "change_5d": change_5d,
+        "change_20d": change_20d,
+        "breakout_20d_pct": breakout_20d_pct,
+        "breakout_50d_pct": breakout_50d_pct,
+        "ema20_distance_pct": ema20_distance_pct,
+        "ema50_distance_pct": ema50_distance_pct,
     }
+
+
+def _stock_momentum_breakout_gate(
+    strategy_name: str,
+    history_metrics: Dict[str, Any],
+    *,
+    price: float,
+    change_pct: float,
+    rvol: float,
+    close_pos: float,
+) -> tuple[bool, List[str]]:
+    """Require actual daily structure for Momentum Breakout Long.
+
+    Huge RVOL after a selloff is not a breakout by itself. This gate prevents
+    dead-cat bounces or stale chart mismatches from being labelled as momentum.
+    """
+    if _normalize_strategy_key(strategy_name) != _normalize_strategy_key("Momentum Breakout Long"):
+        return True, []
+
+    reasons: List[str] = []
+    if not history_metrics.get("history_ok"):
+        reasons.append("not_enough_daily_history")
+
+    ema20 = _alert_float(history_metrics.get("ema20"))
+    ema50 = _alert_float(history_metrics.get("ema50"))
+    rsi14 = _alert_float(history_metrics.get("rsi14"))
+    high20 = _alert_float(history_metrics.get("high_20d"))
+    breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
+    change5d = _alert_float(history_metrics.get("change_5d"))
+
+    if change_pct < 2.5:
+        reasons.append("daily_momentum_too_small")
+    if rvol < 1.5:
+        reasons.append("rvol_below_breakout_threshold")
+    if close_pos < 0.58:
+        reasons.append("daily_close_not_near_high")
+    if ema20 and price <= ema20:
+        reasons.append("price_below_ema20")
+    if ema20 and ema50 and price <= ema50 and ema20 < ema50:
+        reasons.append("no_ema20_50_trend_reclaim")
+    if rsi14 is not None and rsi14 < 45:
+        reasons.append("rsi_too_weak_for_momentum")
+    if rsi14 is not None and rsi14 > 78:
+        reasons.append("rsi_overheated")
+
+    holds_20d_breakout = bool(high20 and breakout20 is not None and breakout20 >= -0.25)
+    if not holds_20d_breakout:
+        reasons.append("no_20d_breakout_hold")
+    if change5d is not None and change5d < -8 and not holds_20d_breakout:
+        reasons.append("bounce_after_recent_selloff")
+
+    return not reasons, reasons
 
 
 def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -8562,6 +8660,17 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
                         continue
 
+                    _momentum_ok, _momentum_block_reasons = _stock_momentum_breakout_gate(
+                        strategy_name,
+                        history_metrics,
+                        price=price,
+                        change_pct=change_pct,
+                        rvol=rvol,
+                        close_pos=close_pos,
+                    )
+                    if not _momentum_ok:
+                        continue
+
                     # Scoring: ATR-/Wick-aware statt "je groesser der Move desto besser".
                     _strat_score, _score_meta = _score_strategy_candidate(
                         strategy_name=strategy_name,
@@ -8658,6 +8767,17 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "Swing_Range_Pos": round(history_metrics.get("range_pos") or close_pos * 100.0, 1),
                         "History_Bars": history_metrics.get("completed_bars"),
                         "History_OK": bool(history_metrics.get("history_ok")),
+                        "RSI": history_metrics.get("rsi14"),
+                        "EMA20": _round_trade_price(history_metrics.get("ema20")) if history_metrics.get("ema20") else None,
+                        "EMA50": _round_trade_price(history_metrics.get("ema50")) if history_metrics.get("ema50") else None,
+                        "EMA200": _round_trade_price(history_metrics.get("ema200")) if history_metrics.get("ema200") else None,
+                        "Change_5D": round(history_metrics.get("change_5d"), 2) if history_metrics.get("change_5d") is not None else None,
+                        "Change_20D": round(history_metrics.get("change_20d"), 2) if history_metrics.get("change_20d") is not None else None,
+                        "Breakout_20D_Pct": round(history_metrics.get("breakout_20d_pct"), 2) if history_metrics.get("breakout_20d_pct") is not None else None,
+                        "Breakout_50D_Pct": round(history_metrics.get("breakout_50d_pct"), 2) if history_metrics.get("breakout_50d_pct") is not None else None,
+                        "EMA20_Distance_Pct": round(history_metrics.get("ema20_distance_pct"), 2) if history_metrics.get("ema20_distance_pct") is not None else None,
+                        "EMA50_Distance_Pct": round(history_metrics.get("ema50_distance_pct"), 2) if history_metrics.get("ema50_distance_pct") is not None else None,
+                        "Momentum_Breakout_Gate": "passed",
                         "Extension_ATR": _score_meta.get("extension_atr"),
                         "Setup_Score": _score_meta.get("setup_score"),
                         "Upper_Wick_Pct": _score_meta.get("upper_wick_pct"),
