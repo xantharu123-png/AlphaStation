@@ -138,12 +138,20 @@ def trade_geometry(
         errors.append("invalid_reward")
 
     rr = None
+    rr_tp1 = None
+    rr_tp2 = None
     if not errors:
+        rr_tp1 = round(reward1 / risk, 2)
+        rr_tp2 = round(reward2 / risk, 2)
         rr = round((0.5 * reward1 + 0.5 * reward2) / risk, 2)
 
     return {
         "valid": not errors,
         "rr": rr,
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "reward1": reward1 if not errors else None,
+        "reward2": reward2 if not errors else None,
         "risk": risk if risk and risk > 0 else None,
         "direction": direction,
         "errors": errors,
@@ -226,6 +234,10 @@ def normalize_alert_trade_levels(
         "tp1": tp1,
         "tp2": tp2,
         "rr": geometry["rr"],
+        "rr_tp1": geometry.get("rr_tp1"),
+        "rr_tp2": geometry.get("rr_tp2"),
+        "reward1": geometry.get("reward1"),
+        "reward2": geometry.get("reward2"),
         "risk": geometry["risk"],
         "direction": geometry["direction"],
         "valid": geometry["valid"],

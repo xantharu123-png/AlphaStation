@@ -2302,3 +2302,82 @@ def test_new_listing_watch_mail_blocks_low_rr_confusing_watch():
     }
 
     assert api._new_listing_watch_candidates(payload) == []
+
+
+def test_alert_plan_html_separates_tp1_tp2_rr_and_marks_runner():
+    row = {
+        "ticker": "NCI",
+        "direction": "LONG",
+        "Entry": 10.32,
+        "StopLoss": 9.98,
+        "TP1": 11.55,
+        "TP2": 16.05,
+        "trade_setup": {
+            "stop_source": "s1_invalidation",
+            "tp1_source": "vrvp_hvn_high",
+            "tp2_source": "vrvp_hvn_low",
+        },
+    }
+
+    body = api._format_alert_plan_html(row)
+
+    assert "R:R eff 4.31" in body
+    assert "TP1 3.6R / TP2 16.9R" in body
+    assert "TP2 ist Runner-Ziel" in body
+    assert "VRVP HVN-Oberkante" in body
+
+
+def test_stock_strategy_swing_blocks_extended_long_without_volume(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"CLS"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "CLS",
+        "grade": "A",
+        "score": 88,
+        "rvol": 1.2,
+        "price": 467.09,
+        "current_price": 467.09,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 9.5,
+        "close_pos": 0.74,
+        "open_to_current_pct": 6.0,
+        "Entry": 467.09,
+        "StopLoss": 450.79,
+        "TP1": 509.11,
+        "TP2": 537.13,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_extended_without_volume_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_short_blocks_chased_drop(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"NU"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "NU",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.0,
+        "price": 11.62,
+        "current_price": 11.62,
+        "direction": "SHORT",
+        "Signal_Direction": "SHORT",
+        "change_pct": -10.5,
+        "close_pos": 0.18,
+        "open_to_current_pct": -7.0,
+        "Entry": 11.62,
+        "StopLoss": 11.95,
+        "TP1": 10.70,
+        "TP2": 10.04,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_short_drop_extended_wait_failed_reclaim" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"

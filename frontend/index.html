@@ -7982,8 +7982,9 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
         try {
             const resp = await fetch(`${API}/api/orb-results`);
             const data = await resp.json();
-            if (data.data && data.data.length > 0) {
-                setResults(data.data[0]);
+            const payload = Array.isArray(data.data) ? data.data[0] : data.data;
+            if (payload) {
+                setResults(payload);
                 setCacheAge(data.cache_age_seconds);
             }
         } catch (e) { console.error('ORB load error:', e); }
@@ -8153,6 +8154,11 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             {subView === 'breakouts' && breakouts.length === 0 && (
                 <div className="card p-6 text-center text-gray-400">
                     <p className="text-lg mb-1">Keine Breakouts</p>
+                    {Number(stats.breakouts || 0) > 0 && (
+                        <p className="text-xs text-amber-600 mb-1">
+                            Backend meldet {stats.breakouts} rohe Breakout(s), aber der aktuelle Cache liefert keine sichtbaren Zeilen. Bitte neu scannen; ORB-Zeilen werden nicht mehr per Signal-Only-Filter versteckt.
+                        </p>
+                    )}
                     <p className="text-xs">{results?.or_phase === 'expired' ? 'ORB-Fenster abgelaufen — nächster Scan morgen 9:45 ET' : results?.or_phase === 'weekend' ? 'Wochenende — ORB Scanner Mo-Fr 9:45-11:00 ET' : results?.or_phase === 'pre_open' ? 'Pre-Market — ORB Scanner startet 9:45 ET' : results?.or_phase === 'late_review' ? `Late Review aktiv — klassische ORB-Edge reduziert (${results?.market_time || ''})` : `ORB Prime aktiv Mo-Fr 9:45-11:00 ET (${results?.market_time || ''})`}</p>
                 </div>
             )}

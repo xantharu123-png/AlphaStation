@@ -886,6 +886,8 @@ _ALERT_MIN_SCORE = 80
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
 _ALERT_MIN_LEVEL_RR = 1.0
+_ALERT_RUNNER_RR_CAP = 5.0
+_ALERT_MIN_PRIMARY_TP_RR = 1.0
 _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
     "strategy_scan", "turtle", "volume_spikes", "crypto_strategy", "early_movers", "new_listing",
@@ -1185,10 +1187,12 @@ _ALERT_SUPPRESSION_LABELS = {
     "hard_extended_long_wait_retest": "Long zu weit gelaufen: Retest abwarten",
     "swing_hard_extended_no_chase": "Swing: Bewegung zu weit gelaufen",
     "swing_extended_wait_retest": "Swing: Bewegung erweitert, Retest abwarten",
+    "swing_extended_without_volume_wait_retest": "Swing: Move erweitert, Volumen bestaetigt nicht genug",
     "swing_current_candle_fading": "Swing: Tageskerze faded",
     "swing_not_holding_highs_after_move": "Swing: haelt Ausbruchshochs nicht",
     "swing_short_not_down_enough": "Swing-Short: Abwaertsimpuls zu schwach",
     "swing_short_extended_wait_retest": "Swing-Short: Drop erweitert, Pullback/Rejection abwarten",
+    "swing_short_drop_extended_wait_failed_reclaim": "Swing-Short: Drop gelaufen, failed reclaim abwarten",
     "swing_short_drop_too_extended_no_chase": "Swing-Short: Drop zu weit gelaufen",
     "swing_short_current_candle_reclaim": "Swing-Short: Tageskerze reclaimed",
     "swing_short_not_closing_weak": "Swing-Short: Close nicht schwach genug",
@@ -1763,6 +1767,52 @@ def _alert_trade_levels(row: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _alert_trade_plan_quality(levels: Dict[str, Any]) -> Dict[str, Any]:
+    """Return alert-facing R:R quality without letting a far runner dominate."""
+    rr = _alert_float(levels.get("rr"), None)
+    rr_tp1 = _alert_float(levels.get("rr_tp1"), None)
+    rr_tp2 = _alert_float(levels.get("rr_tp2"), None)
+    if rr_tp1 is None or rr_tp2 is None:
+        return {
+            "effective_rr": rr,
+            "rr_tp1": rr_tp1,
+            "rr_tp2": rr_tp2,
+            "runner_skew": False,
+            "tp1_ok": rr_tp1 is None or rr_tp1 >= _ALERT_MIN_PRIMARY_TP_RR,
+        }
+    capped_tp2 = min(rr_tp2, _ALERT_RUNNER_RR_CAP)
+    effective_rr = round((rr_tp1 + capped_tp2) / 2.0, 2)
+    runner_skew = rr_tp2 > _ALERT_RUNNER_RR_CAP and rr_tp2 >= max(rr_tp1 * 2.25, rr_tp1 + 4.0)
+    return {
+        "effective_rr": effective_rr,
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "runner_skew": runner_skew,
+        "tp1_ok": rr_tp1 >= _ALERT_MIN_PRIMARY_TP_RR,
+    }
+
+
+def _alert_move_warning_line(row: Dict[str, Any], levels: Dict[str, Any]) -> str:
+    direction = str(levels.get("direction") or _alert_trade_direction(row) or "").upper()
+    change = _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "change", default=None), None)
+    rvol = _extract_alert_rvol(row)
+    notes = []
+    if direction == "LONG" and change is not None:
+        if change >= 12:
+            notes.append("Move stark erweitert: Retest/saubere Struktur statt FOMO.")
+        elif change >= 8 and (rvol is None or rvol < 1.5):
+            notes.append("Move schon weit, RVOL nicht stark genug: Retest bevorzugen.")
+    elif direction == "SHORT" and change is not None:
+        if change <= -12:
+            notes.append("Drop schon weit: Short nur nach failed reclaim/weak bounce.")
+        elif change <= -8:
+            notes.append("Drop laeuft bereits: keine spaete Market-Order ohne Rejection.")
+    if not notes:
+        return ""
+    safe = html.escape(" ".join(notes))
+    return f'<br><span style="color:#b45309;font-size:11px">{safe}</span>'
+
+
 def _humanize_alert_level_source(value: Any) -> str:
     """Short user-facing label for where mail levels came from."""
     raw = str(value or "").strip()
@@ -1770,6 +1820,20 @@ def _humanize_alert_level_source(value: Any) -> str:
         return ""
     text = raw.replace("_", " ").replace("-", " ")
     normalized = text.lower()
+    specific = {
+        "vrvp hvn low": "VRVP HVN-Unterkante (naechste Volumen-Zone)",
+        "vrvp hvn high": "VRVP HVN-Oberkante (naechste Volumen-Zone)",
+        "vrvp lvn lower edge": "VRVP LVN-Unterkante (Invalidation/Gap)",
+        "vrvp lvn upper edge": "VRVP LVN-Oberkante (Rejection/Target)",
+        "vrvp poc": "VRVP POC (meistgehandelter Preis)",
+        "vrvp vah": "VRVP VAH (Value-Area-High)",
+        "vrvp val": "VRVP VAL (Value-Area-Low)",
+        "s1 invalidation": "S1-Invalidation",
+        "r1 invalidation": "R1-Invalidation",
+    }
+    for key, label in specific.items():
+        if key in normalized:
+            return label[:90]
     replacements = {
         "vrvp": "VRVP",
         "poc": "POC",
@@ -1829,8 +1893,23 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     tp1 = _format_alert_price(levels.get("tp1"))
     tp2 = _format_alert_price(levels.get("tp2"))
     rr = levels.get("rr")
-    rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    quality = _alert_trade_plan_quality(levels)
+    effective_rr = quality.get("effective_rr")
+    rr1 = quality.get("rr_tp1")
+    rr2 = quality.get("rr_tp2")
+    rr_text = ""
+    if isinstance(effective_rr, (int, float)):
+        rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R eff {effective_rr:.2f}</span>'
+        if isinstance(rr1, (int, float)) and isinstance(rr2, (int, float)):
+            rr_text += f'<br><span style="color:#64748b;font-size:11px">TP1 {rr1:.1f}R / TP2 {rr2:.1f}R</span>'
+    elif isinstance(rr, (int, float)):
+        rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>'
+    runner_text = (
+        '<br><span style="color:#b45309;font-size:11px">TP2 ist Runner-Ziel; TP1/Stop bestimmen die echte Basis-Qualitaet.</span>'
+        if quality.get("runner_skew") else ""
+    )
     level_source_text = _alert_level_source_line(row)
+    move_warning = _alert_move_warning_line(row, levels)
     source_text = (
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
         if levels.get("estimated") else ""
@@ -1840,7 +1919,9 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
         f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b></span>'
         f'{rr_text}'
+        f'{runner_text}'
         f'{level_source_text}'
+        f'{move_warning}'
         f'{source_text}'
     )
 
@@ -1855,8 +1936,11 @@ def _alert_trade_plan_ok(
         return False
     if require_native_levels and levels.get("estimated"):
         return False
-    rr = levels.get("rr")
-    return not isinstance(rr, (int, float)) or rr >= min_rr
+    quality = _alert_trade_plan_quality(levels)
+    effective_rr = quality.get("effective_rr")
+    if quality.get("tp1_ok") is False:
+        return False
+    return not isinstance(effective_rr, (int, float)) or effective_rr >= min_rr
 
 
 def _alert_trade_health_reasons(row: Dict[str, Any], scanner_name: str) -> List[str]:
@@ -1957,6 +2041,13 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
 
     if not levels.get("valid") or levels.get("estimated"):
         score = min(score, 45)
+    elif levels.get("valid"):
+        plan_quality = _alert_trade_plan_quality(levels)
+        effective_rr = plan_quality.get("effective_rr")
+        if plan_quality.get("tp1_ok") is False:
+            score = min(score, 45)
+        elif isinstance(effective_rr, (int, float)) and effective_rr < 1.5:
+            score = min(score, 69)
 
     swing_stock_mode = scanner_name in _STOCK_SWING_ALERT_SCANNERS and _scanner_uses_swing_horizon(scanner_name)
     short_context = _stock_alert_is_short_context(scanner_name, row)
@@ -3999,9 +4090,11 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     close_pos = fields["close_pos"]
     open_to_current = fields["open_to_current_pct"]
     extension_atr = fields["extension_atr"]
+    rvol = fields.get("rvol")
 
     extended = (change is not None and change >= 12.0) or (extension_atr is not None and extension_atr >= 4.0)
     hard_extended = (change is not None and change >= 25.0) or (extension_atr is not None and extension_atr >= 6.0)
+    soft_extended_without_volume = change is not None and change >= 8.0 and (rvol is None or rvol < 1.5)
     fading_daily = open_to_current is not None and open_to_current < -0.5
     not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
 
@@ -4009,9 +4102,11 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("swing_hard_extended_no_chase")
     elif extended:
         reasons.append("swing_extended_wait_retest")
+    elif soft_extended_without_volume:
+        reasons.append("swing_extended_without_volume_wait_retest")
     if fading_daily:
         reasons.append("swing_current_candle_fading")
-    if not_holding_highs and (extended or fading_daily):
+    if not_holding_highs and (extended or soft_extended_without_volume or fading_daily):
         reasons.append("swing_not_holding_highs_after_move")
     return reasons
 
@@ -4037,6 +4132,8 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("swing_short_drop_too_extended_no_chase")
     elif change <= -12.0:
         reasons.append("swing_short_extended_wait_retest")
+    elif change <= -8.0:
+        reasons.append("swing_short_drop_extended_wait_failed_reclaim")
 
     if open_to_current is not None and open_to_current > 0.5:
         reasons.append("swing_short_current_candle_reclaim")
@@ -4423,9 +4520,11 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "extended_long_fading_wait_retest",
         "not_holding_highs_after_up_move",
         "swing_extended_wait_retest",
+        "swing_extended_without_volume_wait_retest",
         "swing_current_candle_fading",
         "swing_not_holding_highs_after_move",
         "swing_short_extended_wait_retest",
+        "swing_short_drop_extended_wait_failed_reclaim",
         "swing_short_current_candle_reclaim",
         "swing_short_not_closing_weak",
         "early_mover_retest_not_near_entry",
@@ -6537,7 +6636,10 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
                         "no_trade": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() == "NO_TRADE"),
                     }
                 payload[list_key] = decorated_rows
-    return _apply_signal_only_policy("orb", decorated)
+    # ORB is an intraday decision board: users need to see tradeable rows first
+    # and no-trade/wait rows behind them. Hiding all non-tradeable rows made the
+    # UI show "Breakouts: 16" in stats but "Breakouts (0)" in the table.
+    return decorated
 
 
 def _decorate_early_mover_results(results: List[Dict[str, Any]], cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
