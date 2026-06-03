@@ -1,4 +1,9 @@
-from api import _stock_momentum_breakout_gate
+from api import (
+    STOCK_STRATEGY_CACHE_VERSION,
+    _stock_momentum_breakout_gate,
+    load_cache_metadata,
+    save_cache_file,
+)
 
 
 def test_momentum_breakout_rejects_high_rvol_bounce_below_structure():
@@ -64,3 +69,26 @@ def test_momentum_gate_does_not_affect_other_strategies():
 
     assert ok
     assert reasons == []
+
+
+def test_strategy_cache_metadata_roundtrip(tmp_path):
+    cache_path = tmp_path / "strategy_cache.json"
+
+    save_cache_file(
+        str(cache_path),
+        [{"ticker": "TEST", "score": 88}],
+        metadata={
+            "cache_version": STOCK_STRATEGY_CACHE_VERSION,
+            "diagnostics": {
+                "universe_count": 123,
+                "raw_matches_before_special_filter": 4,
+                "final_results": 2,
+            },
+        },
+    )
+
+    metadata = load_cache_metadata(str(cache_path))
+
+    assert metadata["cache_version"] == STOCK_STRATEGY_CACHE_VERSION
+    assert metadata["diagnostics"]["universe_count"] == 123
+    assert metadata["diagnostics"]["final_results"] == 2

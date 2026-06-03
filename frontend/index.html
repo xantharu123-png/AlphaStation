@@ -4498,6 +4498,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     const [marketType, setMarketType] = useState('stocks');
     const [isScanning, setIsScanning] = useState(scanCache.scanner_scanning || false);
     const [results, setResults] = useState(scanCache.scanner_results || []);
+    const [scanInfo, setScanInfo] = useState(scanCache.scanner_info || null);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const { data: strategies } = useAutoRefresh(`/api/strategies?market_type=${marketType}`);
     const pollTimeoutRef = useRef(null);
@@ -4522,6 +4523,17 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         }
     }, [strategy, strategies]);
 
+    const rememberScanInfo = (data) => {
+        const info = {
+            cached_at: data?.cached_at || null,
+            cache_age_seconds: data?.cache_age_seconds ?? null,
+            diagnostics: data?.diagnostics || null,
+            warnings: data?.warnings || [],
+        };
+        setScanInfo(info);
+        updateScanCache('scanner_info', info);
+    };
+
     // Always load latest results from server on mount
     useEffect(() => {
         const loadCached = async () => {
@@ -4532,6 +4544,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                     const items = data.data || [];
                     setResults(items);
                     updateScanCache('scanner_results', items);
+                    rememberScanInfo(data);
                 }
             } catch (err) { console.error('Error:', err); }
         };
@@ -4590,6 +4603,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             if (isNewData) {
                                 setResults(items);
                                 updateScanCache('scanner_results', items);
+                                rememberScanInfo(data);
                                 setIsScanning(false);
                                 updateScanCache('scanner_scanning', false);
                                 if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
@@ -4610,6 +4624,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             updateScanCache('scanner_scanning', false);
         }
     };
+
+    const diagnostics = scanInfo?.diagnostics || null;
+    const topRejects = Array.isArray(diagnostics?.top_rejects) ? diagnostics.top_rejects : [];
 
     return (
         <div className="space-y-6">
@@ -4641,6 +4658,27 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             </div>
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
+
+            {(scanInfo?.warnings?.length > 0 || diagnostics) && (
+                <div className="space-y-2">
+                    {scanInfo?.warnings?.length > 0 && (
+                        <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+                            {scanInfo.warnings.join(' | ')}
+                        </div>
+                    )}
+                    {diagnostics && (
+                        <div className="p-3 rounded-lg border border-blue-100 bg-blue-50 text-blue-800 text-xs flex flex-wrap gap-x-6 gap-y-1">
+                            <span><b>Diagnose:</b> {diagnostics.strategy || strategy || 'Strategie'}</span>
+                            <span>Universum: {diagnostics.universe_count ?? '-'}</span>
+                            <span>Roh-Treffer: {diagnostics.raw_matches_before_special_filter ?? '-'}</span>
+                            <span>Final: {diagnostics.final_results ?? results.length}</span>
+                            {topRejects.length > 0 && (
+                                <span>Top-Blocker: {topRejects.slice(0, 4).map(([k, v]) => `${k} ${v}`).join(', ')}</span>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
                 <div className="md:hidden">

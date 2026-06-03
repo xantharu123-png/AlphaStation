@@ -503,6 +503,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
+STOCK_STRATEGY_CACHE_VERSION = 2
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -5767,6 +5768,7 @@ class ScanResultsResponse(BaseModel):
     cache_age_seconds: Optional[int] = None
     data_source: Optional[str] = None
     data_quality: Optional[Dict[str, Any]] = None
+    diagnostics: Optional[Dict[str, Any]] = None
     warnings: Optional[List[str]] = None
     exclusion_policy: Optional[List[str]] = None
 
@@ -6696,7 +6698,23 @@ def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], 
             return [], None
 
 
-def save_cache_file(filepath: str, data: List[Dict]) -> None:
+def load_cache_metadata(filepath: str) -> Dict[str, Any]:
+    """Return non-result cache metadata without changing the result shape."""
+    with _cache_lock:
+        try:
+            if not Path(filepath).exists():
+                return {}
+            with open(filepath, "r") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                return {}
+            return {k: v for k, v in payload.items() if k not in {"results"}}
+        except Exception as e:
+            print(f"Error loading cache metadata {filepath}: {e}")
+            return {}
+
+
+def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str, Any]] = None) -> None:
     """Save cache file with timestamp (thread-safe)."""
     with _cache_lock:
         try:
@@ -6704,6 +6722,8 @@ def save_cache_file(filepath: str, data: List[Dict]) -> None:
                 "cached_at": datetime.now().isoformat(),
                 "results": data,
             }
+            if metadata:
+                cache_data.update(metadata)
             with open(filepath, "w") as f:
                 json.dump(cache_data, f, indent=2, default=_serialize_json)
         except Exception as e:
@@ -8558,6 +8578,29 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         session_name, _session_label = get_current_trading_session()
         _use_extended_prices = session_name in ("Pre-Market", "After-Hours")
         history_cache: Dict[str, List[Dict[str, Any]]] = {}
+        scan_diag: Dict[str, Any] = {
+            "strategy": strategy_name,
+            "market_type": "stocks",
+            "cache_version": STOCK_STRATEGY_CACHE_VERSION,
+            "universe_count": len(_all_snapshot_tickers),
+            "common_stock_source": common_stock_source,
+            "filters": {
+                "change_pct": [change_min, change_max],
+                "price": [price_min, price_max],
+                "rvol": [rvol_min, rvol_max],
+                "close_position": [close_pos_min, close_pos_max] if "Close Position" in filters else None,
+                "gap_pct": [gap_min, gap_max] if _has_gap_filter else None,
+                "vortag_pct": [vortag_min, vortag_max] if _has_vortag_filter else None,
+                "min_dollar_volume": min_dollar_vol,
+            },
+            "rejected": {},
+            "raw_matches_before_special_filter": 0,
+            "final_results": 0,
+        }
+
+        def _reject(reason: str) -> None:
+            rejected = scan_diag.setdefault("rejected", {})
+            rejected[reason] = int(rejected.get(reason, 0)) + 1
 
         for t in _all_snapshot_tickers:
                 try:
@@ -8565,6 +8608,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     day = t.get("day", {}) or {}
                     prev = t.get("prevDay", {}) or {}
                     if not ticker or "." in ticker or "/" in ticker or not prev.get("c"):
+                        _reject("invalid_symbol_or_missing_prev_close")
                         continue
                     non_stock_reason = _stock_alert_asset_exclusion_reason(
                         ticker,
@@ -8573,6 +8617,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         require_reference=common_stock_universe is None,
                     )
                     if non_stock_reason:
+                        _reject(f"asset:{non_stock_reason}")
                         continue
 
                     prev_close_regular = float(prev.get("c", 0) or 0)
@@ -8590,6 +8635,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         prev_close = prev_close_regular
                         change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
                     if not price or not prev_close:
+                        _reject("missing_price_or_prev_close")
                         continue
 
                     volume = float(day.get("v", 0) or 0)
@@ -8613,16 +8659,22 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     # Cheap filters first; only then fetch 1D history for true 20D RVOL,
                     # ATR14 and swing structure. This avoids Vortags-RVOL false positives.
                     if not (change_min <= change_pct <= change_max):
+                        _reject("change_filter")
                         continue
                     if not (price_min <= price <= price_max):
+                        _reject("price_filter")
                         continue
                     if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                        _reject("close_position_filter")
                         continue
                     if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
+                        _reject("gap_filter")
                         continue
                     if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
+                        _reject("vortag_filter")
                         continue
                     if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
+                        _reject("dollar_volume_filter")
                         continue
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
@@ -8658,6 +8710,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     _is_mdr = _is_true_mdr or _is_day1_blowout
 
                     if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
+                        _reject("rvol_filter")
                         continue
 
                     _momentum_ok, _momentum_block_reasons = _stock_momentum_breakout_gate(
@@ -8669,6 +8722,9 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         close_pos=close_pos,
                     )
                     if not _momentum_ok:
+                        _reject("momentum_breakout_gate")
+                        for _reason in _momentum_block_reasons:
+                            _reject(f"momentum:{_reason}")
                         continue
 
                     # Scoring: ATR-/Wick-aware statt "je groesser der Move desto besser".
@@ -8842,17 +8898,26 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     results.append(strategy_row)
                 except Exception as item_err:
                     print(f"[Strategy Scan] {strategy_name}: skip {t.get('ticker', '?')} ({item_err})")
+                    _reject("exception")
                     continue
 
         # Sortieren nach SCORE absteigend (nicht Change% — Score ist die Gesamtbewertung)
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
+        scan_diag["raw_matches_before_special_filter"] = len(results)
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
         results = results[:50]
+        scan_diag["final_results"] = len(results)
+        scan_diag["top_rejects"] = sorted(
+            scan_diag.get("rejected", {}).items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:8]
 
         # V2.2: Separate Cache-Datei pro Strategie + Fallback auf generischen Cache
         _strat_cache = _strategy_cache_path(strategy_name)
-        save_cache_file(_strat_cache, results)
-        save_cache_file(STRATEGY_SCAN_CACHE, results)  # Fallback für alte Clients
+        _metadata = {"cache_version": STOCK_STRATEGY_CACHE_VERSION, "diagnostics": scan_diag}
+        save_cache_file(_strat_cache, results, metadata=_metadata)
+        save_cache_file(STRATEGY_SCAN_CACHE, results, metadata=_metadata)  # Fallback für alte Clients
         print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
         if send_email:
             _send_strategy_scan_alerts(strategy_name, results, "stocks")
@@ -12603,6 +12668,7 @@ def get_scan_results(
     # Determine cache file based on strategy parameter
     cache_file = None
     normalize_map = None
+    resolved_strategy = None
 
     if strategy:
         resolved_strategy = resolve_strategy_name(strategy, market_type)
@@ -12653,6 +12719,8 @@ def get_scan_results(
         cache_file = BI_CACHE_LONG
         normalize_map = _BI_KEY_MAP
 
+    cache_meta = load_cache_metadata(cache_file) if cache_file else {}
+    diagnostics = cache_meta.get("diagnostics") if isinstance(cache_meta.get("diagnostics"), dict) else None
     results, cached_at = load_cache_file(cache_file)
     if normalize_map:
         results = _normalize_keys(results, normalize_map)
@@ -12684,9 +12752,28 @@ def get_scan_results(
             scanner_name = "turtle"
         elif "crypto" in market_type:
             scanner_name = "early_movers"
+
+    is_generic_stock_strategy = bool(strategy and market_type == "stocks" and scanner_name == "strategy_scan")
+    stale_strategy_cache = (
+        is_generic_stock_strategy
+        and cache_meta.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION
+    )
+    if stale_strategy_cache:
+        results = []
+        diagnostics = {
+            "strategy": resolved_strategy or strategy,
+            "cache_version": cache_meta.get("cache_version"),
+            "required_cache_version": STOCK_STRATEGY_CACHE_VERSION,
+            "final_results": 0,
+            "warning": "strategy_cache_version_old_scan_again",
+        }
+
     results = _decorate_scan_results(results, scanner_name, cache_age)
     results = _apply_signal_only_policy(scanner_name, results)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
+    warnings = list(quality["warnings"])
+    if stale_strategy_cache:
+        warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
 
     return ScanResultsResponse(
         status="success",
@@ -12696,7 +12783,8 @@ def get_scan_results(
         cache_age_seconds=cache_age,
         data_source=quality["data_source"],
         data_quality=quality,
-        warnings=quality["warnings"],
+        diagnostics=diagnostics,
+        warnings=warnings,
         exclusion_policy=quality["exclusion_policy"],
     )
 
