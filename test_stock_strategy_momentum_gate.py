@@ -90,6 +90,33 @@ def test_momentum_breakout_allows_quieter_20d_swing_breakout():
     assert reasons == []
 
 
+def test_momentum_breakout_allows_flat_day_structural_20d_breakout():
+    metrics = {
+        "history_ok": True,
+        "ema20": 39.8,
+        "ema50": 38.9,
+        "rsi14": 55.0,
+        "high_10d": 41.2,
+        "high_20d": 41.2,
+        "breakout_10d_pct": 0.24,
+        "breakout_20d_pct": 0.24,
+        "range_pos": 80.0,
+        "change_5d": 1.4,
+    }
+
+    ok, reasons = _stock_momentum_breakout_gate(
+        "Momentum Breakout Long",
+        metrics,
+        price=41.3,
+        change_pct=0.15,
+        rvol=0.82,
+        close_pos=0.54,
+    )
+
+    assert ok
+    assert reasons == []
+
+
 def test_momentum_breakout_allows_clean_10d_breakout_without_20d_high():
     metrics = {
         "history_ok": True,

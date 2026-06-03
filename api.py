@@ -275,14 +275,15 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         "Momentum Breakout Long": _clone_stock_strategy(
             "Breakout Long",
             filters={
-                "Change %": (2.0, 200.0),
-                "RVOL": (1.2, 100.0),
-                "Close Position": (0.55, 1.0),
+                "Change %": (-0.5, 200.0),
+                "RVOL": (0.7, 100.0),
+                "Close Position": (0.50, 1.0),
                 "Preis": (5.0, 100000.0),
             },
             description="Konsolidierter Momentum-Scanner für Breakout-, Early- und Whale-Setups.",
             logic="Breakout + Trendhaltigkeit + sauberes Volumenprofil = priorisierter Momentum-Kandidat.",
             min_dollar_volume=750000,
+            max_results=150,
             merged_from=["Breakout Long", "Early Momentum", "Whale Watch", "Volume Surge"],
             display_group="Momentum",
         ),
@@ -503,7 +504,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 3
+STOCK_STRATEGY_CACHE_VERSION = 4
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -7709,38 +7710,38 @@ def _stock_momentum_breakout_gate(
     near_10d_breakout = bool(high10 and breakout10 is not None and breakout10 >= -0.15)
     holds_20d_breakout = bool(
         near_20d_breakout
-        and change_pct >= 1.0
-        and rvol >= 1.05
-        and close_pos >= 0.52
+        and change_pct >= -0.2
+        and rvol >= 0.7
+        and close_pos >= 0.50
     )
     holds_10d_breakout = bool(
         near_10d_breakout
-        and change_pct >= 1.5
-        and rvol >= 1.15
-        and close_pos >= 0.55
+        and change_pct >= 0.4
+        and rvol >= 0.8
+        and close_pos >= 0.52
     )
     range_breakout = bool(
         range_pos is not None
         and range_pos >= 78
-        and change_pct >= 2.0
-        and rvol >= 1.25
-        and close_pos >= 0.58
+        and change_pct >= 1.0
+        and rvol >= 1.0
+        and close_pos >= 0.55
     )
     trend_reclaim = bool(
         ema20
         and price > ema20
         and (not ema50 or price > ema50 or ema20 >= ema50)
-        and change_pct >= 2.0
-        and rvol >= 1.35
-        and close_pos >= 0.62
+        and change_pct >= 1.5
+        and rvol >= 1.1
+        and close_pos >= 0.58
     )
 
     if not (holds_20d_breakout or holds_10d_breakout or range_breakout or trend_reclaim):
-        if change_pct < 1.0:
+        if change_pct < -0.2:
             reasons.append("daily_momentum_too_small")
-        if rvol < 1.05:
+        if rvol < 0.7:
             reasons.append("rvol_below_breakout_threshold")
-        if close_pos < 0.52:
+        if close_pos < 0.50:
             reasons.append("daily_close_not_near_high")
 
     if ema20 and price <= ema20 and not (holds_10d_breakout or holds_20d_breakout):
@@ -9001,7 +9002,9 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
-        results = results[:50]
+        max_results = int(strat.get("max_results", 50) or 50)
+        scan_diag["max_results"] = max_results
+        results = results[:max_results]
         scan_diag["final_results"] = len(results)
         scan_diag["top_rejects"] = sorted(
             scan_diag.get("rejected", {}).items(),
