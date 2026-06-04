@@ -108,8 +108,8 @@ _SCAN_CACHE_MAP = {
     "bi_long": "/tmp/bi_cache_long.json",
     "bi_short": "/tmp/bi_cache_short.json",
     "bear_scan": "/tmp/bear_scanner_cache.json",
-    "biotech": "/tmp/biotech_scan_results.json",
-    "strategies": "/tmp/strategy_scan_results.json",
+    "biotech": "/tmp/alpha_biotech_cache.json",
+    "strategies": "/tmp/strategy_scan_cache.json",
     "orb": "/tmp/orb_scan_results.json",
 }
 
@@ -870,7 +870,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         direction = "long" if "long" in scanner_name else "short"
         cache_file = f"/tmp/bi_cache_{direction}.json"
     elif scanner_name == "biotech":
-        cache_file = "/tmp/biotech_scan_results.json"
+        cache_file = "/tmp/alpha_biotech_cache.json"
     elif scanner_name == "orb":
         cache_file = "/tmp/orb_scan_results.json"
     else:
@@ -1961,7 +1961,7 @@ def _run_strategy_scanner(poly_key, secrets):
                     _EMAIL_COOLDOWN[ck] = now
 
         # 6) Cache speichern
-        cache_file = "/tmp/strategy_scan_results.json"
+        cache_file = "/tmp/strategy_scan_cache.json"
         try:
             _atomic_write_json(cache_file, {"results": all_alerts, "timestamp": time.time(),
                            "total_stocks": len(stocks)})

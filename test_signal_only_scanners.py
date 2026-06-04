@@ -232,6 +232,78 @@ def test_scanner_signal_vs_radar_contract():
     assert radar_scanners.isdisjoint(api._STOCK_ALERT_SCANNERS)
 
 
+def test_scanner_cache_and_scheduler_contracts():
+    """Health/cache wiring must point at the scanner that actually writes data."""
+    api_source = (ROOT / "api.py").read_text(encoding="utf-8")
+    bg_source = (ROOT / "bg_service.py").read_text(encoding="utf-8")
+    scanner_names = (
+        set(api._scan_status)
+        | set(api.SCAN_CACHE_MAP)
+        | set(api._SIGNAL_ONLY_SCANNERS)
+        | set(api._STOCK_RESULT_TRADE_STATE_SCANNERS)
+        | set(api._ALERT_TRADE_HEALTH_GUARD_SCANNERS)
+        | set(api.STOCK_SCANNER_ASSET_GUARD_NAMES)
+    )
+
+    assert api.SCAN_CACHE_MAP["crypto_trade_signals"] == api.CRYPTO_TRADE_SIGNALS_CACHE
+    assert api.SCAN_CACHE_MAP["crypto_trade_signals"] != api.CRYPTO_EXPLOSION_CACHE
+    assert scanner_names <= set(api.SCAN_DATA_SOURCES)
+    assert set(api._scan_status) <= set(api.SCAN_CACHE_MAP)
+    assert '("crypto_trade_signals", lambda: _crypto_trade_signals_wrapper(refresh_sources=False))' in api_source
+    assert "/tmp/alpha_biotech_cache.json" in bg_source
+    assert "/tmp/strategy_scan_cache.json" in bg_source
+    assert "/tmp/biotech_scan_results.json" not in bg_source
+    assert "/tmp/strategy_scan_results.json" not in bg_source
+
+
+def test_crypto_trade_signals_scheduler_merge_does_not_rerun_source_scans(monkeypatch):
+    calls = []
+    saved = {}
+    monkeypatch.setattr(api, "_crypto_explosion_wrapper", lambda: calls.append("long"))
+    monkeypatch.setattr(api, "_new_listing_wrapper", lambda: calls.append("short"))
+    monkeypatch.setattr(
+        api,
+        "_build_crypto_trade_signals_from_caches",
+        lambda: ([{"Symbol": "MERGE"}], {"result_count": 1}, "cached", 0, []),
+    )
+    monkeypatch.setattr(
+        api,
+        "save_cache_file",
+        lambda path, rows, metadata=None: saved.update({"path": path, "rows": rows}),
+    )
+
+    api._crypto_trade_signals_wrapper(refresh_sources=False)
+
+    assert calls == []
+    assert saved == {"path": api.CRYPTO_TRADE_SIGNALS_CACHE, "rows": [{"Symbol": "MERGE"}]}
+
+
+def test_generic_crypto_strategy_results_use_crypto_strategy_policy(monkeypatch, tmp_path):
+    cache_path = tmp_path / "crypto_breakout_cache.json"
+    api.save_cache_file(str(cache_path), [{
+        "Ticker": "COINX",
+        "Symbol": "COINX",
+        "grade": "A",
+        "score": 88,
+        "Price": 1.23,
+        "current_price": 1.23,
+        "trade_signal": "JETZT_TRADEN",
+        "trade_action": "LONG_TRIGGER",
+        "execution_trigger_ok": True,
+        "signal_quality": "tradeable",
+        "entry": 1.23,
+        "stop_loss": 1.15,
+        "tp1": 1.42,
+        "tp2": 1.55,
+    }])
+    monkeypatch.setattr(api, "_strategy_cache_path", lambda strategy, market_type="stocks": str(cache_path))
+
+    response = api.get_scan_results(strategy="Breakout Long", market_type="crypto")
+
+    assert response.data_quality["scanner"] == "crypto_strategy"
+    assert response.data_source == api.SCAN_DATA_SOURCES["crypto_strategy"]
+
+
 def test_stock_swing_strategy_scanners_do_not_cap_for_missing_5m(monkeypatch, tmp_path):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))

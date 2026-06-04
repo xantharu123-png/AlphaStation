@@ -5863,10 +5863,12 @@ def _sanitize_biotech_public_results(results: list) -> list:
 
 SCAN_DATA_SOURCES = {
     "strategy_scan": "Polygon snapshots + strategy engine",
+    "stock_strategy": "Polygon snapshots + strategy engine",
     "bi_long": "Polygon snapshots + BI scanner",
     "bi_short": "Polygon snapshots + BI scanner",
     "bear": "Polygon gainers/losers + bearish scanner",
     "biotech": "Polygon + biotech catalyst scanner",
+    "crypto_strategy": "CoinGecko crypto markets + strategy engine",
     "early_movers": "CoinGecko markets + exchange perp feeds",
     "crypto_trade_signals": "Combined crypto direction engine: exchange-native long breakouts + new-listing/pump short cracks",
     "crypto_explosion": "Exchange-native perpetual futures: Bybit/Binance/MEXC/Bitget + 5m/15m/4h candles",
@@ -5900,6 +5902,10 @@ SCAN_EXCLUSION_POLICIES = {
         "Use the long breakout/reclaim engine for explosion candidates.",
         "Use the new-listing/pump exhaustion engine for short crack candidates.",
         "Resolve long/short conflicts before display so one coin cannot show contradictory actions.",
+    ],
+    "crypto_strategy": [
+        "Generic crypto strategy rows are signal-gated; snapshot/watch rows do not become emails.",
+        "Execution-trigger and Trade-Health gates must confirm before a row is tradeable.",
     ],
     "crypto_explosion": [
         "Scan exchange-native perpetual markets for compression near breakout levels.",
@@ -10499,7 +10505,7 @@ SCAN_CACHE_MAP = {
     "bear": "/tmp/bear_scanner_cache.json",
     "biotech": "/tmp/alpha_biotech_cache.json",
     "early_movers": "/tmp/early_movers_cache.json",
-    "crypto_trade_signals": CRYPTO_EXPLOSION_CACHE,
+    "crypto_trade_signals": CRYPTO_TRADE_SIGNALS_CACHE,
     "crypto_explosion": CRYPTO_EXPLOSION_CACHE,
     "crash_monitor": "/tmp/crash_monitor_cache.json",
     "market_context": "/tmp/market_context_cache.json",
@@ -10666,6 +10672,9 @@ def _scheduler_loop():
     # Only add new_listing scan if module is available
     if HAS_NEW_LISTING_SCANNER:
         scan_tasks.append(("new_listing", _new_listing_wrapper))
+    # Unified crypto direction list is a lightweight cache merge after the
+    # dedicated long/short engines. It should not be stale/missing forever.
+    scan_tasks.append(("crypto_trade_signals", lambda: _crypto_trade_signals_wrapper(refresh_sources=False)))
     _heavy_names = {name for name, _ in heavy_scans}
     _isolated_names = {"early_movers", "crypto_explosion"}
 
@@ -13179,6 +13188,13 @@ def get_scan_results(
     - ?strategy=bi_long (new way)
     - ?direction=long (old way, for backward compatibility)
     """
+    # Direct unit/internal calls receive FastAPI Query objects unless callers
+    # pass explicit values. Normalize them so routing logic cannot classify a
+    # scanner as e.g. "bi_annotation=..." by accident.
+    strategy = strategy if isinstance(strategy, str) and strategy.strip() else None
+    direction = direction if isinstance(direction, str) and direction.strip() else None
+    market_type = market_type if isinstance(market_type, str) and market_type.strip() else "stocks"
+
     # Determine cache file based on strategy parameter
     cache_file = None
     normalize_map = None
@@ -13251,8 +13267,17 @@ def get_scan_results(
     if direction:
         scanner_name = f"bi_{direction}"
     elif strategy:
-        sl = str(strategy).lower()
-        if "short" in sl and "bi" in sl:
+        sl = str(resolved_strategy or strategy).lower()
+        if market_type == "crypto":
+            if "early" in sl or "movers" in sl:
+                scanner_name = "early_movers"
+            elif "listing" in sl:
+                scanner_name = "new_listing"
+            elif "btc" in sl or "divergenz" in sl:
+                scanner_name = "btc_divergenz"
+            else:
+                scanner_name = "crypto_strategy"
+        elif "short" in sl and "bi" in sl:
             scanner_name = "bi_short"
         elif "long" in sl and "bi" in sl:
             scanner_name = "bi_long"
@@ -13264,8 +13289,6 @@ def get_scan_results(
             scanner_name = "orb"
         elif "turtle" in sl:
             scanner_name = "turtle"
-        elif "crypto" in market_type:
-            scanner_name = "early_movers"
 
     is_generic_stock_strategy = bool(strategy and market_type == "stocks" and scanner_name == "strategy_scan")
     stale_strategy_cache = (
@@ -17294,13 +17317,14 @@ def _build_crypto_trade_signals_from_caches() -> Tuple[List[Dict[str, Any]], Dic
     return merged, stats, cached_at, cache_age, warnings
 
 
-def _crypto_trade_signals_wrapper() -> None:
+def _crypto_trade_signals_wrapper(refresh_sources: bool = True) -> None:
     """Run both crypto direction engines and cache a unified trader-facing decision list."""
     try:
         print("[Crypto Signals] Starting combined long/short crypto scan...")
-        _crypto_explosion_wrapper()
-        if HAS_NEW_LISTING_SCANNER:
-            _new_listing_wrapper()
+        if refresh_sources:
+            _crypto_explosion_wrapper()
+            if HAS_NEW_LISTING_SCANNER:
+                _new_listing_wrapper()
         rows, stats, _, _, warnings = _build_crypto_trade_signals_from_caches()
         save_cache_file(CRYPTO_TRADE_SIGNALS_CACHE, rows)
         print(f"[Crypto Signals] Done: {stats.get('result_count', 0)} rows ({stats.get('long_count', 0)} long / {stats.get('short_count', 0)} short), warnings={warnings}")
