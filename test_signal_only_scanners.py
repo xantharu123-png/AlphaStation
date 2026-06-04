@@ -155,6 +155,34 @@ def test_stock_signal_scanners_default_to_swing_without_fresh_5m_gate(monkeypatc
         assert [r["ticker"] for r in api._apply_signal_only_policy(scanner_name, decorated)] == ["RAW"]
 
 
+def test_biotech_watchlist_rows_do_not_survive_signal_filter(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"CRSP"}, "unit"))
+    row = {
+        "ticker": "CRSP",
+        "grade": "S",
+        "score": 81,
+        "price": 57.67,
+        "current_price": 57.67,
+        "rvol": 1.2,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "Entry": 57.67,
+        "StopLoss": 55.90,
+        "TP1": 61.20,
+        "TP2": 64.10,
+        "bio_trade_mode": "WATCHLIST",
+        "bio_risk_flags": [
+            "news_catalyst_without_calendar_confirmation",
+            "sell_the_news_risk_extended_chart",
+        ],
+    }
+
+    decorated = api._decorate_scan_results([row], "biotech", 10)
+
+    assert decorated[0]["score"] >= 80
+    assert api._apply_signal_only_policy("biotech", decorated) == []
+
+
 def test_stock_swing_strategy_scanners_do_not_cap_for_missing_5m(monkeypatch, tmp_path):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))

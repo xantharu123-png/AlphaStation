@@ -6489,6 +6489,36 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
     if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
         return bool(explicit_trade and not wait_or_watch and _row_has_alert_quality(row, require_top_grade=False))
 
+    if scanner_name == "biotech":
+        bio_mode = str(row.get("bio_trade_mode") or row.get("Bio_Trade_Mode") or "").upper()
+        bio_flags_raw = row.get("bio_risk_flags") or row.get("Bio_Risk_Flags") or []
+        bio_flags = {
+            str(flag).lower()
+            for flag in (bio_flags_raw if isinstance(bio_flags_raw, list) else [bio_flags_raw])
+            if flag
+        }
+        context_modes = {
+            "WATCHLIST",
+            "LOW_QUALITY",
+            "AVOID_NEWS_RISK",
+            "WAIT_PULLBACK",
+            "WATCH_FOR_TRIGGER",
+            "PRIORITY_WATCH",
+            "SMALL_SIZE_BINARY_RISK",
+        }
+        hard_context_flags = {
+            "news_catalyst_without_calendar_confirmation",
+            "no_confirmed_catalyst_calendar_event",
+            "sell_the_news_risk_extended_chart",
+            "dilution_or_offering_risk",
+            "regulatory_or_trial_failure_risk",
+        }
+        # Bio catalyst rows can receive a generic trade-health TRADEABLE label
+        # from technical levels. The catalyst edge layer is stricter: watchlist
+        # or binary-risk rows are context, not a direct scanner signal.
+        if bio_mode in context_modes or bio_flags.intersection(hard_context_flags):
+            return False
+
     if wait_or_watch and not explicit_trade:
         return False
 
