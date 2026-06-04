@@ -892,7 +892,7 @@ _ALERT_RUNNER_RR_CAP = 5.0
 _ALERT_MIN_PRIMARY_TP_RR = 1.0
 _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
-    "strategy_scan", "turtle", "volume_spikes", "crypto_strategy", "early_movers", "new_listing",
+    "strategy_scan", "turtle", "crypto_strategy", "early_movers", "new_listing",
 }
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
 _NEW_LISTING_MIN_ALERT_RR = 1.5
@@ -960,12 +960,12 @@ _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _SWING_STOCK_STRATEGY_ALERT_SCANNERS = {"stock_strategy", "strategy_scan"}
 _LONG_ENTRY_ALERT_SCANNERS = {
-    "bi_long", "biotech", "turtle", "volume_spikes"
+    "bi_long", "biotech", "turtle"
 }
 _STOCK_EMAIL_ASSET_GUARD_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "stock_strategy", "strategy_scan"
 }
-_STOCK_ALERT_SCANNERS = set(_STOCK_EMAIL_ASSET_GUARD_SCANNERS) | {"turtle", "volume_spikes"}
+_STOCK_ALERT_SCANNERS = set(_STOCK_EMAIL_ASSET_GUARD_SCANNERS) | {"turtle"}
 _INTRADAY_ONLY_SCANNERS = {"orb"}
 _STOCK_SWING_ALERT_SCANNERS = set(_STOCK_ALERT_SCANNERS) - _INTRADAY_ONLY_SCANNERS
 _TRADE_HORIZON_OPTIONS = {"swing", "intraday", "both"}
@@ -983,7 +983,7 @@ _SIGNAL_ONLY_SCANNERS = {
 _CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "crypto_trade_signals", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy"}
 _STOCK_RESULT_TRADE_STATE_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
-    "stock_strategy", "strategy_scan", "volume_spikes",
+    "stock_strategy", "strategy_scan",
 }
 _DISPLAY_ONLY_SUPPRESSION_REASONS = {
     "cooldown_active",
@@ -11345,7 +11345,6 @@ def get_email_alert_audit():
         "orb": ORB_CACHE,
         "new_listing": NEW_LISTING_CACHE,
         "early_movers": EARLY_MOVERS_CACHE,
-        "volume_spikes": VOLUME_SPIKES_CACHE,
         "strategy_scan": STRATEGY_SCAN_CACHE,
     }
     scanners = {}
@@ -11377,6 +11376,7 @@ def get_email_alert_audit():
             "manual_scan_alerts": ["stock_strategy"],
             "watch_only_crypto_no_trade_email": ["crypto_strategy", "btc_divergenz"],
             "informational_no_trade_email": ["btc_divergenz", "money_flow", "crash_monitor"],
+            "display_radar_no_trade_email": ["volume_spikes"],
         },
         "scanners": scanners,
         "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),

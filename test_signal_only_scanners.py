@@ -145,7 +145,7 @@ def test_stock_signal_scanners_default_to_swing_without_fresh_5m_gate(monkeypatc
         "dollar_volume": 10_000_000,
     }
 
-    for scanner_name in ("turtle", "volume_spikes", "bi_long", "biotech"):
+    for scanner_name in ("turtle", "bi_long", "biotech"):
         decorated = api._decorate_scan_results([row], scanner_name, 10)
 
         assert decorated[0]["raw_score"] == 98
@@ -199,9 +199,37 @@ def test_volume_spikes_are_display_radar_not_signal_only(monkeypatch):
         "execution_trigger_ok": False,
     }
 
-    visible = api._apply_signal_only_policy("volume_spikes", [row])
+    decorated = api._decorate_scan_results([row], "volume_spikes", 10)
+    visible = api._apply_signal_only_policy("volume_spikes", decorated)
 
-    assert visible == [row]
+    assert "volume_spikes" not in api._SIGNAL_ONLY_SCANNERS
+    assert "volume_spikes" not in api._ALERT_TRADE_PLAN_GUARD_SCANNERS
+    assert "volume_spikes" not in api._ALERT_TRADE_HEALTH_GUARD_SCANNERS
+    assert "volume_spikes" not in api._LONG_ENTRY_ALERT_SCANNERS
+    assert "volume_spikes" not in api._STOCK_ALERT_SCANNERS
+    assert "volume_spikes" not in api._STOCK_RESULT_TRADE_STATE_SCANNERS
+    assert "volume_spikes" in api.STOCK_SCANNER_ASSET_GUARD_NAMES
+    assert visible == decorated
+    assert visible[0]["trade_signal"] == "BEOBACHTEN"
+    assert visible[0]["trade_action"] == "BEOBACHTEN"
+    assert visible[0]["execution_trigger_ok"] is False
+    assert "scanner_decision" not in visible[0]
+
+
+def test_scanner_signal_vs_radar_contract():
+    """Scanner categories must not silently turn radar/context rows into trades."""
+    trade_signal_scanners = {
+        "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
+        "stock_strategy", "strategy_scan",
+        "early_movers", "crypto_trade_signals", "crypto_explosion",
+        "new_listing", "btc_divergenz", "crypto_strategy",
+    }
+    radar_scanners = {"volume_spikes", "money_flow", "crash_monitor"}
+
+    assert trade_signal_scanners <= api._SIGNAL_ONLY_SCANNERS
+    assert radar_scanners.isdisjoint(api._SIGNAL_ONLY_SCANNERS)
+    assert radar_scanners.isdisjoint(api._STOCK_RESULT_TRADE_STATE_SCANNERS)
+    assert radar_scanners.isdisjoint(api._STOCK_ALERT_SCANNERS)
 
 
 def test_stock_swing_strategy_scanners_do_not_cap_for_missing_5m(monkeypatch, tmp_path):
