@@ -2597,7 +2597,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             const setupForChart = (() => {
                 const scannerSetup = scannerData?.trade_setup || null;
                 const detailSetup = tickerData?.trade_setup || null;
-                if (detailSetup?.starter_plan && !scannerSetup?.starter_plan) return detailSetup;
+                if (detailSetup?.starter_plan) return detailSetup;
                 return scannerSetup || detailSetup;
             })();
             if (setupForChart && candleSeries.current && typeof candleSeries.current.createPriceLine === 'function') {
@@ -3047,7 +3047,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const activeTradeSetup = (() => {
         const scannerSetup = cd.trade_setup || null;
         const detailSetup = d.trade_setup || null;
-        if (detailSetup?.starter_plan && !scannerSetup?.starter_plan) return detailSetup;
+        if (detailSetup?.starter_plan) return detailSetup;
         return scannerSetup || detailSetup;
     })();
     const starterPlan = activeTradeSetup?.starter_plan || null;

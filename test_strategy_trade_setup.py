@@ -98,6 +98,46 @@ def test_long_setup_does_not_add_starter_when_breakout_is_already_close():
     assert setup["entry"] == 33.44
 
 
+def test_long_setup_does_not_add_starter_when_structure_is_only_overhead():
+    setup = _build_structured_trade_setup(
+        direction="LONG",
+        entry=33.44,
+        atr=1.36,
+        support_1=0,
+        resistance_1=33.44,
+        high_20d=33.44,
+        low_20d=26.20,
+        range_pos=62,
+        current_price=30.68,
+        vwap=0,
+        ema20=0,
+        vah=30.85,
+    )
+
+    assert setup is not None
+    assert "starter_plan" not in setup
+
+
+def test_long_setup_does_not_add_starter_when_main_breakout_is_too_far():
+    setup = _build_structured_trade_setup(
+        direction="LONG",
+        entry=42.00,
+        atr=1.20,
+        support_1=30.10,
+        resistance_1=42.00,
+        high_20d=42.00,
+        low_20d=25.50,
+        range_pos=45,
+        current_price=30.50,
+        vwap=30.20,
+        ema20=29.90,
+        vah=30.25,
+    )
+
+    assert setup is not None
+    assert "starter_plan" not in setup
+
+
 def test_strategy_rvol_uses_completed_20d_average_not_previous_day_only():
     bars = []
     for idx in range(20):

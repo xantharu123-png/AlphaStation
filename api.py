@@ -6927,6 +6927,12 @@ def _attach_starter_entry_plan(
     min_distance_pct = max(0.015, min(0.05, (atr_value / current) * 0.35 if current > 0 else 0.015))
     if distance_pct < min_distance_pct:
         return setup
+    max_distance_pct = max(
+        0.08,
+        min(0.15, (atr_value / current) * 2.5 if current > 0 else 0.08),
+    )
+    if distance_pct > max_distance_pct:
+        return setup
 
     def _level(value: Optional[float]) -> float:
         try:
@@ -6941,7 +6947,7 @@ def _attach_starter_entry_plan(
         (_level(ema20), "EMA20"),
         (_level(support_1), "Support"),
     ]
-    held_levels = [(p, label) for p, label in structure_levels if p > 0 and p <= current * 1.006]
+    held_levels = [(p, label) for p, label in structure_levels if p > 0 and p <= current]
 
     # Need at least one real hold level. Prefer two, but do not block BI rows
     # where only VWAP/EMA data is available from ticker detail.
@@ -6988,9 +6994,8 @@ def _attach_starter_entry_plan(
         "Kurs muss VWAP/EMA/Support-Struktur halten",
         "Add erst bei bestaetigtem Breakout ueber Main Entry",
     ]
-    if len(held_levels) >= 2:
-        held_labels = ", ".join(label for _, label in held_levels[:3])
-        conditions.insert(1, f"Struktur-Hold aktiv: {held_labels}")
+    held_labels = ", ".join(label for _, label in held_levels[:3])
+    conditions.insert(1, f"Struktur-Hold aktiv: {held_labels}")
 
     starter_plan = {
         "type": "ANTICIPATION_STARTER",
