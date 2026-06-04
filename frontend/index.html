@@ -133,6 +133,25 @@
         .table-row { border-color: var(--border-color); transition: background-color 0.2s; cursor: pointer; }
         .table-row:hover { background-color: rgba(37, 99, 235, 0.04); }
         [data-theme="dark"] .table-row:hover { background-color: rgba(59, 130, 246, 0.08); }
+        .table-row.active-list-selection,
+        .table-row.active-list-selection:hover {
+            background: linear-gradient(90deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.045)) !important;
+            box-shadow: inset 4px 0 0 var(--accent);
+        }
+        .table-row.active-list-selection td:first-child {
+            color: var(--accent);
+            font-weight: 800;
+        }
+        [data-theme="dark"] .table-row.active-list-selection,
+        [data-theme="dark"] .table-row.active-list-selection:hover {
+            background: linear-gradient(90deg, rgba(59, 130, 246, 0.22), rgba(59, 130, 246, 0.08)) !important;
+        }
+        .scanner-mobile-card.active-list-selection,
+        .orb-result-card.active-list-selection {
+            border-color: var(--accent) !important;
+            background: linear-gradient(90deg, rgba(37, 99, 235, 0.10), rgba(37, 99, 235, 0.035)) !important;
+            box-shadow: inset 4px 0 0 var(--accent), 0 10px 28px rgba(37, 99, 235, 0.12);
+        }
 
         .metric-card {
             background-color: var(--bg-secondary);
@@ -3977,6 +3996,19 @@ function App() {
         setScanCache(prev => ({...prev, [key]: data}));
     };
 
+    const markActiveListSelection = useCallback((event) => {
+        const target = event.target.closest('tr.table-row, .scanner-mobile-card, .orb-result-card');
+        if (!target || !event.currentTarget.contains(target)) return;
+        document.querySelectorAll('.active-list-selection').forEach(el => el.classList.remove('active-list-selection'));
+        target.classList.add('active-list-selection');
+    }, []);
+
+    useEffect(() => {
+        if (!selectedTicker) {
+            document.querySelectorAll('.active-list-selection').forEach(el => el.classList.remove('active-list-selection'));
+        }
+    }, [selectedTicker]);
+
     // Apply dark mode
     useEffect(() => {
         if (darkMode) {
@@ -4459,7 +4491,7 @@ function App() {
 
             {/* Main Content — only visible when not on pricing/account pages */}
             {!showPricing && !showAccount && (
-                <div className="main-shell">
+                <div className="main-shell" onClickCapture={markActiveListSelection}>
                     {activeTab === 'scanner' && <ScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'biotech' && <BiotechTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
@@ -8159,7 +8191,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             {subView === 'breakouts' && breakouts.length > 0 && (
                 <div className="space-y-2">
                     {breakouts.map((b, i) => (
-                        <div key={i} className="card p-3 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
+                        <div key={i} className="card orb-result-card p-3 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
                             <div className="flex justify-between items-start">
                                 <div>
                                     <span className="font-bold text-base">{b.ticker}</span>
@@ -8216,7 +8248,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 <div className="space-y-2">
                     <p className="text-xs text-gray-500 mb-1">Failed Breakouts = Crabel Reversal Setups (Gegenrichtung handeln)</p>
                     {failedBOs.map((b, i) => (
-                        <div key={i} className="card p-3 border-l-4 border-red-400 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
+                        <div key={i} className="card orb-result-card p-3 border-l-4 border-red-400 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
                             <div className="flex justify-between">
                                 <div>
                                     <span className="font-bold">{b.ticker}</span>
@@ -8243,7 +8275,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 <div className="space-y-1">
                     <p className="text-xs text-gray-500 mb-1">Pre-ORB Kandidaten (Gap + RVOL Filter, warten auf Breakout)</p>
                     {candidates.map((c, i) => (
-                        <div key={i} className="card p-2 flex justify-between items-center cursor-pointer hover:bg-gray-50 text-sm" onClick={() => onSelectTicker({ticker: c.ticker, ...c})}>
+                        <div key={i} className="card orb-result-card p-2 flex justify-between items-center cursor-pointer hover:bg-gray-50 text-sm" onClick={() => onSelectTicker({ticker: c.ticker, ...c})}>
                             <span className="font-medium w-16">{c.ticker}</span>
                             <span className={c.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{c.gap_pct > 0 ? '+' : ''}{c.gap_pct}%</span>
                             <span className={c.rvol >= 2 ? 'text-green-600 font-medium' : 'text-gray-500'}>{c.rvol}x</span>
