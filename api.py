@@ -504,7 +504,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 4
+STOCK_STRATEGY_CACHE_VERSION = 5
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -7761,6 +7761,160 @@ def _stock_momentum_breakout_gate(
     return not reasons, reasons
 
 
+def _stock_momentum_breakout_continuation_quality(
+    strategy_name: str,
+    history_metrics: Dict[str, Any],
+    score_meta: Dict[str, Any],
+    *,
+    breakout_type: str,
+    price: float,
+    change_pct: float,
+    rvol: float,
+    close_pos: float,
+) -> Dict[str, Any]:
+    """Estimate whether a momentum breakout is likely follow-through or a wick trap."""
+    if _normalize_strategy_key(strategy_name) != _normalize_strategy_key("Momentum Breakout Long"):
+        return {}
+
+    price = float(price or 0)
+    if price <= 0:
+        return {}
+
+    upper_wick = _clamp_float(score_meta.get("upper_wick_pct"), 0.0, 100.0, 0.0)
+    atr_pct = max(_alert_float(score_meta.get("atr_pct"), 2.5) or 2.5, 0.1)
+    extension_atr = max(_alert_float(score_meta.get("extension_atr"), 0.0) or 0.0, 0.0)
+    close_pos = _clamp_float(close_pos, 0.0, 1.0, 0.5)
+    rvol = max(_alert_float(rvol, 0.0) or 0.0, 0.0)
+    change_pct = _alert_float(change_pct, 0.0) or 0.0
+
+    breakout_type = str(breakout_type or "").upper()
+    level = None
+    level_source = None
+    if "20D" in breakout_type:
+        level = _alert_float(history_metrics.get("high_20d"))
+        level_source = "20D high"
+    elif "10D" in breakout_type:
+        level = _alert_float(history_metrics.get("high_10d"))
+        level_source = "10D high"
+    elif "RANGE" in breakout_type:
+        level = _alert_float(history_metrics.get("high_20d")) or _alert_float(history_metrics.get("high_10d"))
+        level_source = "20D range high"
+    elif "TREND_RECLAIM" in breakout_type:
+        level = _alert_float(history_metrics.get("ema20")) or _alert_float(history_metrics.get("ema50"))
+        level_source = "EMA reclaim"
+
+    breakout_buffer_pct = ((price - level) / level * 100.0) if level and level > 0 else None
+    score = 50.0
+    reasons: List[str] = []
+    blockers: List[str] = []
+
+    if close_pos >= 0.88:
+        score += 20
+        reasons.append("Close nahe Tageshoch")
+    elif close_pos >= 0.75:
+        score += 13
+        reasons.append("Close im oberen Viertel")
+    elif close_pos >= 0.62:
+        score += 5
+        reasons.append("Close noch okay")
+    elif close_pos >= 0.48:
+        score -= 12
+        blockers.append("Close nicht stark genug")
+    else:
+        score -= 24
+        blockers.append("Close faded in der Kerze")
+
+    if upper_wick <= 10:
+        score += 18
+        reasons.append("kaum oberer Wick")
+    elif upper_wick <= 22:
+        score += 10
+        reasons.append("Wick kontrolliert")
+    elif upper_wick <= 35:
+        score -= 8
+        blockers.append("oberer Wick sichtbar")
+    elif upper_wick <= 50:
+        score -= 20
+        blockers.append("langer oberer Wick")
+    else:
+        score -= 32
+        blockers.append("Wick-Fakeout Risiko")
+
+    if rvol >= 2.5:
+        score += 16
+        reasons.append("RVOL stark")
+    elif rvol >= 1.5:
+        score += 10
+        reasons.append("RVOL bestaetigt")
+    elif rvol >= 1.0:
+        score += 3
+        reasons.append("RVOL okay")
+    elif rvol >= 0.7:
+        score -= 8
+        blockers.append("Volumen duenn")
+    else:
+        score -= 18
+        blockers.append("kein Volumen-Commitment")
+
+    if breakout_buffer_pct is not None:
+        if 0.15 <= breakout_buffer_pct <= 5.0:
+            score += 12
+            reasons.append("Breakout-Level haelt")
+        elif 0.0 <= breakout_buffer_pct < 0.15:
+            score += 2
+            reasons.append("knapp ueber Breakout-Level")
+        elif breakout_buffer_pct < 0:
+            score -= 22
+            blockers.append("unter Breakout-Level")
+        elif breakout_buffer_pct <= 9.0:
+            score -= 4
+            blockers.append("bereits erweitert")
+        else:
+            score -= 16
+            blockers.append("Breakout stark gechased")
+
+    if extension_atr >= 4.5 or change_pct >= 18:
+        score -= 16
+        blockers.append("Move ueberdehnt")
+    elif extension_atr >= 3.2 or change_pct >= 12:
+        score -= 8
+        blockers.append("Move spaet")
+
+    if change_pct > 8 and upper_wick > 30:
+        score -= 12
+        blockers.append("Blowoff-Wick")
+
+    score = int(round(_clamp_float(score, 0.0, 100.0, 0.0)))
+    if score >= 78:
+        label = "Durchzug OK"
+        status = "CONTINUATION_OK"
+        risk = "LOW"
+    elif score >= 62:
+        label = "Durchzug moeglich"
+        status = "CONTINUATION_WATCH"
+        risk = "MEDIUM"
+    elif score >= 45:
+        label = "Wick-Risiko"
+        status = "WICK_WATCH"
+        risk = "HIGH"
+    else:
+        label = "Fakeout-Gefahr"
+        status = "FAKEOUT_RISK"
+        risk = "CRITICAL"
+
+    return {
+        "score": score,
+        "label": label,
+        "status": status,
+        "risk": risk,
+        "reasons": reasons[:4],
+        "blockers": blockers[:4],
+        "level": _round_trade_price(level) if level else None,
+        "level_source": level_source,
+        "breakout_buffer_pct": round(breakout_buffer_pct, 2) if breakout_buffer_pct is not None else None,
+    }
+
+
 def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Validate multi-day pattern strategies with real daily history."""
     if analyze_multi_day_pattern is None:
@@ -8837,6 +8991,25 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         day_low=day_low,
                         prev_atr_pct=prev_atr_pct,
                     )
+                    _breakout_quality = _stock_momentum_breakout_continuation_quality(
+                        strategy_name,
+                        history_metrics,
+                        _score_meta,
+                        breakout_type=_momentum_breakout_type,
+                        price=price,
+                        change_pct=change_pct,
+                        rvol=rvol,
+                        close_pos=close_pos,
+                    )
+                    if _breakout_quality:
+                        _bq_score = int(_breakout_quality.get("score") or 0)
+                        _bq_status = str(_breakout_quality.get("status") or "")
+                        if _bq_status == "FAKEOUT_RISK":
+                            _strat_score = min(_strat_score, 64)
+                        elif _bq_status == "WICK_WATCH":
+                            _strat_score = min(_strat_score, 74)
+                        elif _bq_status == "CONTINUATION_OK" and _bq_score >= 84:
+                            _strat_score = min(100, _strat_score + 3)
                     if not history_metrics.get("history_ok"):
                         _strat_score = min(_strat_score, 74)
                     if rvol_source != "20D_avg_volume":
@@ -8881,6 +9054,19 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         # Re-grade (falls Malus gezogen)
                         _strat_score = max(0, min(100, _strat_score))
                         _strat_grade = _strategy_score_to_grade(_strat_score)
+
+                    if _breakout_quality:
+                        _bq_status = str(_breakout_quality.get("status") or "")
+                        if _bq_status == "FAKEOUT_RISK":
+                            _strat_score = min(_strat_score, 64)
+                        elif _bq_status == "WICK_WATCH":
+                            _strat_score = min(_strat_score, 74)
+                        _strat_grade = _strategy_score_to_grade(_strat_score)
+
+                    _breakout_reason_parts: List[str] = []
+                    if _breakout_quality:
+                        _breakout_reason_parts.extend(_breakout_quality.get("reasons") or [])
+                        _breakout_reason_parts.extend(_breakout_quality.get("blockers") or [])
 
                     strategy_row = {
                         "Ticker": ticker,
@@ -8931,6 +9117,18 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "EMA50_Distance_Pct": round(history_metrics.get("ema50_distance_pct"), 2) if history_metrics.get("ema50_distance_pct") is not None else None,
                         "Momentum_Breakout_Gate": "passed",
                         "Momentum_Breakout_Type": _momentum_breakout_type,
+                        "Breakout_Continuation_Score": _breakout_quality.get("score") if _breakout_quality else None,
+                        "breakout_continuation_score": _breakout_quality.get("score") if _breakout_quality else None,
+                        "Breakout_Continuation_Label": _breakout_quality.get("label") if _breakout_quality else None,
+                        "breakout_continuation_label": _breakout_quality.get("label") if _breakout_quality else None,
+                        "Breakout_Continuation_Status": _breakout_quality.get("status") if _breakout_quality else None,
+                        "breakout_continuation_status": _breakout_quality.get("status") if _breakout_quality else None,
+                        "Breakout_Fakeout_Risk": _breakout_quality.get("risk") if _breakout_quality else None,
+                        "breakout_fakeout_risk": _breakout_quality.get("risk") if _breakout_quality else None,
+                        "Breakout_Level": _breakout_quality.get("level") if _breakout_quality else None,
+                        "Breakout_Level_Source": _breakout_quality.get("level_source") if _breakout_quality else None,
+                        "Breakout_Buffer_Pct": _breakout_quality.get("breakout_buffer_pct") if _breakout_quality else None,
+                        "Breakout_Quality_Reasons": _breakout_reason_parts,
                         "Extension_ATR": _score_meta.get("extension_atr"),
                         "Setup_Score": _score_meta.get("setup_score"),
                         "Upper_Wick_Pct": _score_meta.get("upper_wick_pct"),
@@ -8943,6 +9141,10 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "score": _strat_score,
                         "grade": _strat_grade,
                         "mdr_tag": _mdr_label,
+                        "score_details": (
+                            f"Breakout {_breakout_quality.get('score')}/100: "
+                            f"{', '.join(_breakout_reason_parts[:3])}"
+                        ) if _breakout_quality else "",
                     }
                     _setup_direction = str(_score_meta.get("direction") or "").upper()
                     if _setup_direction in ("LONG", "SHORT"):

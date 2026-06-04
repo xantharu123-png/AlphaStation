@@ -1,5 +1,6 @@
 from api import (
     STOCK_STRATEGY_CACHE_VERSION,
+    _stock_momentum_breakout_continuation_quality,
     _stock_momentum_breakout_gate,
     load_cache_metadata,
     save_cache_file,
@@ -156,6 +157,60 @@ def test_momentum_gate_does_not_affect_other_strategies():
 
     assert ok
     assert reasons == []
+
+
+def test_momentum_continuation_quality_rewards_clean_follow_through():
+    quality = _stock_momentum_breakout_continuation_quality(
+        "Momentum Breakout Long",
+        {
+            "high_20d": 100.0,
+            "high_10d": 99.5,
+            "ema20": 94.0,
+            "ema50": 92.0,
+        },
+        {
+            "upper_wick_pct": 6.0,
+            "atr_pct": 3.0,
+            "extension_atr": 1.4,
+        },
+        breakout_type="20D_HIGH_BREAKOUT",
+        price=103.0,
+        change_pct=4.0,
+        rvol=2.4,
+        close_pos=0.9,
+    )
+
+    assert quality["score"] >= 78
+    assert quality["status"] == "CONTINUATION_OK"
+    assert quality["risk"] == "LOW"
+    assert "Close nahe Tageshoch" in quality["reasons"]
+
+
+def test_momentum_continuation_quality_flags_upper_wick_fakeout():
+    quality = _stock_momentum_breakout_continuation_quality(
+        "Momentum Breakout Long",
+        {
+            "high_20d": 100.0,
+            "high_10d": 99.5,
+            "ema20": 94.0,
+            "ema50": 92.0,
+        },
+        {
+            "upper_wick_pct": 62.0,
+            "atr_pct": 2.0,
+            "extension_atr": 3.8,
+        },
+        breakout_type="20D_HIGH_BREAKOUT",
+        price=100.2,
+        change_pct=8.4,
+        rvol=0.8,
+        close_pos=0.46,
+    )
+
+    assert quality["score"] < 45
+    assert quality["status"] == "FAKEOUT_RISK"
+    assert quality["risk"] == "CRITICAL"
+    assert "Wick-Fakeout Risiko" in quality["blockers"]
 
 
 def test_strategy_cache_metadata_roundtrip(tmp_path):

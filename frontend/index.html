@@ -4659,6 +4659,26 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
     const diagnostics = scanInfo?.diagnostics || null;
     const topRejects = Array.isArray(diagnostics?.top_rejects) ? diagnostics.top_rejects : [];
+    const getBreakoutQuality = (item) => {
+        const score = item?.breakout_continuation_score ?? item?.Breakout_Continuation_Score;
+        const label = item?.breakout_continuation_label ?? item?.Breakout_Continuation_Label;
+        const risk = item?.breakout_fakeout_risk ?? item?.Breakout_Fakeout_Risk;
+        if (score == null && !label && !risk) return null;
+        const s = Number(score || 0);
+        const tone = risk === 'LOW' ? 'good' : (risk === 'MEDIUM' ? 'warn' : 'bad');
+        return { score: s, label: label || 'Breakout', risk: risk || '-', tone };
+    };
+    const breakoutBadgeStyle = (tone) => ({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '3px 7px',
+        borderRadius: 6,
+        fontSize: 11,
+        fontWeight: 700,
+        background: tone === 'good' ? '#d1fae5' : tone === 'warn' ? '#fef3c7' : '#fee2e2',
+        color: tone === 'good' ? '#047857' : tone === 'warn' ? '#92400e' : '#b91c1c',
+    });
 
     return (
         <div className="space-y-6">
@@ -4750,6 +4770,16 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                         <div className="scanner-mobile-label">RVOL</div>
                                         <div className="scanner-mobile-value">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</div>
                                     </div>
+                                    {getBreakoutQuality(item) && (
+                                        <div>
+                                            <div className="scanner-mobile-label">Breakout</div>
+                                            <div className="scanner-mobile-value">
+                                                <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)}>
+                                                    {getBreakoutQuality(item).label} {getBreakoutQuality(item).score}/100
+                                                </span>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </button>
                         ))
@@ -4764,6 +4794,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung% {sortKey === 'change_pct' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
+                            <th className="text-center py-2 px-2">Breakout</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score {sortKey === 'score' && '↓'}</th>
                             <th className="text-center py-2 px-2">Grade</th>
                         </tr>
@@ -4779,6 +4810,16 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rsi?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</td>
+                                <td className="py-3 px-2 text-center">
+                                    {getBreakoutQuality(item) ? (
+                                        <div className="inline-flex flex-col items-center gap-1">
+                                            <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)}>
+                                                {getBreakoutQuality(item).label}
+                                            </span>
+                                            <span className="text-xs text-gray-500">{getBreakoutQuality(item).score}/100 | Risk {getBreakoutQuality(item).risk}</span>
+                                        </div>
+                                    ) : '–'}
+                                </td>
                                 <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
                                 <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span></td>
                             </tr>
