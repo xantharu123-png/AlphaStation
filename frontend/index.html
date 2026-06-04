@@ -2594,14 +2594,23 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             }));
             if (candles.length > 0) candleSeries.current.setData(candles);
 
-            const setupForChart = scannerData?.trade_setup || tickerData?.trade_setup;
+            const setupForChart = (() => {
+                const scannerSetup = scannerData?.trade_setup || null;
+                const detailSetup = tickerData?.trade_setup || null;
+                if (detailSetup?.starter_plan && !scannerSetup?.starter_plan) return detailSetup;
+                return scannerSetup || detailSetup;
+            })();
             if (setupForChart && candleSeries.current && typeof candleSeries.current.createPriceLine === 'function') {
-                [
-                    { key: 'entry', label: 'ENTRY', color: '#2563eb' },
+                const tradeLines = [
+                    ...(setupForChart.starter_plan ? [
+                        { key: 'starter_entry', alt: 'early_entry', label: 'STARTER', color: '#f59e0b', width: 2, style: LineStyle.Dotted },
+                    ] : []),
+                    { key: 'entry', alt: 'main_entry', label: setupForChart.starter_plan ? 'MAIN' : 'ENTRY', color: '#2563eb', width: 2, style: LineStyle.Solid },
                     { key: 'stop_loss', alt: 'stop', label: 'STOP', color: '#dc2626' },
                     { key: 'tp1', label: 'TP1', color: '#059669' },
                     { key: 'tp2', label: 'TP2', color: '#10b981' },
-                ].forEach(line => {
+                ];
+                tradeLines.forEach(line => {
                     const rawPrice = setupForChart[line.key] ?? setupForChart[line.alt];
                     const linePrice = Number(rawPrice);
                     if (Number.isFinite(linePrice) && linePrice > 0) {
@@ -2609,8 +2618,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             candleSeries.current.createPriceLine({
                                 price: linePrice,
                                 color: line.color,
-                                lineWidth: line.key === 'entry' ? 2 : 1,
-                                lineStyle: line.key === 'entry' ? (LineStyle.Solid || 0) : LineStyle.Dashed,
+                                lineWidth: line.width || (line.key === 'entry' ? 2 : 1),
+                                lineStyle: line.style ?? (line.key === 'entry' ? (LineStyle.Solid || 0) : LineStyle.Dashed),
                                 axisLabelVisible: true,
                                 title: line.label,
                             });
@@ -3035,7 +3044,13 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const priceSourceLabel = _chartPrice ? `${chartData?.timeframe || timeframe} Chart` : 'Scanner';
     const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
-    const activeTradeSetup = cd.trade_setup || d.trade_setup || null;
+    const activeTradeSetup = (() => {
+        const scannerSetup = cd.trade_setup || null;
+        const detailSetup = d.trade_setup || null;
+        if (detailSetup?.starter_plan && !scannerSetup?.starter_plan) return detailSetup;
+        return scannerSetup || detailSetup;
+    })();
+    const starterPlan = activeTradeSetup?.starter_plan || null;
     const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
     const normalizedSetupAction = String(setupAction || '').toUpperCase();
     const tradeSignal = String(cd.trade_signal || d.trade_signal || '').toUpperCase();
@@ -3835,8 +3850,29 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel} ({activeTradeSetup.direction})</h4>
                             {activeTradeSetup.entry_status && <span className="text-[11px] font-bold px-2 py-1 rounded bg-white/70">{activeTradeSetup.entry_status}</span>}
                         </div>
+                        {starterPlan && (
+                            <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                    <div className="font-semibold">Starter Entry (Anticipation)</div>
+                                    <div className="text-[11px] font-bold px-2 py-1 rounded bg-white/80">kleine Position</div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div><span className="text-amber-700">Starter</span> <span className="font-semibold">{formatSidebarPrice(starterPlan.entry)}</span></div>
+                                    <div><span className="text-amber-700">Starter Stop</span> <span className="font-semibold color-negative">{formatSidebarPrice(starterPlan.stop)}</span></div>
+                                    <div><span className="text-amber-700">Main/Add</span> <span className="font-semibold">{formatSidebarPrice(starterPlan.main_entry || activeTradeSetup.entry)}</span></div>
+                                    <div><span className="text-amber-700">Starter TP1</span> <span className="font-semibold color-positive">{formatSidebarPrice(starterPlan.tp1)}</span></div>
+                                    <div><span className="text-amber-700">Starter R:R</span> <span className="font-semibold">{starterPlan.rr_tp1 || starterPlan.rr}R bis Main</span></div>
+                                    <div><span className="text-amber-700">Status</span> <span className="font-semibold">noch kein Breakout</span></div>
+                                </div>
+                                {starterPlan.conditions && starterPlan.conditions.length > 0 && (
+                                    <div className="mt-2 text-[11px] leading-relaxed">
+                                        {starterPlan.conditions.slice(0, 3).join(' | ')}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2">
-                            <div><span className="text-gray-500">Entry</span> <span className="font-semibold">{formatSidebarPrice(activeTradeSetup.entry)}</span></div>
+                            <div><span className="text-gray-500">{starterPlan ? 'Main Entry' : 'Entry'}</span> <span className="font-semibold">{formatSidebarPrice(activeTradeSetup.entry)}</span></div>
                             <div><span className="text-gray-500">Stop Loss</span> <span className="font-semibold color-negative">{formatSidebarPrice(activeTradeSetup.stop_loss ?? activeTradeSetup.stop)}</span></div>
                             <div><span className="text-gray-500">TP1</span> <span className="font-semibold color-positive">{formatSidebarPrice(activeTradeSetup.tp1)}</span></div>
                             <div><span className="text-gray-500">TP2</span> <span className="font-semibold color-positive">{formatSidebarPrice(activeTradeSetup.tp2)}</span></div>

@@ -49,6 +49,55 @@ def test_short_sidebar_targets_respect_minimum_r_and_support_barriers():
     assert any("Support" in warning for warning in setup["warnings"])
 
 
+def test_long_setup_can_add_starter_entry_before_breakout():
+    setup = _build_structured_trade_setup(
+        direction="LONG",
+        entry=33.44,
+        atr=1.36,
+        support_1=29.99,
+        resistance_1=33.44,
+        high_20d=33.44,
+        low_20d=26.20,
+        range_pos=62,
+        current_price=30.68,
+        vwap=30.02,
+        ema20=29.73,
+        vah=30.43,
+    )
+
+    assert setup is not None
+    assert setup["entry"] == 33.44
+    assert setup["main_entry"] == 33.44
+    assert setup["starter_plan"]["status"] == "ANTICIPATION"
+    assert setup["starter_entry"] == 30.68
+    assert setup["starter_tp1"] == 33.44
+    assert setup["starter_stop"] < 30.68
+    assert setup["starter_plan"]["rr_tp1"] >= 1.15
+    assert setup["entry_plan_type"] == "starter_plus_breakout"
+    assert any("Starter Entry" in note for note in setup["notes"])
+
+
+def test_long_setup_does_not_add_starter_when_breakout_is_already_close():
+    setup = _build_structured_trade_setup(
+        direction="LONG",
+        entry=33.44,
+        atr=1.36,
+        support_1=31.20,
+        resistance_1=33.44,
+        high_20d=33.44,
+        low_20d=28.10,
+        range_pos=82,
+        current_price=33.10,
+        vwap=32.80,
+        ema20=32.40,
+        vah=32.95,
+    )
+
+    assert setup is not None
+    assert "starter_plan" not in setup
+    assert setup["entry"] == 33.44
+
+
 def test_strategy_rvol_uses_completed_20d_average_not_previous_day_only():
     bars = []
     for idx in range(20):

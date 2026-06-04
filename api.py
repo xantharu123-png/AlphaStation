@@ -6882,6 +6882,154 @@ def _round_trade_price(price: float) -> float:
     return round(price, 5)
 
 
+def _attach_starter_entry_plan(
+    setup: Optional[Dict[str, Any]],
+    *,
+    current_price: Optional[float] = None,
+    atr: Optional[float] = None,
+    support_1: Optional[float] = None,
+    high_20d: Optional[float] = None,
+    low_20d: Optional[float] = None,
+    vwap: Optional[float] = None,
+    ema20: Optional[float] = None,
+    vah: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Add a separate anticipation plan without replacing the breakout entry.
+
+    Starter entries are only valid for long setups where price is still below
+    the main breakout level and is holding nearby structure. The main entry
+    remains the confirmed breakout/add level.
+    """
+    if not isinstance(setup, dict):
+        return setup
+    side = str(setup.get("direction") or "").upper()
+    if side != "LONG":
+        return setup
+
+    try:
+        main_entry = float(setup.get("entry") or setup.get("Entry") or 0)
+        current = float(current_price or 0)
+    except (TypeError, ValueError):
+        return setup
+    if main_entry <= 0 or current <= 0:
+        return setup
+
+    # No starter when price is already at/near the breakout. That is add/main,
+    # not anticipation.
+    if current >= main_entry * 0.985:
+        return setup
+
+    atr_value = float(atr or 0)
+    if atr_value <= 0:
+        atr_value = max(current * 0.03, abs(main_entry - current) * 0.35)
+
+    distance_pct = (main_entry - current) / current if current > 0 else 0
+    min_distance_pct = max(0.015, min(0.05, (atr_value / current) * 0.35 if current > 0 else 0.015))
+    if distance_pct < min_distance_pct:
+        return setup
+
+    def _level(value: Optional[float]) -> float:
+        try:
+            val = float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return val if val > 0 else 0.0
+
+    structure_levels = [
+        (_level(vwap), "VWAP"),
+        (_level(vah), "VAH"),
+        (_level(ema20), "EMA20"),
+        (_level(support_1), "Support"),
+    ]
+    held_levels = [(p, label) for p, label in structure_levels if p > 0 and p <= current * 1.006]
+
+    # Need at least one real hold level. Prefer two, but do not block BI rows
+    # where only VWAP/EMA data is available from ticker detail.
+    if not held_levels:
+        return setup
+
+    below_levels = [(p, label) for p, label in held_levels if p < current]
+    lo20 = _level(low_20d)
+    if lo20 > 0 and lo20 < current:
+        below_levels.append((lo20, "20D Low"))
+    if not below_levels:
+        return setup
+
+    # Use the nearest useful structure underneath, but avoid a stop so tight
+    # that normal noise instantly invalidates the starter.
+    stop_base, stop_base_label = max(below_levels, key=lambda item: item[0])
+    buffer = max(atr_value * 0.25, current * 0.006)
+    starter_stop = stop_base - buffer
+    min_starter_risk = max(atr_value * 0.35, current * 0.012)
+    if current - starter_stop < min_starter_risk:
+        starter_stop = current - min_starter_risk
+
+    max_starter_risk = max(atr_value * 1.4, current * 0.06)
+    if current - starter_stop > max_starter_risk:
+        starter_stop = current - max_starter_risk
+        stop_base_label = "controlled starter risk"
+
+    if starter_stop <= 0 or starter_stop >= current:
+        return setup
+
+    starter_risk = current - starter_stop
+    starter_tp1 = main_entry
+    starter_tp2 = float(setup.get("tp1") or setup.get("TP1") or 0)
+    if starter_tp2 <= starter_tp1:
+        starter_tp2 = starter_tp1 + max(starter_risk * 1.5, atr_value, main_entry * 0.02)
+
+    starter_rr_tp1 = (starter_tp1 - current) / starter_risk if starter_risk > 0 else 0
+    starter_rr_tp2 = (starter_tp2 - current) / starter_risk if starter_risk > 0 else 0
+    if starter_rr_tp1 < 1.15:
+        return setup
+
+    conditions = [
+        "kleine Starter-Position, nicht voller Breakout-Entry",
+        "Kurs muss VWAP/EMA/Support-Struktur halten",
+        "Add erst bei bestaetigtem Breakout ueber Main Entry",
+    ]
+    if len(held_levels) >= 2:
+        held_labels = ", ".join(label for _, label in held_levels[:3])
+        conditions.insert(1, f"Struktur-Hold aktiv: {held_labels}")
+
+    starter_plan = {
+        "type": "ANTICIPATION_STARTER",
+        "status": "ANTICIPATION",
+        "entry": _round_trade_price(current),
+        "stop": _round_trade_price(starter_stop),
+        "tp1": _round_trade_price(starter_tp1),
+        "tp2": _round_trade_price(starter_tp2),
+        "main_entry": _round_trade_price(main_entry),
+        "add_entry": _round_trade_price(main_entry),
+        "rr_tp1": round(starter_rr_tp1, 2),
+        "rr_tp2": round(starter_rr_tp2, 2),
+        "rr": round((starter_rr_tp1 + starter_rr_tp2) / 2, 2),
+        "risk": _round_trade_price(starter_risk),
+        "position_hint": "small_starter",
+        "stop_source": f"{stop_base_label} invalidation",
+        "tp1_source": "main breakout entry",
+        "tp2_source": "first structural target after breakout",
+        "conditions": conditions,
+    }
+
+    enriched = dict(setup)
+    enriched["starter_plan"] = starter_plan
+    enriched["entry_plan_type"] = "starter_plus_breakout"
+    enriched["starter_entry"] = starter_plan["entry"]
+    enriched["early_entry"] = starter_plan["entry"]
+    enriched["starter_stop"] = starter_plan["stop"]
+    enriched["starter_tp1"] = starter_plan["tp1"]
+    enriched["starter_tp2"] = starter_plan["tp2"]
+    enriched["starter_rr"] = starter_plan["rr"]
+    enriched["main_entry"] = starter_plan["main_entry"]
+    enriched["add_entry"] = starter_plan["add_entry"]
+    enriched.setdefault("warnings", [])
+    enriched.setdefault("notes", [])
+    if isinstance(enriched["notes"], list):
+        enriched["notes"].append("Starter Entry ist Anticipation; Add erst beim bestaetigten Breakout")
+    return enriched
+
+
 def _round_level_price(price: float) -> float:
     """Round chart levels without destroying small crypto prices."""
     try:
@@ -7024,6 +7172,10 @@ def _build_structured_trade_setup(
     high_20d: Optional[float],
     low_20d: Optional[float],
     range_pos: Optional[float] = None,
+    current_price: Optional[float] = None,
+    vwap: Optional[float] = None,
+    ema20: Optional[float] = None,
+    vah: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build realistic sidebar trade levels from invalidation and target structure.
 
@@ -7227,7 +7379,7 @@ def _build_structured_trade_setup(
         except (TypeError, ValueError):
             pass
 
-    return {
+    result = {
         "entry": _round_trade_price(entry),
         "stop": _round_trade_price(stop),
         "tp1": _round_trade_price(tp1),
@@ -7245,6 +7397,17 @@ def _build_structured_trade_setup(
         "notes": notes,
         "direction": side,
     }
+    return _attach_starter_entry_plan(
+        result,
+        current_price=current_price,
+        atr=atr_value,
+        support_1=support,
+        high_20d=hi20,
+        low_20d=lo20,
+        vwap=vwap,
+        ema20=ema20,
+        vah=vah,
+    )
 
 
 def _infer_strategy_direction(strategy_name: str, filters: Dict[str, Any]) -> str:
@@ -11784,11 +11947,13 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         if signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
             if confluence_direction == "LONG":
                 trade_setup = _build_structured_trade_setup(
-                    "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                    "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
+                    current_price=close, vwap=vwap, ema20=ema20
                 )
             else:  # SHORT
                 trade_setup = _build_structured_trade_setup(
-                    "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                    "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
+                    current_price=close, vwap=vwap, ema20=ema20
                 )
 
         # 10. Candlestick data for chart (last 60 bars, reversed to chronological, with EMA overlays)
@@ -11875,20 +12040,33 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                 trade_setup = {
                     "entry": bi_scanner["entry"],
                     "stop": bi_scanner["stop_loss"],
+                    "stop_loss": bi_scanner["stop_loss"],
                     "tp1": bi_scanner.get("tp1"),
                     "tp2": bi_scanner.get("tp2"),
                     "rr": bi_scanner.get("risk_reward"),
                     "direction": bi_scanner["direction"],
                 }
+                trade_setup = _attach_starter_entry_plan(
+                    trade_setup,
+                    current_price=close,
+                    atr=atr,
+                    support_1=support_1,
+                    high_20d=high_20d,
+                    low_20d=low_20d,
+                    vwap=vwap,
+                    ema20=ema20,
+                )
             # V3.1: Trade Setup generieren falls BI Scanner keins hat aber Grade S/A/B
             elif not trade_setup and signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
                 if confluence_direction == "LONG":
                     trade_setup = _build_structured_trade_setup(
-                        "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                        "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
+                        current_price=close, vwap=vwap, ema20=ema20
                     )
                 else:  # SHORT
                     trade_setup = _build_structured_trade_setup(
-                        "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos
+                        "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
+                        current_price=close, vwap=vwap, ema20=ema20
                     )
 
         # V3.2: Extension-Score — wie weit ist Preis von MA20/VWAP entfernt
