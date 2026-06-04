@@ -977,7 +977,7 @@ _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys(
 }
 _SIGNAL_ONLY_SCANNERS = {
     "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
-    "stock_strategy", "strategy_scan", "volume_spikes",
+    "stock_strategy", "strategy_scan",
     "early_movers", "crypto_trade_signals", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy",
 }
 _CRYPTO_SIGNAL_ONLY_SCANNERS = {"early_movers", "crypto_trade_signals", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy"}

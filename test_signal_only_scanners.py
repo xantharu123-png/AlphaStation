@@ -183,6 +183,27 @@ def test_biotech_watchlist_rows_do_not_survive_signal_filter(monkeypatch):
     assert api._apply_signal_only_policy("biotech", decorated) == []
 
 
+def test_volume_spikes_are_display_radar_not_signal_only(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"VOLX"}, "unit"))
+    row = {
+        "ticker": "VOLX",
+        "price": 12.34,
+        "change_pct": 1.2,
+        "volume": 1_200_000,
+        "rvol": 4.2,
+        "dollar_volume": 14_800_000,
+        "signal_type": "ABSORPTION",
+        "asset_class": "stock",
+        "trade_signal": "BEOBACHTEN",
+        "trade_action": "BEOBACHTEN",
+        "execution_trigger_ok": False,
+    }
+
+    visible = api._apply_signal_only_policy("volume_spikes", [row])
+
+    assert visible == [row]
+
+
 def test_stock_swing_strategy_scanners_do_not_cap_for_missing_5m(monkeypatch, tmp_path):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
