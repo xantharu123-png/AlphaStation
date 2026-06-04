@@ -4562,7 +4562,8 @@ function App() {
 
 // Scanner Tab
 function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
-    const [strategy, setStrategy] = useState('');
+    const defaultStockStrategy = 'Momentum Breakout Long';
+    const [strategy, setStrategy] = useState(scanCache.scanner_strategy || defaultStockStrategy);
     const [marketType, setMarketType] = useState('stocks');
     const [isScanning, setIsScanning] = useState(scanCache.scanner_scanning || false);
     const [results, setResults] = useState(scanCache.scanner_results || []);
@@ -4586,10 +4587,36 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     }, []);
 
     useEffect(() => {
-        if (strategy && strategies?.strategies && !strategies.strategies[strategy]) {
-            setStrategy('');
+        const names = Object.keys(strategies?.strategies || {});
+        if (!names.length) return;
+        const preferred = marketType === 'stocks' && names.includes(defaultStockStrategy)
+            ? defaultStockStrategy
+            : names[0];
+        if (!strategy || !strategies.strategies[strategy]) {
+            setStrategy(preferred);
+            updateScanCache('scanner_strategy', preferred);
         }
-    }, [strategy, strategies]);
+    }, [strategy, strategies, marketType]);
+
+    const handleStrategyChange = (value) => {
+        setStrategy(value);
+        updateScanCache('scanner_strategy', value);
+        setResults([]);
+        updateScanCache('scanner_results', []);
+        setScanInfo(null);
+        updateScanCache('scanner_info', null);
+    };
+
+    const resultsUrlFor = (strategyName = strategy) => {
+        if (!strategyName) return null;
+        const stratLower = String(strategyName || '').toLowerCase();
+        const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
+        if (isBI) {
+            const dir = stratLower.includes('short') ? 'short' : 'long';
+            return `${API}/api/scan-results?direction=${dir}`;
+        }
+        return `${API}/api/scan-results?strategy=${encodeURIComponent(strategyName)}&market_type=${encodeURIComponent(marketType)}`;
+    };
 
     const rememberScanInfo = (data) => {
         const info = {
@@ -4602,11 +4629,14 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         updateScanCache('scanner_info', info);
     };
 
-    // Always load latest results from server on mount
+    // Always load latest results for the selected strategy. Do not fall back to
+    // BI-long here, otherwise the strategy tab can show an unrelated empty cache.
     useEffect(() => {
         const loadCached = async () => {
+            const url = resultsUrlFor(strategy);
+            if (!url) return;
             try {
-                const response = await fetch(`${API}/api/scan-results?direction=long`);
+                const response = await fetch(url);
                 if (response.ok) {
                     const data = await response.json();
                     const items = data.data || [];
@@ -4617,23 +4647,20 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             } catch (err) { console.error('Error:', err); }
         };
         loadCached();
-    }, []);
+    }, [strategy, marketType]);
 
     const handleScan = async () => {
+        if (!strategy) {
+            if (window.addToast) window.addToast('Bitte zuerst eine Strategie waehlen', 'warning');
+            return;
+        }
         setIsScanning(true);
         updateScanCache('scanner_scanning', true);
         // Save current cached_at BEFORE scan starts
         let prevCachedAt = null;
         try {
-            const stratLower = strategy.toLowerCase();
-            const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
-            let preUrl;
-            if (isBI) {
-                const dir = stratLower.includes('short') ? 'short' : 'long';
-                preUrl = `${API}/api/scan-results?direction=${dir}`;
-            } else {
-                preUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}&market_type=${encodeURIComponent(marketType)}`;
-            }
+            const preUrl = resultsUrlFor(strategy);
+            if (!preUrl) throw new Error('strategy missing');
             const preCheck = await fetch(preUrl);
             if (preCheck.ok) {
                 const preData = await preCheck.json();
@@ -4646,7 +4673,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 if (window.addToast) window.addToast('Scan gestartet...', 'info');
                 // Poll for results with increasing intervals
                 const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) {
+                    if (attempts > 60) {
                         setIsScanning(false);
                         updateScanCache('scanner_scanning', false);
                         if (window.addToast) window.addToast('Scan dauert länger...', 'info');
@@ -4654,15 +4681,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                     }
                     try {
                         // Strategie-Name mitsenden für korrekte Cache-Zuordnung
-                        const stratLower = strategy.toLowerCase();
-                        const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
-                        let pollUrl;
-                        if (isBI) {
-                            const dir = stratLower.includes('short') ? 'short' : 'long';
-                            pollUrl = `${API}/api/scan-results?direction=${dir}`;
-                        } else {
-                            pollUrl = `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}&market_type=${encodeURIComponent(marketType)}`;
-                        }
+                        const pollUrl = resultsUrlFor(strategy);
+                        if (!pollUrl) throw new Error('strategy missing');
                         const res = await fetch(pollUrl);
                         if (res.ok) {
                             const data = await res.json();
@@ -4695,6 +4715,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
     const diagnostics = scanInfo?.diagnostics || null;
     const topRejects = Array.isArray(diagnostics?.top_rejects) ? diagnostics.top_rejects : [];
+    const visibleWarnings = isScanning ? [] : (scanInfo?.warnings || []);
     const getBreakoutQuality = (item) => {
         const score = item?.breakout_continuation_score ?? item?.Breakout_Continuation_Score;
         const label = item?.breakout_continuation_label ?? item?.Breakout_Continuation_Label;
@@ -4722,7 +4743,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
-                        <select value={strategy} onChange={(e) => setStrategy(e.target.value)} className="w-full">
+                        <select value={strategy} onChange={(e) => handleStrategyChange(e.target.value)} className="w-full">
                             <option value="">Wählen Sie eine Strategie...</option>
                             {Object.entries(groupedStrategies).map(([group, items]) => (
                                 <optgroup key={group} label={group}>
@@ -4747,11 +4768,11 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
 
-            {(scanInfo?.warnings?.length > 0 || diagnostics) && (
+            {(visibleWarnings.length > 0 || diagnostics) && (
                 <div className="space-y-2">
-                    {scanInfo?.warnings?.length > 0 && (
+                    {visibleWarnings.length > 0 && (
                         <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
-                            {scanInfo.warnings.join(' | ')}
+                            {visibleWarnings.join(' | ')}
                         </div>
                     )}
                     {diagnostics && (
@@ -4771,7 +4792,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
                 <div className="md:hidden">
                     {sorted.length === 0 ? (
-                        <div className="text-sm text-gray-500 text-center py-6">Noch keine Scanner-Ergebnisse vorhanden.</div>
+                        <div className="text-sm text-gray-500 text-center py-6">
+                            {isScanning ? 'Scan laeuft noch - Ergebnisse erscheinen automatisch, sobald der Cache aktualisiert ist.' : 'Noch keine Scanner-Ergebnisse vorhanden.'}
+                        </div>
                     ) : (
                         sorted.map((item, idx) => (
                             <button key={idx} className="scanner-mobile-card w-full text-left" onClick={() => marketType === 'crypto' ? onSelectTicker({ticker: item.ticker, isCrypto: true, ...item}) : onSelectTicker(item.ticker)}>
@@ -4836,6 +4859,13 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         </tr>
                     </thead>
                     <tbody>
+                        {sorted.length === 0 && (
+                            <tr>
+                                <td colSpan="8" className="py-8 text-center text-gray-500">
+                                    {isScanning ? 'Scan laeuft noch - Ergebnisse erscheinen automatisch, sobald der Cache aktualisiert ist.' : 'Noch keine Scanner-Ergebnisse vorhanden.'}
+                                </td>
+                            </tr>
+                        )}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => marketType === 'crypto' ? onSelectTicker({ticker: item.ticker, isCrypto: true, ...item}) : onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">
