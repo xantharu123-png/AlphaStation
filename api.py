@@ -9022,6 +9022,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
             "cache_version": STOCK_STRATEGY_CACHE_VERSION,
             "universe_count": len(_all_snapshot_tickers),
             "common_stock_source": common_stock_source,
+            "common_stock_universe_count": len(common_stock_universe) if common_stock_universe is not None else None,
             "filters": {
                 "change_pct": [change_min, change_max],
                 "price": [price_min, price_max],
@@ -9034,11 +9035,18 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
             "rejected": {},
             "raw_matches_before_special_filter": 0,
             "final_results": 0,
+            "stage_counts": {
+                "snapshot_universe": len(_all_snapshot_tickers),
+            },
         }
 
         def _reject(reason: str) -> None:
             rejected = scan_diag.setdefault("rejected", {})
             rejected[reason] = int(rejected.get(reason, 0)) + 1
+
+        def _stage(name: str) -> None:
+            stages = scan_diag.setdefault("stage_counts", {})
+            stages[name] = int(stages.get(name, 0)) + 1
 
         for t in _all_snapshot_tickers:
                 try:
@@ -9048,6 +9056,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if not ticker or "." in ticker or "/" in ticker or not prev.get("c"):
                         _reject("invalid_symbol_or_missing_prev_close")
                         continue
+                    _stage("valid_symbol_and_prev_close")
                     non_stock_reason = _stock_alert_asset_exclusion_reason(
                         ticker,
                         common_stock_universe=common_stock_universe,
@@ -9057,6 +9066,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if non_stock_reason:
                         _reject(f"asset:{non_stock_reason}")
                         continue
+                    _stage("common_stock_asset")
 
                     prev_close_regular = float(prev.get("c", 0) or 0)
                     day_close = float(day.get("c", 0) or 0)
@@ -9075,6 +9085,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if not price or not prev_close:
                         _reject("missing_price_or_prev_close")
                         continue
+                    _stage("priced_snapshot")
 
                     volume = float(day.get("v", 0) or 0)
                     dollar_vol = volume * price
@@ -9099,21 +9110,29 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if not (change_min <= change_pct <= change_max):
                         _reject("change_filter")
                         continue
+                    _stage("change_filter")
                     if not (price_min <= price <= price_max):
                         _reject("price_filter")
                         continue
+                    _stage("price_filter")
                     if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
                         _reject("close_position_filter")
                         continue
+                    _stage("close_position_filter")
                     if _has_gap_filter and not (gap_min <= gap_pct <= gap_max):
                         _reject("gap_filter")
                         continue
+                    if _has_gap_filter:
+                        _stage("gap_filter")
                     if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
                         _reject("vortag_filter")
                         continue
+                    if _has_vortag_filter:
+                        _stage("vortag_filter")
                     if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
                         _reject("dollar_volume_filter")
                         continue
+                    _stage("dollar_volume_filter")
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
                     history_metrics = _strategy_daily_history_metrics(
@@ -9150,6 +9169,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
                         _reject("rvol_filter")
                         continue
+                    _stage("rvol_filter")
 
                     _momentum_ok, _momentum_block_reasons = _stock_momentum_breakout_gate(
                         strategy_name,
@@ -9164,6 +9184,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         for _reason in _momentum_block_reasons:
                             _reject(f"momentum:{_reason}")
                         continue
+                    _stage("momentum_breakout_gate")
                     _breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
                     _breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
                     _range_pos = _alert_float(history_metrics.get("range_pos"))
@@ -9413,6 +9434,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         scan_diag["max_results"] = max_results
         results = results[:max_results]
         scan_diag["final_results"] = len(results)
+        scan_diag.setdefault("stage_counts", {})["raw_matches_before_special_filter"] = scan_diag["raw_matches_before_special_filter"]
+        scan_diag.setdefault("stage_counts", {})["final_results"] = scan_diag["final_results"]
         scan_diag["top_rejects"] = sorted(
             scan_diag.get("rejected", {}).items(),
             key=lambda item: item[1],
@@ -13307,8 +13330,17 @@ def get_scan_results(
             "warning": "strategy_cache_version_old_scan_again",
         }
 
+    pre_policy_count = len(results or [])
     results = _decorate_scan_results(results, scanner_name, cache_age)
+    decorated_count = len(results or [])
     results = _apply_signal_only_policy(scanner_name, results)
+    visible_count = len(results or [])
+    if diagnostics is not None:
+        diagnostics = dict(diagnostics)
+        diagnostics["cache_results_before_signal_policy"] = pre_policy_count
+        diagnostics["decorated_results_before_signal_policy"] = decorated_count
+        diagnostics["visible_results_after_signal_policy"] = visible_count
+        diagnostics["suppressed_by_signal_policy"] = max(0, decorated_count - visible_count)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     warnings = list(quality["warnings"])
     if stale_strategy_cache:

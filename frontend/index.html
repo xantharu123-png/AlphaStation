@@ -4715,6 +4715,19 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
     const diagnostics = scanInfo?.diagnostics || null;
     const topRejects = Array.isArray(diagnostics?.top_rejects) ? diagnostics.top_rejects : [];
+    const stageCounts = diagnostics?.stage_counts || null;
+    const visibleAfterPolicy = diagnostics?.visible_results_after_signal_policy;
+    const suppressedByPolicy = diagnostics?.suppressed_by_signal_policy;
+    const funnelParts = stageCounts ? [
+        ['gueltig', stageCounts.valid_symbol_and_prev_close],
+        ['Common', stageCounts.common_stock_asset],
+        ['Change', stageCounts.change_filter],
+        ['Preis', stageCounts.price_filter],
+        ['ClosePos', stageCounts.close_position_filter],
+        ['$Vol', stageCounts.dollar_volume_filter],
+        ['RVOL', stageCounts.rvol_filter],
+        ['Struktur', stageCounts.momentum_breakout_gate],
+    ].filter(([, value]) => value != null) : [];
     const visibleWarnings = isScanning ? [] : (scanInfo?.warnings || []);
     const getBreakoutQuality = (item) => {
         const score = item?.breakout_continuation_score ?? item?.Breakout_Continuation_Score;
@@ -4779,8 +4792,13 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         <div className="p-3 rounded-lg border border-blue-100 bg-blue-50 text-blue-800 text-xs flex flex-wrap gap-x-6 gap-y-1">
                             <span><b>Diagnose:</b> {diagnostics.strategy || strategy || 'Strategie'}</span>
                             <span>Universum: {diagnostics.universe_count ?? '-'}</span>
-                            <span>Roh-Treffer: {diagnostics.raw_matches_before_special_filter ?? '-'}</span>
-                            <span>Final: {diagnostics.final_results ?? results.length}</span>
+                            {diagnostics.common_stock_universe_count != null && <span>Common-Universum: {diagnostics.common_stock_universe_count}</span>}
+                            <span>Scanner-Final: {diagnostics.final_results ?? results.length}</span>
+                            {visibleAfterPolicy != null && <span>Sichtbar: {visibleAfterPolicy}</span>}
+                            {suppressedByPolicy > 0 && <span>Signal-Policy unterdrueckt: {suppressedByPolicy}</span>}
+                            {funnelParts.length > 0 && (
+                                <span>Funnel: {funnelParts.map(([label, value]) => `${label} ${value}`).join(' -> ')}</span>
+                            )}
                             {topRejects.length > 0 && (
                                 <span>Top-Blocker: {topRejects.slice(0, 4).map(([k, v]) => `${k} ${v}`).join(', ')}</span>
                             )}
