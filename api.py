@@ -1121,6 +1121,7 @@ def _email_alert_status() -> Dict[str, Any]:
         "subscriber_recipient_count": len(platform_recipients),
         "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
         "default_trade_horizon": _normalize_trade_horizon_value(_DEFAULT_TRADE_HORIZON),
+        "narrative_pulse": _narrative_pulse_email_status(),
         "crypto_armed_watch_mails_enabled": _EARLY_MOVER_SEND_ARMED_EMAILS,
         "new_listing_dump_watch_mails_enabled": _NEW_LISTING_SEND_DUMP_WATCH_EMAILS,
         "startup_cooldown_remaining_seconds": startup_remaining,
@@ -11337,6 +11338,7 @@ def get_email_alert_status():
             "Mail wurde wegen ETF/ETP-Inhalt geblockt.",
             "Pump-&-Dump: kein aktives SHORT-now Signal mit Safety OK, unverpassten Targets und R:R >= 1.5.",
             "New Listing Dump-Watch: keine gepumpten neuen Coins mit Safety/Qualitaet oder taeglicher Dedupe ist aktiv.",
+            "Narrative Pulse: Empfaenger-Frequenz passt nicht, Daily-Dedupe ist aktiv oder die Sektor-Datenquelle lieferte keinen Cache.",
             "Gmail SMTP/Test-Mail ist fehlgeschlagen.",
         ],
         "timestamp": datetime.now().isoformat(),
@@ -16432,14 +16434,133 @@ def _narrative_pulse_bucket(frequency: str, utc_now: datetime) -> str:
     return utc_now.strftime("%Y%m%d")
 
 
+def _normalize_narrative_pulse_frequency(value: Any) -> str:
+    freq = str(value or "daily").strip().lower().replace("-", "_")
+    aliases = {
+        "aus": "off",
+        "off": "off",
+        "none": "off",
+        "daily": "daily",
+        "taeglich": "daily",
+        "taglich": "daily",
+        "twice": "twice_daily",
+        "twice_daily": "twice_daily",
+        "2x": "twice_daily",
+        "weekly": "weekly",
+        "woechentlich": "weekly",
+        "wochentlich": "weekly",
+    }
+    normalized = aliases.get(freq, freq)
+    return normalized if normalized in {"off", *NARRATIVE_PULSE_FREQUENCIES.keys()} else "daily"
+
+
+def _global_alert_recipients() -> List[str]:
+    gmail_user = _SECRETS.get("GMAIL_USER", "")
+    alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
+    recipients = [addr.strip().lower() for addr in str(alert_to or "").split(",") if addr.strip()]
+    return sorted(set(addr for addr in recipients if "@" in addr))
+
+
+def _narrative_pulse_global_frequency() -> str:
+    raw = (
+        os.environ.get("NARRATIVE_EMAIL_FREQUENCY")
+        or _SECRETS.get("NARRATIVE_EMAIL_FREQUENCY")
+        or _SECRETS.get("NARRATIVE_PULSE_FREQUENCY")
+        or "daily"
+    )
+    return _normalize_narrative_pulse_frequency(raw)
+
+
+def _narrative_pulse_cache_status() -> Dict[str, Any]:
+    cache_exists = os.path.exists(NARRATIVE_PULSE_CACHE)
+    cache_age = None
+    generated_at = None
+    item_count = 0
+    if cache_exists:
+        try:
+            payload, cached_at = load_cache_file(NARRATIVE_PULSE_CACHE)
+            if cached_at:
+                try:
+                    cache_age = int(max(0, (datetime.now() - datetime.fromisoformat(cached_at)).total_seconds()))
+                except Exception:
+                    cache_age = None
+            if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                payload = payload[0]
+            if isinstance(payload, dict):
+                generated_at = payload.get("generated_at")
+                item_count = len(payload.get("all") or [])
+        except Exception as exc:
+            return {
+                "cache_exists": True,
+                "cache_age_seconds": None,
+                "generated_at": None,
+                "item_count": 0,
+                "error": str(exc),
+            }
+    return {
+        "cache_exists": cache_exists,
+        "cache_age_seconds": cache_age,
+        "generated_at": generated_at,
+        "item_count": item_count,
+    }
+
+
+def _narrative_pulse_email_status(now: Optional[float] = None) -> Dict[str, Any]:
+    now = now or time.time()
+    utc_now = datetime.now(timezone.utc)
+    global_frequency = _narrative_pulse_global_frequency()
+    global_recipients = _global_alert_recipients()
+    frequencies = {}
+    total_recipients = set()
+    for frequency, cfg in NARRATIVE_PULSE_FREQUENCIES.items():
+        recipients = _narrative_pulse_recipients(frequency)
+        total_recipients.update(recipients)
+        bucket = _narrative_pulse_bucket(frequency, utc_now)
+        dedupe_key = f"narrative_pulse_{frequency}_{bucket}"
+        remaining = _email_dedupe_remaining(dedupe_key, int(cfg["ttl"]), now=now)
+        frequencies[frequency] = {
+            "label": cfg["label"],
+            "recipient_count": len(recipients),
+            "dedupe_key": dedupe_key,
+            "dedupe_remaining_seconds": remaining,
+            "eligible_now": bool(recipients) and remaining <= 0,
+        }
+
+    if not total_recipients:
+        reason = "no_recipients"
+    elif all(item["dedupe_remaining_seconds"] > 0 for item in frequencies.values() if item["recipient_count"] > 0):
+        reason = "dedupe_active"
+    else:
+        reason = "eligible"
+
+    recent_events = [
+        event for event in list(_EMAIL_SEND_LOG[-50:])
+        if "narrative pulse" in str(event.get("subject", "")).lower()
+    ][-10:]
+    return {
+        "configured": bool(_SECRETS.get("GMAIL_USER") and _SECRETS.get("GMAIL_APP_PASSWORD")),
+        "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH,
+        "global_fallback_frequency": global_frequency,
+        "global_recipient_count": len(global_recipients),
+        "recipient_count": len(total_recipients),
+        "reason": reason,
+        "frequencies": frequencies,
+        "cache": _narrative_pulse_cache_status(),
+        "recent_events": recent_events,
+    }
+
+
 def _narrative_pulse_recipients(frequency: str) -> List[str]:
-    if not HAS_AUTH or not ALERT_SEND_TO_SUBSCRIBERS:
-        return []
+    frequency = _normalize_narrative_pulse_frequency(frequency)
+    recipients: List[str] = []
     try:
-        return get_email_alert_recipients("narrative_pulse", frequency)
+        if HAS_AUTH and ALERT_SEND_TO_SUBSCRIBERS:
+            recipients.extend(get_email_alert_recipients("narrative_pulse", frequency))
     except Exception as exc:
         print(f"[Narrative] Recipient filter failed: {exc}")
-        return []
+    if frequency != "off" and _narrative_pulse_global_frequency() == frequency:
+        recipients.extend(_global_alert_recipients())
+    return sorted(set(addr.strip().lower() for addr in recipients if str(addr).strip() and "@" in str(addr)))
 
 
 def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = None) -> bool:
@@ -16474,12 +16595,12 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
     <p style="color:#64748b;font-size:12px;margin-top:18px">Score mischt 5D/20D/1D Performance, Aktivitaet, CMF und OBV. Das zeigt, wohin Kapital rotiert; Entries kommen weiterhin nur ueber die separaten Scanner mit Entry/Stop/TP.</p>
     </body></html>"""
     sent_any = False
-    tried_filtered_recipients = False
+    had_recipients = False
     for frequency, cfg in NARRATIVE_PULSE_FREQUENCIES.items():
         recipients = _narrative_pulse_recipients(frequency)
         if not recipients:
             continue
-        tried_filtered_recipients = True
+        had_recipients = True
         bucket = _narrative_pulse_bucket(frequency, utc_now)
         dedupe_key = f"narrative_pulse_{frequency}_{bucket}"
         if not _email_dedupe_claim(dedupe_key, int(cfg["ttl"]), now=now):
@@ -16489,16 +16610,9 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
         sent = _send_email_alert(subject, body, recipient_emails=recipients)
         sent_any = bool(sent) or sent_any
 
-    if tried_filtered_recipients or (HAS_AUTH and ALERT_SEND_TO_SUBSCRIBERS):
-        return sent_any
-
-    # Fallback for single-user/no-auth deployments.
-    day_key = utc_now.strftime("%Y%m%d")
-    dedupe_key = f"narrative_pulse_daily_{day_key}"
-    if not _email_dedupe_claim(dedupe_key, NARRATIVE_PULSE_DEDUPE_SEC, now=now):
-        _record_email_event("Narrative Pulse Daily", "skipped", "daily_dedupe_active")
-        return False
-    return _send_email_alert(f"Narrative Pulse: Bullisch {top_bull} | Bearisch {top_bear}", body)
+    if not had_recipients:
+        _record_email_event("Narrative Pulse", "skipped", "no_recipients_for_any_frequency")
+    return sent_any
 
 
 def _money_flow_wrapper() -> None:
@@ -16618,6 +16732,16 @@ def get_narrative_pulse():
         "cache_age_seconds": cache_age,
         "data_source": "Sector/theme proxy rotation + representative stock performance",
         "note": "Narrative context only; entries still require scanner trade setup.",
+    }
+
+
+@app.get("/api/narrative-email-status")
+def get_narrative_email_status():
+    """Explain exactly why the sector/narrative digest will or will not send."""
+    return {
+        "status": "ok",
+        "narrative_pulse": _narrative_pulse_email_status(),
+        "timestamp": datetime.now().isoformat(),
     }
 
 
