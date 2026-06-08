@@ -4106,9 +4106,14 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     fading_daily = open_to_current is not None and open_to_current < -0.5
     not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
     is_gap_momentum_long = "gap momentum long" in strategy_name or "gap up" in strategy_name
+    is_momentum_breakout_long = "momentum breakout long" in strategy_name
     is_meaningful_gap = is_gap_momentum_long and (
         (gap_pct is not None and gap_pct >= 3.0)
         or (change is not None and change >= 6.0)
+    )
+    is_momentum_gap_overlap = is_momentum_breakout_long and (
+        (gap_pct is not None and gap_pct >= 3.0)
+        or (change is not None and change >= 7.0 and rvol is not None and rvol >= 2.0)
     )
 
     if hard_extended:
@@ -4128,6 +4133,33 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_gap_not_holding_upper_range_wait_retest")
         if upper_wick_pct is not None and upper_wick_pct >= 38:
             reasons.append("swing_gap_wick_rejection_wait_retest")
+    if is_momentum_gap_overlap:
+        momentum_type = str(
+            row.get("Momentum_Breakout_Type")
+            or row.get("momentum_breakout_type")
+            or ""
+        ).upper()
+        continuation_status = str(
+            row.get("Breakout_Continuation_Status")
+            or row.get("breakout_continuation_status")
+            or ""
+        ).upper()
+        continuation_score = _alert_float(
+            row.get("Breakout_Continuation_Score", row.get("breakout_continuation_score")),
+            None,
+        )
+        if momentum_type == "TREND_RECLAIM" and change is not None and change >= 6.0:
+            reasons.append("swing_momentum_trend_reclaim_gap_wait_retest")
+        if open_to_current is not None and open_to_current < 0.25:
+            reasons.append("swing_momentum_not_holding_open_wait_retest")
+        if close_pos is not None and close_pos < 0.72:
+            reasons.append("swing_momentum_not_holding_upper_range_wait_retest")
+        if upper_wick_pct is not None and upper_wick_pct >= 34:
+            reasons.append("swing_momentum_wick_rejection_wait_retest")
+        if continuation_status and continuation_status != "CONTINUATION_OK":
+            reasons.append("swing_momentum_breakout_quality_wait_retest")
+        elif continuation_score is not None and continuation_score < 78:
+            reasons.append("swing_momentum_breakout_quality_wait_retest")
     return reasons
 
 
@@ -4546,6 +4578,11 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_gap_not_holding_open_wait_retest",
         "swing_gap_not_holding_upper_range_wait_retest",
         "swing_gap_wick_rejection_wait_retest",
+        "swing_momentum_trend_reclaim_gap_wait_retest",
+        "swing_momentum_not_holding_open_wait_retest",
+        "swing_momentum_not_holding_upper_range_wait_retest",
+        "swing_momentum_wick_rejection_wait_retest",
+        "swing_momentum_breakout_quality_wait_retest",
         "swing_short_extended_wait_retest",
         "swing_short_drop_extended_wait_failed_reclaim",
         "swing_short_current_candle_reclaim",
@@ -7996,6 +8033,8 @@ def _stock_momentum_breakout_continuation_quality(
     change_pct: float,
     rvol: float,
     close_pos: float,
+    gap_pct: Optional[float] = None,
+    open_to_current_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Estimate whether a momentum breakout is likely follow-through or a wick trap."""
     if _normalize_strategy_key(strategy_name) != _normalize_strategy_key("Momentum Breakout Long"):
@@ -8011,6 +8050,8 @@ def _stock_momentum_breakout_continuation_quality(
     close_pos = _clamp_float(close_pos, 0.0, 1.0, 0.5)
     rvol = max(_alert_float(rvol, 0.0) or 0.0, 0.0)
     change_pct = _alert_float(change_pct, 0.0) or 0.0
+    gap_pct = _alert_float(gap_pct, None)
+    open_to_current_pct = _alert_float(open_to_current_pct, None)
 
     breakout_type = str(breakout_type or "").upper()
     level = None
@@ -8097,6 +8138,21 @@ def _stock_momentum_breakout_continuation_quality(
         else:
             score -= 16
             blockers.append("Breakout stark gechased")
+
+    meaningful_gap_overlap = (
+        (gap_pct is not None and gap_pct >= 3.0)
+        or (change_pct >= 7.0 and rvol >= 2.0)
+    )
+    if meaningful_gap_overlap:
+        if breakout_type == "TREND_RECLAIM":
+            score -= 20
+            blockers.append("Gap/Reclaim: erst Retest")
+        if open_to_current_pct is not None and open_to_current_pct < 0.25:
+            score -= 16
+            blockers.append("Gap haelt Open nicht")
+        if close_pos < 0.72:
+            score -= 14
+            blockers.append("Gap schliesst nicht stark")
 
     if extension_atr >= 4.5 or change_pct >= 18:
         score -= 16
@@ -9246,6 +9302,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         change_pct=change_pct,
                         rvol=rvol,
                         close_pos=close_pos,
+                        gap_pct=gap_pct,
+                        open_to_current_pct=((price - day_open) / day_open * 100) if day_open > 0 else None,
                     )
                     if _breakout_quality:
                         _bq_score = int(_breakout_quality.get("score") or 0)

@@ -2388,6 +2388,61 @@ def test_stock_strategy_swing_gap_long_waits_when_gap_fades(monkeypatch):
     assert state["decision"] == "WAIT_RETEST"
 
 
+def test_stock_strategy_swing_momentum_gap_reclaim_waits_for_retest(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SOPH"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "SOPH",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "S",
+        "score": 83,
+        "rvol": 4.56,
+        "price": 5.42,
+        "current_price": 5.42,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 8.3,
+        "gap_pct": 7.6,
+        "close_pos": 0.61,
+        "open_to_current_pct": 0.0,
+        "Upper_Wick_Pct": 42.0,
+        "Momentum_Breakout_Type": "TREND_RECLAIM",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 100,
+        "Entry": 5.42,
+        "StopLoss": 5.24,
+        "TP1": 6.00,
+        "TP2": 6.43,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_momentum_trend_reclaim_gap_wait_retest" in state["suppression_reasons"]
+    assert "swing_momentum_not_holding_open_wait_retest" in state["suppression_reasons"]
+    assert "swing_momentum_not_holding_upper_range_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_momentum_breakout_quality_penalizes_gap_reclaim_without_hold():
+    quality = api._stock_momentum_breakout_continuation_quality(
+        "Momentum Breakout Long",
+        {"ema20": 5.0, "high_20d": 5.5, "high_10d": 5.4},
+        {"upper_wick_pct": 42.0, "atr_pct": 4.0, "extension_atr": 1.5},
+        breakout_type="TREND_RECLAIM",
+        price=5.42,
+        change_pct=8.3,
+        rvol=4.56,
+        close_pos=0.61,
+        gap_pct=7.6,
+        open_to_current_pct=0.0,
+    )
+
+    assert quality["status"] != "CONTINUATION_OK"
+    assert quality["risk"] in {"HIGH", "CRITICAL"}
+    assert any("Retest" in blocker or "Gap" in blocker for blocker in quality["blockers"])
+
+
 def test_stock_strategy_swing_short_blocks_chased_drop(monkeypatch):
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"NU"}, "unit"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
