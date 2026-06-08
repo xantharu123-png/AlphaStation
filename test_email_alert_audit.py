@@ -2355,6 +2355,39 @@ def test_stock_strategy_swing_blocks_extended_long_without_volume(monkeypatch):
     assert state["decision"] == "WAIT_RETEST"
 
 
+def test_stock_strategy_swing_gap_long_waits_when_gap_fades(monkeypatch):
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SOPH"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "SOPH",
+        "Strategy": "Gap Momentum Long",
+        "grade": "A",
+        "score": 86,
+        "rvol": 3.3,
+        "price": 5.43,
+        "current_price": 5.43,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 8.6,
+        "gap_pct": 7.9,
+        "close_pos": 0.61,
+        "open_to_current_pct": 0.0,
+        "Upper_Wick_Pct": 42.0,
+        "Entry": 5.43,
+        "StopLoss": 5.24,
+        "TP1": 6.00,
+        "TP2": 6.43,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_gap_not_holding_open_wait_retest" in state["suppression_reasons"]
+    assert "swing_gap_not_holding_upper_range_wait_retest" in state["suppression_reasons"]
+    assert "swing_gap_wick_rejection_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
 def test_stock_strategy_swing_short_blocks_chased_drop(monkeypatch):
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"NU"}, "unit"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)

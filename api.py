@@ -4002,11 +4002,13 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
 def _extract_long_entry_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", "todaysChangePerc")),
+        "gap_pct": _alert_float(_alert_get_any(row, "gap_pct", "Gap_Pct", "Gap%", "Gap %")),
         "close_pos": _alert_float(_alert_get_any(row, "close_pos", "Close_Position", "Close Position", "Range_Pos", "Range Position")),
         "open_to_current_pct": _alert_float(_alert_get_any(row, "open_to_current_pct", "Open_To_Current_Pct", "intraday_change_pct")),
         "latest_bar_change_pct": _alert_float(row.get("latest_bar_change_pct")),
         "latest_bar_close_pos": _alert_float(row.get("latest_bar_close_pos")),
         "extension_atr": _alert_float(row.get("Extension_ATR", row.get("extension_atr"))),
+        "upper_wick_pct": _alert_float(row.get("Upper_Wick_Pct", row.get("upper_wick_pct"))),
         "rvol": _alert_float(row.get("rvol", row.get("RVOL"))),
         "mdr_tag": str(row.get("mdr_tag", "") or "").upper(),
     }
@@ -4090,16 +4092,24 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     fields = _extract_long_entry_fields(row)
     reasons: List[str] = []
     change = fields["change_pct"]
+    gap_pct = fields.get("gap_pct")
     close_pos = fields["close_pos"]
     open_to_current = fields["open_to_current_pct"]
     extension_atr = fields["extension_atr"]
+    upper_wick_pct = fields.get("upper_wick_pct")
     rvol = fields.get("rvol")
+    strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
 
     extended = (change is not None and change >= 12.0) or (extension_atr is not None and extension_atr >= 4.0)
     hard_extended = (change is not None and change >= 25.0) or (extension_atr is not None and extension_atr >= 6.0)
     soft_extended_without_volume = change is not None and change >= 8.0 and (rvol is None or rvol < 1.5)
     fading_daily = open_to_current is not None and open_to_current < -0.5
     not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
+    is_gap_momentum_long = "gap momentum long" in strategy_name or "gap up" in strategy_name
+    is_meaningful_gap = is_gap_momentum_long and (
+        (gap_pct is not None and gap_pct >= 3.0)
+        or (change is not None and change >= 6.0)
+    )
 
     if hard_extended:
         reasons.append("swing_hard_extended_no_chase")
@@ -4111,6 +4121,13 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("swing_current_candle_fading")
     if not_holding_highs and (extended or soft_extended_without_volume or fading_daily):
         reasons.append("swing_not_holding_highs_after_move")
+    if is_meaningful_gap:
+        if open_to_current is not None and open_to_current < 0.25:
+            reasons.append("swing_gap_not_holding_open_wait_retest")
+        if close_pos is not None and close_pos < 0.72:
+            reasons.append("swing_gap_not_holding_upper_range_wait_retest")
+        if upper_wick_pct is not None and upper_wick_pct >= 38:
+            reasons.append("swing_gap_wick_rejection_wait_retest")
     return reasons
 
 
@@ -4526,6 +4543,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_extended_without_volume_wait_retest",
         "swing_current_candle_fading",
         "swing_not_holding_highs_after_move",
+        "swing_gap_not_holding_open_wait_retest",
+        "swing_gap_not_holding_upper_range_wait_retest",
+        "swing_gap_wick_rejection_wait_retest",
         "swing_short_extended_wait_retest",
         "swing_short_drop_extended_wait_failed_reclaim",
         "swing_short_current_candle_reclaim",
