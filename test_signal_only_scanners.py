@@ -249,14 +249,18 @@ def test_volume_spikes_are_display_radar_not_signal_only(monkeypatch):
 def test_scanner_signal_vs_radar_contract():
     """Scanner categories must not silently turn radar/context rows into trades."""
     trade_signal_scanners = {
-        "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
+        "bear", "biotech", "orb", "turtle",
         "stock_strategy", "strategy_scan",
         "early_movers", "crypto_trade_signals", "crypto_explosion",
         "new_listing", "btc_divergenz", "crypto_strategy",
     }
+    candidate_analysis_scanners = {"bi_short", "bi_long"}
     radar_scanners = {"volume_spikes", "money_flow", "crash_monitor"}
 
     assert trade_signal_scanners <= api._SIGNAL_ONLY_SCANNERS
+    assert candidate_analysis_scanners.isdisjoint(api._SIGNAL_ONLY_SCANNERS)
+    assert candidate_analysis_scanners <= api._ALERT_TRADE_HEALTH_GUARD_SCANNERS
+    assert candidate_analysis_scanners <= api._STOCK_RESULT_TRADE_STATE_SCANNERS
     assert radar_scanners.isdisjoint(api._SIGNAL_ONLY_SCANNERS)
     assert radar_scanners.isdisjoint(api._STOCK_RESULT_TRADE_STATE_SCANNERS)
     assert radar_scanners.isdisjoint(api._STOCK_ALERT_SCANNERS)

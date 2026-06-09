@@ -976,7 +976,7 @@ _EMAIL_BLOCKED_ETF_TICKERS = set(NON_STOCK_ETP_TICKERS) | set(INVERSE_ETFS.keys(
     "SDS", "UDOW", "SVXY", "TVIX",
 }
 _SIGNAL_ONLY_SCANNERS = {
-    "bear", "bi_short", "bi_long", "biotech", "orb", "turtle",
+    "bear", "biotech", "orb", "turtle",
     "stock_strategy", "strategy_scan",
     "early_movers", "crypto_trade_signals", "crypto_explosion", "new_listing", "btc_divergenz", "crypto_strategy",
 }
@@ -13498,9 +13498,21 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
             print(f"[Warning] {e}")
 
     scanner_name = f"bi_{direction}"
+    pre_decorate_count = len(results or [])
     results = _decorate_scan_results(results, scanner_name, cache_age)
+    decorated_count = len(results or [])
     results = _apply_signal_only_policy(scanner_name, results)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
+    diagnostics = {
+        "mode": "candidate_analysis",
+        "scanner": scanner_name,
+        "direction": direction,
+        "raw_cache_results": pre_decorate_count,
+        "decorated_candidates": decorated_count,
+        "visible_candidates": len(results or []),
+        "mail_gate": "strict: S/A/A+, score>=80, RVOL>=0.7, valid levels, trade health, no severe chase/fakeout/liquidity blockers",
+        "display_note": "BI tab shows candidates for trader review; mails still require the stricter alert gate.",
+    }
     return ScanResultsResponse(
         status="success",
         count=len(results),
@@ -13509,6 +13521,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         cache_age_seconds=cache_age,
         data_source=quality["data_source"],
         data_quality=quality,
+        diagnostics=diagnostics,
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
     )
