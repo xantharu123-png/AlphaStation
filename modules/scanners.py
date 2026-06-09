@@ -13,6 +13,7 @@ import time
 import threading
 import datetime as dt
 from datetime import datetime, timedelta
+from collections import defaultdict
 from modules.data_fetchers import (
     rate_limited_get, fetch_grouped_daily, get_ticker_details,
     _get_bpiq_catalysts, _calculate_biotech_catalyst_score,
@@ -850,13 +851,17 @@ def _bi_cache_load(direction="long"):
         return None, None, None
 
 
-def _bi_cache_save(results, direction="long"):
+def _bi_cache_save(results, direction="long", *, partial=False, checked=0, total=0, detail=""):
     """Speichert BI-Ergebnisse im Cache."""
     try:
         cache = {
             "cached_at": datetime.now().isoformat(),
             "timestamp": time.time(),
             "direction": direction,
+            "partial": bool(partial),
+            "checked": int(checked or 0),
+            "total": int(total or 0),
+            "detail": detail or "",
             "count": len(results),
             "results": results
         }
@@ -866,6 +871,36 @@ def _bi_cache_save(results, direction="long"):
         print(f"[BI {direction}] Cache gespeichert: {len(results)} Ergebnisse → {path}")
     except Exception as e:
         print(f"[BI {direction}] FEHLER beim Cache-Speichern: {e}")
+
+
+def _bi_interleave_candidates_by_symbol(candidates):
+    """
+    Polygon reference pages are alphabetic. Interleave by first ticker character so
+    partial BI caches already represent the whole market instead of only A/B.
+    """
+    buckets = defaultdict(list)
+    for candidate in candidates or []:
+        ticker = candidate if isinstance(candidate, str) else candidate.get("Ticker", candidate.get("ticker", ""))
+        ticker = str(ticker or "").upper()
+        if not ticker:
+            continue
+        key = ticker[0] if ticker[0].isalnum() else "#"
+        buckets[key].append(candidate)
+
+    ordered_keys = sorted(buckets)
+    interleaved = []
+    idx = 0
+    while True:
+        added = False
+        for key in ordered_keys:
+            bucket = buckets[key]
+            if idx < len(bucket):
+                interleaved.append(bucket[idx])
+                added = True
+        if not added:
+            break
+        idx += 1
+    return interleaved
 
 
 def _bi_progress_read(direction="long"):
@@ -1029,6 +1064,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             _bi_progress_write(direction, "error", detail="Keine Kandidaten verfügbar")
             return
 
+        candidates = _bi_interleave_candidates_by_symbol(candidates)
         total = len(candidates)
         _bi_clear_stop(direction)  # Altes Stop-Signal aufräumen
         _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...")
@@ -1059,7 +1095,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                    detail=f" Manuell gestoppt bei {checked}/{total}")
                 if results:
                     results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)
-                    _bi_cache_save(results, direction)
+                    _bi_cache_save(
+                        results,
+                        direction,
+                        partial=True,
+                        checked=checked,
+                        total=total,
+                        detail=f"Manuell gestoppt bei {checked}/{total}",
+                    )
                 _bi_clear_stop(direction)
                 return
 
@@ -1498,7 +1541,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 # V2.2: Live-Zwischenergebnisse speichern — alle 5 neuen Treffer
                 if len(results) % 5 == 0 or len(results) == 1:
                     _live = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
-                    _bi_cache_save(_live, direction=direction)
+                    _bi_cache_save(
+                        _live,
+                        direction=direction,
+                        partial=True,
+                        checked=checked,
+                        total=total,
+                        detail=f"Zwischenstand: {checked}/{total} analysiert",
+                    )
                     print(f"[BI {direction}] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
             except Exception as e:
                 print(f"[BI {direction}] Error analyzing {ticker}: {e}")
@@ -1506,7 +1556,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
         # Finale Sortierung + Speichern
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
-        _bi_cache_save(results, direction=direction)
+        _bi_cache_save(
+            results,
+            direction=direction,
+            partial=False,
+            checked=checked,
+            total=total,
+            detail="Finaler BI Scan abgeschlossen",
+        )
 
         avg_sc = round(score_sum / max(1, score_count))
         _thr = 45 if direction == "long" else 40  # V4: Angepasst an post-Audit Scores

@@ -13473,6 +13473,20 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
 
     cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
+    cache_meta = {}
+    try:
+        if Path(cache_file).exists():
+            with open(cache_file, "r") as f:
+                raw_cache = json.load(f)
+            if isinstance(raw_cache, dict):
+                cache_meta = {
+                    "partial": bool(raw_cache.get("partial", False)),
+                    "checked": raw_cache.get("checked"),
+                    "total": raw_cache.get("total"),
+                    "detail": raw_cache.get("detail", ""),
+                }
+    except Exception as e:
+        print(f"[Warning] BI cache metadata read failed: {e}")
     results, cached_at = load_cache_file(cache_file)
     results = _normalize_keys(results, _BI_KEY_MAP)
 
@@ -13510,6 +13524,10 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         "raw_cache_results": pre_decorate_count,
         "decorated_candidates": decorated_count,
         "visible_candidates": len(results or []),
+        "cache_partial": cache_meta.get("partial", False),
+        "checked": cache_meta.get("checked"),
+        "total": cache_meta.get("total"),
+        "progress_detail": cache_meta.get("detail", ""),
         "mail_gate": "strict: S/A/A+, score>=80, RVOL>=0.7, valid levels, trade health, no severe chase/fakeout/liquidity blockers",
         "display_note": "BI tab shows candidates for trader review; mails still require the stricter alert gate.",
     }

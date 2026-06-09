@@ -37,7 +37,10 @@ def test_bi_short_accepts_string_candidates_before_enrichment(monkeypatch):
     )
     monkeypatch.setattr(scanners, "calculate_short_bonus_signals", lambda *args, **kwargs: {"bonus_score": 0, "details": []})
     monkeypatch.setattr(scanners, "_detect_chart_patterns", lambda *args, **kwargs: [])
-    monkeypatch.setattr(scanners, "_bi_cache_save", lambda results, direction: saved.update({"results": results, "direction": direction}))
+    def fake_cache_save(results, direction, **kwargs):
+        saved.update({"results": results, "direction": direction, "meta": kwargs})
+
+    monkeypatch.setattr(scanners, "_bi_cache_save", fake_cache_save)
     monkeypatch.setattr(scanners, "_bi_progress_write", lambda *args, **kwargs: None)
     monkeypatch.setattr(scanners, "_bi_should_stop", lambda direction: False)
     monkeypatch.setattr(scanners, "_bi_clear_stop", lambda direction: None)
@@ -45,6 +48,7 @@ def test_bi_short_accepts_string_candidates_before_enrichment(monkeypatch):
     scanners._bi_background_scan("test-key", direction="short", candidates=["TEST"])
 
     assert saved["direction"] == "short"
+    assert saved["meta"]["partial"] is False
     assert saved["results"]
     assert saved["results"][0]["Ticker"] == "TEST"
     assert saved["results"][0]["above_sma20_pct"] is not None

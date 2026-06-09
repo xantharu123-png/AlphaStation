@@ -5029,6 +5029,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
             <div className="text-sm rounded-lg border border-blue-200 bg-blue-50 text-blue-900 px-4 py-3">
                 <b>BI Kandidatenmodus:</b> Die Tabelle zeigt bewusst mehr Setups zur manuellen Pruefung. Mails bleiben strenger und gehen nur raus, wenn Trade Health, RVOL, Level, R:R und Asset-Filter passen.
                 {diagnostics && <span className="ml-2 text-blue-700">Cache: {diagnostics.visible_candidates ?? results.length} sichtbar / {diagnostics.raw_cache_results ?? results.length} roh.</span>}
+                {diagnostics?.cache_partial && <span className="ml-2 text-amber-700 font-semibold">Zwischenstand: {diagnostics.checked || 0}/{diagnostics.total || '?'} geprueft. Ticker sind jetzt ueber A-Z verteilt, nicht alphabetisch vorne.</span>}
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
