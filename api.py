@@ -990,6 +990,11 @@ _DISPLAY_ONLY_SUPPRESSION_REASONS = {
     "persistent_dedupe_active",
     "bearish_ticker_already_alerted",
 }
+_BI_CANDIDATE_ONLY_SUPPRESSION_REASONS = {
+    "grade_below_alert_threshold",
+    "score_below_alert_threshold",
+    "rvol_below_alert_threshold",
+}
 
 
 def _stock_trade_email_status(now_utc: Optional[datetime] = None) -> Dict[str, Any]:
@@ -6203,7 +6208,21 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
         reason for reason in (state.get("suppression_reasons") or [])
         if reason not in _DISPLAY_ONLY_SUPPRESSION_REASONS
     ]
-    decision = _alert_decision_from_reasons(scanner_name, display_reasons)
+    decision_reasons = display_reasons
+    if scanner_name in {"bi_long", "bi_short"}:
+        # BI is a candidate scanner in the UI. Failing the stricter email gate
+        # must not be shown as "NO TRADE"; hard trade blockers still remain.
+        decision_reasons = [
+            reason for reason in display_reasons
+            if reason not in _BI_CANDIDATE_ONLY_SUPPRESSION_REASONS
+        ]
+    decision = _alert_decision_from_reasons(scanner_name, decision_reasons)
+    if scanner_name in {"bi_long", "bi_short"} and display_reasons and not decision_reasons:
+        decision = {
+            "decision": "WATCH",
+            "decision_label": "BI-Kandidat",
+            "decision_reason": "Mail-Gate nicht erreicht",
+        }
     tradeable_now = not display_reasons
     score = _alert_float(state.get("score"), 0) or 0
     trade_grade, trade_grade_label = _score_grade_for_value(score)

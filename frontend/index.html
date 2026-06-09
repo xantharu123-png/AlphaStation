@@ -5051,12 +5051,15 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                     <tbody>
                         {sorted.map((item, idx) => {
                             const action = String(item.trade_action || item.trade_signal || item.scanner_decision || '').toUpperCase();
+                            const reasons = item.scanner_suppression_reasons || item._quality?.exclusion_reasons || [];
+                            const mailGateReasons = new Set(['grade_below_alert_threshold', 'score_below_alert_threshold', 'rvol_below_alert_threshold']);
+                            const alertGateOnly = reasons.length > 0 && reasons.every(r => mailGateReasons.has(String(r)));
                             const isNow = action.includes('NOW') || action.includes('JETZT');
                             const isWait = action.includes('WAIT') || action.includes('WARTEN');
-                            const isNoTrade = action.includes('NO_TRADE') || action.includes('NICHT');
+                            const isNoTrade = !alertGateOnly && (action.includes('NO_TRADE') || action.includes('NICHT'));
                             const actionCls = isNow ? 'bg-green-100 text-green-800' : isNoTrade ? 'bg-red-100 text-red-800' : isWait ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800';
                             const actionLabel = isNow ? 'JETZT' : isNoTrade ? 'NO TRADE' : isWait ? 'WARTEN' : (item.signal_label || 'KANDIDAT');
-                            const blocker = (item.scanner_suppression_reasons || item._quality?.exclusion_reasons || []).slice(0, 2).join(', ');
+                            const blocker = alertGateOnly ? 'Mail-Gate nicht erreicht (kein hartes No-Trade)' : reasons.slice(0, 2).join(', ');
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span></td>
