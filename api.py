@@ -1455,6 +1455,25 @@ def _score_grade_for_value(score_value: Any) -> Tuple[str, str]:
     return "D", "Uninteressant"
 
 
+def _bi_trade_grade_for_score(score_value: Any) -> Tuple[str, str]:
+    """BI needs a stricter action-grade than the generic scanner ladder.
+
+    The raw BI grade can stay visible as setup interest, but the user-facing
+    trade grade must answer "is this actionable enough?", not "is this worth
+    a look?". Otherwise a 66-74 trade score looks like an A setup.
+    """
+    score = _alert_float(score_value, 0) or 0
+    if score >= 90:
+        return "S", "Elite Trade"
+    if score >= 80:
+        return "A", "Stark Trade"
+    if score >= 70:
+        return "B", "Kandidat"
+    if score >= 60:
+        return "C", "Watch"
+    return "D", "Schwach"
+
+
 def _alert_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -6225,7 +6244,10 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
         }
     tradeable_now = not display_reasons
     score = _alert_float(state.get("score"), 0) or 0
-    trade_grade, trade_grade_label = _score_grade_for_value(score)
+    if scanner_name in {"bi_long", "bi_short"}:
+        trade_grade, trade_grade_label = _bi_trade_grade_for_score(score)
+    else:
+        trade_grade, trade_grade_label = _score_grade_for_value(score)
     return {
         **state,
         "alertable_now": tradeable_now,
@@ -6234,6 +6256,61 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
         "trade_grade": trade_grade,
         "trade_grade_label": trade_grade_label,
         **decision,
+    }
+
+
+def _bi_trade_criteria(row: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """Twenty transparent BI checks for UI diagnostics.
+
+    These checks do not hide candidates. They make clear why something is only
+    a candidate, waiting setup, actionable trade, or hard no-trade.
+    """
+    reasons = set(str(r) for r in (state.get("display_reasons") or []))
+    levels = _alert_trade_levels(row)
+    setup_score = _alert_float(row.get("setup_score", row.get("raw_score", row.get("BI_Score", row.get("score")))), 0) or 0
+    trade_score = _alert_float(state.get("trade_score", row.get("trade_score", row.get("score"))), 0) or 0
+    price = _alert_float(_extract_alert_price(row), 0) or 0
+    rvol = _extract_alert_rvol(row)
+    volume = _alert_float(_alert_get_any(row, "volume", "Volume", "volumen", default=0), 0) or 0
+    change = _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "change", "Chg%", default=0), 0) or 0
+    direction = str(row.get("direction") or row.get("Direction") or levels.get("direction") or "").upper()
+    health = row.get("trade_health") if isinstance(row.get("trade_health"), dict) else {}
+    health_decision = str(health.get("decision") or "").upper()
+    fakeout = str(health.get("fakeout_risk") or row.get("fakeout_risk") or "").upper()
+    chase = str(health.get("chase_risk") or row.get("chase_risk") or "").upper()
+    liquidity = str(health.get("liquidity_risk") or row.get("liquidity_risk") or "").upper()
+    rr_ok = _alert_trade_plan_ok(row, require_native_levels=False)
+    hard_reasons = reasons - _BI_CANDIDATE_ONLY_SUPPRESSION_REASONS
+    items = [
+        ("ticker_ok", bool(_extract_alert_ticker(row)), "Ticker vorhanden"),
+        ("asset_ok", "non_common_stock_product" not in reasons, "echte Aktie"),
+        ("price_ok", price >= 0.5, "Preis handelbar"),
+        ("volume_ok", volume >= 100_000, "Volumen >= 100K"),
+        ("rvol_ok", rvol is not None and rvol >= 0.7, "RVOL >= 0.7x"),
+        ("setup_score_ok", setup_score >= 65, "Setup-Score >= 65"),
+        ("trade_score_ok", trade_score >= 70, "Trade-Score >= 70"),
+        ("mail_score_ok", trade_score >= _ALERT_MIN_SCORE, "Mail-Score >= 80"),
+        ("top_grade_ok", str(row.get("setup_grade") or row.get("raw_grade") or row.get("BI_Grade") or row.get("grade") or "").upper() in _ALERT_TOP_GRADES, "Setup-Grade S/A"),
+        ("direction_ok", direction in {"LONG", "SHORT"}, "Richtung klar"),
+        ("levels_ok", bool(levels.get("valid")), "Entry/Stop/TP valide"),
+        ("native_levels_ok", bool(levels.get("valid")) and not bool(levels.get("estimated")), "native Struktur-Level"),
+        ("rr_ok", bool(rr_ok), "R:R ausreichend"),
+        ("not_extended", abs(change) <= 8, "Move nicht stark erweitert"),
+        ("health_not_blocked", health_decision not in {"NO_TRADE", "BLOCKED"}, "Trade-Health nicht blockiert"),
+        ("fakeout_ok", fakeout not in {"HIGH", "CRITICAL"}, "Fakeout nicht hoch"),
+        ("chase_ok", chase not in {"HIGH", "CRITICAL"}, "Chase nicht hoch"),
+        ("liquidity_ok", liquidity not in {"HIGH", "CRITICAL"}, "Liquiditaet nicht hochriskant"),
+        ("timing_ok", not any("wait" in r.lower() or "trigger" in r.lower() for r in reasons), "Timing nicht wartend"),
+        ("hard_blocker_free", not hard_reasons, "keine harten Blocker"),
+    ]
+    passed = sum(1 for _, ok, _ in items if ok)
+    failed = [label for key, ok, label in items if not ok][:6]
+    return {
+        "passed": passed,
+        "total": len(items),
+        "score_pct": round((passed / len(items)) * 100, 1) if items else 0,
+        "items": [{"key": key, "ok": bool(ok), "label": label} for key, ok, label in items],
+        "failed_preview": failed,
     }
 
 
@@ -6273,10 +6350,13 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
     item["Grade"] = trade_grade
     item["trade_score"] = trade_score
     item["trade_grade"] = trade_grade
+    item["trade_grade_label"] = state.get("trade_grade_label")
     item["scanner_decision"] = state.get("decision")
     item["scanner_decision_label"] = state.get("decision_label")
     item["scanner_decision_reason"] = state.get("decision_reason")
     item["scanner_suppression_reasons"] = state.get("display_reasons", [])
+    if scanner_name in {"bi_long", "bi_short"}:
+        item["bi_criteria"] = _bi_trade_criteria(item, state)
 
     if state.get("alertable_now"):
         item["trade_signal"] = "JETZT_TRADEN"
@@ -6299,10 +6379,16 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
         item["trade_action"] = "NO_TRADE"
         item["signal_label"] = "Nicht traden"
     else:
-        item["trade_signal"] = "BEOBACHTEN"
-        item["entry_status"] = "BEOBACHTEN"
-        item["trade_action"] = "BEOBACHTEN"
-        item["signal_label"] = "Beobachten"
+        if scanner_name in {"bi_long", "bi_short"}:
+            item["trade_signal"] = "KANDIDAT"
+            item["entry_status"] = "CANDIDATE_REVIEW"
+            item["trade_action"] = "CANDIDATE_REVIEW"
+            item["signal_label"] = "Kandidat pruefen"
+        else:
+            item["trade_signal"] = "BEOBACHTEN"
+            item["entry_status"] = "BEOBACHTEN"
+            item["trade_action"] = "BEOBACHTEN"
+            item["signal_label"] = "Beobachten"
 
 
 def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:

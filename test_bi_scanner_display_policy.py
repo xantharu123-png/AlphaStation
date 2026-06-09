@@ -32,10 +32,32 @@ def test_bi_mail_gate_does_not_become_no_trade(monkeypatch):
 
     assert state["alertable_now"] is False
     assert state["decision"] == "WATCH"
+    assert state["decision_label"] == "BI-Kandidat"
     assert state["display_reasons"] == [
         "grade_below_alert_threshold",
         "score_below_alert_threshold",
     ]
+
+
+def test_bi_trade_grade_uses_stricter_ladder(monkeypatch):
+    def fake_classify(scanner_name, row, now=None):
+        return {
+            "score": 74,
+            "suppression_reasons": [
+                "grade_below_alert_threshold",
+                "score_below_alert_threshold",
+            ],
+        }
+
+    monkeypatch.setattr(api, "_classify_alert_candidate", fake_classify)
+
+    row = {"ticker": "G", "price": 32.55, "volume": 2_600_000, "rvol": 0.8}
+    api._apply_scanner_result_trade_state(row, "bi_long")
+
+    assert row["grade"] == "B"
+    assert row["trade_action"] == "CANDIDATE_REVIEW"
+    assert row["signal_label"] == "Kandidat pruefen"
+    assert row["bi_criteria"]["total"] == 20
 
 
 def test_bi_hard_blocker_stays_no_trade(monkeypatch):
