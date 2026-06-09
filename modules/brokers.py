@@ -6,6 +6,7 @@ Benötigt ib_insync (optional).
 """
 import threading
 import asyncio
+import warnings
 from datetime import datetime
 
 
@@ -19,9 +20,15 @@ def _debug_log(msg, error=None):
 # Check if ib_insync is available
 try:
     try:
-        asyncio.get_event_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+    warnings.filterwarnings(
+        "ignore",
+        message="'asyncio.get_event_loop_policy' is deprecated.*",
+        category=DeprecationWarning,
+        module="eventkit.util",
+    )
     from ib_insync import IB, Stock, Future, Forex, Crypto, LimitOrder, StopOrder, Order
     IB_INSYNC_AVAILABLE = True
     IB_IMPORT_ERROR = None

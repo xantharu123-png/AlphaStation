@@ -15,7 +15,7 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
@@ -36,6 +36,21 @@ except ImportError:
     print("[Auth] WARNING: stripe not installed — run: pip install stripe")
 
 # ── Config ──
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_iso() -> str:
+    return _utc_now().isoformat()
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = Path(os.environ.get("ALPHA_DATA_DIR", _REPO_ROOT / "data_cache"))
 _AUTH_DIR = _DATA_DIR / "auth"
@@ -201,7 +216,7 @@ def _maybe_migrate_legacy_json(force: bool = False) -> None:
         with open(legacy, "r", encoding="utf-8") as f:
             legacy_db = json.load(f)
         if not isinstance(legacy_db, dict) or not isinstance(legacy_db.get("users"), dict):
-            marker.write_text(datetime.utcnow().isoformat(), encoding="utf-8")
+            marker.write_text(_utc_iso(), encoding="utf-8")
             return
         current = _load_users(skip_migration=True)
         merged = current.get("users", {})
@@ -209,7 +224,7 @@ def _maybe_migrate_legacy_json(force: bool = False) -> None:
             if isinstance(user, dict) and email not in merged:
                 merged[email] = user
         _save_users({"users": merged})
-        marker.write_text(datetime.utcnow().isoformat(), encoding="utf-8")
+        marker.write_text(_utc_iso(), encoding="utf-8")
         print(f"[Auth] Migrated legacy auth JSON to SQLite: {legacy}")
     except Exception as exc:
         print(f"[Auth] Legacy auth migration skipped: {exc}")
@@ -270,7 +285,7 @@ def _save_users(db: Dict):
 
     try:
         users = db.get("users", {}) if isinstance(db, dict) else {}
-        now = datetime.utcnow().isoformat()
+        now = _utc_iso()
         with _sqlite_conn() as conn:
             existing = {row["email"] for row in conn.execute("SELECT email FROM users").fetchall()}
             incoming = set(users.keys())
@@ -317,8 +332,8 @@ def create_token(user_id: str, email: str, plan: str = "free") -> Optional[str]:
         "sub": user_id,
         "email": email,
         "plan": plan,
-        "iat": datetime.utcnow(),
-        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRE_HOURS),
+        "iat": _utc_now(),
+        "exp": _utc_now() + timedelta(hours=JWT_EXPIRE_HOURS),
     }
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -372,8 +387,8 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "narrative_email_frequency": "daily",
         "trade_alert_horizon": "swing",
         "scanner_trade_horizon": "swing",
-        "created_at": datetime.utcnow().isoformat(),
-        "last_login": datetime.utcnow().isoformat(),
+        "created_at": _utc_iso(),
+        "last_login": _utc_iso(),
         "trial_ends_at": None,
     }
 
@@ -415,7 +430,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "alert_email": email, "email_alerts_enabled": True,
             "narrative_email_frequency": "daily",
             "trade_alert_horizon": "swing", "scanner_trade_horizon": "swing",
-            "created_at": datetime.utcnow().isoformat(), "last_login": datetime.utcnow().isoformat(),
+            "created_at": _utc_iso(), "last_login": _utc_iso(),
             "trial_ends_at": None,
         }
         db["users"][email] = user
@@ -434,7 +449,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
         user["password_hash"] = _hash_password(password)
 
     # Update last login + admin always gets elite
-    user["last_login"] = datetime.utcnow().isoformat()
+    user["last_login"] = _utc_iso()
     if email in ADMIN_EMAILS:
         user["plan"] = "elite"
     db["users"][email] = user
@@ -562,7 +577,7 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
             if plan == "trial":
                 # $1 Trial — activate 24h full access
                 db["users"][email]["plan"] = "trial"
-                db["users"][email]["trial_ends_at"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+                db["users"][email]["trial_ends_at"] = (_utc_now() + timedelta(hours=24)).isoformat()
                 db["users"][email]["stripe_customer_id"] = customer_id
                 _save_users(db)
                 print(f"[Auth] Trial activated: {email} → 24h until {db['users'][email]['trial_ends_at']}")
@@ -627,8 +642,8 @@ def get_user_plan(token: str) -> str:
         trial_ends = user.get("trial_ends_at")
         if trial_ends:
             try:
-                end_dt = datetime.fromisoformat(trial_ends)
-                if datetime.utcnow() > end_dt:
+                end_dt = _parse_utc_datetime(trial_ends)
+                if _utc_now() > end_dt:
                     # Trial expired — update DB
                     user["plan"] = "expired"
                     _save_users(db)
@@ -743,7 +758,7 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_
         if plan == "trial":
             trial_ends = user.get("trial_ends_at")
             try:
-                if trial_ends and datetime.utcnow() > datetime.fromisoformat(trial_ends):
+                if trial_ends and _utc_now() > _parse_utc_datetime(trial_ends):
                     user["plan"] = "expired"
                     changed = True
                     continue

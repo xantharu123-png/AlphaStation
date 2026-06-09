@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import modules.auth as auth
@@ -80,7 +80,7 @@ def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp
     db["users"]["off@example.com"]["plan"] = "elite"
     db["users"]["off@example.com"]["email_alerts_enabled"] = False
     db["users"]["expiredtrial@example.com"]["plan"] = "trial"
-    db["users"]["expiredtrial@example.com"]["trial_ends_at"] = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+    db["users"]["expiredtrial@example.com"]["trial_ends_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     auth._save_users(db)
 
     assert auth.get_email_alert_recipients() == ["signals@example.com"]
