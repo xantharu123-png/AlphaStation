@@ -135,6 +135,34 @@ def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
     assert settings["has_email_alerts"] is True
 
 
+def test_auth_security_status_blocks_demo_secrets_and_legacy_bootstrap(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "JWT_SECRET_IS_DEFAULT", True)
+    monkeypatch.setattr(auth, "ALLOW_LEGACY_ADMIN_MASTER_KEY", True)
+    monkeypatch.setattr(auth, "STRIPE_SECRET_KEY", "")
+    monkeypatch.setattr(auth, "STRIPE_WEBHOOK_SECRET", "")
+
+    status = auth.auth_security_status()
+
+    assert status["commercial_ready"] is False
+    assert any("JWT_SECRET" in item for item in status["critical"])
+    assert any("Legacy admin" in item for item in status["critical"])
+
+
+def test_auth_security_status_warns_on_test_stripe_keys_and_default_prices(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "JWT_SECRET_IS_DEFAULT", False)
+    monkeypatch.setattr(auth, "ALLOW_LEGACY_ADMIN_MASTER_KEY", False)
+    monkeypatch.setattr(auth, "STRIPE_SECRET_KEY", "sk_test_unit")
+    monkeypatch.setattr(auth, "STRIPE_WEBHOOK_SECRET", "whsec_unit")
+
+    status = auth.auth_security_status()
+
+    assert status["stripe_key_mode"] == "test"
+    assert any("test key" in item for item in status["warnings"])
+    assert status["stripe_default_price_ids"]
+
+
 def test_narrative_alert_recipients_respect_frequency(monkeypatch, tmp_path):
     _isolate_auth_store(monkeypatch, tmp_path)
 

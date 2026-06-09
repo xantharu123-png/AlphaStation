@@ -3,7 +3,12 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/home/tradingbot/app}"
 BRANCH="${BRANCH:-main}"
-HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
+COMMERCIAL_DEPLOY="${COMMERCIAL_DEPLOY:-0}"
+if [ -z "${HEALTH_URL:-}" ] && [ "$COMMERCIAL_DEPLOY" = "1" ]; then
+  HEALTH_URL="http://127.0.0.1:8000/api/commercial-readiness"
+else
+  HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
+fi
 SERVICES="${SERVICES:-tradingbot-api tradingbot-frontend}"
 REQUESTED_VENV_DIR="${VENV_DIR:-}"
 INSTALL_DEPS="${INSTALL_DEPS:-auto}"
@@ -86,7 +91,12 @@ echo "[deploy] Compile check..."
 
 if "$PYTHON" -m pytest --version >/dev/null 2>&1; then
   echo "[deploy] Pytest smoke checks..."
-  "$PYTHON" -m pytest test_calendar_and_crypto_safety.py test_trading_logic.py -q
+  "$PYTHON" -m pytest \
+    test_calendar_and_crypto_safety.py \
+    test_trading_logic.py \
+    test_commerce_hardening.py \
+    test_email_alert_config.py \
+    -q
 else
   echo "[deploy] pytest not available in venv; skipping pytest smoke checks."
 fi
@@ -99,8 +109,13 @@ done
 echo "[deploy] Waiting for API health..."
 for _ in $(seq 1 20); do
   if curl -fsS "$HEALTH_URL" >/tmp/tradingbot-health.json; then
-    if grep -q '"status"[[:space:]]*:[[:space:]]*"critical"' /tmp/tradingbot-health.json; then
-      echo "[deploy] API returned critical health:"
+    if grep -Eq '"status"[[:space:]]*:[[:space:]]*"(critical|blocked)"' /tmp/tradingbot-health.json; then
+      echo "[deploy] API returned blocking health/readiness:"
+      cat /tmp/tradingbot-health.json
+      exit 1
+    fi
+    if [ "$COMMERCIAL_DEPLOY" = "1" ] && ! grep -q '"commercial_ready"[[:space:]]*:[[:space:]]*true' /tmp/tradingbot-health.json; then
+      echo "[deploy] Commercial readiness failed:"
       cat /tmp/tradingbot-health.json
       exit 1
     fi

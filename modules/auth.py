@@ -837,6 +837,7 @@ def auth_security_status() -> Dict[str, Any]:
     """Commercial-readiness snapshot for auth/billing storage and secrets."""
     warnings = []
     critical = []
+    stripe_mode = "not_configured"
     if JWT_SECRET_IS_DEFAULT:
         critical.append("JWT_SECRET uses fallback demo value")
     if not ADMIN_MASTER_KEY_CONFIGURED:
@@ -845,10 +846,32 @@ def auth_security_status() -> Dict[str, Any]:
         critical.append("Legacy admin bootstrap key is enabled; set ALLOW_LEGACY_ADMIN_MASTER_KEY=0 before commercial launch")
     if not AUTH_DB_IS_SQLITE:
         critical.append("AUTH_DB_PATH still points to JSON; use SQLite for production")
-    if not STRIPE_SECRET_KEY:
+    if STRIPE_SECRET_KEY.startswith("sk_live_"):
+        stripe_mode = "live"
+    elif STRIPE_SECRET_KEY.startswith("sk_test_"):
+        stripe_mode = "test"
+        warnings.append("STRIPE_SECRET_KEY is a test key; paid launch needs live Stripe keys")
+    elif STRIPE_SECRET_KEY:
+        stripe_mode = "unknown"
+        warnings.append("STRIPE_SECRET_KEY is configured but does not look like a standard Stripe key")
+    else:
         warnings.append("STRIPE_SECRET_KEY not configured")
     if not STRIPE_WEBHOOK_SECRET:
         warnings.append("STRIPE_WEBHOOK_SECRET not configured")
+    default_price_ids = {
+        "trial": "price_1TI0SHEOIB5wAqvU3oFEI079",
+        "basic_monthly": "price_1THqyWEOIB5wAqvUrLNLCPZD",
+        "pro_monthly": "price_1THqysEOIB5wAqvU6MG9iywG",
+        "elite_monthly": "price_1THqzjEOIB5wAqvUTrVwLzha",
+    }
+    inherited_default_prices = sorted(
+        plan for plan, default_id in default_price_ids.items()
+        if STRIPE_PRICE_IDS.get(plan) == default_id
+    )
+    if inherited_default_prices:
+        warnings.append(
+            "Stripe price IDs use repository defaults; verify they are your live products before launch"
+        )
     return {
         "auth_db_path": AUTH_DB_PATH,
         "auth_db_type": "sqlite" if AUTH_DB_IS_SQLITE else "json",
@@ -856,7 +879,9 @@ def auth_security_status() -> Dict[str, Any]:
         "admin_master_key_configured": ADMIN_MASTER_KEY_CONFIGURED,
         "legacy_admin_bootstrap_enabled": ALLOW_LEGACY_ADMIN_MASTER_KEY,
         "stripe_secret_configured": bool(STRIPE_SECRET_KEY),
+        "stripe_key_mode": stripe_mode,
         "stripe_webhook_configured": bool(STRIPE_WEBHOOK_SECRET),
+        "stripe_default_price_ids": inherited_default_prices,
         "warnings": warnings,
         "critical": critical,
         "commercial_ready": not critical,

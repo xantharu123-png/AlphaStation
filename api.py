@@ -11237,11 +11237,20 @@ async def api_commercial_readiness():
     critical = list(auth_status.get("critical", []))
     warnings = list(auth_status.get("warnings", []))
     if not PUBLIC_APP_URL.startswith("https://"):
-        warnings.append("PUBLIC_APP_URL is not HTTPS")
+        critical.append("PUBLIC_APP_URL is not HTTPS; paid launch needs a TLS-protected domain")
     if not COMMERCE_ENFORCE_AUTH:
         critical.append("COMMERCE_ENFORCE_AUTH is disabled; API data is not server-side paywalled")
+    if not auth_status.get("stripe_secret_configured"):
+        critical.append("STRIPE_SECRET_KEY is missing; subscriptions cannot be sold")
+    if not auth_status.get("stripe_webhook_configured"):
+        critical.append("STRIPE_WEBHOOK_SECRET is missing; subscription status will not stay in sync")
+    if auth_status.get("stripe_key_mode") == "test":
+        critical.append("Stripe is using test keys; switch to live keys before selling subscriptions")
+    if auth_status.get("stripe_default_price_ids"):
+        warnings.append("Stripe price IDs still match repository defaults; verify live Stripe products before launch")
     if not ALERT_SEND_TO_SUBSCRIBERS:
         warnings.append("ALERT_SEND_TO_SUBSCRIBERS disabled; paid users will not receive platform alerts")
+    warnings.append("Legal/data-license review is not machine-verifiable: confirm terms, privacy, risk disclaimer, refund/cancel policy and market-data redistribution rights before public launch")
     return {
         "status": "blocked" if critical else ("warning" if warnings else "ready"),
         "commercial_ready": not critical,
