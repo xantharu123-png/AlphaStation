@@ -48,6 +48,15 @@ def test_cup_handle_detector_rejects_chased_breakout():
 
 
 def test_cup_handle_strategy_filter_marks_confirmed_breakout_as_trade_now(monkeypatch):
+    # M-Cup&Handle-Fix: Waehrend offener US-Session wird CONFIRMED designgemaess
+    # auf INTRADAY_UNCONFIRMED/BEOBACHTEN downgegradet (unfertige Tageskerze).
+    # Dieser Test prueft den Confirmed-Pfad NACH Tagesschluss => Session mocken,
+    # sonst ist der Test tageszeitabhaengig flaky.
+    monkeypatch.setattr(
+        api,
+        "_stock_trade_email_status",
+        lambda *a, **k: {"allowed": False, "session": "US_CLOSED", "reason": "unit-test market closed"},
+    )
     monkeypatch.setattr(
         api,
         "_fetch_long_latest_intraday_state",

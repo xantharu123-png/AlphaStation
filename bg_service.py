@@ -61,6 +61,23 @@ try:
 except Exception as _auth_alert_err:
     HAS_AUTH_ALERT_RECIPIENTS = False
     get_email_alert_recipients = None
+# Signal-Tracking (Team-A-Kontrakt) — defensiv: bg muss auch ohne Modul laufen.
+try:
+    from modules.signal_tracker import record_alert_signals, evaluate_open_signals
+except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Parallel-Rollout
+    record_alert_signals = None
+    evaluate_open_signals = None
+# Telegram-Benachrichtigung (Team-A-Kontrakt) — optional, gleiche Defensive.
+try:
+    from modules.notify_telegram import (
+        is_telegram_configured,
+        send_telegram_alert,
+        format_alert_rows_for_telegram,
+    )
+except Exception as _telegram_import_err:
+    is_telegram_configured = None
+    send_telegram_alert = None
+    format_alert_rows_for_telegram = None
 
 # ── Logging ──
 logging.basicConfig(
@@ -891,11 +908,164 @@ def _apply_mail_class_prefix(subject, mail_class):
     return f"{prefix}{text}"
 
 
-def _send_email_alert(subject, body_html, secrets, mail_class="trade"):
+# ── Signal-Tracking & Telegram (Team-A-Module, defensiv gekapselt) ──
+_CG_MARKETS_CACHE_FILE = "/tmp/coingecko_markets_cache.json"
+_SIGNAL_EVAL_INTERVAL_SEC = 3600  # stündlicher Evaluierungs-Job (gehört IMMER bg)
+_signal_eval_warned_missing = False
+# Quote-/Perp-Suffixe für Crypto-Symbol-Matching (TSTUSDT -> TST)
+_CRYPTO_QUOTE_SUFFIXES = ("USDT", "USDC", "PERP", "USD", "EUR", "BTC")
+
+
+def _record_alert_signals_safe(scanner_name, rows, mail_class="trade", channel="email"):
+    """Erfasst gemailte Signale im Tracker (Kontrakt: wirft nie).
+
+    Trotzdem gekapselt: fehlendes Modul / unerwartete Fehler dürfen den
+    Mail-Pfad nie brechen. Erwartet ORIGINAL-Rows (inkl. Entry/Stop/TP),
+    nicht die aufbereiteten Mail-Dicts.
+    """
+    if record_alert_signals is None or not rows:
+        return 0
+    try:
+        count = record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel)
+        log.info(f"[SignalTracker] {scanner_name}: {count} Signal(e) erfasst (mail_class={mail_class})")
+        return count
+    except Exception as exc:
+        log.warning(f"[SignalTracker] record fehlgeschlagen ({scanner_name}): {exc}")
+        return 0
+
+
+def _format_telegram_text(rows):
+    """Telegram-Kurztext aus Alert-Rows (Team-A-Formatter, tolerant)."""
+    if format_alert_rows_for_telegram is None or not rows:
+        return ""
+    try:
+        return str(format_alert_rows_for_telegram(rows) or "")
+    except Exception as exc:
+        log.debug(f"[Telegram] Formatter fehlgeschlagen: {exc}")
+        return ""
+
+
+def _send_telegram_companion(final_subject, mail_class, telegram_text=""):
+    """Telegram-Spiegel für trade-Mails (nur wenn Modul vorhanden + konfiguriert).
+
+    Läuft NACH erfolgreichem Mail-Versand; Fehler hier ändern nichts am
+    Mail-Erfolg (return-Wert von _send_email_alert bleibt unberührt).
+    """
+    if mail_class != "trade":
+        return False
+    if is_telegram_configured is None or send_telegram_alert is None:
+        return False
+    try:
+        if not is_telegram_configured():
+            return False
+        ok = bool(send_telegram_alert(final_subject, telegram_text))
+        if ok:
+            log.info(f"[Telegram] Alert gespiegelt: {final_subject}")
+        return ok
+    except Exception as exc:
+        log.warning(f"[Telegram] Versand fehlgeschlagen: {exc}")
+        return False
+
+
+def _tracker_stock_fetcher(ticker, since_iso_date):
+    """Daily-Bars für den Signal-Tracker via Polygon Aggregates.
+
+    Kontrakt Team A: list[{date, high, low, close}] oder None bei Fehler.
+    """
+    try:
+        import requests as req
+        poly_key = _load_secrets().get("POLYGON_KEY", "")
+        if not poly_key or not ticker or not since_iso_date:
+            return None
+        today = datetime.now().strftime("%Y-%m-%d")
+        url = (f"https://api.polygon.io/v2/aggs/ticker/{str(ticker).upper()}"
+               f"/range/1/day/{since_iso_date}/{today}")
+        resp = req.get(url, params={"apiKey": poly_key, "adjusted": "true",
+                                    "sort": "asc", "limit": 5000}, timeout=15)
+        if resp.status_code != 200:
+            log.debug(f"[SignalTracker] Polygon HTTP {resp.status_code} für {ticker}")
+            return None
+        bars = []
+        for b in (resp.json().get("results") or []):
+            try:
+                bars.append({
+                    "date": datetime.utcfromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d"),
+                    "high": float(b["h"]),
+                    "low": float(b["l"]),
+                    "close": float(b["c"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        return bars
+    except Exception as exc:
+        log.debug(f"[SignalTracker] Stock-Fetcher {ticker} fehlgeschlagen: {exc}")
+        return None
+
+
+def _tracker_crypto_fetcher(ticker):
+    """Aktueller Crypto-Preis best-effort aus dem CoinGecko-Markets-Cache.
+
+    Symbol-Match case-insensitive; Perp-/Quote-Suffixe (z.B. USDT) werden
+    gestrippt. Kein Treffer / kein Cache => None (Kontrakt Team A).
+    """
+    try:
+        sym = str(ticker or "").strip().upper()
+        if not sym:
+            return None
+        for suffix in _CRYPTO_QUOTE_SUFFIXES:
+            if sym.endswith(suffix) and len(sym) > len(suffix):
+                sym = sym[: -len(suffix)].rstrip("-_/ ")
+                break
+        if not os.path.exists(_CG_MARKETS_CACHE_FILE):
+            return None
+        with open(_CG_MARKETS_CACHE_FILE, "r") as f:
+            payload = json.load(f)
+        coins = payload.get("coins", []) if isinstance(payload, dict) else payload
+        for c in coins or []:
+            if not isinstance(c, dict):
+                continue
+            if str(c.get("symbol", "")).strip().upper() == sym:
+                price = c.get("current_price")
+                if isinstance(price, (int, float)) and price > 0:
+                    return float(price)
+        return None
+    except Exception as exc:
+        log.debug(f"[SignalTracker] Crypto-Fetcher {ticker} fehlgeschlagen: {exc}")
+        return None
+
+
+def _run_signal_eval_job():
+    """Stündliche Evaluierung offener Tracker-Signale (TP/SL-Auflösung).
+
+    Überspringt sauber (eine Warnung, dann still), wenn das Team-A-Modul fehlt.
+    """
+    global _signal_eval_warned_missing
+    if evaluate_open_signals is None:
+        if not _signal_eval_warned_missing:
+            log.warning("[SignalTracker] modules.signal_tracker fehlt — Evaluierungs-Job inaktiv")
+            _signal_eval_warned_missing = True
+        return None
+    try:
+        stats = evaluate_open_signals(
+            stock_daily_fetcher=_tracker_stock_fetcher,
+            crypto_price_fetcher=_tracker_crypto_fetcher,
+        ) or {}
+        log.info(f"[SignalTracker] Eval-Lauf: evaluated={stats.get('evaluated', 0)} "
+                 f"closed={stats.get('closed', 0)} errors={stats.get('errors', 0)}")
+        return stats
+    except Exception as exc:
+        log.warning(f"[SignalTracker] Evaluierung fehlgeschlagen: {exc}")
+        return None
+
+
+def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text=""):
     """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml
 
     mail_class (B6, mit api-Team abgestimmt): "trade" -> '🚨 JETZT: ',
     "watch" -> '👁️ WATCH: ', "info" -> 'ℹ️ ' als Betreff-Praefix.
+    telegram_text (optional, gleiches Muster wie api): Kurztext für den
+    Telegram-Spiegel; bei trade-Mails wird nach Erfolg zusätzlich Telegram
+    benachrichtigt (sofern modules.notify_telegram konfiguriert ist).
     """
     subject = _apply_mail_class_prefix(subject, mail_class)
     if _email_has_blocked_etf_content(subject, body_html):
@@ -952,6 +1122,9 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade"):
                 server.sendmail(gmail_user, recipients, msg.as_string())
 
             log.info(f"📧 E-Mail Alert gesendet: {subject}")
+            # Telegram-Spiegel nur für trade-Mails, nur nach Mail-Erfolg;
+            # subject ist hier bereits der finale (geprefixte) Betreff.
+            _send_telegram_companion(subject, mail_class, telegram_text)
             return True
         except Exception as e:
             if attempt < max_retries - 1:
@@ -994,6 +1167,10 @@ def _check_and_alert_scan_results(scanner_name, secrets):
 
         # Filter: Nur Grade S oder A
         alerts = []
+        # Signal-Tracking: parallele Liste der ORIGINAL-Rows (inkl. Entry/Stop/TP)
+        # der tatsächlich gemailten Ticker — die alerts-Dicts sind Mail-Aufbereitung
+        # ohne Level-Zahlen (nur trade_plan_html) und für den Tracker unbrauchbar.
+        alert_source_rows = []
         suppressed = {}  # Q3/B4: Audit-Dict je Lauf (geblockt wegen health/estimated/rvol/...)
 
         def _suppress(reason):
@@ -1092,6 +1269,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "trade_plan_html": _format_alert_plan_html(r),
                 "cooldown_key": cooldown_key,
             })
+            alert_source_rows.append(r)
 
         # Q3/B4: Suppression-Audit — eine Log-Zeile pro Scan-Lauf (wie api).
         if suppressed:
@@ -1154,7 +1332,14 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         </p>
         </body></html>"""
 
-        sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
+        # telegram_text-Param TypeError-tolerant mitgeben (B7-Muster: api-Team
+        # rollt denselben Parameter parallel aus; alte Mocks/Signaturen ohne
+        # telegram_text bleiben funktionsfähig).
+        try:
+            sent = _send_email_alert(subject, body_html, secrets, mail_class="trade",
+                                     telegram_text=_format_telegram_text(alert_source_rows))
+        except TypeError:
+            sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
         if sent:
             # B2: Cooldown + persistentes Dedupe NUR bei erfolgreichem Versand setzen.
             for alert in alerts:
@@ -1162,6 +1347,9 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
                 if scanner_name == "bi_short":
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
+            # Signal-Tracking NUR nach erfolgreichem Versand (wirft nie).
+            _record_alert_signals_safe(scanner_name, alert_source_rows,
+                                       mail_class="trade", channel="email")
 
     except Exception as e:
         log.error(f"⚠️ Alert-Check {scanner_name}: {e}")
@@ -1891,6 +2079,9 @@ def _run_bear_scanner(poly_key, secrets):
                     for cs in crash_stocks:
                         _mark_bearish_stock_alert(cs.get("ticker", ""), now=now)
                     log.info(f"  CRASH ALERT sent: {[c['ticker'] for c in crash_stocks]}")
+                    # Signal-Tracking (Pfad dormant): crash_stocks sind Original-Rows.
+                    _record_alert_signals_safe("bear_scan", crash_stocks,
+                                               mail_class="trade", channel="email")
 
     except Exception as e:
         log.error(f"Bear Scanner: {e}\n{traceback.format_exc()}")
@@ -2193,6 +2384,10 @@ def _run_strategy_scanner(poly_key, secrets):
                     _ck = f"strat_{a['_strategy']}_{a['Ticker']}"
                     _EMAIL_COOLDOWN[_ck] = now
                     _email_dedupe_mark(_ck, now=now)
+                # Signal-Tracking (Pfad dormant, gegen Reaktivierung abgesichert):
+                # all_alerts SIND hier die Original-Rows inkl. Entry/Stop/TP.
+                _record_alert_signals_safe("strategy_scan", all_alerts,
+                                           mail_class="trade", channel="email")
 
     except Exception as e:
         log.error(f"❌ Strategy Scanner: {e}\n{traceback.format_exc()}")
@@ -2587,7 +2782,7 @@ def _run_btc_divergence(poly_key=None):
 
         # H-14 Audit-Fix: Teilabrufe (429/Fehler) NICHT als frischen Voll-Cache
         # schreiben — sonst vertrauen Streamlit/api dem Rumpf-Universum 2 Min blind.
-        cg_cache = "/tmp/coingecko_markets_cache.json"
+        cg_cache = _CG_MARKETS_CACHE_FILE
         _cg_payload = _cg_markets_cache_payload(all_coins, _cg_pages_ok, pages_wanted=4)
         if _cg_payload is not None:
             _atomic_write_json(cg_cache, _cg_payload)
@@ -3188,6 +3383,9 @@ def _alert_nls_signals(results, secrets):
 
     now = time.time()
     alerts = []
+    # Signal-Tracking: Original-Signal-Dicts (entry/stop_loss/tp1/tp2 — Tracker
+    # extrahiert tolerant) der tatsächlich gemailten Symbole parallel sammeln.
+    alert_source_rows = []
     for entry in signals:
         if not isinstance(entry, dict):
             continue
@@ -3267,6 +3465,9 @@ def _alert_nls_signals(results, secrets):
             "rr_effective": rr_effective,
             "cooldown_key": cooldown_key,
         })
+        # Roh-Signal (entry/stop_loss/tp*-Felder) + Symbol-Kontext für den Tracker.
+        alert_source_rows.append({**sig, "symbol": raw_symbol, "ticker": symbol,
+                                  "exchange": entry.get("exchange", ""), "direction": "short"})
 
     if not alerts:
         return
@@ -3310,12 +3511,21 @@ def _alert_nls_signals(results, secrets):
     </body></html>
     """
 
-    sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
+    # telegram_text TypeError-tolerant (B7-Muster, s. _check_and_alert_scan_results).
+    try:
+        sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets,
+                                 mail_class="trade",
+                                 telegram_text=_format_telegram_text(alert_source_rows))
+    except TypeError:
+        sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
             _email_dedupe_mark(alert["cooldown_key"], now=now)
         log.info(f"NLS Alert: {n} Dump-Signale gesendet ({', '.join(a['symbol'] for a in alerts)})")
+        # Signal-Tracking NUR nach erfolgreichem Versand (wirft nie).
+        _record_alert_signals_safe("new_listing", alert_source_rows,
+                                   mail_class="trade", channel="email")
     else:
         log.warning(f"NLS Alert konnte nicht gesendet werden ({', '.join(a['symbol'] for a in alerts)})")
 
@@ -3443,6 +3653,13 @@ def run_service():
         log.info(f"   ⏭️ übersprungen (Ownership beim api.py-Scheduler): {sorted(_bg_skipped)}")
     if os.environ.get("BG_SCAN_SET", "").strip():
         log.info(f"   (BG_SCAN_SET-Override aktiv: '{os.environ['BG_SCAN_SET']}')")
+
+    # ── Signal-Tracker-Evaluierung: gehört IMMER bg (kein api-Pendant) ──
+    # Bewusst NACH dem H-9-Ownership-Filter registriert — läuft unabhängig
+    # von BG_SCAN_SET stündlich; überspringt sauber, wenn Team-A-Modul fehlt.
+    SCHEDULE_INTERVAL["signal_eval"] = _SIGNAL_EVAL_INTERVAL_SEC
+    log.info(f"📈 Signal-Tracker-Eval: stündlich aktiv "
+             f"({'Modul vorhanden' if evaluate_open_signals is not None else 'WARTET auf modules.signal_tracker'})")
 
     last_run = {}
     _today_done = {}  # Track welche festen Zeiten heute schon gelaufen sind
@@ -3598,6 +3815,8 @@ def run_service():
                     elif scanner_name == "orb":
                         _run_orb_scanner(poly_key)
                         _check_and_alert_scan_results("orb", secrets)
+                    elif scanner_name == "signal_eval":
+                        _run_signal_eval_job()
                     last_run[scanner_name] = time.time()
                 except Exception as e:
                     log.error(f"❌ {scanner_name}: {e}")

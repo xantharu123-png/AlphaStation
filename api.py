@@ -94,6 +94,33 @@ from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import normalize_alert_trade_levels
 from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
 
+# Signal-Tracking + Telegram-Spiegel (fester Modul-Kontrakt, Parallel-Team).
+# Defensive Imports: Alerts duerfen NIE an Tracking/Telegram scheitern.
+# Evaluierung offener Signale: bg_service stündlich — KEIN Scheduler in api.py.
+try:
+    from modules.signal_tracker import (
+        record_alert_signals,
+        load_performance_summary,
+        get_signal_count,
+    )
+except ImportError as _sig_track_err:
+    record_alert_signals = None
+    load_performance_summary = None
+    get_signal_count = None
+    print(f"[Warning] signal_tracker module not loaded: {_sig_track_err}")
+
+try:
+    from modules.notify_telegram import (
+        is_telegram_configured,
+        send_telegram_alert,
+        format_alert_rows_for_telegram,
+    )
+except ImportError as _notify_tg_err:
+    is_telegram_configured = None
+    send_telegram_alert = None
+    format_alert_rows_for_telegram = None
+    print(f"[Warning] notify_telegram module not loaded: {_notify_tg_err}")
+
 try:
     from modules.backtests import run_bi_v2_backtest, run_biotech_backtest
     HAS_ADVANCED_BACKTESTS = True
@@ -3961,13 +3988,26 @@ def _process_trade_reminders_once() -> None:
                 reminder["trigger_result"] = result
                 channel = str(reminder.get("channel", "email_browser"))
                 if "email" in channel:
-                    _send_email_alert(
+                    # Signal-Tracking: Row mit Entry/Stop/TP-Feldern (Tracker extrahiert tolerant)
+                    _reminder_row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+                    _reminder_signal_rows = [dict(
+                        _reminder_row,
+                        ticker=str(reminder.get("ticker", "")).upper(),
+                        entry=result.get("entry"),
+                        stop=result.get("stop"),
+                        tp1=result.get("tp1"),
+                        tp2=result.get("tp2"),
+                    )]
+                    _reminder_sent = _send_email_alert(
                         f"Reminder: {reminder.get('ticker', '').upper()} Trigger bereit",
                         _format_reminder_email(reminder, result),
                         bypass_startup_cooldown=True,
                         trade_horizon="swing",  # AUDIT H-3: explizit (Reminder = Swing-Kontext)
                         mail_class="trade",  # AUDIT H-2: Trigger bereit = handelbar
+                        telegram_text=_safe_format_telegram_rows(_reminder_signal_rows),
                     )
+                    if _reminder_sent:
+                        _safe_record_alert_signals("trade_reminder", _reminder_signal_rows)
         if changed:
             _save_trade_reminders(reminders)
 
@@ -4274,12 +4314,14 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Swing-Default: Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und saubere Strukturziele. Intraday-5m ist optionaler separater Modus, nicht Pflicht fuer diese Swing-Mail.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2
+    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_rows))  # AUDIT H-3 / H-2
     if sent:
         _email_dedupe_mark(_EARLY_MOVER_DIGEST_KEY, now=now)
         for item in email_rows:
             _EMAIL_COOLDOWN[item["key"]] = now
             _email_dedupe_mark(item["key"], now=now)
+        # Signal-Tracking: nur die tatsaechlich gemailten 🚨-Rows (Watch-Mail loggt nicht).
+        _safe_record_alert_signals("early_movers", email_rows)
     _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
     return bool(sent)
 
@@ -5527,6 +5569,32 @@ def _apply_mail_class_subject(subject: str, mail_class: str) -> str:
     return f"{prefix}{text}"
 
 
+def _safe_format_telegram_rows(rows) -> str:
+    """Telegram-Body defensiv formatieren — Mail-Versand darf nie daran scheitern."""
+    if not format_alert_rows_for_telegram or not rows:
+        return ""
+    try:
+        return str(format_alert_rows_for_telegram(rows) or "")
+    except Exception as exc:
+        print(f"[Alert] Telegram-Formatter Fehler (ignoriert): {exc}")
+        return ""
+
+
+def _safe_record_alert_signals(scanner_name: str, rows, mail_class: str = "trade", channel: str = "email") -> None:
+    """Signal-Tracking nach erfolgreichem Trade-Mail-Versand (defensiv).
+
+    Kontrakt: record_alert_signals wirft nie, dedupet intern und loggt nur
+    mail_class=="trade". Zusaetzlicher try/except, damit Alerts auch bei
+    kaputtem/gemocktem Modul niemals am Tracking scheitern.
+    """
+    if not record_alert_signals or not rows:
+        return
+    try:
+        record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel)
+    except Exception as exc:
+        print(f"[Alert] Signal-Tracking Fehler (ignoriert): {exc}")
+
+
 def _send_email_alert(
     subject,
     body_html,
@@ -5534,6 +5602,7 @@ def _send_email_alert(
     recipient_emails: Optional[List[str]] = None,
     trade_horizon: str = "swing",
     mail_class: str = "trade",
+    telegram_text: str = "",
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
     # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
@@ -5595,6 +5664,15 @@ def _send_email_alert(
                     server.sendmail(gmail_user, recipients, msg.as_string())
             print(f"[Alert] Email gesendet: {subject}")
             _record_email_event(subject, "sent")
+            # Telegram-Spiegel NUR fuer handelbare Alerts (mail_class="trade").
+            # Kontrakt: send_telegram_alert wirft nie; zusaetzlich defensiv,
+            # damit der Mail-Erfolg nie am Telegram-Hook haengt.
+            if mail_class == "trade" and is_telegram_configured and send_telegram_alert:
+                try:
+                    if is_telegram_configured():
+                        send_telegram_alert(subject, telegram_text or "")
+                except Exception as _tg_exc:
+                    print(f"[Alert] Telegram-Hook Fehler (ignoriert): {_tg_exc}")
             return True
         except Exception as e:
             if attempt < 2:
@@ -5668,6 +5746,7 @@ def _check_and_alert(scanner_name, cache_file):
                            "rvol": r.get("RVOL", r.get("rvol", 0)),
                            "entry_quality": r.get("long_entry_quality", ""),
                            "trade_plan_html": _format_alert_plan_html(r),
+                           "source_row": r,  # Signal-Tracking: Row mit Entry/StopLoss/TP-Feldern
                            "cooldown_key": ck})
         if not alerts:
             # Log warum keine Alerts
@@ -5710,13 +5789,15 @@ def _check_and_alert(scanner_name, cache_file):
         <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
         print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
-        sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
+        _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"]) for a in alerts]
+        sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
         if sent:
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
                 if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS:
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
+            _safe_record_alert_signals(scanner_name, _signal_rows)
     except Exception as e:
         import traceback
         print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
@@ -5771,6 +5852,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "strategy": row.get("Strategy") or row.get("strategy") or strategy_name,
             "market_type": market_type,
             "trade_plan_html": _format_alert_plan_html(row),
+            "source_row": row,  # Signal-Tracking: Row mit Entry/StopLoss/TP-Feldern
         })
 
     if not alerts:
@@ -5822,12 +5904,14 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
-    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2 (Strategie-Sweep)
+    _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
+    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep)
     if sent:
         for alert in email_alerts:
             if alert.get("cooldown_key"):
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
+        _safe_record_alert_signals(scanner_key, _signal_rows)
 
 
 def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -6131,11 +6215,13 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2
+    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(alerts[:10]))  # AUDIT H-3 / H-2
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
             _email_dedupe_mark(alert["cooldown_key"], now=now)
+        # Signal-Tracking: nur die Rows, die wirklich in der Mail standen ([:10]).
+        _safe_record_alert_signals("new_listing", alerts[:10])
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -11028,6 +11114,7 @@ def _bear_scan_wrapper() -> None:
                         _crash_body,
                         trade_horizon="swing",
                         mail_class="trade",  # AUDIT H-2: Crash-Shorts sind handelbare Signale
+                        telegram_text=_safe_format_telegram_rows(_crash_stocks[:5]),
                     )
                     if _crash_sent:
                         with _EMAIL_COOLDOWN_LOCK:
@@ -11037,6 +11124,8 @@ def _bear_scan_wrapper() -> None:
                             _email_dedupe_mark(_dedupe_key)
                         for _cs in _crash_stocks:
                             _mark_bearish_stock_alert(_cs.get("ticker", ""), now=time.time())
+                        # Signal-Tracking: nur die Rows in der Mail ([:5]).
+                        _safe_record_alert_signals("crash", _crash_stocks[:5])
                         print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
             elif result.get("breakdown_stocks"):
                 _record_email_event(
@@ -11049,6 +11138,7 @@ def _bear_scan_wrapper() -> None:
             # V2.6b: Bear Summary Email — 1x pro Tag, nur wenn Grade S/A Signale dabei
             _bd_rows = []
             _bear_summary_tickers = []
+            _bear_alert_rows = []  # Signal-Tracking: Row-Dicts der gemailten Shorts
             for bd in result.get("breakdown_stocks", []):
                 if not isinstance(bd, dict):
                     continue
@@ -11061,6 +11151,7 @@ def _bear_scan_wrapper() -> None:
                 _gr = bd.get("grade", "?")
                 _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
                 _bear_summary_tickers.append(_ticker_up)
+                _bear_alert_rows.append(bd)
                 _bd_rows.append(
                     f"<tr><td style='padding:4px 8px;font-weight:bold;color:{_gc}'>{_gr}</td>"
                     f"<td style='padding:4px 8px;font-weight:bold'>{bd.get('ticker','?')}</td>"
@@ -11115,6 +11206,7 @@ def _bear_scan_wrapper() -> None:
                         _bear_body,
                         trade_horizon="swing",
                         mail_class="trade",  # AUDIT H-2
+                        telegram_text=_safe_format_telegram_rows(_bear_alert_rows),
                     )
                     if _bear_sent:
                         with _EMAIL_COOLDOWN_LOCK:
@@ -11122,6 +11214,7 @@ def _bear_scan_wrapper() -> None:
                         _email_dedupe_mark(_bear_ck)
                         for _ticker in _bear_summary_tickers:
                             _mark_bearish_stock_alert(_ticker, now=time.time())
+                        _safe_record_alert_signals("bear", _bear_alert_rows)
             elif result.get("breakdown_stocks"):
                 _record_email_event(
                     "Bear Scanner Alert",
@@ -11893,6 +11986,17 @@ async def api_commercial_readiness():
     }
     _coverage_values = [v for v in calendar_coverage_by_exchange.values() if v]
     calendar_coverage_until = min(_coverage_values) if _coverage_values else None
+    # Signal-Tracking-Status (defensiv: Modul kommt vom Parallel-Team)
+    _signal_tracker_status = {
+        "available": bool(record_alert_signals and load_performance_summary and get_signal_count),
+        "signals_recorded": 0,
+    }
+    if get_signal_count:
+        try:
+            _signal_tracker_status["signals_recorded"] = int(get_signal_count())
+        except Exception as _sig_cnt_err:
+            _signal_tracker_status["available"] = False
+            warnings.append(f"signal_tracker get_signal_count failed: {_sig_cnt_err}")
     _this_year_end = f"{datetime.now().year}-12-31"
     if calendar_coverage_until is None or calendar_coverage_until <= _this_year_end:
         warnings.append(
@@ -11908,10 +12012,32 @@ async def api_commercial_readiness():
         "auth": auth_status,
         "calendar_coverage_until": calendar_coverage_until,
         "calendar_coverage_by_exchange": calendar_coverage_by_exchange,
+        "signal_tracker": _signal_tracker_status,
         "critical": critical,
         "warnings": warnings,
         "note": "Commercial readiness here covers technical gating/security only; legal, tax and data-license review still need human/legal approval.",
     }
+
+
+@app.get("/api/signal-performance")
+def api_signal_performance(
+    days: int = Query(90, ge=1, le=365),
+    authorization: Optional[str] = Header(None),
+):
+    """Hit-Rate/Outcome-Auswertung der versendeten Trade-Signale.
+
+    V1 bewusst admin-only (_require_admin, einfachstes sauberes Gate);
+    Elite-Freigabe spaeter via _TAB_GATES moeglich. Datenbasis:
+    modules/signal_tracker — record beim Mail-Versand hier in api.py,
+    Evaluierung offener Signale laeuft stündlich in bg_service.
+    """
+    _require_admin(authorization)
+    if not load_performance_summary:
+        raise HTTPException(
+            status_code=503,
+            detail="signal_tracker module not available — Signal-Performance ist erst nach Deployment von modules/signal_tracker.py abrufbar",
+        )
+    return load_performance_summary(days)
 
 
 @app.get("/api/auth/plans")
@@ -19242,6 +19368,7 @@ def _orb_scanner_wrapper() -> None:
                 body,
                 trade_horizon="intraday",
                 mail_class="trade",  # AUDIT H-2
+                telegram_text=_safe_format_telegram_rows(alert_breakouts),
             )
             # AUDIT H-2: Cooldown + persistentes Dedupe erst NACH erfolgreichem
             # Versand setzen (Muster wie _check_and_alert); persistenter Dedupe
@@ -19252,6 +19379,7 @@ def _orb_scanner_wrapper() -> None:
                         _EMAIL_COOLDOWN[_ck] = _alert_now
                 for _ck in _orb_alert_cooldown_keys:
                     _email_dedupe_mark(_ck, now=_alert_now)
+                _safe_record_alert_signals("orb", alert_breakouts)
 
     except Exception as e:
         print(f"[ORB] Fehler: {e}")

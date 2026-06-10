@@ -1647,7 +1647,8 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                     alert_email: next.alert_email || user.email,
                     narrative_email_frequency: next.narrative_email_frequency,
                     trade_alert_horizon: next.trade_alert_horizon || 'swing',
-                    scanner_trade_horizon: next.scanner_trade_horizon || 'swing'
+                    scanner_trade_horizon: next.scanner_trade_horizon || 'swing',
+                    watch_mail_optin: !!next.watch_mail_optin
                 })
             });
             const data = await res.json();
@@ -1755,6 +1756,27 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                 )}
                 {alertSettings?.has_email_alerts && (
                     <div style={{ marginTop: 16, display: 'grid', gap: 14 }}>
+                        <div style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 10, background: '#f8fafc', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                            <div>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 3 }}>👁️ Watchlist-Mails erhalten</div>
+                                <div style={{ fontSize: 11, color: '#64748b' }}>Beobachtungs-Setups (👁️ WATCH), kein Einstiegssignal.</div>
+                            </div>
+                            <button
+                                onClick={() => saveAlertSettings({ watch_mail_optin: !(alertSettings?.watch_mail_optin ?? false) })}
+                                disabled={alertSaving}
+                                style={{
+                                    padding: '7px 11px',
+                                    border: `1px solid ${(alertSettings?.watch_mail_optin ?? false) ? '#2563eb' : '#cbd5e1'}`,
+                                    borderRadius: 999,
+                                    background: (alertSettings?.watch_mail_optin ?? false) ? '#dbeafe' : '#fff',
+                                    color: (alertSettings?.watch_mail_optin ?? false) ? '#1d4ed8' : '#475569',
+                                    fontSize: 12,
+                                    fontWeight: 800,
+                                    cursor: alertSaving ? 'wait' : 'pointer'
+                                }}>
+                                {(alertSettings?.watch_mail_optin ?? false) ? 'AN' : 'AUS'}
+                            </button>
+                        </div>
                         {[
                             ['trade_alert_horizon', 'Signal-Mail Modus', 'Welche Trade-Mails du erhalten willst. Swing ist Standard; Intraday ist separat.'],
                             ['scanner_trade_horizon', 'Scanner Default', 'Voreinstellung fuer manuelle Scanner-Ansicht und kuenftige Scan-Filter.']

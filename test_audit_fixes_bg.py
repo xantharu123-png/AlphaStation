@@ -12,15 +12,59 @@ Abgedeckte Audit-Punkte:
 
 Pfad-Konvention: session-unabhängig via __file__ (keine hardcodeten Session-Pfade).
 """
+import ast
 import os
 import sys
+import types
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bg_service  # noqa: E402
-import scanner  # noqa: E402
+
+
+def _load_scanner_helpers():
+    """Extrahiert die getesteten PURE-Helper aus scanner.py per AST, OHNE das
+    Modul auszufuehren.
+
+    Grund: scanner.py ist eine Streamlit-App — `import scanner` fuehrt auf
+    Modulebene UI-/Scan-Code aus (z.B. fetch_orb_scanner -> echte Polygon-Calls),
+    der waehrend der US-Session im Test-Sandbox-Netz HAENGT (Audit 10.06.,
+    nichtdeterministischer Collection-Timeout). Die getesteten Helper sind pure
+    Funktionen/Konstanten — Quelltext-Extraktion ist hier die robuste Loesung.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner.py")
+    with open(path, "r", encoding="utf-8") as f:
+        source = f.read()
+    tree = ast.parse(source)
+    wanted_funcs = {
+        "_btc_div_signal_status",
+        "_cg_file_cache_usable",
+        "_lookup_perp_info",
+        "_parse_mexc_perp_tickers",
+        "_is_leveraged_token_symbol",
+        "_safe_float",
+    }
+    wanted_consts = {"EXCLUDED_CRYPTO_SYMBOLS_LOCAL"}
+    nodes = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted_funcs:
+            nodes.append(node)
+        elif isinstance(node, ast.Assign):
+            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if targets & wanted_consts:
+                nodes.append(node)
+    module = types.ModuleType("scanner_helpers_extracted")
+    module.__dict__["time"] = __import__("time")
+    module.__dict__["re"] = __import__("re")
+    module.__dict__["math"] = __import__("math")
+    code = compile(ast.Module(body=nodes, type_ignores=[]), path, "exec")
+    exec(code, module.__dict__)
+    return module
+
+
+scanner = _load_scanner_helpers()  # noqa: E402 — Drop-in fuer die Tests unten
 
 
 # ══════════════════════════════════════════════════════════════════

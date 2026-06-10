@@ -37,6 +37,14 @@ Template: `.env.production.example`. `deploy/install.sh` copies it to `/home/tra
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*` | Stripe live keys and live Price IDs |
 | `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `ALERT_EMAIL`, `ALERT_SEND_TO_SUBSCRIBERS` | Gmail app password (not the account password) |
 
+## Signal-Tracking & Telegram
+
+- Signal tracking runs automatically in `bg_service.py`: every successfully mailed trade alert is recorded (`modules.signal_tracker`), and an hourly `signal_eval` job resolves open signals against TP/SL (runs always, independent of `BG_SCAN_SET`).
+- Signal performance is available at `/api/signal-performance` (admin only).
+- Telegram mirroring is optional: set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (see `.env.production.example`) and 🚨 trade alerts are additionally sent via Telegram. Leave both empty to disable.
+- Optional `SIGNAL_TRACKER_DB_PATH` overrides the tracker DB location (default `data_cache/signal_tracker.sqlite`); keep it on persistent storage like the auth DB.
+- Frontend: the account page has a `watch_mail_optin` toggle ("👁️ Watchlist-Mails erhalten") so users opt in to watch-class mails; trade mails are unaffected.
+
 ## TLS (Let's Encrypt)
 
 `deploy/install.sh` installs certbot and obtains the certificate before enabling the vHost (the 443 block references the cert files, so order matters). Manual equivalent:
