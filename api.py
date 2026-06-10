@@ -414,6 +414,11 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
                 "RVOL": (1.5, 50.0),
                 "Close Position": (0.45, 1.0),
                 "Preis": (5.0, 100000.0),
+                # AUDIT N-1: Der vom Consolidation-Template geerbte Vortag-Filter
+                # (-3..+3%) ist hier kontraproduktiv — C&H: starker Vortag ist
+                # Feature, kein Bug (Breakouts folgen oft starken Vortagen).
+                # Bewusst explizit geweitet statt stillschweigend geerbt.
+                "Vortag %": (-3.0, 100.0),
             },
             description="Cup-and-Handle Breakout mit 1D-Struktur und frischer Breakout-Bestaetigung.",
             logic="Runder 1D-Cup + kontrollierter Handle + Breakout ueber Lip mit Volumen = Long-Signal.",
@@ -421,8 +426,10 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
             needs_history=False,
             needs_cup_handle=True,
             history_days=180,
-            cup_handle_timeframe="1D",
-            confirmation_timeframe="5m",
+            # AUDIT N-2: cup_handle_timeframe entfernt (wurde nirgends gelesen).
+            # AUDIT M-5: ehrliches Label — es gibt keinen 5m-Trigger ueber den
+            # Pivot, nur Daily-Close-Logik plus 5m-Fade-Check.
+            confirmation_timeframe="daily_close+5m_fade_check",
             merged_from=["Cup and Handle"],
             display_group="Structure",
         ),
@@ -963,7 +970,9 @@ _ALERT_MIN_RVOL_BY_SCANNER = {
     "turtle": _ALERT_BREAKOUT_MIN_RVOL,
 }
 _ALERT_BREAKOUT_STRATEGY_SCANNERS = {"stock_strategy", "strategy_scan"}
-_ALERT_BREAKOUT_STRATEGY_TOKENS = ("breakout", "momentum")
+# AUDIT H-1: "cup" zusaetzlich aufgenommen (cup_handle_breakout matcht zwar
+# schon ueber "breakout", aber der Floor darf nicht an einer Umbenennung haengen).
+_ALERT_BREAKOUT_STRATEGY_TOKENS = ("breakout", "momentum", "cup")
 _ALERT_MIN_LEVEL_RR = 1.0
 _ALERT_RUNNER_RR_CAP = 5.0
 _ALERT_MIN_PRIMARY_TP_RR = 1.0
@@ -1261,6 +1270,7 @@ _ALERT_SUPPRESSION_LABELS = {
     "persistent_dedupe_active": "persistenter Mail-Dedupe aktiv",
     "bearish_ticker_already_alerted": "Bear/Crash fuer diesen Ticker schon gemeldet",
     "non_common_stock_product": "kein handelbarer Common Stock/ADR",
+    "intraday_unconfirmed_pattern": "Pattern intraday unbestaetigt (Tageskerze laeuft) — keine Trade-Mail",
     "invalid_trade_plan": "Entry/Stop/TP ungueltig",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
     "trade_rr_below_threshold": "R:R unter Mindestwert",
@@ -1626,7 +1636,15 @@ def _alert_min_rvol_for_row(scanner_name: str, row: Dict[str, Any]) -> float:
         strategy = str(
             row.get("strategy") or row.get("Strategy") or row.get("Strategie") or ""
         ).lower()
-        if any(token in strategy for token in _ALERT_BREAKOUT_STRATEGY_TOKENS):
+        # AUDIT H-1: Pattern-Rows (z.B. Cup & Handle) trugen keinen Strategy-Key
+        # und fielen auf den 0.7-Default zurueck. Token-Matching deshalb
+        # zusaetzlich auf pattern/pattern_type, damit die Geschaeftsregel
+        # (Breakout-Signal => Mail-Floor RVOL >= 1.5) nicht am Feldnamen haengt.
+        pattern_text = str(
+            row.get("pattern") or row.get("pattern_type") or row.get("Pattern") or ""
+        ).lower()
+        haystack = f"{strategy} {pattern_text}"
+        if any(token in haystack for token in _ALERT_BREAKOUT_STRATEGY_TOKENS):
             min_rvol = max(min_rvol, _ALERT_BREAKOUT_MIN_RVOL)
     return min_rvol
 
@@ -5131,6 +5149,23 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         if entry_quality_text and any(marker in entry_quality_text for marker in non_trade_quality_markers):
             reasons.append("entry_quality_watch_only")
 
+    # AUDIT K-2a: Der Session-Downgrade des C&H-Scanners (laufende Tageskerze
+    # => INTRADAY_UNCONFIRMED/BEOBACHTEN/WAIT_FOR_DAILY_CLOSE) schuetzte nur
+    # die UI — kein Mail-Gate las entry_status/trade_signal. Rows, die der
+    # Scanner selbst als unbestaetigt markiert, sind nie als Trade-Mail
+    # zustellbar. Gilt fuer stock_strategy/strategy_scan generell (jede
+    # Strategie, die diese Felder setzt).
+    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+        _entry_status_text = str(row.get("entry_status", "") or "").strip().upper()
+        _trade_signal_text = str(row.get("trade_signal", "") or "").strip().upper()
+        _trade_action_text = str(row.get("trade_action", "") or "").strip().upper()
+        if (
+            _entry_status_text == "INTRADAY_UNCONFIRMED"
+            or _trade_signal_text == "BEOBACHTEN"
+            or _trade_action_text.startswith("WAIT_FOR")
+        ):
+            reasons.append("intraday_unconfirmed_pattern")
+
     cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
     cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
     cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
@@ -5803,22 +5838,79 @@ def _check_and_alert(scanner_name, cache_file):
         print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
 
 
+def _daily_bar_date_str(bar: Dict[str, Any]) -> str:
+    """Datum einer Daily-Bar als YYYY-MM-DD ('' wenn unbestimmbar)."""
+    if not isinstance(bar, dict):
+        return ""
+    raw = bar.get("date") or bar.get("Date") or ""
+    if raw:
+        return str(raw)[:10]
+    ts = bar.get("t") or bar.get("time") or bar.get("timestamp")
+    try:
+        ts_f = float(ts)
+        if ts_f > 1e12:  # Millisekunden (Polygon aggs)
+            ts_f /= 1000.0
+        if ts_f <= 0:
+            return ""
+        return datetime.fromtimestamp(ts_f, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _strategy_rows_daily_close_confirmed(results: List[Dict[str, Any]]) -> bool:
+    """AUDIT K-2b: Eng begrenzte Daily-Close-Ausnahme vom Session-Mail-Gate.
+
+    True NUR wenn ALLE Rows (a) entry_status == BREAKOUT_CONFIRMED tragen und
+    (b) ihre letzte Daily-Kerze der HEUTIGE US-Handelstag ist (ET). Damit gehen
+    nach Boersenschluss ausschliesslich frisch per Tagesschluss bestaetigte
+    Daily-Breakouts (z.B. Cup & Handle) raus — kein Wochenend-/Feiertags-Stale,
+    keine Mischung mit unbestaetigten Rows.
+    """
+    rows = [row for row in results if isinstance(row, dict)]
+    if not rows:
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        today_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date()
+        exchange = _us_exchange_calendar()
+        if exchange is None or not _is_exchange_trading_day(exchange, today_et):
+            return False  # heute ist kein US-Handelstag => letzte Kerze ist stale
+        today_str = today_et.isoformat()
+    except Exception:
+        return False
+    for row in rows:
+        if str(row.get("entry_status", "") or "").strip().upper() != "BREAKOUT_CONFIRMED":
+            return False
+        if str(row.get("last_daily_bar_date", "") or "")[:10] != today_str:
+            return False
+    return True
+
+
 def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
     if not results:
         return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
+    daily_close_confirmed_mode = False
     if market_type == "stocks":
         market_status = _stock_trade_email_status()
         if not market_status.get("allowed"):
-            reason = str(market_status.get("reason") or "US market closed")
-            print(f"[Alert] Aktien Strategie - {strategy_name}: SKIP stock strategy mail outside US regular session ({reason})")
-            _record_email_event(
-                f"Aktien Strategie Alert - {strategy_name}",
-                "skipped",
-                f"stock_market_closed_before_strategy_mail:{reason}",
-            )
-            return
+            # AUDIT K-2b (PRODUKTENTSCHEIDUNG, final): Nach US-Daily-Close ist
+            # die Bestaetigung eines Daily-Breakouts legitim — sonst waere der
+            # C&H-Kanal architektonisch tot (intraday unterdrueckt K-2a, nach
+            # Close blockte das Session-Gate alles). ENG begrenzte Ausnahme:
+            # nur wenn ALLE Rows BREAKOUT_CONFIRMED + heutige Tageskerze.
+            if _strategy_rows_daily_close_confirmed(results):
+                daily_close_confirmed_mode = True
+            else:
+                reason = str(market_status.get("reason") or "US market closed")
+                print(f"[Alert] Aktien Strategie - {strategy_name}: SKIP stock strategy mail outside US regular session ({reason})")
+                _record_email_event(
+                    f"Aktien Strategie Alert - {strategy_name}",
+                    "skipped",
+                    f"stock_market_closed_before_strategy_mail:{reason}",
+                )
+                return
     now = time.time()
     alerts = []
     suppressed: Dict[str, int] = {}
@@ -5832,6 +5924,17 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if scanner_key in _STOCK_ALERT_SCANNERS:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
         state = _classify_alert_candidate(scanner_key, row, now)
+        if daily_close_confirmed_mode and state.get("cooldown_key"):
+            # AUDIT K-2b: eigener Dedupe-Namespace fuer die Daily-Close-Mail
+            # (Suffix _dailyclose), damit pro Ticker und Tag genau eine
+            # Bestaetigungs-Mail rausgeht — unabhaengig vom Intraday-Cooldown.
+            _dc_key = f"{state['cooldown_key']}_dailyclose"
+            state["cooldown_key"] = _dc_key
+            _dc_ttl = _alert_dedupe_ttl_seconds(scanner_key)
+            _dc_last = _EMAIL_COOLDOWN.get(_dc_key)
+            if (_dc_last and (now - _dc_last) < _dc_ttl) or _email_dedupe_remaining(_dc_key, _dc_ttl, now) > 0:
+                state["alertable_now"] = False
+                state["suppression_reasons"] = list(state.get("suppression_reasons") or []) + ["dailyclose_dedupe_active"]
         if not state["alertable_now"]:
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
@@ -5891,10 +5994,25 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
     )
     count_text = f"{len(email_alerts)} von {len(alerts)}" if len(alerts) > len(email_alerts) else str(len(alerts))
+    # AUDIT K-2b: Daily-Close-Bestaetigung klar labeln (Betreff + Body-Hinweis).
+    _dailyclose_subject_suffix = ""
+    _dailyclose_hint = ""
+    if daily_close_confirmed_mode:
+        _dailyclose_subject_suffix = " (Daily Close bestätigt)"
+        _entry_levels = ", ".join(
+            f"{_format_alert_price(_alert_get_any(a.get('source_row') or {}, 'entry', 'Entry', default=a['price']))} ({a['ticker']})"
+            for a in email_alerts
+        )
+        _dailyclose_hint = (
+            '<p style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;'
+            'padding:10px;color:#065f46;font-size:13px">'
+            f"Bestätigt per Tagesschluss — Entry-Planung für die nächste Session über {_entry_levels}</p>"
+        )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
     <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {count_text} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
+    {_dailyclose_hint}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
     <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
@@ -5905,7 +6023,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
     _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
-    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep)
+    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: mail_class bleibt "trade"
     if sent:
         for alert in email_alerts:
             if alert.get("cooldown_key"):
@@ -9030,6 +9148,9 @@ def _detect_cup_handle_breakout(
     ]
     if len(cleaned) < 70:
         return None
+    # AUDIT N-4: NaN-/0-Bars wurden bisher still entfernt. Bei > 2% entfernten
+    # Bars wird das Setup mit data_gaps=True markiert (Anzeige-Info).
+    data_gaps = bool(daily_bars) and (len(daily_bars) - len(cleaned)) / len(daily_bars) > 0.02
 
     bars = cleaned[-180:]
     last = bars[-1]
@@ -9037,7 +9158,21 @@ def _detect_cup_handle_breakout(
     if price <= 0:
         return None
 
+    # AUDIT K-1: Anti-Fenster-Shopping — globales Referenzhoch der letzten
+    # <=150 Bars VOR dem Breakout-Bar. Die Bestauswahl nahm bisher das
+    # score-optimale Teilfenster, auch wenn dessen "Lip" Prozente unter dem
+    # echten Strukturhoch lag (CONFIRMED unterhalb echter Resistance =
+    # klassischer Fakeout-Einstieg). Ein Fenster-Lip deutlich unter dieser
+    # Referenz ist kein Pivot und wird im Loop verworfen.
+    _pre_breakout_highs = [_bar_num(bar, "high", "h") for bar in bars[:-1][-150:]]
+    global_pre_breakout_high = max(_pre_breakout_highs) if _pre_breakout_highs else 0.0
+
     best: Optional[Dict[str, Any]] = None
+    # AUDIT K-1: Bestauswahl pivot-treu — hoechster gueltiger Lip gewinnt,
+    # Score/RR sind nur noch Tie-Breaker. Vorher gewann das score-optimale
+    # Teilfenster, dessen "Lip" bis zu 3% unter der echten Struktur lag
+    # (gemeldeter Entry 98.09 statt echtem Rim 101.20).
+    best_rank: Tuple[float, float, float] = (-1.0, -1.0, -1.0)
     n = len(bars)
     max_window = min(n, 170)
 
@@ -9065,6 +9200,12 @@ def _detect_cup_handle_breakout(
             if cup_lip <= 0 or bottom <= 0 or bottom >= cup_lip:
                 continue
 
+            # AUDIT K-1: Fenster-Lip muss >= 97% des globalen Pre-Breakout-
+            # Hochs sein — ein "Lip" 3%+ unter der echten Struktur ist kein
+            # Pivot, sondern Fenster-Shopping unterhalb echter Resistance.
+            if global_pre_breakout_high > 0 and cup_lip < global_pre_breakout_high * 0.97:
+                continue
+
             depth_abs = cup_lip - bottom
             depth_pct = depth_abs / cup_lip * 100
             if depth_pct < 10 or depth_pct > 45:
@@ -9089,6 +9230,31 @@ def _detect_cup_handle_breakout(
                 continue
             if handle_high > cup_lip * 1.08:
                 continue
+
+            # AUDIT M-1: Aufwaerts keilender Handle ist O'Neils klassisches
+            # Failure-Signal — der Handle muss seitwaerts/abwaerts driften.
+            # Breakout-Bar (letzter Bar) gehoert nicht zur Drift-Messung.
+            _drift_bars = handle[:-1]
+            if len(_drift_bars) >= 2:
+                _drift_highs = [_bar_num(bar, "high", "h") for bar in _drift_bars]
+                _drift_lows = [_bar_num(bar, "low", "l") for bar in _drift_bars]
+                if _drift_highs[-1] > _drift_highs[0] * 1.015:
+                    continue
+                if max(_drift_lows[-2:]) > max(_drift_lows[:2]) * 1.02:
+                    continue
+                # Kalibrierung: laengere Fenster-Splits koennen den Keil mit
+                # vorgelagerten Rim-Bars maskieren (Drift-Bar[0] = Rim-Touch).
+                # Deshalb zusaetzlich der Monotonie-Anteil der Lows ueber die
+                # GESAMTE Handle-Laenge: steigen >= 80% der Schritte, keilt
+                # der Handle aufwaerts — ein echter Handle hat einen klaren
+                # Down-Leg (Lehrbuch-Fixture: ~56-67% steigende Schritte).
+                if len(_drift_lows) >= 4:
+                    _rising_steps = sum(
+                        1 for _i in range(1, len(_drift_lows))
+                        if _drift_lows[_i] > _drift_lows[_i - 1]
+                    )
+                    if _rising_steps / (len(_drift_lows) - 1) >= 0.8:
+                        continue
 
             close_pos = 0.5
             last_high = _bar_num(last, "high", "h")
@@ -9121,7 +9287,13 @@ def _detect_cup_handle_breakout(
             handle_volumes = [_bar_num(bar, "volume", "v") for bar in handle[:-1] if _bar_num(bar, "volume", "v") > 0]
             cup_avg_volume = sum(cup_volumes) / len(cup_volumes) if cup_volumes else 0
             handle_avg_volume = sum(handle_volumes) / len(handle_volumes) if handle_volumes else 0
-            handle_volume_contracts = bool(cup_avg_volume and handle_avg_volume and handle_avg_volume <= cup_avg_volume * 1.15)
+            # AUDIT M-2: Dry-up als Hard-Gate. Handle-Volumen ueber ~1.15x
+            # Cup-Schnitt ist Distribution — das wichtigste Qualitaetssignal
+            # des Patterns darf kein blosser Score-Bonus sein. Der +6-Bonus
+            # bleibt nur fuer echtes Dry-up (< 0.85x Cup-Schnitt).
+            if cup_avg_volume > 0 and handle_avg_volume > cup_avg_volume * 1.15:
+                continue
+            handle_volume_contracts = bool(cup_avg_volume and handle_avg_volume and handle_avg_volume < cup_avg_volume * 0.85)
 
             atr = _calc_recent_atr(segment, 14)
             if atr <= 0:
@@ -9133,6 +9305,12 @@ def _detect_cup_handle_breakout(
             if stop >= entry:
                 stop = handle_low - atr * 0.35
             if stop <= 0 or stop >= entry:
+                continue
+            # AUDIT M-3: Struktureller Stop weiter als 10% vom Entry => Setup
+            # nicht handelbar (R-Einheit zu gross, Positionsgroessen-Disziplin
+            # unmoeglich). Bewusst KEIN kuenstliches Stop-Anheben — ein Stop
+            # mitten in der Range ist schlechter als kein Trade.
+            if (entry - stop) / entry * 100 > 10.0:
                 continue
 
             tp1 = entry + depth_abs * 0.50
@@ -9158,8 +9336,8 @@ def _detect_cup_handle_breakout(
                 score += 12
             elif rvol >= 1.5:
                 score += 9
-            elif rvol >= 1.1:
-                score += 5
+            # AUDIT N-2: toter "elif rvol >= 1.1"-Zweig entfernt — das harte
+            # RVOL>=1.5-Gate weiter oben macht ihn unerreichbar.
             if extension_pct <= 2.5:
                 score += 10
             elif extension_pct <= 5:
@@ -9196,10 +9374,15 @@ def _detect_cup_handle_breakout(
                 "cup_length": cup_len,
                 "handle_length": handle_len,
                 "timeframe": "1D",
-                "confirmation_timeframe": "5m",
+                # AUDIT M-5: ehrliches Label — es gibt keinen 5m-Trigger ueber
+                # den Pivot, nur Daily-Close-Bestaetigung + 5m-Fade-Check.
+                "confirmation_timeframe": "daily_close+5m_fade_check",
+                "data_gaps": data_gaps,  # AUDIT N-4
             }
-            if not best or (match["score"], match["risk_reward"]) > (best["score"], best["risk_reward"]):
+            _rank = (float(cup_lip), float(match["score"]), float(match["risk_reward"]))
+            if best is None or _rank > best_rank:
                 best = match
+                best_rank = _rank
 
     return best
 
@@ -9217,7 +9400,10 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
 
     final_score = int(max(float(candidate.get("base_score", candidate.get("score", 0)) or 0) * 0.20, 0) + setup["score"] * 0.80)
     final_score = int(_clamp_float(final_score, 0, 100))
-    grade = _strategy_score_to_grade(final_score)
+    # AUDIT M-4: Grade-Spreizung. Die generische Leiter (_strategy_score_to_grade)
+    # gibt ab 80 immer "S" — da C&H unter final 80 ohnehin verwirft, war JEDE
+    # Row automatisch Elite. C&H-eigene Leiter: "S" erst ab 90, "A" fuer 80-89.
+    grade = "S" if final_score >= 90 else "A"
     if final_score < 80:
         return None
 
@@ -9267,11 +9453,17 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         "entry_status": "BREAKOUT_CONFIRMED",
         "direction": "LONG",
         "Signal_Direction": "LONG",
-        "scanner_note": "Cup-and-Handle Breakout: 1D structure, fresh 5m execution trigger confirmed.",
+        # AUDIT M-5: ehrliche Beschreibung — kein 5m-Trigger ueber den Pivot,
+        # sondern Daily-Struktur + 5m-Fade-Check.
+        "scanner_note": "Cup-and-Handle Breakout: 1D-Struktur, 5m-Fade-Check bestanden (kein Gegenvolumen).",
         "trade_setup": trade_setup,
         "score": final_score,
         "grade": grade,
         "base_grade": grade,
+        # AUDIT K-2b: Frische-Stempel fuer die Daily-Close-Mail-Ausnahme
+        # (letzte Daily-Kerze muss der heutige US-Handelstag sein).
+        "last_daily_bar_date": _daily_bar_date_str(daily_bars[-1]) if daily_bars else "",
+        "data_gaps": bool(setup.get("data_gaps")),  # AUDIT N-4 (Anzeige-Info)
     })
     long_reasons = _long_entry_rule_reasons(enriched)
     if long_reasons:
@@ -9295,9 +9487,11 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         enriched["alertable_long"] = False
         trade_setup["entry_status"] = "INTRADAY_UNCONFIRMED"
         trade_setup["trade_action"] = "WAIT_FOR_DAILY_CLOSE"
+        # AUDIT M-5: kein "(oder via 5m-Trigger-Check)" mehr versprechen —
+        # es gibt keinen 5m-Trigger ueber den Pivot, nur den Fade-Check.
         enriched["scanner_note"] = (
             "Cup-and-Handle: 1D-Struktur intakt, aber Tageskerze noch offen — "
-            "Breakout erst nach Daily-Close (oder via 5m-Trigger-Check) bestaetigt."
+            "Breakout erst nach Daily-Close bestaetigt."
         )
     return enriched
 
@@ -9959,6 +10153,11 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         _breakout_reason_parts.extend(_breakout_quality.get("blockers") or [])
 
                     strategy_row = {
+                        # AUDIT H-1: Strategy-Key auf JEDER Row (auch Spezial-
+                        # Strategien wie C&H erben ihn via dict(candidate)) —
+                        # das RVOL-Mail-Floor-Token-Gate matcht sonst nicht.
+                        "Strategy": strategy_name,
+                        "strategy": strategy_name,
                         "Ticker": ticker,
                         "ticker": ticker,
                         "Preis": round(price, 2),

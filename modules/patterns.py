@@ -4716,15 +4716,24 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                                 cup_left_idx = int(len(cup_data) // 6)
                                 cup_bottom_idx = int(len(cup_data) // 2)
                                 cup_right_idx = int(2 * len(cup_data) // 3)
+                                # AUDIT N-3 (C&H-Audit 2026-06-10): Chart-Heuristik
+                                # klar vom strikten Scanner-Detektor abgrenzen und
+                                # "Breakout" erst ab Preis >= Lip behaupten (vorher
+                                # schon ab 0.95x — Chart widersprach dem Scanner).
+                                _ch_broke_out = current_price >= cup_lip
                                 patterns.append({
-                                    "pattern": "Cup & Handle",
+                                    "pattern": "Cup & Handle (Chart-Heuristik)",
                                     "emoji": "⬆",
                                     "type": "bullish",
                                     "cup_depth": f"{cup_depth*100:.1f}%",
                                     "breakout_level": round(cup_lip, 2),
                                     "target": round(cup_lip * (1 + cup_depth), 2),
-                                    "confidence": "High" if current_price > cup_lip else "Medium",
-                                    "description": f"Cup & Handle - Breakout @ ${cup_lip:.2f}. Target: ${cup_lip * (1 + cup_depth):.2f}",
+                                    "confidence": "High" if _ch_broke_out else "Medium",
+                                    "description": (
+                                        f"Cup & Handle - Breakout @ ${cup_lip:.2f}. Target: ${cup_lip * (1 + cup_depth):.2f}"
+                                        if _ch_broke_out
+                                        else f"Cup & Handle formiert sich - Pivot @ ${cup_lip:.2f} noch nicht ausgebrochen. Target: ${cup_lip * (1 + cup_depth):.2f}"
+                                    ),
                                     "draw_points": [{"index": 0, "price": left_avg}, {"index": cup_left_idx, "price": left_avg}, {"index": cup_bottom_idx, "price": bottom_avg}, {"index": cup_right_idx, "price": right_avg}, {"index": cup_end, "price": cup_lip}]
                                 })
         
