@@ -28,19 +28,35 @@ def test_auth_store_uses_sqlite_and_pbkdf2_passwords(monkeypatch, tmp_path):
 
 
 def test_legacy_admin_bootstrap_restores_access_when_user_db_is_empty(monkeypatch, tmp_path):
+    """LB-1 AUDIT FIX: Legacy-Bootstrap nur noch mit ENV-gesetztem Key —
+    der alte hartcodierte Repo-Key ist kompromittiert und gesperrt."""
     _isolate_auth_store(monkeypatch, tmp_path)
     monkeypatch.setattr(auth, "HAS_JWT", True)
     monkeypatch.setattr(auth, "ADMIN_EMAILS", {"miroslav.mikulic@gmail.com"})
     monkeypatch.setattr(auth, "ADMIN_MASTER_KEY", "")
     monkeypatch.setattr(auth, "ADMIN_MASTER_KEY_CONFIGURED", False)
     monkeypatch.setattr(auth, "ALLOW_LEGACY_ADMIN_MASTER_KEY", True)
+    monkeypatch.setattr(auth, "LEGACY_ADMIN_MASTER_KEY", "Env-Bootstrap-Key-2026!")
     monkeypatch.setattr(auth, "create_token", lambda user_id, email, plan="free": f"token:{email}:{plan}")
 
-    result = auth.login_user("miroslav.mikulic@gmail.com", auth.LEGACY_ADMIN_MASTER_KEY)
+    result = auth.login_user("miroslav.mikulic@gmail.com", "Env-Bootstrap-Key-2026!")
 
     assert result["success"] is True
     assert result["user"]["plan"] == "elite"
     assert "miroslav.mikulic@gmail.com" in auth._load_users()["users"]
+
+
+def test_compromised_repo_master_key_is_rejected_even_if_configured(monkeypatch, tmp_path):
+    """LB-1 AUDIT FIX: 'AlphaStation2026!' stand im Git-Verlauf und muss in
+    BEIDEN Pfaden (ADMIN_MASTER_KEY + Legacy) abgelehnt werden."""
+    _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "ADMIN_EMAILS", {"miroslav.mikulic@gmail.com"})
+    monkeypatch.setattr(auth, "ADMIN_MASTER_KEY", "AlphaStation2026!")
+    monkeypatch.setattr(auth, "ADMIN_MASTER_KEY_CONFIGURED", True)
+    monkeypatch.setattr(auth, "ALLOW_LEGACY_ADMIN_MASTER_KEY", True)
+    monkeypatch.setattr(auth, "LEGACY_ADMIN_MASTER_KEY", "AlphaStation2026!")
+
+    assert auth._is_admin_master_login("miroslav.mikulic@gmail.com", "AlphaStation2026!") is False
 
 
 def test_admin_token_always_resolves_to_elite_limits(monkeypatch, tmp_path):

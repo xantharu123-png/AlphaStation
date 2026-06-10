@@ -87,7 +87,12 @@ ADMIN_EMAILS = {
 }
 ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "")
 ADMIN_MASTER_KEY_CONFIGURED = bool(ADMIN_MASTER_KEY)
-LEGACY_ADMIN_MASTER_KEY = "AlphaStation2026!"
+# LB-1 AUDIT FIX (2026-06-10): Der frueher hier hartcodierte Master-Key
+# ("AlphaStation2026!") steht im Git-Verlauf und gilt als KOMPROMITTIERT.
+# Der Legacy-Key kommt nur noch aus der ENV und der kompromittierte Wert
+# wird aktiv gesperrt — auch wenn ihn jemand per ENV wieder setzt.
+_COMPROMISED_MASTER_KEYS = {"AlphaStation2026!"}
+LEGACY_ADMIN_MASTER_KEY = os.environ.get("LEGACY_ADMIN_MASTER_KEY", "").strip()
 # S-6 AUDIT FIX: Fail-closed — der Legacy-Bootstrap-Key ist standardmaessig AUS
 # (Default war "1" = fail-open) und muss explizit aktiviert werden.
 ALLOW_LEGACY_ADMIN_MASTER_KEY = os.environ.get(
@@ -363,12 +368,25 @@ def create_token(user_id: str, email: str, plan: str = "free") -> Optional[str]:
 
 
 def _is_admin_master_login(email: str, password: str) -> bool:
-    """Allow configured admin master key and a temporary legacy bootstrap fallback."""
-    if email not in ADMIN_EMAILS:
+    """Allow configured admin master key and a temporary legacy bootstrap fallback.
+
+    LB-1 AUDIT FIX: timing-safe Vergleiche; kompromittierte Keys (alter
+    Repo-Default) werden in beiden Pfaden aktiv abgelehnt.
+    """
+    if email not in ADMIN_EMAILS or not password:
         return False
-    if ADMIN_MASTER_KEY_CONFIGURED and password == ADMIN_MASTER_KEY:
+    if (
+        ADMIN_MASTER_KEY_CONFIGURED
+        and ADMIN_MASTER_KEY not in _COMPROMISED_MASTER_KEYS
+        and hmac.compare_digest(password.encode("utf-8"), ADMIN_MASTER_KEY.encode("utf-8"))
+    ):
         return True
-    return ALLOW_LEGACY_ADMIN_MASTER_KEY and password == LEGACY_ADMIN_MASTER_KEY
+    return bool(
+        ALLOW_LEGACY_ADMIN_MASTER_KEY
+        and LEGACY_ADMIN_MASTER_KEY
+        and LEGACY_ADMIN_MASTER_KEY not in _COMPROMISED_MASTER_KEYS
+        and hmac.compare_digest(password.encode("utf-8"), LEGACY_ADMIN_MASTER_KEY.encode("utf-8"))
+    )
 
 
 def verify_token(token: str) -> Optional[Dict]:
