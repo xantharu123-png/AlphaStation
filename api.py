@@ -2061,6 +2061,74 @@ def _alert_level_source_line(row: Dict[str, Any]) -> str:
     return f'<br><span style="color:#64748b;font-size:11px">Level-Quelle: {safe}</span>'
 
 
+def _biotech_binary_event_days(row: Dict[str, Any]) -> Optional[float]:
+    """H-2 (Audit 10.06.2026): Tage bis zum naechsten binaeren Event oder None.
+
+    Quellen in Prioritaetsreihenfolge: explizite days-Felder der Row, dann
+    die Readout-Listen (Readout_Details[*].days_until_readout,
+    BPIQ_Catalysts[*].days_until). Negative Werte (overdue) zaehlen nicht —
+    das Event ist vorbei, kein bevorstehendes Gap-Risiko.
+    """
+    if not isinstance(row, dict):
+        return None
+    for key in ("days_until", "Days_Until", "Catalyst_Days", "catalyst_days", "days_until_readout"):
+        val = _alert_float(row.get(key), None)
+        if val is not None:
+            return val
+    best = None
+    for list_key in ("Readout_Details", "readout_details", "BPIQ_Catalysts", "bpiq_catalysts"):
+        items = row.get(list_key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for k in ("days_until_readout", "days_until"):
+                val = _alert_float(item.get(k), None)
+                if val is not None and val >= 0 and (best is None or val < best):
+                    best = val
+    return best
+
+
+def _biotech_near_binary_event(row: Dict[str, Any]) -> bool:
+    """H-2 (Audit 10.06.2026): True wenn die Row vor einem binaeren Event steht.
+
+    Binaer = PDUFA/Readout <= T-3: Gap-Risiko ±40-80%, ein Stop schuetzt NICHT
+    ueber ein Gap. Erkennung ueber near_binary_event-Feld/-Risk-Flag,
+    Bio_Trade_Mode == NEAR_BINARY_EVENT (Event-Risk-Zweig) oder days <= 3.
+    """
+    if not isinstance(row, dict):
+        return False
+    if row.get("near_binary_event"):
+        return True
+    mode = str(row.get("Bio_Trade_Mode", row.get("bio_trade_mode", "")) or "").upper()
+    if mode == "NEAR_BINARY_EVENT":
+        return True
+    flags_raw = row.get("Bio_Risk_Flags") or row.get("bio_risk_flags") or []
+    flags = {
+        str(flag).lower()
+        for flag in (flags_raw if isinstance(flags_raw, list) else [flags_raw])
+        if flag
+    }
+    if "near_binary_event" in flags:
+        return True
+    days = _biotech_binary_event_days(row)
+    return days is not None and 0 <= days <= 3
+
+
+def _biotech_binary_warning_html(row: Dict[str, Any]) -> str:
+    """H-2: Rote Binary-Event-Warnzeile fuer Plan-HTML und Mail-Rows."""
+    if not _biotech_near_binary_event(row):
+        return ""
+    days = _biotech_binary_event_days(row)
+    days_txt = f"{int(days)}d" if isinstance(days, (int, float)) and days >= 0 else "&le;3d"
+    return (
+        '<br><span style="color:#dc2626;font-weight:bold;font-size:12px">'
+        f'⚠ Binäres Event in {days_txt} — Stop schützt NICHT über ein Gap. '
+        'Kein Neueinstieg, Run-up-Trades vor T-3 schließen.</span>'
+    )
+
+
 def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
@@ -2096,13 +2164,24 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         if levels.get("estimated") else ""
     )
     # AUDIT M-1: Level, die _enrich_biotech_alert_trade_levels via
-    # _build_structured_trade_setup synthetisiert hat (Marker
-    # Trade_Setup_Source=biotech_daily_*), sichtbar kennzeichnen.
+    # _build_structured_trade_setup synthetisiert hat, sichtbar kennzeichnen.
+    # AUDIT M-4 (10.06.2026): primaer auf das explizite Synthetic-Flag hoeren
+    # (Trade_Setup_Synthetic auf der Row bzw. levels['synthetic'] aus
+    # normalize_alert_trade_levels) — robuster als der String-Prefix-Check
+    # auf Trade_Setup_Source, der nur als Fallback fuer Alt-Cache-Rows bleibt.
     setup_source = str(row.get("Trade_Setup_Source", row.get("trade_setup_source", "")) or "")
+    is_synthetic = bool(
+        row.get("Trade_Setup_Synthetic")
+        or levels.get("synthetic")
+        or setup_source.startswith("biotech_daily")
+    )
     synthetic_text = (
         '<br><span style="color:#b45309;font-size:11px">Struktur-Level (ATR/Support) - nicht Scanner-nativ</span>'
-        if setup_source.startswith("biotech_daily") else ""
+        if is_synthetic else ""
     )
+    # H-2 (Audit 10.06.2026): Binary-Event-Warnung gehoert in JEDE
+    # Abonnenten-Flaeche, die den Plan rendert (Mail-Row + Trade-Plan-HTML).
+    binary_warning_text = _biotech_binary_warning_html(row)
     return (
         f'<span>Entry <b>{entry}</b></span><br>'
         f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
@@ -2113,6 +2192,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'{move_warning}'
         f'{source_text}'
         f'{synthetic_text}'
+        f'{binary_warning_text}'
     )
 
 
@@ -5132,11 +5212,23 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             for err in levels.get("errors", [])[:2]:
                 reasons.append(f"trade_{err}")
         elif levels.get("estimated"):
+            # AUDIT M-4 (10.06.2026): biotech: synthetic erlaubt (Struktur-
+            # Level aus _enrich_biotech_alert_trade_levels), Kennzeichnung via
+            # M1-Label + synthetic-Flag — levels['synthetic'] loest dieses
+            # estimated-Gate bewusst NICHT aus (native=True, estimated=False).
+            # Geschaetzte Level (price_fallback/day_range/r_multiple) anderer
+            # Scanner bleiben hier hart geblockt.
             reasons.append("estimated_trade_plan")
         elif not _alert_trade_plan_ok(row):
             reasons.append("trade_rr_below_threshold")
     if quality_gate_actionable and scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         reasons.extend(_alert_trade_health_reasons(row, scanner_name))
+
+    # H-2 (Audit 10.06.2026): HARTES Mail-Gate — ein binaeres Event <= T-3
+    # (PDUFA/Readout) ist NIE ein JETZT-Trade-Call: das Gap durchschlaegt
+    # jeden Stop. Run-up-Phase = Beobachtung/Exit, kein Neueinstieg.
+    if scanner_name == "biotech" and _biotech_near_binary_event(row):
+        reasons.append("near_binary_event")
 
     if quality_gate_actionable and scanner_name in (_STOCK_ALERT_SCANNERS - _SWING_STOCK_STRATEGY_ALERT_SCANNERS):
         entry_quality_text = str(
@@ -7219,14 +7311,19 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
             for flag in (bio_flags_raw if isinstance(bio_flags_raw, list) else [bio_flags_raw])
             if flag
         }
+        # H-3 (Audit 10.06.2026): PRIORITY_WATCH und WATCH_FOR_TRIGGER sind
+        # HANDELBARE Trigger-Setups und gehoeren NICHT in die Kontext-Liste —
+        # vorher listete sie ALLE sieben Bio_Trade_Modes, wodurch
+        # /api/biotech-results systematisch 0 Zeilen lieferte (jede Grade-A-Row
+        # unsichtbar). Neu als Kontext: NEAR_BINARY_EVENT (Event-Risk-Zweig,
+        # Beobachtung statt Trade — Stop schuetzt nicht ueber ein Gap).
         context_modes = {
             "WATCHLIST",
             "LOW_QUALITY",
             "AVOID_NEWS_RISK",
             "WAIT_PULLBACK",
-            "WATCH_FOR_TRIGGER",
-            "PRIORITY_WATCH",
             "SMALL_SIZE_BINARY_RISK",
+            "NEAR_BINARY_EVENT",
         }
         hard_context_flags = {
             "news_catalyst_without_calendar_confirmation",
@@ -7448,12 +7545,22 @@ def _decorate_early_mover_results(results: List[Dict[str, Any]], cache_age_secon
     return _apply_signal_only_policy("early_movers", decorated)
 
 
-def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], Optional[str]]:
+def load_cache_file(filepath: str, max_age_hours: Optional[int] = None) -> tuple[List[Dict], Optional[str]]:
     """Load cache file and return (data, cached_at_timestamp) (thread-safe).
 
     Supports two cache formats:
     - New format: {"cached_at": "ISO-string", "results": [...]}
     - Scanner format: {"timestamp": unix_epoch_float, "results": [...]}
+
+    N (Audit 10.06.2026): max_age_hours wird jetzt DURCHGESETZT.
+    - max_age_hours=None (Default): kein Frische-Gate — Anzeige-/UI-Pfade
+      duerfen stale Daten zeigen und rendern die Warnung selbst ueber das
+      mitgelieferte cached_at (cache_age_seconds in den REST-Responses).
+    - max_age_hours=<Zahl>: Cache aelter als max_age ⇒ ([], cached_at) —
+      leeres Ergebnis, cached_at bleibt als Stale-Metadatum erhalten, damit
+      der Aufrufer das Alter loggen/anzeigen kann.
+    Mail-Pfade verlassen sich NICHT hierauf: bg_service hat einen eigenen
+    expliziten 2h-Frische-Check vor dem Mail-Bau.
     """
     with _cache_lock:
         if not Path(filepath).exists():
@@ -7483,6 +7590,16 @@ def load_cache_file(filepath: str, max_age_hours: int = 2) -> tuple[List[Dict], 
 
             if not isinstance(data, list):
                 data = [data]
+
+            # N: Frische-Gate — nur wenn der Aufrufer eine Schwelle setzt.
+            if max_age_hours is not None and cached_at:
+                try:
+                    age_s = (datetime.now() - datetime.fromisoformat(str(cached_at))).total_seconds()
+                    if age_s > float(max_age_hours) * 3600.0:
+                        print(f"[Cache] {filepath} stale ({age_s / 3600.0:.1f}h > {max_age_hours}h) — returning empty results")
+                        return [], cached_at
+                except Exception as e:
+                    print(f"Error checking cache freshness for {filepath}: {e}")
 
             return data, cached_at
         except Exception as e:
@@ -9810,6 +9927,13 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
         row["TP2"] = setup["tp2"]
         row["trade_setup"] = setup
         row["Trade_Setup_Source"] = "biotech_daily_vrvp_structure" if setup.get("vrvp_applied") else "biotech_daily_structure"
+        # AUDIT M-4 (10.06.2026): ehrliche Klassifizierung — diese Level sind
+        # SYNTHETISCH (ATR/Support-Struktur, nicht Scanner-nativ). Das Flag
+        # treibt levels['synthetic'] in normalize_alert_trade_levels und das
+        # M1-Label im Plan-HTML; native/estimated bleiben unveraendert, damit
+        # das estimated-Mail-Gate Biotech weiterhin zulaesst (dokumentierte,
+        # jetzt gekennzeichnete Ausnahme).
+        row["Trade_Setup_Synthetic"] = True
         row["VRVP_POC"] = setup.get("vrvp_poc")
         row["VRVP_VAH"] = setup.get("vrvp_vah")
         row["VRVP_VAL"] = setup.get("vrvp_val")

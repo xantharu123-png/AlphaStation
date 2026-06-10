@@ -15,7 +15,8 @@ import requests
 from modules.indicators import (
     calculate_sma, calculate_ema, calculate_rsi_from_bars,
     calculate_adx, calculate_atr_14, calculate_obv,
-    calculate_macd, calculate_stochastic, calculate_ema_series,
+    calculate_macd, calculate_macd_histogram_series,
+    calculate_stochastic, calculate_ema_series,
     calculate_vwap, calculate_atr_from_ohlc
 )
 from modules.data_fetchers import rate_limited_get
@@ -769,7 +770,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
      BREAKOUT IMMINENT V2.1 — 20-Signal Composite Prediction (Pro-Reweighted)
 
     Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
-    Maximum: 188 Punkte — GEWICHTET nach Trader-Wisdom:
+    Maximum: 183 Punkte (N-Fix BI-Audit 2026-06-10; RSI/Stoch zaehlen als EIN
+    Momentum-Block mit max()) — GEWICHTET nach Trader-Wisdom:
 
     crypto_mode=True: Volume-Signale (2,3,8,16,19) werden durch Spread-basierte
     Preis-Proxies ersetzt, da CoinGecko kein historisches Volume liefert.
@@ -798,7 +800,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         (is_valid, score, max_score, details, direction_confidence, grade)
     """
     if not bars or len(bars) < 15:
-        return False, 0, 188, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
+        return False, 0, 183, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
 
     score = 0
     sm_fires = 0  # Smart Money Fires (Boosted-Signale auf Maximum)
@@ -923,6 +925,13 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     price_change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
     price_flat = abs(price_change_pct) < 5  # Preis relativ flat
 
+    # M-2 (BI-Audit 2026-06-10): OBV-Flow (Signal 3) und Inst-Accumulation (Signal 8)
+    # messen dasselbe Up-Volumen-Phaenomen (74% Doppel-fires auf Nur-Volumen-Serien).
+    # Beide Signale behalten ihre PUNKTE, aber fire/hit landen in lokalen Zaehlern
+    # und werden NACH Signal 8 per max-Prinzip dedupliziert (wie RSI/Stoch-Dedup).
+    obv_fire = 0; obv_hit = 0
+    acc_fire = 0; acc_hit = 0
+
     if crypto_mode:
         # Cumulative Close-Delta: Summe der täglichen Preis-Änderungen (wie OBV ohne Vol)
         ccd = [0]
@@ -940,10 +949,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
             if price_flat:
                 if direction == "long" and ccd_rising:
-                    score += 13; sm_fires += 1; sm_hits += 1
+                    score += 13; obv_fire = 1; obv_hit = 1
                     details.append(f" Close-Momentum bullisch: Preis flat, Momentum steigt")
                 elif direction == "short" and ccd_falling:
-                    score += 13; sm_fires += 1; sm_hits += 1
+                    score += 13; obv_fire = 1; obv_hit = 1
                     details.append(f" Close-Momentum baerisch: Preis flat, Momentum faellt")
                 elif direction == "long" and ccd_falling:
                     details.append(f" Close-Momentum faellt = eher Short")
@@ -954,10 +963,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     details.append(f" Close-Momentum neutral")
             else:
                 if direction == "long" and ccd_rising:
-                    score += 7; sm_hits += 1
+                    score += 7; obv_hit = 1
                     details.append(f" Close-Momentum steigt ({price_change_pct:+.1f}%)")
                 elif direction == "short" and ccd_falling:
-                    score += 7; sm_hits += 1
+                    score += 7; obv_hit = 1
                     details.append(f" Close-Momentum faellt ({price_change_pct:+.1f}%)")
                 else:
                     details.append(f" Close-Momentum passt nicht ({price_change_pct:+.1f}%)")
@@ -992,10 +1001,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
             if price_flat:
                 if direction == "long" and obv_rising:
-                    score += 13; sm_fires += 1; sm_hits += 1
+                    score += 13; obv_fire = 1; obv_hit = 1
                     details.append(f" OBV-Divergenz bullisch: Preis flat, OBV steigt [Smart Money!]")
                 elif direction == "short" and obv_falling:
-                    score += 13; sm_fires += 1; sm_hits += 1
+                    score += 13; obv_fire = 1; obv_hit = 1
                     details.append(f" OBV-Divergenz baerisch: Preis flat, OBV faellt [Smart Money!]")
                 elif direction == "long" and obv_falling:
                     details.append(f" OBV faellt = eher Short")
@@ -1006,10 +1015,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     details.append(f" OBV neutral (kein Signal)")
             else:
                 if direction == "long" and obv_rising:
-                    score += 7; sm_hits += 1
+                    score += 7; obv_hit = 1
                     details.append(f" OBV steigt (Preis nicht flat: {price_change_pct:+.1f}%)")
                 elif direction == "short" and obv_falling:
-                    score += 7; sm_hits += 1
+                    score += 7; obv_hit = 1
                     details.append(f" OBV faellt (Preis nicht flat: {price_change_pct:+.1f}%)")
                 else:
                     details.append(f" OBV-Trend passt nicht zur Richtung (Preis: {price_change_pct:+.1f}%)")
@@ -1196,19 +1205,30 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         distri_days += 1
 
         if direction == "long" and accum_days >= 4 and accum_days > distri_days * 1.5:
-            score += 7; sm_hits += 1; sm_fires += 1
+            score += 7; acc_fire = 1; acc_hit = 1
             details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Akkumulation: {accum_days} Akku vs {distri_days} Distri [SM]")
         elif direction == "long" and accum_days >= 3 and accum_days > distri_days:
-            score += 4; sm_hits += 1
+            score += 4; acc_hit = 1
             details.append(f" Akkumulation: {accum_days} vs {distri_days} Tage")
         elif direction == "short" and distri_days >= 4 and distri_days > accum_days * 1.5:
-            score += 7; sm_hits += 1; sm_fires += 1
+            score += 7; acc_fire = 1; acc_hit = 1
             details.append(f" {'Spread' if crypto_mode else 'Inst.'}-Distribution: {distri_days} Distri vs {accum_days} Akku [SM]")
         elif direction == "short" and distri_days >= 3 and distri_days > accum_days:
-            score += 4; sm_hits += 1
+            score += 4; acc_hit = 1
             details.append(f" Distribution: {distri_days} vs {accum_days} Tage")
         else:
             details.append(f" Gemischte Aktivitaet: {accum_days} Akku / {distri_days} Distri")
+
+    # ===================================================================
+    # M-2 DEDUP (BI-Audit 2026-06-10): Volumen-Komplex = OBV-Flow (S3) +
+    # Inst-Accumulation (S8). Zusammen max 1 fire + 1 hit — das staerkere
+    # Signal zaehlt (max-Prinzip wie RSI/Stoch-Dedup, FIX 4).
+    # Punkte beider Signale bleiben unangetastet, nur die ZAEHLUNG dedupliziert.
+    # ===================================================================
+    sm_fires += max(obv_fire, acc_fire)
+    sm_hits += max(obv_hit, acc_hit)
+    if (obv_fire + acc_fire) > 1 or (obv_hit + acc_hit) > 1:
+        details.append("  [M-2 Dedup: OBV-Flow + Inst-Akkumulation = 1 Volumen-Phaenomen -> max 1 fire/hit]")
 
     # ===================================================================
     # SIGNAL 9: RSI DRIFT — max 5 Punkte [FIX 1: Reduced from 10 to 5]
@@ -1364,7 +1384,11 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # SIGNAL 13: MACD HISTOGRAM DIVERGENZ — max 10 Punkte
     # MACD-Histogram dreht → unsichtbares Momentum baut auf
     # ===================================================================
-    macd_line, signal_line, hist = calculate_macd(bars)
+    # K-2-FIX (BI-Audit 2026-06-10): calculate_macd liefert SKALARE -> alter Code
+    # behandelte hist als Liste => TypeError ab 35 Bars (bg/Autotrader-Crash) bzw.
+    # toter Code bei <=34 Bars (api-Pfad, 10 Punkte nie vergebbar). Jetzt: echte
+    # Histogramm-SERIE; None-Padding (Prefix) wird entfernt, Chronologie bleibt.
+    hist = [h for h in calculate_macd_histogram_series(closes) if h is not None]
     if hist and len(hist) >= 3:
         # Histogram Slope: letzte 3 Werte
         hist_slope = hist[-1] - hist[-3]
@@ -1438,19 +1462,37 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         range_high_15 = max(highs[-min(15, n):])
         range_low_15 = min(lows[-min(15, n):])
         atr_ob = sum((bars[i]["high"] - bars[i]["low"]) for i in range(max(0, n-10), n)) / min(10, n)
+        # M-2 (BI-Audit 2026-06-10): Zonen-Naehe einheitlich auf 3% des Preises
+        # gedeckelt. atr*2 allein war bei volatilen Serien 3-5% vom Preis ->
+        # 42% OB-Treffer auf Random Walks. In engen Konsolidierungen (dem
+        # eigentlichen Setup) ist atr*2 < 3% — dort aendert der Deckel nichts.
+        ob_tol = min(atr_ob * 2, current_price * 0.03) if current_price > 0 else atr_ob * 2
 
         if direction == "long":
             bull_obs = ob_data.get("bullish_obs", [])
             if bull_obs:
                 # V68 Fix: Key "ob_high"/"ob_low" statt "zone_high"/"zone_low" (KeyError behoben)
-                near_breakout = any(abs(ob["ob_high"] - range_high_15) < atr_ob * 2 for ob in bull_obs)
-                near_support = any(abs(ob["ob_low"] - range_low_15) < atr_ob * 2 for ob in bull_obs)
+                near_breakout = any(abs(ob["ob_high"] - range_high_15) < ob_tol for ob in bull_obs)
+                near_support = any(abs(ob["ob_low"] - range_low_15) < ob_tol for ob in bull_obs)
                 if near_breakout:
                     score += 14; sm_fires += 1; sm_hits += 1
                     details.append(f" Bullish OB nahe Breakout-Level = institutionelles Kaufinteresse!")
                 elif near_support:
-                    score += 9; sm_hits += 1
-                    details.append(f" Bullish OB stuetzt Range-Low = Demand Zone")
+                    score += 9
+                    # M-2 (BI-Audit 2026-06-10): hit nur, wenn die OB-Zone binnen 3%
+                    # des aktuellen Preises liegt (Demand Zone muss handelbar nah sein,
+                    # sonst Gratis-hit ohne Richtungsaussage). Punkte bleiben.
+                    ob_near_price = any(
+                        (ob["ob_low"] <= current_price <= ob["ob_high"])
+                        or (current_price > 0 and min(abs(ob["ob_high"] - current_price),
+                                                      abs(ob["ob_low"] - current_price)) / current_price * 100 < 3)
+                        for ob in bull_obs
+                    )
+                    if ob_near_price:
+                        sm_hits += 1
+                        details.append(f" Bullish OB stuetzt Range-Low = Demand Zone (nahe Preis)")
+                    else:
+                        details.append(f" Bullish OB stuetzt Range-Low (>3% vom Preis — kein SM-hit)")
                 else:
                     score += 4
                     details.append(f" Bullish OBs vorhanden ({len(bull_obs)}x) aber nicht in Naehe")
@@ -1460,14 +1502,26 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             bear_obs = ob_data.get("bearish_obs", [])
             if bear_obs:
                 # V68 Fix: Key "ob_low"/"ob_high" statt "zone_low"/"zone_high"
-                near_breakout = any(abs(ob["ob_low"] - range_low_15) < atr_ob * 2 for ob in bear_obs)
-                near_resistance = any(abs(ob["ob_high"] - range_high_15) < atr_ob * 2 for ob in bear_obs)
+                # M-2: gleicher 3%-Naehe-Deckel wie im Long-Zweig
+                near_breakout = any(abs(ob["ob_low"] - range_low_15) < ob_tol for ob in bear_obs)
+                near_resistance = any(abs(ob["ob_high"] - range_high_15) < ob_tol for ob in bear_obs)
                 if near_breakout:
                     score += 14; sm_fires += 1; sm_hits += 1
                     details.append(f" Bearish OB nahe Breakdown-Level = institutioneller Verkaufsdruck!")
                 elif near_resistance:
-                    score += 9; sm_hits += 1
-                    details.append(f" Bearish OB deckt Range-High = Supply Zone")
+                    score += 9
+                    # M-2 (BI-Audit 2026-06-10): hit nur mit OB-Zone binnen 3% des Preises
+                    ob_near_price = any(
+                        (ob["ob_low"] <= current_price <= ob["ob_high"])
+                        or (current_price > 0 and min(abs(ob["ob_high"] - current_price),
+                                                      abs(ob["ob_low"] - current_price)) / current_price * 100 < 3)
+                        for ob in bear_obs
+                    )
+                    if ob_near_price:
+                        sm_hits += 1
+                        details.append(f" Bearish OB deckt Range-High = Supply Zone (nahe Preis)")
+                    else:
+                        details.append(f" Bearish OB deckt Range-High (>3% vom Preis — kein SM-hit)")
                 else:
                     score += 4
                     details.append(f" Bearish OBs vorhanden ({len(bear_obs)}x) aber nicht in Naehe")
@@ -1526,8 +1580,19 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 score += 14; sm_fires += 1; sm_hits += 1
                 details.append(f" Buyside Liquidity {near_liq[0]['level']:.2f} knapp ueber Range = Stop-Hunt Potential")
             elif liq_data["buyside"]:
-                score += 5; sm_hits += 1
-                details.append(f" Buyside Liq vorhanden ({len(liq_data['buyside'])} Levels)")
+                score += 5
+                # M-2 (BI-Audit 2026-06-10): "vorhanden" allein ist keine Richtungsaussage
+                # (15% Gratis-hits auf Random Walks). hit nur, wenn ein Pool binnen 3%
+                # des Range-Highs liegt (Referenzfeld "level"). Punkte bleiben.
+                near_pool = any(
+                    current_price > 0 and abs(l["level"] - range_high_17) / current_price * 100 < 3
+                    for l in liq_data["buyside"]
+                )
+                if near_pool:
+                    sm_hits += 1
+                    details.append(f" Buyside Liq nahe Range-High ({len(liq_data['buyside'])} Levels)")
+                else:
+                    details.append(f" Buyside Liq vorhanden ({len(liq_data['buyside'])} Levels, >3% vom Range-High — kein SM-hit)")
             else:
                 details.append(f" Keine Buyside Liquidity erkannt")
         elif direction == "short" and liq_data.get("sellside"):
@@ -1536,8 +1601,17 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 score += 14; sm_fires += 1; sm_hits += 1
                 details.append(f" Sellside Liquidity {near_liq[0]['level']:.2f} knapp unter Range = Stop-Hunt Potential")
             elif liq_data["sellside"]:
-                score += 5; sm_hits += 1
-                details.append(f" Sellside Liq vorhanden ({len(liq_data['sellside'])} Levels)")
+                score += 5
+                # M-2 (BI-Audit 2026-06-10): hit nur mit Pool binnen 3% des Range-Lows
+                near_pool = any(
+                    current_price > 0 and abs(l["level"] - range_low_17) / current_price * 100 < 3
+                    for l in liq_data["sellside"]
+                )
+                if near_pool:
+                    sm_hits += 1
+                    details.append(f" Sellside Liq nahe Range-Low ({len(liq_data['sellside'])} Levels)")
+                else:
+                    details.append(f" Sellside Liq vorhanden ({len(liq_data['sellside'])} Levels, >3% vom Range-Low — kein SM-hit)")
             else:
                 details.append(f" Keine Sellside Liquidity erkannt")
         else:
@@ -1742,14 +1816,63 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         details.append(f"  [Dedup: max({rsi_points}, {stoch_points}) = {momentum_points} to avoid double-counting momentum]")
 
     # ===================================================================
+    # M-3 (BI-Audit 2026-06-10): DISTRIBUTION-MALUS — nur LONG
+    # Befund: Lehrbuch-Distribution erreichte Ø 59,5 Long-Punkte, 67/80 ueber
+    # Threshold — der Score bestrafte Distribution nicht. Wyckoff: Lower Highs
+    # + dominantes Down-Volumen = Markdown-Risiko, kein Long-Setup.
+    # Kein Spiegel-Malus fuer Short: Short PROFITIERT von Distribution.
+    # Regel: Lower-Highs-Anteil >= 65% UND Avg-Down-Day-Vol > 1.2x Avg-Up-Day-Vol
+    # (keine Up-Tage vorhanden => Down-Volumen dominiert trivialerweise).
+    # Crypto ausgenommen: kein echtes Volumen -> Bedingung nicht messbar.
+    # Lower-High-Metrik: High unter dem Maximum der 3 Vorgaenger-Bars (Swing-
+    # bewusst). Bar-zu-bar-Vergleich ist im Rauschen blind: Lehrbuch-
+    # Distribution erreicht damit nur ~53% — 3-Bar-Referenz: Distribution
+    # Ø 81% (min 67%), Akkumulation Ø 58%, Harness-Case-B 52% (gemessen).
+    # ===================================================================
+    if direction == "long" and not crypto_mode and n >= 10:
+        dist_lower_highs = sum(1 for i in range(3, n) if highs[i] < max(highs[i - 3:i]))
+        dist_lh_share = dist_lower_highs / max(1, n - 3)
+        up_day_vols = [volumes[i] for i in range(1, n) if closes[i] > closes[i - 1]]
+        down_day_vols = [volumes[i] for i in range(1, n) if closes[i] < closes[i - 1]]
+        if dist_lh_share >= 0.65 and down_day_vols:
+            avg_up_v = (sum(up_day_vols) / len(up_day_vols)) if up_day_vols else 0.0
+            avg_down_v = sum(down_day_vols) / len(down_day_vols)
+            if avg_down_v > avg_up_v * 1.2:
+                score = max(0, score - 10)
+                details.append(
+                    f" Distribution-Malus: -10 (Lower Highs {dist_lh_share:.0%}, "
+                    f"Down-Vol {avg_down_v / max(1.0, avg_up_v):.1f}x Up-Vol)"
+                )
+
+    # ===================================================================
     # FINAL SCORE + RICHTUNGS-KONFIDENZ + GRADE + SMART MONEY SUB-SCORE
     # ===================================================================
-    # Tatsächliche Summe der Signal-Maxima (nach FIX 1 + FIX 4):
-    # 6+5+13+10+5+10+14+7+5+10+14+6+10+max(5,10)+14+10+14+10+10+5 = 188
-    # FIX 1: Signal 8 (14→7) + Signal 9 (10→5) = -12 pts from OG 200
-    # FIX 4: RSI+Stoch take max() instead of sum → often saves ~5 pts on average
-    # (BOOSTED-Signale: 14 Punkte max, CUT-Signale: 5-6 Punkte max)
-    max_score = 188
+    # N-FIX (BI-Audit 2026-06-10): Korrekte Summe der Signal-Maxima = 183.
+    # Der alte Kommentar (188) zaehlte RSI(5) UND max(RSI 5, Stoch 10) DOPPELT —
+    # nach FIX 4 zaehlt der Momentum-Block nur EINMAL mit max() = 10.
+    # Aufschluesselung (nach FIX 1 + FIX 4 + K-2):
+    #   S1  ATR-Squeeze            6
+    #   S2  VolDryUp/Body          5
+    #   S3  OBV-Divergenz         13
+    #   S4  Close-Clustering      10
+    #   S5  Range-Duration         5
+    #   S6  Boundary-Tests        10
+    #   S7  ADX Turning           14
+    #   S8  Inst-Accumulation      7   (FIX 1: 14 -> 7)
+    #   S9+S14 Momentum max(5,10) 10   (FIX 4: RSI/Stoch dedupliziert)
+    #   S10 Higher Lows           10
+    #   S11 Resilience            14
+    #   S12 StdDev-Kompression     6
+    #   S13 MACD-Histogramm       10   (K-2: via Serie wieder erreichbar)
+    #   S15 Order Blocks          14
+    #   S16 FVG                   10
+    #   S17 Liquidity             14
+    #   S18 Fib-Confluence        10
+    #   S19 Volume-Void           10
+    #   S20 Body-Kompression       5
+    #   Summe                    183
+    # direction_confidence kann damit 100% erreichen (vorher Deckel ~92%).
+    max_score = 183
 
     # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
     # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation

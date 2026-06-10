@@ -8,6 +8,7 @@ Reine API-Funktionen ohne Streamlit-Abhängigkeiten:
 - Alpaca: Realtime Prices
 - Backtest: Daily Data
 """
+import re
 import time
 import threading
 import requests
@@ -79,6 +80,47 @@ def _get_config_value(key):
             continue
     return ""
 
+# N-a (Biotech-Audit 10.06.): Fuzzy-Quartals-/Halbjahres-Daten.
+# "Q3 2026"/"H2 2026" haben kein exaktes catalyst_date — vorher fiel der
+# Readout still aus der Wertung. Jetzt: MITTE des Zeitraums als Schaetzdatum.
+_FUZZY_QH_RE = re.compile(r"\b([QH])\s*([1-4])\s*[,/'’-]?\s*((?:20)\d{2}|\d{2})\b", re.IGNORECASE)
+_FUZZY_QH_RE_YEARFIRST = re.compile(r"\b((?:20)\d{2})\s*([QH])\s*([1-4])\b", re.IGNORECASE)
+
+
+def _parse_fuzzy_catalyst_date(text):
+    """
+    N-a (10.06.): 'Q3 2026' / 'H2 2026' → ISO-Datum der Zeitraums-MITTE.
+    Q1→15.02., Q2→15.05., Q3→15.08., Q4→15.11. | H1→01.04., H2→01.10.
+    Returns ISO-String 'YYYY-MM-DD' oder None.
+    """
+    if not text:
+        return None
+    _s = str(text)
+    _kind = _num = _year = None
+    _m = _FUZZY_QH_RE.search(_s)
+    if _m:
+        _kind, _num, _year = _m.group(1).upper(), int(_m.group(2)), _m.group(3)
+    else:
+        _m2 = _FUZZY_QH_RE_YEARFIRST.search(_s)
+        if _m2:
+            _year, _kind, _num = _m2.group(1), _m2.group(2).upper(), int(_m2.group(3))
+    if not _kind:
+        return None
+    try:
+        _year = int(_year)
+    except (TypeError, ValueError):
+        return None
+    if _year < 100:
+        _year += 2000
+    if _kind == "Q" and 1 <= _num <= 4:
+        _md = {1: "02-15", 2: "05-15", 3: "08-15", 4: "11-15"}[_num]
+    elif _kind == "H" and _num in (1, 2):
+        _md = {1: "04-01", 2: "10-01"}[_num]
+    else:
+        return None
+    return f"{_year}-{_md}"
+
+
 def _load_bpiq_catalyst_cache():
     """
     Lädt ALLE Drugs mit Catalyst-Dates von BPIQ in einen In-Memory-Cache.
@@ -145,7 +187,9 @@ def _load_bpiq_catalyst_cache():
 
         # Gruppiere nach Ticker mit vollständiger Daten-Aufbereitung
         cache = {}
-        _now = datetime.now()
+        # N-c (Biotech-Audit 10.06.): UTC-DATUM statt naiver Server-now() —
+        # naive Zeit konnte T-0 als OVERDUE (days_until=-1) einstufen.
+        _today_utc = datetime.now(dt.timezone.utc).date()
         for drug in all_drugs:
             ticker = drug.get("ticker", "").upper()
             if not ticker:
@@ -161,13 +205,25 @@ def _load_bpiq_catalyst_cache():
 
             # Tage bis Catalyst berechnen + Datum validieren
             days_until = None
+            date_estimated = False
+            _had_invalid_date = False
             if cat_date:
                 try:
                     _cd = datetime.strptime(cat_date[:10], "%Y-%m-%d")
-                    days_until = (_cd - _now).days
+                    days_until = (_cd.date() - _today_utc).days  # N-c: Datums-Arithmetik in UTC
                 except (ValueError, TypeError):
-                    # Ungültiges Datum (z.B. "2026-03-35") → ignorieren
+                    # Ungültiges Datum (z.B. "2026-03-35") → Fuzzy-Fallback unten
                     cat_date = None
+                    _had_invalid_date = True
+            if days_until is None:
+                # N-a (10.06.): Fuzzy-Quartale ("Q3 2026"/"H2 2026") → Mitte des
+                # Zeitraums als Schaetzdatum statt stillem Verwurf des Readouts.
+                _fuzzy_iso = _parse_fuzzy_catalyst_date(cat_text)
+                if _fuzzy_iso:
+                    cat_date = _fuzzy_iso
+                    date_estimated = True
+                    days_until = (datetime.strptime(_fuzzy_iso, "%Y-%m-%d").date() - _today_utc).days
+                elif _had_invalid_date:
                     cat_text = "TBA"
 
             # Kategorie bestimmen
@@ -209,6 +265,7 @@ def _load_bpiq_catalyst_cache():
                 "catalyst_date": cat_date,
                 "catalyst_date_text": cat_text,
                 "days_until": days_until,
+                "date_estimated": date_estimated,  # N-a (10.06.): Quartals-/Halbjahres-Schaetzung
                 "category": category,
                 "phase_mult": phase_mult,
                 "bpiq_score": bpiq_score,
@@ -1201,7 +1258,10 @@ def _get_bpiq_catalysts(ticker):
         elif cat == "LATER":
             readout_score += 0.5 * pm
 
-        if cat in ("OVERDUE", "IMMINENT", "UPCOMING"):
+        # N-b (Biotech-Audit 10.06.): LATER scored (0.5*pm) → erscheint jetzt
+        # auch in catalyst_readouts (Konsistenz: was scored, ist sichtbar).
+        # Cache-Sortierung haelt OVERDUE/IMMINENT/UPCOMING weiter vorn.
+        if cat in ("OVERDUE", "IMMINENT", "UPCOMING", "LATER"):
             catalyst_readouts.append(drug)
 
     readout_score = min(15, int(readout_score))
@@ -1230,6 +1290,11 @@ def _get_bpiq_catalysts(ticker):
                 readout_label = f"[~] {stage} in {days}d — {drug_name}"
             elif cat == "UPCOMING":
                 readout_label = f"[+] {stage} in {days}d — {drug_name}"
+
+        # N-b (10.06.): LATER-only-Faelle bekommen ein eigenes Label
+        # (vorher leer, obwohl der Readout scored).
+        if not readout_label and cat == "LATER" and days is not None:
+            readout_label = f"[.] {stage} in {days}d — {drug_name}"
 
     return {
         "readout_score": readout_score,

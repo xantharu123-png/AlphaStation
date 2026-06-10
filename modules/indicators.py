@@ -319,6 +319,45 @@ def calculate_macd(bars, fast=12, slow=26, signal=9):
     return macd_line[-1], signal_line[-1], hist[-1] if hist else 0
 
 
+def calculate_macd_histogram_series(closes, fast=12, slow=26, signal=9):
+    """MACD-Histogramm als chronologische SERIE, None-gepolstert.
+
+    K-2-FIX (BI-Audit 2026-06-10): calculate_macd() liefert SKALARE (letzte Werte)
+    und bleibt fuer Bestandskonsumenten UNVERAENDERT. Konsumenten, die Slope/Turn
+    des Histogramms brauchen (patterns.analyze_breakout_imminent Signal 13),
+    nutzen DIESE Serie statt den Skalar als Liste zu missbrauchen (TypeError).
+
+    Args:
+        closes: Schlusskurse chronologisch (aeltester zuerst, neuester zuletzt)
+        fast/slow/signal: Standard-MACD-Perioden (12/26/9)
+
+    Returns:
+        Liste in Laenge von closes. result[i] = Histogramm (MACD - Signallinie)
+        am Bar i, oder None wo noch nicht berechenbar (None-Padding vorne,
+        Konvention identisch zu calculate_ema_series mit SMA-Seed).
+        Erster berechenbarer Index: max(fast, slow) + signal - 2
+        (bei 12/26/9 also Index 33 -> ab 34 Closes existiert mind. ein Wert).
+    """
+    if not closes:
+        return []
+    n = len(closes)
+    result = [None] * n
+    if fast <= 0 or slow <= 0 or signal <= 0:
+        return result
+    start = max(fast, slow) - 1  # ab diesem Index existieren beide EMAs
+    if n <= start:
+        return result
+    ema_fast = calculate_ema_series(closes, fast)
+    ema_slow = calculate_ema_series(closes, slow)
+    # MACD-Linie kompakt ab 'start' (beide EMA-Serien sind dort non-None)
+    macd_line = [ema_fast[i] - ema_slow[i] for i in range(start, n)]
+    signal_series = calculate_ema_series(macd_line, signal)
+    for j, sig in enumerate(signal_series):
+        if sig is not None:
+            result[start + j] = macd_line[j] - sig
+    return result
+
+
 def calculate_stochastic(bars, k_period=14, d_period=3):
     """Stochastic Oscillator (%K, %D). Returns (k, d) oder (None, None)."""
     if not bars or len(bars) < k_period + d_period:

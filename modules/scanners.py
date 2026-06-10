@@ -60,9 +60,15 @@ BIOTECH_NAME_KEYWORDS = [
 ]
 
 FDA_CATALYST_KEYWORDS = {
+    # K-1 (Biotech-Audit 10.06.): Texte werden vor dem Matching Roman→Arabisch
+    # normalisiert ("phase iii" → "phase 3"). Bare Roman-Keywords ("phase iii",
+    # "phase i") sind deshalb entfernt — sie matchten zudem kontextfrei jede
+    # Erwaehnung (auch Fehlschlaege) als tier2.
+    # M-5 (10.06.): "fda clearance"/"510(k)" sind Device-Routine (kein
+    # Binary-Drug-Event) — von tier1 (30) auf tier4-Niveau (8) gestuft.
     "tier1": {
         "keywords": ["fda approval", "fda approved", "pdufa", "nda accepted", "bla accepted",
-                     "fda clearance", "breakthrough therapy", "fast track", "priority review",
+                     "breakthrough therapy", "fast track", "priority review",
                      "accelerated approval", "orphan drug", "emergency use", "eua granted",
                      "adcom", "advisory committee",
                      "fda decision", "fda action date"],
@@ -70,11 +76,11 @@ FDA_CATALYST_KEYWORDS = {
         "label": " FDA Event"
     },
     "tier2": {
-        "keywords": ["phase 3 results", "phase 3 data", "phase iii", "pivotal trial",
+        "keywords": ["phase 3 results", "phase 3 data", "pivotal trial",
                      "primary endpoint met", "primary endpoint", "topline results", "topline data",
                      "positive results", "statistically significant", "overall survival",
                      "progression-free survival", "complete remission", "phase 2 results",
-                     "phase ii data", "late-breaking", "interim analysis", "interim data"],
+                     "phase 2 data", "late-breaking", "interim analysis", "interim data"],
         "score": 22,
         "label": " Trial Results"
     },
@@ -87,9 +93,10 @@ FDA_CATALYST_KEYWORDS = {
         "label": " Deal/Pipeline"
     },
     "tier4": {
-        "keywords": ["preclinical", "phase 1", "phase i", "proof of concept",
+        "keywords": ["preclinical", "phase 1", "proof of concept",
                      "patent granted", "patent filed", "ip protection", "data presentation",
-                     "conference presentation", "manuscript published", "peer review"],
+                     "conference presentation", "manuscript published", "peer review",
+                     "fda clearance", "510(k)"],
         "score": 8,
         "label": " Early Pipeline"
     },
@@ -113,7 +120,99 @@ BIOTECH_NEGATIVE_CATALYSTS = {
     "going concern": -20,
     "delisting": -25,
     "sec investigation": -15,
+    # M-1/M-2 (Biotech-Audit 10.06.): Kapitalerhoehung/Dilution + eingestellte
+    # Programme in die News-Negativliste (mit Wortgrenzen; Verb-Formen und
+    # Kontext-Fenster deckt zusaetzlich BIOTECH_NEGATIVE_PATTERNS ab).
+    "public offering": -12,
+    "registered direct offering": -12,
+    "underwritten offering": -12,
+    "discontinued": -20,
+    "discontinuation": -20,
+    "terminated": -18,
 }
+
+# K-1 (Biotech-Audit 10.06.): Verb-Formen/Kontext-Patterns fuer Fehlschlaege.
+# Die starre Phrasen-Liste oben fing "misses primary endpoint", "failed to
+# meet", "fell short", "did not achieve" etc. NICHT — das schlimmste
+# Biotech-Outcome wurde als positiver Katalysator gescored. Patterns laufen
+# auf title UND description (normalisiert, lowercased, Roman→Arabisch).
+# [^.!?;]{0,60} = Kontext-Fenster innerhalb desselben Satzteils.
+BIOTECH_NEGATIVE_PATTERNS = [
+    ("missed endpoint", -25, re.compile(r"\bmiss(?:es|ed|ing)?\b[^.!?;]{0,60}?\bendpoints?\b")),
+    ("failed to meet", -25, re.compile(r"\bfail(?:s|ed)?\s+to\s+(?:meet|achieve|demonstrate)\b")),
+    ("fell short", -20, re.compile(r"\bfell\s+short\b")),
+    ("disappointing results", -20, re.compile(r"\bdisappointing\s+(?:results|data|topline)\b")),
+    ("did not meet", -25, re.compile(r"\b(?:did|does|do)\s+not\s+(?:meet|achieve|reach|demonstrate)\b")),
+    ("no significant benefit", -20, re.compile(r"\bno\s+(?:statistically\s+significant|significant)\s+(?:improvement|difference|benefit)\b")),
+    ("terminated program", -20, re.compile(r"\bterminat(?:e|es|ed|ing|ion)\b[^.!?;]{0,60}?\b(?:trial|study|development|program)\b")),
+    ("discontinued development", -20, re.compile(r"\bdiscontinu(?:e|es|ed|ing|ation)\b[^.!?;]{0,60}?\b(?:development|program|trial|study)\b")),
+    ("public offering", -12, re.compile(r"\b(?:public|registered\s+direct|underwritten)\s+offering\b")),
+    ("dilution", -10, re.compile(r"\bdilut(?:ion|ive)\b")),
+    ("shares plunge", -15, re.compile(r"\bshares?\s+(?:plunge[ds]?|tumble[ds]?|sink|sinks|sank|crater(?:s|ed)?)\b")),
+    ("delisting", -25, re.compile(r"\bdelist(?:s|ed|ing)?\b")),
+]
+
+# K-1c: Verneinungsfenster — Negation bis ~6 Woerter VOR einem Keyword
+# ("did not ... meet primary endpoint", "no safety concerns seen").
+_BIOTECH_NEGATION_BEFORE_RE = re.compile(
+    r"(?:\b(?:did|does|do)\s+not\b|\bnot\b|\bno\b|\bwithout\b|"
+    r"\bfail(?:s|ed)?\s+to\b|\bunable\s+to\b|\babsence\s+of\b|\bfree\s+of\b)"
+    r"(?:\W+\w+){0,5}\W*$"
+)
+
+# K-1a: Roman→Arabisch-Normalisierung fuer Phasen (Reihenfolge: iii vor ii vor i).
+_BIOTECH_ROMAN_PHASES = [
+    (re.compile(r"\bphase\s+iii\b"), "phase 3"),
+    (re.compile(r"\bphase\s+iv\b"), "phase 4"),
+    (re.compile(r"\bphase\s+ii\b"), "phase 2"),
+    (re.compile(r"\bphase\s+i\b"), "phase 1"),
+]
+
+
+def _biotech_normalize_text(text):
+    """K-1a (10.06.): lowercased + Phasen Roman→Arabisch ('phase iii'→'phase 3')."""
+    t = (text or "").lower()
+    for _rx, _repl in _BIOTECH_ROMAN_PHASES:
+        t = _rx.sub(_repl, t)
+    return t
+
+
+def _biotech_negative_match(text, kw):
+    """Negativ-Keyword mit Verneinungs-Guard: 'no safety concerns seen' ist
+    KEIN Negativ-Signal. Liefert True nur fuer nicht-verneinte Treffer."""
+    for _m in re.finditer(r"(?<!\w)" + re.escape(kw) + r"s?(?!\w)", text):
+        _prefix = text[max(0, _m.start() - 60):_m.start()]
+        if _BIOTECH_NEGATION_BEFORE_RE.search(_prefix):
+            continue
+        return True
+    return False
+
+
+def _biotech_positive_match(text, kw):
+    """K-1c (10.06.): Positiv-Keyword nur ohne Negation im Vorfenster
+    ('did not meet primary endpoint' darf 'primary endpoint' nicht scoren)."""
+    for _m in re.finditer(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", text):
+        _prefix = text[max(0, _m.start() - 60):_m.start()]
+        if _BIOTECH_NEGATION_BEFORE_RE.search(_prefix):
+            continue
+        return True
+    return False
+
+
+# H-4 (Biotech-Audit 10.06.): FORWARD-Katalysatoren — angekuendigte, noch NICHT
+# eingetretene Ergebnisse ("topline results expected in Q3") duerfen nicht wie
+# eingetretene Events scoren. Termin-Wertung laeuft ueber den BPIQ-Pfad.
+# "pleased/proud to report" ist Ergebnis-Sprache (kein Forward) → Lookbehinds.
+_BIOTECH_FORWARD_RE = re.compile(
+    r"\b(?:expected|anticipated|upcoming|on\s+track\s+to|"
+    r"will\s+(?:report|announce|present|release)|"
+    r"plans?\s+to\s+(?:report|announce|present|release)|"
+    r"expects?\s+to\s+(?:report|announce|present|release)|"
+    r"(?<!pleased )(?<!proud )(?<!happy )(?<!glad )to\s+report)\b"
+)
+_BIOTECH_FORWARD_RESULT_RE = re.compile(
+    r"\b(?:results?|data|readouts?|topline|interim|endpoints?|analysis|findings|decision)\b"
+)
 
 # ── Constants (extracted from scanner.py V70.2) ──
 _AUTOTRADER_CONFIG_FILE = "/tmp/alpha_autotrader_config.json"
@@ -967,6 +1066,33 @@ def _bi_scan_is_running(direction="long"):
     return True
 
 
+def _bi_strip_partial_bar(all_bars):
+    """
+    M-1 (BI-Audit 10.06.): Liefert die Bars OHNE den heutigen, noch LAUFENDEN
+    Handelstag. Der Partial-Bar floss bisher als vollwertige Kerze in die
+    Kontraktions-Signale (ATR-Squeeze meldete morgens in 96% "stark", 8/25
+    marginale Setups flippten invalid->valid nur durch die Tagesuhr).
+    Nach US-Close (>= 16:00 ET) ist der heutige Bar komplett und bleibt drin —
+    gleiche Session-/Datums-Logik wie der RVOL-Pfad (letzter KOMPLETTER Tag).
+    """
+    if not all_bars:
+        return all_bars
+    try:
+        import pytz
+        _et = pytz.timezone("US/Eastern")
+        _now_et = datetime.now(_et)
+        if all_bars[-1].get("date", "") != _now_et.strftime("%Y-%m-%d"):
+            return all_bars  # Letzter Bar ist nicht von heute → komplett
+        if _now_et.hour >= 16:
+            return all_bars  # Nach US-Close → heutiger Bar ist komplett
+        return all_bars[:-1]
+    except Exception:
+        # Fallback: reine Datums-Logik (wie der bestehende RVOL-Pfad)
+        if all_bars[-1].get("date", "") == datetime.now().strftime("%Y-%m-%d"):
+            return all_bars[:-1]
+        return all_bars
+
+
 def _bi_background_scan(poly_key, direction="long", candidates=None):
     """
     Background-Thread: Analysiert vorgeladene Kandidaten auf BI-Signale.
@@ -1077,6 +1203,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         range_fail = 0
         atr_fail = 0
         rr_fail = 0
+        ext_fail = 0       # H-2 (10.06.): Entry/Kurs zu weit auseinander (Chase-Schutz)
+        cum_pump_fail = 0  # H-2c (10.06.): kumulativer 2-Tages-Pump
         score_sum = 0
         score_count = 0
         top_score = 0
@@ -1157,11 +1285,16 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         "close": bar["c"],
                         "volume": bar["v"]
                     })
-                bars = all_bars[-30:]  # Letzte 30 für BI-Analyse
+                # M-1 (BI-Audit 10.06.): Die an analyze_breakout_imminent uebergebenen
+                # Bars enden mit dem letzten KOMPLETTEN Handelstag — der laufende
+                # Partial-Bar verfaelschte die Kontraktions-Signale. Live-Preis-Checks
+                # (Already-Broke-Out, Extension-Gates, Preis-Feld) nutzen weiter all_bars.
+                _session_bars = _bi_strip_partial_bar(all_bars)
+                bars = _session_bars[-30:]  # Letzte 30 KOMPLETTE Tage für BI-Analyse
 
                 # ── Mindest-History: Brauchen min 15 Bars für zuverlässige Analyse ──
                 # IPOs/frische Listings haben zu wenig Daten für Pattern-Erkennung
-                if len(all_bars) < 15:
+                if len(_session_bars) < 15:
                     no_data_count += 1
                     continue
 
@@ -1211,6 +1344,30 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     if direction == "short" and _today_change_pct < -15:
                         continue  # Schon gecrasht — zu spät
 
+                # H-2c (BI-Audit 10.06.): KUMULATIVER Pump-Filter (Long).
+                # Der 1-Tages-Pump-Filter (patterns.py) laesst 2-Tages-Pumps
+                # (+9-12%/Tag) in 25% der Faelle durch. Regel: Summe der letzten
+                # 2 Tages-Moves > 12% UND > 4x StdDev der Vorlauf-Moves → kein Setup
+                # (schon gelaufen). Auf kompletten Tagen gerechnet (ohne Partial-Bar).
+                if direction == "long":
+                    _pp_closes = [b["close"] for b in _session_bars[-30:]]
+                    if len(_pp_closes) >= 10:
+                        _pp_d1 = (_pp_closes[-1] - _pp_closes[-2]) / max(1e-9, _pp_closes[-2]) * 100
+                        _pp_d2 = (_pp_closes[-2] - _pp_closes[-3]) / max(1e-9, _pp_closes[-3]) * 100
+                        _pp_cum2 = _pp_d1 + _pp_d2
+                        _pp_prev = [
+                            abs(_pp_closes[i] - _pp_closes[i - 1]) / max(1e-9, _pp_closes[i - 1]) * 100
+                            for i in range(1, len(_pp_closes) - 2)
+                        ]
+                        if _pp_prev and _pp_cum2 > 12:
+                            _pp_mean = sum(_pp_prev) / len(_pp_prev)
+                            _pp_std = (sum((x - _pp_mean) ** 2 for x in _pp_prev) / len(_pp_prev)) ** 0.5
+                            if _pp_cum2 > 4 * max(0.1, _pp_std):
+                                cum_pump_fail += 1
+                                print(f"[BI {direction}] Suppressed {ticker}: cumulative_pump "
+                                      f"(+{_pp_cum2:.1f}% in 2 Tagen, {_pp_cum2 / max(0.1, _pp_std):.1f}x StdDev)")
+                                continue
+
                 # Analyse
                 result = analyze_breakout_imminent(bars, direction=direction)
                 if len(result) == 8:
@@ -1245,8 +1402,26 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
                     candidate["above_sma20_pct"] = round(_above_sma20_pct, 1)
 
-                # Range berechnen — IMMER auf all_bars basieren (konsistentes 15-Tage-Fenster)
-                _range_bars = all_bars[-15:]
+                # H-2b (BI-Audit 10.06.): Fenster-Kohaerenz Analyse ↔ Level.
+                # Die Signale rechnen auf dem ADAPTIVEN Konsolidierungsfenster —
+                # Entry/Stop/TP muessen dasselbe Fenster nutzen, sonst ist die
+                # Entry-Referenz ein Spike statt der Konsolidierung (Fuzz-Befund:
+                # 22% der validen Longs mit Entry >5% ueber Kurs, median 12,4%).
+                # patterns liefert range_days in den Details ("... Konsolidierung:
+                # N Tage" bzw. "... ignoriert (N Tage)"). Fenster OHNE laufenden
+                # Tag (_session_bars enden mit dem letzten kompletten Handelstag).
+                _range_days = 0
+                for _det in details:
+                    _m_rd = re.search(r"Konsolidierung:\s*(\d+)\s*Tage", str(_det))
+                    if not _m_rd:
+                        _m_rd = re.search(r"ignoriert\s*\((\d+)\s*Tage\)", str(_det))
+                    if _m_rd:
+                        _range_days = int(_m_rd.group(1))
+                        break
+                if _range_days >= 5:
+                    _range_bars = _session_bars[-_range_days:]
+                else:
+                    _range_bars = _session_bars[-15:]  # Fallback: 15 komplette Tage
                 range_high = max(b["high"] for b in _range_bars)
                 range_low = min(b["low"] for b in _range_bars)
                 range_size = range_high - range_low
@@ -1300,13 +1475,25 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     # V2.6b AUDIT: SHORT Entry — verbesserte Berechnung
                     _current = bars[-1]["close"]
                     _range_mid = (range_high + range_low) / 2
+
+                    # H-2 (BI-Audit 10.06.): Short-Extension-Gate — vorher toter Code
+                    # (Range inkl. letzter Kerze ⇒ Extension ≡ 0). Mit dem adaptiven
+                    # Fenster (ohne laufenden Tag) kann der LIVE-Kurs real unter
+                    # range_low liegen: zu weit drunter = Breakdown verpasst (Chase).
+                    # Gate VOR der Breakdown/Pullback-Zweigwahl und auf dem LIVE-Kurs:
+                    # ein Intraday-Crash (letzter KOMPLETTER Close noch in der Range)
+                    # darf nicht in den Pullback-Zweig durchrutschen.
+                    _live_close_s = all_bars[-1]["close"]
+                    _atr_pct_s = atr_5 / _live_close_s if _live_close_s > 0 else 0
+                    if _live_close_s < range_low * (1 - max(2 * _atr_pct_s, 0.03)):
+                        ext_fail += 1
+                        print(f"[BI {direction}] Suppressed {ticker}: entry_too_extended "
+                              f"(Kurs {_live_close_s:.2f} zu weit unter Range-Low {range_low:.2f})")
+                        continue
+
                     _near_low = _current < _range_mid  # Preis in unterer Hälfte = Breakdown
                     if _near_low:
                         # BREAKDOWN-SHORT: Preis nahe/unter Range-Low → Entry bei aktuellem Preis
-                        _breakdown_extension = max(0, range_low - _current)
-                        if _breakdown_extension > max(atr_5 * 1.2, _current * 0.04):
-                            rr_fail += 1
-                            continue
                         candidate["Entry"] = round(_current, 2)
                         reclaim_stop = min(range_high, max(range_low + atr_5 * 0.75, _current + atr_5 * 1.2))
                         candidate["StopLoss"] = round(reclaim_stop, 2)
@@ -1318,11 +1505,22 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         candidate["stop_source"] = "range_high_reclaim_invalidation"
                     risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])
                     # TP basiert auf Support/Range-Extensions, nicht auf reiner R:R-Optimierung.
+                    # H-2 (BI-Audit 10.06.): Formel-Absicherung — mit dem adaptiven
+                    # Range-Fenster (Pre-Breakdown) kann Entry unter range_low liegen.
+                    # min() garantiert Stop > Entry > TP1 > TP2 strukturell
+                    # (alter bi_short-TP1-Befund, der durch die Fensteraenderung
+                    # sonst zurueckkommen koennte).
                     if candidate["Entry"] > range_low and (candidate["Entry"] - range_low) >= risk_short * 1.15:
                         candidate["TP1"] = round(range_low, 2)  # TP1 = Range-Low (logisches Ziel)
                     else:
-                        candidate["TP1"] = round(max(0.01, range_low - range_size * 0.272), 2)
-                    candidate["TP2"] = round(max(0.01, range_low - range_size * 0.618), 2)
+                        candidate["TP1"] = round(max(0.01, min(
+                            range_low - range_size * 0.272,
+                            candidate["Entry"] - 0.5 * risk_short,
+                        )), 2)
+                    candidate["TP2"] = round(max(0.01, min(
+                        range_low - range_size * 0.618,
+                        candidate["TP1"] - 0.25 * risk_short,
+                    )), 2)
                     candidate["level_model"] = "bi_structure_first_v2"
                     candidate["tp1_source"] = "range_low_support_or_extension"
                     candidate["tp2_source"] = "range_extension"
@@ -1366,6 +1564,22 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["VRVP_POC"] = _setup.get("vrvp_poc")
                 candidate["VRVP_VAH"] = _setup.get("vrvp_vah")
                 candidate["VRVP_VAL"] = _setup.get("vrvp_val")
+
+                # H-2a (BI-Audit 10.06.): Long-Extension-Gate — Entry zu weit ueber
+                # dem aktuellen Kurs = "imminent"-Trigger, der nie sauber ausloest
+                # (Chase-Schutz; Fuzz: 22% der validen Longs mit Entry >5% ueber
+                # Kurs, Fantasie-R:R p95=15,2). Check auf dem FINALEN Entry
+                # (nach VRVP) gegen den LIVE-Kurs.
+                _live_close = all_bars[-1]["close"]
+                if direction == "long" and _live_close > 0 and candidate.get("Entry"):
+                    _atr_pct_l = atr_5 / _live_close
+                    _entry_ext = (candidate["Entry"] - _live_close) / _live_close
+                    if _entry_ext > max(2 * _atr_pct_l, 0.03):
+                        ext_fail += 1
+                        print(f"[BI {direction}] Suppressed {ticker}: entry_too_extended "
+                              f"(Entry {_entry_ext * 100:.1f}% ueber Kurs, "
+                              f"Limit {max(2 * _atr_pct_l, 0.03) * 100:.1f}%)")
+                        continue
 
                 _geometry = trade_geometry(
                     candidate.get("Entry"),
@@ -1433,9 +1647,13 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         short_bonus = bonus_result.get("bonus_score", 0)
                         bi_score += short_bonus
                         candidate["ShortBonusScore"] = short_bonus
+                        # H-1 (10.06.): Bonus separat ausweisen — fliesst in den
+                        # SCORE, hebt aber das Grade nicht (kommt aus patterns).
+                        candidate["short_bonus"] = short_bonus
                         candidate["ShortBonusDetails"] = bonus_result.get("details", [])
                     except Exception:
                         candidate["ShortBonusScore"] = 0
+                        candidate["short_bonus"] = 0
                         candidate["ShortBonusDetails"] = []
 
                     _short_rvol = candidate.get("RVOL", 0)
@@ -1514,20 +1732,17 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 candidate["BI_Score"] = max(0, bi_score)
 
-                # ── Grading — IMMER ausführen, mit SM-Bestätigung (Original-Logik) ──
-                # Proportional skaliert für max_score 188 (statt Original 200)
+                # ── H-1 (BI-Audit 10.06.): EINE Grade-Quelle ──
+                # Das Grade von analyze_breakout_imminent (V3.3/V4-Leiter, S=85+4f /
+                # A=71+3f / B=57+2h / C=55+1h) wird DURCHGEREICHT (bereits oben in
+                # BI_Grade/BI_GradeLabel gesetzt). Die Alt-Leiter (113/99/85/75) lag
+                # ueber der empirischen Score-Obergrenze (~98): 0,0% der Lehrbuch-
+                # Akkumulationen erreichten Scanner-Grade S/A — das Mail-Gate war
+                # strukturell ausgehungert. Wichtig: Das patterns-Grade ist VOR dem
+                # ShortBonus berechnet — der Bonus fliesst weiter in den SCORE
+                # (separat ausgewiesen: short_bonus/ShortBonusScore), hebt aber das
+                # Grade nicht mehr ueber die Leiter.
                 _cand_rvol = candidate.get("RVOL", 0)
-
-                if bi_score >= 113 and sm_fires >= 4:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "S", "S — ELITE"
-                elif bi_score >= 99 and sm_fires >= 3:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "A", "A — STARK"
-                elif bi_score >= 85 and sm_hits >= 2:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE"
-                elif bi_score >= 75:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH"
-                else:
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "D", "D — SCHWACH"
 
                 # ── RVOL Guard: Ohne Volumen kein Top-Grade ──
                 # Breakout ohne Volumen ist nicht vertrauenswürdig
@@ -1569,9 +1784,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _thr = 45 if direction == "long" else 40  # V4: Angepasst an post-Audit Scores
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
         pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
+                    f"{cum_pump_fail} 2d-Pump → "
                     f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold {_thr}) → "
                     f"{low_score_count} unter Threshold → {range_fail} Range → "
-                    f"{atr_fail} ATR → {rr_fail} R:R → {len(results)} Treffer"
+                    f"{atr_fail} ATR → {ext_fail} Extension → {rr_fail} R:R → {len(results)} Treffer"
                     f" [Scores: {_buckets_str}]")
         print(f"[BI {direction}] Pipeline: {pipeline}")
 
@@ -1759,12 +1975,16 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         negative_flags = []
         news_items = []
         best_tier = None
+        forward_catalyst = False  # H-4 (10.06.): angekuendigtes, noch nicht eingetretenes Ergebnis
 
         for article in articles[:limit]:
             title = (article.get("title", "") or "").lower()
             desc = (article.get("description", "") or "").lower()
-            combined = title + " " + desc
             pub_date = (article.get("published_utc", "") or "")[:10]
+
+            # K-1a (10.06.): Normalisierung — lowercased + Roman→Arabisch
+            # ("phase iii" → "phase 3"), auf title UND description.
+            norm_combined = (_biotech_normalize_text(title) + " " + _biotech_normalize_text(desc)).strip()
 
             # Sentiment
             sentiment = "neutral"
@@ -1773,22 +1993,58 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                     sentiment = insight.get("sentiment", "neutral")
                     break
 
-            # Negative Catalyst Check (mit Wortgrenzen) — VOR positivem Check
-            # NUR im Titel prüfen — in der Description stehen oft Referenzen
-            # (z.B. "fda approval" Artikel erwähnt auch "complete response" als Kontext)
+            # K-1b (10.06.): NEGATIV-PRUEFUNG ZUERST, auf title UND description.
+            # 1) Statische Phrasen (mit Wortgrenzen, Plural-s, Verneinungs-Guard:
+            #    "no safety concerns seen" ist kein Negativ-Signal).
+            # 2) Verb-Form-/Kontext-Patterns (misses ... endpoint, failed to meet,
+            #    fell short, did not achieve, discontinuation of development, ...).
+            # Stem-Dedupe: "registered direct offering" + Pattern "public offering"
+            # erzeugen nur EINEN Flag pro Artikel-Sachverhalt.
             _is_negative_article = False
+            _article_neg_stems = set()
+
+            def _neg_stems(label):
+                return {w[:6] for w in label.split() if len(w) >= 3}
+
             for neg_kw, penalty in BIOTECH_NEGATIVE_CATALYSTS.items():
-                if re.search(r'\b' + re.escape(neg_kw) + r'\b', title):
+                if _biotech_negative_match(norm_combined, neg_kw):
+                    _stems = _neg_stems(neg_kw)
+                    if _stems & _article_neg_stems:
+                        _is_negative_article = True
+                        continue
                     negative_flags.append({"flag": neg_kw, "penalty": penalty, "date": pub_date})
+                    _article_neg_stems |= _stems
                     _is_negative_article = True
 
-            # Positive Catalyst Detection (Tier-basiert, mit Wortgrenzen)
-            # Skip positive detection wenn Artikel bereits als negativ markiert (z.B. CRL)
-            article_catalysts = []
+            for _neg_label, _neg_penalty, _neg_rx in BIOTECH_NEGATIVE_PATTERNS:
+                if _neg_rx.search(norm_combined):
+                    _stems = _neg_stems(_neg_label)
+                    if _stems & _article_neg_stems:
+                        _is_negative_article = True
+                        continue
+                    negative_flags.append({"flag": _neg_label, "penalty": _neg_penalty, "date": pub_date})
+                    _article_neg_stems |= _stems
+                    _is_negative_article = True
+
+            # H-4 (10.06.): FORWARD-Check — "expected/anticipated/on track to/
+            # will report/upcoming ..." + Ergebnis-Keyword = angekuendigtes Event.
+            # KEIN catalyst_score (nichts ist eingetreten), nur Watch-Flag.
+            # Die Termin-Wertung (Event-Datum, Naehe) laeuft ueber den BPIQ-Pfad.
+            _is_forward_article = False
             if not _is_negative_article:
+                if _BIOTECH_FORWARD_RE.search(norm_combined) and _BIOTECH_FORWARD_RESULT_RE.search(norm_combined):
+                    _is_forward_article = True
+                    forward_catalyst = True
+
+            # Positive Catalyst Detection (Tier-basiert, mit Wortgrenzen)
+            # Skip wenn Artikel negativ (z.B. CRL) oder forward (H-4).
+            # K-1c (10.06.): Verneinungsfenster — "did not ... <Positiv-Keyword>"
+            # innerhalb ~6 Woerter blockiert den Positiv-Score.
+            article_catalysts = []
+            if not _is_negative_article and not _is_forward_article:
                 for tier_name, tier_data in FDA_CATALYST_KEYWORDS.items():
                     for kw in tier_data["keywords"]:
-                        if re.search(r'\b' + re.escape(kw) + r'\b', combined):
+                        if _biotech_positive_match(norm_combined, kw):
                             cat = {
                                 "keyword": kw,
                                 "tier": tier_name,
@@ -1819,6 +2075,11 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         # danach schnell eingepreist. ONCY FDA Event vom 17.02. (52 Tage alt) mit
         # 85% Score ist Unsinn — der Markt hat das längst verarbeitet.
         # Neue Kurve: 7d=100%, 14d=75%, 30d=50%, 60d=25%, 90d=10%, >90d=5%
+        # H-4 (10.06.): Das News-PUBLIKATIONSdatum ist hier die korrekte
+        # Decay-Basis, weil nur EINGETRETENE Events scoren (Forward-Meldungen
+        # sind oben aussortiert, forward_catalyst=True). Event-TERMINE werden
+        # nicht hier, sondern ueber den BPIQ-Pfad bewertet (Event-Datum,
+        # days_until, Kategorie IMMINENT/UPCOMING/...).
         from datetime import datetime as _dt_cls, timedelta as _td_cls
         _today = _dt_cls.utcnow().date()
         for cat in catalysts:
@@ -1899,9 +2160,11 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
             "negative_flags": negative_flags,
             "best_catalyst": catalysts[0] if catalysts else None,  # Jetzt korrekt: höchster Score
             "had_catalyst_keywords": _had_catalyst_keywords,  # Vor Decay Keywords gefunden?
+            "forward_catalyst": forward_catalyst,  # H-4: angekuendigtes Event (Watch-Kontext, kein Score)
         }
     except Exception:
-        return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
+        return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": [],
+                "forward_catalyst": False}
 
 
 def _check_clinical_trials(company_name, ticker):
@@ -2398,7 +2661,9 @@ def _news_text_blob(news_data):
 
 
 def _has_any_keyword(text, keywords):
-    return any(re.search(r"\b" + re.escape(keyword) + r"\b", text) for keyword in keywords)
+    # N-d (10.06.): Lookaround-Wortgrenzen + optionales Plural-s —
+    # "safety concern" matcht jetzt auch "safety concerns" (vorher \b-Miss).
+    return any(re.search(r"(?<!\w)" + re.escape(keyword) + r"s?(?!\w)", text) for keyword in keywords)
 
 
 def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
@@ -2423,12 +2688,12 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
     regulatory_risk = 0
     sell_news_risk = 0
     halt_risk = 0
+    near_binary_event = False  # H-1 (10.06.): Binary-Event in <= 3 Tagen
 
     if readouts:
         top = readouts[0]
         stage_text = " ".join(str(top.get(k, "") or "") for k in ("stage_label", "event_label", "full_label")).lower()
         days = top.get("days_until")
-        provider_score = float(top.get("bpiq_score", 0) or 0)
 
         if "pdufa" in stage_text or "phase 3" in stage_text or "phase iii" in stage_text:
             catalyst_power += 22
@@ -2441,13 +2706,18 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
             risk_flags.append("early_stage_lower_predictability")
 
         if days is not None:
-            if days < 0:
-                catalyst_power -= 8
-                risk_flags.append("overdue_catalyst")
-            elif days <= 3:
+            # H-1 (Biotech-Audit 10.06.): T-3 bis T(-1) = unmittelbares
+            # Binary-Event (Gap +-40-80%, Stop ueber das Gap wertlos) —
+            # eigener Zweig UNABHAENGIG von MCap/halt_risk-Schwelle.
+            # days 4-10 bleiben Run-up-Phase (near_term, Modus unveraendert).
+            if -1 <= days <= 3:
+                near_binary_event = True
                 catalyst_power += 4
                 halt_risk += 18
                 risk_flags.append("near_binary_event")
+            elif days < 0:
+                catalyst_power -= 8
+                risk_flags.append("overdue_catalyst")
             elif days <= 14:
                 catalyst_power += 14
                 positive_factors.append("near_term_catalyst")
@@ -2461,11 +2731,12 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
                 catalyst_power += 2
                 risk_flags.append("catalyst_too_far_out")
 
-        if provider_score >= 80:
-            catalyst_power += 8
-            positive_factors.append("high_catalyst_quality")
-        elif provider_score >= 50:
-            catalyst_power += 4
+        # M-3 (Biotech-Audit 10.06.): Der bpiq_score-Anteil (+8/+4 fuer
+        # provider_score >= 80/50) ist ENTFERNT — derselbe BPIQ-Readout
+        # fliesst bereits via readout_score in den pipeline_score
+        # (Doppelzaehlung: pipeline +10 UND Edge +8). Der Readout bleibt
+        # NUR im pipeline_score; die Edge bewertet Timing/Risiko des
+        # Events und News-Katalysatoren.
 
         if top.get("is_big_mover") or top.get("is_suspected_mover"):
             catalyst_power += 6
@@ -2536,6 +2807,14 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
     if regulatory_risk >= 30 or dilution_risk >= 25:
         trade_mode = "AVOID_NEWS_RISK"
         score_adjustment = -18
+    elif near_binary_event:
+        # H-1 (10.06.): NEAR_BINARY_EVENT — unabhaengig von MCap und
+        # halt_risk-Schwelle. Vorher blieben Mid/Large-Caps bis T-1 in
+        # PRIORITY_WATCH (+8); jetzt mindestens -10 zusaetzlich zum
+        # halt_risk(+18)-Anteil in der risk_penalty.
+        # Vertrag Team C (Mail/api): Mode-String exakt "NEAR_BINARY_EVENT".
+        trade_mode = "NEAR_BINARY_EVENT"
+        score_adjustment = -10
     elif sell_news_risk >= 25:
         trade_mode = "WAIT_PULLBACK"
         score_adjustment = -10
@@ -2567,6 +2846,7 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
         "regulatory_risk": _clamp_int(regulatory_risk, 0, 100),
         "sell_the_news_risk": _clamp_int(sell_news_risk, 0, 100),
         "halt_risk": _clamp_int(halt_risk, 0, 100),
+        "near_binary_event": near_binary_event,  # H-1 (10.06.): explizit fuer Mail/api (Team C)
     }
 
 
@@ -2747,7 +3027,10 @@ def _biotech_background_scan(poly_key):
                 # BPIQ aufrufen wenn: irgendein Catalyst-Keyword in News war (auch wenn
                 # Score nach Time-Decay auf 0 fiel), ODER starkes Momentum.
                 # BPIQ hat eigene aktuelle Readout-Dates — unabhängig vom News-Alter.
-                _had_keywords = news_data.get("had_catalyst_keywords", False)
+                # H-4 (10.06.): forward_catalyst triggert den BPIQ-Lookup mit —
+                # eine angekuendigte Readout-News ist genau der Fall, in dem der
+                # Termin-Kalender (Event-Datum) die Wertung uebernehmen muss.
+                _had_keywords = news_data.get("had_catalyst_keywords", False) or news_data.get("forward_catalyst", False)
                 bpiq_data = {"bpiq_available": False, "readout_score": 0, "readout_label": "", "catalyst_readouts": []}  # Default
                 if catalyst_score > 0 or _had_keywords or momentum_score >= 6 or _in_catalyst_calendar:
                     # Nur BPIQ — einzige zuverlässige Catalyst-Quelle
@@ -3136,6 +3419,8 @@ def _biotech_background_scan(poly_key):
                     "Regulatory_Risk": _bio_edge.get("regulatory_risk", 0),
                     "Sell_The_News_Risk": _bio_edge.get("sell_the_news_risk", 0),
                     "Halt_Risk": _bio_edge.get("halt_risk", 0),
+                    "Near_Binary_Event": _bio_edge.get("near_binary_event", False),  # H-1 (10.06.)
+                    "Forward_Catalyst": news_data.get("forward_catalyst", False),    # H-4 (10.06.)
                     "Trials": trial_data.get("trials", [])[:5],
                     "News": news_data.get("news", [])[:5],
                     "Negative_Flags": _neg_flags,
@@ -3339,6 +3624,8 @@ def _biotech_quick_scan(poly_key):
                     old["Regulatory_Risk"] = _bio_edge.get("regulatory_risk", 0)
                     old["Sell_The_News_Risk"] = _bio_edge.get("sell_the_news_risk", 0)
                     old["Halt_Risk"] = _bio_edge.get("halt_risk", 0)
+                    old["Near_Binary_Event"] = _bio_edge.get("near_binary_event", False)  # H-1 (10.06.)
+                    old["Forward_Catalyst"] = news_data.get("forward_catalyst", False)    # H-4 (10.06.)
 
                     # Grade aktualisieren — synchron zu Full Scan / Biotech Audit V3
                     s = old["Score"]

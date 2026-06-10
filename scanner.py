@@ -2136,6 +2136,13 @@ _BPIQ_CACHE_TIMESTAMP = 0
 
 def _load_bpiq_catalyst_cache():
     """
+    DEPRECATED (Audit 10.06.2026) — tote Dublette, der Live-Pfad ist
+    modules/data_fetchers.py::_load_bpiq_catalyst_cache (von Scannern und
+    Tests genutzt). Diese Kopie hat repo-weit 0 Aufrufer; sie bleibt nur
+    vorsorglich fuer die Streamlit-UI erhalten und wird NICHT weiter gepflegt.
+    Aenderungen an der BPIQ-Logik gehoeren ausschliesslich nach
+    modules/data_fetchers.py.
+
     Lädt ALLE Drugs mit Catalyst-Dates von BPIQ in einen In-Memory-Cache.
     648 Drugs, 332 Ticker — 4 API-Calls (limit=200 pro Call).
     Cache-TTL: 4 Stunden (Daten werden täglich aktualisiert).

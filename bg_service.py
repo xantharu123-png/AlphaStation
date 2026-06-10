@@ -206,6 +206,9 @@ _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "strategies", "stock_strateg
 _ALERT_MIN_RVOL = 0.7
 _BG_ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech"}
 _ALERT_MIN_HEALTH_SCORE = 80
+# N (Audit 10.06.2026): Frische-Gate fuer bg-Mails — Cache aelter als 2h ist
+# kein "JETZT-Trade"-Signal mehr (Schutz gegen tote Scan-Owner, vgl. K-1).
+_ALERT_CACHE_MAX_AGE_S = 2 * 3600
 # B2: Dedupe-TTLs wie api — Biotech-Katalysator-Setups bleiben tagelang gleich.
 _BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600
 # B5: Einmalige Invalidierungs-Update-Mail je Symbol (72h-Fenster).
@@ -364,6 +367,73 @@ def _alert_level_source_line(row):
     return f'<br><span style="color:#64748b;font-size:11px">Level-Quelle: {safe}</span>'
 
 
+def _biotech_binary_event_days(row):
+    """H-2 (Audit 10.06.2026): Tage bis zum naechsten binaeren Event oder None.
+
+    Quellen: explizite days-Felder der Row, dann die Readout-Listen
+    (Readout_Details[*].days_until_readout, BPIQ_Catalysts[*].days_until).
+    Negative Werte (overdue) zaehlen nicht — Event vorbei, kein Gap-Risiko.
+    """
+    if not isinstance(row, dict):
+        return None
+    for key in ("days_until", "Days_Until", "Catalyst_Days", "catalyst_days", "days_until_readout"):
+        val = _safe_float(row.get(key), None)
+        if val is not None:
+            return val
+    best = None
+    for list_key in ("Readout_Details", "readout_details", "BPIQ_Catalysts", "bpiq_catalysts"):
+        items = row.get(list_key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for k in ("days_until_readout", "days_until"):
+                val = _safe_float(item.get(k), None)
+                if val is not None and val >= 0 and (best is None or val < best):
+                    best = val
+    return best
+
+
+def _biotech_near_binary_event(row):
+    """H-2 (Audit 10.06.2026): True wenn die Row vor einem binaeren Event steht.
+
+    Binaer = PDUFA/Readout <= T-3: Gap-Risiko ±40-80%, ein Stop schuetzt NICHT
+    ueber ein Gap. Erkennung wie api: near_binary_event-Feld/-Risk-Flag,
+    Bio_Trade_Mode == NEAR_BINARY_EVENT oder days <= 3.
+    """
+    if not isinstance(row, dict):
+        return False
+    if row.get("near_binary_event"):
+        return True
+    mode = str(row.get("Bio_Trade_Mode", row.get("bio_trade_mode", "")) or "").upper()
+    if mode == "NEAR_BINARY_EVENT":
+        return True
+    flags_raw = row.get("Bio_Risk_Flags") or row.get("bio_risk_flags") or []
+    flags = {
+        str(flag).lower()
+        for flag in (flags_raw if isinstance(flags_raw, list) else [flags_raw])
+        if flag
+    }
+    if "near_binary_event" in flags:
+        return True
+    days = _biotech_binary_event_days(row)
+    return days is not None and 0 <= days <= 3
+
+
+def _biotech_binary_warning_html(row):
+    """H-2: Rote Binary-Event-Warnzeile fuer Plan-HTML und Mail-Rows (wie api)."""
+    if not _biotech_near_binary_event(row):
+        return ""
+    days = _biotech_binary_event_days(row)
+    days_txt = f"{int(days)}d" if isinstance(days, (int, float)) and days >= 0 else "&le;3d"
+    return (
+        '<br><span style="color:#dc2626;font-weight:bold;font-size:12px">'
+        f'⚠ Binäres Event in {days_txt} — Stop schützt NICHT über ein Gap. '
+        'Kein Neueinstieg, Run-up-Trades vor T-3 schließen.</span>'
+    )
+
+
 def _format_alert_plan_html(row):
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
@@ -379,6 +449,17 @@ def _format_alert_plan_html(row):
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
         if levels.get("estimated") else ""
     )
+    # AUDIT M-4 (10.06.2026): synthetische Biotech-Struktur-Level ehrlich
+    # kennzeichnen (Flag Trade_Setup_Synthetic / levels['synthetic'];
+    # Trade_Setup_Source-Prefix nur als Fallback fuer Alt-Cache-Rows).
+    _setup_source = str(row.get("Trade_Setup_Source", row.get("trade_setup_source", "")) or "")
+    synthetic_text = (
+        '<br><span style="color:#b45309;font-size:11px">Struktur-Level (ATR/Support) - nicht Scanner-nativ</span>'
+        if (row.get("Trade_Setup_Synthetic") or levels.get("synthetic")
+            or _setup_source.startswith("biotech_daily")) else ""
+    )
+    # H-2 (Audit 10.06.2026): Binary-Event-Warnung in jeder Abonnenten-Flaeche.
+    binary_warning_text = _biotech_binary_warning_html(row)
     return (
         f'Entry <b>{_format_alert_price(levels.get("entry"))}</b><br>'
         f'Stop <b style="color:#dc2626">{_format_alert_price(levels.get("stop"))}</b><br>'
@@ -386,6 +467,8 @@ def _format_alert_plan_html(row):
         f'{rr_text}'
         f'{level_source_text}'
         f'{source_text}'
+        f'{synthetic_text}'
+        f'{binary_warning_text}'
     )
 
 
@@ -1165,6 +1248,29 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         if not results:
             return
 
+        # N (Audit 10.06.2026): Frische-Gate — bg mailt NIE aus einem stale
+        # Cache (> _ALERT_CACHE_MAX_AGE_S). Waere der Scan-Owner erneut tot
+        # (vgl. K-1), duerfen alte Treffer keine JETZT-Trade-Mails ausloesen.
+        # Zeitquelle: timestamp/cached_at aus dem Cache, Datei-mtime als
+        # Fallback (nicht jeder Writer schreibt ein timestamp-Feld).
+        cache_ts = _safe_float(data.get("timestamp"), 0)
+        if not cache_ts:
+            try:
+                cache_ts = datetime.fromisoformat(str(data.get("cached_at", ""))).timestamp()
+            except Exception:
+                cache_ts = 0
+        if not cache_ts:
+            try:
+                cache_ts = os.path.getmtime(cache_file)
+            except Exception:
+                cache_ts = 0
+        cache_age_s = (now - cache_ts) if cache_ts else None
+        if cache_age_s is None or cache_age_s > _ALERT_CACHE_MAX_AGE_S:
+            age_txt = f"{cache_age_s / 3600.0:.1f}h" if cache_age_s is not None else "unbekannt"
+            log.info(f"[Alert] {scanner_name}: Cache stale (Alter {age_txt} > "
+                     f"{_ALERT_CACHE_MAX_AGE_S // 3600}h) — keine Mails aus altem Cache")
+            return
+
         # Filter: Nur Grade S oder A
         alerts = []
         # Signal-Tracking: parallele Liste der ORIGINAL-Rows (inkl. Entry/Stop/TP)
@@ -1243,6 +1349,13 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 for hreason in health_reasons:
                     _suppress(hreason)
                 log.debug(f"Alert suppressed by health gate: {scanner_name} {ticker} {health_reasons}")
+                continue
+            # H-2 (Audit 10.06.2026): HARTES Gate (Paritaet zu api) — biotech-
+            # Rows vor binaerem Event (<= T-3) sind NIE ein JETZT-Trade-Call:
+            # das Gap durchschlaegt jeden Stop. Run-up = Beobachtung/Exit.
+            if scanner_name == "biotech" and _biotech_near_binary_event(r):
+                _suppress("near_binary_event")
+                log.debug(f"Alert suppressed by binary event gate: {ticker}")
                 continue
 
             # B2: In-Memory-Cooldown + geteiltes persistentes Dedupe (gleiche Datei
@@ -1328,7 +1441,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         <p style="color:#999;font-size:12px;margin-top:20px">
             Automatischer Alert vom TradingBot Background Service.<br>
             Mail ab Score >= {_ALERT_MIN_SCORE}; {int(_alert_dedupe_ttl_seconds(scanner_name) // 3600)}h Cooldown pro Ticker (persistent).<br>
-            Grade S = ELITE (Score ≥113 + 4 Smart Money) | Grade A = STARK (Score ≥99 + 3 SM)
+            Grade S = Score 85 + 4 Smart-Money-Fires | A = 71 + 3 Fires (V3.3-Leiter)
         </p>
         </body></html>"""
 
@@ -1532,6 +1645,25 @@ def _fetch_crash_monitor(poly_key):
         return None
 
 
+def _bg_run_bi_scan(direction, secrets, candidates=None):
+    """K-1 (Audit 10.06.2026): Testbare Kapselung des ECHTEN BI-Scans.
+
+    Delegiert an modules.scanners._bi_background_scan(poly_key, direction,
+    candidates) — denselben Code, den auch der Streamlit-/api-Pfad nutzt
+    (Schwelle 45/40, Struktur-Level, Geometrie-Gates). Die Funktion schreibt
+    Cache (/tmp/bi_cache_{direction}.json) und Progress-File
+    (/tmp/bi_scan_progress_{direction}.json) selbst via _bi_cache_save /
+    _bi_progress_write.
+
+    candidates: vorgefilterte Kandidaten-Liste (Dicts mit "Ticker"-Key oder
+    Strings — beide Formen akzeptiert _bi_background_scan). None => die
+    Funktion laedt das volle Polygon-Universe selbst (Netz!).
+    """
+    from modules import scanners as _scanners_mod
+    poly_key = (secrets or {}).get("POLYGON_KEY", "")
+    _scanners_mod._bi_background_scan(poly_key, direction=direction, candidates=candidates)
+
+
 def _run_bi_scanner(poly_key, direction="long"):
     """BI Scanner via Polygon Snapshot → _bi_background_scan"""
     _clear_scan_cache(f"bi_{direction}")
@@ -1640,224 +1772,19 @@ def _run_bi_scanner(poly_key, direction="long"):
         _atomic_write_json(progress_file, {"status": "running", "checked": 0, "total": len(filtered),
                        "hits": 0, "detail": f"{len(filtered)} Kandidaten", "timestamp": time.time()})
 
-        # 6) Analyse starten — nutze _bi_background_scan aus scanner.py
-        # Das ist der gleiche Code den der Streamlit-Thread nutzt
-        try:
-            # Importiere die Scan-Funktion
-            from modules.scanners import _bi_background_scan_standalone
-            _bi_background_scan_standalone(poly_key, direction, filtered, progress_file)
-        except ImportError:
-            # Fallback: Rufe die Funktion direkt auf
-            # _bi_background_scan ist in scanner.py definiert, nicht importierbar
-            # Wir triggern den Scan über die Progress-Datei — Streamlit picked es auf
-            log.warning(f"  _bi_background_scan_standalone nicht verfügbar — nutze direkte Analyse")
-            _run_bi_analysis_direct(poly_key, direction, filtered, progress_file)
+        # 6) Analyse starten — ECHTER Scan-Pfad: modules.scanners._bi_background_scan
+        # (K-1-Fix 10.06.2026: vorher Import einer nie existierenden *_standalone-
+        # Funktion => ImportError => divergenter Direkt-Fallback mit Schwelle 85/75
+        # + falschem Level-Modell, der per MACD-TypeError crashte und stuendlich
+        # results=[] schrieb. Fallback ersatzlos geloescht.)
+        # _bi_background_scan schreibt Cache + Progress-File selbst.
+        _bg_run_bi_scan(direction, {"POLYGON_KEY": poly_key}, candidates=filtered)
 
         _update_status(f"bi_{direction}", "ok", f"Scan abgeschlossen")
 
     except Exception as e:
         log.error(f"❌ {label}: {e}\n{traceback.format_exc()}")
         _update_status(f"bi_{direction}", "error", str(e))
-
-
-def _run_bi_analysis_direct(poly_key, direction, candidates, progress_file):
-    """Direkte BI-Analyse ohne scanner.py Import"""
-    from modules.data_fetchers import rate_limited_get, fetch_grouped_daily
-    from modules.patterns import analyze_breakout_imminent
-    from modules.analysis import _detect_chart_patterns, calculate_sr_from_historical, calculate_short_bonus_signals
-
-    results = []
-    checked = 0
-    total = len(candidates)
-    top_score = 0
-    threshold = 75 if direction == "short" else 85
-
-    for cand in candidates:
-        ticker = cand["Ticker"]
-        checked += 1
-
-        # Progress update alle 10 Ticker
-        if checked % 10 == 0:
-            try:
-                _atomic_write_json(progress_file, {"status": "running", "checked": checked, "total": total,
-                               "hits": len(results), "top_score": top_score,
-                               "detail": f"Analysiere {ticker}...", "timestamp": time.time()})
-            except Exception as e:
-                log.debug(f"Non-critical error: {e}")
-
-        try:
-            # Daily Bars laden — Short braucht 300 Tage für SMA200
-            end = datetime.now()
-            fetch_days = 320 if direction == "short" else 120
-            start = end - timedelta(days=fetch_days)
-            url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
-            resp = rate_limited_get(url, params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10)
-
-            if resp.status_code != 200:
-                continue
-
-            bars_raw = resp.json().get("results", [])
-            if not bars_raw or len(bars_raw) < 20:
-                continue
-
-            bars = [{"date": b.get("t", 0), "open": b["o"], "high": b["h"],
-                     "low": b["l"], "close": b["c"], "volume": b["v"]} for b in bars_raw]
-
-            # BI Analyse
-            bi_result = analyze_breakout_imminent(bars, direction=direction)
-            if len(bi_result) >= 6:
-                is_valid, bi_score, bi_max, details, confidence, grade = bi_result[:6]
-                sm_fires = bi_result[6] if len(bi_result) > 6 else 0
-                sm_hits = bi_result[7] if len(bi_result) > 7 else 0
-            else:
-                continue
-
-            if not is_valid or bi_score < threshold:
-                if bi_score > top_score:
-                    top_score = bi_score
-                continue
-
-            if bi_score > top_score:
-                top_score = bi_score
-
-            # 🐻 Short Trend-Validierung: Aktie MUSS in Downtrend sein
-            # Verhindert dass Long-Setups auch als Short-Setups erscheinen
-            if direction == "short" and len(bars) >= 20:
-                closes_recent = [b["close"] for b in bars]
-                sma20 = sum(closes_recent[-20:]) / 20
-                sma10 = sum(closes_recent[-10:]) / 10
-                current = closes_recent[-1]
-                # Preis muss unter SMA20 ODER SMA10 fallend sein
-                if current > sma20 * 1.02 and sma10 > sma20:
-                    # Aktie ist im Uptrend → kein Short-Setup
-                    continue
-
-            # S/R Levels — bars_raw in Tuple-Format konvertieren
-            # calculate_sr_from_historical erwartet (date, open, high, low, close, volume)
-            # Gibt zurück: ((supports_list, resistances_list), fib_info_dict)
-            current_price = cand["Preis"]
-            bars_tuples = [(b.get("t", 0), b["o"], b["h"], b["l"], b["c"], b["v"]) for b in bars_raw]
-            try:
-                sr_result = calculate_sr_from_historical(bars_tuples, current_price)
-                (supports_list, resistances_list), fib_info = sr_result
-                # Nächste Resistance über Preis, nächster Support unter Preis
-                resistance = resistances_list[0] if resistances_list else current_price * 1.05
-                support = supports_list[0] if supports_list else current_price * 0.95
-            except Exception:
-                resistance = current_price * 1.05
-                support = current_price * 0.95
-
-            # Entry/Stop/Target berechnen
-            if direction == "long":
-                entry = round(resistance, 2)
-                stop = round(support, 2)
-                risk = entry - stop
-                tp1 = round(entry + risk * 1.5, 2) if risk > 0 else round(entry * 1.03, 2)
-                tp2 = round(entry + risk * 2.5, 2) if risk > 0 else round(entry * 1.05, 2)
-            else:
-                # SHORT: Entry bei Resistance (Pullback-Short), Stop knapp darüber
-                entry = round(resistance * 0.995, 2)
-                stop = round(resistance * 1.015, 2)
-                risk = stop - entry
-                tp1 = round(entry - risk * 2.0, 2) if risk > 0 else round(entry * 0.95, 2)
-                tp2 = round(entry - risk * 3.5, 2) if risk > 0 else round(entry * 0.90, 2)
-
-            rr = round(abs(entry - tp1) / max(0.01, abs(entry - stop)), 1) if abs(entry - stop) > 0 else 0
-
-            # V2.8: Pattern Warnings — nur informativ, KEINE Score-Penalties
-            # (konsistent mit modules/scanners.py)
-            pattern_warnings = _detect_chart_patterns(bars, direction=direction)
-            pattern_label = "Clean"
-            if pattern_warnings:
-                high_w = [w for w in pattern_warnings if w.get("severity") == "high"]
-                if high_w:
-                    pattern_label = " | ".join(w.get("pattern", "?") for w in high_w)
-                else:
-                    pattern_label = " | ".join(w.get("pattern", "?") for w in pattern_warnings)
-
-            # 🐻 Short Bonus Signals (nur für Bear Scanner)
-            short_bonus_score = 0
-            short_bonus_details = []
-            if direction == "short":
-                try:
-                    bonus_result = calculate_short_bonus_signals(
-                        ticker, bars, poly_key=poly_key, mode="swing"
-                    )
-                    short_bonus_score = bonus_result.get("bonus_score", 0)
-                    short_bonus_details = bonus_result.get("details", [])
-                    bi_score += short_bonus_score
-                    bi_score = max(0, bi_score)
-                except Exception as e:
-                    log.warning(f"  Short Bonus Fehler {ticker}: {e}")
-
-            # V2.8: Grade — proportional skaliert (max_score 188), mit SM-Bestätigung
-            # Konsistent mit patterns.py + modules/scanners.py
-            _cand_rvol = cand.get("RVOL", 0)
-
-            if bi_score >= 113 and sm_fires >= 4:
-                grade = "S"; grade_label = "S — ELITE"
-            elif bi_score >= 99 and sm_fires >= 3:
-                grade = "A"; grade_label = "A — STARK"
-            elif bi_score >= 85 and sm_hits >= 2:
-                grade = "B"; grade_label = "B — SOLIDE"
-            elif bi_score >= 75:
-                grade = "C"; grade_label = "C — WATCH"
-            else:
-                grade = "D"; grade_label = "D — SCHWACH"
-
-            # RVOL Guard: Ohne Volumen kein Top-Grade
-            if _cand_rvol < 0.7 and grade in ("S", "A"):
-                grade = "B"; grade_label = "B — SOLIDE (RVOL zu niedrig)"
-            elif _cand_rvol < 0.5 and grade == "B":
-                grade = "C"; grade_label = "C — WATCH (RVOL zu niedrig)"
-
-            results.append({
-                "Ticker": ticker, "Name": cand["Name"],
-                "Preis": cand["Preis"], "Change%": cand["Change%"],
-                "BI_Score": bi_score, "BI_MaxScore": bi_max,
-                "BI_Grade": grade, "BI_GradeLabel": grade_label,
-                "BI_Confidence": confidence,
-                "BI_Details": details,
-                "Entry": entry, "StopLoss": stop, "TP1": tp1, "TP2": tp2,
-                "RiskReward": rr,
-                "RangeHigh": round(resistance, 2), "RangeLow": round(support, 2),
-                "RVOL": cand["RVOL"], "DollarVol": cand["DollarVol"],
-                "PatternLabel": pattern_label,
-                "PatternWarnings": pattern_warnings,
-                "ShortBonusScore": short_bonus_score,
-                "ShortBonusDetails": short_bonus_details,
-            })
-
-        except Exception as e:
-            _exc_score = locals().get("bi_score", 0) or 0
-            if _exc_score >= threshold:
-                log.warning(f"  ⚠️ {ticker} Score {_exc_score} aber Exception: {e}")
-            continue
-
-    # Sortiere + Speichere
-    results.sort(key=lambda x: x.get("BI_Score", 0), reverse=True)
-    results = results[:50]
-
-    # Cache schreiben (gleicher Pfad den Streamlit liest)
-    cache_file = f"/tmp/bi_cache_{direction}.json"
-    try:
-        _atomic_write_json(cache_file, {"results": results, "timestamp": time.time(), "ts": time.time(),
-                       "direction": direction, "count": len(results)})
-    except Exception as e:
-        log.debug(f"Non-critical error: {e}")
-
-    # Progress: Done
-    _detail = f"✅ {len(results)} Treffer"
-    if len(results) == 0:
-        _detail = f"0 Treffer (Top Score: {top_score}, Threshold: {threshold}) — {total} analysiert"
-    try:
-        _atomic_write_json(progress_file, {"status": "done", "checked": checked, "total": total,
-                       "hits": len(results), "top_score": top_score,
-                       "detail": _detail, "timestamp": time.time()})
-    except Exception as e:
-        log.debug(f"Non-critical error: {e}")
-
-    log.info(f"  {len(results)} Treffer (von {total} analysiert, Top: {top_score}, Threshold: {threshold})")
 
 
 def _run_bear_scanner(poly_key, secrets):

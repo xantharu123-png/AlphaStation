@@ -228,6 +228,19 @@ def normalize_alert_trade_levels(
     native = all(sources.get(key) and not str(sources[key]).startswith(("estimated", "price_fallback")) for key in ("entry", "stop", "tp1", "tp2"))
     source_label = "native" if native else "estimated" if estimated else "incomplete"
 
+    # AUDIT M-4 (Biotech, 10.06.2026): synthetisch erzeugte Level — z.B. baut
+    # _enrich_biotech_alert_trade_levels Entry/Stop/TP aus ATR/Support-Struktur
+    # und schreibt sie als explizite Row-Felder — gingen bisher als native
+    # durch (estimated-Sperre des Plan-Guards wirkungslos). Drittes, EHRLICHES
+    # Flag: synthetic. Bewusst minimal-invasiv: native bleibt True und
+    # estimated bleibt False, damit das bestehende estimated-Mail-Gate
+    # Biotech-Mails weiter zulaesst (dokumentierte Ausnahme: Struktur-Level
+    # sind handelbar, aber via M1-Label + synthetic-Flag gekennzeichnet).
+    synthetic = bool(row.get("Trade_Setup_Synthetic") or row.get("trade_setup_synthetic"))
+    if not synthetic:
+        _setup_src = str(row.get("Trade_Setup_Source", row.get("trade_setup_source", "")) or "")
+        synthetic = _setup_src.startswith("biotech_daily")
+
     return {
         "entry": entry,
         "stop": stop,
@@ -245,6 +258,7 @@ def normalize_alert_trade_levels(
         "warnings": geometry["warnings"],
         "estimated": estimated,
         "native": native,
+        "synthetic": synthetic,
         "source": source_label,
         "sources": sources,
     }
