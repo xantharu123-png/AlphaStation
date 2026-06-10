@@ -972,10 +972,16 @@ _EARLY_MOVER_MIN_ALERT_RR = 1.5
 _EARLY_MOVER_RETEST_MAX_DISTANCE_R = 0.35
 _EARLY_MOVER_DIGEST_DEDUPE_SEC = 2 * 3600
 _EARLY_MOVER_DIGEST_KEY = "early_movers_long_digest"
+# AUDIT Q-1: separate Watch-Mail (Retest-/Wait-Kandidaten), eigener Cooldown.
+_EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC = 2 * 3600
+_EARLY_MOVER_WATCH_DIGEST_KEY = "early_mover_watch_digest"
 _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC = 4 * 3600
 _EARLY_MOVER_ARMED_DIGEST_KEY = "early_movers_explosion_armed_digest"
 _EARLY_MOVER_MAX_EMAIL_ROWS = 5
 _EARLY_MOVER_TRIGGER_TTL = 180
+# AUDIT Q-2: 15-Min-Frische-Gate fuer JETZT-Trade-Mails. Trigger/Scan-Zustand
+# aelter als 900s darf keine sofort handelbare Mail mehr ausloesen.
+_MAIL_TRIGGER_MAX_AGE_SEC = 900
 _EARLY_MOVER_MARKET_PAGES = 4  # 4 * 250 = Top-1000 CoinGecko universe
 _EARLY_MOVER_TRIGGER_SCAN_LIMIT = 1000
 _EARLY_MOVER_MAX_DISPLAY = 160
@@ -1381,6 +1387,8 @@ def _email_dedupe_ttl_for_key(key: str) -> int:
         return _DAILY_SUMMARY_DEDUPE_SEC
     if key == _EARLY_MOVER_DIGEST_KEY:
         return _EARLY_MOVER_DIGEST_DEDUPE_SEC
+    if key == _EARLY_MOVER_WATCH_DIGEST_KEY:
+        return _EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC
     if key == _EARLY_MOVER_ARMED_DIGEST_KEY:
         return _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC
     if key.startswith("early_movers_armed_"):
@@ -1735,6 +1743,28 @@ def _early_mover_btc_allows_long(fields: Dict[str, Any]) -> bool:
     return (fields.get("alpha_24h") or 0) >= 1.0 and (fields.get("change24") or 0) >= 1.0
 
 
+def _early_mover_mail_trigger_age_seconds(row: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
+    """AUDIT Q-2: Alter des Trigger-/Scan-Zustands einer Crypto-Row fuer Mails.
+
+    Bevorzugt den echten Trigger-Pruefzeitpunkt (trigger_checked_at bzw.
+    intraday_trigger.checked_at). Fehlt ein Row-Zeitstempel, dient das vom
+    Mail-Pfad gestempelte Scan-/Cache-Alter (_mail_scan_age_sec) als
+    konservativer Proxy. None = Alter unbekannt (kein Gate).
+    """
+    now_value = float(now if now is not None else time.time())
+    checked_at = _alert_float(row.get("trigger_checked_at"), None)
+    if checked_at is None:
+        trigger = row.get("intraday_trigger")
+        if isinstance(trigger, dict):
+            checked_at = _alert_float(trigger.get("checked_at"), None)
+    if checked_at is not None and checked_at > 0:
+        return max(0.0, now_value - checked_at)
+    scan_age = _alert_float(row.get("_mail_scan_age_sec"), None)
+    if scan_age is not None and scan_age >= 0:
+        return scan_age
+    return None
+
+
 def _early_mover_alert_key(row: Dict[str, Any], ticker: Optional[str] = None) -> str:
     symbol = (ticker or _extract_alert_ticker(row)).upper()
     action = str(row.get("trade_action", row.get("entry_status", "long")) or "long").lower()
@@ -1757,7 +1787,10 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
 
     if fields["direction"] and fields["direction"] != "LONG":
         reasons.append("early_mover_not_long")
-    if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+    # AUDIT Q-1: Nur LONG_TRIGGER ist mailbar. WAIT_FOR_RETEST ist ein
+    # Watch-Zustand und gehoert in die separate Watch-Mail, nicht in die
+    # JETZT-Trade-Mail.
+    if action != "LONG_TRIGGER":
         reasons.append("early_mover_action_not_alertable")
     if fields["signal_quality"] == "no_chase" or "overheated_phase3" in risk_flags:
         reasons.append("early_mover_no_chase")
@@ -2017,6 +2050,14 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
         if levels.get("estimated") else ""
     )
+    # AUDIT M-1: Level, die _enrich_biotech_alert_trade_levels via
+    # _build_structured_trade_setup synthetisiert hat (Marker
+    # Trade_Setup_Source=biotech_daily_*), sichtbar kennzeichnen.
+    setup_source = str(row.get("Trade_Setup_Source", row.get("trade_setup_source", "")) or "")
+    synthetic_text = (
+        '<br><span style="color:#b45309;font-size:11px">Struktur-Level (ATR/Support) - nicht Scanner-nativ</span>'
+        if setup_source.startswith("biotech_daily") else ""
+    )
     return (
         f'<span>Entry <b>{entry}</b></span><br>'
         f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
@@ -2026,6 +2067,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'{level_source_text}'
         f'{move_warning}'
         f'{source_text}'
+        f'{synthetic_text}'
     )
 
 
@@ -2078,13 +2120,14 @@ def _alert_trade_health_reasons(row: Dict[str, Any], scanner_name: str) -> List[
     health = calculate_trade_health(health_row, scanner_name=health_scanner, market_context=market_context)
     decision = str(health.get("decision", "") or "").upper()
     reasons: List[str] = []
-    horizon = _normalize_trade_horizon_value(row.get("_alert_horizon", _DEFAULT_TRADE_HORIZON))
-    swing_early_mover = scanner_name == "early_movers" and horizon == "swing"
-    soft_swing_wait = swing_early_mover and decision in {"WAIT_FOR_RETEST", "WAIT_FOR_TRIGGER", "WAIT_FOR_CONTINUATION", "WATCH_ONLY"}
+    # AUDIT Q-1: Der fruehere soft_swing_wait-Bypass (early_movers + swing
+    # liess WAIT_FOR_RETEST/WAIT_FOR_TRIGGER/WAIT_FOR_CONTINUATION/WATCH_ONLY
+    # weich durch) ist entfernt. WAIT-Decisions unterdruecken jetzt auch
+    # Crypto-Swing-Mails; Watch-Kandidaten laufen in die separate Watch-Mail.
 
-    if decision != "TRADEABLE" and not soft_swing_wait:
+    if decision != "TRADEABLE":
         reasons.append(f"trade_health_{decision.lower() or 'not_tradeable'}")
-    if int(health.get("health_score") or 0) < 80 and not soft_swing_wait:
+    if int(health.get("health_score") or 0) < 80:
         reasons.append("trade_health_score_below_80")
     if str(health.get("chase_risk", "") or "").upper() in {"HIGH", "CRITICAL"}:
         reasons.append("trade_health_chase_risk")
@@ -2983,6 +3026,9 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
             break
 
     result = max(results, key=lambda item: item.get("execution_score", 0)) if results else {"ok": False, "reason": "no_trigger_checks", "execution_score": 0}
+    # AUDIT Q-2: Original-Pruefzeitpunkt mitfuehren, damit der Mail-Pfad das
+    # Trigger-Alter auch fuer Cache-Treffer korrekt bestimmen kann.
+    result["checked_at"] = now
     result["adaptive_checks"] = [
         {
             "timeframe": item.get("timeframe"),
@@ -3920,6 +3966,7 @@ def _process_trade_reminders_once() -> None:
                         _format_reminder_email(reminder, result),
                         bypass_startup_cooldown=True,
                         trade_horizon="swing",  # AUDIT H-3: explizit (Reminder = Swing-Kontext)
+                        mail_class="trade",  # AUDIT H-2: Trigger bereit = handelbar
                     )
         if changed:
             _save_trade_reminders(reminders)
@@ -3949,11 +3996,133 @@ def _stop_trade_reminder_loop() -> None:
     _trade_reminder_running = False
 
 
+# AUDIT Q-1: Watch-Mail-Klassifikation. Kern-Gruende = "nur warten", keine
+# Qualitaetsmaengel. Rows mit irgendeinem Grund ausserhalb der Allowed-Menge
+# (Grade/Score/RVOL/Plan/No-Chase/Daten/Liquiditaet/Cooldown) bleiben draussen.
+_EARLY_MOVER_WATCH_CORE_REASONS = {
+    "early_mover_action_not_alertable",  # nur falls Action == WAIT_FOR_RETEST (separat geprueft)
+    "early_mover_retest_not_near_entry",
+    "trade_health_wait_for_retest",
+    "trade_health_wait_for_trigger",
+    "trade_health_wait_for_continuation",
+    "trade_health_watch_only",
+    "trigger_stale_for_mail",
+}
+_EARLY_MOVER_WATCH_ALLOWED_REASONS = _EARLY_MOVER_WATCH_CORE_REASONS | {
+    "trade_health_score_below_80",
+    "early_mover_wait_entry_confirmation",
+}
+_EARLY_MOVER_WATCH_REASON_LABELS = {
+    "trigger_stale_for_mail": "Trigger abgelaufen - neu bewerten",
+    "early_mover_action_not_alertable": "Auf Retest warten",
+    "early_mover_retest_not_near_entry": "Retest-Zone noch nicht erreicht",
+    "trade_health_wait_for_retest": "Auf Retest warten",
+    "trade_health_wait_for_trigger": "Auf Trigger warten",
+    "trade_health_wait_for_continuation": "Auf Continuation warten",
+    "trade_health_watch_only": "Nur beobachten",
+    "early_mover_wait_entry_confirmation": "Entry-Bestaetigung abwarten",
+}
+
+
+def _early_mover_watch_mail_reasons(row: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
+    """AUDIT Q-1: Warte-Gruende einer Row, die NUR wegen Wait/Watch (nicht
+    wegen Qualitaetsmaengeln) aus der JETZT-Mail gefallen ist. Leer = Row
+    gehoert nicht in die Watch-Mail."""
+    reasons = list(state.get("suppression_reasons") or [])
+    if not reasons:
+        return []
+    core = [reason for reason in reasons if reason in _EARLY_MOVER_WATCH_CORE_REASONS]
+    if not core:
+        return []
+    if any(reason not in _EARLY_MOVER_WATCH_ALLOWED_REASONS for reason in reasons):
+        return []
+    action = str(row.get("trade_action", row.get("entry_status", "")) or "").upper()
+    if "early_mover_action_not_alertable" in reasons and action != "WAIT_FOR_RETEST":
+        return []
+    return core
+
+
+def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Optional[float] = None) -> bool:
+    """AUDIT Q-1: Watch-Kandidaten (Retest/Wait) als separate, klar markierte
+    Beobachtungs-Mail (mail_class="watch") statt in der JETZT-Trade-Mail."""
+    if not watch_rows:
+        return False
+    now = now or time.time()
+    remaining = _email_dedupe_remaining(_EARLY_MOVER_WATCH_DIGEST_KEY, _EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC, now)
+    if remaining > 0:
+        _record_email_event(
+            "Crypto Early Mover WATCH Digest",
+            "skipped",
+            f"watch_digest_cooldown_active:{remaining}s candidates={len(watch_rows)}",
+        )
+        return False
+
+    def _fmt_num(value, suffix="", decimals=1, default="-"):
+        number = _alert_float(value)
+        if number is None:
+            return default
+        return f"{number:.{decimals}f}{suffix}"
+
+    items = sorted(
+        watch_rows,
+        key=lambda item: ({"S": 4, "A+": 3, "A": 2}.get(str(item.get("grade", "")).upper(), 0), _alert_float(item.get("score"), 0) or 0),
+        reverse=True,
+    )[:_EARLY_MOVER_MAX_EMAIL_ROWS]
+
+    rows = ""
+    for item in items:
+        symbol = html.escape(str(item.get("symbol", "")))
+        name = html.escape(str(item.get("name") or ""))
+        wait_text = html.escape(str(item.get("wait_reason") or "Auf Trigger/Retest warten"))
+        rows += (
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee;color:#b45309"><b>{wait_text}</b><br><span style="color:#777">{html.escape(str(item.get("exchange") or ""))}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item.get("grade", "")))} / {html.escape(str(item.get("score", "")))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item.get("price"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item.get("entry"))}<br>Stop {_format_alert_price(item.get("stop"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">TP1 {_format_alert_price(item.get("tp1"))}<br>TP2 {_format_alert_price(item.get("tp2"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt_num(item.get("live_rr"), "R", 2)}<br><span style="color:#777">Dist {_fmt_num(item.get("distance_r"), "R", 2)}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">24h {_fmt_num(item.get("change24"), "%")}<br>V/MCap {_fmt_num(item.get("vol_mcap"), "%")}</td></tr>'
+        )
+
+    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
+    <h2 style="color:#b45309">Crypto Retest-Zonen (Watchlist)</h2>
+    <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:12px;margin:12px 0;color:#78350f;font-size:14px">
+      <b>BEOBACHTUNG — kein Einstiegssignal.</b> Warte auf Trigger/Retest.
+      Diese Setups erfuellen Grade/Score/Plan-Qualitaet, sind aber im Versandmoment NICHT handelbar.
+    </div>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {len(items)} von {len(watch_rows)} Watch-Kandidat(en)</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr style="background:#fffbeb"><th style="padding:8px;text-align:left">Coin</th>
+    <th style="padding:8px;text-align:left">Aktion (Warte-Grund)</th><th style="padding:8px;text-align:left">Grade/Score</th>
+    <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">Entry/Stop</th>
+    <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
+    <th style="padding:8px;text-align:left">Kontext</th></tr>
+    {rows}</table>
+    <p style="color:#999;font-size:12px;margin-top:20px">Watch-Digest-Cooldown: {_EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC // 3600}h. Nur Kandidaten, deren Grade/Score/RVOL/Plan passen und die ausschliesslich wegen Wait-/Retest-/Frische-Gates nicht JETZT handelbar sind.</p>
+    </body></html>'''
+    sent = _send_email_alert(
+        f"Crypto Retest-Zonen ({len(items)} Kandidaten)",
+        body,
+        trade_horizon="swing",
+        mail_class="watch",
+    )
+    if sent:
+        _email_dedupe_mark(_EARLY_MOVER_WATCH_DIGEST_KEY, now=now)
+        for item in items:
+            key = item.get("key")
+            if key:
+                _EMAIL_COOLDOWN[key] = now
+                _email_dedupe_mark(key, now=now)
+    return bool(sent)
+
+
 def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     """Mail swing Early-Mover long/retest candidates; no-chase rows stay UI-only."""
     now = time.time()
     swing_mode = _scanner_uses_swing_horizon("early_movers")
     candidates = []
+    watch_rows: List[Dict[str, Any]] = []  # AUDIT Q-1: Kandidaten fuer die separate Watch-Mail
     suppressed: Dict[str, int] = {}
     seen_keys = set()
 
@@ -3979,6 +4148,32 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
 
         state = _classify_alert_candidate("early_movers", row, now)
         if not state["alertable_now"]:
+            # AUDIT Q-1: Rows, die NUR wegen Wait/Retest/Frische warten muessen
+            # (Qualitaet passt), wandern in die separate Watch-Mail.
+            watch_reason_codes = _early_mover_watch_mail_reasons(row, state)
+            if watch_reason_codes and state["cooldown_key"] not in seen_keys:
+                seen_keys.add(state["cooldown_key"])
+                watch_setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+                watch_rows.append({
+                    "key": state["cooldown_key"],
+                    "symbol": state["ticker"],
+                    "name": row.get("Name", row.get("name", "")),
+                    "grade": state["grade"],
+                    "score": state["score"],
+                    "price": row.get("Price", state["price"]),
+                    "wait_reason": _EARLY_MOVER_WATCH_REASON_LABELS.get(
+                        watch_reason_codes[0], watch_reason_codes[0]
+                    ),
+                    "entry": row.get("entry", watch_setup.get("entry")),
+                    "stop": row.get("stop_loss", row.get("stop", watch_setup.get("stop_loss", watch_setup.get("stop")))),
+                    "tp1": row.get("tp1", watch_setup.get("tp1")),
+                    "tp2": row.get("tp2", watch_setup.get("tp2")),
+                    "live_rr": row.get("live_rr_ratio", watch_setup.get("live_rr")),
+                    "distance_r": row.get("distance_to_entry_r", watch_setup.get("distance_to_entry_r")),
+                    "change24": row.get("Change24h"),
+                    "vol_mcap": row.get("VolMCapRatio"),
+                    "exchange": row.get("PerpChartExchange", row.get("Exchange", "")),
+                })
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
@@ -4018,6 +4213,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     if not candidates:
         if suppressed:
             _record_email_event("Crypto Early Mover LONG Alert", "skipped", f"no_active_long_setups:{suppressed}")
+        _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
         return False
     digest_remaining = _email_dedupe_remaining(_EARLY_MOVER_DIGEST_KEY, _EARLY_MOVER_DIGEST_DEDUPE_SEC, now)
     if digest_remaining > 0:
@@ -4026,6 +4222,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "skipped",
             f"digest_cooldown_active:{digest_remaining}s candidates={len(candidates)}",
         )
+        _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
         return False
 
     def _fmt_num(value, suffix="", decimals=1, default="-"):
@@ -4077,12 +4274,13 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Swing-Default: Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und saubere Strukturziele. Intraday-5m ist optionaler separater Modus, nicht Pflicht fuer diese Swing-Mail.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing")  # AUDIT H-3
+    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2
     if sent:
         _email_dedupe_mark(_EARLY_MOVER_DIGEST_KEY, now=now)
         for item in email_rows:
             _EMAIL_COOLDOWN[item["key"]] = now
             _email_dedupe_mark(item["key"], now=now)
+    _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
     return bool(sent)
 
 
@@ -4698,6 +4896,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "fresh_5m_state_missing_wait_retest",
         "current_candle_red_fade",
         "early_mover_wait_entry_confirmation",
+        "trigger_stale_for_mail",
     }
     no_trade_markers = {
         "drop_too_extended_no_chase",
@@ -4775,7 +4974,14 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         if horizon == "swing" and _scanner_uses_swing_horizon("early_movers"):
             # Swing crypto mails are setup/structure alerts. They must not depend
             # on a fresh 5m trigger, but they still need a clean entry score.
-            score = min(_alert_float(score, 0) or 0, max(_alert_float(entry_score, 0) or 0, 80))
+            # AUDIT H-1: entry_score cappt IMMER (auch 0 ist valide und muss
+            # cappen). Das alte max(entry_score, 80) hob den Cap faelschlich
+            # auf mindestens 80 an. 80 ist nur noch Fallback ohne entry_score.
+            entry_score_cap = _alert_float(entry_score, None)
+            score = min(
+                _alert_float(score, 0) or 0,
+                entry_score_cap if entry_score_cap is not None else 80,
+            )
         elif signal == "JETZT_TRADEN":
             score = _early_mover_trade_score(row)
         elif signal == "EXPLOSION_ARMED" and explosion_score is not None:
@@ -4853,6 +5059,12 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("partial_crypto_data")
     if scanner_name == "early_movers":
         reasons.extend(_early_mover_long_rule_reasons(row))
+        # AUDIT Q-2: 15-Min-Frische-Gate. Trigger-/Scan-Zustand aelter als
+        # _MAIL_TRIGGER_MAX_AGE_SEC darf nicht mehr als JETZT-Mail raus;
+        # solche Rows gehoeren (mit Hinweis) in die Watch-Mail.
+        trigger_age = _early_mover_mail_trigger_age_seconds(row, now)
+        if trigger_age is not None and trigger_age > _MAIL_TRIGGER_MAX_AGE_SEC:
+            reasons.append("trigger_stale_for_mail")
     if quality_gate_actionable and scanner_name in _ALERT_TRADE_PLAN_GUARD_SCANNERS:
         levels = _alert_trade_levels(row)
         if not levels.get("valid"):
@@ -5272,14 +5484,60 @@ def _brand_email_html(subject: str, body_html: str) -> str:
 </html>"""
 
 
+# AUDIT H-2: Mail-Klassen mit verbindlichem Betreff-Praefix. "trade" = im
+# Versandmoment handelbar, "watch" = Beobachtung ohne Einstiegssignal,
+# "info" = Status/Test/Marktkontext ohne Trade-Bezug.
+_MAIL_CLASS_SUBJECT_PREFIXES = {
+    "trade": "\U0001F6A8 JETZT: ",
+    "watch": "\U0001F441️ WATCH: ",
+    "info": "ℹ️ ",
+}
+
+
+def _apply_mail_class_subject(subject: str, mail_class: str) -> str:
+    """AUDIT H-2: Klassen-Praefix voranstellen ohne Emoji-Stapelung.
+
+    Bereits vorhandene Klassen-/Legacy-Emojis am Betreffanfang werden ersetzt
+    statt gestapelt (z.B. "\U0001F6A8 3 Top-Setups" -> "\U0001F6A8 JETZT: 3 Top-Setups").
+    """
+    cls = str(mail_class or "trade").strip().lower()
+    prefix = _MAIL_CLASS_SUBJECT_PREFIXES.get(cls, _MAIL_CLASS_SUBJECT_PREFIXES["trade"])
+    text = str(subject or "").strip()
+    legacy_markers = (
+        "\U0001F6A8 JETZT:",
+        "\U0001F441️ WATCH:",
+        "\U0001F441 WATCH:",
+        "ℹ️",
+        "ℹ",
+        "\U0001F6A8",
+        "\U0001F441️",
+        "\U0001F441",
+        "\U0001F514",
+        "⚠️",
+        "⚠",
+        "✅",
+    )
+    stripped = True
+    while stripped:
+        stripped = False
+        for marker in legacy_markers:
+            if text.startswith(marker):
+                text = text[len(marker):].lstrip()
+                stripped = True
+    return f"{prefix}{text}"
+
+
 def _send_email_alert(
     subject,
     body_html,
     bypass_startup_cooldown: bool = False,
     recipient_emails: Optional[List[str]] = None,
     trade_horizon: str = "swing",
+    mail_class: str = "trade",
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
+    # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
+    subject = _apply_mail_class_subject(subject, mail_class)
     if _email_has_blocked_etf_content(subject, body_html):
         print(f"[Alert] SKIP (ETF/ETP-Inhalt blockiert): {subject}")
         _record_email_event(subject, "skipped", "blocked_etf_content")
@@ -5302,7 +5560,9 @@ def _send_email_alert(
         recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
     if recipient_emails is None and ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
         try:
-            recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon))
+            # AUDIT H-3: watch-Mails nur an Abonnenten mit watch_mail_optin;
+            # der Betreiber (ALERT_EMAIL/GMAIL_USER oben) bekommt alle Klassen.
+            recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon, mail_class=mail_class))
         except Exception as exc:
             print(f"[Alert] Subscriber recipients skipped: {exc}")
     recipients = sorted(set(addr for addr in recipients if "@" in addr))
@@ -5450,7 +5710,7 @@ def _check_and_alert(scanner_name, cache_file):
         <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
         print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
-        sent = _send_email_alert(subject, body, trade_horizon="swing")  # AUDIT H-3
+        sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
         if sent:
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -5562,7 +5822,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
-    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body, trade_horizon="swing")  # AUDIT H-3
+    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2 (Strategie-Sweep)
     if sent:
         for alert in email_alerts:
             if alert.get("cooldown_key"):
@@ -5788,7 +6048,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Dump-Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
-    return _send_email_alert(f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN", body, trade_horizon="swing")  # AUDIT H-3
+    return _send_email_alert(f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN", body, trade_horizon="swing", mail_class="watch")  # AUDIT H-3 / H-2 (Beobachtung, kein Einstiegssignal)
 
 
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
@@ -5871,7 +6131,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing")  # AUDIT H-3
+    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade")  # AUDIT H-3 / H-2
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -10764,9 +11024,10 @@ def _bear_scan_wrapper() -> None:
                     # _EMAIL_SEND_LOG[-1] (Race: parallele Sender koennen den
                     # letzten Log-Eintrag ueberschreiben). AUDIT H-3: swing.
                     _crash_sent = _send_email_alert(
-                        f"⚠️ CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)",
+                        f"CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)",
                         _crash_body,
                         trade_horizon="swing",
+                        mail_class="trade",  # AUDIT H-2: Crash-Shorts sind handelbare Signale
                     )
                     if _crash_sent:
                         with _EMAIL_COOLDOWN_LOCK:
@@ -10853,6 +11114,7 @@ def _bear_scan_wrapper() -> None:
                         f"Bear Alert: {_total_signals} Aktien-Shorts",
                         _bear_body,
                         trade_horizon="swing",
+                        mail_class="trade",  # AUDIT H-2
                     )
                     if _bear_sent:
                         with _EMAIL_COOLDOWN_LOCK:
@@ -11412,6 +11674,7 @@ class AlertSettingsRequest(BaseModel):
     narrative_email_frequency: Optional[str] = None
     trade_alert_horizon: Optional[str] = None
     scanner_trade_horizon: Optional[str] = None
+    watch_mail_optin: Optional[bool] = None  # AUDIT H-3
 
 
 # ── Admin Models ──
@@ -11594,6 +11857,7 @@ async def api_update_alert_settings(req_body: AlertSettingsRequest, authorizatio
         narrative_email_frequency=req_body.narrative_email_frequency,
         trade_alert_horizon=req_body.trade_alert_horizon,
         scanner_trade_horizon=req_body.scanner_trade_horizon,
+        watch_mail_optin=req_body.watch_mail_optin,  # AUDIT H-3
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))
@@ -12075,8 +12339,12 @@ def test_email_alert(authorization: Optional[str] = Header(None)):
             "message": "Email Alerts nicht konfiguriert",
             "status": status,
         })
+    # AUDIT H-3: Test-Mail ist "info" und geht NUR an die Betreiber-/Admin-
+    # Adresse (ALERT_EMAIL, Fallback GMAIL_USER), nie an Abonnenten.
+    _admin_alert_to = str(_SECRETS.get("ALERT_EMAIL", _SECRETS.get("GMAIL_USER", "")) or "")
+    _admin_recipients = [addr.strip() for addr in _admin_alert_to.split(",") if addr.strip()]
     success = _send_email_alert(
-        "✅ TradingBot Test — Email Alerts funktionieren!",
+        "TradingBot Test — Email Alerts funktionieren!",
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
         <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
         <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
@@ -12085,6 +12353,8 @@ def test_email_alert(authorization: Optional[str] = Header(None)):
         </body></html>''',
         bypass_startup_cooldown=True,
         trade_horizon="swing",  # AUDIT H-3: explizit
+        recipient_emails=_admin_recipients,  # AUDIT H-3: nur Admin/Betreiber
+        mail_class="info",  # AUDIT H-2
     )
     if success:
         return {"status": "ok", "message": "Test-Email gesendet!"}
@@ -15797,6 +16067,24 @@ def _early_movers_wrapper() -> None:
         print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
               f"Phase 1: {s.get('phase_1_count', 0)}, Phase 2: {s.get('phase_2_count', 0)}, "
               f"Phase 3: {s.get('phase_3_count', 0)}")
+        # AUDIT Q-2: abgelaufene 5m-Trigger VOR dem Mail-Bau downgraden
+        # (gleiches cache_age wie die UI ueber cached_at sieht) und jede Row
+        # mit dem Scan-/Cache-Alter stempeln, damit das 15-Min-Frische-Gate
+        # in _classify_alert_candidate auch ohne Row-Zeitstempel greift.
+        try:
+            _, _mail_cached_at = load_cache_file(EARLY_MOVERS_CACHE)
+            mail_cache_age = None
+            if _mail_cached_at:
+                mail_cache_age = int(max(0, (datetime.now() - datetime.fromisoformat(_mail_cached_at)).total_seconds()))
+            coins = result.get("coins") if isinstance(result, dict) else None
+            if isinstance(coins, list):
+                _downgrade_expired_crypto_triggers(coins, mail_cache_age)
+                if mail_cache_age is not None:
+                    for coin in coins:
+                        if isinstance(coin, dict):
+                            coin.setdefault("_mail_scan_age_sec", mail_cache_age)
+        except Exception as age_exc:
+            print(f"[Early Movers] mail freshness prep skipped: {age_exc}")
         _send_early_mover_long_alerts(result)
     except Exception as e:
         print(f"[Early Movers] Error: {e}")
@@ -17246,7 +17534,7 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
             _record_email_event(f"Narrative Pulse {frequency}", "skipped", "frequency_dedupe_active")
             continue
         subject = f"Narrative Pulse ({cfg['label']}): Bullisch {top_bull} | Bearisch {top_bear}"
-        sent = _send_email_alert(subject, body, recipient_emails=recipients, trade_horizon="swing")  # AUDIT H-3 (explizite Empfaenger, Horizon nur informativ)
+        sent = _send_email_alert(subject, body, recipient_emails=recipients, trade_horizon="swing", mail_class="info")  # AUDIT H-3 / H-2 (eigenes Narrative-Opt-in bleibt unveraendert; nur Praefix)
         sent_any = bool(sent) or sent_any
 
     if not had_recipients:
@@ -18950,9 +19238,10 @@ def _orb_scanner_wrapper() -> None:
             </body></html>'''
             # AUDIT H-3: ORB ist intraday-only — Empfaenger-Routing "intraday".
             _orb_sent = _send_email_alert(
-                f"🔔 {len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)",
+                f"{len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)",
                 body,
                 trade_horizon="intraday",
+                mail_class="trade",  # AUDIT H-2
             )
             # AUDIT H-2: Cooldown + persistentes Dedupe erst NACH erfolgreichem
             # Versand setzen (Muster wie _check_and_alert); persistenter Dedupe

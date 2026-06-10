@@ -1,0 +1,515 @@
+"""Mail-Audit 10.06. — Tests fuer Q1/Q2/H1/H2/H3/M1.
+
+Abgedeckt:
+- Q1: WAIT-Decisions (WAIT_FOR_RETEST / WATCH_ONLY) unterdruecken die
+  JETZT-Trade-Mail auch fuer Crypto-Swing und landen stattdessen in der
+  separaten Watch-Mail; LONG_TRIGGER + frisch bleibt JETZT-mailbar.
+- Q2: 15-Min-Frische-Gate (trigger_stale_for_mail) ueber Trigger-Zeitstempel
+  und Scan-Alter-Proxy; Chase-Schutz greift fuer Crypto ohne Soft-Bypass.
+- H1: entry_score cappt den Mail-Score ehrlich (auch 0), 80 nur als
+  Fallback ohne entry_score.
+- H2: Betreff-Praefix pro Mail-Klasse ohne Emoji-Stapelung.
+- H3: watch-Mails nur an Abonnenten mit watch_mail_optin; trade unveraendert;
+  Test-Mail nur an Admin/Betreiber; Betreiber bekommt alle Klassen.
+- M1: synthetische Biotech-Level werden im Mail-HTML gekennzeichnet.
+
+Mock-/Fixture-Muster folgt test_email_alert_audit.py.
+"""
+
+import time
+
+import pytest
+
+import api
+import modules.auth as auth
+
+
+@pytest.fixture(autouse=True)
+def _isolate_email_state(monkeypatch, tmp_path):
+    """Gleiches Isolations-Muster wie test_email_alert_audit.py."""
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+
+
+def _early_mover_row(**overrides):
+    """Sauberes, im Versandmoment handelbares Crypto-Swing-Setup
+    (Spiegel der Fixture aus test_email_alert_audit.py inkl. AUDIT-H-1
+    entry_score)."""
+    row = {
+        "Symbol": "EMO",
+        "Name": "Early Mover",
+        "grade": "A",
+        "score": 86,
+        "entry_score": 85,
+        "Price": 1.25,
+        "Change24h": 4.2,
+        "VolMCapRatio": 8.5,
+        "direction": "LONG",
+        "trade_action": "LONG_TRIGGER",
+        "entry_status": "CONDITIONAL_LONG",
+        "entry_quality": "GOOD",
+        "execution_trigger_ok": True,
+        "signal_quality": "conditional_long_setup",
+        "entry": 1.25,
+        "stop_loss": 1.15,
+        "tp1": 1.43,
+        "tp2": 1.57,
+        "live_rr_ratio": 2.4,
+        "distance_to_entry_r": 0,
+        "late_to_tp1": False,
+        "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        "risk_flags": [],
+        "trade_setup": {
+            "trade_action": "LONG_TRIGGER",
+            "entry": 1.25,
+            "stop_loss": 1.15,
+            "tp1": 1.43,
+            "tp2": 1.57,
+            "live_rr": 2.4,
+            "distance_to_entry_r": 0,
+            "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        },
+    }
+    row.update(overrides)
+    return row
+
+
+def _capture_send(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda subject, body, **kwargs: sent.append((subject, body, kwargs)) or True,
+    )
+    return sent
+
+
+def _tradeable_health(**overrides):
+    health = {
+        "decision": "TRADEABLE",
+        "health_score": 95,
+        "chase_risk": "LOW",
+        "fakeout_risk": "LOW",
+        "liquidity_risk": "LOW",
+        "entry_quality_score": 90,
+        "fakeout_risk_score": 95,
+        "liquidity_score": 95,
+    }
+    health.update(overrides)
+    return health
+
+
+# ── Q1: WAIT-Decisions raus aus der JETZT-Mail, rein in die Watch-Mail ──
+
+
+def test_q1_wait_for_retest_row_not_in_trade_mail_but_in_watch_mail(monkeypatch):
+    sent = _capture_send(monkeypatch)
+    payload = {"coins": [
+        _early_mover_row(
+            Symbol="RETESTZONE",
+            trade_action="WAIT_FOR_RETEST",
+            entry_status="WAIT_FOR_RETEST",
+            execution_trigger_ok=False,
+        ),
+    ]}
+
+    api._send_early_mover_long_alerts(payload)
+
+    assert len(sent) == 1
+    subject, body, kwargs = sent[0]
+    assert kwargs.get("mail_class") == "watch"
+    assert "Retest-Zonen" in subject
+    assert "RETESTZONE" in body
+    assert "BEOBACHTUNG" in body
+    assert "kein Einstiegssignal" in body
+    assert "Auf Retest warten" in body
+
+
+def test_q1_watch_only_health_row_goes_to_watch_mail(monkeypatch):
+    sent = _capture_send(monkeypatch)
+    monkeypatch.setattr(
+        api,
+        "calculate_trade_health",
+        lambda row, scanner_name="scanner", market_context=None: _tradeable_health(
+            decision="WATCH_ONLY", health_score=60
+        ),
+    )
+
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="WATCHME")]})
+
+    assert len(sent) == 1
+    subject, body, kwargs = sent[0]
+    assert kwargs.get("mail_class") == "watch"
+    assert "WATCHME" in body
+    assert "Nur beobachten" in body
+
+
+def test_q1_fresh_long_trigger_row_goes_to_trade_mail(monkeypatch):
+    sent = _capture_send(monkeypatch)
+
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="TRADENOW")]})
+
+    trade_mails = [item for item in sent if item[2].get("mail_class") == "trade"]
+    watch_mails = [item for item in sent if item[2].get("mail_class") == "watch"]
+    assert len(trade_mails) == 1
+    assert "TRADENOW" in trade_mails[0][1]
+    assert "Crypto Early Mover LONG Digest" in trade_mails[0][0]
+    assert watch_mails == []
+
+
+def test_q1_trade_and_watch_rows_split_into_separate_mails(monkeypatch):
+    sent = _capture_send(monkeypatch)
+    payload = {"coins": [
+        _early_mover_row(Symbol="TRADENOW"),
+        _early_mover_row(
+            Symbol="RETESTZONE",
+            trade_action="WAIT_FOR_RETEST",
+            entry_status="WAIT_FOR_RETEST",
+            execution_trigger_ok=False,
+        ),
+    ]}
+
+    api._send_early_mover_long_alerts(payload)
+
+    assert len(sent) == 2
+    trade = next(item for item in sent if item[2].get("mail_class") == "trade")
+    watch = next(item for item in sent if item[2].get("mail_class") == "watch")
+    assert "TRADENOW" in trade[1]
+    assert "RETESTZONE" not in trade[1]
+    assert "RETESTZONE" in watch[1]
+    assert "TRADENOW" not in watch[1]
+
+
+def test_q1_quality_fail_rows_do_not_reach_watch_mail(monkeypatch):
+    """Watch-Mail ist kein Auffangbecken: Grade/Score/RVOL/Plan muessen passen."""
+    sent = _capture_send(monkeypatch)
+    payload = {"coins": [
+        # Score/Entry-Qualitaet zu schwach
+        _early_mover_row(
+            Symbol="LOWSCORE",
+            trade_action="WAIT_FOR_RETEST",
+            execution_trigger_ok=False,
+            entry_score=40,
+            score=55,
+            grade="B",
+        ),
+        # Live-R:R unter Schwelle
+        _early_mover_row(
+            Symbol="BADRR",
+            trade_action="WAIT_FOR_RETEST",
+            execution_trigger_ok=False,
+            live_rr_ratio=0.8,
+        ),
+    ]}
+
+    api._send_early_mover_long_alerts(payload)
+
+    assert sent == []
+
+
+def test_q1_watch_mail_has_own_cooldown_key(monkeypatch):
+    sent = _capture_send(monkeypatch)
+    payload = {"coins": [
+        _early_mover_row(
+            Symbol="RETESTZONE",
+            trade_action="WAIT_FOR_RETEST",
+            entry_status="WAIT_FOR_RETEST",
+            execution_trigger_ok=False,
+        ),
+    ]}
+
+    api._send_early_mover_long_alerts(payload)
+    api._send_early_mover_long_alerts(payload)
+
+    watch_mails = [item for item in sent if item[2].get("mail_class") == "watch"]
+    assert len(watch_mails) == 1
+    status = api._email_dedupe_status(now=time.time())
+    digest = [item for item in status["recent"] if item["key"] == api._EARLY_MOVER_WATCH_DIGEST_KEY]
+    assert digest
+    assert 0 < digest[0]["remaining_seconds"] <= api._EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC
+
+
+# ── Q2: 15-Min-Frische-Gate ──
+
+
+def test_q2_trigger_older_than_15min_is_suppressed_for_mail():
+    now = 1_000_000.0
+    row = _early_mover_row(
+        Symbol="STALE",
+        intraday_trigger={"ok": True, "reason": "5m_breakout_volume_confirmed", "checked_at": now - 1200},
+    )
+
+    state = api._classify_alert_candidate("early_movers", row, now)
+
+    assert state["alertable_now"] is False
+    assert "trigger_stale_for_mail" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_TRIGGER"
+
+
+def test_q2_trigger_younger_than_15min_stays_alertable():
+    now = 1_000_000.0
+    row = _early_mover_row(
+        Symbol="FRESH",
+        intraday_trigger={"ok": True, "reason": "5m_breakout_volume_confirmed", "checked_at": now - 600},
+    )
+
+    state = api._classify_alert_candidate("early_movers", row, now)
+
+    assert "trigger_stale_for_mail" not in state["suppression_reasons"]
+    assert state["alertable_now"] is True
+
+
+def test_q2_scan_age_proxy_used_when_row_timestamp_missing():
+    now = 1_000_000.0
+    stale = _early_mover_row(Symbol="OLDSCAN", _mail_scan_age_sec=1200)
+    fresh = _early_mover_row(Symbol="NEWSCAN", _mail_scan_age_sec=300)
+
+    stale_state = api._classify_alert_candidate("early_movers", stale, now)
+    fresh_state = api._classify_alert_candidate("early_movers", fresh, now)
+
+    assert "trigger_stale_for_mail" in stale_state["suppression_reasons"]
+    assert "trigger_stale_for_mail" not in fresh_state["suppression_reasons"]
+    # Ohne jeden Zeitstempel: kein Gate (Alter unbekannt)
+    unknown_state = api._classify_alert_candidate("early_movers", _early_mover_row(Symbol="NOAGE"), now)
+    assert "trigger_stale_for_mail" not in unknown_state["suppression_reasons"]
+
+
+def test_q2_stale_trigger_row_lands_in_watch_mail_with_hint(monkeypatch):
+    sent = _capture_send(monkeypatch)
+    row = _early_mover_row(
+        Symbol="STALEROW",
+        intraday_trigger={"ok": True, "reason": "5m_breakout_volume_confirmed", "checked_at": time.time() - 1200},
+    )
+
+    api._send_early_mover_long_alerts({"coins": [row]})
+
+    assert len(sent) == 1
+    subject, body, kwargs = sent[0]
+    assert kwargs.get("mail_class") == "watch"
+    assert "STALEROW" in body
+    assert "Trigger abgelaufen - neu bewerten" in body
+
+
+def test_q2_chase_protection_applies_to_crypto_without_soft_bypass(monkeypatch):
+    """Preis weit weg von der Entry-Zone => Health-NO_TRADE, weder JETZT- noch Watch-Mail.
+
+    Health berechnet die Entry-Distanz live aus current/entry/risk: Preis 1.55
+    bei Entry 1.25 / Stop 1.15 = 3R Chase => distance-/live_rr-Gates greifen
+    nach Q1 auch fuer Crypto-Swing (kein Soft-Bypass mehr).
+    """
+    sent = _capture_send(monkeypatch)
+    row = _early_mover_row(
+        Symbol="CHASED",
+        Price=1.55,
+        current_price=1.55,
+        distance_to_entry_r=3.0,
+        live_rr_ratio=0.2,
+    )
+
+    state = api._classify_alert_candidate("early_movers", row, time.time())
+    assert state["alertable_now"] is False
+    assert "trade_health_chase_risk" in state["suppression_reasons"]
+    assert any(reason.startswith("trade_health_") for reason in state["suppression_reasons"])
+
+    api._send_early_mover_long_alerts({"coins": [row]})
+    assert sent == []
+
+
+# ── H1: Entry-Score-Cap ──
+
+
+def test_h1_low_entry_score_caps_swing_mail_score():
+    state = api._classify_alert_candidate(
+        "early_movers", _early_mover_row(Symbol="WEAKENTRY", score=95, entry_score=10), 1_000_000.0
+    )
+
+    assert state["score"] == 10
+    assert state["alertable_now"] is False
+    assert "score_below_alert_threshold" in state["suppression_reasons"]
+
+
+def test_h1_entry_score_zero_is_valid_and_caps_to_zero():
+    state = api._classify_alert_candidate(
+        "early_movers", _early_mover_row(Symbol="ZEROENTRY", score=95, entry_score=0), 1_000_000.0
+    )
+
+    assert state["score"] == 0
+    assert state["alertable_now"] is False
+
+
+def test_h1_good_entry_score_caps_to_entry_score():
+    state = api._classify_alert_candidate(
+        "early_movers", _early_mover_row(Symbol="OKENTRY", score=95, entry_score=85), 1_000_000.0
+    )
+
+    assert state["score"] == 85
+    assert state["alertable_now"] is True
+
+
+# ── H2: Betreff-Praefixe pro Mail-Klasse ──
+
+
+def test_h2_subject_prefixes_per_mail_class():
+    assert api._apply_mail_class_subject("3 Top-Setups", "trade") == api._MAIL_CLASS_SUBJECT_PREFIXES["trade"] + "3 Top-Setups"
+    assert api._apply_mail_class_subject("Crypto Retest-Zonen (2 Kandidaten)", "watch") == api._MAIL_CLASS_SUBJECT_PREFIXES["watch"] + "Crypto Retest-Zonen (2 Kandidaten)"
+    assert api._apply_mail_class_subject("Status", "info") == api._MAIL_CLASS_SUBJECT_PREFIXES["info"] + "Status"
+    # Unbekannte Klasse faellt konservativ auf "trade" zurueck
+    assert api._apply_mail_class_subject("X", "unknown") == api._MAIL_CLASS_SUBJECT_PREFIXES["trade"] + "X"
+
+
+def test_h2_no_double_emoji_for_legacy_subjects():
+    trade_prefix = api._MAIL_CLASS_SUBJECT_PREFIXES["trade"]
+    info_prefix = api._MAIL_CLASS_SUBJECT_PREFIXES["info"]
+    # Bestehende Emojis am Anfang werden ersetzt, nicht gestapelt
+    assert api._apply_mail_class_subject("\U0001F6A8 3 Top-Setups — BI Scanner LONG", "trade") == trade_prefix + "3 Top-Setups — BI Scanner LONG"
+    assert api._apply_mail_class_subject("⚠️ CRASH: 2 Aktien", "trade") == trade_prefix + "CRASH: 2 Aktien"
+    assert api._apply_mail_class_subject("\U0001F514 5 ORB Breakouts", "trade") == trade_prefix + "5 ORB Breakouts"
+    assert api._apply_mail_class_subject("✅ TradingBot Test", "info") == info_prefix + "TradingBot Test"
+    # Idempotent: bereits klassifizierte Betreffs bleiben einfach
+    once = api._apply_mail_class_subject("Foo", "trade")
+    assert api._apply_mail_class_subject(once, "trade") == once
+    assert once.count("\U0001F6A8") == 1
+
+
+def test_h2_send_email_alert_records_prefixed_subject(monkeypatch):
+    events = []
+    monkeypatch.setattr(api, "_record_email_event", lambda subject, status, reason=None: events.append((subject, status, reason)))
+    monkeypatch.setattr(api, "_SECRETS", {})  # kein Gmail -> skipped, aber Subject ist schon gepraefixt
+
+    ok = api._send_email_alert("Crypto Retest-Zonen (1 Kandidaten)", "<p>x</p>", bypass_startup_cooldown=True, mail_class="watch")
+
+    assert ok is False
+    assert events
+    assert events[-1][0].startswith(api._MAIL_CLASS_SUBJECT_PREFIXES["watch"])
+    assert events[-1][2] == "missing_gmail_config"
+
+
+# ── H3: Empfaenger-Routing nach Mail-Klasse ──
+
+
+def _h3_users():
+    return {"users": {
+        "plain@x.com": {
+            "plan": "elite",
+            "email_alerts_enabled": True,
+            "alert_email": "plain@x.com",
+            "trade_alert_horizon": "both",
+        },
+        "watcher@x.com": {
+            "plan": "elite",
+            "email_alerts_enabled": True,
+            "alert_email": "watcher@x.com",
+            "trade_alert_horizon": "both",
+            "watch_mail_optin": True,
+        },
+    }}
+
+
+def test_h3_watch_mails_require_subscriber_optin(monkeypatch):
+    monkeypatch.setattr(auth, "_load_users", _h3_users)
+    monkeypatch.setattr(auth, "_save_users", lambda db: None)
+
+    watch = auth.get_email_alert_recipients(trade_horizon="swing", mail_class="watch")
+    trade = auth.get_email_alert_recipients(trade_horizon="swing", mail_class="trade")
+    default = auth.get_email_alert_recipients(trade_horizon="swing")
+
+    assert watch == ["watcher@x.com"]
+    assert trade == ["plain@x.com", "watcher@x.com"]
+    assert default == trade  # trade-Verhalten unveraendert (Default)
+
+
+def test_h3_send_email_alert_passes_mail_class_and_keeps_operator(monkeypatch):
+    captured = {}
+    deliveries = []
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, recipients, message):
+            deliveries.append(list(recipients))
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(api, "_SECRETS", {"GMAIL_USER": "op@x.com", "GMAIL_APP_PASSWORD": "pw", "ALERT_EMAIL": "op@x.com"})
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", True)
+    monkeypatch.setattr(api, "HAS_AUTH", True)
+
+    def _fake_recipients(trade_horizon="", mail_class="trade"):
+        captured["mail_class"] = mail_class
+        return []  # kein Abonnent hat Watch-Opt-in
+
+    monkeypatch.setattr(api, "get_email_alert_recipients", _fake_recipients)
+
+    ok = api._send_email_alert("Crypto Retest-Zonen (1 Kandidaten)", "<p>x</p>", bypass_startup_cooldown=True, mail_class="watch")
+
+    assert ok is True
+    assert captured["mail_class"] == "watch"
+    # Betreiber (ALERT_EMAIL) bekommt weiterhin ALLE Klassen
+    assert deliveries == [["op@x.com"]]
+
+
+def test_h3_test_email_goes_only_to_admin(monkeypatch):
+    sent = []
+    monkeypatch.setattr(api, "_require_admin", lambda authorization: None)
+    monkeypatch.setattr(api, "_email_alert_status", lambda: {"configured": True})
+    monkeypatch.setattr(api, "_SECRETS", {"GMAIL_USER": "op@x.com", "GMAIL_APP_PASSWORD": "pw", "ALERT_EMAIL": "admin@x.com"})
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, kwargs)) or True)
+
+    result = api.test_email_alert(authorization="Bearer admin-token")
+
+    assert result["status"] == "ok"
+    assert len(sent) == 1
+    subject, kwargs = sent[0]
+    assert kwargs.get("recipient_emails") == ["admin@x.com"]
+    assert kwargs.get("mail_class") == "info"
+
+
+# ── M1: synthetische Biotech-Level kennzeichnen ──
+
+
+def test_m1_synthetic_biotech_levels_are_marked_in_mail_html():
+    row = {
+        "Ticker": "BIO",
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.2,
+        "TP1": 11.5,
+        "TP2": 12.4,
+        "Trade_Setup_Source": "biotech_daily_structure",
+        "trade_setup": {
+            "stop_source": "ATR invalidation fallback",
+            "tp1_source": "R1",
+            "tp2_source": "127% range extension",
+        },
+    }
+
+    html_out = api._format_alert_plan_html(row)
+
+    assert "Struktur-Level (ATR/Support) - nicht Scanner-nativ" in html_out
+
+
+def test_m1_native_levels_are_not_marked():
+    row = {
+        "Ticker": "NATIVE",
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.2,
+        "TP1": 11.5,
+        "TP2": 12.4,
+    }
+
+    html_out = api._format_alert_plan_html(row)
+
+    assert "nicht Scanner-nativ" not in html_out

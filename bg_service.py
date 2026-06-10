@@ -54,6 +54,7 @@ STATUS_FILE = DATA_DIR / "bg_status.json"
 sys.path.insert(0, str(BASE_DIR))
 
 from modules.trade_levels import normalize_alert_trade_levels
+from modules.trade_health import calculate_trade_health  # Q3/B4: zentrales Health-Gate wie api
 try:
     from modules.auth import get_email_alert_recipients
     HAS_AUTH_ALERT_RECIPIENTS = True
@@ -182,6 +183,22 @@ _ALERT_MIN_SCORE = 80
 _NLS_MIN_ALERT_RR = 1.5
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _LONG_ENTRY_ALERT_SCANNERS = {"bi_long", "biotech", "strategies", "stock_strategy", "strategy_scan"}
+# Q3/B4: RVOL-Floor wie api (0.7) fuer die bg-Mail-Scanner. bi/biotech sind
+# Pre-Breakout-Scanner; der 1.5er-Breakout-Floor (AUDIT S-1) gilt nur fuer
+# Breakout-/Momentum-Strategien im api-Pfad und betrifft KEINEN bg-Scanner.
+_ALERT_MIN_RVOL = 0.7
+_BG_ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech"}
+_ALERT_MIN_HEALTH_SCORE = 80
+# B2: Dedupe-TTLs wie api — Biotech-Katalysator-Setups bleiben tagelang gleich.
+_BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600
+# B5: Einmalige Invalidierungs-Update-Mail je Symbol (72h-Fenster).
+_NLS_INVALIDATION_DEDUPE_SEC = 72 * 3600
+# Startup-Delay wie api (_EMAIL_STARTUP_DELAY): nach Prozess-Restart 5 Min keine
+# Mails — alte Cache-Daten erzeugen sonst Phantom-Alerts/Restart-Spam.
+_BG_STARTED_AT = time.time()
+_BG_STARTUP_MAIL_DELAY = 300
+# B6: Mail-Klassen-Praefixe (mit api-Team abgestimmt, identische Konvention).
+_MAIL_CLASS_PREFIXES = {"trade": "🚨 JETZT: ", "watch": "👁️ WATCH: ", "info": "ℹ️ "}
 _NON_STOCK_PRODUCT_TICKERS = {
     "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ",
     "NVDL", "NVDQ", "NVDU", "NVDD", "CONL", "GGLL", "GGLS", "AAPU", "AAPD",
@@ -359,8 +376,54 @@ def _alert_trade_plan_ok(row, min_rr=1.0):
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
         return False
+    # Q3/B4: geschaetzte Level (price_fallback / 3%-Range-Schaetzung) sind keine
+    # handelbaren nativen Scanner-Level -> nicht mailbar (api: estimated_trade_plan).
+    if levels.get("estimated"):
+        return False
     rr = levels.get("rr")
-    return not isinstance(rr, (int, float)) or rr >= min_rr
+    # Q3/B4: rr=None heisst unvollstaendige Geometrie -> nicht mailbar (wie api).
+    return isinstance(rr, (int, float)) and rr >= min_rr
+
+
+def _alert_dedupe_ttl_seconds(scanner_name):
+    """B2: Dedupe-TTL je Scanner — identisch zu api._alert_dedupe_ttl_seconds."""
+    if str(scanner_name or "").lower() == "biotech":
+        return _BIOTECH_ALERT_DEDUPE_SEC
+    return _EMAIL_COOLDOWN_SEC
+
+
+def _bg_alert_health_reasons(row, scanner_name):
+    """Q3/B4: api-Health-Gate gespiegelt — beantwortet 'jetzt handelbar?'.
+
+    Stop-Breach, Chase-/Entry-Zonen-Schutz und live R:R liegen zentral in
+    modules.trade_health; mailbar nur decision==TRADEABLE mit health_score >= 80.
+    """
+    levels = _alert_trade_levels(row)
+    health_row = dict(row)
+    if levels.get("valid"):
+        health_row.setdefault("entry", levels.get("entry"))
+        health_row.setdefault("Entry", levels.get("entry"))
+        health_row.setdefault("stop_loss", levels.get("stop"))
+        health_row.setdefault("StopLoss", levels.get("stop"))
+        health_row.setdefault("tp1", levels.get("tp1"))
+        health_row.setdefault("TP1", levels.get("tp1"))
+        health_row.setdefault("tp2", levels.get("tp2"))
+        health_row.setdefault("TP2", levels.get("tp2"))
+        health_row.setdefault("direction", levels.get("direction"))
+    if "current_price" not in health_row:
+        health_row["current_price"] = _extract_alert_price(health_row)
+    try:
+        health = calculate_trade_health(health_row, scanner_name=scanner_name)
+    except Exception as exc:
+        log.warning(f"Health-Gate Fehler ({scanner_name}): {exc}")
+        return ["health_check_failed"]
+    reasons = []
+    decision = str(health.get("decision", "") or "").upper()
+    if decision != "TRADEABLE":
+        reasons.append(f"health_{(decision or 'unknown').lower()}")
+    if _safe_float(health.get("health_score"), 0) < _ALERT_MIN_HEALTH_SCORE:
+        reasons.append("health_score_below_threshold")
+    return reasons
 
 
 def _extract_long_entry_fields(row):
@@ -804,10 +867,44 @@ def _cleanup_email_cooldown():
         log.debug(f"  Cooldown cleanup: {len(expired)} abgelaufene Einträge entfernt, {len(_EMAIL_COOLDOWN)} aktiv")
 
 
-def _send_email_alert(subject, body_html, secrets):
-    """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml"""
+def _apply_mail_class_prefix(subject, mail_class):
+    """B6: Betreff-Praefix je Mail-Klasse (trade/watch/info), api-identisch.
+
+    Vorhandene fuehrende Alert-Emojis und alte Klassen-Tokens werden ERSETZT,
+    nicht gestapelt.
+    """
+    text = str(subject or "").strip()
+    known_emojis = ("🚨", "📊", "🔴", "👁️", "👁", "ℹ️", "ℹ", "⚠️", "⚠", "🏆", "🔥", "🆕")
+    known_tokens = ("JETZT:", "WATCH:")
+    changed = True
+    while changed and text:
+        changed = False
+        for emoji in known_emojis:
+            if text.startswith(emoji):
+                text = text[len(emoji):].lstrip()
+                changed = True
+        for token in known_tokens:
+            if text.upper().startswith(token):
+                text = text[len(token):].lstrip()
+                changed = True
+    prefix = _MAIL_CLASS_PREFIXES.get(str(mail_class or "").strip().lower(), "")
+    return f"{prefix}{text}"
+
+
+def _send_email_alert(subject, body_html, secrets, mail_class="trade"):
+    """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml
+
+    mail_class (B6, mit api-Team abgestimmt): "trade" -> '🚨 JETZT: ',
+    "watch" -> '👁️ WATCH: ', "info" -> 'ℹ️ ' als Betreff-Praefix.
+    """
+    subject = _apply_mail_class_prefix(subject, mail_class)
     if _email_has_blocked_etf_content(subject, body_html):
         log.warning(f"E-Mail Alert blockiert (ETF/ETP-Inhalt): {subject}")
+        return False
+    # Startup-Delay wie api: nach Restart 5 Min keine Mails (alte Cache-Daten
+    # wuerden Phantom-Alerts / Restart-Spam erzeugen).
+    if time.time() - _BG_STARTED_AT < _BG_STARTUP_MAIL_DELAY:
+        log.info(f"E-Mail Alert unterdrueckt (Startup-Delay {_BG_STARTUP_MAIL_DELAY}s): {subject}")
         return False
     gmail_user = secrets.get("GMAIL_USER", "")
     gmail_pass = secrets.get("GMAIL_APP_PASSWORD", "")
@@ -816,7 +913,12 @@ def _send_email_alert(subject, body_html, secrets):
     send_to_subscribers = str(secrets.get("ALERT_SEND_TO_SUBSCRIBERS", os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"))).strip().lower() not in {"0", "false", "no", "off"}
     if send_to_subscribers and HAS_AUTH_ALERT_RECIPIENTS and get_email_alert_recipients:
         try:
-            recipients.extend(get_email_alert_recipients())
+            # B7: swing-Horizont wie api; mail_class nur defensiv via
+            # TypeError-Fallback mitgeben (api-Team rollt den Parameter parallel aus).
+            try:
+                recipients.extend(get_email_alert_recipients(trade_horizon="swing", mail_class=mail_class))
+            except TypeError:
+                recipients.extend(get_email_alert_recipients(trade_horizon="swing"))
         except Exception as exc:
             log.warning(f"Subscriber-Alert-Empfaenger konnten nicht geladen werden: {exc}")
     recipients = sorted(set(addr for addr in recipients if "@" in addr))
@@ -892,6 +994,11 @@ def _check_and_alert_scan_results(scanner_name, secrets):
 
         # Filter: Nur Grade S oder A
         alerts = []
+        suppressed = {}  # Q3/B4: Audit-Dict je Lauf (geblockt wegen health/estimated/rvol/...)
+
+        def _suppress(reason):
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+
         for r in results:
             ticker = r.get("ticker", r.get("Ticker", ""))
             grade = r.get("BI_Grade", r.get("Grade", r.get("rating", "")))
@@ -903,8 +1010,18 @@ def _check_and_alert_scan_results(scanner_name, secrets):
             if not is_top_grade:
                 continue
             if score_num < _ALERT_MIN_SCORE:
+                _suppress("score_below_alert_threshold")
+                continue
+            # Q3/B4: RVOL-Floor wie api (0.7; None => Block). bi/biotech sind
+            # Pre-Breakout-Scanner — der 1.5er-Breakout-Floor (AUDIT S-1) gilt nur
+            # fuer Breakout-/Momentum-Strategien im api-Pfad, nicht hier.
+            rvol_num = _safe_float(r.get("RVOL", r.get("rvol")), None)
+            if scanner_name in _BG_ALERT_RVOL_GUARD_SCANNERS and (rvol_num is None or rvol_num < _ALERT_MIN_RVOL):
+                _suppress("rvol_below_alert_threshold")
+                log.debug(f"Alert suppressed by RVOL floor: {scanner_name} {ticker} rvol={rvol_num}")
                 continue
             if scanner_name == "bi_short" and _bearish_stock_alert_active(ticker, now=now):
+                _suppress("bearish_ticker_already_alerted")
                 log.debug(f"BI short alert suppressed by bearish ticker dedupe: {ticker}")
                 continue
             if scanner_name == "bi_short" and ticker:
@@ -914,6 +1031,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 r["bear_entry_quality"] = _bear_entry_quality(r)
                 _bear_reasons = _bear_short_rule_reasons(r)
                 if _bear_reasons:
+                    _suppress("short_timing_guard")
                     log.debug(f"BI short alert suppressed by timing guard: {ticker} {_bear_reasons}")
                     continue
             if scanner_name in _LONG_ENTRY_ALERT_SCANNERS and ticker:
@@ -923,17 +1041,44 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 r["long_entry_quality"] = _long_entry_quality(r)
                 r["alertable_long"] = not _long_entry_rule_reasons(r)
                 if not r["alertable_long"]:
+                    _suppress("long_timing_guard")
                     log.debug(f"Long alert suppressed by timing guard: {ticker} {r.get('long_entry_quality')} {r.get('latest_bar_change_pct')}")
                     continue
-            if not _alert_trade_plan_ok(r):
-                log.debug(f"Alert suppressed by invalid trade plan: {scanner_name} {ticker} {_alert_trade_levels(r).get('errors')}")
+            # Q3/B4: Trade-Plan-Gates wie api — valid + nicht estimated + rr >= 1.0.
+            levels = _alert_trade_levels(r)
+            if not levels.get("valid"):
+                _suppress("invalid_trade_plan")
+                log.debug(f"Alert suppressed by invalid trade plan: {scanner_name} {ticker} {levels.get('errors')}")
+                continue
+            if levels.get("estimated"):
+                _suppress("estimated_trade_plan")
+                log.debug(f"Alert suppressed by estimated trade plan: {scanner_name} {ticker}")
+                continue
+            rr = levels.get("rr")
+            if not isinstance(rr, (int, float)) or rr < 1.0:
+                _suppress("trade_rr_below_threshold")
+                log.debug(f"Alert suppressed by R:R gate: {scanner_name} {ticker} rr={rr}")
+                continue
+            # Q3/B4: Health-Gate (zentral in modules.trade_health) — Stop-Breach,
+            # Chase/Entry-Zone, live R:R; mailbar nur TRADEABLE + health_score >= 80.
+            health_reasons = _bg_alert_health_reasons(r, scanner_name)
+            if health_reasons:
+                for hreason in health_reasons:
+                    _suppress(hreason)
+                log.debug(f"Alert suppressed by health gate: {scanner_name} {ticker} {health_reasons}")
                 continue
 
-            # Cooldown: Nicht denselben Ticker nochmal innerhalb 4h
+            # B2: In-Memory-Cooldown + geteiltes persistentes Dedupe (gleiche Datei
+            # und gleiches Key-Format wie api: f"{scanner_name}_{ticker}").
             cooldown_key = f"{scanner_name}_{ticker}"
+            dedupe_ttl = _alert_dedupe_ttl_seconds(scanner_name)
             if cooldown_key in _EMAIL_COOLDOWN:
-                if now - _EMAIL_COOLDOWN[cooldown_key] < _EMAIL_COOLDOWN_SEC:
+                if now - _EMAIL_COOLDOWN[cooldown_key] < dedupe_ttl:
+                    _suppress("cooldown_active")
                     continue
+            if _email_dedupe_active(cooldown_key, dedupe_ttl, now=now):
+                _suppress("persistent_dedupe_active")
+                continue
 
             alerts.append({
                 "ticker": ticker,
@@ -942,11 +1087,15 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "price": r.get("Preis", r.get("current", 0)),
                 "direction": r.get("direction", direction if scanner_name.startswith("bi_") else ""),
                 "name": r.get("Name", r.get("name", "")),
-                "rvol": r.get("RVOL", r.get("rvol", 0)),
+                "rvol": rvol_num if rvol_num is not None else 0,
                 "entry_quality": r.get("long_entry_quality", r.get("bear_entry_quality", "")),
                 "trade_plan_html": _format_alert_plan_html(r),
                 "cooldown_key": cooldown_key,
             })
+
+        # Q3/B4: Suppression-Audit — eine Log-Zeile pro Scan-Lauf (wie api).
+        if suppressed:
+            log.info(f"[Alert] {scanner_name}: suppressed={suppressed}")
 
         if not alerts:
             return
@@ -965,7 +1114,9 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         rows = ""
         for a in alerts:
             emoji = "🏆" if a["grade"] == "S" else "🔥"
-            dir_label = "⬆️ LONG" if "long" in str(a.get("direction", "")).lower() else "⬇️ SHORT"
+            # B6: neutraler Fallback bei leerer Richtung statt faelschlich '⬇️ SHORT'.
+            direction_text = str(a.get("direction", "")).lower()
+            dir_label = "⬆️ LONG" if "long" in direction_text else ("⬇️ SHORT" if "short" in direction_text else "")
             rows += f"""<tr>
                 <td style="padding:8px;border-bottom:1px solid #eee"><b>{a['ticker']}</b></td>
                 <td style="padding:8px;border-bottom:1px solid #eee">{a.get('name', '')[:25]}</td>
@@ -998,15 +1149,17 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         </table>
         <p style="color:#999;font-size:12px;margin-top:20px">
             Automatischer Alert vom TradingBot Background Service.<br>
-            Mail ab Score >= {_ALERT_MIN_SCORE}; 8h Cooldown pro Ticker.<br>
+            Mail ab Score >= {_ALERT_MIN_SCORE}; {int(_alert_dedupe_ttl_seconds(scanner_name) // 3600)}h Cooldown pro Ticker (persistent).<br>
             Grade S = ELITE (Score ≥113 + 4 Smart Money) | Grade A = STARK (Score ≥99 + 3 SM)
         </p>
         </body></html>"""
 
-        sent = _send_email_alert(subject, body_html, secrets)
+        sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
         if sent:
+            # B2: Cooldown + persistentes Dedupe NUR bei erfolgreichem Versand setzen.
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+                _email_dedupe_mark(alert["cooldown_key"], now=now)
                 if scanner_name == "bi_short":
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
 
@@ -1730,7 +1883,7 @@ def _run_bear_scanner(poly_key, secrets):
                 {_crash_rows}</table>
                 <p style="color:#999;font-size:11px;margin-top:12px">Automatischer Short/Crash Alert vom Background Service (stündlich)</p>
                 </body></html>'''
-                sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets)
+                sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets, mail_class="trade")
                 if sent:
                     _EMAIL_COOLDOWN[_crash_ck] = now
                     for dedupe_key in crash_dedupe_keys:
@@ -1936,9 +2089,12 @@ def _run_strategy_scanner(poly_key, secrets):
             top = matches[:5]
 
             for m in top:
-                # Cooldown pro Ticker+Strategie
+                # Cooldown pro Ticker+Strategie (B2: zusaetzlich persistent, B8:
+                # gesetzt wird erst NACH erfolgreichem Versand)
                 ck = f"strat_{strat_name}_{m['Ticker']}"
                 if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < _EMAIL_COOLDOWN_SEC:
+                    continue
+                if _email_dedupe_active(ck, _EMAIL_COOLDOWN_SEC, now=now):
                     continue
                 # Nur starke Setups: Score >= 80
                 if m["_score"] >= _ALERT_MIN_SCORE:
@@ -1955,10 +2111,16 @@ def _run_strategy_scanner(poly_key, secrets):
                         m["bear_entry_quality"] = _bear_entry_quality(m)
                         if _bear_short_rule_reasons(m):
                             continue
+                    # B8/Q3: dieselben Gates wie _check_and_alert_scan_results
+                    # (Pfad ist dormant, aber gegen Reaktivierung abgesichert).
                     if not _alert_trade_plan_ok(m):
                         continue
+                    _rvol_num = _safe_float(m.get("RVOL", m.get("rvol")), None)
+                    if _rvol_num is None or _rvol_num < _ALERT_MIN_RVOL:
+                        continue
+                    if _bg_alert_health_reasons(m, "strategy_scan"):
+                        continue
                     all_alerts.append(m)
-                    _EMAIL_COOLDOWN[ck] = now
 
         # 6) Cache speichern
         cache_file = "/tmp/strategy_scan_cache.json"
@@ -2024,7 +2186,13 @@ def _run_strategy_scanner(poly_key, secrets):
             </p>
             </body></html>"""
 
-            _send_email_alert(subject, body_html, secrets)
+            sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
+            if sent:
+                # B8: Cooldown/Dedupe erst NACH erfolgreichem Versand setzen.
+                for a in all_alerts:
+                    _ck = f"strat_{a['_strategy']}_{a['Ticker']}"
+                    _EMAIL_COOLDOWN[_ck] = now
+                    _email_dedupe_mark(_ck, now=now)
 
     except Exception as e:
         log.error(f"❌ Strategy Scanner: {e}\n{traceback.format_exc()}")
@@ -2948,10 +3116,72 @@ def _alert_nls_signals_legacy(results, secrets):
     log.info(f"📧 NLS Alert: {n} Dump-Signale gesendet ({', '.join(a['symbol'] for a in alerts)})")
 
 
+def _alert_nls_invalidations(results, secrets):
+    """B5: Einmalige Info-Update-Mail, wenn ein bereits GEMAILTES NLS-Signal
+    invalidiert wurde (Stop gerissen).
+
+    Nur fuer Symbole mit aktivem new_listing_{RAW}-Dedupe-Mark (= Erst-Mail ging
+    wirklich raus); eigener Dedupe-Key new_listing_invalidated_{RAW} (TTL 72h).
+    """
+    monitoring = results.get("monitoring", []) if isinstance(results, dict) else []
+    if not monitoring:
+        return
+    now = time.time()
+    for entry in monitoring:
+        if not isinstance(entry, dict):
+            continue
+        category = str(entry.get("trade_category", "") or "").upper()
+        status = str(entry.get("status", "") or "").lower()
+        if category != "SIGNAL_INVALIDATED" and status != "invalidated":
+            continue
+        raw_symbol = str(entry.get("symbol", "") or "").strip().upper()
+        if not raw_symbol:
+            continue
+        # Erst-Mail-Mark? Roh-Symbol-Key wie api (B3). 72h-Fenster: Signal lebt
+        # max. 24h, das Fenster deckt Restarts/verzoegerte Scans ab.
+        signal_key = f"new_listing_{raw_symbol}"
+        if not _email_dedupe_active(signal_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
+            continue
+        invalidation_key = f"new_listing_invalidated_{raw_symbol}"
+        if _email_dedupe_active(invalidation_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
+            continue
+        display = _display_crypto_contract_symbol(raw_symbol)
+        reason = html.escape(str(entry.get("status_reason", "") or "Stop gerissen"))
+        price = _safe_float(entry.get("price"), None)
+        stop = _safe_float(entry.get("stop_loss"), None)
+        price_text = f"${price:.6g}" if price is not None else "-"
+        stop_text = f"${stop:.6g}" if stop is not None else "-"
+        body_html = f"""
+        <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
+        <h2 style="color:#0f172a">Signal invalidiert — {display}</h2>
+        <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | New Listing Dump Scanner</p>
+        <p>Das zuvor gemailte SHORT-Signal fuer <b>{display}</b>
+        ({html.escape(str(entry.get('exchange', '') or ''))}) ist invalidiert —
+        der Stop wurde gerissen.</p>
+        <p>Preis: <b>{price_text}</b> | Stop: <b>{stop_text}</b><br>
+        Grund: {reason}</p>
+        <p style="color:#999;font-size:12px;margin-top:16px">
+            Update-Mail (einmalig pro Symbol). Kein neues Signal, keine Handelsaufforderung.
+        </p>
+        </body></html>"""
+        sent = _send_email_alert(
+            f"Signal invalidiert — Stop gerissen: {display}",
+            body_html, secrets, mail_class="info",
+        )
+        if sent:
+            _email_dedupe_mark(invalidation_key, now=now)
+            log.info(f"NLS Invalidierungs-Update gesendet: {display} ({raw_symbol})")
+
+
 def _alert_nls_signals(results, secrets):
     """Override: mail only active, safe Pump-&-Dump SHORT-now signals."""
     if not results:
         return
+    # B5: Invalidierungs-Updates zuerst — unabhaengig davon, ob neue Signale da sind.
+    try:
+        _alert_nls_invalidations(results, secrets)
+    except Exception as exc:
+        log.warning(f"NLS Invalidierungs-Update fehlgeschlagen: {exc}")
     signals = results.get("signals", [])
     if not signals:
         return
@@ -3008,7 +3238,10 @@ def _alert_nls_signals(results, secrets):
         if signal_quality and signal_quality != "tradeable":
             reasons.append("not_tradeable_signal_quality")
 
-        cooldown_key = f"new_listing_{symbol}"
+        # B3: Dedupe-Key auf ROH-Symbol (api-Format, z.B. new_listing_TSTUSD).
+        # Der Display-Symbol-Key (new_listing_TST) lief am persistierten
+        # api-Bestand vorbei und erlaubte Doppel-Mails.
+        cooldown_key = f"new_listing_{str(raw_symbol or '').strip().upper()}"
         if cooldown_key in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[cooldown_key] < _EMAIL_COOLDOWN_SEC:
             reasons.append("cooldown_active")
         if _email_dedupe_active(cooldown_key, _EMAIL_COOLDOWN_SEC, now=now):
@@ -3072,12 +3305,12 @@ def _alert_nls_signals(results, secrets):
         {rows}
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
-        Nur aktive SHORT-now Signale: Score >= {_ALERT_MIN_SCORE}, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol.
+        Nur aktive SHORT-now Signale: Score >= {_ALERT_MIN_SCORE}, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NLS_MIN_ALERT_RR}. 8h Cooldown pro Symbol (persistent).
     </p>
     </body></html>
     """
 
-    sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets)
+    sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -3418,4 +3651,6 @@ def run_once():
         _run_strategy_scanner(poly_key, secrets)
     except Exception as e:
         print(f"   ❌ Strategien: {e}")
+
+# Audit 2026-06-10: bg-Mail-Gates an api angeglichen (Q3/B4, B2, B3, B5, B6-B8).
 

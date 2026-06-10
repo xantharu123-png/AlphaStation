@@ -1821,11 +1821,17 @@ def test_crypto_strategy_scan_does_not_email_snapshot_rows(monkeypatch):
 
 
 def _early_mover_row(**overrides):
+    # AUDIT H-1 (10.06.): Fixture braucht ein explizites entry_score >= 80.
+    # Der Mail-Score wird jetzt ehrlich durch entry_score gecappt; der alte
+    # max(entry_score, 80)-Floor (der schwache Entries kuenstlich auf 80 hob)
+    # ist entfernt. Ohne Feld ergibt _early_mover_entry_score(row) hier 48 und
+    # die Row waere korrekt nicht mailbar.
     row = {
         "Symbol": "EMO",
         "Name": "Early Mover",
         "grade": "A",
         "score": 86,
+        "entry_score": 85,
         "Price": 1.25,
         "Change24h": 4.2,
         "VolMCapRatio": 8.5,

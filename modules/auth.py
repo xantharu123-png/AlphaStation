@@ -430,6 +430,7 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "narrative_email_frequency": "daily",
         "trade_alert_horizon": "swing",
         "scanner_trade_horizon": "swing",
+        "watch_mail_optin": False,  # AUDIT H-3: Watch-Mails nur mit Opt-in
         "created_at": _utc_iso(),
         "last_login": _utc_iso(),
         "trial_ends_at": None,
@@ -473,6 +474,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "alert_email": email, "email_alerts_enabled": True,
             "narrative_email_frequency": "daily",
             "trade_alert_horizon": "swing", "scanner_trade_horizon": "swing",
+            "watch_mail_optin": False,  # AUDIT H-3
             "created_at": _utc_iso(), "last_login": _utc_iso(),
             "trial_ends_at": None,
         }
@@ -833,14 +835,22 @@ def _normalize_trade_horizon(value: Any) -> str:
     return aliases.get(horizon, horizon if horizon in TRADE_HORIZON_OPTIONS else "swing")
 
 
-def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "") -> List[str]:
-    """Return unique alert recipients for active plans with email-alert access."""
+def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "", mail_class: str = "trade") -> List[str]:
+    """Return unique alert recipients for active plans with email-alert access.
+
+    AUDIT H-3: mail_class steuert das Abonnenten-Routing. "watch"-Mails
+    (Beobachtungslisten ohne Einstiegssignal) gehen nur an Abonnenten mit
+    explizitem Opt-in (watch_mail_optin, Default False). "trade"/"info"
+    verhalten sich wie bisher; der Betreiber-Fallback-Empfaenger wird in
+    api._send_email_alert separat behandelt und bekommt alle Klassen.
+    """
     recipients: List[str] = []
     db = _load_users()
     changed = False
     alert_type = str(alert_type or "").strip().lower()
     frequency = _normalize_narrative_email_frequency(frequency) if frequency else ""
     trade_horizon = _normalize_trade_horizon(trade_horizon) if trade_horizon else ""
+    mail_class = str(mail_class or "trade").strip().lower()
     for email, user in db.get("users", {}).items():
         if not isinstance(user, dict):
             continue
@@ -858,6 +868,9 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_
         if not features.get("has_email_alerts"):
             continue
         if user.get("email_alerts_enabled", True) is False:
+            continue
+        if mail_class == "watch" and not bool(user.get("watch_mail_optin", False)):
+            # AUDIT H-3: Watch-Mails nur mit explizitem Opt-in.
             continue
         if alert_type == "narrative_pulse":
             user_frequency = _normalize_narrative_email_frequency(user.get("narrative_email_frequency", "daily"))
@@ -891,6 +904,7 @@ def get_user_alert_settings(token: str) -> Dict[str, Any]:
         "trade_alert_horizon": _normalize_trade_horizon(user.get("trade_alert_horizon", "swing")),
         "scanner_trade_horizon": _normalize_trade_horizon(user.get("scanner_trade_horizon", "swing")),
         "trade_horizon_options": ["swing", "intraday", "both"],
+        "watch_mail_optin": bool(user.get("watch_mail_optin", False)),  # AUDIT H-3
         "has_email_alerts": get_plan_features(get_user_plan(token)).get("has_email_alerts", False),
     }
 
@@ -902,6 +916,7 @@ def update_user_alert_settings(
     narrative_email_frequency: Optional[str] = None,
     trade_alert_horizon: Optional[str] = None,
     scanner_trade_horizon: Optional[str] = None,
+    watch_mail_optin: Optional[bool] = None,
 ) -> Dict[str, Any]:
     payload = verify_token(token)
     if not payload:
@@ -933,6 +948,9 @@ def update_user_alert_settings(
         if horizon not in TRADE_HORIZON_OPTIONS:
             return {"success": False, "message": "Invalid scanner trade horizon"}
         user["scanner_trade_horizon"] = horizon
+    if watch_mail_optin is not None:
+        # AUDIT H-3: explizites Opt-in/Opt-out fuer Watch-Mails.
+        user["watch_mail_optin"] = bool(watch_mail_optin)
     db["users"][email] = user
     _save_users(db)
     return {"success": True, "settings": get_user_alert_settings(token)}
