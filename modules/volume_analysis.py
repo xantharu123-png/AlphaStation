@@ -53,8 +53,15 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
             
             day_range = day_high - day_low
             if day_range <= 0:
-                day_range = 0.01  # Minimum für Doji
-            
+                # M-Doji AUDIT FIX: High==Low-Bars (Doji/1-Tick) haben keine Range.
+                # Der alte 0.01-Fallback war toter Code: Die Overlap-Schleife fand
+                # nie eine Ueberlappung und das Volumen ging KOMPLETT verloren.
+                # Fix: Gesamtes Bar-Volumen in den Bin des Preises (Volumen-Erhaltung).
+                idx = int((day_high - range_low) / bin_size) if bin_size > 0 else 0
+                idx = max(0, min(num_bins - 1, idx))
+                bins[idx]['volume'] += day_vol
+                continue
+
             # Finde welche Bins dieser Tag berührt
             for bin in bins:
                 # Überlappung berechnen
@@ -76,28 +83,38 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
         max_volume = max(volumes)
         
         # Point of Control (POC) - Bin mit meistem Volumen
-        poc_bin = max(bins, key=lambda x: x['volume'])
+        poc_idx = max(range(num_bins), key=lambda i: bins[i]['volume'])
+        poc_bin = bins[poc_idx]
         poc = poc_bin['mid']
-        
-        # Value Area (70% des Volumens um POC)
-        # Sortiere Bins nach Volumen absteigend
-        sorted_bins = sorted(bins, key=lambda x: x['volume'], reverse=True)
-        va_volume = 0
+
+        # M-VA AUDIT FIX: Value Area als KONTIGUIERLICHE POC-Expansion
+        # (Vorbild: volume_profile.py _calculate_value_area). Die alte Greedy-
+        # Variante sammelte die volumenstaerksten Bins unabhaengig von ihrer
+        # Lage — ein Fern-Cluster blaehte die VA dann ueber leere Zonen hinweg
+        # auf (z.B. VA [100,120] statt [100,111]).
         va_target = total_volume * 0.70
-        va_bins = []
-        
-        for bin in sorted_bins:
-            va_bins.append(bin)
-            va_volume += bin['volume']
-            if va_volume >= va_target:
+        accumulated = float(bins[poc_idx]['volume'])
+        va_low_idx = poc_idx
+        va_high_idx = poc_idx
+
+        while accumulated < va_target:
+            can_go_up = va_high_idx + 1 < num_bins
+            can_go_down = va_low_idx - 1 >= 0
+            if not can_go_up and not can_go_down:
                 break
-        
-        if va_bins:
-            vah = max(b['high'] for b in va_bins)
-            val = min(b['low'] for b in va_bins)
-        else:
-            vah = range_high
-            val = range_low
+            vol_up = float(bins[va_high_idx + 1]['volume']) if can_go_up else -1
+            vol_down = float(bins[va_low_idx - 1]['volume']) if can_go_down else -1
+            # Overshoot-Guard wie im Vorbild
+            remaining = va_target - accumulated
+            if vol_up >= vol_down:
+                va_high_idx += 1
+                accumulated += min(vol_up, remaining)
+            else:
+                va_low_idx -= 1
+                accumulated += min(vol_down, remaining)
+
+        vah = bins[va_high_idx]['high']
+        val = bins[va_low_idx]['low']
         
         # Identifiziere LVNs (Low Volume Nodes) - Bins mit < 50% des Durchschnitts
         lvn_threshold = avg_volume * 0.50
@@ -262,8 +279,15 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
         for d in ohlcv_data:
             vol = d.get("volume", 0)
             h, l = d["high"], d["low"]
-            day_range = h - l if h > l else 0.01
-            
+            if h <= l:
+                # M-Doji AUDIT FIX: High==Low-Bar — gesamtes Volumen in den Bin
+                # des Preises (der 0.01-Fallback war toter Code, Volumen ging verloren).
+                idx = int((h - range_low) / bin_size) if bin_size > 0 else 0
+                idx = max(0, min(num_bins - 1, idx))
+                bins[idx]["volume"] += vol
+                continue
+            day_range = h - l
+
             for bin in bins:
                 overlap_low = max(bin["low"], l)
                 overlap_high = min(bin["high"], h)

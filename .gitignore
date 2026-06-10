@@ -14,3 +14,6 @@ tmp_*.html
 .codex_tmp_html_checks/
 .pytest_tmp/
 data_cache/auth/
+data_cache/nls_cache_*.json
+backup_pre_sanierung_*.tar.gz
+*.bust

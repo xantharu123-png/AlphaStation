@@ -4,7 +4,8 @@
 
 - Einen VPS mit Ubuntu 22.04 oder Debian 12
 - SSH-Zugang (root oder sudo-User)
-- Deine Polygon API Keys (aus Streamlit Cloud Secrets)
+- Eine Domain mit DNS-A-Record auf den Server (für TLS/Let's Encrypt)
+- API Keys + Produktions-Secrets (Vorlage: `.env.production.example` im Repo-Root)
 
 ## Empfohlene Server
 
@@ -64,79 +65,77 @@ chmod +x install.sh
 ```
 
 Das Script:
-- Installiert Python, Nginx, Dependencies
+- Installiert Python, nginx, certbot, Dependencies
 - Erstellt User "tradingbot"
-- Fragt nach deinen API Keys
-- Richtet Systemd Services ein (auto-start bei Reboot)
-- Konfiguriert Nginx Reverse Proxy
+- Legt `/home/tradingbot/app/.env` aus `.env.production.example` an (Platzhalter ersetzen!)
+- Richtet die systemd-Units `tradingbot-api` + `tradingbot-bg` ein (Auto-Start bei Reboot)
+- Migriert Alt-Installationen: deaktiviert die alte Streamlit-Unit `tradingbot`
+- Konfiguriert nginx: TLS via certbot, statisches Frontend, `/api/`-Proxy auf Port 8000
 
 ## Schritt 5: Prüfen
 
 ```bash
-# App läuft?
-systemctl status tradingbot
+# API läuft?
+systemctl status tradingbot-api
 
 # Background Service läuft?
 systemctl status tradingbot-bg
 
 # Logs ansehen
-journalctl -u tradingbot -f        # Streamlit App
+journalctl -u tradingbot-api -f    # FastAPI Backend (uvicorn, 127.0.0.1:8000)
 journalctl -u tradingbot-bg -f     # Background Scanner
 
-# Im Browser öffnen
-# http://DEINE_SERVER_IP
+# Health-Check lokal (uvicorn lauscht nur auf localhost)
+curl -s http://127.0.0.1:8000/api/health
+
+# Im Browser öffnen (nginx liefert das statische Frontend aus)
+# https://DEINE-DOMAIN
 ```
 
 ## Nützliche Befehle
 
 ```bash
-# Neustart (nach Code-Update)
-sudo systemctl restart tradingbot
+# Neustart
+sudo systemctl restart tradingbot-api
 sudo systemctl restart tradingbot-bg
 
 # Logs
-journalctl -u tradingbot --since "1 hour ago"
+journalctl -u tradingbot-api --since "1 hour ago"
 
-# Code updaten (wenn Git)
-cd /home/tradingbot/app && git pull && sudo systemctl restart tradingbot
+# Code updaten (empfohlen — mit Compile-/Test-/Health-Gates):
+cd /home/tradingbot/app && bash deploy/safe_deploy.sh
+# Frontend-Änderungen sind damit sofort live (statisch, kein Service-Restart nötig).
 
 # Secrets ändern
-nano /home/tradingbot/.streamlit/secrets.toml
-sudo systemctl restart tradingbot
+nano /home/tradingbot/app/.env
+sudo systemctl restart tradingbot-api tradingbot-bg
 ```
 
-## Optional: SSL (HTTPS)
+## SSL/TLS (HTTPS) — Pflicht für den kommerziellen Betrieb
 
-Wenn du eine Domain hast:
+`install.sh` erledigt das automatisch (fragt nach der Domain). Manuell — Zertifikat ZUERST holen, dann den vHost aktivieren (der 443-Block referenziert die Cert-Dateien):
 
 ```bash
-# In nginx-tradingbot.conf: server_name deine-domain.de;
-sudo certbot --nginx -d deine-domain.de
+sudo certbot certonly --nginx -d deine-domain.de
+sudo sed 's/${DOMAIN}/deine-domain.de/g' /home/tradingbot/app/deploy/nginx-tradingbot.conf | sudo tee /etc/nginx/sites-available/tradingbot
+sudo ln -sf /etc/nginx/sites-available/tradingbot /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Kostenlos via Let's Encrypt, erneuert sich automatisch.
+Kostenlos via Let's Encrypt, erneuert sich automatisch (`certbot.timer`).
 
-## Optional: Passwort-Schutz
+## Passwort-Schutz
 
-Streamlit hat keinen eingebauten Login. Einfachster Schutz:
-
-```bash
-# Nginx Basic Auth
-sudo apt install apache2-utils
-sudo htpasswd -c /etc/nginx/.htpasswd miroslav
-# Dann in nginx-tradingbot.conf unter location / hinzufügen:
-#   auth_basic "TradingBot";
-#   auth_basic_user_file /etc/nginx/.htpasswd;
-sudo systemctl reload nginx
-```
+Nicht mehr nötig: Die App hat einen eingebauten JWT-Login (`COMMERCE_ENFORCE_AUTH=1` in `.env`), nginx limitiert `/api/auth/login` zusätzlich per Rate-Limit. Nginx Basic Auth ist nur noch relevant, falls das Legacy-Streamlit-UI (Port 8501, auskommentierter Block in `nginx-tradingbot.conf`) intern reaktiviert wird.
 
 ## Was läuft auf dem Server
 
 | Service | Was es macht | Auto-Start |
 |---------|-------------|------------|
-| `tradingbot` | Streamlit Web-App (Port 8501) | Ja (bei Reboot) |
+| `tradingbot-api` | FastAPI Backend via uvicorn (`api.py`, 127.0.0.1:8000) | Ja (bei Reboot) |
 | `tradingbot-bg` | bg_service.py — Hintergrund-Scans nach Zeitplan | Ja (bei Reboot) |
-| `nginx` | Reverse Proxy (Port 80 → 8501) | Ja |
+| `nginx` | TLS :443, statisches Frontend (`frontend/`), `/api/`-Proxy → :8000 | Ja |
+| `tradingbot` (alt) | Streamlit-UI `scanner.py` :8501 — wird bei der Migration deaktiviert | Nein |
 
 ## Vorteile vs. Streamlit Cloud
 

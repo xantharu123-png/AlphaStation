@@ -326,3 +326,98 @@ def test_non_tradeable_health_does_not_show_trade_now_positives():
     assert "Live R:R" not in positives
     assert "relative Volumenbestaetigung" not in positives
     assert "Breakout-Volumen bestaetigt" not in positives
+
+
+# ── S-2 Audit-Fix: Stop-Breach-Erkennung ──
+
+def test_long_stop_breach_invalidates_setup():
+    # Audit-Repro: LONG Entry 100 / Stop 95 / Preis 92 war vorher TRADEABLE/health=100
+    row = {
+        "ticker": "BREACH",
+        "direction": "LONG",
+        "Entry": 100.0,
+        "StopLoss": 95.0,
+        "TP1": 110.0,
+        "TP2": 120.0,
+        "current_price": 92.0,
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.85,
+        "dollar_volume": 9_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    assert health["decision"] == "NO_TRADE"
+    assert "setup_invalidated_stop_breached" in health["exclusion_reasons"]
+    assert health["health_score"] <= 15
+    assert health["risk_level"] == "CRITICAL"
+    assert health["metrics"]["live_rr"] == 0.0
+
+
+def test_short_stop_breach_invalidates_setup():
+    row = {
+        "ticker": "SBREACH",
+        "direction": "SHORT",
+        "Entry": 100.0,
+        "StopLoss": 105.0,
+        "TP1": 90.0,
+        "TP2": 80.0,
+        "current_price": 107.0,
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.15,
+        "dollar_volume": 9_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_short")
+
+    assert health["decision"] == "NO_TRADE"
+    assert "setup_invalidated_stop_breached" in health["exclusion_reasons"]
+    assert health["health_score"] <= 15
+    assert health["risk_level"] == "CRITICAL"
+    assert health["metrics"]["live_rr"] == 0.0
+
+
+def test_price_exactly_at_stop_is_breach():
+    row = {
+        "ticker": "ATSTOP",
+        "direction": "LONG",
+        "Entry": 100.0,
+        "StopLoss": 95.0,
+        "TP1": 110.0,
+        "current_price": 95.0,
+        "rvol": 2.0,
+        "dollar_volume": 9_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    assert health["decision"] == "NO_TRADE"
+    assert "setup_invalidated_stop_breached" in health["exclusion_reasons"]
+
+
+def test_pullback_between_stop_and_entry_is_not_breach():
+    row = {
+        "ticker": "PULL",
+        "direction": "LONG",
+        "Entry": 100.0,
+        "StopLoss": 95.0,
+        "TP1": 110.0,
+        "TP2": 120.0,
+        "current_price": 97.0,
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.85,
+        "dollar_volume": 9_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    assert "setup_invalidated_stop_breached" not in health["exclusion_reasons"]
+    assert health["decision"] != "NO_TRADE"
+    assert health["health_score"] >= 65
+    assert any("Richtung Stop" in w for w in health["warnings"])

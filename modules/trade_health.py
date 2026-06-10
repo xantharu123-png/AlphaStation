@@ -2,6 +2,8 @@
 
 The scanner scores answer "is this interesting?". This module answers the
 separate execution question: "is it still tradeable right now?".
+
+S-2 Audit-Fix 2026-06-10: Stop-Breach-Erkennung (current vs stop) ergaenzt.
 """
 
 from __future__ import annotations
@@ -30,11 +32,27 @@ def _first(row: Dict[str, Any], aliases: Iterable[str], default: Any = None) -> 
 
 
 def _to_float(value: Any) -> Optional[float]:
+    """Robust float parsing for scanner rows.
+
+    N-toFloat Audit-Fix:
+    - "1,5" wird als Dezimaltrenner gelesen (1.5), wenn kein Punkt vorhanden ist.
+    - "1,234.56" / "1,234,567" behandeln Kommas als Tausendertrenner.
+    - Nicht-numerische Strings wie "0x10" ergeben None (frueher faelschlich 10.0,
+      weil jedes "x" entfernt wurde). Nur ein Suffix-"x" (z.B. "2.5x" RVOL) wird entfernt.
+    """
     if value is None or value == "":
         return None
     try:
         if isinstance(value, str):
-            value = value.replace("$", "").replace(",", "").replace("%", "").replace("x", "").strip()
+            text = value.replace("$", "").replace("%", "").strip()
+            if text.lower().endswith("x"):
+                text = text[:-1].strip()
+            if "," in text:
+                if "." not in text and text.count(",") == 1:
+                    text = text.replace(",", ".")
+                else:
+                    text = text.replace(",", "")
+            value = text
         number = float(value)
         if number != number:
             return None
@@ -157,6 +175,14 @@ def _live_rr(
             ],
         )
     )
+    # S-2 Audit-Fix: Wenn der Stop bereits gerissen ist, darf das Clamping
+    # (max(current, entry) bzw. min(current, entry)) den Breach nicht maskieren.
+    # Ein gerissener Stop bedeutet: kein lebendes Setup mehr -> Live R:R = 0.0.
+    if current is not None and stop is not None:
+        if direction == "LONG" and current <= stop:
+            return 0.0
+        if direction == "SHORT" and current >= stop:
+            return 0.0
     if current is None or entry is None or stop is None or tp1 is None:
         return provided if provided is not None else fallback
     if direction == "LONG":
@@ -276,6 +302,24 @@ def calculate_trade_health(
     distance_r = _distance_to_entry_r(row, current, entry, risk, direction)
     live_rr = _live_rr(row, current, entry, stop, tp1, tp2, direction)
     tp1_missed, tp2_missed = _target_missed(row, current, direction, tp1, tp2)
+
+    # ── S-2 Audit-Fix: Stop-Breach-Erkennung ──
+    # LONG: current <= stop (exakt am Stop zaehlt als Breach) -> Setup invalidiert.
+    # SHORT: current >= stop analog. Preis ZWISCHEN Stop und Entry ist ein
+    # normaler Pullback und KEIN Breach.
+    stop_breached = False
+    if current is not None and stop is not None:
+        if direction == "LONG" and current <= stop:
+            stop_breached = True
+        elif direction == "SHORT" and current >= stop:
+            stop_breached = True
+    if stop_breached:
+        exclusion_reasons.append("setup_invalidated_stop_breached")
+        warnings.append(
+            f"Stop bereits gerissen ({'Preis <= Stop' if direction == 'LONG' else 'Preis >= Stop'}: "
+            f"{current} vs {stop}) - Setup invalidiert"
+        )
+
     vol_confirmed_bool: Optional[bool] = None
     vwap_aligned_bool: Optional[bool] = None
     close_strength = False
@@ -316,8 +360,16 @@ def calculate_trade_health(
         elif distance_r >= 0.35:
             entry_score -= 15
             warnings.append(f"Entry nicht mehr perfekt: {distance_r:.2f}R Entfernung")
-        elif distance_r <= 0.15:
+        elif 0 <= distance_r <= 0.15:
+            # S-2 Audit-Fix: Positivum nur bei nicht-negativer Distanz.
             near_entry_distance = True
+        elif distance_r < 0:
+            # Negative Distanz = Preis liegt Richtung Stop unter/ueber dem Entry.
+            # Das ist ein Pullback (kein Breach solange Stop haelt), aber kein
+            # "Entry nahe am Trigger"-Positivum.
+            warnings.append(
+                f"Preis liegt {abs(distance_r):.2f}R unter Entry Richtung Stop - Retest abwarten"
+            )
 
     if live_rr is not None:
         if live_rr < HARD_MIN_RR:
@@ -507,6 +559,14 @@ def calculate_trade_health(
     fakeout_score = max(0, min(100, int(round(fakeout_score))))
     liquidity_score = max(0, min(100, int(round(liquidity_score))))
 
+    # S-2 Audit-Fix: Gerissener Stop erzwingt CRITICAL-Scores, egal wie gut
+    # die restlichen Komponenten aussehen.
+    if stop_breached:
+        entry_score = min(entry_score, 15)
+        fakeout_score = min(fakeout_score, 15)
+        near_entry_distance = False
+        live_rr = 0.0
+
     if near_entry_distance:
         if entry_score >= 70 and not tactical_reasons and raw_entry_quality not in {"CHASE", "LATE", "EXTENDED"}:
             positives.append("Entry liegt nahe am Trigger")
@@ -514,6 +574,8 @@ def calculate_trade_health(
             warnings.append("Preis ist nah am Entry, aber Chase-Risiko bleibt durch Setup-/Market-Filter erhoeht")
 
     health_score = int(round(entry_score * 0.45 + fakeout_score * 0.35 + liquidity_score * 0.20))
+    if stop_breached:
+        health_score = min(health_score, 15)
 
     chase_risk = _risk_band(entry_score)
     fakeout_risk = _risk_band(fakeout_score)
@@ -568,6 +630,8 @@ def calculate_trade_health(
         "health_score": health_score,
         "decision": decision,
         "decision_label": _decision_label(decision),
+        "risk_level": "CRITICAL" if stop_breached else _risk_band(health_score),
+        "stop_breached": stop_breached,
         "entry_quality": _entry_quality(entry_score),
         "entry_quality_score": entry_score,
         "fakeout_risk": fakeout_risk,

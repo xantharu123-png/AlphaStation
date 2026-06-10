@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPRECATED (N-1 Audit 2026-06-10) — NICHT IMPORTIEREN!
+# Diese Root-Kopie ist veraltet und wird nicht mehr gepflegt.
+# Aktive, gewartete Version: modules/new_listing_scanner.py
+# (Stand Audit: kein einziger Import dieser Datei im Repo — bg_service/api
+#  nutzen modules.new_listing_scanner.)
+# ═══════════════════════════════════════════════════════════════════════════════
 """
 🆕 New Listing Dump Scanner V1
 ================================

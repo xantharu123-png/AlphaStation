@@ -1,0 +1,61 @@
+# Alpha Station — FastAPI Backend (das kommerzielle Produkt)
+# Ersetzt die alte Unit "tradingbot.service" (Streamlit), siehe Audit LB-3.
+# Install: sudo cp deploy/tradingbot-api.service /etc/systemd/system/ && sudo systemctl daemon-reload
+
+[Unit]
+Description=Alpha Station API (FastAPI/uvicorn auf 127.0.0.1:8000)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/home/tradingbot/app
+
+# Pflicht-ENVs (JWT_SECRET, COMMERCE_ENFORCE_AUTH, Stripe, ...) — Vorlage:
+# .env.production.example; install.sh legt die Datei an. Das "-" vor dem Pfad:
+# fehlende .env blockiert den systemd-Start nicht (ENV kann auch per Drop-in
+# kommen). Fail-closed erzwingt die App selbst: im Commercial-Mode bricht sie
+# beim Boot mit RuntimeError ab, wenn Default-Secrets/Legacy-Keys aktiv sind.
+EnvironmentFile=-/home/tradingbot/app/.env
+Environment="PATH=/home/tradingbot/app/venv/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Nur an localhost binden — TLS-Terminierung und Frontend-Auslieferung macht nginx.
+ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host 127.0.0.1 --port 8000
+
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradingbot-api
+
+# Limits
+LimitNOFILE=65536
+
+# ── Hardening ──
+NoNewPrivileges=true
+# /usr, /boot, /etc read-only. Das App-Verzeichnis bleibt beschreibbar
+# (Auth-DB + data_cache/ liegen dort); explizit freigegeben, damit ein
+# spaeterer Wechsel auf ProtectSystem=strict nichts kaputt macht.
+ProtectSystem=full
+ReadWritePaths=/home/tradingbot/app
+# ProtectHome NICHT setzen — die App liegt unter /home/tradingbot/app.
+# PrivateTmp MUSS false bleiben: api.py und bg_service.py teilen sich
+# Scan-Caches in /tmp (per grep '"/tmp/' verifiziert, u.a. /tmp/bi_cache_long.json,
+# /tmp/bi_cache_short.json, /tmp/alpha_biotech_cache.json, /tmp/orb_scan_results.json,
+# /tmp/coingecko_markets_cache.json, /tmp/bear_scanner_cache.json,
+# /tmp/strategy_scan_cache.json). Mit PrivateTmp=true bekaeme jeder Prozess
+# ein eigenes /tmp und die Scan-Ergebnisse des Background-Service kaemen nie
+# in der API an. Gleiches gilt fuer tradingbot-bg.service.
+PrivateTmp=false
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -10,6 +10,9 @@ This module contains all core technical indicator calculations used by the Tradi
 
 All functions are designed to work with OHLC(V) data and return standardized outputs for
 technical analysis, backtesting, and real-time scanning.
+
+H-13/M-VWAP Audit-Fix 2026-06-10: estimate_crypto_atr ist hier KANONISCH
+(mit Pump-Kappung), VWAP-Baender volumengewichtet ohne 2-Dezimal-Rundung.
 """
 
 import math
@@ -62,25 +65,46 @@ def calculate_close_position(high, low, close, min_range_pct=1.0):
     return max(0.0, min(1.0, close_pos))
 
 
-def estimate_crypto_atr(market_cap, high_24h=None, low_24h=None, price=None):
-    """V69: Zentrale ATR-Schätzung für Crypto — bevorzugt echten Range wenn verfügbar.
+def _mcap_atr_baseline(market_cap):
+    """MCap-basierte typische Daily ATR% für Crypto.
 
-    Wenn high_24h/low_24h/price vorhanden → echte Tages-Range als ATR-Proxy.
-    Sonst Fallback auf Market-Cap-Tiers (weniger genau).
+    H-13 AUDIT FIX: Kanonische Tiers (aus der scorers-V70-Variante übernommen,
+    die konservativeren/höheren Werte): 3.5 / 4.5 / 7.0 / 10.0 / 15.0.
+    Die alte indicators-Variante (4.0 / 6.5 / 9.5) ist damit abgelöst.
     """
-    # Echte Range nutzen wenn verfügbar (10x genauer als statische Tiers)
+    mc = market_cap or 0
+    if mc > 100_000_000_000:   return 3.5   # BTC, ETH (Mega Cap)
+    elif mc > 10_000_000_000:  return 4.5   # Top-20
+    elif mc > 1_000_000_000:   return 7.0   # Mid-Cap
+    elif mc > 100_000_000:     return 10.0  # Small-Cap
+    else:                      return 15.0  # Micro-Cap
+
+
+def estimate_crypto_atr(market_cap, high_24h=None, low_24h=None, price=None):
+    """Zentrale ATR-Schätzung für Crypto — KANONISCHE Implementierung (H-13).
+
+    Es gab zwei Duplikate: indicators (ohne Pump-Kappung) und scorers (mit
+    Pump-Kappung). Kanonisch ist die Variante MIT Pump-Kappung, weil sie
+    konservativer ist: Bei Pump-Tagen ist die heutige 24h-Range aufgebläht
+    und KEIN Proxy für die "normale" Volatilität.
+
+    Logik:
+    - high/low/price vorhanden → echte Tages-Range als ATR-Proxy (>= 0.1%).
+    - Pump-Kappung: Range > 2x MCap-Baseline → Baseline statt Range nutzen
+      (die heutige Range ist dann Teil des Pumps, nicht die Normal-Volatilität).
+    - Sonst Fallback auf Market-Cap-Tiers (siehe _mcap_atr_baseline).
+
+    modules.scorers.estimate_crypto_atr delegiert hierher.
+    """
+    mcap_baseline = _mcap_atr_baseline(market_cap)
+
     if high_24h and low_24h and price and price > 0 and high_24h > low_24h:
         real_atr = (high_24h - low_24h) / price * 100
         if real_atr >= 0.1:  # Mindestens 0.1% Range (Sanity Check)
+            if real_atr > mcap_baseline * 2.0:
+                return mcap_baseline  # Pump-Kappung: Baseline statt aufgeblähter Range
             return real_atr
-    # Fallback: Market-Cap-basierte Schätzung
-    # V69.1 AUDIT FIX: Mega Cap 2.5→3.5% (BTC reale ATR typisch 3-5%, 2.5% war zu niedrig)
-    mc = market_cap or 0
-    if mc > 100_000_000_000:   return 3.5
-    elif mc > 10_000_000_000:  return 4.0
-    elif mc > 1_000_000_000:   return 6.5
-    elif mc > 100_000_000:     return 9.5
-    else:                      return 15.0
+    return mcap_baseline
 
 
 def calculate_atr_from_ohlc(high, low, close, prev_close):
@@ -406,22 +430,33 @@ def calculate_vwap(ohlcv_data):
 
         current_vwap = vwap_values[-1] if vwap_values else typical_prices[-1]
 
-        # Standard Deviation berechnen — Abweichung TP vs laufender VWAP
+        # M-VWAP AUDIT FIX:
+        # 1. Baender VOLUMENGEWICHTET (TradingView-Style):
+        #    var = SUM(vol_i * (tp_i - vwap_i)^2) / SUM(vol_i)  statt ungewichtet.
+        # 2. Kein round(..., 2) mehr: Sub-Cent-Preise (z.B. 0.0005) wurden sonst
+        #    auf 0.0 gerundet -> VWAP/Baender unbrauchbar. Volle Praezision.
         if len(vwap_values) == len(typical_prices):
-            squared_diffs = [(typical_prices[i] - vwap_values[i]) ** 2 for i in range(len(vwap_values))]
+            deviations = [typical_prices[i] - vwap_values[i] for i in range(len(vwap_values))]
         else:
-            squared_diffs = [(tp - current_vwap) ** 2 for tp in typical_prices]
-        variance = sum(squared_diffs) / len(squared_diffs) if squared_diffs else 0
+            deviations = [tp - current_vwap for tp in typical_prices]
+        total_volume = sum(volumes)
+        if total_volume > 0:
+            variance = sum(
+                volumes[i] * deviations[i] ** 2 for i in range(len(deviations))
+            ) / total_volume
+        else:
+            # Fallback ohne Volumendaten: ungewichtete Varianz
+            variance = sum(d ** 2 for d in deviations) / len(deviations) if deviations else 0
         std_dev = variance ** 0.5
 
         return {
-            "vwap": round(current_vwap, 2),
+            "vwap": current_vwap,
             "vwap_values": vwap_values,
-            "std_dev": round(std_dev, 2),
-            "upper_1": round(current_vwap + std_dev, 2),
-            "upper_2": round(current_vwap + 2 * std_dev, 2),
-            "lower_1": round(current_vwap - std_dev, 2),
-            "lower_2": round(current_vwap - 2 * std_dev, 2),
+            "std_dev": std_dev,
+            "upper_1": current_vwap + std_dev,
+            "upper_2": current_vwap + 2 * std_dev,
+            "lower_1": current_vwap - std_dev,
+            "lower_2": current_vwap - 2 * std_dev,
         }
     except Exception as e:
         return None

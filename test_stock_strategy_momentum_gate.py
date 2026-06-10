@@ -64,7 +64,9 @@ def test_momentum_breakout_allows_clean_20d_breakout():
     assert reasons == []
 
 
-def test_momentum_breakout_allows_quieter_20d_swing_breakout():
+def test_momentum_breakout_rejects_quieter_20d_swing_breakout_below_rvol_floor():
+    """AUDIT S-1 (2026-06-10): RVOL >= 1.5 ist nicht verhandelbare Geschaeftsregel
+    fuer Breakout-Signale — 20d-Swing-Breakout mit RVOL 1.12 darf NICHT passieren."""
     metrics = {
         "history_ok": True,
         "ema20": 40.0,
@@ -87,11 +89,26 @@ def test_momentum_breakout_allows_quieter_20d_swing_breakout():
         close_pos=0.57,
     )
 
-    assert ok
-    assert reasons == []
+    assert not ok
+    assert reasons
+
+    # Identisches Setup MIT Volumenbestaetigung (RVOL >= 1.5) muss passieren.
+    ok_with_volume, reasons_with_volume = _stock_momentum_breakout_gate(
+        "Momentum Breakout Long",
+        metrics,
+        price=41.9,
+        change_pct=1.35,
+        rvol=1.55,
+        close_pos=0.57,
+    )
+
+    assert ok_with_volume
+    assert reasons_with_volume == []
 
 
-def test_momentum_breakout_allows_flat_day_structural_20d_breakout():
+def test_momentum_breakout_rejects_flat_day_structural_20d_breakout_without_volume():
+    """AUDIT S-1 (2026-06-10): Flat-Day-Struktur-Breakout mit RVOL 0.82 ist genau
+    der Fakeout-Typ, den der 1.5-Floor verhindern soll — muss abgelehnt werden."""
     metrics = {
         "history_ok": True,
         "ema20": 39.8,
@@ -114,8 +131,8 @@ def test_momentum_breakout_allows_flat_day_structural_20d_breakout():
         close_pos=0.54,
     )
 
-    assert ok
-    assert reasons == []
+    assert not ok
+    assert reasons
 
 
 def test_momentum_breakout_allows_clean_10d_breakout_without_20d_high():

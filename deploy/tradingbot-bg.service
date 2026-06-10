@@ -1,21 +1,54 @@
+# Alpha Station — Background Scanner Service (Scans nach Zeitplan, E-Mail-Alerts)
+# Install: sudo cp deploy/tradingbot-bg.service /etc/systemd/system/ && sudo systemctl daemon-reload
+
 [Unit]
-Description=TradingBot Background Scanner Service
-After=network.target
+Description=Alpha Station Background Scanner (bg_service.py)
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 User=tradingbot
 Group=tradingbot
 WorkingDirectory=/home/tradingbot/app
-Environment="PATH=/home/tradingbot/app/venv/bin:/usr/bin"
-ExecStart=/home/tradingbot/app/venv/bin/python bg_service.py
+
+# Gleiche ENV-Quelle wie tradingbot-api (Provider-Keys, GMAIL_*, BG_SCAN_SET,
+# BG_POLYGON_BUDGET_PER_MIN). "-" wie bei tradingbot-api: fehlende .env
+# blockiert den systemd-Start nicht; fail-closed-Checks macht die App selbst.
+EnvironmentFile=-/home/tradingbot/app/.env
+Environment="PATH=/home/tradingbot/app/venv/bin:/usr/local/bin:/usr/bin:/bin"
+
+ExecStart=/home/tradingbot/app/venv/bin/python3 bg_service.py
+
 Restart=always
-RestartSec=30
+RestartSec=5
 
 # Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=tradingbot-bg
+
+# Limits
+LimitNOFILE=65536
+
+# ── Hardening ──
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/home/tradingbot/app
+# ProtectHome NICHT setzen — die App liegt unter /home/tradingbot/app.
+# PrivateTmp MUSS false bleiben und identisch zu tradingbot-api.service sein:
+# bg_service.py SCHREIBT die Scan-Caches nach /tmp (z.B. /tmp/bi_cache_long.json,
+# /tmp/alpha_biotech_cache.json, /tmp/orb_scan_results.json,
+# /tmp/coingecko_markets_cache.json), api.py LIEST sie von dort. Beide Prozesse
+# muessen dasselbe /tmp sehen. (Alternative waere JoinsNamespaceOf= mit
+# PrivateTmp=true — bewusst nicht gewaehlt, PrivateTmp=false auf beiden Seiten
+# ist einfacher und robuster gegenueber Restart-Reihenfolgen.)
+PrivateTmp=false
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

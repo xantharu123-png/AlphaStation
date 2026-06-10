@@ -238,7 +238,7 @@ def test_biotech_alert_persistent_dedupe_survives_restart(tmp_path, monkeypatch)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PFE"}, "unit"))
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, bypass_startup_cooldown=False: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, bypass_startup_cooldown=False, **kwargs: sent.append((subject, body)) or True)
     cache_file = tmp_path / "biotech.json"
     row = {
         "Ticker": "PFE",
@@ -946,7 +946,7 @@ def test_alert_classifier_blocks_invalid_trade_geometry():
 def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     cache_file = tmp_path / "orb_alert.json"
     cache_file.write_text(json.dumps({
         "results": [{
@@ -979,7 +979,7 @@ def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch
 def test_strategy_scan_email_includes_entry_stop_tp1_tp2(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_strategy_scan_alerts("Momentum Breakout Long", [{
         "Ticker": "MOMO",
@@ -1025,7 +1025,7 @@ def test_stock_strategy_sweep_is_scheduled_and_tracked():
 def test_strategy_sweep_email_keeps_row_strategy_name(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
         "Ticker": "SSWP",
@@ -1058,7 +1058,7 @@ def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeyp
     sent = []
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SWNG"}, "unit"))
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
         "Ticker": "SWNG",
@@ -1129,7 +1129,7 @@ def test_stock_strategy_swing_email_does_not_fetch_or_require_5m(monkeypatch):
 
 def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: False)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: False)
 
     api._send_strategy_scan_alerts("Momentum Breakout Long", [{
         "Ticker": "MOMO",
@@ -1153,7 +1153,7 @@ def test_strategy_scan_failed_email_does_not_set_cooldown(monkeypatch):
 def test_strategy_scan_dedupes_same_ticker_inside_one_mail(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     row = {
         "Ticker": "MOMO",
         "grade": "A",
@@ -1279,7 +1279,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     payload = {
         "signals": [
@@ -1358,7 +1358,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
 def test_new_listing_pipeline_sends_dump_watch_when_no_short_now(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
     monkeypatch.setattr(api, "_NEW_LISTING_SEND_DUMP_WATCH_EMAILS", True)
 
@@ -1412,7 +1412,7 @@ def test_new_listing_dump_watch_can_be_disabled(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
     events = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_record_email_event", lambda subject, status, reason="": events.append((subject, status, reason)))
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
     monkeypatch.setattr(api, "_NEW_LISTING_SEND_DUMP_WATCH_EMAILS", False)
@@ -1443,7 +1443,7 @@ def test_new_listing_dump_watch_can_be_disabled(monkeypatch):
 def test_new_listing_pipeline_does_not_send_low_score_watch_mail(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
 
     payload = {
@@ -1472,7 +1472,7 @@ def test_new_listing_pipeline_does_not_send_low_score_watch_mail(monkeypatch):
 
 def test_new_listing_pipeline_does_not_mail_unpumped_new_listing(monkeypatch):
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
 
     payload = {
@@ -1501,7 +1501,7 @@ def test_new_listing_pipeline_does_not_mail_unpumped_new_listing(monkeypatch):
 def test_new_listing_pipeline_does_not_mail_pure_exchange_announcement(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
 
     payload = {
@@ -1526,7 +1526,7 @@ def test_new_listing_pipeline_does_not_mail_pure_exchange_announcement(monkeypat
 
 def test_new_listing_watch_ignores_active_pump_rows(monkeypatch):
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda key, ttl_seconds, now=None: True)
 
     payload = {
@@ -1803,7 +1803,7 @@ def test_crypto_strategy_alerts_are_watch_only_without_execution_trigger():
 def test_crypto_strategy_scan_does_not_email_snapshot_rows(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_strategy_scan_alerts("Low Cap Rockets", [{
         "Ticker": "PUMP",
@@ -2053,7 +2053,7 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     payload = {"coins": [_early_mover_row(Symbol="MAILME")]}
 
@@ -2078,7 +2078,7 @@ def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch)
         "volume_ratio": 1.6,
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="FIRST")]})
     api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="SECOND")]})
@@ -2101,7 +2101,7 @@ def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
         "volume_ratio": 1.6,
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     rows = [
         _early_mover_row(Symbol=f"ROW{idx}", score=90 - idx, grade="S" if idx == 0 else "A")
         for idx in range(api._EARLY_MOVER_MAX_EMAIL_ROWS + 2)
@@ -2124,7 +2124,7 @@ def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
         "reason": "no_fresh_5m_trigger",
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="OBSERVEONLY")]})
 
@@ -2144,7 +2144,7 @@ def test_early_mover_email_blocks_1m_only_trigger(tmp_path, monkeypatch):
         "volume_ratio": 2.8,
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="GALA")]})
 
@@ -2163,7 +2163,7 @@ def test_early_mover_email_checks_realtime_trigger_when_cache_unconfirmed(tmp_pa
         "volume_ratio": 1.8,
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
 
     api._send_early_mover_long_alerts({"coins": [
         _early_mover_row(Symbol="LIVEOK", execution_trigger_ok=False)
@@ -2220,7 +2220,7 @@ def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
         "volume_ratio": 1.7,
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, bypass_startup_cooldown=False: sent.append((subject, body, bypass_startup_cooldown)) or True)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, bypass_startup_cooldown=False, **kwargs: sent.append((subject, body, bypass_startup_cooldown)) or True)
 
     api._save_trade_reminders([{
         "id": "rem1",

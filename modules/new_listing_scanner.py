@@ -259,7 +259,12 @@ def fetch_cryptocom_ticker(instrument_name):
             "high_24h": float(t.get("h", 0)),
             "low_24h": float(t.get("l", 0)),
             "volume_24h": float(t.get("v", 0)),
-            "volume_usd_24h": float(t.get("vv", 0)),
+            # H-8 AUDIT FIX: Crypto.com liefert "vv" (USD-Volumen) nicht immer —
+            # Fallback: Basis-Volumen * letzter Preis statt stillem 0-Wert.
+            "volume_usd_24h": (
+                float(t.get("vv") or 0)
+                or (float(t.get("v") or 0) * float(t.get("a", t.get("last", 0)) or 0))
+            ),
             "change_24h": float(t.get("c", 0)) * 100 if t.get("c") else 0,
             "open_interest": float(t.get("oi", 0)),
             "timestamp": t.get("t", 0),
@@ -287,7 +292,13 @@ def fetch_cryptocom_candles(instrument_name, timeframe="1h", count=50):
             "low": float(c.get("l", 0)),
             "close": float(c.get("c", 0)),
             "volume": float(c.get("v", 0)),
-            "volume_usd": float(c.get("vv", 0)),
+            # H-8 AUDIT FIX: "vv" fehlt bei Crypto.com-Candles teils komplett —
+            # ohne Fallback waren micro/sell_volume-Pfade stumm (alles 0).
+            # Fallback: v * close als USD-Approximation.
+            "volume_usd": (
+                float(c.get("vv") or 0)
+                or (float(c.get("v") or 0) * float(c.get("c") or 0))
+            ),
         })
     # Chronologisch sortieren (älteste zuerst)
     candles.sort(key=lambda x: x["timestamp"])
@@ -388,6 +399,25 @@ def fetch_mexc_ticker(symbol):
     if not t or not isinstance(t, dict):
         return None
 
+    # H-1 AUDIT FIX (MEXC-Einheiten):
+    # - USD-Volumen kommt aus "amount24" (Quote-Volumen), NICHT volume24*lastPrice
+    #   (volume24 ist in Kontrakten, nicht in Coins).
+    # - holdVol ist ebenfalls in KONTRAKTEN: nur mit contractSize-Faktor in
+    #   Basis-Einheiten umrechenbar. Liefert der Response keinen contractSize,
+    #   bleibt der Rohwert stehen und wird mit oi_usd_estimate=True geflaggt.
+    oi_contracts = float(t.get("holdVol", 0))
+    contract_size_raw = t.get("contractSize", t.get("contract_size"))
+    try:
+        contract_size = float(contract_size_raw) if contract_size_raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        contract_size = 0.0
+    if contract_size > 0:
+        open_interest = oi_contracts * contract_size
+        oi_usd_estimate = False
+    else:
+        open_interest = oi_contracts
+        oi_usd_estimate = True
+
     return {
         "price": float(t.get("lastPrice", 0)),
         "bid": float(t.get("bid1", 0)),
@@ -397,7 +427,8 @@ def fetch_mexc_ticker(symbol):
         "volume_24h": float(t.get("volume24", 0)),
         "volume_usd_24h": float(t.get("amount24", 0)),
         "change_24h": float(t.get("riseFallRate", 0)) * 100,
-        "open_interest": float(t.get("holdVol", 0)),
+        "open_interest": open_interest,
+        "oi_usd_estimate": oi_usd_estimate,
         "funding_rate": float(t.get("fundingRate", 0)),
         "timestamp": t.get("timestamp", 0),
     }
@@ -1404,26 +1435,31 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     score += min(10, pts)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 7. OI vs PRICE DIVERGENZ (0-10)
-    #    OI steigt während Preis stagniert/fällt = Longs sind trapped
-    #    Höheres Gewicht weil einer der zuverlässigsten Indikatoren
+    # 7. OI-PRÄSENZ + ATH-ABSTAND (0-10)
+    #    M-OI-Label AUDIT FIX: Diese Komponente misst KEINE echte OI/Preis-
+    #    Divergenz (dafür fehlt eine OI-History). Sie misst nur: OI vorhanden
+    #    + wie weit der Preis unter dem ATH steht. "Trapped Longs" wäre erst
+    #    bei messbarem Preisverfall NACH OI-Aufbau belegbar — ohne OI-Verlauf
+    #    bleibt das Label neutral.
     # ═══════════════════════════════════════════════════════════════════════
     if ticker and ticker.get("open_interest", 0) > 0:
         oi = ticker["open_interest"]
         if current_from_ath >= 10 and oi > 0:
-            pts = 10  # Preis stark unter ATH + hohe OI = massive trapped Longs
-            details.append(f"📊 OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (Trapped Longs!)")
+            pts = 10
+            details.append(f"📊 OI praesent: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (OI-Praesenz + ATH-Abstand, keine OI-History)")
         elif current_from_ath >= 5 and oi > 0:
             pts = 7
-            details.append(f"📊 OI: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (Trapped Longs)")
+            details.append(f"📊 OI praesent: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (OI-Praesenz + ATH-Abstand)")
         elif current_from_ath >= 2:
             pts = 4
-            details.append(f"📊 OI: {oi:,.0f} → {pts}/10")
+            details.append(f"📊 OI praesent: {oi:,.0f} → {pts}/10")
         else:
             pts = 0
             details.append(f"📊 OI: {oi:,.0f} (neutral)")
         score += pts
         pump_data["open_interest"] = oi
+        if ticker.get("oi_usd_estimate"):
+            pump_data["oi_usd_estimate"] = True
     else:
         details.append("📊 OI: keine Daten")
 
@@ -1434,8 +1470,18 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #    Extrem hohe Funding (>0.1%) bei neuen Listings = fast sicherer Dump
     # ═══════════════════════════════════════════════════════════════════════
     fr = ticker.get("funding_rate", 0) if ticker else 0
+    # M-Funding-Intervall AUDIT FIX: Die Schwellen unten sind pro-8h kalibriert.
+    # Liefert ein Fetcher kuenftig ein Intervall-Feld, wird hier auf 8h normalisiert.
+    # Stand heute liefern fetch_mexc/bitget/binance_ticker KEIN Intervall-Feld
+    # (alle drei nutzen den 8h-Standard) -> Konstante 8h.
+    # TODO: Sobald ein Fetcher "funding_interval_hours" liefert (z.B. MEXC
+    # collectCycle oder Bitget fundingTime-Abstand), Feld im Ticker-Dict setzen.
+    FUNDING_STANDARD_INTERVAL_H = 8.0
+    funding_interval_h = _to_float((ticker or {}).get("funding_interval_hours"), 0)
+    if fr and funding_interval_h > 0 and funding_interval_h != FUNDING_STANDARD_INTERVAL_H:
+        fr = fr * (FUNDING_STANDARD_INTERVAL_H / funding_interval_h)
     if fr and fr > 0:
-        fr_pct = fr * 100  # z.B. 0.001 → 0.1%
+        fr_pct = fr * 100  # z.B. 0.001 → 0.1% (pro 8h)
         if fr_pct >= 0.3:      # Extrem (> 0.3% pro 8h = 3.6%/Tag Kosten!)
             pts = 15
         elif fr_pct >= 0.1:    # Sehr hoch (> 0.1%)
@@ -2363,13 +2409,56 @@ def add_to_monitoring(symbol, exchange="crypto.com", listing_ts_ms=None, source=
             "detected_at": datetime.now(timezone.utc).isoformat(),
             "listing_time": listing_time,
             "source": source,
-            "status": "monitoring",  # monitoring | signal | expired
+            "status": "monitoring",  # monitoring | waiting_for_history | signal | invalidated | expired
             "last_exh_score": 0,
             "peak_exh_score": 0,
         }
         save_monitoring_list(monitoring)
         log.info(f"🆕 NLS: {symbol} zur Überwachung hinzugefügt")
     return monitoring
+
+
+# H-15 AUDIT FIX: Signale sind kein One-Shot mehr — sie werden weiter ueberwacht
+# und sichtbar invalidiert (Stop gerissen) bzw. nach 24h als abgelaufen markiert.
+SIGNAL_EXPIRY_HOURS = 24
+
+
+def evaluate_signal_lifecycle(mon_data, live_price, now=None):
+    """H-15: Lebenszyklus eines bereits ausgeloesten Signals pruefen.
+
+    Returns (status, reason):
+      - ("invalidated", grund): Stop gerissen (SHORT: Preis >= Stop, LONG: Preis <= Stop)
+      - ("expired", grund): Signal aelter als SIGNAL_EXPIRY_HOURS
+      - ("signal", None): Signal weiterhin gueltig -> weiter ueberwachen
+    Fuer Eintraege ohne status "signal" wird der Status unveraendert zurueckgegeben.
+    """
+    if not isinstance(mon_data, dict) or mon_data.get("status") != "signal":
+        return (str((mon_data or {}).get("status", "monitoring")), None)
+
+    direction = str(mon_data.get("signal_direction", "SHORT")).upper()
+    stop = _to_float(mon_data.get("signal_stop_loss"))
+    price = _to_float(live_price)
+    if stop > 0 and price > 0:
+        breached = price >= stop if direction == "SHORT" else price <= stop
+        if breached:
+            cmp_txt = ">=" if direction == "SHORT" else "<="
+            return (
+                "invalidated",
+                f"stop_breached: Preis {price:g} {cmp_txt} Stop {stop:g} ({direction})",
+            )
+
+    now = now or datetime.now(timezone.utc)
+    signal_at = mon_data.get("signal_at") or mon_data.get("last_check") or mon_data.get("detected_at")
+    try:
+        sig_dt = datetime.fromisoformat(str(signal_at).replace("Z", "+00:00"))
+        if sig_dt.tzinfo is None:
+            sig_dt = sig_dt.replace(tzinfo=timezone.utc)
+        if (now - sig_dt).total_seconds() >= SIGNAL_EXPIRY_HOURS * 3600:
+            return ("expired", f"signal_expired_after_{SIGNAL_EXPIRY_HOURS}h")
+    except Exception:
+        pass
+
+    return ("signal", None)
 
 
 def cleanup_monitoring(monitoring):
@@ -2406,6 +2495,20 @@ def cleanup_monitoring(monitoring):
 # Scannt ALLE Perps auf extreme Pump-Bedingungen und fügt sie zum Monitoring hinzu
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _pump_base_symbol(symbol):
+    """Normalisiert Exchange-Symbole auf das Base-Asset (BTC_USDT/BTCUSDT -> BTC)."""
+    s = str(symbol or "").upper().replace("_", "").replace("-", "")
+    for quote in ("USDT", "USDC", "USD"):
+        if s.endswith(quote) and len(s) > len(quote):
+            return s[: -len(quote)]
+    return s
+
+
+# M-Pumps AUDIT FIX: Mindest-Quote-Volumen, damit illiquide Manipulations-Pumps
+# (nicht handelbar, Spread-Hoelle) gar nicht erst ins Monitoring laufen.
+PUMP_MIN_QUOTE_VOLUME_USD = 500_000
+
+
 def detect_active_pumps(all_perps):
     """
     Scannt alle bekannten Perps auf aktive Pump & Dump Bedingungen.
@@ -2415,6 +2518,10 @@ def detect_active_pumps(all_perps):
     - 24h Change > 25%  ODER
     - 24h Change > 15% UND Funding < -0.05%  ODER
     - 24h Change > 15% UND Volume extrem hoch
+
+    M-Pumps AUDIT FIX:
+    - Liquiditaetsfloor: quote_volume >= $500k, sonst skip.
+    - Cross-Exchange-Dedupe per Base-Symbol (staerkster Pump gewinnt).
 
     Returns: Liste von {symbol, exchange, pump_reason, ticker_data}
     """
@@ -2524,6 +2631,11 @@ def detect_active_pumps(all_perps):
         if monitor_key in already_monitored or sym in already_monitored:
             continue
 
+        # M-Pumps AUDIT FIX: Liquiditaetsfloor — unter $500k Quote-Volumen ist
+        # ein Pump nicht sauber shortbar (Slippage/Spread) und meist reine Manipulation.
+        if volume < PUMP_MIN_QUOTE_VOLUME_USD:
+            continue
+
         # === PUMP-KRITERIEN ===
         pump_reasons = []
 
@@ -2561,6 +2673,19 @@ def detect_active_pumps(all_perps):
 
     # Sortiere nach Change (stärkste Pumps zuerst)
     detected_pumps.sort(key=lambda x: x["change_24h"], reverse=True)
+
+    # M-Pumps AUDIT FIX: Cross-Exchange-Dedupe per Base-Symbol.
+    # Derselbe Coin pumpt auf MEXC+Bitget+Binance gleichzeitig — wir behalten
+    # nur den staerksten Eintrag (Liste ist bereits nach Change sortiert).
+    deduped_pumps = []
+    seen_bases = set()
+    for pump in detected_pumps:
+        base = _pump_base_symbol(pump["symbol"])
+        if base and base in seen_bases:
+            continue
+        seen_bases.add(base)
+        deduped_pumps.append(pump)
+    detected_pumps = deduped_pumps
 
     # Max 15 Pumps zur Überwachung hinzufügen (Rate-Limiting beachten)
     added = 0
@@ -2685,8 +2810,11 @@ def run_new_listing_scanner():
         monitoring = load_monitoring_list()
         monitoring = cleanup_monitoring(monitoring)
 
+        # H-15 AUDIT FIX: Auch Coins mit status="signal" bleiben im aktiven Set,
+        # damit Stop-Breaches (-> "invalidated") und 24h-Expiry (-> "expired")
+        # sichtbar werden statt das Signal als One-Shot einzufrieren.
         active = {k: v for k, v in monitoring.items()
-                  if v.get("status") in ("monitoring", "waiting_for_history")}
+                  if v.get("status") in ("monitoring", "waiting_for_history", "signal")}
 
         log.info(f"🔥 P&D: {len(active)} Coins in Überwachung, "
                  f"{len(new_listings)} neue Listings, "
@@ -2703,6 +2831,40 @@ def run_new_listing_scanner():
                 ticker = fetch_ticker_for(symbol, exchange)
                 if not ticker:
                     continue
+
+                # H-15 AUDIT FIX: Bereits ausgeloeste Signale zuerst auf
+                # Stop-Breach / 24h-Expiry pruefen (sichtbar mit Grund).
+                if mon_data.get("status") == "signal":
+                    lifecycle_status, lifecycle_reason = evaluate_signal_lifecycle(
+                        mon_data, ticker.get("price")
+                    )
+                    if lifecycle_status in ("invalidated", "expired"):
+                        mon_data["status"] = lifecycle_status
+                        mon_data["status_reason"] = lifecycle_reason
+                        mon_data["status_changed_at"] = datetime.now(timezone.utc).isoformat()
+                        mon_data["price"] = _to_float(ticker.get("price"))
+                        is_invalid = lifecycle_status == "invalidated"
+                        results["monitoring"].append({
+                            "symbol": symbol,
+                            "exchange": exchange,
+                            "source": mon_data.get("source", "new_listing"),
+                            "price": _to_float(ticker.get("price")),
+                            "stop_loss": _to_float(mon_data.get("signal_stop_loss")),
+                            "status": lifecycle_status,
+                            "status_reason": lifecycle_reason,
+                            "grade": "INVALID" if is_invalid else "EXPIRED",
+                            "timing": (
+                                "[X] Signal invalidiert — Stop gerissen"
+                                if is_invalid else "[X] Signal abgelaufen (24h)"
+                            ),
+                            "trade_category": "SIGNAL_INVALIDATED" if is_invalid else "SIGNAL_EXPIRED",
+                            "risk_flags": [lifecycle_reason] if lifecycle_reason else [],
+                            "announcement_source": mon_data.get("announcement_source"),
+                            "announcement_title": mon_data.get("announcement_title"),
+                            "announcement_url": mon_data.get("announcement_url"),
+                        })
+                        log.info(f"[X] NLS Signal-Lifecycle: {symbol} -> {lifecycle_status} ({lifecycle_reason})")
+                        continue
 
                 candles = fetch_candles_for(symbol, exchange, "1h", 50)
                 time.sleep(0.3)
@@ -2908,11 +3070,20 @@ def run_new_listing_scanner():
                 mon_data["trade_category"] = signal.get("trade_category", "UNKNOWN")
 
                 if _is_tradeable_short_signal(signal):
-                    results["signals"].append(entry)
-                    mon_data["status"] = "signal"
-                    log.info(f"[-] NLS SHORT SIGNAL: {symbol} — ExhScore {exh_score}, "
-                             f"Pump {pump_data.get('pump_pct', 0):.0f}%, "
-                             f"RR {signal['rr_effective']:.1f}x, Grade {signal['grade']}")
+                    # H-15 AUDIT FIX: Nur beim ERSTEN Uebergang zu "signal" mailen
+                    # (bestehender Cooldown). Danach bleibt der Coin in Ueberwachung,
+                    # aber ohne zweites Mail-Signal; die Original-Level bleiben die
+                    # Referenz fuer Invalidation/Expiry.
+                    if mon_data.get("status") != "signal":
+                        results["signals"].append(entry)
+                        mon_data["status"] = "signal"
+                        mon_data["signal_at"] = datetime.now(timezone.utc).isoformat()
+                        mon_data["signal_direction"] = signal.get("direction", "SHORT")
+                        mon_data["signal_entry"] = signal.get("entry")
+                        mon_data["signal_stop_loss"] = signal.get("stop_loss")
+                        log.info(f"[-] NLS SHORT SIGNAL: {symbol} — ExhScore {exh_score}, "
+                                 f"Pump {pump_data.get('pump_pct', 0):.0f}%, "
+                                 f"RR {signal['rr_effective']:.1f}x, Grade {signal['grade']}")
                 elif signal["timing_quality"] >= 2:
                     results["watchlist"].append(entry)
 

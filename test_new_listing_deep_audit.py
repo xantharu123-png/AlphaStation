@@ -8,9 +8,11 @@ from modules.new_listing_scanner import (
     _is_tradeable_short_signal,
     _monitor_key,
     _parse_mexc_listing_announcements_html,
+    _pump_base_symbol,
     calculate_micro_crack_trigger,
     check_safety,
     cleanup_monitoring,
+    evaluate_signal_lifecycle,
     generate_short_signal,
 )
 
@@ -578,3 +580,66 @@ def test_low_rr_confirmed_crack_stays_watchlist_only():
     assert "rr_too_low" in signal["risk_flags"]
     assert signal["signal_quality"] == "watch_or_blocked"
     assert _is_tradeable_short_signal(signal) is False
+
+
+# ── H-15 Audit-Fix: Signale sind kein One-Shot mehr ──
+
+def test_signal_lifecycle_invalidates_short_when_price_breaches_stop():
+    mon = {
+        "status": "signal",
+        "signal_direction": "SHORT",
+        "signal_stop_loss": 105.0,
+        "signal_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    status, reason = evaluate_signal_lifecycle(dict(mon), 106.0)
+    assert status == "invalidated"
+    assert "stop_breached" in reason
+
+    # Exakt am Stop = Breach (SHORT: Preis >= Stop)
+    status, _ = evaluate_signal_lifecycle(dict(mon), 105.0)
+    assert status == "invalidated"
+
+    # Unter dem Stop bleibt das Signal aktiv
+    status, reason = evaluate_signal_lifecycle(dict(mon), 99.0)
+    assert status == "signal"
+    assert reason is None
+
+
+def test_signal_lifecycle_invalidates_long_when_price_breaches_stop():
+    mon = {
+        "status": "signal",
+        "signal_direction": "LONG",
+        "signal_stop_loss": 95.0,
+        "signal_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    status, reason = evaluate_signal_lifecycle(mon, 94.0)
+    assert status == "invalidated"
+    assert "stop_breached" in reason
+
+
+def test_signal_lifecycle_expires_after_24h():
+    mon = {
+        "status": "signal",
+        "signal_direction": "SHORT",
+        "signal_stop_loss": 105.0,
+        "signal_at": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+    }
+
+    status, reason = evaluate_signal_lifecycle(mon, 99.0)
+    assert status == "expired"
+    assert "24" in reason
+
+
+def test_signal_lifecycle_ignores_non_signal_entries():
+    mon = {"status": "monitoring"}
+    status, reason = evaluate_signal_lifecycle(mon, 50.0)
+    assert status == "monitoring"
+    assert reason is None
+
+
+def test_pump_base_symbol_dedupes_cross_exchange_symbols():
+    # M-Pumps Audit-Fix: MEXC "ABC_USDT" und Binance/Bitget "ABCUSDT" sind derselbe Coin
+    assert _pump_base_symbol("ABC_USDT") == _pump_base_symbol("ABCUSDT") == "ABC"
+    assert _pump_base_symbol("btc_usdt") == "BTC"

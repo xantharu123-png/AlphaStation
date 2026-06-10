@@ -90,8 +90,18 @@ from modules.patterns import (
     scan_wyckoff_single, scan_wyckoff_batch,
     detect_volume_imbalances, detect_order_blocks, detect_liquidity_levels,
     format_smc_setup, detect_wolfe_waves, detect_chart_patterns,
-    scan_harmonic_batch, find_harmonic_for_chart
+    find_harmonic_for_chart
 )
+try:
+    # scan_harmonic_batch ist in modules/patterns.py aktuell nicht vorhanden
+    # (Migration "Moved to modules/patterns.py" unvollständig, siehe Audit-Report).
+    # Guarded Import: Harmonic-Batch-Scan degradiert dann zu "keine Treffer",
+    # statt die komplette App beim Import zu crashen.
+    from modules.patterns import scan_harmonic_batch
+except ImportError:
+    def scan_harmonic_batch(tickers, poly_key, days=120, timeframe="day"):
+        print("[WARN] modules.patterns.scan_harmonic_batch fehlt — Harmonic-Batch-Scan deaktiviert")
+        return {}
 from modules.data_fetchers import (
     rate_limited_get, fetch_daily_candles_crypto, fetch_daily_candles,
     fetch_multi_day_data, fetch_historical_data_crypto, fetch_historical_data_stocks,
@@ -3525,20 +3535,39 @@ def fetch_insider_transactions(finnhub_key, transaction_type="BUY"):
         return [], 0, 0
 
 
+def _cg_file_cache_usable(cached, age_seconds, max_age=120):
+    """H-14 Audit-Fix (pure, testbar): Frische-Check für den CoinGecko-Datei-Cache.
+
+    Partial-Caches (429-Teilabrufe, markiert mit "partial": true) gelten IMMER
+    als stale → Re-Fetch statt dem Rumpf-Universum 2 Min blind zu vertrauen.
+    """
+    if not isinstance(cached, dict):
+        return False
+    if cached.get("partial"):
+        return False
+    coins = cached.get("coins") or []
+    if not coins:
+        return False
+    return age_seconds is not None and age_seconds < max_age
+
+
 @st.cache_data(ttl=120)
 def _fetch_coingecko_markets(pages=4):
     """Cached CoinGecko markets API — 2 Min TTL, reduziert Rate Limit Probleme."""
     # Thread-Fallback: Wenn Datei-Cache frisch genug ist (< 2 Min), nutze den
+    # H-14: partial-Caches (Teilabrufe) werden NICHT als frisch akzeptiert
     _CG_CACHE = "/tmp/coingecko_markets_cache.json"
+    _partial_fallback = []
     try:
         if os.path.exists(_CG_CACHE):
             _cg_age = time.time() - os.path.getmtime(_CG_CACHE)
-            if _cg_age < 120:  # < 2 Min alt
-                with open(_CG_CACHE, "r") as _f:
-                    _cached = json.load(_f)
-                    _coins = _cached.get("coins", [])
-                    if _coins:
-                        return _coins
+            with open(_CG_CACHE, "r") as _f:
+                _cached = json.load(_f)
+            if _cg_file_cache_usable(_cached, _cg_age):
+                return _cached.get("coins", [])
+            if _cached.get("partial") and (_cached.get("coins") or []):
+                # Nur Notnagel falls der Live-Re-Fetch komplett leer ausgeht
+                _partial_fallback = _cached.get("coins", [])
     except Exception:
         pass
 
@@ -3587,6 +3616,9 @@ def _fetch_coingecko_markets(pages=4):
         all_coins.extend(page_coins)
         if page_num < pages:
             time.sleep(3.0)  # Mehr Pause zwischen Pages (war 2.5s)
+    if not all_coins and _partial_fallback:
+        # H-14: Live-Re-Fetch komplett gescheitert → alter Partial-Cache als Notnagel
+        return _partial_fallback
     return all_coins
 
 
@@ -4191,17 +4223,20 @@ def fetch_early_movers(_prefetched_perps=None):
             high_24h = coin.get("high_24h") or price
             low_24h = coin.get("low_24h") or price
 
+            # M-7 Audit-Fix: Stablecoins/Wrapped/LSD (vollständige Liste) +
+            # Leveraged-Token VOR dem Perp-Lookup überspringen
+            if symbol in EXCLUDED_CRYPTO_SYMBOLS_LOCAL or _is_leveraged_token_symbol(symbol):
+                continue
+
             # Multi-Exchange Perp info (Bitget + MEXC)
-            perp_info = perp_data.get(symbol, {})
+            # M-5 Audit-Fix: 1000{SYM}-Mapping + Preis-Plausibilität gegen Kollisionen
+            perp_info = _lookup_perp_info(perp_data, symbol, price)
             has_perp = bool(perp_info)
             funding_rate = perp_info.get("funding_rate", 0)
             oi_ratio = perp_info.get("oi_ratio", 0)
+            oi_is_estimate = bool(perp_info.get("oi_usd_estimate", False))  # H-1
             best_exchange = perp_info.get("best_exchange", "")
             exchanges = perp_info.get("exchanges", [])
-
-            # Skip stablecoins + wrapped
-            if symbol in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "WBTC", "WETH", "STETH", "RETH"):
-                continue
 
             # ── RVOL berechnen (Vol/MCap Ratio als Proxy) ──
             vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0
@@ -4403,7 +4438,13 @@ def fetch_early_movers(_prefetched_perps=None):
                 signals = []
 
                 # OI/Volume Ratio hoch = Positionen werden aufgebaut
-                if oi_ratio >= 3.0:
+                # H-1 Audit-Fix: MEXC-OI ohne contractSize ist nur eine Schätzung
+                # (holdVol=Kontrakte ≠ Coins) → keine vollen OI-Punkte vergeben
+                if oi_is_estimate:
+                    if oi_ratio >= 0.8:
+                        whale_score += 10  # konservativ: max. Basis-Punkte
+                        signals.append(f"📈 OI/Vol ~{oi_ratio:.1f}x (Schätzung, MEXC ohne contractSize)")
+                elif oi_ratio >= 3.0:
                     whale_score += 30
                     signals.append(f"🐋 OI/Vol {oi_ratio:.1f}x (stark gehebelt)")
                 elif oi_ratio >= 1.5:
@@ -4522,6 +4563,126 @@ def fetch_early_movers(_prefetched_perps=None):
     }
 
 
+# ── M-7 Audit-Fix: Stablecoins / Wrapped / LSD / Gold-Token — keine direktionalen Mover ──
+# SYNC mit api.py EXCLUDED_CRYPTO_SYMBOLS (dort gepflegt, hier gespiegelt) + lokale
+# Ergänzung CBBTC (cbBTC). Identische Kopie in bg_service.py — Änderungen in beiden nachziehen.
+EXCLUDED_CRYPTO_SYMBOLS_LOCAL = {
+    "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE", "USDS", "USDD",
+    "USDP", "PYUSD", "FRAX", "LUSD", "GUSD", "DOLA", "SUSD", "EUSD", "USDL",
+    "USDY", "USDX", "EURC", "EUROC", "WBTC", "CBTC", "TBTC", "LBTC", "WETH",
+    "WBNB", "STETH", "WSTETH", "RETH", "CBETH", "WBETH", "WEETH", "EZETH",
+    "METH", "RSETH", "SFRXETH", "FRXETH", "PAXG", "XAUT",
+    "CBBTC",  # cbBTC (Coinbase Wrapped BTC) — Ergänzung zur api-Liste
+}
+
+
+def _is_leveraged_token_symbol(symbol):
+    """M-7 Audit-Fix: Leveraged-Token erkennen (kein Spot-Mover, gehört nicht in Scans).
+
+    Erkennt: 3L/3S/4L/4S/5L/5S-Suffixe, UP/DOWN-Endungen (Binance Leveraged Tokens)
+    und BULL/BEAR-Token. Konservative Mindestlängen, damit echte Ticker wie
+    'JUP' (endet auf UP) oder ein Coin namens 'BULL' nicht gefiltert werden.
+    SYNC: identische Kopie in bg_service.py.
+    """
+    sym = (symbol or "").upper().strip()
+    if len(sym) >= 4 and sym[-2:] in ("3L", "3S", "4L", "4S", "5L", "5S"):
+        return True
+    if sym.endswith("UP") and len(sym) >= 5:
+        return True
+    if sym.endswith("DOWN") and len(sym) >= 6:
+        return True
+    if (sym.endswith("BULL") or sym.endswith("BEAR")) and len(sym) >= 6:
+        return True
+    return False
+
+
+def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak):
+    """H-7 Audit-Fix: Einheitliche, pure Timing-/Gate-Logik für BTC-Divergenz-Shorts.
+
+    SYNC: Identische Implementierung in scanner.py UND bg_service.py — Änderungen
+    immer in beiden Dateien nachziehen. (Shared-Home wäre modules/scorers, gehört
+    aber einem anderen Team; Cross-Import hat Seiteneffekte: Logging/PID/Streamlit.)
+
+    Regeln (konsolidiert mit der api.py-Variante):
+    - "JETZT"-Signale erst ab ExhScore >= 65 (vorher bg_service: 55/50/45) UND nur
+      bei BTC-Schwäche (btc_weak=True). BTC stark → bestenfalls "BEOBACHTEN".
+    - Dieser Pfad liefert KEINEN Entry/Stop/TP → auch "JETZT SHORTEN" ist nur ein
+      Beobachtungssignal und trägt den expliziten Hinweis "kein definierter Stop".
+
+    Returns:
+        (timing: str, timing_quality: int, btc_gate: bool)
+        timing_quality: 5=JETZT SHORTEN, 4=JETZT, 3=BEREIT, 2=WATCH/BEOBACHTEN,
+                        0=ZU FRÜH, -1=ZU SPÄT. btc_gate=True nur bei BTC-Schwäche.
+    """
+    no_stop_note = " · ⚠️ kein definierter Stop — Beobachtungssignal"
+    cp = close_pos if close_pos is not None else 0.5
+    price_near_high = cp >= 0.70
+    price_mid_range = 0.40 <= cp < 0.70
+    price_near_low = cp < 0.40
+    btc_gate = bool(btc_weak)
+
+    if price_near_low and change_24h < -3:
+        return ("⚫ ZU SPÄT — Preis schon {:.0f}% vom High, Move gelaufen".format((1 - cp) * 100), -1, btc_gate)
+
+    if not btc_gate:
+        # H-7: BTC auf den Makro-Zeitfenstern stark → KEIN Short-Timing vergeben,
+        # egal wie hoch Divergenz/ExhScore sind. Nur beobachten.
+        if exh_score >= 50:
+            return ("👁️ BEOBACHTEN (BTC stark — kein Short-Timing)", 2, False)
+        return ("⚪ ZU FRÜH", 0, False)
+
+    if exh_score >= 65 and price_near_high and change_1h < -1.5:
+        return ("🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%){}".format(change_1h, no_stop_note), 5, True)
+    if exh_score >= 65 and price_near_high and change_1h < -0.5:
+        return ("🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%){}".format(change_1h, no_stop_note), 4, True)
+    if exh_score >= 65 and price_near_high:
+        return ("🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze", 3, True)
+    if exh_score >= 65 and price_mid_range:
+        return ("🟡 BEREIT — Warte auf Bounce Richtung High für besseren Entry", 3, True)
+    if exh_score >= 50 and price_near_high and change_1h < -2.0:
+        # Vorher "JETZT" schon ab Score 50/55 — konsolidiert: unter 65 kein JETZT mehr.
+        # WICHTIG: Wort "JETZT" hier vermeiden — UI matcht per Substring!
+        return ("🟡 BEREIT — Starker 1h-Dump ({:+.1f}%), ExhScore unter Schwelle 65".format(change_1h), 3, True)
+    if exh_score >= 50 and price_mid_range and change_1h < 0:
+        return ("🟠 WATCHLIST — Mittlerer Bereich, könnte noch bounzen", 2, True)
+    if exh_score >= 65 and price_near_low:
+        return ("⚫ ZU SPÄT — Preis schon {:.0f}% vom High gefallen".format((1 - cp) * 100), -1, True)
+    if exh_score >= 50:
+        return ("🟠 WATCHLIST — Noch nicht reif", 2, True)
+    return ("⚪ ZU FRÜH", 0, True)
+
+
+def _lookup_perp_info(perp_data, symbol, cg_price=None):
+    """M-5 Audit-Fix: Perp-Lookup mit 1000{SYM}-Mapping + Preis-Plausibilität.
+
+    Memecoins werden auf Perp-Börsen oft als 1000PEPE/10000SATS gelistet
+    (Referenz: api.py-Variante). Zusätzlich Plausi-Check: Weicht der Perp-Preis
+    (nach Multiplier) mehr als Faktor 3 vom CoinGecko-Preis ab, ist es eine
+    Symbol-Kollision (anderes Asset, gleicher Ticker) → kein Match, FR/OI leer.
+    """
+    if not perp_data or not symbol:
+        return {}
+    try:
+        cg_price = float(cg_price) if cg_price else 0.0
+    except (TypeError, ValueError):
+        cg_price = 0.0
+    for key, mult in ((symbol, 1.0), (f"1000{symbol}", 1000.0), (f"10000{symbol}", 10000.0)):
+        info = perp_data.get(key)
+        if not info:
+            continue
+        try:
+            perp_price = float(info.get("last_price") or 0)
+        except (TypeError, ValueError):
+            perp_price = 0.0
+        if cg_price > 0 and perp_price > 0:
+            expected = cg_price * mult
+            ratio = perp_price / expected if expected > 0 else 0.0
+            if ratio > 3.0 or ratio < (1.0 / 3.0):
+                continue  # Faktor > 3 daneben → Kollision, kein Match
+        return info
+    return {}
+
+
 @st.cache_data(ttl=300)
 def fetch_mexc_funding_oi():
     """
@@ -4536,31 +4697,63 @@ def fetch_mexc_funding_oi():
         data = resp.json()
         if not data.get("success") or not data.get("data"):
             return {}
-
-        result = {}
-        for t in data.get("data", []):
-            symbol = t.get("symbol", "")
-            if not symbol.endswith("_USDT"):
-                continue
-            base = symbol.replace("_USDT", "")
-            hold_vol = float(t.get("holdVol") or 0)
-            volume24 = float(t.get("volume24") or 0)
-            fr = float(t.get("fundingRate") or 0)
-            last_price = float(t.get("lastPrice") or t.get("last") or 0)
-            # Fix #2: USDT-basierte Werte für konsistenten Vergleich mit Bitget
-            oi_usdt = hold_vol * last_price if last_price > 0 else hold_vol
-            vol_usdt = volume24 * last_price if last_price > 0 else volume24
-            oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
-            result[base] = {
-                "funding_rate": fr,
-                "hold_vol": hold_vol,
-                "volume24": vol_usdt,  # Jetzt USDT-basiert
-                "oi_usdt": oi_usdt,
-                "oi_ratio": round(oi_ratio, 2),
-            }
-        return result
+        return _parse_mexc_perp_tickers(data.get("data", []))
     except Exception:
         return {}
+
+
+def _parse_mexc_perp_tickers(items):
+    """H-1 Audit-Fix (pure, testbar): MEXC /contract/ticker Items → {BASE: {...}}.
+
+    Einheiten-Korrektur:
+    - Volumen: `amount24` ist bereits 24h-Turnover in USDT (wie bei
+      detect_active_pumps/_fetch_mexc_perp_rows). `volume24` sind KONTRAKTE —
+      volume24*lastPrice war falsch (Kontrakt ≠ 1 Coin).
+    - OI: `holdVol` sind Kontrakte. Mit `contractSize` (falls im Response) →
+      echtes OI in USD. Ohne contractSize nur Schätzung → oi_usd_estimate=True,
+      nachgelagerte Schwellen behandeln das konservativ.
+    """
+    result = {}
+    for t in items or []:
+        symbol = t.get("symbol", "")
+        if not symbol.endswith("_USDT"):
+            continue
+        base = symbol.replace("_USDT", "")
+        try:
+            hold_vol = float(t.get("holdVol") or 0)
+            volume24 = float(t.get("volume24") or 0)
+            amount24 = float(t.get("amount24") or 0)
+            contract_size = float(t.get("contractSize") or 0)
+            fr = float(t.get("fundingRate") or 0)
+            last_price = float(t.get("lastPrice") or t.get("last") or 0)
+        except (TypeError, ValueError):
+            continue
+        # H-1: amount24 = 24h-Volumen in USDT (direkt vom Exchange, korrekt)
+        if amount24 > 0:
+            vol_usdt = amount24
+            vol_estimate = False
+        else:
+            vol_usdt = volume24 * last_price if last_price > 0 else volume24
+            vol_estimate = True
+        # H-1: holdVol = Kontrakte → USD nur mit contractSize exakt
+        if contract_size > 0 and last_price > 0:
+            oi_usdt = hold_vol * contract_size * last_price
+            oi_estimate = False
+        else:
+            oi_usdt = hold_vol * last_price if last_price > 0 else hold_vol
+            oi_estimate = True
+        oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
+        result[base] = {
+            "funding_rate": fr,
+            "hold_vol": hold_vol,
+            "volume24": vol_usdt,  # USDT-basiert (amount24)
+            "oi_usdt": oi_usdt,
+            "oi_ratio": round(oi_ratio, 2),
+            "oi_usd_estimate": oi_estimate,
+            "vol_usd_estimate": vol_estimate,
+            "last_price": last_price,
+        }
+    return result
 
 
 @st.cache_data(ttl=300)
@@ -4650,12 +4843,16 @@ def fetch_multi_exchange_perps():
             best_oi_ratio = b.get("oi_ratio", 0)
             best_oi_usdt = b.get("oi_usdt", 0)
             best_vol = bitget_vol
+            best_oi_estimate = False  # Bitget holdingAmount = Base-Coins → echtes OI
+            best_last_price = b.get("last_price", 0)
         elif m:
             best = "MEXC"
             best_fr = m.get("funding_rate", 0)
             best_oi_ratio = m.get("oi_ratio", 0)
-            best_oi_usdt = m.get("hold_vol", 0)
+            best_oi_usdt = m.get("oi_usdt", m.get("hold_vol", 0))
             best_vol = mexc_vol
+            best_oi_estimate = bool(m.get("oi_usd_estimate", True))  # H-1
+            best_last_price = m.get("last_price", 0)
         else:
             continue
 
@@ -4665,6 +4862,8 @@ def fetch_multi_exchange_perps():
             "funding_rate": best_fr,
             "oi_ratio": best_oi_ratio,
             "oi_usdt": best_oi_usdt,
+            "oi_usd_estimate": best_oi_estimate,  # H-1: True = OI nur geschätzt
+            "last_price": best_last_price,  # M-5: für Preis-Plausi-Check
             "volume24_usdt": max(mexc_vol, bitget_vol),
             "mexc": m,
             "bitget": b,
@@ -5305,8 +5504,10 @@ def fetch_btc_divergence_shorts():
                 if price <= 0:
                     continue
                 symbol = coin.get("symbol", "").upper()
-                if symbol in ("BTC", "USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD"):
-                    continue  # Stablecoins + BTC selbst überspringen
+                # M-7 Audit-Fix: BTC selbst + vollständige Stable-/Wrapped-/LSD-Liste
+                # + Leveraged-Token (3L/3S/…, UP/DOWN, BULL/BEAR) überspringen
+                if symbol == "BTC" or symbol in EXCLUDED_CRYPTO_SYMBOLS_LOCAL or _is_leveraged_token_symbol(symbol):
+                    continue
 
                 change_1h = coin.get("price_change_percentage_1h_in_currency") or 0
                 change_24h = coin.get("price_change_percentage_24h") or 0
@@ -5375,9 +5576,14 @@ def fetch_btc_divergence_shorts():
                 close_pos = calculate_close_position(high_24h, low_24h, price, min_range_pct=0.3)
 
                 # ── Multi-Exchange Funding Rate + OI für diesen Coin ──
-                perp_info = perp_data.get(symbol, {})
+                # M-5 Audit-Fix: 1000{SYM}-Mapping + Preis-Plausibilität gegen Kollisionen
+                perp_info = _lookup_perp_info(perp_data, symbol, price)
                 coin_funding_rate = perp_info.get("funding_rate") if perp_info else None
-                coin_oi_ratio = perp_info.get("oi_ratio") if perp_info else None
+                # H-1: geschätztes OI (MEXC ohne contractSize) nicht in den Score füttern
+                if perp_info and not perp_info.get("oi_usd_estimate"):
+                    coin_oi_ratio = perp_info.get("oi_ratio")
+                else:
+                    coin_oi_ratio = None
                 coin_exchanges = perp_info.get("exchanges", []) if perp_info else []
                 coin_best_exchange = perp_info.get("best_exchange", "") if perp_info else ""
 
@@ -5416,38 +5622,20 @@ def fetch_btc_divergence_shorts():
                 # PURR-Fix: Coin +28% 7d, 24h negativ, aber Preis schon 15% vom High
                 # → Das ist Konsolidierung, nicht frisches Reversal → "ZU SPÄT" nicht "JETZT"
 
+                # ── H-7 Audit-Fix: Timing über gemeinsame Gate-Helper-Logik ──
+                # Vorher: "JETZT SHORTEN" allein nach Divergenz/ExhScore — auch bei
+                # BTC +20%/7d (btc_has_weakness wurde berechnet, aber ignoriert).
+                # Jetzt: BTC-Schwäche-Gate + expliziter "kein Stop"-Hinweis,
+                # da dieser Pfad keinen Entry/Stop/TP liefert (Beobachtungssignal).
                 cp = close_pos if close_pos is not None else 0.5
-                price_near_high = cp >= 0.70    # Obere 30% der 24h-Range
-                price_mid_range = 0.40 <= cp < 0.70  # Mitte
-                price_near_low = cp < 0.40      # Untere 40% — Move schon gelaufen
-
-                if price_near_low and change_24h < -3:
-                    # Preis schon weit unten + stark gefallen → Move gelaufen
-                    timing = "⚫ ZU SPÄT — Preis schon {:.0f}% vom High, Move gelaufen".format((1 - cp) * 100)
-                elif exh_score >= 65 and price_near_high and change_1h < -1.5:
-                    # Perfekter Short: Hohe Exhaustion + nahe High + gerade am Kippen
-                    timing = "🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%)".format(change_1h)
-                elif exh_score >= 65 and price_near_high and change_1h < -0.5:
-                    timing = "🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%)".format(change_1h)
-                elif exh_score >= 50 and price_near_high and change_1h < -2.0:
-                    timing = "🟢 JETZT — Nahe High, starker 1h-Dump ({:+.1f}%)".format(change_1h)
-                elif exh_score >= 65 and price_near_high:
-                    timing = "🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze"
-                elif exh_score >= 65 and price_mid_range:
-                    timing = "🟡 BEREIT — Warte auf Bounce Richtung High für besseren Entry"
-                elif exh_score >= 50 and price_mid_range and change_1h < 0:
-                    timing = "🟠 WATCHLIST — Mittlerer Bereich, könnte noch bounzen"
-                elif exh_score >= 65 and price_near_low:
-                    timing = "⚫ ZU SPÄT — Preis schon {:.0f}% vom High gefallen".format((1 - cp) * 100)
-                elif exh_score >= 50:
-                    timing = "🟠 WATCHLIST — Noch nicht reif"
-                else:
-                    timing = "⚪ ZU FRÜH"
+                timing, _timing_quality, _btc_gate = _btc_div_signal_status(
+                    exh_score, close_pos, change_1h, change_24h, btc_has_weakness)
 
                 # Coins ohne Perp: Downgrade "JETZT" → "WATCHLIST" (nicht shortbar!)
                 if not perp_info:
                     if "JETZT" in timing:
                         timing = "🟠 WATCHLIST — Kein Perp-Contract, nicht direkt shortbar ⚠️"
+                        _timing_quality = 2
                     else:
                         timing = timing + " ⚠️ KEIN PERP"
 
@@ -5464,20 +5652,8 @@ def fetch_btc_divergence_shorts():
                 else:
                     rvol = 1.0
 
-                # Timing-Qualitätsstufe als Zahl (für SellProb statt String-Matching)
-                _timing_quality = 0
-                if "🔴 JETZT" in timing:
-                    _timing_quality = 5  # Perfekt
-                elif "🟢 JETZT" in timing:
-                    _timing_quality = 4
-                elif "🟡 BEREIT" in timing:
-                    _timing_quality = 3
-                elif "🟠 WATCHLIST" in timing:
-                    _timing_quality = 2
-                elif "ZU SPÄT" in timing:
-                    _timing_quality = -1
-                elif "ZU FRÜH" in timing:
-                    _timing_quality = 0
+                # H-7: _timing_quality kommt direkt aus _btc_div_signal_status
+                # (kein fragiles String-Matching mehr)
 
                 results.append({
                     "Ticker": symbol,
@@ -5502,6 +5678,7 @@ def fetch_btc_divergence_shorts():
                     "GradeLabel": grade_label,
                     "Timing": timing,
                     "TimingQuality": _timing_quality,
+                    "btc_gate": _btc_gate,  # H-7: False = BTC stark, kein Short-Timing
                     "RVOL": rvol,
                     "UpperWick%": round(upper_wick_pct, 1),
                     "ClosePos": close_pos,
@@ -5579,6 +5756,7 @@ def fetch_btc_divergence_shorts():
             "skipped": skipped,
             "btc_7d": btc_7d,
             "btc_bullish": btc_bullish,
+            "btc_has_weakness": btc_has_weakness,  # H-7: Gate-Status für UI
         }
         return results, btc_data, stats
 
@@ -15301,6 +15479,7 @@ with tab_divergence:
                     "RVOL": 0, "UpperWick%": 0, "MarketCap": 0, "Vol24h": 0,
                     "HasPerp": False, "Exchanges": [], "ExhDetails": [],
                     "CoinId": "", "BestExchange": "", "Ticker": "?", "Name": "?", "Preis": 0,
+                    "btc_gate": None,  # H-7: None = Altdaten ohne Gate-Info
                 }
                 for _r in new_results:
                     for _dk, _dv in _div_defaults.items():
@@ -15329,7 +15508,9 @@ with tab_divergence:
                            "timestamp": time.time()}, _f)
 
             # CoinGecko Daten DIREKT laden (kein st.cache_data!)
+            # H-14: Vollständigkeit mitzählen — Teilabrufe als partial markieren
             _cg_coins = []
+            _cg_pages_ok = 0
             for _pg in range(1, 5):
                 try:
                     _cg_resp = _rq.get("https://api.coingecko.com/api/v3/coins/markets",
@@ -15341,6 +15522,7 @@ with tab_divergence:
                         _pg_data = _cg_resp.json()
                         if isinstance(_pg_data, list):
                             _cg_coins.extend(_pg_data)
+                            _cg_pages_ok += 1
                         with open(_DIV_PROGRESS, "w") as _f:
                             json.dump({"status": "running", "checked": 0, "total": 0, "hits": 0,
                                        "detail": f"📡 CoinGecko Seite {_pg}/4 geladen ({len(_cg_coins)} Coins)...",
@@ -15366,9 +15548,13 @@ with tab_divergence:
                 return
 
             # Speichere CoinGecko Daten in Datei damit fetch_btc_divergence_shorts sie nutzen kann
+            # H-14 Audit-Fix: Teilabrufe (429) explizit als partial markieren —
+            # Konsumenten (_fetch_coingecko_markets, api) behandeln partial als stale
             _CG_CACHE = "/tmp/coingecko_markets_cache.json"
+            _cg_partial = (_cg_pages_ok < 4) or (len(_cg_coins) < 1000)
             with open(_CG_CACHE, "w") as _f:
-                json.dump({"coins": _cg_coins, "ts": time.time()}, _f)
+                json.dump({"coins": _cg_coins, "ts": time.time(),
+                           "partial": _cg_partial, "pages_fetched": _cg_pages_ok}, _f)
 
             with open(_DIV_PROGRESS, "w") as _f:
                 json.dump({"status": "running", "checked": 0, "total": len(_cg_coins), "hits": 0,
@@ -15450,6 +15636,7 @@ with tab_divergence:
                 "HasPerp": False, "Exchanges": [], "ExhDetails": [],
                 "CoinId": "", "BestExchange": "", "Ticker": "?", "Name": "?",
                 "Preis": 0,
+                "btc_gate": None,  # H-7: None = Altdaten ohne Gate-Info
             }
             for _r in new_results:
                 for _dk, _dv in _div_defaults.items():
@@ -15537,9 +15724,18 @@ with tab_divergence:
         st.markdown("---")
 
         # ── Echtzeit-Alerts: Coins die JETZT kippen ──
-        jetzt_coins = [c for c in div_results if "JETZT" in c.get("Timing", "")]
-        if jetzt_coins:
-            st.error(f"🚨 **{len(jetzt_coins)} AKTIVE SHORT-SIGNALE** — Diese Coins kippen gerade!")
+        # H-7 Audit-Fix: Im Watch-Only-Modus (BTC bullisch) KEINE rote Alarmbox —
+        # ohne BTC-Schwäche gibt es kein Short-Timing, nur Beobachtung.
+        is_watch_only = bool(div_stats and div_stats.get("btc_bullish", False))
+        jetzt_coins = [c for c in div_results
+                       if "JETZT" in c.get("Timing", "") and c.get("btc_gate", True) is not False]
+        if is_watch_only:
+            st.info("👁️ **BTC ist stark — Watch-Only-Modus.** Keine aktiven Short-Signale; "
+                    "überdehnte Coins unten nur beobachten (kein Short-Timing ohne BTC-Schwäche).")
+            st.markdown("---")
+        elif jetzt_coins:
+            st.error(f"🚨 **{len(jetzt_coins)} AKTIVE SHORT-SIGNALE** — Diese Coins kippen gerade! "
+                     f"(kein definierter Stop — Beobachtungssignale, Entry/Stop selbst setzen)")
             for jc in jetzt_coins:
                 st.markdown(
                     f"  **{jc.get('Ticker', '?')}** — 1h: **{jc.get('1h%', 0):+.1f}%** | "
@@ -15547,8 +15743,6 @@ with tab_divergence:
                     f"{jc.get('Timing', '')}"
                 )
             st.markdown("---")
-
-        is_watch_only = div_stats and div_stats.get("btc_bullish", False)
         if is_watch_only:
             st.subheader(f"👁️ {len(div_results)} Coins auf Watchlist (BTC bullisch — Watch Only)")
         else:
@@ -16348,7 +16542,10 @@ with tab_newlisting:
                 "safety_ok": "Safety",
                 "grade": "Grade",
                 "timing": "Timing",
-                "hours_tracked": "Stunden",
+                # AUDIT-Kleinkram: hours_tracked = Anzahl 1h-Kerzen, NICHT das
+                # Listing-Alter → ehrliches Label + echtes Alter separat anzeigen
+                "listing_age_hours": "Alter (h)",
+                "hours_tracked": "Kerzen (1h)",
             }
             _mon_display = _mon_df.rename(columns=_mon_cols)
             for col in _mon_cols.values():

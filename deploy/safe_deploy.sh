@@ -9,7 +9,11 @@ if [ -z "${HEALTH_URL:-}" ] && [ "$COMMERCIAL_DEPLOY" = "1" ]; then
 else
   HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 fi
-SERVICES="${SERVICES:-tradingbot-api tradingbot-frontend}"
+# Produktions-Units: tradingbot-api (FastAPI :8000) + tradingbot-bg (bg_service.py).
+# Das Frontend ist statisch und wird von nginx ausgeliefert — es gibt KEINEN
+# tradingbot-frontend-Service. Die alten Unit-Namen (tradingbot = Streamlit,
+# tradingbot-bg) wurden migriert, siehe deploy/install.sh Abschnitt 9.
+SERVICES="${SERVICES:-tradingbot-api tradingbot-bg}"
 REQUESTED_VENV_DIR="${VENV_DIR:-}"
 INSTALL_DEPS="${INSTALL_DEPS:-auto}"
 

@@ -2261,6 +2261,111 @@ def _run_biotech_scanner(poly_key):
         log.error(f"  ❌ Biotech Scan Fehler: {e}")
 
 
+# ── M-7 Audit-Fix: Stablecoins / Wrapped / LSD / Gold-Token — keine direktionalen Mover ──
+# SYNC mit api.py EXCLUDED_CRYPTO_SYMBOLS (dort gepflegt, hier gespiegelt) + lokale
+# Ergänzung CBBTC (cbBTC). Identische Kopie in scanner.py — Änderungen in beiden nachziehen.
+EXCLUDED_CRYPTO_SYMBOLS_LOCAL = {
+    "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE", "USDS", "USDD",
+    "USDP", "PYUSD", "FRAX", "LUSD", "GUSD", "DOLA", "SUSD", "EUSD", "USDL",
+    "USDY", "USDX", "EURC", "EUROC", "WBTC", "CBTC", "TBTC", "LBTC", "WETH",
+    "WBNB", "STETH", "WSTETH", "RETH", "CBETH", "WBETH", "WEETH", "EZETH",
+    "METH", "RSETH", "SFRXETH", "FRXETH", "PAXG", "XAUT",
+    "CBBTC",  # cbBTC (Coinbase Wrapped BTC) — Ergänzung zur api-Liste
+}
+
+
+def _is_leveraged_token_symbol(symbol):
+    """M-7 Audit-Fix: Leveraged-Token erkennen (kein Spot-Mover, gehört nicht in Scans).
+
+    Erkennt: 3L/3S/4L/4S/5L/5S-Suffixe, UP/DOWN-Endungen (Binance Leveraged Tokens)
+    und BULL/BEAR-Token. Konservative Mindestlängen, damit echte Ticker wie
+    'JUP' (endet auf UP) oder ein Coin namens 'BULL' nicht gefiltert werden.
+    SYNC: identische Kopie in scanner.py.
+    """
+    sym = (symbol or "").upper().strip()
+    if len(sym) >= 4 and sym[-2:] in ("3L", "3S", "4L", "4S", "5L", "5S"):
+        return True
+    if sym.endswith("UP") and len(sym) >= 5:
+        return True
+    if sym.endswith("DOWN") and len(sym) >= 6:
+        return True
+    if (sym.endswith("BULL") or sym.endswith("BEAR")) and len(sym) >= 6:
+        return True
+    return False
+
+
+def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak):
+    """H-7 Audit-Fix: Einheitliche, pure Timing-/Gate-Logik für BTC-Divergenz-Shorts.
+
+    SYNC: Identische Implementierung in scanner.py UND bg_service.py — Änderungen
+    immer in beiden Dateien nachziehen. (Shared-Home wäre modules/scorers, gehört
+    aber einem anderen Team; Cross-Import hat Seiteneffekte: Logging/PID/Streamlit.)
+
+    Regeln (konsolidiert mit der api.py-Variante):
+    - "JETZT"-Signale erst ab ExhScore >= 65 (vorher bg_service: 55/50/45) UND nur
+      bei BTC-Schwäche (btc_weak=True). BTC stark → bestenfalls "BEOBACHTEN".
+    - Dieser Pfad liefert KEINEN Entry/Stop/TP → auch "JETZT SHORTEN" ist nur ein
+      Beobachtungssignal und trägt den expliziten Hinweis "kein definierter Stop".
+
+    Returns:
+        (timing: str, timing_quality: int, btc_gate: bool)
+        timing_quality: 5=JETZT SHORTEN, 4=JETZT, 3=BEREIT, 2=WATCH/BEOBACHTEN,
+                        0=ZU FRÜH, -1=ZU SPÄT. btc_gate=True nur bei BTC-Schwäche.
+    """
+    no_stop_note = " · ⚠️ kein definierter Stop — Beobachtungssignal"
+    cp = close_pos if close_pos is not None else 0.5
+    price_near_high = cp >= 0.70
+    price_mid_range = 0.40 <= cp < 0.70
+    price_near_low = cp < 0.40
+    btc_gate = bool(btc_weak)
+
+    if price_near_low and change_24h < -3:
+        return ("⚫ ZU SPÄT — Preis schon {:.0f}% vom High, Move gelaufen".format((1 - cp) * 100), -1, btc_gate)
+
+    if not btc_gate:
+        # H-7: BTC auf den Makro-Zeitfenstern stark → KEIN Short-Timing vergeben,
+        # egal wie hoch Divergenz/ExhScore sind. Nur beobachten.
+        if exh_score >= 50:
+            return ("👁️ BEOBACHTEN (BTC stark — kein Short-Timing)", 2, False)
+        return ("⚪ ZU FRÜH", 0, False)
+
+    if exh_score >= 65 and price_near_high and change_1h < -1.5:
+        return ("🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%){}".format(change_1h, no_stop_note), 5, True)
+    if exh_score >= 65 and price_near_high and change_1h < -0.5:
+        return ("🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%){}".format(change_1h, no_stop_note), 4, True)
+    if exh_score >= 65 and price_near_high:
+        return ("🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze", 3, True)
+    if exh_score >= 65 and price_mid_range:
+        return ("🟡 BEREIT — Warte auf Bounce Richtung High für besseren Entry", 3, True)
+    if exh_score >= 50 and price_near_high and change_1h < -2.0:
+        # Vorher "JETZT" schon ab Score 50/55 — konsolidiert: unter 65 kein JETZT mehr.
+        # WICHTIG: Wort "JETZT" hier vermeiden — UI matcht per Substring!
+        return ("🟡 BEREIT — Starker 1h-Dump ({:+.1f}%), ExhScore unter Schwelle 65".format(change_1h), 3, True)
+    if exh_score >= 50 and price_mid_range and change_1h < 0:
+        return ("🟠 WATCHLIST — Mittlerer Bereich, könnte noch bounzen", 2, True)
+    if exh_score >= 65 and price_near_low:
+        return ("⚫ ZU SPÄT — Preis schon {:.0f}% vom High gefallen".format((1 - cp) * 100), -1, True)
+    if exh_score >= 50:
+        return ("🟠 WATCHLIST — Noch nicht reif", 2, True)
+    return ("⚪ ZU FRÜH", 0, True)
+
+
+def _cg_markets_cache_payload(all_coins, pages_ok, pages_wanted=4, per_page=250):
+    """H-14 Audit-Fix (pure, testbar): Cache-Payload NUR für vollständige Abrufe.
+
+    429-Teilabrufe dürfen nicht als frischer Voll-Cache geschrieben werden —
+    Konsumenten (scanner/api) würden 2 Min lang blind einem Rumpf-Universum
+    vertrauen (Vorbild: gehärteter api.py-Writer "partial must not poison cache").
+
+    Returns: Payload-Dict bei Vollständigkeit, sonst None (→ nicht schreiben).
+    """
+    coins = all_coins or []
+    complete = pages_ok >= pages_wanted and len(coins) >= pages_wanted * per_page
+    if complete:
+        return {"coins": coins, "ts": time.time(), "pages": pages_wanted}
+    return None
+
+
 def _run_btc_divergence(poly_key=None):
     """BTC-Divergenz Scanner — nutzt CoinGecko (kein Polygon nötig)
     V2: Berechnet Timing, ExhScore, SellProb etc. (vorher fehlten diese Felder)"""
@@ -2270,18 +2375,23 @@ def _run_btc_divergence(poly_key=None):
     import requests as req
 
     # Import Scoring-Funktionen (kein Streamlit nötig)
+    # AUDIT-Kleinkram: calculate_close_position aus modules.indicators statt
+    # modules.scorers — die scorers-Version ist ein Stub, der min_range_pct
+    # ignoriert. Die indicators-Version respektiert min_range_pct=0.3
+    # (gewollte Verhaltensänderung: Mini-Ranges liefern None statt Pseudo-Werte).
     try:
         from modules.scorers import (calculate_exhaustion_score,
-                                     calculate_close_position,
                                      get_exhaustion_grade)
+        from modules.indicators import calculate_close_position
     except ImportError as ie:
         log.error(f"  scorers import fehlgeschlagen: {ie}")
         _update_status("btc_divergence", "error", f"Import: {ie}")
         return
 
     try:
-        # CoinGecko laden (4 Seiten)
+        # CoinGecko laden (4 Seiten) — H-14: Vollständigkeit mitzählen
         all_coins = []
+        _cg_pages_ok = 0
         for page in range(1, 5):
             try:
                 resp = req.get("https://api.coingecko.com/api/v3/coins/markets",
@@ -2293,6 +2403,7 @@ def _run_btc_divergence(poly_key=None):
                     data = resp.json()
                     if isinstance(data, list):
                         all_coins.extend(data)
+                        _cg_pages_ok += 1
                 elif resp.status_code == 429:
                     log.warning(f"  CoinGecko Rate Limit bei Seite {page}")
                     break
@@ -2306,11 +2417,16 @@ def _run_btc_divergence(poly_key=None):
             _update_status("btc_divergence", "error", "Keine CoinGecko Daten")
             return
 
-        # In Datei-Cache speichern (für Streamlit)
+        # H-14 Audit-Fix: Teilabrufe (429/Fehler) NICHT als frischen Voll-Cache
+        # schreiben — sonst vertrauen Streamlit/api dem Rumpf-Universum 2 Min blind.
         cg_cache = "/tmp/coingecko_markets_cache.json"
-        _atomic_write_json(cg_cache, {"coins": all_coins, "ts": time.time()})
-
-        log.info(f"  {len(all_coins)} Coins geladen, speichere für Streamlit")
+        _cg_payload = _cg_markets_cache_payload(all_coins, _cg_pages_ok, pages_wanted=4)
+        if _cg_payload is not None:
+            _atomic_write_json(cg_cache, _cg_payload)
+            log.info(f"  {len(all_coins)} Coins geladen, speichere für Streamlit")
+        else:
+            log.warning(f"  CoinGecko unvollständig (Seiten {_cg_pages_ok}/4, {len(all_coins)} Coins) "
+                        f"— Datei-Cache NICHT überschrieben, Scan läuft mit Teilmenge weiter")
 
         # Progress-Datei für Streamlit
         div_progress = "/tmp/div_scan_progress.json"
@@ -2339,6 +2455,16 @@ def _run_btc_divergence(poly_key=None):
         btc_7d = btc_data.get("change_7d", 0)
         btc_14d = btc_data.get("change_14d", 0)
         btc_30d = btc_data.get("change_30d", 0)
+
+        # ── H-7 Audit-Fix: BTC-Schwäche-Gate (identische Regel wie scanner.py) ──
+        # Short-Timing gibt es nur, wenn BTC auf mind. 2 von 3 Zeitfenstern schwach ist.
+        btc_weak_7d = btc_7d <= 0.0          # 7d negativ/flat
+        btc_weak_14d = btc_14d <= 3.0        # 14d kaum Bewegung
+        btc_weak_30d = btc_30d <= 3.0        # 30d kaum Bewegung
+        btc_has_weakness = sum([btc_weak_7d, btc_weak_14d, btc_weak_30d]) >= 2
+        btc_bullish = not btc_has_weakness
+        log.info(f"  H-7 BTC-Gate: {'SCHWACH → Short-Timing erlaubt' if btc_has_weakness else 'STARK → nur Beobachten'} "
+                 f"(7d {btc_7d:+.1f}% / 14d {btc_14d:+.1f}% / 30d {btc_30d:+.1f}%)")
 
         # ── FIX 2: BTC Dominance als Makro-Filter ──
         btc_dominance = None
@@ -2416,8 +2542,12 @@ def _run_btc_divergence(poly_key=None):
                         }
                 if liquidation_data:
                     log.info(f"  Liquidation Daten: {len(liquidation_data)} Coins")
-        except Exception:
-            pass  # Coinglass free tier kann fehlen
+            else:
+                # AUDIT-Kleinkram: nicht still schlucken — 1 Warnung pro Lauf
+                log.warning(f"  Coinglass Liquidation HTTP {liq_resp.status_code} — LiqFactor bleibt neutral (1.0)")
+        except Exception as _cg_liq_err:
+            # Coinglass free tier kann fehlen — aber sichtbar loggen (1x pro Lauf)
+            log.warning(f"  Coinglass Liquidation nicht erreichbar: {_cg_liq_err} — LiqFactor bleibt neutral")
 
         # ── FIX 5: OI Daten holen (für Delta-Berechnung) ──
         oi_current = {}
@@ -2434,8 +2564,11 @@ def _run_btc_divergence(poly_key=None):
                         oi_current[sym] = oi_val
                 if oi_current:
                     log.info(f"  OI Daten: {len(oi_current)} Coins")
-        except Exception:
-            pass
+            else:
+                # AUDIT-Kleinkram: nicht still schlucken — 1 Warnung pro Lauf
+                log.warning(f"  Coinglass Open Interest HTTP {oi_resp.status_code} — OI-Delta entfällt diesen Lauf")
+        except Exception as _cg_oi_err:
+            log.warning(f"  Coinglass Open Interest nicht erreichbar: {_cg_oi_err} — OI-Delta entfällt")
 
         results = []
         checked = 0
@@ -2444,7 +2577,9 @@ def _run_btc_divergence(poly_key=None):
             checked += 1
             try:
                 symbol = coin.get("symbol", "").upper()
-                if symbol in ("BTC", "USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD"):
+                # M-7 Audit-Fix: BTC selbst + vollständige Stable-/Wrapped-/LSD-Liste
+                # + Leveraged-Token (3L/3S/…, UP/DOWN, BULL/BEAR) überspringen
+                if symbol == "BTC" or symbol in EXCLUDED_CRYPTO_SYMBOLS_LOCAL or _is_leveraged_token_symbol(symbol):
                     continue
 
                 price = coin.get("current_price") or 0
@@ -2512,51 +2647,13 @@ def _run_btc_divergence(poly_key=None):
                 )
                 grade, grade_emoji, grade_label = get_exhaustion_grade(exh_score)
 
-                # Short-Timing V4 (AUDIT FIX: Schwellen gesenkt, realistisch)
-                # ExhScore erreicht in bg_service praktisch max ~75 (kein Funding/OI)
-                # Daher: Schwellen 65→50 für JETZT, 50→40 für BEREIT/WATCH
-                # cp = Close Position in 24h-Range (0.0=Low, 1.0=High)
-                # 0.70+ = oberes Drittel (ideal für Short-Entry)
-                # 0.40-0.70 = Mitte (warten auf Bounce/Breakdown)
-                # <0.40 = unteres Drittel (zu spät für Short)
+                # ── H-7 Audit-Fix: Short-Timing über gemeinsame Gate-Helper-Logik ──
+                # Vorher: bg-eigene Schwellen 55/50/45 für "JETZT" und KEIN BTC-Gate
+                # → "JETZT SHORTEN" auch bei BTC +20%/7d. Jetzt: Schwelle 65 (wie api)
+                # + BTC-Schwäche-Gate + expliziter "kein Stop"-Hinweis (Beobachtungssignal).
                 cp = close_pos if close_pos is not None else 0.5
-                price_near_high = cp >= 0.70
-                price_mid_range = 0.40 <= cp < 0.70
-                price_near_low = cp < 0.40
-
-                if price_near_low and change_24h < -3:
-                    timing = "⚫ ZU SPÄT — Preis schon {:.0f}% vom High, Move gelaufen".format((1 - cp) * 100)
-                elif exh_score >= 55 and price_near_high and change_1h < -1.5:
-                    timing = "🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%)".format(change_1h)
-                elif exh_score >= 50 and price_near_high and change_1h < -0.5:
-                    timing = "🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%)".format(change_1h)
-                elif exh_score >= 45 and price_near_high and change_1h < -2.0:
-                    timing = "🟢 JETZT — Nahe High, starker 1h-Dump ({:+.1f}%)".format(change_1h)
-                elif exh_score >= 50 and price_near_high:
-                    timing = "🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze"
-                elif exh_score >= 50 and price_mid_range:
-                    timing = "🟡 BEREIT — Warte auf Bounce Richtung High für besseren Entry"
-                elif exh_score >= 40 and price_mid_range and change_1h < 0:
-                    timing = "🟠 WATCHLIST — Mittlerer Bereich, könnte noch bounzen"
-                elif exh_score >= 50 and price_near_low:
-                    timing = "⚫ ZU SPÄT — Preis schon {:.0f}% vom High gefallen".format((1 - cp) * 100)
-                elif exh_score >= 40:
-                    timing = "🟠 WATCHLIST — Noch nicht reif"
-                else:
-                    timing = "⚪ ZU FRÜH"
-
-                # Timing-Qualitätsstufe (für SellProb)
-                _timing_quality = 0
-                if "🔴 JETZT" in timing:
-                    _timing_quality = 5
-                elif "🟢 JETZT" in timing:
-                    _timing_quality = 4
-                elif "🟡 BEREIT" in timing:
-                    _timing_quality = 3
-                elif "🟠 WATCHLIST" in timing:
-                    _timing_quality = 2
-                elif "ZU SPÄT" in timing:
-                    _timing_quality = -1
+                timing, _timing_quality, _btc_gate = _btc_div_signal_status(
+                    exh_score, close_pos, change_1h, change_24h, btc_has_weakness)
 
                 # RVOL
                 if market_cap > 0 and vol_24h > 0:
@@ -2660,6 +2757,7 @@ def _run_btc_divergence(poly_key=None):
                     "GradeEmoji": grade_emoji,
                     "Timing": timing,
                     "TimingQuality": _timing_quality,
+                    "btc_gate": _btc_gate,  # H-7: False = BTC stark, kein Short-Timing
                     "SellProb": sell_prob,
                     "RVOL": rvol,
                     "UpperWick%": round(upper_wick_pct, 1),
@@ -2738,7 +2836,10 @@ def _run_btc_divergence(poly_key=None):
         # Speichere für Streamlit
         div_results = "/tmp/div_scan_results.json"
         _atomic_write_json(div_results, {"results": results, "btc": btc_data,
-                       "stats": {"scanned": checked, "candidates": len(results), "btc_7d": btc_7d},
+                       "stats": {"scanned": checked, "candidates": len(results), "btc_7d": btc_7d,
+                                 # H-7: Gate-Status für UI (Watch-Only-Box statt Alarm)
+                                 "btc_bullish": btc_bullish,
+                                 "btc_has_weakness": btc_has_weakness},
                        "ts": time.time()})
 
         _atomic_write_json(div_progress, {"status": "done", "detail": f"✅ {len(results)} Divergenzen",
@@ -3018,6 +3119,48 @@ def _signal_handler(sig, frame):
     log.info("⏹️ Stop-Signal empfangen...")
     _running = False
 
+# ── H-9 Audit-Fix: Doppel-Scheduler — Scan-Ownership bg_service vs. api.py ──
+# api.py _scheduler_loop scannt bereits (light): crypto_explosion, early_movers,
+# crash_monitor, market_context, btc_divergenz, volume_spikes, money_flow, orb,
+# bear, strategy_scan, turtle — plus (heavy) bi_long, bi_short, biotech sowie
+# new_listing und crypto_trade_signals.
+# Audit-Überlappung bg↔api: crash_monitor, btc_divergence(btc_divergenz),
+# bear_scan(bear), strategies(strategy_scan), orb → Default-Ownership: api.
+# bg behält: bi_long, bi_short, biotech (Email-Alerts + feste ET-Zeitfenster)
+# und new_listing (15-Min-Zyklus + NLS-Mails MUSS hier weiterlaufen).
+# Hinweis: bi_long/bi_short/biotech/new_listing stehen auch im api-Scheduler —
+# dortige Dedupe ist api-Team-Thema (siehe Audit-Report H-9).
+# Override per ENV: BG_SCAN_SET="crash_monitor,btc_divergence,..." (kommasepariert).
+BG_ALL_SCANS = {
+    "bi_long", "bi_short", "biotech", "crash_monitor", "strategies",
+    "bear_scan", "btc_divergence", "new_listing", "orb",
+}
+BG_API_OWNED_OVERLAP = {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb"}
+BG_DEFAULT_SCAN_SET = BG_ALL_SCANS - BG_API_OWNED_OVERLAP
+
+
+def _resolve_bg_scan_set(env_value=None):
+    """H-9 (pure, testbar): Aktive bg-Scans aus ENV BG_SCAN_SET oder Default-Set.
+
+    Returns: (aktive_scans: set, übersprungene_scans: set)
+    """
+    raw = env_value if env_value is not None else os.environ.get("BG_SCAN_SET", "")
+    raw = (raw or "").strip()
+    if raw:
+        wanted = {s.strip().lower() for s in raw.split(",") if s.strip()}
+        unknown = wanted - BG_ALL_SCANS
+        if unknown:
+            log.warning(f"BG_SCAN_SET: unbekannte Scans ignoriert: {sorted(unknown)} "
+                        f"(gültig: {sorted(BG_ALL_SCANS)})")
+        active = wanted & BG_ALL_SCANS
+        if not active:
+            log.warning("BG_SCAN_SET ergab leere Scan-Menge — nutze Default-Set")
+            active = set(BG_DEFAULT_SCAN_SET)
+    else:
+        active = set(BG_DEFAULT_SCAN_SET)
+    return active, BG_ALL_SCANS - active
+
+
 def run_service():
     global _running
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -3058,6 +3201,16 @@ def run_service():
         "orb":              300,   # 5 Min (nur aktiv 9:45-11:00 ET Mo-Fr)
     }
 
+    # ── H-9 Audit-Fix: Scan-Ownership anwenden (Doppel-Scheduler bg↔api) ──
+    _bg_scans, _bg_skipped = _resolve_bg_scan_set()
+    SCHEDULE_TIMES = {k: v for k, v in SCHEDULE_TIMES.items() if k in _bg_scans}
+    SCHEDULE_INTERVAL = {k: v for k, v in SCHEDULE_INTERVAL.items() if k in _bg_scans}
+    log.info(f"🗂️ H-9 Scan-Ownership: bg übernimmt {sorted(_bg_scans)}")
+    if _bg_skipped:
+        log.info(f"   ⏭️ übersprungen (Ownership beim api.py-Scheduler): {sorted(_bg_skipped)}")
+    if os.environ.get("BG_SCAN_SET", "").strip():
+        log.info(f"   (BG_SCAN_SET-Override aktiv: '{os.environ['BG_SCAN_SET']}')")
+
     last_run = {}
     _today_done = {}  # Track welche festen Zeiten heute schon gelaufen sind
     _running_scanners = set()  # B-05: Prevent concurrent scanner execution
@@ -3082,54 +3235,56 @@ def run_service():
                 return (True, slot_key)  # Return slot_key for marking after completion
         return (False, None)
 
-    # ── Initialer Load (einmal beim Start) ──
+    # ── Initialer Load (einmal beim Start) — H-9: nur Scans mit bg-Ownership ──
     log.info("📡 Initialer Load...")
-    try:
-        _fetch_crash_monitor(poly_key)
-        last_run["crash_monitor"] = time.time()
-    except Exception as e:
-        log.error(f"Init Crash: {e}")
+    if "crash_monitor" in _bg_scans:
+        try:
+            _fetch_crash_monitor(poly_key)
+            last_run["crash_monitor"] = time.time()
+        except Exception as e:
+            log.error(f"Init Crash: {e}")
+        time.sleep(5)
 
-    time.sleep(5)
+    if "btc_divergence" in _bg_scans:
+        try:
+            _run_btc_divergence(poly_key)
+            last_run["btc_divergence"] = time.time()
+        except Exception as e:
+            log.error(f"Init BTC-Div: {e}")
+        time.sleep(5)
 
-    try:
-        _run_btc_divergence(poly_key)
-        last_run["btc_divergence"] = time.time()
-    except Exception as e:
-        log.error(f"Init BTC-Div: {e}")
+    if "new_listing" in _bg_scans:
+        try:
+            _nls_init = _run_new_listing_scanner()
+            _alert_nls_signals(_nls_init, secrets)
+            last_run["new_listing"] = time.time()
+        except Exception as e:
+            log.error(f"Init New Listing: {e}")
+        time.sleep(10)
 
-    time.sleep(5)
+    if "bi_long" in _bg_scans:
+        try:
+            _run_bi_scanner(poly_key, "long")
+            last_run["bi_long"] = time.time()
+        except Exception as e:
+            log.error(f"Init BI Long: {e}")
+        time.sleep(10)
 
-    try:
-        _nls_init = _run_new_listing_scanner()
-        _alert_nls_signals(_nls_init, secrets)
-        last_run["new_listing"] = time.time()
-    except Exception as e:
-        log.error(f"Init New Listing: {e}")
+    if "bi_short" in _bg_scans:
+        try:
+            _run_bi_scanner(poly_key, "short")
+            last_run["bi_short"] = time.time()
+        except Exception as e:
+            log.error(f"Init BI Short: {e}")
 
-    time.sleep(10)
-
-    try:
-        _run_bi_scanner(poly_key, "long")
-        last_run["bi_long"] = time.time()
-    except Exception as e:
-        log.error(f"Init BI Long: {e}")
-
-    time.sleep(10)
-
-    try:
-        _run_bi_scanner(poly_key, "short")
-        last_run["bi_short"] = time.time()
-    except Exception as e:
-        log.error(f"Init BI Short: {e}")
-
-    # Biotech Scanner nach 2 Min starten (nicht sofort — spart API-Calls beim Init)
-    time.sleep(120)
-    try:
-        _run_biotech_scanner(poly_key)
-        last_run["biotech"] = time.time()
-    except Exception as e:
-        log.error(f"Init Biotech: {e}")
+    if "biotech" in _bg_scans:
+        # Biotech Scanner nach 2 Min starten (nicht sofort — spart API-Calls beim Init)
+        time.sleep(120)
+        try:
+            _run_biotech_scanner(poly_key)
+            last_run["biotech"] = time.time()
+        except Exception as e:
+            log.error(f"Init Biotech: {e}")
 
     log.info("✅ Initialer Load abgeschlossen. Service läuft.")
     log.info(f"📅 Zeitplan: BI 3x/Tag, Crash+Biotech 2x/Tag, BTC-Div alle 2h, ORB 5min bei Open")

@@ -1,20 +1,30 @@
 #!/bin/bash
 # ============================================================
-# TradingBot Server Setup — Automatisches Install-Script
+# Alpha Station / TradingBot — Server Setup (Produktion)
 # Getestet auf: Ubuntu 22.04 / Debian 12
+#
+# Produkt-Architektur (siehe Audit LB-3):
+#   tradingbot-api.service  -> uvicorn api:app   (127.0.0.1:8000)
+#   tradingbot-bg.service   -> python3 bg_service.py
+#   nginx                   -> TLS :443, statisches Frontend, /api/-Proxy
+#   (KEIN tradingbot-frontend-Service — Frontend ist statisch.)
+#
+# Migration von Alt-Installationen:
+#   alte Unit "tradingbot" (Streamlit scanner.py :8501) wird deaktiviert,
+#   "tradingbot-bg" wird mit der neuen, gehaerteten Unit-Datei ueberschrieben.
 # ============================================================
 set -e
 
 echo "╔══════════════════════════════════════════╗"
-echo "║  TradingBot Server Setup                 ║"
+echo "║  Alpha Station Server Setup (FastAPI)    ║"
 echo "╚══════════════════════════════════════════╝"
 
 # ── 1) System-Updates ──
 echo "📦 System-Updates..."
 sudo apt update && sudo apt upgrade -y
 
-# ── 2) Python 3.11+ installieren ──
-echo "🐍 Python installieren..."
+# ── 2) Pakete installieren (inkl. nginx + certbot) ──
+echo "🐍 Python, nginx, certbot installieren..."
 sudo apt install -y python3 python3-pip python3-venv git nginx certbot python3-certbot-nginx
 
 # ── 3) User erstellen ──
@@ -43,6 +53,7 @@ if [[ ! $REPLY =~ ^[Jj]$ ]]; then
 fi
 
 # ── 6) Virtual Environment + Dependencies ──
+# Hinweis: Unit-Dateien und safe_deploy.sh erwarten das venv unter $APP_DIR/venv.
 echo "📦 Python Dependencies installieren..."
 sudo -u tradingbot bash -c "
     cd $APP_DIR
@@ -52,72 +63,94 @@ sudo -u tradingbot bash -c "
     pip install -r requirements.txt
 "
 
-# ── 7) Streamlit Secrets anlegen ──
-SECRETS_DIR="/home/tradingbot/.streamlit"
-sudo -u tradingbot mkdir -p "$SECRETS_DIR"
-
-if [ ! -f "$SECRETS_DIR/secrets.toml" ]; then
+# ── 7) Produktions-.env anlegen (Pflicht — Units starten ohne .env NICHT) ──
+# Die App bootet im Commercial-Mode fail-closed: mit Default-Secrets
+# (z.B. Repo-Fallback fuer JWT_SECRET) verweigert sie den Start.
+ENV_FILE="$APP_DIR/.env"
+if [ ! -f "$ENV_FILE" ] || [ ! -s "$ENV_FILE" ]; then
+    echo "🔑 Erzeuge $ENV_FILE aus .env.production.example ..."
+    sudo -u tradingbot cp "$APP_DIR/.env.production.example" "$ENV_FILE"
+    sudo chmod 600 "$ENV_FILE"
     echo ""
-    echo "🔑 Streamlit Secrets konfigurieren..."
-    read -p "POLYGON_KEY: " POLY_KEY
-    read -p "ANTHROPIC_API_KEY (optional, Enter zum Überspringen): " ANTH_KEY
-
-    sudo -u tradingbot bash -c "cat > $SECRETS_DIR/secrets.toml << TOMLEOF
-POLYGON_KEY = \"$POLY_KEY\"
-ANTHROPIC_API_KEY = \"${ANTH_KEY:-skip}\"
-TOMLEOF"
-    echo "✅ Secrets gespeichert in $SECRETS_DIR/secrets.toml"
+    echo "⚠️  PFLICHT: $ENV_FILE jetzt editieren und ALLE Platzhalter ersetzen"
+    echo "    (JWT_SECRET, COMMERCE_ENFORCE_AUTH=1, ALLOW_LEGACY_ADMIN_MASTER_KEY=0,"
+    echo "     CORS_ORIGINS, Stripe-Live-Keys, Provider-Keys, GMAIL_*)."
+    read -p "Weiter mit Enter, wenn .env fertig editiert ist..." -r
 else
-    echo "✅ Secrets existieren bereits"
+    echo "✅ $ENV_FILE existiert bereits (wird nicht ueberschrieben)"
 fi
 
-# ── 8) Streamlit Config ──
-sudo -u tradingbot bash -c "cat > $SECRETS_DIR/config.toml << 'TOMLEOF'
-[server]
-port = 8501
-address = \"0.0.0.0\"
-headless = true
-maxUploadSize = 50
-
-[browser]
-gatherUsageStats = false
-
-[theme]
-primaryColor = \"#4CAF50\"
-TOMLEOF"
-
-echo "✅ Streamlit Config angelegt"
-
-# ── 9) Systemd Services installieren ──
+# ── 8) Systemd Services installieren ──
 echo "⚙️ Systemd Services einrichten..."
+sudo cp "$APP_DIR/deploy/tradingbot-api.service" /etc/systemd/system/
+sudo cp "$APP_DIR/deploy/tradingbot-bg.service"  /etc/systemd/system/
 
-# Streamlit App Service
-sudo cp /home/tradingbot/app/deploy/tradingbot.service /etc/systemd/system/
-sudo cp /home/tradingbot/app/deploy/tradingbot-bg.service /etc/systemd/system/
+# ── 9) MIGRATION: alte Streamlit-Unit "tradingbot" stilllegen ──
+# Die alte Unit startete das FALSCHE Produkt (Streamlit scanner.py auf :8501
+# statt FastAPI api.py auf :8000). Sie wird deaktiviert und entfernt;
+# das Legacy-UI kann bei Bedarf manuell gestartet werden.
+if systemctl list-unit-files 'tradingbot.service' --no-legend 2>/dev/null | grep -q '^tradingbot.service'; then
+    echo "🔁 Migration: deaktiviere alte Streamlit-Unit 'tradingbot'..."
+    sudo systemctl disable --now tradingbot.service || true
+    sudo rm -f /etc/systemd/system/tradingbot.service
+fi
 
 sudo systemctl daemon-reload
-sudo systemctl enable tradingbot
-sudo systemctl enable tradingbot-bg
-sudo systemctl start tradingbot
-sudo systemctl start tradingbot-bg
+sudo systemctl enable tradingbot-api tradingbot-bg
+sudo systemctl restart tradingbot-bg
+sudo systemctl restart tradingbot-api
 
-echo "✅ Services gestartet"
+echo "✅ Services gestartet (tradingbot-api, tradingbot-bg)"
 
-# ── 10) Nginx Reverse Proxy ──
-echo "🌐 Nginx konfigurieren..."
-sudo cp /home/tradingbot/app/deploy/nginx-tradingbot.conf /etc/nginx/sites-available/tradingbot
-sudo ln -sf /etc/nginx/sites-available/tradingbot /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl reload nginx
+# ── 10) Nginx + TLS (Let's Encrypt) ──
+echo "🌐 Nginx + TLS konfigurieren..."
+echo "   (Die Domain muss bereits per DNS-A-Record auf diesen Server zeigen.)"
+read -p "Domain fuer die App (z.B. app.deine-domain.de, leer = Schritt ueberspringen): " DOMAIN
 
+if [ -n "$DOMAIN" ]; then
+    # nginx (www-data) muss das Frontend unter /home/tradingbot/app/frontend lesen koennen.
+    sudo chmod 755 /home/tradingbot
+    sudo chmod -R a+rX "$APP_DIR/frontend"
+
+    # Webroot fuer ACME-Renewals (Port-80-Block der nginx-Config).
+    sudo mkdir -p /var/www/certbot
+
+    # Zertifikat ZUERST holen — der 443-vHost referenziert die Cert-Dateien,
+    # ohne sie schlaegt `nginx -t` fehl. certbot nutzt dafuer den gerade
+    # installierten nginx (Default-Site reicht aus).
+    if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        echo "🔐 Hole Let's-Encrypt-Zertifikat fuer $DOMAIN ..."
+        sudo certbot certonly --nginx -d "$DOMAIN"
+    else
+        echo "✅ Zertifikat fuer $DOMAIN existiert bereits"
+    fi
+
+    # vHost installieren: ${DOMAIN}-Platzhalter ersetzen, dann aktivieren.
+    sudo sed "s/\${DOMAIN}/$DOMAIN/g" "$APP_DIR/deploy/nginx-tradingbot.conf" \
+        | sudo tee /etc/nginx/sites-available/tradingbot > /dev/null
+    sudo ln -sf /etc/nginx/sites-available/tradingbot /etc/nginx/sites-enabled/
+    sudo rm -f /etc/nginx/sites-enabled/default
+    sudo nginx -t && sudo systemctl reload nginx
+
+    echo "✅ Nginx aktiv: https://$DOMAIN  (Renewal laeuft automatisch via certbot.timer)"
+else
+    echo "⏭️  Nginx/TLS uebersprungen. Spaeter manuell:"
+    echo "    sudo certbot certonly --nginx -d DEINE_DOMAIN"
+    echo "    sudo sed 's/\${DOMAIN}/DEINE_DOMAIN/g' $APP_DIR/deploy/nginx-tradingbot.conf | sudo tee /etc/nginx/sites-available/tradingbot"
+    echo "    sudo ln -sf /etc/nginx/sites-available/tradingbot /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx"
+fi
+
+# ── 11) Abschluss ──
 echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║  ✅ SETUP FERTIG!                        ║"
-echo "╠══════════════════════════════════════════╣"
-echo "║  App: http://SERVER_IP:8501              ║"
-echo "║  Logs: journalctl -u tradingbot -f       ║"
-echo "║  BG:   journalctl -u tradingbot-bg -f    ║"
-echo "╚══════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║  ✅ SETUP FERTIG!                                    ║"
+echo "╠══════════════════════════════════════════════════════╣"
+echo "║  App:        https://\$DOMAIN  (nginx, TLS)           ║"
+echo "║  API lokal:  http://127.0.0.1:8000/api/health        ║"
+echo "║  Logs API:   journalctl -u tradingbot-api -f          ║"
+echo "║  Logs BG:    journalctl -u tradingbot-bg -f           ║"
+echo "║  Deploy:     bash deploy/safe_deploy.sh               ║"
+echo "╚══════════════════════════════════════════════════════╝"
 echo ""
-echo "Optional: SSL mit Let's Encrypt einrichten:"
-echo "  sudo certbot --nginx -d deine-domain.de"
+echo "Naechste Schritte (siehe COMMERCIAL_LAUNCH_CHECKLIST.md):"
+echo "  curl -s http://127.0.0.1:8000/api/commercial-readiness | python3 -m json.tool"

@@ -6,6 +6,12 @@ Extracted from scanner.py v68.0 to modularize scoring logic.
 
 import math
 
+from modules.indicators import (
+    _mcap_atr_baseline as _indicators_mcap_atr_baseline,
+    calculate_close_position as _indicators_close_position,
+    estimate_crypto_atr as _indicators_estimate_crypto_atr,
+)
+
 # Catalyst Constants
 BEARISH_CATALYSTS = {" OFFERING", " LEGAL", " DOWNGRADE", " BANKRUPTCY", " REVERSE SPLIT"}
 BULLISH_CATALYSTS = {" M&A", " CONTRACT", " UPGRADE", " DIVIDEND", " INSIDER", " PRODUCT", " STOCK SPLIT"}
@@ -49,55 +55,40 @@ def _z_score(value, values_list):
 
 
 def _mcap_atr_baseline(market_cap):
-    """MCap-basierte typische Daily ATR% für Crypto."""
-    mc = market_cap or 0
-    if mc > 100_000_000_000:   return 3.5   # BTC, ETH
-    elif mc > 10_000_000_000:  return 4.5   # Top-20
-    elif mc > 1_000_000_000:   return 7.0   # Mid-Cap
-    elif mc > 100_000_000:     return 10.0  # Small-Cap
-    else:                      return 15.0  # Micro-Cap
+    """H-13: Delegiert an modules.indicators._mcap_atr_baseline (kanonische Tiers)."""
+    return _indicators_mcap_atr_baseline(market_cap)
 
 
 def estimate_crypto_atr(market_cap, high_24h=None, low_24h=None, price=None):
-    """V70 AUDIT FIX: ATR-Schätzung die bei Pump-Tagen nicht bricht.
+    """H-13: Delegiert an modules.indicators.estimate_crypto_atr.
 
-    Problem (V69): Heutige Range als ATR → bei Pump ist Range aufgebläht
-    → Extension Ratio kollabiert → 0 Punkte für überdehnte Coins.
-
-    Fix: Wenn heutige Range > 2× MCap-Baseline → nutze MCap-Baseline.
-    Die heutige Range ist dann TEIL des Pumps, nicht die "normale" Volatilität.
+    Kanonisch ist die Variante MIT Pump-Kappung (Range > 2x MCap-Baseline
+    -> Baseline), implementiert in modules/indicators.py. Frueher gab es hier
+    ein abweichendes Duplikat; jetzt gibt es genau eine Implementierung.
     """
-    mcap_baseline = _mcap_atr_baseline(market_cap)
-
-    if high_24h and low_24h and price and price > 0 and high_24h > low_24h:
-        real_atr = (high_24h - low_24h) / price * 100
-        if real_atr >= 0.1:
-            # AUDIT FIX: Wenn heutige Range > 2× normal → Range ist vom Pump aufgebläht
-            # In dem Fall ist MCap-Baseline besser als Proxy für "normale" Volatilität
-            if real_atr > mcap_baseline * 2.0:
-                return mcap_baseline  # Nutze Baseline, nicht die aufgeblähte Range
-            return real_atr
-    return mcap_baseline
+    return _indicators_estimate_crypto_atr(market_cap, high_24h, low_24h, price)
 
 
 def detect_chart_patterns(ohlcv_data, lookback=50):
+    """H-13: Delegiert an die echte Implementierung modules.patterns.detect_chart_patterns.
+
+    Lazy-Import in der Funktion, damit der schwere patterns-Import
+    (requests, data_fetchers, volume_analysis) nicht beim scorers-Import
+    haengt und keine Zirkular-Import-Kette entstehen kann.
     """
-    Detects chart patterns from OHLCV history.
-    Returns list of dicts with pattern type and classification.
-    This is a stub — full implementation would be imported from indicators.
-    """
-    # Stub implementation
-    return []
+    from modules.patterns import detect_chart_patterns as _full_detect_chart_patterns
+
+    return _full_detect_chart_patterns(ohlcv_data, lookback=lookback)
 
 
 def calculate_close_position(high, low, close, min_range_pct=1.0):
+    """H-13: Delegiert an modules.indicators.calculate_close_position.
+
+    Die kanonische Version clampt auf 0-1, liefert None bei fehlender/zu
+    kleiner Range und respektiert min_range_pct (das alte Duplikat hier
+    ignorierte min_range_pct und gab ungeclampte Werte zurueck).
     """
-    Close Position 0-1 (where 0=Low, 1=High).
-    This is a stub — full implementation would be imported from indicators.
-    """
-    if not high or not low or high == low:
-        return 0.5
-    return (close - low) / (high - low)
+    return _indicators_close_position(high, low, close, min_range_pct=min_range_pct)
 
 
 def assess_breakout_health(change_pct, rvol, close_pos, high, low, close,
@@ -1505,14 +1496,24 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
     if btc_change_7d is not None and change_7d:
         divergence = change_7d - btc_change_7d  # Positiv = Altcoin outperformt BTC
 
-        # FIX 5: Calculate Pearson correlation over 14-day window if data available
-        corr_14d = 0.0
-        if coin_changes_14d and btc_changes_14d:
+        # S-5 AUDIT FIX: Pearson-Korrelation NUR berechnen, wenn beide 14d-Listen
+        # tatsaechlich vorhanden und lang genug sind (>= 5 Punkte, Minimum von
+        # _pearson_corr). Frueher fiel corr_14d ohne Daten auf 0.0 zurueck und
+        # erzeugte einen Phantom "+15 Real Decoupling"-Bonus samt falschem Text.
+        corr_14d = None
+        if (
+            coin_changes_14d
+            and btc_changes_14d
+            and len(coin_changes_14d) >= 5
+            and len(btc_changes_14d) >= 5
+        ):
             corr_14d = _pearson_corr(coin_changes_14d, btc_changes_14d)
 
-        # FIX 5: Correlation interpretation
         corr_bonus = 0
-        if corr_14d < 0.3:
+        if corr_14d is None:
+            # Keine 14d-Daten -> kein Decoupling-Bonus, kein Detailtext (S-5)
+            pass
+        elif corr_14d < 0.3:
             # Real decoupling — altcoin moving independently from BTC
             corr_bonus = 15
             details.append(f" [FIX5] Real Decoupling: Correlation {corr_14d:.2f} — unabhängiger Pump!")
@@ -1523,18 +1524,19 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         else:
             details.append(f" [FIX5] Moderate Correlation: {corr_14d:.2f}")
 
+        div_points = 0
         if divergence > 25 and btc_change_7d < -5:
-            score += 12
+            div_points = 12
             details.append(f" Extreme Divergenz 7d: Coin +{change_7d:.0f}% vs BTC {btc_change_7d:+.0f}% (Δ{divergence:+.0f}%)")
         elif divergence > 15 and btc_change_7d < 0:
-            score += 9
+            div_points = 9
             details.append(f" Starke Divergenz 7d: Δ{divergence:+.0f}% vs BTC {btc_change_7d:+.0f}%")
         elif divergence > 10 and btc_change_7d < 2:
-            score += 6
+            div_points = 6
             details.append(f" Moderate Divergenz 7d: Δ{divergence:+.0f}% vs BTC {btc_change_7d:+.0f}%")
         elif divergence > 5 and btc_change_7d < 3:
             # Nur Punkte wenn BTC wenigstens seitwärts/schwach ist (<+3%)
-            score += 3
+            div_points = 3
             details.append(f" Leichte Divergenz 7d: Δ{divergence:+.0f}% (BTC {btc_change_7d:+.0f}%)")
         elif divergence > 5:
             # BTC auch stark → keine echte Divergenz
@@ -1542,8 +1544,9 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         else:
             details.append(f" Keine relevante Divergenz 7d: Δ{divergence:+.0f}%")
 
-        # FIX 5: Apply correlation bonus/penalty
-        score += corr_bonus
+        # M-ExhCap AUDIT FIX: Dimension 5 (Divergenz + Decoupling ZUSAMMEN) ist
+        # mit 0-12 dokumentiert -> auf 12 deckeln (frueher bis zu 12+15=27).
+        score += max(-10, min(12, div_points + corr_bonus))
     else:
         details.append(" BTC-Divergenz: Keine Daten")
 

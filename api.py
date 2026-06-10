@@ -28,6 +28,7 @@ import smtplib
 import threading
 import html
 import uuid
+import tempfile  # AUDIT H-10: atomare Cache-Writes
 import traceback
 from copy import deepcopy
 from typing import Optional, Dict, List, Any, Tuple
@@ -228,6 +229,32 @@ BACKTEST_STRATEGY_ALIASES = {
     "Gap Momentum Short": "Gap Down Short",
 }
 
+# AUDIT H-5: Backtest-Regel-Korrektur (api-seitig, da modules/strategies.py
+# nicht angefasst werden darf). Der Alias "Momentum Breakout Long" ->
+# "Breakout Long" zeigte auf die ALTEN Backtest-Regeln (Change >= 3%, KEIN
+# RVOL-Filter). Live gilt seit S-1: Change >= 2%, RVOL >= 1.5, ClosePos >=
+# 0.5 — der Backtest muss dieselben Signal-Bedingungen pruefen, sonst testet
+# er eine andere Strategie. Der Alias bleibt bestehen (Frontend/Tests nutzen
+# ihn); korrigiert wird die Ziel-Regel "Breakout Long" selbst, plus ein
+# identischer nativer Eintrag unter dem Live-Namen.
+_H5_LIVE_SYNCED_BREAKOUT_RULE = {
+    "direction": "long",
+    "description": "Live-synchron (AUDIT H-5): Change >=2%, RVOL >=1.5, Close-Position >=0.5",
+    "signal": {
+        "change_pct_min": 2.0, "change_pct_max": 50.0,
+        "close_pos_min": 0.50,
+        "rvol_min": 1.5,
+    },
+    "entry": "next_open",
+    "stop_pct": 0.05,
+    "tp1_rr": 1.5,
+    "tp2_rr": 2.5,
+    "max_hold_days": 3,
+    "min_price": 5.0,
+}
+BACKTEST_RULES["Breakout Long"] = dict(_H5_LIVE_SYNCED_BREAKOUT_RULE)
+BACKTEST_RULES["Momentum Breakout Long"] = dict(_H5_LIVE_SYNCED_BREAKOUT_RULE)
+
 STOCK_STRATEGY_HIDDEN = {
     "Penny Rockets",
     "Dip Buy",
@@ -275,8 +302,10 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         "Momentum Breakout Long": _clone_stock_strategy(
             "Breakout Long",
             filters={
-                "Change %": (-0.5, 200.0),
-                "RVOL": (0.7, 100.0),
+                # AUDIT S-1 (2026-06-10): RVOL-Floor 1.5 ist Kern-Geschaeftsregel fuer
+                # Breakout-Signale — nicht senken. Change >= 2% verhindert Flat-Day-Fakes.
+                "Change %": (2.0, 200.0),
+                "RVOL": (1.5, 100.0),
                 "Close Position": (0.50, 1.0),
                 "Preis": (5.0, 100000.0),
             },
@@ -340,7 +369,9 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
             filters={
                 "Change %": (1.2, 50.0),
                 "Vortag %": (-3.0, 3.0),
-                "RVOL": (1.3, 50.0),
+                # AUDIT M-Compression: Breakout ohne RVOL >= 1.5 ist kein
+                # bestaetigter Ausbruch (Kern-Geschaeftsregel wie S-1).
+                "RVOL": (1.5, 50.0),
             },
             description="Komprimierte Mehrtagesrange mit bestätigtem Ausbruch.",
             logic="Enger Aufbau + steigendes Interesse + Breakout-Tag = strukturierter Long-Kandidat.",
@@ -351,7 +382,9 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
             "Consolidation Breakout ",
             filters={
                 "Change %": (-2.0, 12.0),
-                "RVOL": (0.8, 50.0),
+                # AUDIT M-Cup&Handle: Filter-Floor 0.8 -> 1.5; ein Cup-Breakout
+                # ohne Volumen ist kein handelbares Breakout-Signal.
+                "RVOL": (1.5, 50.0),
                 "Close Position": (0.45, 1.0),
                 "Preis": (5.0, 100000.0),
             },
@@ -876,9 +909,17 @@ for _cfg_key in ("POLYGON_KEY", "BPIQ_API_KEY", "ANTHROPIC_API_KEY", "FINNHUB_KE
         os.environ[_cfg_key] = _SECRETS[_cfg_key]
 
 _EMAIL_COOLDOWN = {}
+# AUDIT M-Cooldown-Lock (2026-06-10): _EMAIL_COOLDOWN wird aus mehreren
+# Background-Threads mutiert — alle Mutationen/Cleanup-Iterationen laufen
+# ueber dieses Lock (Reads einzelner Keys bleiben lockfrei, dict-Zugriff
+# auf einzelne Keys ist in CPython atomar).
+_EMAIL_COOLDOWN_LOCK = threading.Lock()
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
 _EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
+# AUDIT M-Bear-SendLog-Race (2026-06-10): Tages-Summaries (crash_summary_/bear_summary_)
+# werden persistent dedupet, damit ein Restart keine zweite Tagesmail ausloest.
+_DAILY_SUMMARY_DEDUPE_SEC = 24 * 3600
 _BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600  # Catalyst setups persist for days; avoid repeat ticker mails.
 _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach Restart
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
@@ -887,14 +928,30 @@ _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_MIN_SCORE = 80
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
 _ALERT_MIN_RVOL = 0.7
+# AUDIT S-1 (2026-06-10): Breakout-Signalpfade brauchen ein hartes Mail-Gate von
+# RVOL >= 1.5 (Kern-Geschaeftsregel). Der globale Floor bleibt bewusst bei 0.7,
+# damit bi_long-Pre-Breakout-Logik (Akkumulation VOR dem Volumen-Spike) nicht stirbt.
+_ALERT_BREAKOUT_MIN_RVOL = 1.5
+_ALERT_MIN_RVOL_BY_SCANNER = {
+    "turtle": _ALERT_BREAKOUT_MIN_RVOL,
+}
+_ALERT_BREAKOUT_STRATEGY_SCANNERS = {"stock_strategy", "strategy_scan"}
+_ALERT_BREAKOUT_STRATEGY_TOKENS = ("breakout", "momentum")
 _ALERT_MIN_LEVEL_RR = 1.0
 _ALERT_RUNNER_RR_CAP = 5.0
 _ALERT_MIN_PRIMARY_TP_RR = 1.0
 _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
     "strategy_scan", "turtle", "crypto_strategy", "early_movers", "new_listing",
+    # AUDIT H-6: Crypto-Signalpfade tragen native entry/stop/tp1/tp2-Rows
+    # (crypto_trade_signals = Merge aus crypto_explosion-Longs + new_listing-
+    # Shorts) -> Plan-Guard muss sie pruefen wie die Aktien-Scanner.
+    "crypto_explosion", "crypto_trade_signals",
 }
-_ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS)
+# AUDIT H-6: btc_divergenz ist watch-only (Rows ohne Trade-Plan-Level) und
+# gehoert deshalb NUR in den Health-Guard (Final-Signal-Enforcement gegen
+# faelschlich handelbare Anzeige), nicht in den Plan-Guard.
+_ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS) | {"btc_divergenz"}
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_WATCH_MIN_SCORE = 70
 _NEW_LISTING_WATCH_MIN_PUMP_PCT = 15.0
@@ -1166,7 +1223,7 @@ _ALERT_SUPPRESSION_LABELS = {
     "missing_ticker": "Ticker fehlt",
     "grade_below_alert_threshold": "Grade unter S/A/A+",
     "score_below_alert_threshold": f"Score unter {_ALERT_MIN_SCORE}",
-    "rvol_below_alert_threshold": f"RVOL unter {_ALERT_MIN_RVOL}x",
+    "rvol_below_alert_threshold": f"RVOL unter Mindestwert ({_ALERT_MIN_RVOL}x; Breakout-Pfade {_ALERT_BREAKOUT_MIN_RVOL}x)",
     "cooldown_active": "8h Mail-Cooldown aktiv",
     "persistent_dedupe_active": "persistenter Mail-Dedupe aktiv",
     "bearish_ticker_already_alerted": "Bear/Crash fuer diesen Ticker schon gemeldet",
@@ -1320,6 +1377,8 @@ def _email_dedupe_ttl_for_key(key: str) -> int:
     key = str(key or "")
     if key.startswith("crash_stock_"):
         return _CRASH_ALERT_DEDUPE_SEC
+    if key.startswith("crash_summary_") or key.startswith("bear_summary_"):
+        return _DAILY_SUMMARY_DEDUPE_SEC
     if key == _EARLY_MOVER_DIGEST_KEY:
         return _EARLY_MOVER_DIGEST_DEDUPE_SEC
     if key == _EARLY_MOVER_ARMED_DIGEST_KEY:
@@ -1518,6 +1577,23 @@ def _extract_alert_rvol(row: Dict[str, Any]) -> Optional[float]:
         if key in row:
             return _alert_float(row.get(key))
     return None
+
+
+def _alert_min_rvol_for_row(scanner_name: str, row: Dict[str, Any]) -> float:
+    """AUDIT S-1: Scanner-/Strategie-abhaengiger RVOL-Mindestwert fuers Mail-Gate.
+
+    Default 0.7 (Pre-Breakout-Pfade wie bi_long). Breakout-Signalpfade
+    (turtle sowie stock_strategy/strategy_scan-Rows mit "Breakout"/"Momentum"
+    im Strategie-Namen) verlangen hart RVOL >= 1.5.
+    """
+    min_rvol = float(_ALERT_MIN_RVOL_BY_SCANNER.get(scanner_name, _ALERT_MIN_RVOL))
+    if scanner_name in _ALERT_BREAKOUT_STRATEGY_SCANNERS:
+        strategy = str(
+            row.get("strategy") or row.get("Strategy") or row.get("Strategie") or ""
+        ).lower()
+        if any(token in strategy for token in _ALERT_BREAKOUT_STRATEGY_TOKENS):
+            min_rvol = max(min_rvol, _ALERT_BREAKOUT_MIN_RVOL)
+    return min_rvol
 
 
 def _extract_alert_ticker(row: Dict[str, Any]) -> str:
@@ -3843,6 +3919,7 @@ def _process_trade_reminders_once() -> None:
                         f"Reminder: {reminder.get('ticker', '').upper()} Trigger bereit",
                         _format_reminder_email(reminder, result),
                         bypass_startup_cooldown=True,
+                        trade_horizon="swing",  # AUDIT H-3: explizit (Reminder = Swing-Kontext)
                     )
         if changed:
             _save_trade_reminders(reminders)
@@ -4000,7 +4077,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Swing-Default: Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und saubere Strukturziele. Intraday-5m ist optionaler separater Modus, nicht Pflicht fuer diese Swing-Mail.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body)
+    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing")  # AUDIT H-3
     if sent:
         _email_dedupe_mark(_EARLY_MOVER_DIGEST_KEY, now=now)
         for item in email_rows:
@@ -4728,7 +4805,14 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("grade_below_alert_threshold")
     if score < _ALERT_MIN_SCORE:
         reasons.append("score_below_alert_threshold")
-    if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and (rvol is None or rvol < _ALERT_MIN_RVOL):
+    # AUDIT S-1: Breakout-Pfade (turtle / *Breakout*/*Momentum*-Strategien)
+    # verlangen RVOL >= 1.5; uebrige Guard-Scanner weiterhin >= 0.7.
+    _min_rvol_required = _alert_min_rvol_for_row(scanner_name, row)
+    _rvol_gate_active = (
+        scanner_name in _ALERT_RVOL_GUARD_SCANNERS
+        or _min_rvol_required > _ALERT_MIN_RVOL
+    )
+    if _rvol_gate_active and (rvol is None or rvol < _min_rvol_required):
         reasons.append("rvol_below_alert_threshold")
     base_blockers = {
         "missing_ticker",
@@ -5308,8 +5392,9 @@ def _check_and_alert(scanner_name, cache_file):
                 for reason in state["suppression_reasons"]:
                     suppressed[reason] = suppressed.get(reason, 0) + 1
                 continue
-            # RVOL Guard: Grade S/A braucht min RVOL 0.7 — Sicherheitsnetz
-            if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and grade in ("S", "A", "A+") and _rvol_check < 0.7:
+            # RVOL Guard: Grade S/A braucht min RVOL (0.7 default, 1.5 fuer
+            # Breakout-Pfade, AUDIT S-1) — Sicherheitsnetz
+            if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and grade in ("S", "A", "A+") and _rvol_check < _alert_min_rvol_for_row(scanner_name, r):
                 grade = "B"  # Downgrade — kein Alert
             if grade not in _alert_grades:
                 continue
@@ -5365,7 +5450,7 @@ def _check_and_alert(scanner_name, cache_file):
         <p style="color:#999;font-size:12px;margin-top:20px">Automatischer Alert — S = ELITE | A = STARK | B = SOLIDE</p>
         </body></html>'''
         print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
-        sent = _send_email_alert(subject, body)
+        sent = _send_email_alert(subject, body, trade_horizon="swing")  # AUDIT H-3
         if sent:
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -5477,7 +5562,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
-    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body)
+    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}", body, trade_horizon="swing")  # AUDIT H-3
     if sent:
         for alert in email_alerts:
             if alert.get("cooldown_key"):
@@ -5703,7 +5788,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Dump-Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
-    return _send_email_alert(f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN", body)
+    return _send_email_alert(f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN", body, trade_horizon="swing")  # AUDIT H-3
 
 
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
@@ -5786,7 +5871,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body)
+    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing")  # AUDIT H-3
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -5795,10 +5880,14 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
 def _cleanup_email_cooldown():
+    # AUDIT M-Cooldown-Lock: Snapshot der Items unter Lock — verhindert
+    # RuntimeError("dictionary changed size during iteration") bei parallelen
+    # Scanner-Threads, die waehrend des Cleanups Cooldowns setzen.
     now = time.time()
-    expired = [k for k, ts in _EMAIL_COOLDOWN.items() if now - ts > _EMAIL_COOLDOWN_SEC]
-    for k in expired:
-        del _EMAIL_COOLDOWN[k]
+    with _EMAIL_COOLDOWN_LOCK:
+        expired = [k for k, ts in list(_EMAIL_COOLDOWN.items()) if now - ts > _EMAIL_COOLDOWN_SEC]
+        for k in expired:
+            _EMAIL_COOLDOWN.pop(k, None)
 
 
 # ── Pydantic Models ──
@@ -6954,8 +7043,15 @@ def load_cache_metadata(filepath: str) -> Dict[str, Any]:
 
 
 def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str, Any]] = None) -> None:
-    """Save cache file with timestamp (thread-safe)."""
+    """Save cache file with timestamp (thread-safe).
+
+    AUDIT H-10: atomarer Write (tempfile im Zielverzeichnis + os.replace,
+    Vorbild bg_service._atomic_write_json). Vorher konnte ein Crash mitten im
+    json.dump eine halb geschriebene Cache-Datei hinterlassen, die alle Reader
+    (Alerts, Endpoints) mit JSONDecodeError gebrochen haette.
+    """
     with _cache_lock:
+        tmp_path = None
         try:
             cache_data = {
                 "cached_at": datetime.now().isoformat(),
@@ -6963,10 +7059,23 @@ def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str
             }
             if metadata:
                 cache_data.update(metadata)
-            with open(filepath, "w") as f:
+            tmp_dir = os.path.dirname(filepath) or "."
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=tmp_dir, delete=False, suffix=".tmp"
+            ) as f:
+                # tmp_path SOFORT merken: crasht json.dump, muss der
+                # except-Zweig die Temp-Datei trotzdem aufraeumen koennen.
+                tmp_path = f.name
                 json.dump(cache_data, f, indent=2, default=_serialize_json)
+            os.replace(tmp_path, filepath)
+            tmp_path = None
         except Exception as e:
             print(f"Error saving cache {filepath}: {e}")
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 
 def _serialize_json(obj):
@@ -8075,23 +8184,25 @@ def _stock_momentum_breakout_gate(
 
     near_20d_breakout = bool(high20 and breakout20 is not None and breakout20 >= -0.25)
     near_10d_breakout = bool(high10 and breakout10 is not None and breakout10 >= -0.15)
+    # AUDIT S-1 (2026-06-10): RVOL >= 1.5 ist die nicht verhandelbare Mindest-
+    # Volumenbestaetigung fuer ALLE Breakout-Aeste (Geschaeftsregel).
     holds_20d_breakout = bool(
         near_20d_breakout
         and change_pct >= -0.2
-        and rvol >= 0.7
+        and rvol >= 1.5
         and close_pos >= 0.50
     )
     holds_10d_breakout = bool(
         near_10d_breakout
         and change_pct >= 0.4
-        and rvol >= 0.8
+        and rvol >= 1.5
         and close_pos >= 0.52
     )
     range_breakout = bool(
         range_pos is not None
         and range_pos >= 78
         and change_pct >= 1.0
-        and rvol >= 1.0
+        and rvol >= 1.5
         and close_pos >= 0.55
     )
     trend_reclaim = bool(
@@ -8099,14 +8210,14 @@ def _stock_momentum_breakout_gate(
         and price > ema20
         and (not ema50 or price > ema50 or ema20 >= ema50)
         and change_pct >= 1.5
-        and rvol >= 1.1
+        and rvol >= 1.5
         and close_pos >= 0.58
     )
 
     if not (holds_20d_breakout or holds_10d_breakout or range_breakout or trend_reclaim):
         if change_pct < -0.2:
             reasons.append("daily_momentum_too_small")
-        if rvol < 0.7:
+        if rvol < 1.5:
             reasons.append("rvol_below_breakout_threshold")
         if close_pos < 0.50:
             reasons.append("daily_close_not_near_high")
@@ -8655,7 +8766,9 @@ def _detect_cup_handle_breakout(
             if avg20_volume <= 0 or last_volume <= 0:
                 continue
             rvol = last_volume / avg20_volume
-            if rvol < 1.1:
+            # AUDIT M-Cup&Handle: Bestaetigungs-RVOL 1.1 -> 1.5 (Breakout-
+            # Kernregel: ohne 1.5x Volumen keine Bestaetigung).
+            if rvol < 1.5:
                 continue
 
             cup_volumes = [_bar_num(bar, "volume", "v") for bar in cup if _bar_num(bar, "volume", "v") > 0]
@@ -8819,6 +8932,27 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         return None
     enriched["long_entry_quality"] = _long_entry_quality(enriched)
     enriched["alertable_long"] = True
+    # AUDIT M-Cup&Handle: Waehrend der US-Regular-Session ist die Tageskerze
+    # unfertig — "BREAKOUT_CONFIRMED"/"JETZT_TRADEN" auf Basis des laufenden
+    # Daily-Close ist nicht belastbar (Kerze kann bis zum Schluss unter den
+    # Lip zurueckfallen). Minimal-invasiver Downgrade auf INTRADAY_UNCONFIRMED;
+    # der 5m-Fade-Check (_long_entry_rule_reasons) blockt weiterhin schwache
+    # Moves komplett. Nach Daily-Close bleibt CONFIRMED legitim.
+    try:
+        _us_session_open = bool(_stock_trade_email_status().get("allowed"))
+    except Exception:
+        _us_session_open = False
+    if _us_session_open:
+        enriched["entry_status"] = "INTRADAY_UNCONFIRMED"
+        enriched["trade_signal"] = "BEOBACHTEN"
+        enriched["trade_action"] = "WAIT_FOR_DAILY_CLOSE"
+        enriched["alertable_long"] = False
+        trade_setup["entry_status"] = "INTRADAY_UNCONFIRMED"
+        trade_setup["trade_action"] = "WAIT_FOR_DAILY_CLOSE"
+        enriched["scanner_note"] = (
+            "Cup-and-Handle: 1D-Struktur intakt, aber Tageskerze noch offen — "
+            "Breakout erst nach Daily-Close (oder via 5m-Trigger-Check) bestaetigt."
+        )
     return enriched
 
 
@@ -9342,10 +9476,11 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     # eigenes Label, damit der Trader sie unterscheiden kann.
                     _is_true_mdr = vortag_pct > 10 and change_pct > 5
                     _is_day1_blowout = (change_pct > 30 and close_pos > 0.6) and not _is_true_mdr
-                    # _is_mdr steuert den RVOL-Bypass — beide Klassen duerfen bypassen
-                    # (Day-1-Blowouts haben in der Praxis ohnehin RVOL>=1.5, aber
-                    # Konsistenz-halber gleiche Filter-Regel).
-                    _is_mdr = _is_true_mdr or _is_day1_blowout
+                    # _is_mdr steuert den RVOL-Bypass — beide Klassen duerfen bypassen.
+                    # AUDIT S-1 (2026-06-10): Bypass nur noch mit harter RVOL>=1.5-
+                    # Bestaetigung (vorher Behauptung im Kommentar, nicht im Code —
+                    # Rows mit RVOL<1.5 konnten den Filter komplett umgehen).
+                    _is_mdr = (_is_true_mdr or _is_day1_blowout) and (rvol is not None and float(rvol) >= 1.5)
 
                     if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
                         _reject("rvol_filter")
@@ -9988,6 +10123,13 @@ def _turtle_scan_wrapper() -> None:
                 risk_per_share = entry_price - stop_loss
                 reward_to_exit = current_close - entry_price
 
+                # AUDIT H-4: Turtle-Rows hatten nur Entry/Stop/Exit_Level und
+                # endeten dadurch immer als estimated/NO_TRADE. Native R-Multiple
+                # Targets: TP1 = 1.5R, TP2 = 2.5R; Exit_Level (10T-Tief) bleibt
+                # als Trailing-Exit-Info erhalten.
+                tp1_price = entry_price + 1.5 * risk_per_share
+                tp2_price = entry_price + 2.5 * risk_per_share
+
                 # Breakout-Stärke: Wie weit über dem 20-Day-High?
                 breakout_pct = (current_close - dc_high_20) / dc_high_20 * 100
 
@@ -10066,6 +10208,13 @@ def _turtle_scan_wrapper() -> None:
                     "ATR_Pct": round(atr / current_close * 100, 2),
                     "Entry": round(entry_price, 2),
                     "Stop": round(stop_loss, 2),
+                    # AUDIT H-4: native Targets + StopLoss-Alias fuer die
+                    # Trade-Level-Normalisierung (kein estimated-Plan mehr).
+                    "StopLoss": round(stop_loss, 2),
+                    "TP1": round(tp1_price, 2),
+                    "TP2": round(tp2_price, 2),
+                    "direction": "LONG",
+                    "Signal_Direction": "LONG",
                     "Exit_Level": round(exit_level, 2),
                     "Risk": round(risk_per_share, 2),
                     "RVOL": round(rvol, 2),
@@ -10077,6 +10226,28 @@ def _turtle_scan_wrapper() -> None:
                     "turtle_quality_flags": turtle_quality_flags,
                     "score_details": f"Donchian {breakout_pct:.2f}% over 20D high | RVOL {rvol:.2f}x | ATR {atr_pct:.2f}%",
                     "signal": f"Breakout +{breakout_pct:.1f}% über 20T-Hoch | Stop ${stop_loss:.2f} (2×ATR) | Exit ${exit_level:.2f} (10T-Tief)",
+                    # AUDIT H-4: natives trade_setup analog der anderen Scanner
+                    # (Feld-Layout wie _build_structured_trade_setup), damit die
+                    # Trade-State-Decision handelbare Plaene sieht.
+                    "trade_setup": {
+                        "entry": _round_trade_price(entry_price),
+                        "stop": _round_trade_price(stop_loss),
+                        "tp1": _round_trade_price(tp1_price),
+                        "tp2": _round_trade_price(tp2_price),
+                        "rr": 2.0,
+                        "rr_tp1": 1.5,
+                        "rr_tp2": 2.5,
+                        "risk": _round_trade_price(risk_per_share),
+                        "model": "Turtle: 2x-ATR-Stop, R-Multiple-Targets, 10T-Tief Trailing-Exit",
+                        "level_model": "turtle_r_multiple_v1",
+                        "stop_source": "2 ATR turtle stop",
+                        "tp1_source": "measured move 1.5R (turtle)",
+                        "tp2_source": "measured move 2.5R (turtle)",
+                        "warnings": [],
+                        "notes": [f"Exit_Level ${exit_level:.2f} (10T-Tief) bleibt Trailing-Exit"],
+                        "direction": "LONG",
+                    },
+                    "Trade_Setup_Source": "turtle_r_multiple",
                 })
 
             except Exception as e:
@@ -10561,7 +10732,9 @@ def _bear_scan_wrapper() -> None:
 
             if _crash_stocks and _stock_bear_mail_allowed:
                 _crash_ck = f"crash_summary_{datetime.now().strftime('%Y%m%d')}"
-                if _crash_ck not in _EMAIL_COOLDOWN:
+                # AUDIT M-Bear-SendLog-Race: Tages-Summary auch persistent dedupen
+                # (Restart-sicher), nicht nur In-Memory-Cooldown.
+                if _crash_ck not in _EMAIL_COOLDOWN and not _email_dedupe_active(_crash_ck, _DAILY_SUMMARY_DEDUPE_SEC):
                     _crash_rows = ""
                     for _cs in _crash_stocks[:5]:  # Max 5 in einer Mail
                         _gc = {"S": "#7c3aed", "A": "#16a34a"}.get(_cs.get("grade", ""), "#666")
@@ -10587,9 +10760,18 @@ def _bear_scan_wrapper() -> None:
                     <th style="padding:6px 8px;text-align:right">Score</th></tr>
                     {_crash_rows}</table>
                     </body></html>'''
-                    _send_email_alert(f"⚠️ CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)", _crash_body)
-                    if _EMAIL_SEND_LOG and _EMAIL_SEND_LOG[-1].get("status") == "sent":
-                        _EMAIL_COOLDOWN[_crash_ck] = time.time()
+                    # AUDIT M-Bear-SendLog-Race: direkter Rueckgabewert statt
+                    # _EMAIL_SEND_LOG[-1] (Race: parallele Sender koennen den
+                    # letzten Log-Eintrag ueberschreiben). AUDIT H-3: swing.
+                    _crash_sent = _send_email_alert(
+                        f"⚠️ CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)",
+                        _crash_body,
+                        trade_horizon="swing",
+                    )
+                    if _crash_sent:
+                        with _EMAIL_COOLDOWN_LOCK:
+                            _EMAIL_COOLDOWN[_crash_ck] = time.time()
+                        _email_dedupe_mark(_crash_ck)
                         for _dedupe_key in _crash_dedupe_keys:
                             _email_dedupe_mark(_dedupe_key)
                         for _cs in _crash_stocks:
@@ -10639,7 +10821,9 @@ def _bear_scan_wrapper() -> None:
 
             if _total_signals > 0 and _stock_bear_mail_allowed:
                 _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
-                if _bear_ck not in _EMAIL_COOLDOWN:
+                # AUDIT M-Bear-SendLog-Race: persistenter Tages-Dedupe zusaetzlich
+                # zum In-Memory-Cooldown (Restart-sicher).
+                if _bear_ck not in _EMAIL_COOLDOWN and not _email_dedupe_active(_bear_ck, _DAILY_SUMMARY_DEDUPE_SEC):
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Aktien-Shorts</p>"
                     _bd_html = ""
                     if _bd_rows:
@@ -10663,9 +10847,17 @@ def _bear_scan_wrapper() -> None:
                     {_ts}{_bd_html}
                     <p style="color:#999;font-size:11px;margin-top:12px">Nur handelbare Breakdown-Shorts: Drop -3% bis -12%, keine grüne Reclaim-Kerze, Close nahe Tagestief. Überdehnte Crashs bleiben Watch/Crash-Monitor, kein FOMO-Short.</p>
                     </body></html>'''
-                    _send_email_alert(f"Bear Alert: {_total_signals} Aktien-Shorts", _bear_body)
-                    if _EMAIL_SEND_LOG and _EMAIL_SEND_LOG[-1].get("status") == "sent":
-                        _EMAIL_COOLDOWN[_bear_ck] = time.time()
+                    # AUDIT M-Bear-SendLog-Race: direkter Rueckgabewert statt
+                    # _EMAIL_SEND_LOG[-1]. AUDIT H-3: swing-Horizon explizit.
+                    _bear_sent = _send_email_alert(
+                        f"Bear Alert: {_total_signals} Aktien-Shorts",
+                        _bear_body,
+                        trade_horizon="swing",
+                    )
+                    if _bear_sent:
+                        with _EMAIL_COOLDOWN_LOCK:
+                            _EMAIL_COOLDOWN[_bear_ck] = time.time()
+                        _email_dedupe_mark(_bear_ck)
                         for _ticker in _bear_summary_tickers:
                             _mark_bearish_stock_alert(_ticker, now=time.time())
             elif result.get("breakdown_stocks"):
@@ -11095,6 +11287,19 @@ _TAB_GATES = [
     ("/api/ticker-search", "chart-analyse"),
     ("/api/strategies", "strategie-guide"),
     ("/api/scan", "scanner"),
+    # AUDIT H-11: Crypto-/Kontext-Endpoints waren komplett ungated (jeder
+    # Token, auch expired/basic, bekam Pro-Daten). Tab-IDs gemaess
+    # SCANNER_TABS_BY_PLAN (modules/auth.py): "crypto-explosion" und
+    # "crypto-signals" sind Pro+, narrative-pulse gehoert zum Money-Flow-Tab
+    # (SectorNarrativeTab im Frontend), market-context ("Market Weather")
+    # zum Crash-Monitor-Risikoblock (Basic+); Crypto-Charts dienen nur den
+    # Pro-Crypto-Tabs -> "crypto-signals" als Umbrella.
+    ("/api/crypto-explosion", "crypto-explosion"),
+    ("/api/crypto-trade-signals", "crypto-signals"),
+    ("/api/narrative-pulse", "money-flow"),
+    ("/api/market-context", "crash-monitor"),
+    ("/api/crypto-chart", "crypto-signals"),
+    ("/api/exchange-chart", "crypto-signals"),
 ]
 
 
@@ -11134,13 +11339,12 @@ async def commerce_auth_gate(request: Request, call_next):
     path = request.url.path
     if not COMMERCE_ENFORCE_AUTH or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
         return await call_next(request)
-    if path.startswith("/api/auth/") and path not in {
-        "/api/auth/me",
-        "/api/auth/checkout",
-        "/api/auth/billing-portal",
-        "/api/auth/alert-settings",
-    }:
-        return await call_next(request)
+    # AUDIT H-11 Default-Deny: Die fruehere Blanket-Ausnahme fuer /api/auth/*
+    # (alles ausser me/checkout/billing-portal/alert-settings lief OHNE Token
+    # durch) war ein Default-Allow fuer kuenftige Auth-Routen. Die legitimen
+    # Public-Auth-Routen (register/login/plans) stehen explizit in
+    # _PUBLIC_API_PATHS — alle anderen /api/-Routen (auch unbekannte) sind
+    # mindestens Token-pflichtig.
     if not HAS_AUTH:
         return JSONResponse(status_code=503, content={"detail": "Auth system not available"})
     token = _token_from_authorization(request.headers.get("authorization"))
@@ -11244,6 +11448,56 @@ class TicketStatusRequest(BaseModel):
     status: str
 
 
+# AUDIT H-12: In-Memory Login-Throttle gegen Brute-Force.
+# Max 5 Fehlversuche pro (Email, Client-IP) in 10 Minuten -> 429 + Retry-After.
+# Erfolgreicher Login setzt den Zaehler zurueck. Bewusst in-memory: ein
+# Prozess-Restart vergisst die Zaehler, blockt aber jeden laufenden Angriff.
+_LOGIN_THROTTLE_LOCK = threading.Lock()
+_LOGIN_THROTTLE_MAX_FAILURES = 5
+_LOGIN_THROTTLE_WINDOW_SEC = 600
+_LOGIN_FAILED_ATTEMPTS: Dict[str, List[float]] = {}
+
+
+def _login_throttle_key(email: str, client_ip: str) -> str:
+    return f"{str(email or '').strip().lower()}|{str(client_ip or 'unknown')}"
+
+
+def _login_throttle_retry_after(email: str, client_ip: str, now: Optional[float] = None) -> int:
+    """Sekunden bis zum naechsten erlaubten Versuch (0 = Login erlaubt)."""
+    ts = time.time() if now is None else now
+    key = _login_throttle_key(email, client_ip)
+    with _LOGIN_THROTTLE_LOCK:
+        attempts = [t for t in _LOGIN_FAILED_ATTEMPTS.get(key, []) if ts - t < _LOGIN_THROTTLE_WINDOW_SEC]
+        if attempts:
+            _LOGIN_FAILED_ATTEMPTS[key] = attempts
+        else:
+            _LOGIN_FAILED_ATTEMPTS.pop(key, None)
+        if len(attempts) >= _LOGIN_THROTTLE_MAX_FAILURES:
+            return max(1, int(_LOGIN_THROTTLE_WINDOW_SEC - (ts - attempts[0])) + 1)
+    return 0
+
+
+def _login_throttle_record_failure(email: str, client_ip: str, now: Optional[float] = None) -> None:
+    ts = time.time() if now is None else now
+    key = _login_throttle_key(email, client_ip)
+    with _LOGIN_THROTTLE_LOCK:
+        attempts = [t for t in _LOGIN_FAILED_ATTEMPTS.get(key, []) if ts - t < _LOGIN_THROTTLE_WINDOW_SEC]
+        attempts.append(ts)
+        _LOGIN_FAILED_ATTEMPTS[key] = attempts
+        # Memory-Guard: abgelaufene Fremd-Keys entsorgen, sobald die Map waechst
+        if len(_LOGIN_FAILED_ATTEMPTS) > 5000:
+            for stale_key in [
+                k for k, v in _LOGIN_FAILED_ATTEMPTS.items()
+                if not v or ts - v[-1] >= _LOGIN_THROTTLE_WINDOW_SEC
+            ]:
+                _LOGIN_FAILED_ATTEMPTS.pop(stale_key, None)
+
+
+def _login_throttle_reset(email: str, client_ip: str) -> None:
+    with _LOGIN_THROTTLE_LOCK:
+        _LOGIN_FAILED_ATTEMPTS.pop(_login_throttle_key(email, client_ip), None)
+
+
 @app.post("/api/auth/register")
 async def api_register(req_body: RegisterRequest):
     """Register a new user account."""
@@ -11256,13 +11510,24 @@ async def api_register(req_body: RegisterRequest):
 
 
 @app.post("/api/auth/login")
-async def api_login(req_body: LoginRequest):
+async def api_login(req_body: LoginRequest, request: Request):
     """Login with email + password. Returns JWT token."""
     if not HAS_AUTH:
         raise HTTPException(status_code=503, detail="Auth system not available")
+    # AUDIT H-12: Brute-Force-Throttle pro Email+IP (5 Fehlversuche / 10 Min).
+    client_ip = request.client.host if request and request.client else "unknown"
+    retry_after = _login_throttle_retry_after(req_body.email, client_ip)
+    if retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Zu viele fehlgeschlagene Login-Versuche. Bitte spaeter erneut versuchen.",
+            headers={"Retry-After": str(retry_after)},
+        )
     result = login_user(req_body.email, req_body.password)
     if not result["success"]:
+        _login_throttle_record_failure(req_body.email, client_ip)
         raise HTTPException(status_code=401, detail=result["message"])
+    _login_throttle_reset(req_body.email, client_ip)
     return result
 
 
@@ -11356,6 +11621,20 @@ async def api_commercial_readiness():
     if not ALERT_SEND_TO_SUBSCRIBERS:
         warnings.append("ALERT_SEND_TO_SUBSCRIBERS disabled; paid users will not receive platform alerts")
     warnings.append("Legal/data-license review is not machine-verifiable: confirm terms, privacy, risk disclaimer, refund/cancel policy and market-data redistribution rights before public launch")
+    # AUDIT M-Kalender-2027 (c): Kalender-Abdeckung sichtbar machen, damit
+    # Ops VOR Jahreswechsel sieht, wann die Feiertagsdaten auslaufen.
+    calendar_coverage_by_exchange = {
+        str(ex.get("code") or "?"): _exchange_calendar_coverage_until(ex)
+        for ex in EXCHANGE_CALENDARS_2026
+    }
+    _coverage_values = [v for v in calendar_coverage_by_exchange.values() if v]
+    calendar_coverage_until = min(_coverage_values) if _coverage_values else None
+    _this_year_end = f"{datetime.now().year}-12-31"
+    if calendar_coverage_until is None or calendar_coverage_until <= _this_year_end:
+        warnings.append(
+            f"Boersenkalender-Abdeckung endet {calendar_coverage_until or 'unbekannt'} - "
+            "Feiertage/Half-Days fuer Folgejahr nachpflegen (EXCHANGE_CALENDARS_2026)"
+        )
     return {
         "status": "blocked" if critical else ("warning" if warnings else "ready"),
         "commercial_ready": not critical,
@@ -11363,6 +11642,8 @@ async def api_commercial_readiness():
         "commerce_enforce_auth": COMMERCE_ENFORCE_AUTH,
         "alert_send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
         "auth": auth_status,
+        "calendar_coverage_until": calendar_coverage_until,
+        "calendar_coverage_by_exchange": calendar_coverage_by_exchange,
         "critical": critical,
         "warnings": warnings,
         "note": "Commercial readiness here covers technical gating/security only; legal, tax and data-license review still need human/legal approval.",
@@ -11780,8 +12061,14 @@ def debug_keys():
 
 
 @app.post("/api/test-email")
-def test_email_alert():
-    """Test-Endpoint: Sendet eine Test-Mail um Email-Alerts zu verifizieren."""
+def test_email_alert(authorization: Optional[str] = Header(None)):
+    """Test-Endpoint: Sendet eine Test-Mail um Email-Alerts zu verifizieren.
+
+    AUDIT H-12: admin-only — vorher konnte jeder authentifizierte (bzw. bei
+    deaktiviertem Commerce-Gate sogar anonyme) Aufrufer Mails an alle
+    konfigurierten Empfaenger ausloesen (Spam-/Kosten-Vektor).
+    """
+    _require_admin(authorization)
     status = _email_alert_status()
     if not status["configured"]:
         raise HTTPException(status_code=500, detail={
@@ -11797,6 +12084,7 @@ def test_email_alert():
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>''',
         bypass_startup_cooldown=True,
+        trade_horizon="swing",  # AUDIT H-3: explizit
     )
     if success:
         return {"status": "ok", "message": "Test-Email gesendet!"}
@@ -12006,18 +12294,25 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             macd = round(ema12 - ema26, 2)
             # Signal line is EMA9 of MACD line
             if len(closes) >= 34:
-                # Calculate EMA12 and EMA26 series for all bars (single pass each)
-                ema12_series = calculate_ema_series(closes, 12)
-                ema26_series = calculate_ema_series(closes, 26)
-                # Derive MACD line from the series (only where both values exist)
+                # AUDIT S-3 (2026-06-10): bars kommen sort=desc (newest first).
+                # calculate_ema_series erwartet CHRONOLOGISCHE Daten (oldest first)
+                # — vorher liefen die EMA-Serien zeitverkehrt und das MACD-Signal
+                # war Muell. Jetzt: chronologische Kopie, Serien darauf, letzter
+                # Wert der Signal-Serie = aktueller Signalwert.
+                closes_chrono = list(reversed(closes))
+                ema12_series = calculate_ema_series(closes_chrono, 12)
+                ema26_series = calculate_ema_series(closes_chrono, 26)
+                # MACD-Linie chronologisch ableiten (nur wo beide EMAs existieren)
                 macd_line_vals = []
                 min_len = min(len(ema12_series), len(ema26_series))
                 for i in range(min_len):
                     if ema12_series[i] is not None and ema26_series[i] is not None:
                         macd_line_vals.append(ema12_series[i] - ema26_series[i])
                 if len(macd_line_vals) >= 9:
-                    # Reverse to chronological for EMA calculation of signal line
-                    macd_signal = calculate_ema(list(reversed(macd_line_vals)), 9)
+                    # Signal-Linie = EMA9 der chronologischen MACD-Linie
+                    _signal_series = calculate_ema_series(macd_line_vals, 9)
+                    if _signal_series and _signal_series[-1] is not None:
+                        macd_signal = round(_signal_series[-1], 2)
             if macd_signal is not None:
                 macd_histogram = round(macd - macd_signal, 2)
 
@@ -12222,24 +12517,19 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         bars_for_chart = list(reversed(bars[:60]))
 
         # Calculate EMA20 and EMA50 for each candle
-        # Use full lookback (all available data) for proper EMA calculation
-        ema20_series = calculate_ema_series(closes, 20) if len(closes) >= 20 else []
-        ema50_series = calculate_ema_series(closes, 50) if len(closes) >= 50 else []
+        # AUDIT S-3 (2026-06-10): closes sind sort=desc, calculate_ema_series
+        # erwartet chronologische Daten — Serie auf chrono-Kopie rechnen und
+        # die LETZTEN len(bars_for_chart) Werte nehmen (bars_for_chart = die
+        # neuesten 60 Bars in chronologischer Reihenfolge, aelteste zuerst).
+        _chart_closes_chrono = list(reversed(closes))
+        ema20_series = calculate_ema_series(_chart_closes_chrono, 20) if len(closes) >= 20 else []
+        ema50_series = calculate_ema_series(_chart_closes_chrono, 50) if len(closes) >= 50 else []
 
-        # Align with chart bars (last 60 bars in chronological order)
-        ema20_for_chart = []
-        ema50_for_chart = []
-        start_idx = len(closes) - 60
-        for i, ema_val in enumerate(ema20_series):
-            if start_idx + i >= 0:
-                ema20_for_chart.append(ema_val)
-        for i, ema_val in enumerate(ema50_series):
-            if start_idx + i >= 0:
-                ema50_for_chart.append(ema_val)
-
-        # Reverse to match bars_for_chart order (chronological)
-        ema20_for_chart = list(reversed(ema20_for_chart[-60:]))
-        ema50_for_chart = list(reversed(ema50_for_chart[-60:]))
+        # Align with chart bars: chrono-Serie und bars_for_chart enden beide
+        # am neuesten Bar → letzte N Werte = exakt die Chart-Bars.
+        _n_chart = len(bars_for_chart)
+        ema20_for_chart = ema20_series[-_n_chart:] if ema20_series else []
+        ema50_for_chart = ema50_series[-_n_chart:] if ema50_series else []
 
         for idx, b in enumerate(bars_for_chart):
             candle = {
@@ -13802,6 +14092,38 @@ EXCLUDED_CRYPTO_TEXT_TERMS = (
 PERP_OI_HISTORY_CACHE = "/tmp/early_movers_perp_oi_history.json"
 
 
+# AUDIT M-LeveragedTokens: Basis-Coins der historischen Binance UP/DOWN-
+# Leveraged-Tokens. UP/DOWN wird NUR fuer diese Basen geflaggt, damit
+# legitime Symbole wie SYRUP oder JUP nicht faelschlich ausgeschlossen werden.
+_LEVERAGED_UPDOWN_BASES = {
+    "BTC", "ETH", "BNB", "ADA", "XRP", "DOT", "LINK", "LTC", "SOL", "DOGE",
+    "SUSHI", "UNI", "AAVE", "FIL", "TRX", "BCH", "EOS", "XTZ", "1INCH", "SXP", "YFI",
+}
+
+
+def _is_leveraged_token_symbol(symbol: str) -> bool:
+    """AUDIT M-LeveragedTokens: Leveraged-Token sind Derivate auf Derivate —
+    sie gehoeren in kein Spot-/Perp-Momentum-Universum (verzerrte Change-%,
+    Decay, kein echtes Orderbuch-Momentum). Erkannt werden:
+    - 3L/3S/4L/4S/5L/5S-Suffixe (KuCoin/Gate-Style), z.B. XYZ3L (Basis >= 2)
+    - UP/DOWN-Endungen (Binance-Style) nur fuer bekannte Basen (BTCUP, ETHDOWN)
+    - BULL/BEAR-Endungen (FTX-Style) mit Basis >= 2, z.B. ETHBULL;
+      "BULL"/"BEAR" allein sind normale Memecoin-Symbole und bleiben erlaubt.
+    """
+    sym = str(symbol or "").upper().strip()
+    if len(sym) < 4:
+        return False
+    if sym[-2:] in {"3L", "3S", "4L", "4S", "5L", "5S"}:
+        return True
+    if sym.endswith("UP") and sym[:-2] in _LEVERAGED_UPDOWN_BASES:
+        return True
+    if sym.endswith("DOWN") and sym[:-4] in _LEVERAGED_UPDOWN_BASES:
+        return True
+    if len(sym) >= 6 and (sym.endswith("BULL") or sym.endswith("BEAR")):
+        return True
+    return False
+
+
 def _crypto_asset_exclusion_reason(symbol: str, coin_id: str = "", name: str = "") -> Optional[str]:
     """Return why a crypto asset should not be treated as a directional mover."""
     sym = (symbol or "").upper().strip()
@@ -13811,6 +14133,11 @@ def _crypto_asset_exclusion_reason(symbol: str, coin_id: str = "", name: str = "
 
     if sym in EXCLUDED_CRYPTO_SYMBOLS:
         return f"excluded stable/wrapped symbol {sym}"
+    # AUDIT M-LeveragedTokens: zentral hier, damit ALLE Crypto-Universen
+    # (Early Mover, Explosion/_ce_normalized_row, BTC-Divergenz, Strategy)
+    # Leveraged-Tokens konsistent ausfiltern.
+    if _is_leveraged_token_symbol(sym):
+        return f"excluded leveraged token symbol {sym}"
     if any(term in text for term in EXCLUDED_CRYPTO_TEXT_TERMS):
         return "excluded stable/wrapped/liquid-staking asset"
     if sym.startswith("USD") and len(sym) <= 5:
@@ -15690,11 +16017,29 @@ def _fetch_bitget_perp_rows() -> List[Dict[str, Any]]:
         if not contract.endswith("USDT"):
             continue
         change_raw = _ce_float(item.get("change24h"))
+        # AUDIT M-CryptoExplosion (change_raw): Bitget v2 liefert change24h
+        # als DEZIMAL-FRAKTION (0.0523 = +5.23%). Die alte Heuristik
+        # ("*100 nur wenn abs<=5") kippte bei Pumps > 500% (Fraktion > 5)
+        # stillschweigend auf Prozent-Lesart und meldete z.B. 600% als 6%.
+        # Gewaehlte Logik: primaer Fraktions-Lesart (dokumentiertes API-
+        # Verhalten); Konsistenz-Check gegen die echte 24h-Range (high/low):
+        # nur wenn die Fraktions-Lesart die physikalisch moegliche Bewegung
+        # klar sprengt UND die Prozent-Lesart hineinpasst, wird der Wert als
+        # Prozent interpretiert (Schutz, falls Bitget das Format umstellt).
+        _bg_high = _ce_float(item.get("high24h"))
+        _bg_low = _ce_float(item.get("low24h"))
+        _bg_change_pct = change_raw * 100.0
+        if _bg_high > 0 and _bg_low > 0 and _bg_high >= _bg_low:
+            _bg_max_move_pct = (_bg_high - _bg_low) / _bg_low * 100.0
+            _bg_fraction_fits = abs(_bg_change_pct) <= _bg_max_move_pct * 1.15 + 2.0
+            _bg_percent_fits = abs(change_raw) <= _bg_max_move_pct * 1.15 + 2.0
+            if not _bg_fraction_fits and _bg_percent_fits:
+                _bg_change_pct = change_raw
         row = _ce_normalized_row(
             exchange="bitget",
             contract=contract,
             price=item.get("lastPr") or item.get("last"),
-            change_24h=change_raw * (100 if abs(change_raw) <= 5 else 1),
+            change_24h=_bg_change_pct,
             turnover_usd=item.get("quoteVolume") or item.get("usdtVolume"),
             high_24h=item.get("high24h"),
             low_24h=item.get("low24h"),
@@ -16071,6 +16416,35 @@ def _crypto_explosion_wrapper() -> None:
         traceback.print_exc()
 
 
+def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Optional[int]) -> List[Dict[str, Any]]:
+    """AUDIT M-CryptoExplosion: 5m-Breakout-Trigger sind nur ~3 Minuten
+    belastbar (_EARLY_MOVER_TRIGGER_TTL als Vorbild); der Scan laeuft alle
+    15 Min. Ein "JETZT_TRADEN"/LONG_NOW aus dem Cache ist beim GET daher
+    fast immer abgelaufen -> Downgrade auf WARTEN statt veralteter
+    Kauf-Aufforderung."""
+    if cache_age is None or cache_age <= _EARLY_MOVER_TRIGGER_TTL:
+        return rows
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if (
+            row.get("trade_signal") == "JETZT_TRADEN"
+            or row.get("trade_action") == "LONG_NOW"
+            or bool(row.get("execution_trigger_ok"))
+        ):
+            row["trade_signal"] = "WARTEN"
+            row["trade_action"] = "WAIT_FOR_BREAKOUT"
+            row["trade_decision"] = "WAIT_FOR_TRIGGER"
+            row["trade_decision_label"] = "5m-Trigger abgelaufen - neuen Breakout/Reclaim abwarten"
+            row["signal_label"] = f"5m-Trigger aelter als {_EARLY_MOVER_TRIGGER_TTL}s - kein Market-Buy"
+            row["execution_trigger_ok"] = False
+            row["alertable_crypto"] = False
+            row["trigger_expired"] = True
+            row["phase"] = 1
+            row["phase_label"] = "Trigger expired; wait for fresh 5m breakout"
+    return rows
+
+
 @app.post("/api/crypto-explosion-scan")
 def trigger_crypto_explosion_scan():
     _run_scan_safe("crypto_explosion", _crypto_explosion_wrapper)
@@ -16088,6 +16462,9 @@ def get_crypto_explosion_results():
             print(f"[Warning] {exc}")
     decorated = _decorate_scan_results(results, "crypto_explosion", cache_age)
     decorated = _apply_signal_only_policy("crypto_explosion", decorated)
+    # AUDIT M-CryptoExplosion: abgelaufene 5m-Trigger VOR Quality/Stats
+    # downgraden, damit trade_now_count die Wahrheit zeigt.
+    decorated = _downgrade_expired_crypto_triggers(decorated, cache_age)
     quality = _scan_quality_payload("crypto_explosion", cache_age, decorated)
     stats = {
         "result_count": len(decorated),
@@ -16417,7 +16794,12 @@ def _btc_divergenz_wrapper() -> None:
                     divergence = r.get("change_5d", 0) - expected_5d
                     residual_var = var_a + (beta ** 2) * var_b - 2 * beta * cov
                     residual_std = max(residual_var ** 0.5 if residual_var > 0 else std_a, 0.5)
-                    z_score = divergence / residual_std
+                    # AUDIT M-BTC-Z: divergence ist ein 5-TAGES-Aggregat,
+                    # residual_std stammt aus TAGES-Residuen. Ein 5d-Aggregat
+                    # unabhaengiger Tages-Residuen skaliert mit sqrt(5) —
+                    # ohne die Skalierung war |z| ~2.2x ueberhoeht und
+                    # WATCH-Signale feuerten viel zu frueh.
+                    z_score = divergence / (residual_std * math.sqrt(5))
 
                 r["beta"] = round(beta, 2)
                 r["correlation"] = round(correlation, 2)
@@ -16561,7 +16943,9 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, 
     volumes = [float(b.get("v", 0) or 0) for b in reversed(bars)]
     highs = [float(b.get("h", 0) or 0) for b in reversed(bars)]
     lows = [float(b.get("l", 0) or 0) for b in reversed(bars)]
-    obv_values = calculate_obv(closes, volumes)
+    # AUDIT S-4 (2026-06-10): calculate_obv liefert (liste, trend) — vorher wurde
+    # das Tupel selbst als Serie behandelt (len==2) und obv_change blieb immer 0.
+    obv_values, _obv_trend = calculate_obv(closes, volumes)
     obv_change = 0.0
     if len(obv_values) >= 6 and obv_values[-6] != 0:
         obv_change = (obv_values[-1] - obv_values[-6]) / abs(obv_values[-6]) * 100
@@ -16862,7 +17246,7 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
             _record_email_event(f"Narrative Pulse {frequency}", "skipped", "frequency_dedupe_active")
             continue
         subject = f"Narrative Pulse ({cfg['label']}): Bullisch {top_bull} | Bearisch {top_bear}"
-        sent = _send_email_alert(subject, body, recipient_emails=recipients)
+        sent = _send_email_alert(subject, body, recipient_emails=recipients, trade_horizon="swing")  # AUDIT H-3 (explizite Empfaenger, Horizon nur informativ)
         sent_any = bool(sent) or sent_any
 
     if not had_recipients:
@@ -17671,6 +18055,10 @@ def _build_crypto_trade_signals_from_caches() -> Tuple[List[Dict[str, Any]], Dic
     short_age = _crypto_trade_cache_age(short_cached_at)
     long_rows = _decorate_scan_results(long_raw or [], "crypto_explosion", long_age)
     long_rows = _apply_signal_only_policy("crypto_explosion", long_rows)
+    # AUDIT M-CryptoExplosion: gleicher Stale-Trigger-Downgrade wie im
+    # crypto-explosion-GET — die Merge-Engine darf keine abgelaufenen
+    # LONG_NOW-Trigger als handelbar weiterreichen.
+    long_rows = _downgrade_expired_crypto_triggers(long_rows, long_age)
     short_rows, short_stats = _decorate_new_listing_display_results(short_raw or [], short_age)
     merged = _merge_crypto_trade_signals(long_rows, short_rows)
     cached_at = _crypto_trade_max_cached_at(long_cached_at, short_cached_at)
@@ -17898,10 +18286,36 @@ def _orb_scanner_wrapper() -> None:
 
         # Prime ORB: 9:45-11:00 ET. Manual late review is allowed until close,
         # but late results are capped and labelled because the classic edge decays.
-        if weekday >= 5 or time_val < ORB_START_MINUTE or time_val >= ORB_SCAN_END_MINUTE:
-            print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {'Mo-Fr' if weekday < 5 else 'Wochenende'}) — übersprungen")
+        # AUDIT M-ORB-HalfDays: Fenster-Ende folgt dem offiziellen US-Kalender:
+        # Early-Close-Tage (z.B. Tag nach Thanksgiving) enden 13:00 ET statt
+        # 16:00, Voll-Feiertage setzen komplett aus (vorher lief der Scanner
+        # an Half-Days bis 16:00 auf toten/duennen Daten weiter).
+        _orb_scan_end_minute = ORB_SCAN_END_MINUTE
+        _orb_holiday_name = None
+        _us_cal = _us_exchange_calendar()
+        if _us_cal:
+            _today_iso = now_et.strftime("%Y-%m-%d")
+            _orb_holiday_name = (_us_cal.get("holidays") or {}).get(_today_iso)
+            _early_close = (_us_cal.get("early_closes") or {}).get(_today_iso) or {}
+            if _early_close.get("close"):
+                _orb_scan_end_minute = min(_orb_scan_end_minute, _exchange_minutes(_early_close["close"]))
+            if now_et.year not in _exchange_calendar_known_years(_us_cal):
+                _warn_unknown_calendar_year(_us_cal, now_et.year)
+        if weekday >= 5 or _orb_holiday_name or time_val < ORB_START_MINUTE or time_val >= _orb_scan_end_minute:
+            _reason = (
+                "Wochenende" if weekday >= 5
+                else f"Feiertag: {_orb_holiday_name}" if _orb_holiday_name
+                else "Mo-Fr"
+            )
+            print(f"[ORB] Außerhalb Fenster ({now_et.strftime('%H:%M')} ET, {_reason}) — übersprungen")
             # Trotzdem Cache mit Phase-Info speichern, damit Frontend Feedback gibt
-            _phase = "weekend" if weekday >= 5 else "pre_open" if time_val < ORB_START_MINUTE else "expired"
+            _phase = (
+                "weekend" if weekday >= 5
+                else "holiday" if _orb_holiday_name
+                else "pre_open" if time_val < ORB_START_MINUTE
+                else "early_close_expired" if _orb_scan_end_minute < ORB_SCAN_END_MINUTE
+                else "expired"
+            )
             save_cache_file(ORB_CACHE, [{"breakouts": [], "failed_breakouts": [], "candidates": [],
                 "stats": {"scanned": 0, "candidates": 0, "breakouts": 0, "failed": 0},
                 "or_phase": _phase, "market_time": now_et.strftime("%H:%M ET")}])
@@ -18495,11 +18909,16 @@ def _orb_scanner_wrapper() -> None:
         alert_breakouts = [b for b in breakouts if b.get("grade") in ("S", "A")]
         _alert_now = time.time()
         _fresh_alert_breakouts = []
+        _orb_alert_cooldown_keys: List[str] = []
         for _b in alert_breakouts:
             _state = _classify_alert_candidate("orb", _b, _alert_now)
             if _state["alertable_now"]:
-                _EMAIL_COOLDOWN[_state["cooldown_key"]] = _alert_now
+                # AUDIT H-2 (2026-06-10): Cooldown NICHT mehr vor dem Versand
+                # setzen — sonst unterdrueckt ein fehlgeschlagener Versand den
+                # Re-Alert fuer die volle TTL. Keys merken, nach Erfolg markieren.
                 _fresh_alert_breakouts.append(_b)
+                if _state.get("cooldown_key"):
+                    _orb_alert_cooldown_keys.append(_state["cooldown_key"])
         alert_breakouts = _fresh_alert_breakouts
         if alert_breakouts:
             rows = ""
@@ -18529,7 +18948,21 @@ def _orb_scanner_wrapper() -> None:
             {rows}</table>
             <p style="color:#999;font-size:11px;margin-top:15px">ORB V2 — Volume Confirmed | VWAP Aligned | R:R optimiert</p>
             </body></html>'''
-            _send_email_alert(f"🔔 {len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)", body)
+            # AUDIT H-3: ORB ist intraday-only — Empfaenger-Routing "intraday".
+            _orb_sent = _send_email_alert(
+                f"🔔 {len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)",
+                body,
+                trade_horizon="intraday",
+            )
+            # AUDIT H-2: Cooldown + persistentes Dedupe erst NACH erfolgreichem
+            # Versand setzen (Muster wie _check_and_alert); persistenter Dedupe
+            # verhindert Doppel-Mails nach Prozess-Restart.
+            if _orb_sent:
+                with _EMAIL_COOLDOWN_LOCK:
+                    for _ck in _orb_alert_cooldown_keys:
+                        _EMAIL_COOLDOWN[_ck] = _alert_now
+                for _ck in _orb_alert_cooldown_keys:
+                    _email_dedupe_mark(_ck, now=_alert_now)
 
     except Exception as e:
         print(f"[ORB] Fehler: {e}")
@@ -19042,11 +19475,30 @@ EXCHANGE_CALENDARS_2026 = [
             "2026-09-07": "Labor Day",
             "2026-11-26": "Thanksgiving Day",
             "2026-12-25": "Christmas Day",
+            # AUDIT M-Kalender-2027: Quelle = offizielle NYSE-Group-
+            # Pressemitteilung (ICE, "NYSE Group Announces 2025, 2026 and
+            # 2027 Holiday and Early Closings Calendar", 08.11.2024):
+            # https://ir.theice.com/press/news-details/2024/NYSE-Group-Announces-2025-2026-and-2027-Holiday-and-Early-Closings-Calendar/default.aspx
+            "2027-01-01": "New Year's Day",
+            "2027-01-18": "Martin Luther King Jr. Day",
+            "2027-02-15": "Washington's Birthday / Presidents Day",
+            "2027-03-26": "Good Friday",
+            "2027-05-31": "Memorial Day",
+            "2027-06-18": "Juneteenth National Independence Day observed",
+            "2027-07-05": "Independence Day observed",
+            "2027-09-06": "Labor Day",
+            "2027-11-25": "Thanksgiving Day",
+            "2027-12-24": "Christmas Day observed",
         },
         "early_closes": {
             "2026-07-02": {"name": "Early close before Independence Day", "close": "13:00"},
             "2026-11-27": {"name": "Early close after Thanksgiving", "close": "13:00"},
             "2026-12-24": {"name": "Christmas Eve early close", "close": "13:00"},
+            # AUDIT M-Kalender-2027: 2027 gibt es laut offizieller NYSE-
+            # Pressemitteilung NUR den Early Close am Tag nach Thanksgiving
+            # (Juli: 05.07. ist Voll-Feiertag, 02.07. normale Session;
+            # 24.12. ist selbst der beobachtete Christmas-Feiertag).
+            "2027-11-26": {"name": "Early close after Thanksgiving", "close": "13:00"},
         },
     },
     {
@@ -19194,8 +19646,61 @@ def _exchange_segments_for_day(exchange: Dict[str, Any], date_str: str) -> List[
     return adjusted
 
 
+# AUDIT M-Kalender-2027 (c): Fallback fuer Jahre ohne Kalenderdaten.
+# Einmalige Log-Warnung pro (Boerse, Jahr); danach reine Wochenend-Logik,
+# damit der Bot nicht stillschweigend Feiertage als Handelstage behandelt,
+# ohne dass es jemand merkt.
+_CALENDAR_KNOWN_YEARS_CACHE: Dict[str, set] = {}
+_CALENDAR_UNKNOWN_YEAR_WARNED: set = set()
+
+
+def _exchange_calendar_known_years(exchange: Dict[str, Any]) -> set:
+    code = str(exchange.get("code") or "?")
+    cached = _CALENDAR_KNOWN_YEARS_CACHE.get(code)
+    if cached is None:
+        cached = set()
+        for date_key in (exchange.get("holidays") or {}):
+            try:
+                cached.add(int(str(date_key)[:4]))
+            except (TypeError, ValueError):
+                continue
+        _CALENDAR_KNOWN_YEARS_CACHE[code] = cached
+    return cached
+
+
+def _warn_unknown_calendar_year(exchange: Dict[str, Any], year: int) -> None:
+    code = str(exchange.get("code") or "?")
+    key = (code, int(year))
+    if key in _CALENDAR_UNKNOWN_YEAR_WARNED:
+        return
+    _CALENDAR_UNKNOWN_YEAR_WARNED.add(key)
+    print(
+        f"[Kalender] WARNUNG: Keine Feiertagsdaten fuer {code} {year} — "
+        "Fallback auf reine Wochenend-Logik (Feiertage/Half-Days unbekannt). "
+        "Kalender in EXCHANGE_CALENDARS_2026 nachpflegen!"
+    )
+
+
+def _exchange_calendar_coverage_until(exchange: Dict[str, Any]) -> Optional[str]:
+    """Letztes Jahr mit gepflegten Feiertagsdaten als ISO-Datum (31.12.)."""
+    years = _exchange_calendar_known_years(exchange)
+    return f"{max(years)}-12-31" if years else None
+
+
+def _us_exchange_calendar() -> Optional[Dict[str, Any]]:
+    for exchange in EXCHANGE_CALENDARS_2026:
+        if exchange.get("code") == "US":
+            return exchange
+    return None
+
+
 def _is_exchange_trading_day(exchange: Dict[str, Any], local_date) -> bool:
-    return local_date.weekday() < 5 and local_date.isoformat() not in (exchange.get("holidays") or {})
+    if local_date.weekday() >= 5:
+        return False
+    if local_date.year not in _exchange_calendar_known_years(exchange):
+        _warn_unknown_calendar_year(exchange, local_date.year)
+        return True  # Fallback: nur Wochenend-Logik moeglich
+    return local_date.isoformat() not in (exchange.get("holidays") or {})
 
 
 def _next_exchange_session(exchange: Dict[str, Any], start_date):
@@ -19231,6 +19736,10 @@ def _build_exchange_calendar_status(now_utc=None) -> List[Dict[str, Any]]:
         now_local = now_utc.astimezone(tz)
         local_date = now_local.date()
         date_str = local_date.isoformat()
+        # AUDIT M-Kalender-2027 (c): unbekanntes Jahr -> einmalige Warnung,
+        # Status faellt auf Wochenend-Logik zurueck (Feiertage unbekannt).
+        if local_date.year not in _exchange_calendar_known_years(exchange):
+            _warn_unknown_calendar_year(exchange, local_date.year)
         holidays = exchange.get("holidays") or {}
         early = (exchange.get("early_closes") or {}).get(date_str)
         segments = _exchange_segments_for_day(exchange, date_str)
@@ -20822,8 +21331,12 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             entry_type = rule.get("entry", "next_open")
             min_price = rule.get("min_price", 1.0)
 
-            # Pre-calc RVOL (20d avg volume) — init with 1.0 to avoid div-by-zero
-            avg_vols = [1.0] * len(bars)
+            # Pre-calc RVOL (20d avg volume).
+            # AUDIT M-Backtest-RVOL: Init war 1.0 -> in den ersten 20 Bars wurde
+            # rvol = Rohvolumen (riesig) und rvol_min war trivial erfuellt.
+            # None = keine valide Volumenbasis; rvol-gated Strategien duerfen
+            # dort kein Signal generieren.
+            avg_vols = [None] * len(bars)
             for i in range(20, len(bars)):
                 avg_vols[i] = sum(volumes[i-20:i]) / 20 if sum(volumes[i-20:i]) > 0 else 1
 
@@ -20892,8 +21405,9 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 # Prev day change %
                 prev_change_pct = ((prev_c - closes[i - 2]) / closes[i - 2]) * 100 if i >= 2 and closes[i - 2] else 0
 
-                # RVOL
-                rvol = volumes[i] / avg_vols[i] if avg_vols[i] > 0 else 1.0
+                # RVOL — None solange keine 20-Bar-Volumenbasis existiert
+                # (AUDIT M-Backtest-RVOL: vorher fake 1.0-Basis vor Bar 20)
+                rvol = (volumes[i] / avg_vols[i]) if avg_vols[i] else None
 
                 # Check all signal conditions
                 match = True
@@ -20913,9 +21427,11 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     match = False
                 if "prev_change_pct_max" in sig and prev_change_pct > sig["prev_change_pct_max"]:
                     match = False
-                if "rvol_min" in sig and rvol < sig["rvol_min"]:
+                # AUDIT M-Backtest-RVOL: rvol=None (erste 20 Bars) erfuellt
+                # KEINE rvol-Bedingung -> kein Signal fuer rvol-gated Regeln.
+                if "rvol_min" in sig and (rvol is None or rvol < sig["rvol_min"]):
                     match = False
-                if "rvol_max" in sig and rvol > sig["rvol_max"]:
+                if "rvol_max" in sig and (rvol is None or rvol > sig["rvol_max"]):
                     match = False
 
                 if not match:

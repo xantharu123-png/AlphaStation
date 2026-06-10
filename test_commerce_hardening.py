@@ -71,7 +71,7 @@ def test_email_alert_recipients_include_only_active_alert_plans(monkeypatch, tmp
     _isolate_auth_store(monkeypatch, tmp_path)
 
     for email in ("pro@example.com", "basic@example.com", "off@example.com", "expiredtrial@example.com"):
-        assert auth.register_user(email, "secret", email.split("@")[0])["success"] is True
+        assert auth.register_user(email, "secret-pass-123", email.split("@")[0])["success"] is True
 
     db = auth._load_users()
     db["users"]["pro@example.com"]["plan"] = "pro"
@@ -95,7 +95,7 @@ def test_trade_alert_recipients_respect_swing_intraday_horizon(monkeypatch, tmp_
         ("intraday@example.com", "intraday"),
         ("both@example.com", "both"),
     ):
-        assert auth.register_user(email, "secret", email.split("@")[0])["success"] is True
+        assert auth.register_user(email, "secret-pass-123", email.split("@")[0])["success"] is True
         db = auth._load_users()
         db["users"][email]["plan"] = "elite"
         db["users"][email]["trade_alert_horizon"] = horizon
@@ -108,7 +108,7 @@ def test_trade_alert_recipients_respect_swing_intraday_horizon(monkeypatch, tmp_
 def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
     _isolate_auth_store(monkeypatch, tmp_path)
 
-    registered = auth.register_user("elite@example.com", "secret", "Elite")
+    registered = auth.register_user("elite@example.com", "secret-pass-123", "Elite")
     assert registered["success"] is True
     db = auth._load_users()
     db["users"]["elite@example.com"]["plan"] = "elite"
@@ -133,6 +133,56 @@ def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
     assert settings["trade_alert_horizon"] == "both"
     assert settings["scanner_trade_horizon"] == "intraday"
     assert settings["has_email_alerts"] is True
+
+
+def test_signup_requires_min_password_length_of_10(monkeypatch, tmp_path):
+    # S-6 Audit-Fix: Mindestlaenge 6 -> 10
+    _isolate_auth_store(monkeypatch, tmp_path)
+
+    too_short = auth.register_user("short@example.com", "nine-char", "Shorty")
+    assert too_short["success"] is False
+    assert "10" in too_short["message"]
+
+    long_enough = auth.register_user("long@example.com", "ten-chars!", "Longy")
+    assert long_enough["success"] is True
+
+
+def test_stripe_webhook_duplicate_event_is_idempotent(monkeypatch, tmp_path):
+    # S-6 Audit-Fix: Event-ID-Dedupe — Stripe-Retries duerfen Plan-Updates
+    # nicht doppelt anwenden, Antwort bleibt success (HTTP 200).
+    _isolate_auth_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "HAS_STRIPE", True)
+    monkeypatch.setattr(auth, "STRIPE_WEBHOOK_SECRET", "whsec_unit")
+    assert auth.register_user("dupe@example.com", "secret-pass-123", "Dupe")["success"] is True
+
+    event = {
+        "id": "evt_unit_dedupe_1",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "metadata": {"email": "dupe@example.com", "plan": "pro"},
+            "subscription": "sub_unit_1",
+            "customer": "cus_unit_1",
+        }},
+    }
+    monkeypatch.setattr(
+        auth.stripe.Webhook,
+        "construct_event",
+        staticmethod(lambda payload, sig_header, secret: event),
+    )
+
+    first = auth.handle_stripe_webhook(b"{}", "sig")
+    assert first["success"] is True
+    assert auth._load_users()["users"]["dupe@example.com"]["plan"] == "pro"
+
+    # Plan manuell zuruecksetzen — das Duplikat darf ihn NICHT erneut hochstufen
+    db = auth._load_users()
+    db["users"]["dupe@example.com"]["plan"] = "expired"
+    auth._save_users(db)
+
+    second = auth.handle_stripe_webhook(b"{}", "sig")
+    assert second["success"] is True
+    assert second.get("duplicate") is True
+    assert auth._load_users()["users"]["dupe@example.com"]["plan"] == "expired"
 
 
 def test_auth_security_status_blocks_demo_secrets_and_legacy_bootstrap(monkeypatch, tmp_path):
@@ -171,7 +221,7 @@ def test_narrative_alert_recipients_respect_frequency(monkeypatch, tmp_path):
         ("twice@example.com", "twice_daily"),
         ("off@example.com", "off"),
     ):
-        assert auth.register_user(email, "secret", email.split("@")[0])["success"] is True
+        assert auth.register_user(email, "secret-pass-123", email.split("@")[0])["success"] is True
         db = auth._load_users()
         db["users"][email]["plan"] = "elite"
         db["users"][email]["narrative_email_frequency"] = frequency

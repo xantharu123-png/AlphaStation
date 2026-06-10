@@ -61,8 +61,24 @@ AUTH_DB_LEGACY_JSON_PATH = os.environ.get("AUTH_DB_LEGACY_JSON_PATH", "/tmp/alph
 AUTH_DB_IS_SQLITE = not str(AUTH_DB_PATH).lower().endswith(".json")
 
 _JWT_DEFAULT_SECRET = "as_jwt_2026_alpha_station_prod_key_x9k2m"
-JWT_SECRET = os.environ.get("JWT_SECRET", _JWT_DEFAULT_SECRET)
+# S-6 AUDIT FIX: Kein hartkodierter Default mehr. Fehlt JWT_SECRET, wird ein
+# ephemerer Zufalls-Secret erzeugt (Tokens ueberleben dann KEINEN Neustart) und
+# laut gewarnt. Im Commercial-Modus erzwingt enforce_commercial_boot_security()
+# einen expliziten, sicheren Secret.
+_JWT_ENV_SECRET = os.environ.get("JWT_SECRET", "")
+if _JWT_ENV_SECRET:
+    JWT_SECRET = _JWT_ENV_SECRET
+    JWT_SECRET_IS_EPHEMERAL = False
+else:
+    JWT_SECRET = secrets.token_hex(32)
+    JWT_SECRET_IS_EPHEMERAL = True
+    print(
+        "[Auth] WARNUNG: JWT_SECRET ist nicht gesetzt — ephemerer Zufalls-Secret aktiv. "
+        "Alle Sessions werden bei jedem Neustart ungueltig. Setze JWT_SECRET als ENV-Variable!"
+    )
 JWT_SECRET_IS_DEFAULT = JWT_SECRET == _JWT_DEFAULT_SECRET
+if JWT_SECRET_IS_DEFAULT:
+    print("[Auth] WARNUNG: JWT_SECRET nutzt den unsicheren Repository-Default — sofort ersetzen!")
 JWT_ALGORITHM = "HS256"
 ADMIN_EMAILS = {
     email.strip().lower()
@@ -72,10 +88,18 @@ ADMIN_EMAILS = {
 ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "")
 ADMIN_MASTER_KEY_CONFIGURED = bool(ADMIN_MASTER_KEY)
 LEGACY_ADMIN_MASTER_KEY = "AlphaStation2026!"
+# S-6 AUDIT FIX: Fail-closed — der Legacy-Bootstrap-Key ist standardmaessig AUS
+# (Default war "1" = fail-open) und muss explizit aktiviert werden.
 ALLOW_LEGACY_ADMIN_MASTER_KEY = os.environ.get(
-    "ALLOW_LEGACY_ADMIN_MASTER_KEY", "1"
-).strip().lower() not in {"0", "false", "no", "off"}
-JWT_EXPIRE_HOURS = 72  # Token valid for 3 days
+    "ALLOW_LEGACY_ADMIN_MASTER_KEY", "0"
+).strip().lower() not in {"0", "false", "no", "off", ""}
+# S-6 AUDIT FIX: Token-Laufzeit via ENV steuerbar, Default 24h (vorher fix 72h).
+try:
+    JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))
+except (TypeError, ValueError):
+    JWT_EXPIRE_HOURS = 24
+if JWT_EXPIRE_HOURS <= 0:
+    JWT_EXPIRE_HOURS = 24
 PBKDF2_ITERATIONS = int(os.environ.get("AUTH_PBKDF2_ITERATIONS", "260000"))
 NARRATIVE_EMAIL_FREQUENCIES = {"off", "daily", "twice_daily", "weekly"}
 TRADE_HORIZON_OPTIONS = {"swing", "intraday", "both"}
@@ -366,8 +390,9 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
     email = email.strip().lower()
     if not email or "@" not in email:
         return {"success": False, "message": "Ungültige Email-Adresse"}
-    if len(password) < 6:
-        return {"success": False, "message": "Passwort muss mindestens 6 Zeichen haben"}
+    # S-6 AUDIT FIX: Mindestlaenge 10 statt 6 (Commercial-Launch-Anforderung)
+    if len(password) < 10:
+        return {"success": False, "message": "Passwort muss mindestens 10 Zeichen haben"}
 
     db = _load_users()
     if email in db["users"]:
@@ -552,6 +577,41 @@ def create_billing_portal(email: str, return_url: str) -> Optional[str]:
         return None
 
 
+# ── S-6 AUDIT FIX: Stripe-Webhook Event-ID-Dedupe (Replay-/Retry-Schutz) ──
+_WEBHOOK_EVENT_LIMIT = 5000
+
+
+def _webhook_events_file() -> Path:
+    """Persistenter Event-ID-Store neben der Auth-DB (folgt AUTH_DB_PATH)."""
+    return Path(AUTH_DB_PATH).parent / "stripe_webhook_events.json"
+
+
+def _load_processed_webhook_events() -> List[str]:
+    try:
+        data = json.loads(_webhook_events_file().read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(x) for x in data]
+    except Exception:
+        pass
+    return []
+
+
+def _remember_webhook_event(event_id: str) -> None:
+    if not event_id:
+        return
+    events = _load_processed_webhook_events()
+    events.append(str(event_id))
+    if len(events) > _WEBHOOK_EVENT_LIMIT:
+        # Rotation: nur die juengsten ~5000 IDs behalten
+        events = events[-_WEBHOOK_EVENT_LIMIT:]
+    try:
+        path = _webhook_events_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(events), encoding="utf-8")
+    except Exception as exc:
+        print(f"[Auth] Webhook-Event-Store konnte nicht geschrieben werden: {exc}")
+
+
 def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
     """Handle Stripe webhook events. Returns {success, event_type}."""
     if not HAS_STRIPE or not STRIPE_WEBHOOK_SECRET:
@@ -564,6 +624,15 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
 
     event_type = event["type"]
     data = event["data"]["object"]
+
+    # S-6 AUDIT FIX: Bereits verarbeitete Event-IDs idempotent mit 200 quittieren
+    # (Stripe retried Webhooks aggressiv; doppelte Plan-Updates vermeiden).
+    try:
+        event_id = str(event.get("id", "") if isinstance(event, dict) else event["id"])
+    except Exception:
+        event_id = ""
+    if event_id and event_id in set(_load_processed_webhook_events()):
+        return {"success": True, "event_type": event_type, "duplicate": True}
 
     db = _load_users()
 
@@ -619,6 +688,9 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
                 _save_users(db)
                 print(f"[Auth] Subscription deleted: {email} → expired")
                 break
+
+    # S-6 AUDIT FIX: Event-ID erst NACH erfolgreicher Verarbeitung persistieren
+    _remember_webhook_event(event_id)
 
     return {"success": True, "event_type": event_type}
 
@@ -855,6 +927,8 @@ def auth_security_status() -> Dict[str, Any]:
     stripe_mode = "not_configured"
     if JWT_SECRET_IS_DEFAULT:
         critical.append("JWT_SECRET uses fallback demo value")
+    elif JWT_SECRET_IS_EPHEMERAL:
+        critical.append("JWT_SECRET not configured; ephemeral secret invalidates all sessions on restart")
     if not ADMIN_MASTER_KEY_CONFIGURED:
         warnings.append("ADMIN_MASTER_KEY not configured; admin bypass disabled")
     if ALLOW_LEGACY_ADMIN_MASTER_KEY:
@@ -890,7 +964,8 @@ def auth_security_status() -> Dict[str, Any]:
     return {
         "auth_db_path": AUTH_DB_PATH,
         "auth_db_type": "sqlite" if AUTH_DB_IS_SQLITE else "json",
-        "jwt_secret_configured": bool(JWT_SECRET) and not JWT_SECRET_IS_DEFAULT,
+        "jwt_secret_configured": bool(JWT_SECRET) and not JWT_SECRET_IS_DEFAULT and not JWT_SECRET_IS_EPHEMERAL,
+        "jwt_secret_ephemeral": JWT_SECRET_IS_EPHEMERAL,
         "admin_master_key_configured": ADMIN_MASTER_KEY_CONFIGURED,
         "legacy_admin_bootstrap_enabled": ALLOW_LEGACY_ADMIN_MASTER_KEY,
         "stripe_secret_configured": bool(STRIPE_SECRET_KEY),
@@ -901,3 +976,32 @@ def auth_security_status() -> Dict[str, Any]:
         "critical": critical,
         "commercial_ready": not critical,
     }
+
+
+# ── S-6 AUDIT FIX: Fail-closed Boot-Gate für den kommerziellen Betrieb ──
+def enforce_commercial_boot_security() -> None:
+    """Wirft RuntimeError, wenn COMMERCE_ENFORCE_AUTH=1 und die Auth-Konfiguration
+    unsicher ist (fehlender/Default-JWT-Secret oder aktiver Legacy-Master-Key).
+
+    Wird am Modul-Ende automatisch aufgerufen, sobald COMMERCE_ENFORCE_AUTH=1
+    gesetzt ist — wirkt damit ohne Aenderung an api.py (fail-closed statt
+    fail-open).
+    """
+    if os.environ.get("COMMERCE_ENFORCE_AUTH", "0").strip() != "1":
+        return
+    problems = []
+    if JWT_SECRET_IS_EPHEMERAL:
+        problems.append("JWT_SECRET fehlt (ephemerer Zufallswert aktiv)")
+    if JWT_SECRET == _JWT_DEFAULT_SECRET:
+        problems.append("JWT_SECRET nutzt den unsicheren Repository-Default")
+    if ALLOW_LEGACY_ADMIN_MASTER_KEY:
+        problems.append("Legacy-Admin-Master-Key ist aktiv (ALLOW_LEGACY_ADMIN_MASTER_KEY=0 setzen)")
+    if problems:
+        raise RuntimeError(
+            "COMMERCE_ENFORCE_AUTH=1: Boot abgebrochen wegen unsicherer Auth-Konfiguration: "
+            + "; ".join(problems)
+        )
+
+
+if os.environ.get("COMMERCE_ENFORCE_AUTH", "0").strip() == "1":
+    enforce_commercial_boot_security()
