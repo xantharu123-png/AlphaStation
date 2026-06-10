@@ -15,5 +15,7 @@ tmp_*.html
 .pytest_tmp/
 data_cache/auth/
 data_cache/nls_cache_*.json
+data_cache/*.log
+data_cache/signal_tracker.sqlite*
 backup_pre_sanierung_*.tar.gz
 *.bust
