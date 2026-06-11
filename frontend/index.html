@@ -4156,7 +4156,7 @@ function App() {
                 { title: null, items: [
                     { id: 'btc-divergenz', name: 'BTC-Divergenz', desc: 'Altcoins vs BTC Relative Strength', svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316' },
                     { id: 'early-movers', name: 'Early Mover', desc: 'Phase 1/2/3 — Accumulation, Breakout & Risiko', svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#10b981' },
-                    { id: 'crypto-signals', name: 'Crypto Signals', desc: 'Ein Scanner: Long-Explosion oder Short-Pump-Dump', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#06b6d4' },
+                    { id: 'crypto-signals', name: 'Crypto Signals', desc: 'Long-Explosionen & Short-Pump-Dumps — Mix je nach Marktlage', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#06b6d4' },
                 ]},
             ]
         },
@@ -6044,6 +6044,17 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
                     <span>{stats.trade_now_count || 0} jetzt tradebar</span>
                     <span>{stats.wait_count || 0} Watch/Armed</span>
                     {stats.scanner_note && <span>{stats.scanner_note}</span>}
+                </div>
+            )}
+            {stats && (stats.result_count || 0) > 0 && (stats.long_count || 0) === 0 && (stats.short_count || 0) > 0 && (
+                <div className="text-xs rounded-lg border border-amber-100 bg-amber-50 text-amber-900 px-3 py-2">
+                    Aktuell 0 Long-Kandidaten: Die Long-Engine (Explosion) zeigt nur frische, bestaetigte 5m-Ausbrueche — keiner aktiv.
+                    Im Risk-Off-Markt ist typischerweise die Short-Seite (Pump-Exhaustion) aktiver. Das ist kein Fehler, sondern Marktlage.
+                </div>
+            )}
+            {stats && (stats.result_count || 0) > 0 && (stats.short_count || 0) === 0 && (stats.long_count || 0) > 0 && (
+                <div className="text-xs rounded-lg border border-amber-100 bg-amber-50 text-amber-900 px-3 py-2">
+                    Aktuell 0 Short-Kandidaten: Die Short-Engine (Pump/Dump) braucht frische Pumps (≥15-25%) mit Exhaustion — keiner im Monitoring.
                 </div>
             )}
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
