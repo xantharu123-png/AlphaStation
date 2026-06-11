@@ -18595,6 +18595,19 @@ def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, An
         "drawdown_from_high_pct": _crypto_trade_to_float(row.get("from_ath_pct"), 0),
         "risk_reward": _crypto_trade_to_float(row.get("rr_effective", row.get("risk_reward")), 0),
         "direction_reason": "New-Listing/Pump-Exhaustion-Engine",
+        # UI-Detail-Panel-Felder (Audit 11.06.): NLS-Rows trugen keine
+        # target_quality/level-source/live_rr/btc_context-Felder -> das Panel
+        # zeigte "Zielquelle pruefen" mit leeren Strichen. Die NLS-Level sind
+        # Struktur-Level (Pump-Hoch/Crack-Retracements), rr_effective ist der
+        # live berechnete R:R des 15-Min-Zyklus, btc_context_ok das Tailwind-Gate.
+        "target_quality": row.get("target_quality") or "STRUCTURAL",
+        "stop_source": row.get("stop_source") or "pump_structure_high",
+        "tp1_source": row.get("tp1_source") or "crack_structure",
+        "tp2_source": row.get("tp2_source") or "crack_structure",
+        "live_rr_ratio": _crypto_trade_to_float(row.get("live_rr_ratio", row.get("rr_effective")), 0) or None,
+        "btc_context": row.get("btc_context") or (
+            {"tailwind": bool(row.get("btc_context_ok"))} if row.get("btc_context_ok") is not None else None
+        ),
         "isCrypto": True,
         "isExchangeCrypto": True,
     }
