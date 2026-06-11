@@ -3800,3 +3800,20 @@ def run_once():
 
 # Audit 2026-06-10: bg-Mail-Gates an api angeglichen (Q3/B4, B2, B3, B5, B6-B8).
 
+
+if __name__ == "__main__":
+    # WIEDERHERGESTELLT (Live-Diagnose 11.06.2026): Der Startblock wurde in
+    # Commit 2a78cb5 ("AUDIT FIX: 16 Bugs behoben", Fremd-KI) versehentlich
+    # entfernt — `python3 bg_service.py` importierte seither nur und endete mit
+    # Exit 0 => systemd-Restart-Schleife ("Deactivated successfully",
+    # Restart-Counter > 3500) und KEIN bg-Scan/-Alert lief jemals an.
+    # Default = "start", damit die systemd-Unit mit UND ohne Argument startet.
+    _cmd = sys.argv[1].lower() if len(sys.argv) > 1 else "start"
+    if _cmd == "start":
+        run_service()
+    elif _cmd == "once":
+        run_once()
+    else:
+        print(__doc__)
+        print("Befehle: start | once  (Default ohne Argument: start)")
+
