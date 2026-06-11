@@ -89,7 +89,7 @@ from modules.data_fetchers import (
     fetch_multi_day_data,
     get_bpiq_catalyst_watchlist,
 )
-from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv
+from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv, calculate_ad_line
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import normalize_alert_trade_levels
 from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
@@ -8742,6 +8742,111 @@ def _strategy_daily_history_metrics(
     }
 
 
+def _ad_divergence_signal(
+    daily_bars: List[Dict[str, Any]],
+    lookback: int = 20,
+    split: int = 10,
+) -> Dict[str, Any]:
+    """Chaikin-A/D-Divergenz auf den letzten `lookback` KOMPLETTEN Daily-Bars.
+
+    Kernidee (Chaikin-Schule): Faellt der Preis, aber die A/D-Linie haelt
+    oder steigt, akkumuliert Smart Money unter der Oberflaeche -> qualitativ
+    starkes Reversal-Setup. Bestaetigt die A/D-Linie den Abverkauf dagegen
+    mit eigenem Lower Low und klar negativer Steigung, ist es Distribution
+    (Falling Knife) und KEIN Reversal-Kandidat.
+
+    Fenster-Mechanik: letzte `lookback` komplette Bars, geteilt in erste/
+    zweite Haelfte (je `split`). Preis-Seite = min(Low) je Haelfte + Close-
+    Slope in %. A/D-Seite = min(A/D) je Haelfte + normalisierte Steigung:
+    ad_slope_norm = A/D-Aenderung / mittleres Tagesvolumen -> skalenfrei
+    (Einheit: "volle Akkumulations-Tage", Bereich ca. -lookback..+lookback).
+
+    Klassifikation:
+    - BULLISH_DIVERGENCE: Preis Lower Low ODER Preis-Slope < -3%,
+      UND A/D Higher Low UND ad_slope_norm >= 0 (Akkumulation).
+    - DISTRIBUTION: Preis-Schwaeche UND A/D Lower Low UND ad_slope_norm
+      <= -2.0 (A/D gibt netto >= 2 volle Tagesvolumina ab = deutlich).
+    - NEUTRAL: alles andere; < lookback Bars -> reason="insufficient_history"
+      (Datenmangel blockt NIE, nur echte Distribution blockt).
+    """
+    parsed: List[Dict[str, float]] = []
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for bar in daily_bars or []:
+        try:
+            close = float(bar.get("close", bar.get("c", 0)) or 0)
+            high = float(bar.get("high", bar.get("h", close)) or close)
+            low = float(bar.get("low", bar.get("l", close)) or close)
+            volume = float(bar.get("volume", bar.get("v", 0)) or 0)
+            date = str(bar.get("date", "") or "")
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if close <= 0 or high <= 0 or low <= 0 or high < low:
+            continue
+        parsed.append({"high": high, "low": low, "close": close, "volume": volume, "date": date})
+
+    # Laufenden Tag ausschliessen — gleiche Konvention wie
+    # _strategy_daily_history_metrics (nur komplette Tage zaehlen).
+    completed = parsed
+    if completed and completed[-1].get("date") == today_str:
+        completed = completed[:-1]
+
+    result: Dict[str, Any] = {
+        "signal": "NEUTRAL",
+        "price_lower_low": False,
+        "ad_higher_low": False,
+        "ad_slope_norm": 0.0,
+        "price_slope_pct": 0.0,
+        "reason": "insufficient_history",
+    }
+    if lookback < 4 or split < 2 or split >= lookback:
+        return result
+    if len(completed) < lookback:
+        return result
+
+    window = completed[-lookback:]
+    price_low_first = min(b["low"] for b in window[:split])
+    price_low_second = min(b["low"] for b in window[split:])
+    price_lower_low = price_low_second < price_low_first
+    close_start = window[0]["close"]
+    close_end = window[-1]["close"]
+    price_slope_pct = ((close_end - close_start) / close_start * 100.0) if close_start > 0 else 0.0
+
+    ad_line = calculate_ad_line(window)
+    if len(ad_line) != len(window):
+        result["reason"] = "ad_line_unavailable"
+        return result
+
+    ad_low_first = min(ad_line[:split])
+    ad_low_second = min(ad_line[split:])
+    ad_higher_low = ad_low_second > ad_low_first
+    ad_lower_low = ad_low_second < ad_low_first
+
+    volumes = [b["volume"] for b in window if b["volume"] > 0]
+    avg_volume = (sum(volumes) / len(volumes)) if volumes else 0.0
+    ad_slope_norm = ((ad_line[-1] - ad_line[0]) / avg_volume) if avg_volume > 0 else 0.0
+
+    # Preis-Schwaeche: Lower Low in der zweiten Haelfte ODER Netto-Slope
+    # unter -3% (Reversal-Kontext: der Abverkauf muss sichtbar sein).
+    price_weak = price_lower_low or price_slope_pct < -3.0
+
+    result.update({
+        "price_lower_low": price_lower_low,
+        "ad_higher_low": ad_higher_low,
+        "ad_slope_norm": round(ad_slope_norm, 3),
+        "price_slope_pct": round(price_slope_pct, 2),
+    })
+
+    if price_weak and ad_higher_low and ad_slope_norm >= 0:
+        result["signal"] = "BULLISH_DIVERGENCE"
+        result["reason"] = "price_weak_but_ad_accumulating"
+    elif price_weak and ad_lower_low and ad_slope_norm <= -2.0:
+        result["signal"] = "DISTRIBUTION"
+        result["reason"] = "ad_confirms_selloff"
+    else:
+        result["reason"] = "no_clear_divergence"
+    return result
+
+
 def _stock_momentum_breakout_gate(
     strategy_name: str,
     history_metrics: Dict[str, Any],
@@ -8828,6 +8933,52 @@ def _stock_momentum_breakout_gate(
         reasons.append("bounce_after_recent_selloff")
 
     return not reasons, reasons
+
+
+def _stock_reversal_ad_gate(
+    strategy_name: str,
+    daily_bars: List[Dict[str, Any]],
+    row: Optional[Dict[str, Any]] = None,
+) -> tuple[bool, List[str], Dict[str, Any]]:
+    """Chaikin-A/D-Divergenz-Gate fuer Trend Reversal (Long).
+
+    Reversal-Kandidaten sehen im Snapshot alle gleich aus (rote Tage, heute
+    gruen). Die A/D-Linie trennt echte Akkumulation vom Falling Knife:
+    - DISTRIBUTION (A/D bestaetigt den Abverkauf mit eigenem Lower Low und
+      deutlich negativer Steigung) -> Reject "ad_confirms_selloff_falling_knife".
+    - BULLISH_DIVERGENCE (Preis faellt, A/D haelt/steigt = Akkumulation
+      unter der Oberflaeche) -> Pass + Row-Flags ad_divergence/ad_signal
+      + Score-Bonus +8 (Cap 100, gleiche Konvention wie MDR-Boni).
+    - NEUTRAL (inkl. < lookback Bars History) -> Pass ohne Bonus.
+      Datenmangel blockt NIE — nur bestaetigte Distribution blockt.
+
+    Greift NUR bei der Reversal-Strategie (Namens-Check wie Momentum-Gate);
+    alle anderen Strategien passieren unveraendert.
+    """
+    if _normalize_strategy_key(strategy_name) != _normalize_strategy_key("Trend Reversal"):
+        return True, [], {}
+
+    ad_info = _ad_divergence_signal(daily_bars)
+    signal = str(ad_info.get("signal") or "NEUTRAL")
+
+    if signal == "DISTRIBUTION":
+        return False, ["ad_confirms_selloff_falling_knife"], ad_info
+
+    if isinstance(row, dict):
+        row["ad_signal"] = signal
+        row["AD_Signal"] = signal
+        row["ad_divergence"] = signal == "BULLISH_DIVERGENCE"
+        row["ad_slope_norm"] = ad_info.get("ad_slope_norm")
+        if signal == "BULLISH_DIVERGENCE":
+            # Akkumulations-Divergenz = Qualitaetsmerkmal: +8 Score-Bonus,
+            # gedeckelt bei 100 (Score-Skala endet dort), Grade re-graden.
+            for score_key, grade_key in (("score", "grade"), ("base_score", "base_grade")):
+                if score_key in row:
+                    boosted = min(100, int(_alert_float(row.get(score_key), 0.0) or 0.0) + 8)
+                    row[score_key] = boosted
+                    row[grade_key] = _strategy_score_to_grade(boosted)
+
+    return True, [], ad_info
 
 
 def _stock_momentum_breakout_continuation_quality(
@@ -10369,6 +10520,25 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             f"{', '.join(_breakout_reason_parts[:3])}"
                         ) if _breakout_quality else "",
                     }
+                    # Chaikin-A/D-Divergenz-Gate (nur Trend Reversal): nutzt die
+                    # bereits geladenen daily_bars — KEINE neuen API-Calls.
+                    # DISTRIBUTION = Falling Knife -> Reject; BULLISH_DIVERGENCE
+                    # -> +8 Score-Bonus (Cap 100) + ad_divergence-Flag in der Row.
+                    _ad_ok, _ad_block_reasons, _ad_info = _stock_reversal_ad_gate(
+                        strategy_name,
+                        daily_bars,
+                        strategy_row,
+                    )
+                    if not _ad_ok:
+                        _reject("reversal_ad_gate")
+                        for _reason in _ad_block_reasons:
+                            _reject(f"reversal_ad:{_reason}")
+                        continue
+                    _stage("reversal_ad_gate")
+                    # Bonus kann Score/Grade der Row angehoben haben -> lokale
+                    # Variablen nachziehen (entry_quality-Check nutzt _strat_grade).
+                    _strat_score = int(strategy_row.get("score") or _strat_score)
+                    _strat_grade = str(strategy_row.get("grade") or _strat_grade)
                     _setup_direction = str(_score_meta.get("direction") or "").upper()
                     if _setup_direction in ("LONG", "SHORT"):
                         _trade_setup = _build_structured_trade_setup(

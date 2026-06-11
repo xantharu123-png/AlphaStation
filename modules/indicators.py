@@ -542,3 +542,54 @@ def calculate_obv(closes, volumes):
         trend = 0
 
     return obv, trend
+
+
+def calculate_ad_line(bars):
+    """
+    Berechnet die Accumulation/Distribution-Linie (A/D-Linie nach Chaikin).
+
+    Formel je Bar:
+        MFM (Money Flow Multiplier) = ((C - L) - (H - C)) / (H - L)
+        MFV (Money Flow Volume)     = MFM * Volumen
+        AD[i] = AD[i-1] + MFV[i]
+
+    Interpretation: Close nahe High bei Volumen = Akkumulation (AD steigt),
+    Close nahe Low bei Volumen = Distribution (AD fällt). Divergenzen
+    zwischen Preis und A/D-Linie zeigen Smart-Money-Aktivität, bevor der
+    Preis reagiert (Chaikin-Schule).
+
+    Sonderfälle:
+    - H == L (Doji / keine Range): MFM = 0 → Bar trägt nichts bei (kein Crash).
+    - Ungültige Bars (None/NaN/fehlende Keys): MFV = 0 → AD-Wert wird
+      fortgeschrieben (defensiv überspringen statt abbrechen).
+
+    Args:
+        bars: Liste von Dicts mit high/low/close/volume (Datei-Konvention)
+
+    Returns:
+        Liste von Floats gleicher Länge (kumulative A/D-Linie),
+        [] bei leerem oder zu kurzem Input (< 2 Bars)
+    """
+    if not bars or len(bars) < 2:
+        return []
+
+    ad_values = []
+    ad = 0.0
+    for bar in bars:
+        mfv = 0.0
+        try:
+            high = float(bar["high"])
+            low = float(bar["low"])
+            close = float(bar["close"])
+            volume = float(bar.get("volume", 0) or 0)
+            if any(math.isnan(v) or math.isinf(v) for v in (high, low, close, volume)):
+                raise ValueError("NaN/Inf bar")
+            if high > low:
+                mfm = ((close - low) - (high - close)) / (high - low)
+                mfv = mfm * volume
+            # high == low (Doji-Konvention): MFM = 0 → mfv bleibt 0.0
+        except (KeyError, TypeError, ValueError):
+            mfv = 0.0  # Defensiv: kaputte Bar → Wert fortschreiben
+        ad += mfv
+        ad_values.append(ad)
+    return ad_values
