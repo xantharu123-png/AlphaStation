@@ -290,16 +290,24 @@ def test_h12_test_email_endpoint_requires_admin():
 
 
 # ══════════════════════════════════════════════════════════════
-# M-BTC-Z: sqrt(5)-Skalierung der 5-Tage-Divergenz
+# M-BTC-Z: Legacy-z-Score-Block ist entfernt (Restpunkte 2026-06-11)
 # ══════════════════════════════════════════════════════════════
+# HISTORIE: Dieser Test pinnte frueher die sqrt(5)-Formel im Source von
+# _btc_divergenz_wrapper. Die Formel stand aber AUSSCHLIESSLICH im toten
+# Legacy-Block hinter einem unbedingten fruehen return — der Live-Pfad
+# _build_crypto_btc_divergence_results (CoinGecko-Regime-Modell) rechnet
+# gar keinen residual-z-Score. Nach der auftragsgemaessen Entfernung des
+# unreachable Blocks (Restpunkte-Fix 3) sichert der Test jetzt das
+# Gegenteil: Der Legacy-Block bleibt draussen, der Wrapper delegiert nur.
 
-def test_mbtcz_z_score_divides_by_residual_std_times_sqrt5():
+def test_mbtcz_legacy_zscore_block_stays_removed():
     src = inspect.getsource(api._btc_divergenz_wrapper)
-    assert re.search(
-        r"z_score\s*=\s*divergence\s*/\s*\(residual_std\s*\*\s*math\.sqrt\(5\)\)", src
-    ), "5d-Divergenz muss durch residual_std * sqrt(5) geteilt werden (Tages-Std -> 5d-Skala)"
-    # Alte (falsche) Formel darf nicht mehr vorkommen:
-    assert not re.search(r"z_score\s*=\s*divergence\s*/\s*residual_std\s*$", src, re.MULTILINE)
+    assert "_build_crypto_btc_divergence_results" in src, \
+        "Wrapper muss den Live-Builder aufrufen"
+    assert not re.search(r"z_score\s*=", src), \
+        "Legacy-z-Score-Berechnung darf nicht in den Wrapper zurueckkehren"
+    assert "residual_std" not in src and "assets = []" not in src, \
+        "toter Legacy-Block (Beta/Residual-Modell) darf nicht zurueckkehren"
 
 
 # ══════════════════════════════════════════════════════════════

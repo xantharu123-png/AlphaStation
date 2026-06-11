@@ -1547,14 +1547,24 @@ def _alert_float(value: Any, default: Optional[float] = None) -> Optional[float]
 
 
 def _score_grade_for_value(score_value: Any) -> Tuple[str, str]:
+    """Zentrale Score→Grade-Leiter: S≥88, A≥80, B≥65, C≥50, sonst D.
+
+    AUDIT-Fix Label-Inflation: A = mail-würdig ab 80, konsistent mit dem
+    _ALERT-Score-Gate (_ALERT_MIN_SCORE=80, _ALERT_TOP_GRADES enthält S/A).
+    Die alte Leiter (S≥80/A≥60) vergab "A" ab 60 — ein A mit Score 62 war
+    aber nie mailbar, weil das Mail-Gate Score≥80 verlangt. Jetzt identisch
+    kalibriert mit der (vorher separaten) crypto_explosion-Leiter S≥88/A≥80.
+    NICHT für BI-patterns (85/71/57/55), Cup&Handle (S ab 90) oder
+    _bi_trade_grade_for_score — das sind eigene Scoring-Systeme.
+    """
     score = _alert_float(score_value, 0) or 0
-    if score >= 80:
+    if score >= 88:
         return "S", "Excellent"
-    if score >= 60:
+    if score >= 80:
         return "A", "Stark"
-    if score >= 40:
+    if score >= 65:
         return "B", "Solide"
-    if score >= 25:
+    if score >= 50:
         return "C", "Schwach"
     return "D", "Uninteressant"
 
@@ -11713,6 +11723,32 @@ def _run_scan_safe(name, func, timeout_min=None):
     t.start()
     # NON-BLOCKING: thread runs in background, watchdog handles timeouts
 
+
+# ── Scan-Ownership (H-9 Folge-Fix): bg_service ist Owner dieser 4 Scanner ──
+# bg_service.py BG_DEFAULT_SCAN_SET = {bi_long, bi_short, biotech, new_listing}
+# (Email-Alerts + feste ET-Zeitfenster laufen dort). Der api-SCHEDULER skippt
+# sie per Default, damit nicht beide Dienste dieselben schweren Polygon-Scans
+# parallel fahren (Doppel-API-Last; Mails waren per geteiltem Dedupe schon
+# sicher). Manuelle Scans (POST /api/scan, /api/bi-scan, /api/biotech-scan,
+# /api/new-listing-scan) sind NIE betroffen — nur der Scheduler skippt.
+# ENV API_SCAN_SKIP_BG_OWNED="0" stellt das alte Verhalten wieder her
+# (z.B. wenn tradingbot-bg nicht laeuft).
+_BG_OWNED_SCANNERS = frozenset({"bi_long", "bi_short", "biotech", "new_listing"})
+
+
+def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = None) -> bool:
+    """True, wenn der api-SCHEDULER diesen Scanner ueberspringen soll (pure, testbar).
+
+    Default (API_SCAN_SKIP_BG_OWNED unset oder "1"): die 4 bg-owned Scanner
+    werden geskippt; "0" = altes Verhalten (api scannt mit).
+    Scanner ausserhalb von _BG_OWNED_SCANNERS werden NIE geskippt.
+    """
+    if scanner_name not in _BG_OWNED_SCANNERS:
+        return False
+    raw = env_value if env_value is not None else os.environ.get("API_SCAN_SKIP_BG_OWNED", "1")
+    return _alert_bool(raw, True)
+
+
 def _scheduler_loop():
     """Background loop that triggers all scans at their defined intervals."""
     global _scheduler_running
@@ -11752,6 +11788,14 @@ def _scheduler_loop():
     # Unified crypto direction list is a lightweight cache merge after the
     # dedicated long/short engines. It should not be stale/missing forever.
     scan_tasks.append(("crypto_trade_signals", lambda: _crypto_trade_signals_wrapper(refresh_sources=False)))
+    # ── Scan-Ownership: bg-owned Scanner aus dem Scheduler-Plan nehmen ──
+    # Gilt fuer Initial-Scans UND den Intervall-Loop (beide iterieren scan_tasks).
+    # Manuelle Scan-Routen rufen _run_scan_safe direkt und bleiben unberuehrt.
+    _bg_owned_skips = {name for name, _ in scan_tasks if _api_scheduler_should_skip(name)}
+    if _bg_owned_skips:
+        scan_tasks = [(name, func) for name, func in scan_tasks if name not in _bg_owned_skips]
+        print("[Scheduler] Scan-Ownership: bi_long/bi_short/biotech/new_listing laufen bei "
+              "tradingbot-bg (API_SCAN_SKIP_BG_OWNED=0 zum Übersteuern)")
     _heavy_names = {name for name, _ in heavy_scans}
     _isolated_names = {"early_movers", "crypto_explosion"}
 
@@ -17038,7 +17082,9 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     if not trigger_ok:
         risk_reasons.append("wait for 5m breakout confirmation")
 
-    grade = "S" if explosion_score >= 88 else "A" if explosion_score >= 80 else "B"
+    # Zentrale Leiter statt Inline-Duplikat (S≥88/A≥80/B≥65...) — identisch im
+    # erreichbaren Bereich, da explosion_score < 70 oben bereits None liefert.
+    grade, _ = _score_grade_for_value(explosion_score)
     return {
         **row,
         "ticker": row.get("Symbol"),
@@ -17422,154 +17468,11 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
 def _btc_divergenz_wrapper() -> None:
     """Compare crypto coins/perps vs BTC; equities/ETFs are intentionally excluded."""
     try:
+        # AUDIT-Cleanup 2026-06-11: Der tote Legacy-Block (eigene z-Score/Beta-
+        # Berechnung hinter einem unbedingten fruehen return, seit dem
+        # sqrt(5)-Fix dokumentiert unreachable) wurde komplett entfernt.
+        # Live-Pfad ist ausschliesslich _build_crypto_btc_divergence_results().
         save_cache_file(BTC_DIVERGENZ_CACHE, _build_crypto_btc_divergence_results())
-        return
-        assets = []
-        results = []
-
-        for sym, short, name in assets:
-            try:
-                url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/2024-01-01/2099-12-31"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
-                if resp.status_code != 200:
-                    continue
-                bars = resp.json().get("results", [])
-                if len(bars) < 2:
-                    continue
-
-                bars_by_date = {}
-                for b in bars:
-                    if not b.get("t") or not b.get("c"):
-                        continue
-                    d = datetime.utcfromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d")
-                    bars_by_date[d] = b
-                if len(bars_by_date) < 2:
-                    continue
-
-                dates_desc = sorted(bars_by_date.keys(), reverse=True)
-                close = bars_by_date[dates_desc[0]]["c"]
-
-                entry = {
-                    "ticker": sym,
-                    "symbol": short,
-                    "name": name,
-                    "price": round(close, 2),
-                    "change_1d": 0,
-                    "change_5d": 0,
-                    "change_20d": 0,
-                    "_bars_by_date": bars_by_date,
-                }
-                results.append(entry)
-            except Exception as e:
-                print(f"[Warning] {e}")
-                continue
-
-        btc_data = next((r for r in results if r["ticker"] == "X:BTCUSD"), None)
-
-        def _change_for_dates(series: Dict[str, Dict[str, Any]], dates_desc: List[str], lookback: int) -> float:
-            if len(dates_desc) <= lookback:
-                return 0.0
-            now_close = series[dates_desc[0]].get("c", 0)
-            old_close = series[dates_desc[lookback]].get("c", 0)
-            return ((now_close - old_close) / old_close * 100) if old_close else 0.0
-
-        def _aligned_returns(asset_series: Dict[str, Dict[str, Any]], btc_series: Dict[str, Dict[str, Any]], max_pairs: int = 20):
-            common = sorted(set(asset_series.keys()) & set(btc_series.keys()), reverse=True)
-            asset_returns, btc_returns = [], []
-            for i in range(min(max_pairs, len(common) - 1)):
-                d0, d1 = common[i], common[i + 1]
-                a_prev = asset_series[d1].get("c", 0)
-                b_prev = btc_series[d1].get("c", 0)
-                if a_prev > 0 and b_prev > 0:
-                    asset_returns.append((asset_series[d0]["c"] - a_prev) / a_prev * 100)
-                    btc_returns.append((btc_series[d0]["c"] - b_prev) / b_prev * 100)
-            return asset_returns, btc_returns, common
-
-        # Calculate divergence vs BTC on matched market dates only.
-        if btc_data:
-            btc_series = btc_data.get("_bars_by_date", {})
-            for r in results:
-                series = r.get("_bars_by_date", {})
-                _, _, common_dates = _aligned_returns(series, btc_series, max_pairs=20)
-                if len(common_dates) >= 2:
-                    r["change_1d"] = round(_change_for_dates(series, common_dates, 1), 2)
-                    r["change_5d"] = round(_change_for_dates(series, common_dates, min(5, len(common_dates) - 1)), 2)
-                    r["change_20d"] = round(_change_for_dates(series, common_dates, min(20, len(common_dates) - 1)), 2)
-
-            btc_data["div_1d"] = 0
-            btc_data["div_5d"] = 0
-            btc_data["beta"] = 1.0
-            btc_data["correlation"] = 1.0
-            btc_data["z_score"] = 0
-            btc_data["signal"] = "BTC"
-
-            for r in results:
-                if r["ticker"] == "X:BTCUSD":
-                    continue
-                asset_returns, btc_returns, common_dates = _aligned_returns(r.get("_bars_by_date", {}), btc_series, max_pairs=20)
-                btc_change_1d = _change_for_dates(btc_series, common_dates, 1) if len(common_dates) >= 2 else 0
-                btc_change_5d = _change_for_dates(btc_series, common_dates, min(5, len(common_dates) - 1)) if len(common_dates) >= 2 else 0
-                r["div_1d"] = round(r.get("change_1d", 0) - btc_change_1d, 2)
-                r["div_5d"] = round(r.get("change_5d", 0) - btc_change_5d, 2)
-
-                beta = 1.0
-                correlation = 0.0
-                z_score = 0.0
-                n = min(len(asset_returns), len(btc_returns))
-                if n >= 10:
-                    mean_a = sum(asset_returns[:n]) / n
-                    mean_b = sum(btc_returns[:n]) / n
-                    denom = max(n - 1, 1)
-                    cov = sum((asset_returns[i] - mean_a) * (btc_returns[i] - mean_b) for i in range(n)) / denom
-                    var_b = sum((btc_returns[i] - mean_b) ** 2 for i in range(n)) / denom
-                    var_a = sum((asset_returns[i] - mean_a) ** 2 for i in range(n)) / denom
-                    std_a = var_a ** 0.5 if var_a > 0 else 1
-                    std_b = var_b ** 0.5 if var_b > 0 else 1
-                    beta = cov / var_b if var_b > 0 else 1.0
-                    correlation = max(-1.0, min(1.0, cov / (std_a * std_b) if (std_a * std_b) > 0 else 0.0))
-                    expected_5d = btc_change_5d * beta
-                    divergence = r.get("change_5d", 0) - expected_5d
-                    residual_var = var_a + (beta ** 2) * var_b - 2 * beta * cov
-                    residual_std = max(residual_var ** 0.5 if residual_var > 0 else std_a, 0.5)
-                    # AUDIT M-BTC-Z: divergence ist ein 5-TAGES-Aggregat,
-                    # residual_std stammt aus TAGES-Residuen. Ein 5d-Aggregat
-                    # unabhaengiger Tages-Residuen skaliert mit sqrt(5) —
-                    # ohne die Skalierung war |z| ~2.2x ueberhoeht und
-                    # WATCH-Signale feuerten viel zu frueh.
-                    z_score = divergence / (residual_std * math.sqrt(5))
-
-                r["beta"] = round(beta, 2)
-                r["correlation"] = round(correlation, 2)
-                r["z_score"] = round(z_score, 2)
-                r["aligned_days"] = len(common_dates)
-
-                if z_score > 1.5 and correlation > 0.5:
-                    r["signal"] = "WATCH LONG-BIAS"
-                elif z_score < -1.5 and correlation > 0.5:
-                    r["signal"] = "WATCH RISIKO"
-                elif abs(z_score) < 0.5:
-                    r["signal"] = "NEUTRAL"
-                else:
-                    r["signal"] = "WATCH"
-                r["signal_quality"] = "observe"
-                r["entry_status"] = "BEOBACHTEN"
-                r["trade_action"] = "BEOBACHTEN"
-                r["trade_signal"] = "BEOBACHTEN"
-                r["signal_label"] = "Achtung beobachten: BTC-Proxy-Kontext, kein Entry"
-                r["execution_trigger_ok"] = False
-                r["risk_flags"] = ["btc_divergence_context_only", "no_intraday_execution_trigger"]
-                r["scanner_note"] = "BTC-Divergenz ist Kontext/Bias, kein Kauf- oder Short-Trigger."
-
-        # Remove internal bars and filter out BTC reference before saving
-        final_results = []
-        for r in results:
-            if "_bars_by_date" in r:
-                del r["_bars_by_date"]
-            # BTC ist nur Referenz, nicht in Ergebnisliste anzeigen
-            if r["ticker"] != "X:BTCUSD":
-                final_results.append(r)
-
-        save_cache_file(BTC_DIVERGENZ_CACHE, final_results)
     except Exception as e:
         print(f"BTC divergenz error: {e}")
 

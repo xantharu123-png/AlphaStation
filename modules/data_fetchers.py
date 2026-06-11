@@ -9,6 +9,7 @@ Reine API-Funktionen ohne Streamlit-Abhängigkeiten:
 - Backtest: Daily Data
 """
 import re
+import json
 import time
 import threading
 import requests
@@ -514,14 +515,142 @@ CATALYST_KEYWORDS = {
 }
 
 
+# ── Prozessübergreifender Polygon-Budget-Limiter (Datei-basiert) ─────────────
+# Problem: api.py (uvicorn) und bg_service.py sind GETRENNTE Prozesse. Der
+# In-Prozess-Limiter in rate_limited_get() zählt pro Prozess => effektiv
+# 2x calls_per_minute gegen Polygon => 429er. Lösung: EIN gemeinsames
+# Minuten-Budget (epoch//60 + Zähler) in einer /tmp-Datei — beide Prozesse
+# sehen dasselbe /tmp (PrivateTmp=false, verifiziert) — serialisiert über
+# fcntl.flock auf einer separaten Lock-Datei.
+#
+# Modul-Konstanten (KEINE Funktions-Defaults), damit Tests sie per
+# monkeypatch auf tmp_path umbiegen können; Auflösung erst zur Laufzeit.
+POLYGON_BUDGET_FILE = "/tmp/polygon_rate_budget.json"
+POLYGON_BUDGET_LOCK_FILE = "/tmp/polygon_rate_budget.lock"
+SHARED_BUDGET_MAX_WAIT_S = 65.0  # Schutz: nie länger als ~1 Fenster blockieren
+
+try:
+    import fcntl as _fcntl  # Linux/Unix — auf Windows-Dev-Umgebung nicht verfügbar
+except ImportError:  # pragma: no cover
+    _fcntl = None
+
+# Nach erstem flock-/IO-Fehler: permanenter Fallback auf In-Prozess-Limiter
+# (einmalige Warnung, niemals crashen, niemals Calls verlieren).
+_shared_budget_failed = False
+
+
+def _shared_budget_enabled():
+    """Notausstieg: ENV POLYGON_SHARED_BUDGET=0 => altes In-Prozess-Verhalten."""
+    flag = _os.getenv("POLYGON_SHARED_BUDGET", "1").strip().lower()
+    return flag not in ("0", "false", "no", "off")
+
+
+def _shared_budget_per_min():
+    """Gesamt-Budget pro Minute über ALLE Prozesse (api + bg zusammen).
+
+    ENV POLYGON_BUDGET_PER_MIN, Default 200 — bewusst NICHT der per-Prozess-
+    Parameter calls_per_minute, denn der gilt nur innerhalb eines Prozesses.
+    """
+    try:
+        return max(1, int(_os.getenv("POLYGON_BUDGET_PER_MIN", "200")))
+    except (TypeError, ValueError):
+        return 200
+
+
+def _shared_budget_try_consume(budget):
+    """Ein read→check→increment→write-Zyklus unter fcntl.flock.
+
+    Returns (acquired, wait_seconds). Das Lock-Fenster ist bewusst minimal
+    (nur Datei-I/O, kein HTTP, kein Sleep) — typisch <1ms, damit sind auch
+    Tausende Calls/min über beide Prozesse problemlos.
+    Korrupte/fehlende Budget-Datei => Selbstheilung (Zähler neu ab 0).
+    OSError (flock/open/write) propagiert zum Caller => dort Fallback.
+    Schreiben als einfaches Truncate-Write: unter Lock reicht das, kein
+    tmp+rename nötig (Leser laufen ebenfalls nur unter dem Lock).
+    """
+    with open(POLYGON_BUDGET_LOCK_FILE, "a") as lock_fh:
+        _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX)
+        try:
+            now = time.time()
+            window = int(now // 60)
+            count = 0
+            try:
+                with open(POLYGON_BUDGET_FILE, "r") as fh:
+                    state = json.load(fh)
+                if int(state.get("window", -1)) == window:
+                    count = max(0, int(state.get("count", 0)))
+            except (OSError, ValueError, TypeError, AttributeError):
+                count = 0  # fehlt/korrupt/kein dict => neu initialisieren
+            if count < budget:
+                with open(POLYGON_BUDGET_FILE, "w") as fh:
+                    json.dump({"window": window, "count": count + 1}, fh)
+                return True, 0.0
+            # Fenster voll: bis zum nächsten Minuten-Fenster warten — gleiche
+            # Semantik wie der In-Prozess-Limiter (sleep bis Fensterwechsel).
+            wait_s = min(max(60.0 - (now % 60.0), 0.05), SHARED_BUDGET_MAX_WAIT_S)
+            return False, wait_s
+        finally:
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
+
+
+def _acquire_shared_polygon_token():
+    """Blockiert, bis ein Token aus dem prozessübergreifenden Budget frei ist.
+
+    True  => Token konsumiert, der HTTP-Call darf raus.
+    False => Shared-Limiter inaktiv (ENV-Override, kein fcntl, flock-Fehler);
+             der Caller verlässt sich dann allein auf den In-Prozess-Limiter.
+    Crasht nie und verliert nie Calls: jeder Fehlerpfad endet im Fallback,
+    jeder Wartepfad in einem Retry mit Gesamt-Deckel SHARED_BUDGET_MAX_WAIT_S
+    (danach wird der Call durchgelassen statt ewig zu blockieren).
+    """
+    global _shared_budget_failed
+    if not _shared_budget_enabled():
+        return False
+    if _shared_budget_failed:
+        return False
+    if _fcntl is None:
+        _shared_budget_failed = True
+        print("[RATE] WARN: fcntl nicht verfügbar — Shared-Polygon-Budget deaktiviert, Fallback auf In-Prozess-Limiter")
+        return False
+    deadline = time.time() + SHARED_BUDGET_MAX_WAIT_S
+    while True:
+        try:
+            acquired, wait_s = _shared_budget_try_consume(_shared_budget_per_min())
+        except Exception as exc:  # flock/IO-Fehler (z.B. exotisches FS)
+            _shared_budget_failed = True
+            print(f"[RATE] WARN: Shared-Polygon-Budget deaktiviert ({exc.__class__.__name__}: {exc}) — Fallback auf In-Prozess-Limiter")
+            return False
+        if acquired:
+            return True
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            # Max-Wartezeit-Schutz: lieber durchlassen (429 wird upstream
+            # behandelt) als einen Scan-Thread dauerhaft zu blockieren.
+            return True
+        time.sleep(min(wait_s, remaining))
+
+
 # ── rate_limited_get (originally line 895) ──
 def rate_limited_get(url, params=None, timeout=15, calls_per_minute=200, **kwargs):
     """Rate-limited requests.get() — thread-safe, wartet automatisch wenn zu viele Calls.
+
+    Zweistufig:
+      1) Prozessübergreifendes Minuten-Budget (Datei + flock): api.py und
+         bg_service.py teilen sich EIN Polygon-Budget (ENV POLYGON_BUDGET_PER_MIN,
+         Default 200 GESAMT). Notausstieg: POLYGON_SHARED_BUDGET=0.
+      2) In-Prozess-Limiter (unten) bleibt als Sekundär-Schutz: liefert den
+         0.05s-Mindestabstand (Burst-Glättung, die das Minuten-Budget nicht
+         abdeckt) und ist der alleinige Limiter im Fallback-Fall (kein fcntl /
+         flock-Fehler / ENV-Override).
 
     Default 200 calls/min (Polygon paid plans erlauben deutlich mehr als 75).
     Akzeptiert alle kwargs die requests.get() auch akzeptiert (headers, etc.)
     """
     global _last_api_call, _api_call_count, _api_call_window_start
+
+    # Stufe 1: gemeinsames Budget über beide Prozesse (blockiert ggf. bis
+    # Fensterwechsel). Bei False greift ausschließlich Stufe 2 (Fallback).
+    _acquire_shared_polygon_token()
 
     sleep_time = 0
     with _rate_lock:

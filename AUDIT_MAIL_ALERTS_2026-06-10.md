@@ -43,4 +43,7 @@ Aktien-Pfade in api.py rendern nur JETZT-Rows (Laufzeit-Beweis: 1 gute + 3 schle
 2. **Q2:** `_MAIL_TRIGGER_MAX_AGE_SEC = 900` (15 Min, Betreiber-Vorgabe): Trigger-Alter-Check + `_downgrade_expired_crypto_triggers` VOR dem Mail-Bau; Chase-Schutz prüft Entry-Zone.
 3. **Q3/B4:** bg spiegelt die api-Gates (Health via `modules.trade_health` direkt importierbar, RVOL-Floor, estimated-Sperre, Entry-Zone) — ODER bi/biotech-Mails komplett an api konsolidieren (bg bleibt reiner Scanner). Empfehlung: Konsolidierung (weniger doppelte Logik).
 4. **B2/B3:** bg auf das geteilte persistente Dedupe-File + api-Key-Format umstellen (Funktionen existieren in bg bereits).
-5. *
+5. **H2/H3:** `mail_class="trade"|"watch"|"info"`-Parameter in `_send_email_alert` mit automatischem Betreff-Präfix (🚨 JETZT / 👁️ WATCH / ℹ️) + Empfänger-Routing nach Klasse (watch nur mit Opt-in); Test-Mail nur an Admin.
+6. **H1:** Score-Cap-Zeile korrigieren (`min(score, entry_score)`).
+7. **B5:** Einmalige "Signal invalidiert — Stop gerissen"-Update-Mail für bereits gemailte NLS-Signale.
+8. **M1/B6/B7/B8:** Kennzeichnung synthetischer Level, Label-Fallbacks, horizon-Param in bg, Cooldown-nach-Send.
