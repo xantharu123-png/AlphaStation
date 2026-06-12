@@ -63,10 +63,15 @@ except Exception as _auth_alert_err:
     get_email_alert_recipients = None
 # Signal-Tracking (Team-A-Kontrakt) — defensiv: bg muss auch ohne Modul laufen.
 try:
-    from modules.signal_tracker import record_alert_signals, evaluate_open_signals
+    from modules.signal_tracker import (
+        record_alert_signals,
+        evaluate_open_signals,
+        load_performance_summary,
+    )
 except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Parallel-Rollout
     record_alert_signals = None
     evaluate_open_signals = None
+    load_performance_summary = None
 # Telegram-Benachrichtigung (Team-A-Kontrakt) — optional, gleiche Defensive.
 try:
     from modules.notify_telegram import (
@@ -1302,6 +1307,227 @@ def _run_signal_eval_job(secrets=None):
     except Exception as exc:
         log.warning(f"[SignalTracker] Evaluierung fehlgeschlagen: {exc}")
         return None
+
+
+# ── Wochenreport-Mail (Freitag nach US-Boersenschluss) ──────────────────────
+_WEEKLY_REPORT_CHECK_INTERVAL_SEC = 900       # Anklopf-Takt des Schedulers (15 Min)
+_WEEKLY_REPORT_DEDUPE_SEC = 8 * 86400         # TTL 8 Tage (Key zusaetzlich wochen-scoped)
+_WEEKLY_REPORT_WINDOW_START_MIN = 16 * 60 + 15  # Freitag ab 16:15 ET (nach US-Close)
+_WEEKLY_REPORT_WINDOW_END_MIN = 23 * 60         # bis 23:00 ET — danach verfaellt der Slot
+_weekly_report_warned_missing = False
+
+
+def _weekly_report_window_open(now_et):
+    """True nur Freitag (ET-Wochentag 4) zwischen 16:15 und 23:00 ET."""
+    if now_et.weekday() != 4:
+        return False
+    now_min = now_et.hour * 60 + now_et.minute
+    return _WEEKLY_REPORT_WINDOW_START_MIN <= now_min < _WEEKLY_REPORT_WINDOW_END_MIN
+
+
+def _weekly_report_dedupe_key(now_et):
+    """Persistenter Wochen-Key: weekly_report_{ISO-Jahr}W{ISO-Woche}.
+
+    Wochen-scoped => die 7-Tage-Prune-Grenze von _load_email_dedupe kann nie
+    eine Doppel-Mail innerhalb derselben Woche freischalten (naechster
+    Freitag = neue ISO-Woche = neuer Key).
+    """
+    iso = now_et.isocalendar()
+    return f"weekly_report_{iso[0]}W{iso[1]:02d}"
+
+
+def _build_weekly_report_mail(summary, now_et=None):
+    """Baut (subject, body_html) der Wochen-Bilanz aus load_performance_summary(days=7).
+
+    Hausstil wie _send_signal_update_mail (Arial, 700px, Tabellen). Subject
+    OHNE Klassen-Praefix — das ℹ️ setzt _apply_mail_class_prefix beim Versand.
+    Leere Woche => 'Keine Signale diese Woche'-Lebenszeichen statt Tabellen.
+    """
+    stamp = now_et if now_et is not None else datetime.now()
+    total = summary.get("total") or {}
+
+    def _i(bucket, key):
+        try:
+            return int(bucket.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _hit_text(bucket):
+        rate = bucket.get("win_rate_pct")
+        return f"{float(rate):.0f}%" if isinstance(rate, (int, float)) else "–"
+
+    n = _i(total, "signals")
+    decided = _i(total, "tp1_hit") + _i(total, "tp2_hit") + _i(total, "stop_hit")
+    sum_r = float(total.get("sum_r") or 0.0)
+    avg_r = total.get("avg_r")
+    avg_r_text = f"{float(avg_r):+.2f}R" if isinstance(avg_r, (int, float)) else "–"
+    subject = (f"Wochenreport Signal-Tracker: {sum_r:+.1f}R | {n} Signale | "
+               f"Hit-Rate {_hit_text(total)}")
+
+    if n == 0:
+        mid_html = """
+    <p style="background:#f5f5f5;padding:12px;border-radius:4px;font-size:14px;color:#0f172a">
+        <b>Keine Signale diese Woche.</b> Scanner und Tracker laufen — dies ist
+        das woechentliche Lebenszeichen des Forward-Track-Records.
+    </p>"""
+    else:
+        head_html = f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Signale</th>
+            <th style="padding:8px;text-align:left">Entschieden</th>
+            <th style="padding:8px;text-align:left">Hit-Rate</th>
+            <th style="padding:8px;text-align:left">Σ R</th>
+            <th style="padding:8px;text-align:left">Ø R</th>
+            <th style="padding:8px;text-align:left">Alerts/Tag</th>
+            <th style="padding:8px;text-align:left">Offen</th>
+        </tr>
+        <tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{n}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{decided}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_hit_text(total)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{sum_r:+.1f}R</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{avg_r_text}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{float(total.get('alerts_per_day') or 0.0):.1f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_i(total, 'open')}</td>
+        </tr>
+    </table>"""
+
+        scanner_rows = ""
+        per_scanner = summary.get("per_scanner") or {}
+        for scanner, bucket in sorted(
+            per_scanner.items(),
+            key=lambda item: float((item[1] or {}).get("sum_r") or 0.0),
+            reverse=True,
+        ):
+            bucket = bucket or {}
+            row_sum_r = float(bucket.get("sum_r") or 0.0)
+            tint = "#e9f7ef" if row_sum_r >= 0 else "#fdecea"
+            scanner_rows += f"""<tr style="background:{tint}">
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{html.escape(str(scanner))}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'signals')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'tp1_hit')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'tp2_hit')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'stop_hit')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'open')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_hit_text(bucket)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{row_sum_r:+.1f}R</b></td>
+        </tr>"""
+
+        recent_rows = ""
+        for sig in (summary.get("recent") or [])[:10]:
+            if not isinstance(sig, dict):
+                continue
+            ticker = html.escape(str(sig.get("ticker") or "?"))
+            rec_scanner = html.escape(str(sig.get("scanner") or "?"))
+            direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
+            status = html.escape(str(sig.get("status") or "?"))
+            if sig.get("tp1_hit_at") and "TP2" not in status:
+                status += " (TP1✓)"
+            r_realized = sig.get("r_realized")
+            r_text = (f"{float(r_realized):+.2f}R"
+                      if isinstance(r_realized, (int, float)) else "–")
+            recent_rows += f"""<tr>
+            <td style="padding:6px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{rec_scanner}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{status}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{r_text}</td>
+        </tr>"""
+
+        mid_html = f"""{head_html}
+    <h3 style="color:#0f172a;font-size:14px">Je Scanner</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Scanner</th>
+            <th style="padding:8px;text-align:left">Signale</th>
+            <th style="padding:8px;text-align:left">TP1</th>
+            <th style="padding:8px;text-align:left">TP2</th>
+            <th style="padding:8px;text-align:left">Stop</th>
+            <th style="padding:8px;text-align:left">offen</th>
+            <th style="padding:8px;text-align:left">Hit-Rate</th>
+            <th style="padding:8px;text-align:left">Σ R</th>
+        </tr>
+        {scanner_rows}
+    </table>
+    <h3 style="color:#0f172a;font-size:14px">Letzte Signale</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:6px;text-align:left">Ticker</th>
+            <th style="padding:6px;text-align:left">Scanner</th>
+            <th style="padding:6px;text-align:left">Status</th>
+            <th style="padding:6px;text-align:left">R</th>
+        </tr>
+        {recent_rows}
+    </table>"""
+
+    sample_hint = ""
+    if decided < 30:
+        sample_hint = ("<br>Stichprobe noch klein — keine Schwellen-Entscheidungen "
+                       "daraus ableiten.")
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+    <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
+    <p style="color:#666">{stamp.strftime('%d.%m.%Y %H:%M')} ET | KW {stamp.isocalendar()[1]} | Fenster: letzte 7 Tage</p>
+    {mid_html}
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
+        Kursen ausgewertet. Mechanik: 1R Risiko, TP1 = halb raus + Stop auf
+        Einstand. Kein Backtest.{sample_hint}
+    </p>
+    </body></html>"""
+    return subject, body_html
+
+
+def _run_weekly_report(secrets=None, now_et=None):
+    """Woechentliche ℹ️-Bilanz-Mail des Signal-Trackers (Freitag nach US-Close).
+
+    Self-gated wie der ORB-Job: der Scheduler klopft alle 15 Min an, der Job
+    prueft Fenster + Dedupe selbst.
+      - Fenster: Freitag (ET) 16:15–23:00. Lief der Service um 16:15 nicht,
+        wird innerhalb des Fensters nachgeholt; ausserhalb verfaellt der
+        Slot (KEIN Nachschicken am Samstag).
+      - Persistentes Dedupe weekly_report_{ISO-Jahr}W{ISO-Woche} (TTL 8 Tage)
+        => genau EINE Mail pro Woche, Restart-sicher. Mark erst NACH
+        erfolgreichem Versand (B2-Muster: SMTP-Fehler => Retry im Fenster).
+      - Fehler im Report-Bau erreichen den Scheduler NIE (try/except + Log).
+
+    Returns True nur bei tatsaechlich versendeter Mail.
+    """
+    global _weekly_report_warned_missing
+    try:
+        if now_et is None:
+            try:
+                from zoneinfo import ZoneInfo
+                now_et = datetime.now(ZoneInfo("America/New_York"))
+            except Exception:
+                now_et = datetime.now()
+        if not _weekly_report_window_open(now_et):
+            return False
+        if load_performance_summary is None:
+            if not _weekly_report_warned_missing:
+                log.warning("[Wochenreport] modules.signal_tracker fehlt — Report-Job inaktiv")
+                _weekly_report_warned_missing = True
+            return False
+        dedupe_key = _weekly_report_dedupe_key(now_et)
+        if _email_dedupe_active(dedupe_key, _WEEKLY_REPORT_DEDUPE_SEC):
+            return False
+        summary = load_performance_summary(days=7) or {}
+        subject, body_html = _build_weekly_report_mail(summary, now_et=now_et)
+        sent = _send_email_alert(
+            subject, body_html,
+            secrets if secrets is not None else _load_secrets(),
+            mail_class="info",
+        )
+        if sent:
+            _email_dedupe_mark(dedupe_key)
+            log.info(f"[Wochenreport] 📧 Wochen-Bilanz versendet ({dedupe_key})")
+        else:
+            log.warning(f"[Wochenreport] Mail nicht versendet ({dedupe_key}) — "
+                        f"Retry beim naechsten Takt im Fenster")
+        return bool(sent)
+    except Exception as exc:
+        log.warning(f"[Wochenreport] Report fehlgeschlagen (Scheduler laeuft weiter): {exc}")
+        return False
 
 
 def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text=""):
@@ -3751,6 +3977,13 @@ def run_service():
     log.info(f"📈 Signal-Tracker-Eval: stündlich aktiv "
              f"({'Modul vorhanden' if evaluate_open_signals is not None else 'WARTET auf modules.signal_tracker'})")
 
+    # ── Wochenreport-Mail: gehört IMMER bg (kein api-Pendant), self-gated ──
+    # 15-Min-Takt ist nur der Anklopf-Rhythmus; Fenster (Fr 16:15–23:00 ET)
+    # und Wochen-Dedupe prüft _run_weekly_report selbst (Restart-sicher).
+    SCHEDULE_INTERVAL["weekly_report"] = _WEEKLY_REPORT_CHECK_INTERVAL_SEC
+    log.info(f"🧾 Wochenreport-Mail: Freitag 16:15–23:00 ET aktiv "
+             f"({'Modul vorhanden' if load_performance_summary is not None else 'WARTET auf modules.signal_tracker'})")
+
     last_run = {}
     _today_done = {}  # Track welche festen Zeiten heute schon gelaufen sind
     _running_scanners = set()  # B-05: Prevent concurrent scanner execution
@@ -3910,6 +4143,10 @@ def run_service():
                         # test_tracker_bg_frontend): der Job laedt secrets
                         # selbst lazy, nur wenn Transitionen anstehen.
                         _run_signal_eval_job()
+                    elif scanner_name == "weekly_report":
+                        # Freitags-Wochenbilanz; Job ist self-gated und
+                        # wirft nie (Fenster/Dedupe/try-except intern).
+                        _run_weekly_report(secrets)
                     last_run[scanner_name] = time.time()
                 except Exception as e:
                     log.error(f"❌ {scanner_name}: {e}")
