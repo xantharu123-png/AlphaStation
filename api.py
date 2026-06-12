@@ -548,6 +548,8 @@ NON_STOCK_ETP_KEYWORDS = {
 }
 
 STOCK_SCANNER_ALLOWED_REFERENCE_TYPES = {"CS", "ADRC", "ADRP"}
+# Klumpenrisiko-Mail-Warnung: ADR-Subtypen (auslaendische US-Listings, oft derselbe Laender-/Makro-Treiber)
+STOCK_ADR_REFERENCE_TYPES = {"ADRC", "ADRP"}
 ORB_ALLOWED_POLYGON_TYPES = STOCK_SCANNER_ALLOWED_REFERENCE_TYPES
 _ORB_REFERENCE_CACHE: Dict[str, tuple[bool, str]] = {}
 _ORB_ATR_CACHE: Dict[str, float] = {}
@@ -684,7 +686,7 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
 
 
 COMMON_STOCK_UNIVERSE_CACHE = "/tmp/polygon_common_stock_universe.json"
-_COMMON_STOCK_UNIVERSE_MEM: Dict[str, Any] = {"loaded_at": 0, "tickers": None, "source": "not_loaded"}
+_COMMON_STOCK_UNIVERSE_MEM: Dict[str, Any] = {"loaded_at": 0, "tickers": None, "source": "not_loaded", "adr_tickers": None}
 
 
 def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optional[set[str]], str]:
@@ -699,19 +701,23 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
     stale_cached_tickers: set[str] = stale_mem_tickers
     stale_cached_source = str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
     stale_cached_at = mem_loaded_at
+    stale_cached_adr: set[str] = set(_COMMON_STOCK_UNIVERSE_MEM.get("adr_tickers") or [])
     try:
         if os.path.exists(COMMON_STOCK_UNIVERSE_CACHE):
             with open(COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
                 cached = json.load(f)
             cached_at = float(cached.get("cached_at", 0) or 0)
             cached_tickers = set(cached.get("tickers", []) or [])
+            # Abwaertskompatibel: altes Cache-Format ohne "adr_tickers" => leeres Set, KEIN Re-Fetch-Zwang
+            cached_adr = set(cached.get("adr_tickers", []) or [])
             if cached_tickers and now_ts - cached_at < max_age_seconds:
-                _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(cached_tickers), "source": "file_cache"})
+                _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(cached_tickers), "source": "file_cache", "adr_tickers": sorted(cached_adr)})
                 return cached_tickers, "file_cache"
             if cached_tickers:
                 stale_cached_tickers = cached_tickers
                 stale_cached_source = "stale_file_cache"
                 stale_cached_at = cached_at
+                stale_cached_adr = cached_adr
     except Exception as cache_err:
         print(f"[Common Stock Universe] cache read error: {cache_err}")
 
@@ -721,11 +727,13 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
                 "loaded_at": stale_cached_at or now_ts,
                 "tickers": sorted(stale_cached_tickers),
                 "source": stale_cached_source,
+                "adr_tickers": sorted(stale_cached_adr),
             })
             return stale_cached_tickers, stale_cached_source
         return None, "missing_polygon_key"
 
     tickers: set[str] = set()
+    adr_tickers: set[str] = set()
     try:
         for asset_type in sorted(ORB_ALLOWED_POLYGON_TYPES):
             url = "https://api.polygon.io/v3/reference/tickers"
@@ -755,6 +763,8 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
                     if _looks_like_non_stock_etp_symbol(tk) or _name_has_non_stock_product_keyword(name):
                         continue
                     tickers.add(tk)
+                    if item_type in STOCK_ADR_REFERENCE_TYPES:
+                        adr_tickers.add(tk)
                 next_url = payload.get("next_url")
                 url = next_url if next_url else None
                 params = {"apiKey": POLYGON_KEY} if next_url else {}
@@ -764,10 +774,10 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
             try:
                 os.makedirs(os.path.dirname(COMMON_STOCK_UNIVERSE_CACHE) or ".", exist_ok=True)
                 with open(COMMON_STOCK_UNIVERSE_CACHE, "w", encoding="utf-8") as f:
-                    json.dump({"cached_at": now_ts, "tickers": sorted(tickers)}, f)
+                    json.dump({"cached_at": now_ts, "tickers": sorted(tickers), "adr_tickers": sorted(adr_tickers)}, f)
             except Exception as write_err:
                 print(f"[Common Stock Universe] cache write error: {write_err}")
-            _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(tickers), "source": "polygon_reference"})
+            _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(tickers), "source": "polygon_reference", "adr_tickers": sorted(adr_tickers)})
             return tickers, "polygon_reference"
     except Exception as e:
         print(f"[Common Stock Universe] fetch error: {e}")
@@ -777,10 +787,34 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
             "loaded_at": stale_cached_at or now_ts,
             "tickers": sorted(stale_cached_tickers),
             "source": stale_cached_source,
+            "adr_tickers": sorted(stale_cached_adr),
         })
         return stale_cached_tickers, stale_cached_source
 
     return None, "unavailable"
+
+
+def _adr_ticker_set() -> set[str]:
+    """ADR-Ticker (ADRC/ADRP) fuer die Klumpenrisiko-Warnung — lazy aus dem Universe-Cache.
+
+    KEIN Netz-Fetch (Mail-Bau darf nie auf Polygon warten), nie werfen:
+    Memory-Cache zuerst, dann File-Cache; bei jedem Fehler oder altem
+    Cache-Format ohne "adr_tickers"-Feld einfach leeres Set.
+    """
+    try:
+        mem_adr = _COMMON_STOCK_UNIVERSE_MEM.get("adr_tickers")
+        if mem_adr is not None:
+            return {str(t).upper().strip() for t in mem_adr if str(t or "").strip()}
+        if os.path.exists(COMMON_STOCK_UNIVERSE_CACHE):
+            with open(COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if isinstance(cached, dict):
+                adr = {str(t).upper().strip() for t in (cached.get("adr_tickers", []) or []) if str(t or "").strip()}
+                _COMMON_STOCK_UNIVERSE_MEM["adr_tickers"] = sorted(adr)
+                return adr
+    except Exception as adr_err:
+        print(f"[Common Stock Universe] adr set read error: {adr_err}")
+    return set()
 
 
 def _common_stock_guard_status() -> Dict[str, Any]:
@@ -5820,6 +5854,63 @@ def _send_email_alert(
                 return False
 
 
+def _cluster_warning_html(rows) -> str:
+    """Klumpenrisiko-Hinweis fuer Aktien-Signal-Mails — reine Funktion, "" wenn nichts zu warnen.
+
+    Anlass (11.06.): zwei Alert-Mails enthielten zusammen 5 argentinische ADRs
+    (BMA, GGAL, CEPU, TGS, IRS) als "separate" Setups — derselbe Makro-Treiber,
+    Abonnenten haetten 3x Size auf denselben Trade legen koennen.
+    Regel A: >= 2 Setups, deren Ticker im ADR-Set (ADRC/ADRP) liegen.
+    Regel B: >= 3 Setups mit |Tages-Change| > 5 Prozent.
+    Beide Regeln koennen gemeinsam erscheinen. NUR Information — Setups werden
+    nicht unterdrueckt (Produktentscheidung: jedes Setup bleibt einzeln valide).
+    Darf NIE werfen und NIE Netz ziehen (laeuft im Mail-Versandpfad).
+    """
+    try:
+        safe_rows = [r for r in (rows or []) if isinstance(r, dict)]
+        if not safe_rows:
+            return ""
+        try:
+            adr_set = _adr_ticker_set()
+        except Exception:
+            adr_set = set()  # doppeltes Sicherheitsnetz — _adr_ticker_set wirft selbst nie
+        change_keys = ("change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", "change", "Change")
+        adr_hits: list[str] = []
+        strong_movers = 0
+        for row in safe_rows:
+            ticker = _extract_alert_ticker(row)
+            if ticker and ticker in adr_set and ticker not in adr_hits:
+                adr_hits.append(ticker)
+            change_raw = _alert_get_any(row, *change_keys, default=None)
+            if change_raw is None and isinstance(row.get("source_row"), dict):
+                change_raw = _alert_get_any(row["source_row"], *change_keys, default=None)
+            change_val = _alert_float(change_raw, None)
+            if change_val is not None and abs(change_val) > 5:
+                strong_movers += 1
+        warnings: list[str] = []
+        if len(adr_hits) >= 2:
+            warnings.append(
+                f"⚠ Klumpenrisiko: {len(adr_hits)} Setups sind auslaendische US-Listings "
+                f"(ADR: {', '.join(adr_hits)}) — haeufig derselbe Laender-/Makro-Treiber. "
+                "Als EINEN Trade behandeln, nicht mehrfach Size aufbauen."
+            )
+        if strong_movers >= 3:
+            warnings.append(
+                f"⚠ {strong_movers} Setups mit starkem Tages-Move — pruefe gemeinsamen "
+                "Treiber (News/Sektor/Land) vor dem Einstieg."
+            )
+        if not warnings:
+            return ""
+        lines = "".join(f'<div style="margin:2px 0">{w}</div>' for w in warnings)
+        return (
+            '<p style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;'
+            f'padding:10px;color:#b91c1c;font-size:13px;font-weight:bold">{lines}</p>'
+        )
+    except Exception as cluster_err:
+        print(f"[Cluster Warning] build error: {cluster_err}")
+        return ""
+
+
 def _check_and_alert(scanner_name, cache_file):
     """Prüft Scan-Ergebnisse auf Grade S/A/B und sendet Alert."""
     now = time.time()
@@ -5914,9 +6005,12 @@ def _check_and_alert(scanner_name, cache_file):
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]}x</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a.get("entry_quality", "")}</td></tr>'
+        # Klumpenrisiko-Hinweis (ADR-Cluster / Mehrfach-Mover) — nur Information, keine Unterdrueckung
+        _cluster_hint = _cluster_warning_html(alerts)
         body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
         <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
         <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {n} starke Setups</p>
+        {_cluster_hint}
         <table style="width:100%;border-collapse:collapse;font-size:14px">
         <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
         <th style="padding:8px;text-align:left">Grade</th><th style="padding:8px;text-align:left">Score</th>
@@ -6110,10 +6204,14 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             'padding:10px;color:#065f46;font-size:13px">'
             f"Bestätigt per Tagesschluss — Entry-Planung für die nächste Session über {_entry_levels}</p>"
         )
+    # Klumpenrisiko-Hinweis (ADR-Cluster / Mehrfach-Mover) — nur Aktien-Mails:
+    # in Crypto-Sweeps waere Regel B (Mover >5%) quasi immer aktiv => Warn-Fatigue.
+    _cluster_hint = _cluster_warning_html(email_alerts) if market_type == "stocks" else ""
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
     <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {count_text} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
+    {_cluster_hint}
     {_dailyclose_hint}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
