@@ -213,6 +213,11 @@ _ALERT_CACHE_MAX_AGE_S = 2 * 3600
 _BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600
 # B5: Einmalige Invalidierungs-Update-Mail je Symbol (72h-Fenster).
 _NLS_INVALIDATION_DEDUPE_SEC = 72 * 3600
+# Exit-Update-Mails (Signal-Tracker): einmalig je Transition. 7-Tage-Fenster =
+# grosszuegig — deckt das komplette Signal-Leben ab (Aktien max. 5 Daily-Bars,
+# Crypto 120h) und entspricht der max. Haltedauer der Dedupe-Datei selbst
+# (_load_email_dedupe prunt Eintraege > 7 Tage).
+_SIGNAL_UPDATE_DEDUPE_SEC = 7 * 86400
 # Startup-Delay wie api (_EMAIL_STARTUP_DELAY): nach Prozess-Restart 5 Min keine
 # Mails — alte Cache-Daten erzeugen sonst Phantom-Alerts/Restart-Spam.
 _BG_STARTED_AT = time.time()
@@ -1117,10 +1122,156 @@ def _tracker_crypto_fetcher(ticker):
         return None
 
 
-def _run_signal_eval_job():
+# Mailbare Exit-Ereignisse je Transitions-Status (Kontrakt
+# evaluate_open_signals -> result['transitions']). UNTRACKED fehlt bewusst:
+# "keine Kursdaten" ist ein Datenproblem, kein Positions-Ereignis fuers Abo.
+_SIGNAL_UPDATE_EVENTS = {
+    "STOP_HIT": "Stop erreicht",
+    "TP1_HIT_OPEN": "TP1 erreicht — Rest Freiroll Richtung TP2",
+    "TP2_HIT": "TP2 erreicht",
+    "EXPIRED": "Verfallen",
+}
+
+
+def _signal_origin_was_mailed(scanner, ticker, now=None):
+    """Zweitsicherung: hat das Ursprungssignal wirklich eine Mail ausgeloest?
+
+    Der Tracker loggt ohnehin NUR tatsaechlich versendete Signale
+    (record_alert_signals laeuft erst NACH sent=True, s. B2-Muster) — diese
+    Pruefung ist eine bewusste Doppelsicherung gegen Alt-/Fremdbestaende in
+    der Tracker-DB (z.B. manuell eingespielte oder Telegram-only Signale).
+
+    Geprueft wird das geteilte persistente Dedupe (api+bg, gleiche Datei) mit
+    dem Key-Format f"{scanner}_{ticker}". Sonderfall new_listing: api/bg
+    markieren auf dem ROH-Symbol (new_listing_TSTUSDT), der Tracker fuehrt
+    das Display-Symbol (TST) — daher dort Suffix-tolerante Suche ueber
+    _display_crypto_contract_symbol. 7-Tage-Fenster = grosszuegig (Signal
+    lebt max. ~5 Handelstage / 120h).
+    """
+    now = now or time.time()
+    scanner = str(scanner or "").strip()
+    ticker = str(ticker or "").strip().upper()
+    if not scanner or not ticker:
+        return False
+    if _email_dedupe_active(f"{scanner}_{ticker}", _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
+        return True
+    if scanner == "new_listing":
+        for key, ts in _load_email_dedupe(now=now).items():
+            if not str(key).startswith("new_listing_"):
+                continue
+            if now - ts >= _SIGNAL_UPDATE_DEDUPE_SEC:
+                continue
+            raw_symbol = str(key)[len("new_listing_"):]
+            if _display_crypto_contract_symbol(raw_symbol) == ticker:
+                return True
+    return False
+
+
+def _send_signal_update_mail(transitions, secrets):
+    """ℹ️-Sammel-Update fuer Exits bereits gemailter Tracker-Signale.
+
+    Schliesst den Signal-Kreislauf fuers Abo-Produkt: Wer die 🚨-Mail bekam,
+    erfaehrt auch Stop/TP1/TP2/Expiry. Regeln:
+      - EINE Sammelmail pro Eval-Lauf (alle Transitionen gebuendelt),
+        kein Versand ohne mailbare Transitionen.
+      - Nur Ereignisse aus _SIGNAL_UPDATE_EVENTS (UNTRACKED wird verworfen).
+      - Zweitsicherung _signal_origin_was_mailed (s. dort).
+      - Persistentes Dedupe je Transition: signal_update_{id}_{new_status}
+        (TTL 7d) — kein Spam bei Re-Evals; Mark erst NACH erfolgreichem
+        Versand (B2-Muster: SMTP-Fehler => naechster Lauf darf erneut).
+      - Startup-Delay + ETF-Block greifen automatisch in _send_email_alert.
+
+    Returns True nur bei tatsaechlich versendeter Mail.
+    """
+    if not transitions:
+        return False
+    now = time.time()
+    pending = []
+    for tr in transitions:
+        if not isinstance(tr, dict):
+            continue
+        new_status = str(tr.get("new_status") or "")
+        event = _SIGNAL_UPDATE_EVENTS.get(new_status)
+        if event is None:
+            continue
+        if not _signal_origin_was_mailed(tr.get("scanner"), tr.get("ticker"), now=now):
+            log.debug(f"[SignalTracker] Update unterdrueckt (kein Erst-Mail-Mark): "
+                      f"{tr.get('scanner')}/{tr.get('ticker')} -> {new_status}")
+            continue
+        dedupe_key = f"signal_update_{tr.get('id')}_{new_status}"
+        if _email_dedupe_active(dedupe_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
+            continue
+        pending.append((dedupe_key, event, tr))
+    if not pending:
+        return False
+
+    n = len(pending)
+    stop_count = sum(1 for _, _, tr in pending if tr.get("new_status") == "STOP_HIT")
+    tp_count = sum(1 for _, _, tr in pending
+                   if tr.get("new_status") in ("TP1_HIT_OPEN", "TP2_HIT"))
+    subject = f"Signal-Update: {n} Position(en) — {stop_count} Stop / {tp_count} TP"
+
+    rows = ""
+    for _, event, tr in pending:
+        ticker = html.escape(str(tr.get("ticker") or "?"))
+        scanner = html.escape(str(tr.get("scanner") or "?"))
+        direction = "SHORT" if str(tr.get("direction")) == "SHORT" else "LONG"
+        r_realized = tr.get("r_realized")
+        r_text = (f"{float(r_realized):+.2f}R"
+                  if isinstance(r_realized, (int, float)) else "offen")
+        plan = " | ".join(
+            f"{label} {_format_alert_price(tr.get(key))}"
+            for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
+            if tr.get(key) is not None
+        )
+        rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{event}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{r_text}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{plan}</td>
+        </tr>"""
+
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+    <h2 style="color:#0f172a">Signal-Update — Positions-Ereignisse</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} Update(s) zu zuvor gemailten Signalen</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Ticker</th>
+            <th style="padding:8px;text-align:left">Scanner</th>
+            <th style="padding:8px;text-align:left">Ereignis</th>
+            <th style="padding:8px;text-align:left">R</th>
+            <th style="padding:8px;text-align:left">Plan-Level</th>
+        </tr>
+        {rows}
+    </table>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatisches Update vom Signal-Tracker (stuendliche Evaluierung).<br>
+        'TP1 erreicht' = Teilgewinn-Zone erreicht, Restposition risikofrei Richtung TP2 (Stop auf Entry).<br>
+        Kein neues Signal, keine Handelsaufforderung. Einmalig je Ereignis (7-Tage-Dedupe).
+    </p>
+    </body></html>"""
+
+    sent = _send_email_alert(subject, body_html, secrets, mail_class="info")
+    if sent:
+        # B2-Muster: Dedupe-Mark NUR nach erfolgreichem Versand.
+        for dedupe_key, _, _ in pending:
+            _email_dedupe_mark(dedupe_key, now=now)
+        log.info(f"[SignalTracker] 📧 Update-Mail gesendet: {n} Transition(en) "
+                 f"({', '.join(str(tr.get('ticker') or '?') for _, _, tr in pending)})")
+    else:
+        log.warning(f"[SignalTracker] Update-Mail nicht versendet ({n} Transition(en) offen)")
+    return bool(sent)
+
+
+def _run_signal_eval_job(secrets=None):
     """Stündliche Evaluierung offener Tracker-Signale (TP/SL-Auflösung).
 
     Überspringt sauber (eine Warnung, dann still), wenn das Team-A-Modul fehlt.
+    Nach dem Eval gehen ℹ️-Exit-Update-Mails für die Transitionen des Laufs
+    raus (_send_signal_update_mail) — Fehler dort dürfen den Eval-Job und
+    seine Rückgabe NIE beschädigen (eigenes try/except).
     """
     global _signal_eval_warned_missing
     if evaluate_open_signals is None:
@@ -1134,7 +1285,19 @@ def _run_signal_eval_job():
             crypto_price_fetcher=_tracker_crypto_fetcher,
         ) or {}
         log.info(f"[SignalTracker] Eval-Lauf: evaluated={stats.get('evaluated', 0)} "
-                 f"closed={stats.get('closed', 0)} errors={stats.get('errors', 0)}")
+                 f"closed={stats.get('closed', 0)} errors={stats.get('errors', 0)} "
+                 f"transitions={len(stats.get('transitions') or [])}")
+        # Exit-Update-Mails: tolerant gegen alte Tracker-Versionen ohne
+        # 'transitions'-Feld (.get) und gegen JEDEN Fehler im Mail-Bau.
+        try:
+            transitions = stats.get("transitions") or []
+            if transitions:
+                _send_signal_update_mail(
+                    transitions, secrets if secrets is not None else _load_secrets()
+                )
+        except Exception as exc:
+            log.warning(f"[SignalTracker] Exit-Update-Mail fehlgeschlagen (Eval-Ergebnis "
+                        f"bleibt gueltig): {exc}")
         return stats
     except Exception as exc:
         log.warning(f"[SignalTracker] Evaluierung fehlgeschlagen: {exc}")
@@ -3743,6 +3906,9 @@ def run_service():
                         _run_orb_scanner(poly_key)
                         _check_and_alert_scan_results("orb", secrets)
                     elif scanner_name == "signal_eval":
+                        # Bewusst ohne secrets-Arg (Wiring-Kontrakt
+                        # test_tracker_bg_frontend): der Job laedt secrets
+                        # selbst lazy, nur wenn Transitionen anstehen.
                         _run_signal_eval_job()
                     last_run[scanner_name] = time.time()
                 except Exception as e:

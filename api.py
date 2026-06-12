@@ -12290,7 +12290,18 @@ _TAB_GATES = [
     ("/api/market-context", "crash-monitor"),
     ("/api/crypto-chart", "crypto-signals"),
     ("/api/exchange-chart", "crypto-signals"),
+    # Track-Record-Tab (Performance): Pro+Elite, Basic nicht. Admin-Bypass
+    # passiert vor den Gate-Loops in _commerce_gate_denial (ADMIN_EMAILS).
+    ("/api/signal-performance", "signal-performance"),
 ]
+
+# Tab-Freischaltung "signal-performance" fuer Pro: Elite/Trial haben in
+# SCANNER_TABS_BY_PLAN None (= alle Tabs) und sind damit automatisch drin,
+# Basic/Expired bleiben gesperrt. Die Pro-Liste wird HIER erweitert statt in
+# modules/auth.py (fremde Datei-Ownership); get_user_limits() liest dieselbe
+# Liste, das Frontend sieht den Tab fuer Pro also auch in allowed_tabs.
+if HAS_AUTH and isinstance(SCANNER_TABS_BY_PLAN.get("pro"), list) and "signal-performance" not in SCANNER_TABS_BY_PLAN["pro"]:
+    SCANNER_TABS_BY_PLAN["pro"].append("signal-performance")
 
 
 def _token_from_authorization(authorization: Optional[str]) -> Optional[str]:
@@ -12656,23 +12667,43 @@ async def api_commercial_readiness():
 
 @app.get("/api/signal-performance")
 def api_signal_performance(
-    days: int = Query(90, ge=1, le=365),
+    days: int = Query(30),
     authorization: Optional[str] = Header(None),
 ):
     """Hit-Rate/Outcome-Auswertung der versendeten Trade-Signale.
 
-    V1 bewusst admin-only (_require_admin, einfachstes sauberes Gate);
-    Elite-Freigabe spaeter via _TAB_GATES moeglich. Datenbasis:
-    modules/signal_tracker — record beim Mail-Versand hier in api.py,
-    Evaluierung offener Signale laeuft stündlich in bg_service.
+    Zugriff: Admin immer (bestehende _require_admin-Logik); sonst genuegt
+    hier ein gueltiger Login-Token — das Plan-Gating (Pro/Elite, Tab-Gate
+    'signal-performance' in _TAB_GATES) erzwingt die commerce_auth_gate-
+    Middleware serverseitig, Basic bekommt dort 403 upgrade_required.
+    `days` wird auf 1..365 geklemmt (Default 30, UI bietet 7/30/90) —
+    Clamp statt Query(ge/le)-422, damit auch direkte Aufrufe sauber sind.
+    Datenbasis: modules/signal_tracker — record beim Mail-Versand hier in
+    api.py, Evaluierung offener Signale laeuft stündlich in bg_service.
     """
-    _require_admin(authorization)
+    try:
+        _require_admin(authorization)
+    except HTTPException:
+        # Kein Admin: eingeloggter User reicht an dieser Stelle, den
+        # Plan-Check (Pro/Elite) uebernimmt das Tab-Gate in der Middleware.
+        token = _token_from_authorization(authorization)
+        payload = verify_token(token) if (HAS_AUTH and token) else None
+        if not payload:
+            raise HTTPException(
+                status_code=403,
+                detail="Login erforderlich — die Performance-Ansicht ist Teil von Pro/Elite",
+            )
     if not load_performance_summary:
         raise HTTPException(
             status_code=503,
             detail="signal_tracker module not available — Signal-Performance ist erst nach Deployment von modules/signal_tracker.py abrufbar",
         )
-    return load_performance_summary(days)
+    try:
+        days_clamped = int(days)
+    except (TypeError, ValueError):
+        days_clamped = 30  # direkter Funktionsaufruf ohne FastAPI-Parsing
+    days_clamped = max(1, min(365, days_clamped))
+    return load_performance_summary(days=days_clamped)
 
 
 @app.get("/api/auth/plans")

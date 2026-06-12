@@ -4102,6 +4102,7 @@ function App() {
         { id: 'orb', label: 'ORB Scanner' },
         { id: 'autotrader', label: 'Auto-Trader' },
         { id: 'chart-analyse', label: 'Chart & Analyse' },
+        { id: 'signal-performance', label: 'Performance' },
         { id: 'admin', label: 'Admin' }
     ];
 
@@ -4135,6 +4136,7 @@ function App() {
                 { title: null, items: [
                     { id: 'chart-analyse', name: 'Chart & Analyse', desc: 'Interaktive Charts mit Indikatoren', svg: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z', color: '#3b82f6' },
                     { id: 'strategie-guide', name: 'Strategie Guide', desc: 'Trading-Strategien & Playbooks', svg: 'M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2zM22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z', color: '#f59e0b' },
+                    { id: 'signal-performance', name: 'Performance', desc: 'Track-Record: Hit-Rate & R-Bilanz aller Signale', svg: 'M3 3V21H21M7 15L11 11L14 14L20 7M20 7H15.5M20 7V11.5', color: '#22c55e' },
                 ]},
             ]
         },
@@ -4566,6 +4568,7 @@ function App() {
                     {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'autotrader' && <AutoTraderTab />}
                     {activeTab === 'chart-analyse' && <ChartAnalyseTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
+                    {activeTab === 'signal-performance' && <SignalPerformanceTab />}
                     {activeTab === 'admin' && <AdminTab />}
                 </div>
             )}
@@ -5913,6 +5916,196 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 {filtered.length === 0 && <div className="text-center text-gray-400 py-8">Keine ausreichend guten Early-Mover-Kandidaten{phaseFilter > 0 ? ` fuer Phase ${phaseFilter}` : ''}. Schwache, illiquide oder geblockte Coins werden weiter unterdrueckt.</div>}
             </div>
 
+        </div>
+    );
+}
+
+// ══════════════════════════════════════════════════════════════
+// SIGNAL PERFORMANCE TAB — Track-Record des Signal-Trackers
+// Daten: GET /api/signal-performance?days=N (Pro/Elite via Tab-Gate,
+// Admin immer). Buckets siehe modules/signal_tracker.load_performance_summary.
+// ══════════════════════════════════════════════════════════════
+function SignalPerformanceTab() {
+    const [days, setDays] = useState(30);
+    const [perf, setPerf] = useState(null);
+    const [perfError, setPerfError] = useState('');
+    const [forbidden, setForbidden] = useState(false);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadPerformance = async () => {
+            setLoading(true);
+            setPerfError('');
+            setForbidden(false);
+            try {
+                const res = await fetch(`${API}/api/signal-performance?days=${days}`);
+                if (cancelled) return;
+                if (res.ok) {
+                    setPerf(await res.json());
+                } else if (res.status === 403) {
+                    setForbidden(true);
+                    setPerf(null);
+                } else {
+                    let detail = '';
+                    try { detail = (await res.json()).detail || ''; } catch (e) {}
+                    setPerfError(`Performance-Daten konnten nicht geladen werden (${res.status})${detail ? `: ${detail}` : ''}`);
+                }
+            } catch (err) {
+                if (!cancelled) setPerfError('Performance-Daten konnten nicht geladen werden (Netzwerkfehler).');
+            }
+            if (!cancelled) setLoading(false);
+        };
+        loadPerformance();
+        return () => { cancelled = true; };
+    }, [days]);
+
+    const fmtR = (v) => (v === null || v === undefined) ? '—' : `${Number(v) > 0 ? '+' : ''}${Number(v).toFixed(2)}R`;
+    const fmtPct = (v) => (v === null || v === undefined) ? '—' : `${Number(v).toFixed(1)}%`;
+    const rTone = (v) => (v ?? 0) > 0 ? 'text-green-600' : (v ?? 0) < 0 ? 'text-red-600' : 'text-gray-600';
+    const statusBadge = (sig) => {
+        const status = sig.status || 'OPEN';
+        if (status === 'STOP_HIT') return { label: 'STOP', cls: 'bg-red-100 text-red-700' };
+        if (status === 'TP2_HIT') return { label: 'TP2', cls: 'bg-green-100 text-green-700' };
+        if (status === 'TP1_HIT_OPEN') return { label: 'TP1 · OPEN', cls: 'bg-blue-100 text-blue-700' };
+        if (status === 'EXPIRED') return sig.tp1_hit_at
+            ? { label: 'TP1', cls: 'bg-green-100 text-green-700' }
+            : { label: 'EXPIRED', cls: 'bg-gray-100 text-gray-600' };
+        if (status === 'UNTRACKED') return { label: 'UNTRACKED', cls: 'bg-gray-100 text-gray-500' };
+        return { label: 'OPEN', cls: 'bg-blue-100 text-blue-700' };
+    };
+
+    const total = perf?.total || {};
+    const scanners = Object.entries(perf?.per_scanner || {}).sort((a, b) => (b[1].sum_r ?? 0) - (a[1].sum_r ?? 0));
+    const recent = perf?.recent || [];
+    const hasSignals = (total.signals || 0) > 0;
+
+    const headCards = [
+        { label: 'Signale gesamt', value: String(total.signals ?? 0), cls: 'text-gray-900' },
+        { label: 'Hit-Rate', value: fmtPct(total.win_rate_pct), cls: 'text-gray-900', hint: 'TP1+TP2 vs. entschieden' },
+        { label: 'Summe R', value: fmtR(total.sum_r), cls: rTone(total.sum_r) },
+        { label: 'Ø R', value: fmtR(total.avg_r), cls: rTone(total.avg_r) },
+        { label: 'Offene Positionen', value: String(total.open ?? 0), cls: 'text-blue-600' },
+    ];
+
+    return (
+        <div className="space-y-6">
+            {/* Kopf: Titel + Zeitraum-Schalter 7/30/90 */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h2 className="text-lg font-bold text-gray-900">Signal-Performance</h2>
+                    <div className="text-xs text-gray-500">Track-Record aller versendeten Trade-Signale — automatisch ausgewertet, nicht kuratiert.</div>
+                </div>
+                <div className="flex items-center gap-1">
+                    {[7, 30, 90].map(d => (
+                        <button key={d} onClick={() => setDays(d)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${days === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                            {d} Tage
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {forbidden && (
+                <div className="card border border-amber-200 bg-amber-50 text-amber-900 px-4 py-4 rounded-lg text-sm">
+                    <div className="font-semibold">Performance-Ansicht benötigt Pro-Plan</div>
+                    <div>Der Track-Record (Hit-Rate, R-Bilanz, letzte Signale) ist Teil von Pro und Elite. Upgrade über „Pläne &amp; Preise“.</div>
+                </div>
+            )}
+
+            {perfError && !forbidden && (
+                <div className="card border border-red-200 bg-red-50 text-red-800 px-4 py-3 rounded-lg text-sm">{perfError}</div>
+            )}
+
+            {loading && !perf && !forbidden && !perfError && (
+                <div className="card border border-gray-200 p-6 rounded-lg text-center text-gray-400 animate-pulse">Lade Performance-Daten…</div>
+            )}
+
+            {perf && !forbidden && !hasSignals && (
+                <div className="card border border-gray-200 p-8 rounded-lg text-center text-gray-500">
+                    <div className="font-semibold text-gray-700 mb-1">Noch keine Signale im gewählten Zeitraum</div>
+                    <div className="text-sm">Sobald Scanner-Alerts versendet werden, erscheint hier automatisch der Track-Record. Zeitraum vergrößern (90 Tage) kann helfen.</div>
+                </div>
+            )}
+
+            {perf && !forbidden && hasSignals && (
+                <>
+                    {/* Kopf-Karten */}
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                        {headCards.map(c => (
+                            <div key={c.label} className="card border border-gray-200 rounded-lg p-4">
+                                <div className="text-xs text-gray-500">{c.label}</div>
+                                <div className={`text-2xl font-bold ${c.cls}`}>{c.value}</div>
+                                {c.hint && <div className="text-[10px] text-gray-400 mt-0.5">{c.hint}</div>}
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Tabelle pro Scanner */}
+                    <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                        <h3 className="font-semibold text-gray-900 mb-3">Performance pro Scanner</h3>
+                        <table className="w-full text-sm">
+                            <thead className="border-b border-gray-200 text-gray-500">
+                                <tr>
+                                    <th className="text-left py-2 px-1">Scanner</th>
+                                    <th className="text-right py-2 px-1">Signale</th>
+                                    <th className="text-right py-2 px-1">TP1</th>
+                                    <th className="text-right py-2 px-1">TP2</th>
+                                    <th className="text-right py-2 px-1">Stop</th>
+                                    <th className="text-right py-2 px-1">Offen</th>
+                                    <th className="text-right py-2 px-1">Hit-Rate</th>
+                                    <th className="text-right py-2 px-1">Ø R</th>
+                                    <th className="text-right py-2 px-1">Σ R</th>
+                                    <th className="text-right py-2 px-1">Alerts/Tag</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {scanners.map(([scanner, s]) => (
+                                    <tr key={scanner} className={`border-b border-gray-100 ${(s.sum_r ?? 0) > 0 ? 'bg-green-50' : (s.sum_r ?? 0) < 0 ? 'bg-red-50' : ''}`}>
+                                        <td className="py-2 px-1 font-medium text-gray-900">{scanner}</td>
+                                        <td className="py-2 px-1 text-right">{s.signals ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-green-700">{s.tp1_hit ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-green-700 font-semibold">{s.tp2_hit ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-red-600">{s.stop_hit ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-blue-600">{s.open ?? 0}</td>
+                                        <td className="py-2 px-1 text-right font-medium">{fmtPct(s.win_rate_pct)}</td>
+                                        <td className={`py-2 px-1 text-right ${rTone(s.avg_r)}`}>{fmtR(s.avg_r)}</td>
+                                        <td className={`py-2 px-1 text-right font-semibold ${rTone(s.sum_r)}`}>{fmtR(s.sum_r)}</td>
+                                        <td className="py-2 px-1 text-right text-gray-500">{(s.alerts_per_day ?? 0).toFixed(2)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Letzte Signale */}
+                    <div className="card border border-gray-200 p-6 rounded-lg">
+                        <h3 className="font-semibold text-gray-900 mb-3">Letzte Signale</h3>
+                        {recent.length === 0 && <div className="text-sm text-gray-400">Keine Signale im Zeitfenster.</div>}
+                        <div className="divide-y divide-gray-100">
+                            {recent.map(sig => {
+                                const badge = statusBadge(sig);
+                                return (
+                                    <div key={sig.id} className="flex flex-wrap items-center gap-2 py-2 text-sm">
+                                        <span className="text-xs text-gray-400 w-20">{String(sig.created_at || '').slice(0, 10)}</span>
+                                        <span className="font-semibold text-gray-900 w-20">{sig.ticker}</span>
+                                        <span className="text-xs text-gray-500 flex-1 min-w-[90px]">{sig.scanner}</span>
+                                        <span className={`text-xs px-2 py-0.5 rounded font-medium ${String(sig.direction).toLowerCase() === 'short' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-700'}`}>{String(sig.direction || 'long').toUpperCase()}</span>
+                                        <span className={`text-xs px-2 py-0.5 rounded font-semibold ${badge.cls}`}>{badge.label}</span>
+                                        <span className={`w-16 text-right font-medium ${rTone(sig.r_realized)}`}>{sig.r_realized === null || sig.r_realized === undefined ? '—' : fmtR(sig.r_realized)}</span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </>
+            )}
+
+            {!forbidden && (
+                <div className="text-xs text-gray-400">
+                    Auswertung: First-Touch konservativ (Stop vor Ziel), TP1 = halbe Position. Crypto stündlicher Spot-Check.
+                </div>
+            )}
         </div>
     );
 }

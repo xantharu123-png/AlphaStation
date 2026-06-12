@@ -95,6 +95,11 @@ STATUS_STOP = "STOP_HIT"
 STATUS_TP2 = "TP2_HIT"
 STATUS_EXPIRED = "EXPIRED"
 STATUS_UNTRACKED = "UNTRACKED"
+#: Virtueller Transitions-Status (NIE in der DB): TP1 wurde in DIESEM
+#: Eval-Lauf erreicht, das Signal bleibt aber OPEN (Teilgewinn, Rest
+#: Freiroll Richtung TP2). Nur fuer result['transitions'] der Funktion
+#: evaluate_open_signals — Konsument: Exit-Update-Mails in bg_service.
+STATUS_TP1_OPEN = "TP1_HIT_OPEN"
 
 STOCK_EXPIRY_BARS = 5       # Handelstage (= Daily-Bars) nach dem Alert
 CRYPTO_EXPIRY_HOURS = 120   # Stunden nach created_at
@@ -645,6 +650,55 @@ def _apply_signal_updates(signal_id: int, updates: Dict[str, Any]) -> None:
             conn.execute("UPDATE signals SET %s WHERE id = ?" % columns, values)
 
 
+class _EvalResult(dict):
+    """Rueckgabe-Dict von evaluate_open_signals inkl. 'transitions'-Liste.
+
+    ABWAERTSKOMPATIBILITAET: Bestands-Aufrufer und -Tests vergleichen das
+    Ergebnis strikt mit {'evaluated','closed','errors'}-Dicts (z.B.
+    ``result == {"evaluated": 1, "closed": 1, "errors": 0}``). Der
+    Gleichheitsvergleich ignoriert deshalb beidseitig den Schluessel
+    'transitions'. ALLE anderen Zugriffe (Iteration, .get, ['transitions'],
+    'in', json.dumps) sehen den Schluessel normal.
+    """
+
+    def __eq__(self, other: Any) -> Any:
+        if not isinstance(other, dict):
+            return NotImplemented
+        self_cmp = {k: v for k, v in self.items() if k != "transitions"}
+        other_cmp = {k: v for k, v in other.items() if k != "transitions"}
+        return self_cmp == other_cmp
+
+    def __ne__(self, other: Any) -> Any:
+        eq = self.__eq__(other)
+        return eq if eq is NotImplemented else not eq
+
+
+def _transition_record(
+    sig: Dict[str, Any],
+    new_status: str,
+    updates: Dict[str, Any],
+    tp1_hit_this_run: bool,
+) -> Dict[str, Any]:
+    """Transitions-Dict fuer result['transitions'] bauen (Kontrakt s. Docstring
+    von evaluate_open_signals). Plan-Level stammen aus der DB-Row, r_realized
+    aus den Updates dieses Laufs (None bei TP1_HIT_OPEN/UNTRACKED)."""
+    return {
+        "id": int(sig["id"]),
+        "ticker": sig.get("ticker"),
+        "scanner": sig.get("scanner"),
+        "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
+        "old_status": str(sig.get("status") or STATUS_OPEN),
+        "new_status": new_status,
+        "entry": _to_float(sig.get("entry")),
+        "stop": _to_float(sig.get("stop")),
+        "tp1": _to_float(sig.get("tp1")),
+        "tp2": _to_float(sig.get("tp2")),
+        "r_realized": _to_float(updates.get("r_realized")),
+        "tp1_hit_this_run": bool(tp1_hit_this_run),
+        "asset_class": str(sig.get("asset_class") or "stock"),
+    }
+
+
 def evaluate_open_signals(
     stock_daily_fetcher: Optional[Callable[[str, str], Any]] = None,
     crypto_price_fetcher: Optional[Callable[[str], Any]] = None,
@@ -665,13 +719,27 @@ def evaluate_open_signals(
             Default ist die aktuelle UTC-Zeit.
 
     Returns:
-        {'evaluated': n, 'closed': n, 'errors': n}
+        {'evaluated': n, 'closed': n, 'errors': n, 'transitions': [...]}
           evaluated — Signale, fuer die ein Bewertungsversuch lief (passender
                       Fetcher injiziert; ohne Fetcher wird uebersprungen,
                       ohne dass ein Fehlversuch zaehlt)
           closed    — Signale, die in diesem Lauf einen terminalen Status
                       erreichten (STOP_HIT/TP2_HIT/EXPIRED/UNTRACKED)
           errors    — Fehlversuche (Fetcher lieferte None/[]/Exception)
+          transitions — ein Dict je Statusaenderung DIESES Laufs (nur
+                      erfolgreich persistierte Updates), Konsument sind die
+                      Exit-Update-Mails in bg_service:
+                      {'id', 'ticker', 'scanner', 'direction', 'old_status',
+                       'new_status', 'entry', 'stop', 'tp1', 'tp2',
+                       'r_realized', 'tp1_hit_this_run', 'asset_class'}
+                      new_status: STOP_HIT/TP2_HIT/EXPIRED/UNTRACKED oder
+                      der virtuelle Status 'TP1_HIT_OPEN' (TP1 in diesem Lauf
+                      erreicht, Signal bleibt OPEN). r_realized ist None bei
+                      TP1_HIT_OPEN/UNTRACKED. tp1_hit_this_run ist auch bei
+                      TP2_HIT/EXPIRED True, wenn TP1 erst in diesem Lauf fiel.
+                      ABWAERTSKOMPATIBEL: Gleichheitsvergleiche des
+                      Rueckgabe-Dicts ignorieren 'transitions' (_EvalResult),
+                      Bestands-Aufrufer sehen nur ein zusaetzliches Feld.
 
     Aktien werden praezise ueber Daily-OHLC der Folgetage bewertet (Daily-Bars
     implizieren US-Handelstage), Crypto nur als Best-Effort-Spot-Check des
@@ -679,7 +747,7 @@ def evaluate_open_signals(
     zwischen zwei Laeufen). Crypto-Expiry: 120h nach created_at; Aktien-Expiry:
     5 Daily-Bars nach Alert.
     """
-    result = {"evaluated": 0, "closed": 0, "errors": 0}
+    result = _EvalResult({"evaluated": 0, "closed": 0, "errors": 0, "transitions": []})
     try:
         now_dt = _coerce_now(now)
         with _DB_LOCK:
@@ -718,6 +786,24 @@ def evaluate_open_signals(
             except Exception as exc:
                 logger.warning("Signal %s: Update fehlgeschlagen: %s", sig.get("id"), exc)
                 result["errors"] += 1
+            else:
+                # Transition nur fuer PERSISTIERTE Aenderungen melden: echter
+                # Statuswechsel ODER TP1 in diesem Lauf erreicht (Signal
+                # bleibt OPEN -> virtueller Status TP1_HIT_OPEN).
+                tp1_hit_this_run = bool(updates.get("tp1_hit_at")) and not sig.get("tp1_hit_at")
+                if new_status and new_status != STATUS_OPEN:
+                    transition_status = new_status
+                elif tp1_hit_this_run:
+                    transition_status = STATUS_TP1_OPEN
+                else:
+                    transition_status = None
+                if transition_status:
+                    try:
+                        result["transitions"].append(
+                            _transition_record(sig, transition_status, updates, tp1_hit_this_run)
+                        )
+                    except Exception as exc:  # Defensive: darf Eval-Loop nie abbrechen
+                        logger.warning("Signal %s: Transition nicht erfasst: %s", sig.get("id"), exc)
     except Exception as exc:
         logger.warning("evaluate_open_signals fehlgeschlagen: %s", exc)
         result["errors"] += 1
