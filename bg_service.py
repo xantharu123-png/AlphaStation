@@ -32,7 +32,6 @@ import smtplib
 import re
 import html
 import atexit
-import fcntl
 import tempfile
 import math
 import glob
@@ -41,6 +40,26 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+try:
+    import fcntl
+except ImportError:
+    class _FcntlFallback:
+        LOCK_EX = 0
+        LOCK_UN = 0
+
+        @staticmethod
+        def flock(*_args, **_kwargs):
+            return None
+
+    fcntl = _FcntlFallback()
 
 # ── Pfade ──
 BASE_DIR = Path(__file__).parent

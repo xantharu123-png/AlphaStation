@@ -32,6 +32,13 @@ try:
     import stripe
     HAS_STRIPE = True
 except ImportError:
+    class _StripeFallback:
+        class Webhook:
+            @staticmethod
+            def construct_event(*_args, **_kwargs):
+                raise RuntimeError("stripe package is not installed")
+
+    stripe = _StripeFallback()
     HAS_STRIPE = False
     print("[Auth] WARNING: stripe not installed — run: pip install stripe")
 

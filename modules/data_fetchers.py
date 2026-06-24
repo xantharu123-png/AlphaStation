@@ -532,7 +532,15 @@ SHARED_BUDGET_MAX_WAIT_S = 65.0  # Schutz: nie länger als ~1 Fenster blockieren
 try:
     import fcntl as _fcntl  # Linux/Unix — auf Windows-Dev-Umgebung nicht verfügbar
 except ImportError:  # pragma: no cover
-    _fcntl = None
+    class _NoopFcntl:
+        LOCK_EX = 2
+        LOCK_UN = 8
+
+        @staticmethod
+        def flock(*_args, **_kwargs):
+            return None
+
+    _fcntl = _NoopFcntl()
 
 # Nach erstem flock-/IO-Fehler: permanenter Fallback auf In-Prozess-Limiter
 # (einmalige Warnung, niemals crashen, niemals Calls verlieren).
@@ -1717,5 +1725,4 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
         
     except Exception as e:
         return None
-
 
