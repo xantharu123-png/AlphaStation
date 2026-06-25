@@ -2249,7 +2249,7 @@ def _format_alert_timing_label(value: Any, market_type: str = "stocks") -> str:
     raw = str(value or "").strip()
     key = raw.upper()
     labels = {
-        "SWING_SETUP": "Swing-Plan",
+        "SWING_SETUP": "Swing-Setup aktiv",
         "TRADEABLE": "Tradeable",
         "JETZT_TRADEN": "Jetzt handelbar",
         "WAIT_FOR_RETEST": "Retest abwarten",
@@ -2261,7 +2261,7 @@ def _format_alert_timing_label(value: Any, market_type: str = "stocks") -> str:
     if key in labels:
         return labels[key]
     if not raw and market_type == "stocks":
-        return "Swing-Plan"
+        return "Swing-Setup aktiv"
     return raw.replace("_", " ").title()[:40]
 
 
@@ -5727,7 +5727,7 @@ def _brand_email_html(subject: str, body_html: str) -> str:
 # "info" = Status/Test/Marktkontext ohne Trade-Bezug.
 _MAIL_CLASS_SUBJECT_PREFIXES = {
     "trade": "\U0001F6A8 JETZT: ",
-    "swing_trade": "\U0001F4C8 SWING: ",
+    "swing_trade": "\U0001F6A8 JETZT SWING: ",
     "watch": "\U0001F441️ WATCH: ",
     "info": "ℹ️ ",
 }
@@ -5743,6 +5743,7 @@ def _apply_mail_class_subject(subject: str, mail_class: str, trade_horizon: str 
     prefix = _MAIL_CLASS_SUBJECT_PREFIXES.get(cls, _MAIL_CLASS_SUBJECT_PREFIXES["trade"])
     text = str(subject or "").strip()
     legacy_markers = (
+        "\U0001F6A8 JETZT SWING:",
         "\U0001F6A8 JETZT:",
         "\U0001F4C8 SWING:",
         "\U0001F441️ WATCH:",

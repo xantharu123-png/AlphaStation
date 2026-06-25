@@ -374,12 +374,13 @@ def test_h2_no_double_emoji_for_legacy_subjects():
     assert once.count("\U0001F6A8") == 1
     once_swing = api._apply_mail_class_subject("Swing Foo", "swing_trade")
     assert api._apply_mail_class_subject(once_swing, "swing_trade") == once_swing
-    assert once_swing.count("\U0001F4C8") == 1
+    assert once_swing.count("\U0001F6A8") == 1
+    assert "JETZT SWING:" in once_swing
 
 
 def test_h2_strategy_swing_timing_label_is_human_readable():
-    assert api._format_alert_timing_label("SWING_SETUP", "stocks") == "Swing-Plan"
-    assert api._format_alert_timing_label("", "stocks") == "Swing-Plan"
+    assert api._format_alert_timing_label("SWING_SETUP", "stocks") == "Swing-Setup aktiv"
+    assert api._format_alert_timing_label("", "stocks") == "Swing-Setup aktiv"
     assert api._format_alert_timing_label("WAIT_FOR_RETEST", "stocks") == "Retest abwarten"
 
 
@@ -410,7 +411,7 @@ def test_h2_stock_strategy_swing_mail_uses_swing_class_and_label(monkeypatch):
     assert "Aktien Strategie Swing" in subject
     assert kwargs["mail_class"] == "swing_trade"
     assert kwargs["trade_horizon"] == "swing"
-    assert "Swing-Plan" in body
+    assert "Swing-Setup aktiv" in body
     assert ">SWING_SETUP<" not in body
 
 
