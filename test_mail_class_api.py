@@ -351,8 +351,11 @@ def test_h1_good_entry_score_caps_to_entry_score():
 
 def test_h2_subject_prefixes_per_mail_class():
     assert api._apply_mail_class_subject("3 Top-Setups", "trade") == api._MAIL_CLASS_SUBJECT_PREFIXES["trade"] + "3 Top-Setups"
+    assert api._apply_mail_class_subject("Aktien Strategie Swing", "swing_trade") == api._MAIL_CLASS_SUBJECT_PREFIXES["swing_trade"] + "Aktien Strategie Swing"
     assert api._apply_mail_class_subject("Crypto Retest-Zonen (2 Kandidaten)", "watch") == api._MAIL_CLASS_SUBJECT_PREFIXES["watch"] + "Crypto Retest-Zonen (2 Kandidaten)"
     assert api._apply_mail_class_subject("Status", "info") == api._MAIL_CLASS_SUBJECT_PREFIXES["info"] + "Status"
+    # trade_horizon ist Routing/Subscriber-Logik; der sichtbare Betreff haengt an mail_class.
+    assert api._apply_mail_class_subject("Swing ohne Klasse", "trade", trade_horizon="swing") == api._MAIL_CLASS_SUBJECT_PREFIXES["trade"] + "Swing ohne Klasse"
     # Unbekannte Klasse faellt konservativ auf "trade" zurueck
     assert api._apply_mail_class_subject("X", "unknown") == api._MAIL_CLASS_SUBJECT_PREFIXES["trade"] + "X"
 
@@ -369,6 +372,46 @@ def test_h2_no_double_emoji_for_legacy_subjects():
     once = api._apply_mail_class_subject("Foo", "trade")
     assert api._apply_mail_class_subject(once, "trade") == once
     assert once.count("\U0001F6A8") == 1
+    once_swing = api._apply_mail_class_subject("Swing Foo", "swing_trade")
+    assert api._apply_mail_class_subject(once_swing, "swing_trade") == once_swing
+    assert once_swing.count("\U0001F4C8") == 1
+
+
+def test_h2_strategy_swing_timing_label_is_human_readable():
+    assert api._format_alert_timing_label("SWING_SETUP", "stocks") == "Swing-Plan"
+    assert api._format_alert_timing_label("", "stocks") == "Swing-Plan"
+    assert api._format_alert_timing_label("WAIT_FOR_RETEST", "stocks") == "Retest abwarten"
+
+
+def test_h2_stock_strategy_swing_mail_uses_swing_class_and_label(monkeypatch):
+    sent = []
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True})
+    monkeypatch.setattr(api, "_enrich_stock_alert_5m_state", lambda scanner_key, row, strategy_name: row)
+    monkeypatch.setattr(
+        api,
+        "_classify_alert_candidate",
+        lambda scanner_key, row, now: {
+            "alertable_now": True,
+            "suppression_reasons": [],
+            "cooldown_key": "stock_strategy:TEST",
+            "ticker": "TEST",
+            "grade": "A",
+            "score": 88,
+            "price": 10.0,
+            "rvol": 1.8,
+        },
+    )
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body, kwargs)) or True)
+
+    api._send_strategy_scan_alerts("Momentum Breakout Long", [{"entry_quality": "SWING_SETUP"}], market_type="stocks")
+
+    assert len(sent) == 1
+    subject, body, kwargs = sent[0]
+    assert "Aktien Strategie Swing" in subject
+    assert kwargs["mail_class"] == "swing_trade"
+    assert kwargs["trade_horizon"] == "swing"
+    assert "Swing-Plan" in body
+    assert ">SWING_SETUP<" not in body
 
 
 def test_h2_send_email_alert_records_prefixed_subject(monkeypatch):

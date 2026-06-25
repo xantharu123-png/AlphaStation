@@ -2240,6 +2240,31 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     )
 
 
+def _format_alert_timing_label(value: Any, market_type: str = "stocks") -> str:
+    """Human-readable timing label for alert tables.
+
+    Scanner internals use machine states like SWING_SETUP. Emails should tell a
+    trader what to do with the signal, not leak implementation labels.
+    """
+    raw = str(value or "").strip()
+    key = raw.upper()
+    labels = {
+        "SWING_SETUP": "Swing-Plan",
+        "TRADEABLE": "Tradeable",
+        "JETZT_TRADEN": "Jetzt handelbar",
+        "WAIT_FOR_RETEST": "Retest abwarten",
+        "WAIT_FOR_TRIGGER": "Trigger abwarten",
+        "WAIT_FOR_CONTINUATION": "Fortsetzung abwarten",
+        "WATCH_ONLY": "Beobachten",
+        "NO_TRADE": "Nicht handeln",
+    }
+    if key in labels:
+        return labels[key]
+    if not raw and market_type == "stocks":
+        return "Swing-Plan"
+    return raw.replace("_", " ").title()[:40]
+
+
 def _alert_trade_plan_ok(
     row: Dict[str, Any],
     min_rr: float = _ALERT_MIN_LEVEL_RR,
@@ -5702,12 +5727,13 @@ def _brand_email_html(subject: str, body_html: str) -> str:
 # "info" = Status/Test/Marktkontext ohne Trade-Bezug.
 _MAIL_CLASS_SUBJECT_PREFIXES = {
     "trade": "\U0001F6A8 JETZT: ",
+    "swing_trade": "\U0001F4C8 SWING: ",
     "watch": "\U0001F441️ WATCH: ",
     "info": "ℹ️ ",
 }
 
 
-def _apply_mail_class_subject(subject: str, mail_class: str) -> str:
+def _apply_mail_class_subject(subject: str, mail_class: str, trade_horizon: str = "") -> str:
     """AUDIT H-2: Klassen-Praefix voranstellen ohne Emoji-Stapelung.
 
     Bereits vorhandene Klassen-/Legacy-Emojis am Betreffanfang werden ersetzt
@@ -5718,11 +5744,13 @@ def _apply_mail_class_subject(subject: str, mail_class: str) -> str:
     text = str(subject or "").strip()
     legacy_markers = (
         "\U0001F6A8 JETZT:",
+        "\U0001F4C8 SWING:",
         "\U0001F441️ WATCH:",
         "\U0001F441 WATCH:",
         "ℹ️",
         "ℹ",
         "\U0001F6A8",
+        "\U0001F4C8",
         "\U0001F441️",
         "\U0001F441",
         "\U0001F514",
@@ -5777,7 +5805,7 @@ def _send_email_alert(
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
     # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
-    subject = _apply_mail_class_subject(subject, mail_class)
+    subject = _apply_mail_class_subject(subject, mail_class, trade_horizon=trade_horizon)
     if _email_has_blocked_etf_content(subject, body_html):
         print(f"[Alert] SKIP (ETF/ETP-Inhalt blockiert): {subject}")
         _record_email_event(subject, "skipped", "blocked_etf_content")
@@ -5835,10 +5863,10 @@ def _send_email_alert(
                     server.sendmail(gmail_user, recipients, msg.as_string())
             print(f"[Alert] Email gesendet: {subject}")
             _record_email_event(subject, "sent")
-            # Telegram-Spiegel NUR fuer handelbare Alerts (mail_class="trade").
+            # Telegram-Spiegel NUR fuer handelbare Alerts (trade/swing_trade).
             # Kontrakt: send_telegram_alert wirft nie; zusaetzlich defensiv,
             # damit der Mail-Erfolg nie am Telegram-Hook haengt.
-            if mail_class == "trade" and is_telegram_configured and send_telegram_alert:
+            if str(mail_class or "").strip().lower() in {"trade", "swing_trade"} and is_telegram_configured and send_telegram_alert:
                 try:
                     if is_telegram_configured():
                         send_telegram_alert(subject, telegram_text or "")
@@ -6166,6 +6194,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     rows = ""
     email_alerts = alerts[:_ALERT_EMAIL_MAX_ROWS]
     for a in email_alerts:
+        timing_label = html.escape(_format_alert_timing_label(a.get("entry_quality"), market_type))
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
@@ -6175,7 +6204,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["entry_quality"]}</td></tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{timing_label}</td></tr>'
         )
     label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie Swing"
     horizon_note = (
@@ -6223,7 +6252,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
     _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
-    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: mail_class bleibt "trade"
+    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade
     if sent:
         for alert in email_alerts:
             if alert.get("cooldown_key"):
