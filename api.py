@@ -9513,6 +9513,85 @@ def _calc_recent_atr(bars: List[Dict[str, Any]], period: int = 14) -> float:
     return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
 
 
+def _cup_handle_quality_band(value: float, ideal_low: float, ideal_high: float,
+                             valid_low: float, valid_high: float) -> float:
+    """0..1 score: full inside ideal band, fades toward the valid edge."""
+    try:
+        value = float(value)
+    except Exception:
+        return 0.0
+    if ideal_low <= value <= ideal_high:
+        return 1.0
+    if value < ideal_low:
+        if ideal_low <= valid_low:
+            return 0.0
+        return _clamp_float((value - valid_low) / (ideal_low - valid_low), 0.0, 1.0)
+    if valid_high <= ideal_high:
+        return 0.0
+    return _clamp_float((valid_high - value) / (valid_high - ideal_high), 0.0, 1.0)
+
+
+def _score_cup_handle_breakout_quality(
+    *,
+    depth_pct: float,
+    lip_ratio: float,
+    handle_depth_pct: float,
+    handle_position: float,
+    rvol: float,
+    extension_pct: float,
+    rr: float,
+    rounded_bottom_bars: int,
+    handle_volume_contracts: bool,
+) -> Tuple[int, Dict[str, float]]:
+    """
+    Calibrated Cup-&-Handle quality score.
+
+    Gates say whether the pattern is valid. This score says whether a valid
+    pattern is acceptable (80s) or genuinely elite (90s). The previous additive
+    score started too high and saturated nearly every match at 90+.
+    """
+    depth_q = _cup_handle_quality_band(depth_pct, 18.0, 30.0, 10.0, 45.0)
+    symmetry_q = _clamp_float(1.0 - (abs(1.0 - lip_ratio) / 0.14), 0.0, 1.0)
+    handle_depth_q = _cup_handle_quality_band(handle_depth_pct, 4.0, 10.0, 1.0, 16.0)
+    handle_position_q = _clamp_float((handle_position - 0.45) / 0.30, 0.0, 1.0)
+    rvol_q = _clamp_float((rvol - 1.5) / 1.5, 0.0, 1.0)
+    extension_q = (
+        1.0 if -0.25 <= extension_pct <= 2.5
+        else 0.65 if extension_pct <= 5.0
+        else 0.25 if extension_pct <= 8.0
+        else 0.0
+    )
+    rr_q = 0.35 + 0.65 * _clamp_float((rr - 1.8) / 1.2, 0.0, 1.0)
+    rounded_q = _clamp_float((rounded_bottom_bars - 3) / 4.0, 0.0, 1.0)
+    dryup_q = 1.0 if handle_volume_contracts else 0.0
+
+    components = {
+        "depth": round(depth_q, 3),
+        "symmetry": round(symmetry_q, 3),
+        "handle_depth": round(handle_depth_q, 3),
+        "handle_position": round(handle_position_q, 3),
+        "breakout_volume": round(rvol_q, 3),
+        "extension": round(extension_q, 3),
+        "risk_reward": round(rr_q, 3),
+        "rounded_bottom": round(rounded_q, 3),
+        "volume_dryup": round(dryup_q, 3),
+    }
+
+    score = (
+        52.0
+        + depth_q * 6.0
+        + symmetry_q * 7.0
+        + handle_depth_q * 7.0
+        + handle_position_q * 5.0
+        + rvol_q * 8.0
+        + extension_q * 5.0
+        + rr_q * 5.0
+        + rounded_q * 2.0
+        + dryup_q * 3.0
+    )
+    return int(_clamp_float(round(score), 0, 100)), components
+
+
 def _detect_cup_handle_breakout(
     daily_bars: List[Dict[str, Any]],
     current_price: Optional[float] = None,
@@ -9698,43 +9777,28 @@ def _detect_cup_handle_breakout(
             if rr < 1.8 or live_rr < 1.4:
                 continue
 
-            score = 50.0
-            if 12 <= depth_pct <= 32:
-                score += 15
-            elif depth_pct <= 40:
-                score += 8
-            score += max(0.0, 10.0 - abs(1.0 - lip_ratio) * 50.0)
-            if 3 <= handle_depth_pct <= 12:
-                score += 10
-            elif handle_depth_pct <= 16:
-                score += 5
-            if rvol >= 2.0:
-                score += 12
-            elif rvol >= 1.5:
-                score += 9
-            # AUDIT N-2: toter "elif rvol >= 1.1"-Zweig entfernt — das harte
-            # RVOL>=1.5-Gate weiter oben macht ihn unerreichbar.
-            if extension_pct <= 2.5:
-                score += 10
-            elif extension_pct <= 5:
-                score += 5
-            if rr >= 2.5:
-                score += 8
-            elif rr >= 1.8:
-                score += 4
-            if handle_volume_contracts:
-                score += 6
-            if rounded_bottom_bars >= 5:
-                score += 4
-
+            handle_position = (handle_low - bottom) / depth_abs if depth_abs > 0 else 0.0
+            score, score_components = _score_cup_handle_breakout_quality(
+                depth_pct=depth_pct,
+                lip_ratio=lip_ratio,
+                handle_depth_pct=handle_depth_pct,
+                handle_position=handle_position,
+                rvol=rvol,
+                extension_pct=extension_pct,
+                rr=rr,
+                rounded_bottom_bars=rounded_bottom_bars,
+                handle_volume_contracts=handle_volume_contracts,
+            )
             score = int(_clamp_float(round(score), 0, 100))
             if score < 80:
                 continue
 
             match = {
                 "score": score,
+                "score_components": score_components,
                 "cup_depth_pct": round(depth_pct, 2),
                 "handle_depth_pct": round(handle_depth_pct, 2),
+                "handle_position": round(handle_position, 3),
                 "cup_lip": _round_level_price(cup_lip),
                 "cup_bottom": _round_level_price(bottom),
                 "handle_low": _round_level_price(handle_low),

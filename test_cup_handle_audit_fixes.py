@@ -303,15 +303,30 @@ def test_m3_structural_stop_wider_than_10pct_rejected():
 # M-4 — Grade-Spreizung
 # ---------------------------------------------------------------------------
 
+def test_m4_detector_score_calibrates_medium_vs_elite():
+    elite = api._detect_cup_handle_breakout(_cup_handle_bars(), current_price=101.7)
+    medium = api._detect_cup_handle_breakout(
+        _cup_handle_bars(last_close=104.1, last_volume=1_800_000, handle_vol=1_050_000),
+        current_price=104.1,
+    )
+
+    assert elite is not None and medium is not None
+    assert 90 <= elite["score"] <= 100
+    assert 80 <= medium["score"] < 90
+    assert medium["score_components"]["breakout_volume"] < elite["score_components"]["breakout_volume"]
+    assert medium["handle_volume_contracts"] is False
+
+
 def test_m4_grade_spread_a_for_85_s_for_92(monkeypatch):
     _mock_mail_env(monkeypatch, allowed=False)
-    # Pattern-Score der Fixture ist 100 => final = int(0.2*base + 80).
+    # Kalibrierter Pattern-Score der Fixture ist 95 => final spreizt echte
+    # A-/S-Qualitaet statt alles automatisch zu S zu machen.
     row_a = api._apply_cup_handle_strategy_filter(
         _mk_candidate(base_score=25), {"min_dollar_volume": 2_000_000}
     )
-    assert row_a is not None and row_a["score"] == 85 and row_a["grade"] == "A"
+    assert row_a is not None and row_a["score"] == 81 and row_a["grade"] == "A"
     row_s = api._apply_cup_handle_strategy_filter(
-        _mk_candidate(base_score=60), {"min_dollar_volume": 2_000_000}
+        _mk_candidate(base_score=82), {"min_dollar_volume": 2_000_000}
     )
     assert row_s is not None and row_s["score"] == 92 and row_s["grade"] == "S"
     assert row_a["grade"] in {"S", "A"} and row_s["grade"] in {"S", "A"}  # Bestands-Kompatibilitaet

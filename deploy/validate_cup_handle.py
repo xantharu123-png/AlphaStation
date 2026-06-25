@@ -368,8 +368,9 @@ def print_report(
         for year in sorted({str(r["date"])[:4] for r in rows}):
             _print_block(year, [r for r in rows if str(r["date"]).startswith(year)])
         print()
-        print("-- (c) nach Score-Bucket (Grade-Leiter: A=80-89, S=90+) --")
-        _print_block("80-89 (A)", [r for r in rows if int(r["score"]) < 90])
+        print("-- (c) nach Score-Bucket (kalibriert: 80-84 / 85-89 / 90+) --")
+        _print_block("80-84", [r for r in rows if 80 <= int(r["score"]) <= 84])
+        _print_block("85-89", [r for r in rows if 85 <= int(r["score"]) <= 89])
         _print_block("90+   (S)", [r for r in rows if int(r["score"]) >= 90])
         print()
         ranked = sorted(rows, key=lambda r: float(r["r_realized"]), reverse=True)
