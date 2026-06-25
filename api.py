@@ -4704,6 +4704,72 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(reasons))
 
 
+def _stock_strategy_mail_quality_state(row: Dict[str, Any]) -> tuple[bool, str]:
+    """Extra quality gate for automatic stock strategy mails.
+
+    The manual strategy scanner may show broad candidates. The automatic mail
+    should be stricter: a "Momentum Breakout Long" mail must be an actual
+    breakout setup, not just a trend reclaim that scored well on raw momentum.
+    """
+    strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
+    if "momentum breakout long" not in strategy_name:
+        return True, ""
+
+    breakout_type = str(
+        row.get("Momentum_Breakout_Type")
+        or row.get("momentum_breakout_type")
+        or ""
+    ).upper()
+    if not breakout_type:
+        return True, ""
+
+    continuation_status = str(
+        row.get("Breakout_Continuation_Status")
+        or row.get("breakout_continuation_status")
+        or ""
+    ).upper()
+    continuation_score = _alert_float(
+        row.get("Breakout_Continuation_Score", row.get("breakout_continuation_score")),
+        None,
+    )
+    fakeout_risk = str(
+        row.get("Breakout_Fakeout_Risk")
+        or row.get("breakout_fakeout_risk")
+        or ""
+    ).upper()
+    close_pos = _alert_float(_alert_get_any(row, "Close_Position", "close_pos", "Range_Pos", "Range Position"))
+    rvol = _alert_float(_alert_get_any(row, "RVOL", "rvol"))
+    upper_wick = _alert_float(row.get("Upper_Wick_Pct", row.get("upper_wick_pct")))
+    breakout10 = _alert_float(row.get("Breakout_10D_Pct", row.get("breakout_10d_pct")))
+    breakout20 = _alert_float(row.get("Breakout_20D_Pct", row.get("breakout_20d_pct")))
+
+    if breakout_type == "TREND_RECLAIM":
+        return False, "momentum_mail_blocked_trend_reclaim_not_breakout"
+    if breakout_type not in {"20D_HIGH_BREAKOUT", "10D_HIGH_BREAKOUT", "RANGE_BREAKOUT"}:
+        return False, "momentum_mail_blocked_unknown_breakout_type"
+    if continuation_status and continuation_status != "CONTINUATION_OK":
+        return False, "momentum_mail_blocked_breakout_continuation_watch"
+    if continuation_score is not None and continuation_score < 78:
+        return False, "momentum_mail_blocked_breakout_quality_low"
+    if fakeout_risk in {"HIGH", "CRITICAL"}:
+        return False, "momentum_mail_blocked_fakeout_risk"
+    if upper_wick is not None and upper_wick >= 38:
+        return False, "momentum_mail_blocked_upper_wick"
+    if close_pos is not None and close_pos < 0.65:
+        return False, "momentum_mail_blocked_not_holding_upper_range"
+    if rvol is not None and rvol < 1.5:
+        return False, "momentum_mail_blocked_rvol_below_breakout_floor"
+    if breakout_type == "RANGE_BREAKOUT":
+        near_real_breakout = (
+            (breakout10 is not None and breakout10 >= -1.0)
+            or (breakout20 is not None and breakout20 >= -2.0)
+        )
+        if not near_real_breakout:
+            return False, "momentum_mail_blocked_range_not_near_breakout_high"
+
+    return True, ""
+
+
 def _long_entry_quality(row: Dict[str, Any]) -> str:
     reasons = _long_entry_rule_reasons(row)
     if reasons:
@@ -6148,6 +6214,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         grade_counts[grade_for_counts] = grade_counts.get(grade_for_counts, 0) + 1
         if scanner_key in _STOCK_ALERT_SCANNERS:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
+        if scanner_key == "stock_strategy":
+            mail_quality_ok, mail_quality_reason = _stock_strategy_mail_quality_state(row)
+            if not mail_quality_ok:
+                reason_key = mail_quality_reason or "stock_strategy_mail_quality_gate"
+                suppressed[reason_key] = suppressed.get(reason_key, 0) + 1
+                continue
         state = _classify_alert_candidate(scanner_key, row, now)
         if daily_close_confirmed_mode and state.get("cooldown_key"):
             # AUDIT K-2b: eigener Dedupe-Namespace fuer die Daily-Close-Mail
@@ -10571,6 +10643,18 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             _strat_score = min(_strat_score, 74)
                         elif _bq_status == "CONTINUATION_OK" and _bq_score >= 84:
                             _strat_score = min(100, _strat_score + 3)
+                    # A trend reclaim can be useful as a watch/retest candidate,
+                    # but it is not a clean momentum breakout. Keep it out of
+                    # S/A breakout mails and top-ranked "breakout" rows.
+                    if _momentum_breakout_type == "TREND_RECLAIM":
+                        _strat_score = min(_strat_score, 79)
+                    elif _momentum_breakout_type == "RANGE_BREAKOUT":
+                        _near_real_high = (
+                            (_breakout10 is not None and _breakout10 >= -1.0)
+                            or (_breakout20 is not None and _breakout20 >= -2.0)
+                        )
+                        if not _near_real_high:
+                            _strat_score = min(_strat_score, 79)
                     if not history_metrics.get("history_ok"):
                         _strat_score = min(_strat_score, 74)
                     if rvol_source != "20D_avg_volume":

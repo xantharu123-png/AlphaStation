@@ -1090,6 +1090,66 @@ def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeyp
     assert "frische 5m-Bestaetigung" not in body
 
 
+def test_stock_strategy_momentum_mail_blocks_trend_reclaim(monkeypatch, tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True})
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"TRND"}, "unit"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "TRND",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "S",
+        "score": 94,
+        "RVOL": 2.4,
+        "Preis": 20.0,
+        "Change_Pct": 4.5,
+        "Signal_Direction": "LONG",
+        "close_pos": 0.86,
+        "Momentum_Breakout_Type": "TREND_RECLAIM",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 91,
+        "Breakout_Fakeout_Risk": "LOW",
+        "Upper_Wick_Pct": 6.0,
+        "trade_setup": {"direction": "LONG", "entry": 20.0, "stop": 19.2, "tp1": 21.8, "tp2": 23.0},
+    }], "stocks")
+
+    assert sent == []
+
+
+def test_stock_strategy_momentum_mail_allows_clean_real_breakout(monkeypatch, tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True})
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BRKO"}, "unit"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "BRKO",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 88,
+        "RVOL": 2.2,
+        "Preis": 31.0,
+        "Change_Pct": 4.1,
+        "Signal_Direction": "LONG",
+        "close_pos": 0.88,
+        "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 86,
+        "Breakout_Fakeout_Risk": "LOW",
+        "Upper_Wick_Pct": 9.0,
+        "Breakout_20D_Pct": 1.2,
+        "trade_setup": {"direction": "LONG", "entry": 31.0, "stop": 29.9, "tp1": 33.4, "tp2": 35.0},
+    }], "stocks")
+
+    assert len(sent) == 1
+    assert "BRKO" in sent[0][1]
+
+
 def test_stock_strategy_swing_email_does_not_fetch_or_require_5m(monkeypatch):
     row = {
         "Ticker": "SWNG",
