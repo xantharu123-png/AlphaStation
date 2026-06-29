@@ -1119,6 +1119,68 @@ def test_stock_strategy_momentum_mail_blocks_trend_reclaim(monkeypatch, tmp_path
     assert sent == []
 
 
+def test_stock_strategy_momentum_mail_blocks_already_hit_tp1(monkeypatch, tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True})
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"WSHP"}, "unit"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "WSHP",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "S",
+        "score": 93,
+        "RVOL": 4.0,
+        "Preis": 8.48,
+        "Change_Pct": 6.0,
+        "Signal_Direction": "LONG",
+        "close_pos": 0.82,
+        "Day_High": 10.68,
+        "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 91,
+        "Breakout_Fakeout_Risk": "LOW",
+        "Upper_Wick_Pct": 8.0,
+        "Breakout_20D_Pct": 1.4,
+        "trade_setup": {"direction": "LONG", "entry": 8.48, "stop": 7.615, "tp1": 10.68, "tp2": 15.23},
+    }], "stocks")
+
+    assert sent == []
+
+
+def test_stock_strategy_momentum_mail_blocks_rejected_spike(monkeypatch, tmp_path):
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True})
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SPYK"}, "unit"))
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "SPYK",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "S",
+        "score": 91,
+        "RVOL": 3.4,
+        "Preis": 8.50,
+        "Change_Pct": 5.8,
+        "Signal_Direction": "LONG",
+        "close_pos": 0.70,
+        "Day_High": 10.20,
+        "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 88,
+        "Breakout_Fakeout_Risk": "LOW",
+        "Upper_Wick_Pct": 15.0,
+        "Breakout_20D_Pct": 1.1,
+        "trade_setup": {"direction": "LONG", "entry": 8.50, "stop": 7.90, "tp1": 10.80, "tp2": 12.00},
+    }], "stocks")
+
+    assert sent == []
+
+
 def test_stock_strategy_momentum_mail_allows_clean_real_breakout(monkeypatch, tmp_path):
     api._EMAIL_COOLDOWN.clear()
     sent = []
@@ -1143,6 +1205,7 @@ def test_stock_strategy_momentum_mail_allows_clean_real_breakout(monkeypatch, tm
         "Breakout_Fakeout_Risk": "LOW",
         "Upper_Wick_Pct": 9.0,
         "Breakout_20D_Pct": 1.2,
+        "Day_High": 31.8,
         "trade_setup": {"direction": "LONG", "entry": 31.0, "stop": 29.9, "tp1": 33.4, "tp2": 35.0},
     }], "stocks")
 

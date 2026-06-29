@@ -1304,6 +1304,8 @@ _ALERT_SUPPRESSION_LABELS = {
     "persistent_dedupe_active": "persistenter Mail-Dedupe aktiv",
     "bearish_ticker_already_alerted": "Bear/Crash fuer diesen Ticker schon gemeldet",
     "non_common_stock_product": "kein handelbarer Common Stock/ADR",
+    "momentum_mail_blocked_tp1_already_touched_intraday": "Momentum-Mail: TP1 wurde intraday schon erreicht",
+    "momentum_mail_blocked_spike_rejected_from_high": "Momentum-Mail: Spike vom Tageshoch wurde abverkauft",
     "intraday_unconfirmed_pattern": "Pattern intraday unbestaetigt (Tageskerze laeuft) — keine Trade-Mail",
     "invalid_trade_plan": "Entry/Stop/TP ungueltig",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
@@ -4742,6 +4744,23 @@ def _stock_strategy_mail_quality_state(row: Dict[str, Any]) -> tuple[bool, str]:
     upper_wick = _alert_float(row.get("Upper_Wick_Pct", row.get("upper_wick_pct")))
     breakout10 = _alert_float(row.get("Breakout_10D_Pct", row.get("breakout_10d_pct")))
     breakout20 = _alert_float(row.get("Breakout_20D_Pct", row.get("breakout_20d_pct")))
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    price = _alert_float(_alert_get_any(
+        row,
+        "Preis",
+        "price",
+        "current_price",
+        default=setup.get("entry") or setup.get("Entry"),
+    ))
+    day_high = _alert_float(_alert_get_any(row, "Day_High", "day_high", "DayHigh", "High", "high"))
+    tp1 = _alert_float(_alert_get_any(
+        row,
+        "TP1",
+        "tp1",
+        "TakeProfit1",
+        "target1",
+        default=setup.get("tp1") or setup.get("TP1"),
+    ))
 
     if breakout_type == "TREND_RECLAIM":
         return False, "momentum_mail_blocked_trend_reclaim_not_breakout"
@@ -4759,6 +4778,13 @@ def _stock_strategy_mail_quality_state(row: Dict[str, Any]) -> tuple[bool, str]:
         return False, "momentum_mail_blocked_not_holding_upper_range"
     if rvol is not None and rvol < 1.5:
         return False, "momentum_mail_blocked_rvol_below_breakout_floor"
+    if day_high is not None and tp1 is not None and day_high > 0 and tp1 > 0:
+        if day_high >= tp1 * 0.995:
+            return False, "momentum_mail_blocked_tp1_already_touched_intraday"
+    if price is not None and day_high is not None and price > 0 and day_high > price:
+        pullback_from_high_pct = (day_high - price) / day_high * 100.0
+        if pullback_from_high_pct >= 8.0 and (close_pos is None or close_pos < 0.78):
+            return False, "momentum_mail_blocked_spike_rejected_from_high"
     if breakout_type == "RANGE_BREAKOUT":
         near_real_breakout = (
             (breakout10 is not None and breakout10 >= -1.0)
