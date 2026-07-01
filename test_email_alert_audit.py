@@ -1181,6 +1181,86 @@ def test_stock_strategy_momentum_mail_blocks_rejected_spike(monkeypatch, tmp_pat
     assert sent == []
 
 
+def test_stock_strategy_momentum_mail_blocks_late_session_without_daily_close():
+    ok, reason = api._stock_strategy_mail_quality_state(
+        {
+            "Strategy": "Momentum Breakout Long",
+            "RVOL": 2.8,
+            "Preis": 24.50,
+            "Change_Pct": 4.2,
+            "Signal_Direction": "LONG",
+            "close_pos": 0.91,
+            "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+            "Breakout_Continuation_Status": "CONTINUATION_OK",
+            "Breakout_Continuation_Score": 91,
+            "Breakout_Fakeout_Risk": "LOW",
+            "Upper_Wick_Pct": 5.0,
+            "Breakout_20D_Pct": 1.5,
+            "trade_setup": {"direction": "LONG", "entry": 24.5, "stop": 23.7, "tp1": 26.2, "tp2": 27.4},
+        },
+        daily_close_confirmed_mode=False,
+        market_status={"allowed": True, "session": "US_REGULAR", "market_time": "15:55"},
+        now_utc=datetime(2026, 1, 5, 20, 55, tzinfo=timezone.utc),
+    )
+
+    assert ok is False
+    assert reason == "momentum_mail_blocked_late_session_without_daily_close"
+
+
+def test_stock_strategy_momentum_mail_blocks_large_move_not_clean():
+    ok, reason = api._stock_strategy_mail_quality_state(
+        {
+            "Strategy": "Momentum Breakout Long",
+            "RVOL": 4.0,
+            "Preis": 8.48,
+            "Change_Pct": 13.1,
+            "Signal_Direction": "LONG",
+            "close_pos": 0.82,
+            "Day_High": 9.15,
+            "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+            "Breakout_Continuation_Status": "CONTINUATION_OK",
+            "Breakout_Continuation_Score": 91,
+            "Breakout_Fakeout_Risk": "LOW",
+            "Upper_Wick_Pct": 10.0,
+            "Breakout_20D_Pct": 1.4,
+            "trade_setup": {"direction": "LONG", "entry": 8.48, "stop": 7.62, "tp1": 10.68, "tp2": 15.23},
+        },
+        daily_close_confirmed_mode=False,
+        market_status={"allowed": True, "session": "US_REGULAR", "market_time": "13:05"},
+        now_utc=datetime(2026, 1, 5, 18, 5, tzinfo=timezone.utc),
+    )
+
+    assert ok is False
+    assert reason == "momentum_mail_blocked_spike_rejected_from_high"
+
+
+def test_stock_strategy_momentum_mail_allows_elite_clean_large_move():
+    ok, reason = api._stock_strategy_mail_quality_state(
+        {
+            "Strategy": "Momentum Breakout Long",
+            "RVOL": 3.1,
+            "Preis": 40.00,
+            "Change_Pct": 8.6,
+            "Signal_Direction": "LONG",
+            "close_pos": 0.94,
+            "Day_High": 40.60,
+            "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+            "Breakout_Continuation_Status": "CONTINUATION_OK",
+            "Breakout_Continuation_Score": 94,
+            "Breakout_Fakeout_Risk": "LOW",
+            "Upper_Wick_Pct": 6.0,
+            "Breakout_20D_Pct": 2.0,
+            "trade_setup": {"direction": "LONG", "entry": 40.0, "stop": 38.6, "tp1": 43.0, "tp2": 45.2},
+        },
+        daily_close_confirmed_mode=False,
+        market_status={"allowed": True, "session": "US_REGULAR", "market_time": "12:05"},
+        now_utc=datetime(2026, 1, 5, 17, 5, tzinfo=timezone.utc),
+    )
+
+    assert ok is True
+    assert reason == ""
+
+
 def test_stock_strategy_momentum_mail_allows_clean_real_breakout(monkeypatch, tmp_path):
     api._EMAIL_COOLDOWN.clear()
     sent = []

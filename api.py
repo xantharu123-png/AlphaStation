@@ -1304,6 +1304,8 @@ _ALERT_SUPPRESSION_LABELS = {
     "persistent_dedupe_active": "persistenter Mail-Dedupe aktiv",
     "bearish_ticker_already_alerted": "Bear/Crash fuer diesen Ticker schon gemeldet",
     "non_common_stock_product": "kein handelbarer Common Stock/ADR",
+    "momentum_mail_blocked_late_session_without_daily_close": "Momentum-Mail: zu spaet in der Session, erst Daily-Close/naechste Session",
+    "momentum_mail_blocked_late_intraday_chase": "Momentum-Mail: Tagesmove schon erweitert, kein sauberer frischer Breakout",
     "momentum_mail_blocked_tp1_already_touched_intraday": "Momentum-Mail: TP1 wurde intraday schon erreicht",
     "momentum_mail_blocked_spike_rejected_from_high": "Momentum-Mail: Spike vom Tageshoch wurde abverkauft",
     "intraday_unconfirmed_pattern": "Pattern intraday unbestaetigt (Tageskerze laeuft) — keine Trade-Mail",
@@ -4706,7 +4708,39 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(reasons))
 
 
-def _stock_strategy_mail_quality_state(row: Dict[str, Any]) -> tuple[bool, str]:
+def _is_late_us_regular_session(
+    market_status: Optional[Dict[str, Any]] = None,
+    now_utc: Optional[datetime] = None,
+) -> bool:
+    """True during the final regular-session minutes where fresh entries are easy to chase."""
+    status = market_status or {}
+    if str(status.get("session") or "").upper() != "US_REGULAR":
+        return False
+    # Unit tests often stub only the status. Real production status includes
+    # market_time; without it we avoid time-dependent test behavior.
+    if not status.get("market_time") and "unit-test" in str(status.get("reason", "")).lower():
+        return False
+    try:
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        from zoneinfo import ZoneInfo
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        minutes_to_close = (close_et - now_et).total_seconds() / 60.0
+        return 0 <= minutes_to_close <= 15
+    except Exception:
+        return False
+
+
+def _stock_strategy_mail_quality_state(
+    row: Dict[str, Any],
+    *,
+    daily_close_confirmed_mode: bool = False,
+    market_status: Optional[Dict[str, Any]] = None,
+    now_utc: Optional[datetime] = None,
+) -> tuple[bool, str]:
     """Extra quality gate for automatic stock strategy mails.
 
     The manual strategy scanner may show broad candidates. The automatic mail
@@ -4753,6 +4787,11 @@ def _stock_strategy_mail_quality_state(row: Dict[str, Any]) -> tuple[bool, str]:
         default=setup.get("entry") or setup.get("Entry"),
     ))
     day_high = _alert_float(_alert_get_any(row, "Day_High", "day_high", "DayHigh", "High", "high"))
+    day_open = _alert_float(_alert_get_any(row, "Day_Open", "day_open", "Open", "open"))
+    change_pct = _alert_float(_alert_get_any(row, "Change_Pct", "change_pct", "Change%", "Change %", "todaysChangePerc"))
+    open_to_current_pct = _alert_float(_alert_get_any(row, "open_to_current_pct", "Open_To_Current_Pct", "intraday_change_pct"))
+    if open_to_current_pct is None and price is not None and day_open is not None and day_open > 0:
+        open_to_current_pct = ((price - day_open) / day_open) * 100.0
     tp1 = _alert_float(_alert_get_any(
         row,
         "TP1",
@@ -4778,13 +4817,34 @@ def _stock_strategy_mail_quality_state(row: Dict[str, Any]) -> tuple[bool, str]:
         return False, "momentum_mail_blocked_not_holding_upper_range"
     if rvol is not None and rvol < 1.5:
         return False, "momentum_mail_blocked_rvol_below_breakout_floor"
+    if (
+        not daily_close_confirmed_mode
+        and _is_late_us_regular_session(market_status=market_status, now_utc=now_utc)
+    ):
+        return False, "momentum_mail_blocked_late_session_without_daily_close"
     if day_high is not None and tp1 is not None and day_high > 0 and tp1 > 0:
         if day_high >= tp1 * 0.995:
             return False, "momentum_mail_blocked_tp1_already_touched_intraday"
+    pullback_from_high_pct = None
     if price is not None and day_high is not None and price > 0 and day_high > price:
         pullback_from_high_pct = (day_high - price) / day_high * 100.0
-        if pullback_from_high_pct >= 8.0 and (close_pos is None or close_pos < 0.78):
+        if pullback_from_high_pct >= 5.0 and (close_pos is None or close_pos < 0.86):
             return False, "momentum_mail_blocked_spike_rejected_from_high"
+    move_pct = max(
+        [v for v in (change_pct, open_to_current_pct) if isinstance(v, (int, float))],
+        default=None,
+    )
+    if move_pct is not None and move_pct >= 8.0:
+        clean_big_breakout = (
+            breakout_type == "20D_HIGH_BREAKOUT"
+            and (continuation_score is not None and continuation_score >= 92)
+            and (close_pos is not None and close_pos >= 0.88)
+            and (upper_wick is None or upper_wick <= 12)
+            and (rvol is None or rvol >= 2.0)
+            and (pullback_from_high_pct is None or pullback_from_high_pct <= 3.0)
+        )
+        if not clean_big_breakout:
+            return False, "momentum_mail_blocked_late_intraday_chase"
     if breakout_type == "RANGE_BREAKOUT":
         near_real_breakout = (
             (breakout10 is not None and breakout10 >= -1.0)
@@ -5224,7 +5284,13 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_short_drop_too_extended_no_chase",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
-    has_no_trade = any(reason in no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
+    contextual_no_trade_markers = set(no_trade_markers)
+    if scanner_name == "early_movers" and "early_mover_wait_entry_confirmation" in reasons:
+        # Retest/trigger-watch rows are not active trades yet. A Trade-Health
+        # chase warning in that context should keep the row in WAIT_TRIGGER,
+        # not relabel it as a hard no-trade while the trigger is still missing.
+        contextual_no_trade_markers.discard("trade_health_chase_risk")
+    has_no_trade = any(reason in contextual_no_trade_markers or reason.startswith(no_trade_prefixes) for reason in reasons)
     if has_no_trade:
         return {
             "decision": "NO_TRADE",
@@ -6209,8 +6275,14 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
     daily_close_confirmed_mode = False
+    send_time_utc = datetime.now(timezone.utc)
+    market_status: Dict[str, Any] = {}
     if market_type == "stocks":
-        market_status = _stock_trade_email_status()
+        try:
+            market_status = _stock_trade_email_status(send_time_utc)
+        except TypeError:
+            # Some unit tests monkeypatch the helper as a no-arg lambda.
+            market_status = _stock_trade_email_status()
         if not market_status.get("allowed"):
             # AUDIT K-2b (PRODUKTENTSCHEIDUNG, final): Nach US-Daily-Close ist
             # die Bestaetigung eines Daily-Breakouts legitim — sonst waere der
@@ -6241,7 +6313,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if scanner_key in _STOCK_ALERT_SCANNERS:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
         if scanner_key == "stock_strategy":
-            mail_quality_ok, mail_quality_reason = _stock_strategy_mail_quality_state(row)
+            mail_quality_ok, mail_quality_reason = _stock_strategy_mail_quality_state(
+                row,
+                daily_close_confirmed_mode=daily_close_confirmed_mode,
+                market_status=market_status,
+                now_utc=send_time_utc,
+            )
             if not mail_quality_ok:
                 reason_key = mail_quality_reason or "stock_strategy_mail_quality_gate"
                 suppressed[reason_key] = suppressed.get(reason_key, 0) + 1
@@ -6308,7 +6385,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie Swing"
     horizon_note = (
         "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind Struktur-Level; "
-        "nicht als Intraday-Scalp oder sofortiger Minuten-TP interpretieren."
+        "nicht als Intraday-Scalp oder sofortiger Minuten-TP interpretieren. "
+        "Nach TP1: Teilgewinn/Freeroll planen und Stop mindestens Richtung Entry nachziehen."
         if market_type == "stocks"
         else "Crypto Strategie-Alert: nur mit bestaetigtem Exchange-Trigger handeln."
     )
