@@ -48,7 +48,9 @@ def test_vrvp_lifts_long_targets_to_structural_resistance():
 
     assert enriched["tp1"] > enriched["entry"]
     assert enriched["tp2"] > enriched["tp1"]
-    assert enriched["rr"] >= 1.35
+    assert enriched["rr_tp1"] >= 1.5
+    assert enriched["rr_tp2"] >= 2.4
+    assert enriched["rr"] >= 1.95
     assert enriched["vrvp_poc"] is not None
     assert "vrvp" in enriched["level_model"]
 
@@ -69,7 +71,9 @@ def test_vrvp_short_targets_remain_below_entry_and_separate():
     assert enriched["stop"] > enriched["entry"]
     assert enriched["tp1"] < enriched["entry"]
     assert enriched["tp2"] < enriched["tp1"]
-    assert enriched["rr"] >= 1.35
+    assert enriched["rr_tp1"] >= 1.5
+    assert enriched["rr_tp2"] >= 2.4
+    assert enriched["rr"] >= 1.95
     assert enriched["vrvp_poc"] is not None
 
 

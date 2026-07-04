@@ -313,7 +313,7 @@ def test_early_mover_build_never_returns_identical_tp1_tp2():
     )
 
     assert setup["tp2"] > setup["tp1"]
-    assert setup["tp2"] - setup["tp1"] >= max(setup["entry"] * 0.018, setup["risk"] * 0.45)
+    assert setup["tp2"] - setup["tp1"] >= max(setup["entry"] * 0.024, setup["risk"] * 0.55)
 
 
 def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):

@@ -252,8 +252,8 @@ def apply_vrvp_to_trade_setup(
 
     profile = _asset_profile(asset_type)
     atr_value = _safe_float(atr, 0.0) or 0.0
-    min_tp_reward = max(risk * 1.35, entry * profile["min_tp_pct"], atr_value * 0.65)
-    min_tp2_reward = max(risk * 2.15, min_tp_reward * 1.45, entry * profile["min_tp_pct"] * 1.65)
+    min_tp_reward = max(risk * 1.5, entry * profile["min_tp_pct"], atr_value * 0.70)
+    min_tp2_reward = max(risk * 2.4, min_tp_reward * 1.5, entry * profile["min_tp_pct"] * 1.8)
 
     used: List[str] = []
     # Stop only moves to a nearby VRVP invalidation zone when it does not widen
@@ -297,7 +297,7 @@ def apply_vrvp_to_trade_setup(
             selected_tp1 = (price, source)
             continue
         if selected_tp1 is not None and _distance_ok(price, entry, min_tp2_reward, side):
-            if abs(price - selected_tp1[0]) >= max(risk * 0.35, entry * 0.006):
+            if abs(price - selected_tp1[0]) >= max(risk * 0.55, entry * 0.008):
                 selected_tp2 = (price, source)
                 break
 
@@ -312,10 +312,10 @@ def apply_vrvp_to_trade_setup(
 
     # Preserve valid existing targets if VRVP has no cleaner level, but never
     # allow duplicate/invalid TP1 and TP2 after enrichment.
-    if tp1 is None or not _distance_ok(tp1, entry, max(risk * 1.05, entry * 0.004), side):
+    if tp1 is None or not _distance_ok(tp1, entry, max(risk * 1.5, entry * 0.006), side):
         tp1 = entry + risk * 1.6 if side == "LONG" else max(0.00000001, entry - risk * 1.6)
         enriched["tp1_source"] = "risk fallback after VRVP validation"
-    if tp2 is None or not _distance_ok(tp2, entry, max(abs(tp1 - entry) * 1.18, risk * 1.8), side):
+    if tp2 is None or not _distance_ok(tp2, entry, max(abs(tp1 - entry) + risk * 0.55, risk * 2.4, entry * 0.012), side):
         tp2 = entry + max(risk * 2.45, abs(tp1 - entry) * 1.35) if side == "LONG" else max(0.00000001, entry - max(risk * 2.45, abs(tp1 - entry) * 1.35))
         enriched["tp2_source"] = "risk fallback after VRVP validation"
 

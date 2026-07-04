@@ -943,6 +943,48 @@ def test_alert_classifier_blocks_invalid_trade_geometry():
     assert "invalid_trade_plan" in state["suppression_reasons"]
 
 
+def test_alert_classifier_blocks_runner_rr_that_hides_weak_tp1():
+    api._EMAIL_COOLDOWN.clear()
+    state = api._classify_alert_candidate("stock_strategy", {
+        "ticker": "BADRR",
+        "grade": "A",
+        "score": 92,
+        "rvol": 2.1,
+        "price": 10.0,
+        "change_pct": 3.4,
+        "close_pos": 0.82,
+        "direction": "LONG",
+        "entry": 10.0,
+        "stop": 9.5,
+        "tp1": 10.55,
+        "tp2": 13.5,
+    }, now=1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "trade_rr_below_threshold" in state["suppression_reasons"]
+
+
+def test_alert_classifier_blocks_tp_targets_that_are_too_close():
+    api._EMAIL_COOLDOWN.clear()
+    state = api._classify_alert_candidate("stock_strategy", {
+        "ticker": "DUP",
+        "grade": "A",
+        "score": 90,
+        "rvol": 2.0,
+        "price": 10.0,
+        "change_pct": 3.2,
+        "close_pos": 0.84,
+        "direction": "LONG",
+        "entry": 10.0,
+        "stop": 9.5,
+        "tp1": 10.75,
+        "tp2": 10.98,
+    }, now=1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "trade_rr_below_threshold" in state["suppression_reasons"]
+
+
 def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     sent = []
@@ -1496,9 +1538,9 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
                     "safety_ok": True,
                     "entry": 1.2,
                     "stop_loss": 1.5,
-                    "tp1": 0.9,
-                    "tp2": 0.6,
-                    "rr_effective": 1.5,
+                    "tp1": 0.72,
+                    "tp2": 0.45,
+                    "rr_effective": 2.05,
                     "risk_pct": 25,
                     "confirmation_ok": True,
                     "continuation_risk": False,

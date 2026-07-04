@@ -1007,9 +1007,12 @@ _ALERT_BREAKOUT_STRATEGY_SCANNERS = {"stock_strategy", "strategy_scan"}
 # AUDIT H-1: "cup" zusaetzlich aufgenommen (cup_handle_breakout matcht zwar
 # schon ueber "breakout", aber der Floor darf nicht an einer Umbenennung haengen).
 _ALERT_BREAKOUT_STRATEGY_TOKENS = ("breakout", "momentum", "cup")
-_ALERT_MIN_LEVEL_RR = 1.0
+_ALERT_MIN_LEVEL_RR = 1.5
 _ALERT_RUNNER_RR_CAP = 5.0
-_ALERT_MIN_PRIMARY_TP_RR = 1.0
+_ALERT_MIN_PRIMARY_TP_RR = 1.5
+_ALERT_MIN_TP_GAP_R = 0.50
+_ALERT_MIN_TP_GAP_PCT = 0.006
+_ALERT_MAX_RUNNER_TO_TP1_RATIO = 3.5
 _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
     "strategy_scan", "turtle", "crypto_strategy", "early_movers", "new_listing",
@@ -2001,6 +2004,13 @@ def _alert_trade_plan_quality(levels: Dict[str, Any]) -> Dict[str, Any]:
     rr = _alert_float(levels.get("rr"), None)
     rr_tp1 = _alert_float(levels.get("rr_tp1"), None)
     rr_tp2 = _alert_float(levels.get("rr_tp2"), None)
+    entry = _alert_float(levels.get("entry"), None)
+    risk = _alert_float(levels.get("risk"), None)
+    reward1 = _alert_float(levels.get("reward1"), None)
+    reward2 = _alert_float(levels.get("reward2"), None)
+    warnings = {str(item) for item in (levels.get("warnings") or [])}
+    issues: List[str] = []
+
     if rr_tp1 is None or rr_tp2 is None:
         return {
             "effective_rr": rr,
@@ -2008,7 +2018,25 @@ def _alert_trade_plan_quality(levels: Dict[str, Any]) -> Dict[str, Any]:
             "rr_tp2": rr_tp2,
             "runner_skew": False,
             "tp1_ok": rr_tp1 is None or rr_tp1 >= _ALERT_MIN_PRIMARY_TP_RR,
+            "issues": issues,
         }
+    if rr_tp1 < _ALERT_MIN_PRIMARY_TP_RR:
+        issues.append("tp1_rr_below_primary_threshold")
+    if warnings.intersection({"tp2_not_above_tp1", "tp2_not_below_tp1"}):
+        issues.append("tp2_not_beyond_tp1")
+    if entry and risk and reward1 is not None and reward2 is not None:
+        min_tp_gap = max(risk * _ALERT_MIN_TP_GAP_R, entry * _ALERT_MIN_TP_GAP_PCT)
+        if reward2 <= reward1:
+            issues.append("tp2_not_beyond_tp1")
+        elif (reward2 - reward1) < min_tp_gap:
+            issues.append("targets_too_close")
+    if rr_tp2 < max(2.0, rr_tp1 + _ALERT_MIN_TP_GAP_R):
+        issues.append("targets_too_close")
+    if rr_tp2 > _ALERT_RUNNER_RR_CAP and rr_tp1 < 2.0:
+        issues.append("runner_rr_overdominates_tp1")
+    if rr_tp1 > 0 and rr_tp2 / rr_tp1 > _ALERT_MAX_RUNNER_TO_TP1_RATIO and rr_tp1 < 2.0:
+        issues.append("runner_rr_overdominates_tp1")
+
     capped_tp2 = min(rr_tp2, _ALERT_RUNNER_RR_CAP)
     effective_rr = round((rr_tp1 + capped_tp2) / 2.0, 2)
     runner_skew = rr_tp2 > _ALERT_RUNNER_RR_CAP and rr_tp2 >= max(rr_tp1 * 2.25, rr_tp1 + 4.0)
@@ -2018,6 +2046,7 @@ def _alert_trade_plan_quality(levels: Dict[str, Any]) -> Dict[str, Any]:
         "rr_tp2": rr_tp2,
         "runner_skew": runner_skew,
         "tp1_ok": rr_tp1 >= _ALERT_MIN_PRIMARY_TP_RR,
+        "issues": list(dict.fromkeys(issues)),
     }
 
 
@@ -2205,6 +2234,14 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         '<br><span style="color:#b45309;font-size:11px">TP2 ist Runner-Ziel; TP1/Stop bestimmen die echte Basis-Qualitaet.</span>'
         if quality.get("runner_skew") else ""
     )
+    issue_text = ""
+    issues = quality.get("issues") or []
+    if issues:
+        issue_label = html.escape(", ".join(str(item) for item in issues[:3]))
+        issue_text = (
+            '<br><span style="color:#dc2626;font-size:11px;font-weight:bold">'
+            f'Trade-Plan blockiert: {issue_label}</span>'
+        )
     level_source_text = _alert_level_source_line(row)
     move_warning = _alert_move_warning_line(row, levels)
     source_text = (
@@ -2236,6 +2273,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b></span>'
         f'{rr_text}'
         f'{runner_text}'
+        f'{issue_text}'
         f'{level_source_text}'
         f'{move_warning}'
         f'{source_text}'
@@ -2282,6 +2320,8 @@ def _alert_trade_plan_ok(
     quality = _alert_trade_plan_quality(levels)
     effective_rr = quality.get("effective_rr")
     if quality.get("tp1_ok") is False:
+        return False
+    if quality.get("issues"):
         return False
     return not isinstance(effective_rr, (int, float)) or effective_rr >= min_rr
 
@@ -2388,7 +2428,9 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
     elif levels.get("valid"):
         plan_quality = _alert_trade_plan_quality(levels)
         effective_rr = plan_quality.get("effective_rr")
-        if plan_quality.get("tp1_ok") is False:
+        if plan_quality.get("issues"):
+            score = min(score, 45)
+        elif plan_quality.get("tp1_ok") is False:
             score = min(score, 45)
         elif isinstance(effective_rr, (int, float)) and effective_rr < 1.5:
             score = min(score, 69)
@@ -3777,14 +3819,14 @@ def _early_mover_target_plan_issues(row: Dict[str, Any]) -> List[str]:
     risk = max(entry - stop, entry * 0.01)
     if stop >= entry or tp1 <= entry:
         issues.append("invalid_target_plan")
-    min_tp2_gap = max(entry * 0.018, risk * 0.45)
+    min_tp2_gap = max(entry * 0.024, risk * 0.55)
     if tp2 <= tp1:
         issues.append("duplicate_targets")
     elif (tp2 - tp1) < min_tp2_gap:
         issues.append("targets_too_close")
     rr1 = (tp1 - entry) / risk if risk > 0 else 0
     rr2 = (tp2 - entry) / risk if risk > 0 else 0
-    if rr1 < 1.2 or rr2 < max(1.6, rr1 + 0.35):
+    if rr1 < 1.5 or rr2 < max(2.05, rr1 + 0.55):
         issues.append("targets_too_close")
     if target_quality.startswith("WEAK"):
         issues.append("weak_structural_targets")
