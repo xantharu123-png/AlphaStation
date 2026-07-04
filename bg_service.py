@@ -3900,20 +3900,21 @@ def _signal_handler(sig, frame):
 # ── H-9 Audit-Fix: Doppel-Scheduler — Scan-Ownership bg_service vs. api.py ──
 # api.py _scheduler_loop scannt bereits (light): crypto_explosion, early_movers,
 # crash_monitor, market_context, btc_divergenz, volume_spikes, money_flow, orb,
-# bear, strategy_scan, turtle — plus (heavy) bi_long, bi_short, biotech sowie
-# new_listing und crypto_trade_signals.
+# bear, strategy_scan, turtle, new_listing und crypto_trade_signals.
 # Audit-Überlappung bg↔api: crash_monitor, btc_divergence(btc_divergenz),
-# bear_scan(bear), strategies(strategy_scan), orb → Default-Ownership: api.
+# bear_scan(bear), strategies(strategy_scan), orb, new_listing → Default-Ownership: api.
 # bg behält: bi_long, bi_short, biotech (Email-Alerts + feste ET-Zeitfenster)
-# und new_listing (15-Min-Zyklus + NLS-Mails MUSS hier weiterlaufen).
-# Hinweis: bi_long/bi_short/biotech/new_listing stehen auch im api-Scheduler —
-# dortige Dedupe ist api-Team-Thema (siehe Audit-Report H-9).
+# New Listing bleibt API-owned, damit Crypto-Listing-Mails nicht still ausfallen,
+# wenn tradingbot-bg hängt/stale ist. Per BG_SCAN_SET kann bg new_listing weiter
+# explizit übernehmen; geteilte Dedupe schützt dann vor Doppel-Mails.
+# Hinweis: bi_long/bi_short/biotech stehen auch im api-Scheduler —
+# dortige Skip-Logik ist api-Team-Thema (siehe Audit-Report H-9).
 # Override per ENV: BG_SCAN_SET="crash_monitor,btc_divergence,..." (kommasepariert).
 BG_ALL_SCANS = {
     "bi_long", "bi_short", "biotech", "crash_monitor", "strategies",
     "bear_scan", "btc_divergence", "new_listing", "orb",
 }
-BG_API_OWNED_OVERLAP = {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb"}
+BG_API_OWNED_OVERLAP = {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb", "new_listing"}
 BG_DEFAULT_SCAN_SET = BG_ALL_SCANS - BG_API_OWNED_OVERLAP
 
 
@@ -3975,7 +3976,7 @@ def run_service():
     # Interval-basiert (unverändert)
     SCHEDULE_INTERVAL = {
         "btc_divergence":  7200,   # alle 2 Stunden (Crypto 24/7)
-        "new_listing":      900,   # alle 15 Min (Crypto 24/7 — neue Listings erkennen)
+        "new_listing":      900,   # optional via BG_SCAN_SET; Default-Owner ist api.py
         "orb":              300,   # 5 Min (nur aktiv 9:45-11:00 ET Mo-Fr)
     }
 

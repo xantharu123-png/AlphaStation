@@ -1,8 +1,8 @@
 """Restpunkte-Audit 2026-06-11 — api.py: Scan-Ownership, Grade-Leiter, toter z-Score-Block.
 
 Deckt die drei Fixes ab:
-1) API_SCAN_SKIP_BG_OWNED: api-Scheduler skippt die 4 bg-owned Scanner
-   (bi_long/bi_short/biotech/new_listing) per Default; manuelle Routen nie.
+1) API_SCAN_SKIP_BG_OWNED: api-Scheduler skippt die 3 bg-owned Scanner
+   (bi_long/bi_short/biotech) per Default; new_listing bleibt API-owned.
 2) Zentrale Grade-Leiter S>=88/A>=80/B>=65/C>=50/D — konsistent mit dem
    _ALERT-Mail-Gate (Score>=80); crypto_explosion nutzt die zentrale Funktion.
 3) Toter Legacy-z-Score-Block in _btc_divergenz_wrapper ist entfernt,
@@ -18,13 +18,13 @@ if str(ROOT) not in sys.path:
 
 import api  # noqa: E402  (Import ist zugleich der Smoke-Test fuer Fix 3)
 
-_BG_OWNED = ("bi_long", "bi_short", "biotech", "new_listing")
+_BG_OWNED = ("bi_long", "bi_short", "biotech")
 
 
 # ── Fix 1: Scan-Ownership ───────────────────────────────────────────────────
 
 def test_scheduler_skips_bg_owned_by_default(monkeypatch):
-    """Default (ENV unset oder "1"): alle 4 bg-owned Scanner werden geskippt."""
+    """Default (ENV unset oder "1"): schwere bg-owned Scanner werden geskippt."""
     monkeypatch.delenv("API_SCAN_SKIP_BG_OWNED", raising=False)
     for name in _BG_OWNED:
         assert api._api_scheduler_should_skip(name) is True, name
@@ -43,7 +43,7 @@ def test_scheduler_never_skips_other_scanners():
     """Nicht-bg-owned Scanner werden NIE geskippt — egal was die ENV sagt."""
     for name in ("crypto_explosion", "early_movers", "crash_monitor",
                  "market_context", "btc_divergenz", "volume_spikes", "orb",
-                 "bear", "strategy_scan", "turtle", "crypto_trade_signals"):
+                 "bear", "strategy_scan", "turtle", "crypto_trade_signals", "new_listing"):
         assert api._api_scheduler_should_skip(name) is False, name
         assert api._api_scheduler_should_skip(name, env_value="1") is False, name
 
@@ -59,6 +59,8 @@ def test_only_scheduler_skips_manual_scan_routes_untouched():
     manual_src = inspect.getsource(api.run_scan)
     assert "_api_scheduler_should_skip" not in manual_src
     assert '"bi_long"' in manual_src and "_run_scan_safe" in manual_src
+    assert api._api_scheduler_should_skip("new_listing") is False
+    assert api._api_scheduler_should_skip("new_listing", env_value="1") is False
     # Ownership-Vertrag mit bg_service (NUR Quelltext-Check, kein Import):
     bg_src = (ROOT / "bg_service.py").read_text(encoding="utf-8")
     assert "BG_API_OWNED_OVERLAP" in bg_src

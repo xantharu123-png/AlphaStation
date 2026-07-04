@@ -12274,16 +12274,18 @@ def _run_scan_safe(name, func, timeout_min=None):
     # NON-BLOCKING: thread runs in background, watchdog handles timeouts
 
 
-# ── Scan-Ownership (H-9 Folge-Fix): bg_service ist Owner dieser 4 Scanner ──
-# bg_service.py BG_DEFAULT_SCAN_SET = {bi_long, bi_short, biotech, new_listing}
+# ── Scan-Ownership (H-9 Folge-Fix): bg_service ist Owner der schweren Stock-Scanner ──
+# bg_service.py BG_DEFAULT_SCAN_SET = {bi_long, bi_short, biotech}
 # (Email-Alerts + feste ET-Zeitfenster laufen dort). Der api-SCHEDULER skippt
 # sie per Default, damit nicht beide Dienste dieselben schweren Polygon-Scans
 # parallel fahren (Doppel-API-Last; Mails waren per geteiltem Dedupe schon
-# sicher). Manuelle Scans (POST /api/scan, /api/bi-scan, /api/biotech-scan,
+# sicher). New Listing bleibt bewusst API-owned: der BG-Service war live stale
+# und Crypto-New-Listing-Mails dürfen nicht still an einem zweiten Dienst hängen.
+# Manuelle Scans (POST /api/scan, /api/bi-scan, /api/biotech-scan,
 # /api/new-listing-scan) sind NIE betroffen — nur der Scheduler skippt.
 # ENV API_SCAN_SKIP_BG_OWNED="0" stellt das alte Verhalten wieder her
 # (z.B. wenn tradingbot-bg nicht laeuft).
-_BG_OWNED_SCANNERS = frozenset({"bi_long", "bi_short", "biotech", "new_listing"})
+_BG_OWNED_SCANNERS = frozenset({"bi_long", "bi_short", "biotech"})
 
 
 def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = None) -> bool:
@@ -12344,8 +12346,8 @@ def _scheduler_loop():
     _bg_owned_skips = {name for name, _ in scan_tasks if _api_scheduler_should_skip(name)}
     if _bg_owned_skips:
         scan_tasks = [(name, func) for name, func in scan_tasks if name not in _bg_owned_skips]
-        print("[Scheduler] Scan-Ownership: bi_long/bi_short/biotech/new_listing laufen bei "
-              "tradingbot-bg (API_SCAN_SKIP_BG_OWNED=0 zum Übersteuern)")
+        print("[Scheduler] Scan-Ownership: bi_long/bi_short/biotech laufen bei "
+              "tradingbot-bg; new_listing bleibt API-owned (API_SCAN_SKIP_BG_OWNED=0 zum Übersteuern)")
     _heavy_names = {name for name, _ in heavy_scans}
     _isolated_names = {"early_movers", "crypto_explosion"}
 

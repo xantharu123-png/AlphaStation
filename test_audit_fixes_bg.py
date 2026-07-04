@@ -158,17 +158,17 @@ def test_h7_scanner_und_bg_implementierung_identisch():
 # ══════════════════════════════════════════════════════════════════
 
 def test_h9_default_scan_set_ohne_api_overlap():
-    """Default: bg übernimmt NUR die Nicht-Überlappenden (inkl. new_listing 15-Min)."""
+    """Default: bg übernimmt NUR die schweren Nicht-Überlappenden."""
     active, skipped = bg_service._resolve_bg_scan_set(env_value="")
-    assert active == {"bi_long", "bi_short", "biotech", "new_listing"}
-    assert skipped == {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb"}
-    assert "new_listing" in active  # NLS-15-Min-Zyklus MUSS weiterlaufen
+    assert active == {"bi_long", "bi_short", "biotech"}
+    assert skipped == {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb", "new_listing"}
+    assert "new_listing" in skipped  # NLS läuft default im api.py-Scheduler
 
 
 def test_h9_env_override_bestimmt_scans():
-    active, skipped = bg_service._resolve_bg_scan_set(env_value="btc_divergence, orb")
-    assert active == {"btc_divergence", "orb"}
-    assert "bi_long" in skipped and "new_listing" in skipped
+    active, skipped = bg_service._resolve_bg_scan_set(env_value="btc_divergence, orb, new_listing")
+    assert active == {"btc_divergence", "orb", "new_listing"}
+    assert "bi_long" in skipped
 
 
 def test_h9_env_override_ignoriert_unbekannte_scans():
