@@ -127,8 +127,11 @@ def test_h5_momentum_breakout_backtest_rule_matches_live():
     # Live-Filter seit S-1: Change >= 2%, RVOL >= 1.5, ClosePos >= 0.5 —
     # vorher testete der Backtest Change >= 3% OHNE RVOL-Bedingung.
     assert sig["change_pct_min"] == pytest.approx(2.0)
-    assert sig["close_pos_min"] == pytest.approx(0.50)
+    assert sig["close_pos_min"] == pytest.approx(0.65)
     assert sig["rvol_min"] == pytest.approx(1.5)
+    assert sig["breakout_lookback_days"] == 20
+    assert sig["breakout_proximity_min"] == pytest.approx(-0.01)
+    assert sig["upper_wick_pct_max"] == pytest.approx(38.0)
     assert rule["direction"] == "long"
     # Auch der native Live-Name traegt die korrigierte Regel.
     assert api.BACKTEST_RULES["Momentum Breakout Long"]["signal"]["rvol_min"] == pytest.approx(1.5)

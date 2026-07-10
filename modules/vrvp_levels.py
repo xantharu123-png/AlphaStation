@@ -218,6 +218,97 @@ def _asset_profile(asset_type: str) -> Dict[str, float]:
     return {"min_tp_pct": 0.025, "max_stop_mult": 1.35, "stop_buffer_pct": 0.0025}
 
 
+def _barrier_profile(asset_type: str) -> Dict[str, float]:
+    """Distance thresholds where the next opposite VRVP zone becomes a gate.
+
+    A nearby resistance/support is not automatically a target. If it is too
+    close relative to risk, the setup first needs a break/reclaim instead of a
+    blind entry.
+    """
+    text = str(asset_type or "").lower()
+    if "crypto" in text:
+        return {"max_r": 1.25, "max_pct": 1.8, "max_pct_r": 1.8}
+    if "intraday" in text or "orb" in text:
+        return {"max_r": 1.10, "max_pct": 0.9, "max_pct_r": 1.6}
+    return {"max_r": 1.25, "max_pct": 2.5, "max_pct_r": 1.8}
+
+
+def _nearest_target_level(vrvp: Dict[str, Any], side: str, entry: float) -> Optional[Dict[str, Any]]:
+    key = "resistances" if side == "LONG" else "supports"
+    levels = []
+    for level in vrvp.get(key) or []:
+        price = _safe_float(level.get("price"))
+        if price is None or price <= 0:
+            continue
+        if side == "LONG" and price <= entry:
+            continue
+        if side == "SHORT" and price >= entry:
+            continue
+        levels.append(level)
+    if not levels:
+        return None
+    return sorted(levels, key=lambda x: abs((_safe_float(x.get("price"), entry) or entry) - entry))[0]
+
+
+def _near_trade_barrier(
+    vrvp: Dict[str, Any],
+    side: str,
+    entry: float,
+    risk: float,
+    asset_type: str,
+) -> Optional[Dict[str, Any]]:
+    if not vrvp or side not in ("LONG", "SHORT") or entry <= 0 or risk <= 0:
+        return None
+    level = _nearest_target_level(vrvp, side, entry)
+    if not level:
+        return None
+    price = _safe_float(level.get("price"))
+    if price is None or price <= 0:
+        return None
+    distance = abs(price - entry)
+    distance_pct = (distance / entry) * 100.0
+    distance_r = distance / risk
+    profile = _barrier_profile(asset_type)
+    is_close = (
+        distance_r <= profile["max_r"]
+        or (distance_pct <= profile["max_pct"] and distance_r <= profile["max_pct_r"])
+    )
+    if not is_close:
+        return None
+    side_label = "resistance" if side == "LONG" else "support"
+    return {
+        "side": side_label,
+        "price": round_trade_price(price),
+        "source": str(level.get("source") or "VRVP level"),
+        "timeframe": vrvp.get("timeframe"),
+        "distance_pct": round(distance_pct, 2),
+        "distance_r": round(distance_r, 2),
+        "strength": round(float(_safe_float(level.get("weight"), 1.0) or 1.0), 2),
+        "action": "BREAK_RECLAIM_REQUIRED" if side == "LONG" else "BREAK_SUPPORT_REQUIRED",
+    }
+
+
+def _attach_barrier_gate(enriched: Dict[str, Any], barrier: Optional[Dict[str, Any]], side: str) -> None:
+    if not barrier:
+        return
+    key = "overhead_resistance" if side == "LONG" else "underlying_support"
+    flag = "near_overhead_resistance" if side == "LONG" else "near_underlying_support"
+    label = "Resistance erst brechen/reclaimen" if side == "LONG" else "Support erst brechen/reclaimen"
+    enriched["nearest_barrier"] = barrier
+    enriched[key] = barrier
+    enriched["barrier_gate"] = barrier.get("action")
+    enriched["barrier_gate_reason"] = label
+    flags = list(enriched.get("risk_flags") or [])
+    flags.append(flag)
+    enriched["risk_flags"] = list(dict.fromkeys(flags))
+    notes = list(enriched.get("notes") or [])
+    notes.append(
+        f"Nahe {barrier.get('side')} {barrier.get('price')} ({barrier.get('timeframe') or 'VRVP'}, "
+        f"{barrier.get('distance_r')}R) - {label}"
+    )
+    enriched["notes"] = list(dict.fromkeys(notes))
+
+
 def apply_vrvp_to_trade_setup(
     setup: Dict[str, Any],
     vrvp: Optional[Dict[str, Any]],
@@ -254,7 +345,6 @@ def apply_vrvp_to_trade_setup(
     atr_value = _safe_float(atr, 0.0) or 0.0
     min_tp_reward = max(risk * 1.5, entry * profile["min_tp_pct"], atr_value * 0.70)
     min_tp2_reward = max(risk * 2.4, min_tp_reward * 1.5, entry * profile["min_tp_pct"] * 1.8)
-
     used: List[str] = []
     # Stop only moves to a nearby VRVP invalidation zone when it does not widen
     # risk too aggressively. Otherwise we keep the existing structure stop.
@@ -283,6 +373,7 @@ def apply_vrvp_to_trade_setup(
                     used.append("stop")
                     break
         risk = (entry - stop) if side == "LONG" else (stop - entry)
+    _attach_barrier_gate(enriched, _near_trade_barrier(vrvp, side, entry, risk, asset_type), side)
 
     target_candidates = _candidate_prices(vrvp, side, target=True)
     if side == "LONG":

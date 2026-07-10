@@ -91,3 +91,53 @@ def test_vrvp_validation_prevents_duplicate_targets():
     assert enriched["vrvp_applied"] is False
     assert enriched["tp1"] == 10.2
     assert enriched["tp2"] == 10.2
+
+
+def test_vrvp_marks_near_overhead_resistance_as_long_gate():
+    vrvp = {
+        "timeframe": "4H",
+        "resistances": [
+            {"price": 100.55, "source": "VRVP HVN high", "weight": 2.2},
+            {"price": 106.0, "source": "VRVP VAH", "weight": 1.3},
+        ],
+        "supports": [{"price": 98.8, "source": "VRVP POC", "weight": 1.5}],
+    }
+    setup = {
+        "entry": 100.0,
+        "stop": 99.35,
+        "tp1": 103.0,
+        "tp2": 106.0,
+        "direction": "LONG",
+    }
+
+    enriched = apply_vrvp_to_trade_setup(setup, vrvp, direction="LONG", asset_type="crypto")
+
+    assert enriched["nearest_barrier"]["side"] == "resistance"
+    assert enriched["overhead_resistance"]["price"] == 100.55
+    assert enriched["barrier_gate"] == "BREAK_RECLAIM_REQUIRED"
+    assert "near_overhead_resistance" in enriched["risk_flags"]
+
+
+def test_vrvp_marks_near_underlying_support_as_short_gate():
+    vrvp = {
+        "timeframe": "4H",
+        "supports": [
+            {"price": 99.45, "source": "VRVP HVN low", "weight": 2.0},
+            {"price": 94.0, "source": "VRVP VAL", "weight": 1.4},
+        ],
+        "resistances": [{"price": 101.2, "source": "VRVP POC", "weight": 1.2}],
+    }
+    setup = {
+        "entry": 100.0,
+        "stop": 100.65,
+        "tp1": 97.0,
+        "tp2": 94.0,
+        "direction": "SHORT",
+    }
+
+    enriched = apply_vrvp_to_trade_setup(setup, vrvp, direction="SHORT", asset_type="crypto")
+
+    assert enriched["nearest_barrier"]["side"] == "support"
+    assert enriched["underlying_support"]["price"] == 99.45
+    assert enriched["barrier_gate"] == "BREAK_SUPPORT_REQUIRED"
+    assert "near_underlying_support" in enriched["risk_flags"]

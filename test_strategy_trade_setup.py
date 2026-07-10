@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from api import (
     _apply_trade_health_final_signal,
     _build_structured_trade_setup,
@@ -158,6 +160,7 @@ def test_strategy_rvol_uses_completed_20d_average_not_previous_day_only():
         day_high=11.2,
         day_low=10.6,
         day_volume=200_000,
+        now_utc=datetime(2026, 4, 20, 21, 0, tzinfo=timezone.utc),
     )
 
     assert metrics["history_ok"] is True

@@ -37,7 +37,7 @@ import math
 import glob
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1101,7 +1101,7 @@ def _tracker_stock_fetcher(ticker, since_iso_date):
         for b in (resp.json().get("results") or []):
             try:
                 bars.append({
-                    "date": datetime.utcfromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d"),
+                    "date": datetime.fromtimestamp(b["t"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
                     "high": float(b["h"]),
                     "low": float(b["l"]),
                     "close": float(b["c"]),

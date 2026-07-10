@@ -2080,8 +2080,8 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         # sind oben aussortiert, forward_catalyst=True). Event-TERMINE werden
         # nicht hier, sondern ueber den BPIQ-Pfad bewertet (Event-Datum,
         # days_until, Kategorie IMMINENT/UPCOMING/...).
-        from datetime import datetime as _dt_cls, timedelta as _td_cls
-        _today = _dt_cls.utcnow().date()
+        from datetime import datetime as _dt_cls, timedelta as _td_cls, timezone as _dt_tz
+        _today = _dt_cls.now(_dt_tz.utc).date()
         for cat in catalysts:
             _cat_date_str = cat.get("date", "")
             if _cat_date_str and len(_cat_date_str) >= 10:
@@ -2124,8 +2124,8 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                 catalyst_score += int(catalysts[1]["score"] * 0.5)  # 50% Bonus für 2. Catalyst
 
         # Negative Flags abziehen (mit Time-Decay) — FIX 1: Weniger aggressive Decay
-        from datetime import datetime as _nf_dt_cls
-        _nf_today = _nf_dt_cls.utcnow().date()
+        from datetime import datetime as _nf_dt_cls, timezone as _nf_dt_tz
+        _nf_today = _nf_dt_cls.now(_nf_dt_tz.utc).date()
         for nf in negative_flags:
             nf_date_str = nf.get("date", "")
             nf_age_days = 0

@@ -266,11 +266,14 @@ BACKTEST_STRATEGY_ALIASES = {
 # identischer nativer Eintrag unter dem Live-Namen.
 _H5_LIVE_SYNCED_BREAKOUT_RULE = {
     "direction": "long",
-    "description": "Live-synchron (AUDIT H-5): Change >=2%, RVOL >=1.5, Close-Position >=0.5",
+    "description": "Daily live-signal proxy: 20D breakout proximity, Change >=2%, RVOL >=1.5, close hold and controlled wick",
     "signal": {
         "change_pct_min": 2.0, "change_pct_max": 50.0,
-        "close_pos_min": 0.50,
+        "close_pos_min": 0.65,
         "rvol_min": 1.5,
+        "breakout_lookback_days": 20,
+        "breakout_proximity_min": -0.01,
+        "upper_wick_pct_max": 38.0,
     },
     "entry": "next_open",
     "stop_pct": 0.05,
@@ -1198,6 +1201,47 @@ def _stock_trade_email_allowed(scanner_name: str) -> Tuple[bool, str]:
     _record_email_event(f"{scanner_name} Stock Alert", "skipped", f"us_market_closed:{reason}")
     print(f"[Alert] {scanner_name}: SKIP stock trade mail outside US regular session ({reason})")
     return False, reason
+
+
+def _us_equity_expected_volume_fraction(now_utc: Optional[datetime] = None) -> float:
+    """Expected cumulative regular-session volume using a conservative U-curve.
+
+    Comparing a partial trading day with completed daily bars understates RVOL
+    early in the session. Outside regular hours the snapshot is treated as a
+    completed session and therefore is not projected.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        current = now_utc or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_et = current.astimezone(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
+            return 1.0
+        minutes_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
+        if minutes_open <= 0 or minutes_open >= 390:
+            return 1.0
+
+        anchors = (
+            (0.0, 0.0),
+            (5.0, 0.08),
+            (15.0, 0.15),
+            (30.0, 0.22),
+            (60.0, 0.30),
+            (120.0, 0.40),
+            (240.0, 0.62),
+            (330.0, 0.79),
+            (390.0, 1.0),
+        )
+        for (left_min, left_fraction), (right_min, right_fraction) in zip(anchors, anchors[1:]):
+            if minutes_open <= right_min:
+                progress = (minutes_open - left_min) / max(right_min - left_min, 1.0)
+                fraction = left_fraction + (right_fraction - left_fraction) * progress
+                return round(max(0.01, min(fraction, 1.0)), 6)
+    except Exception:
+        pass
+    return 1.0
 
 
 def _normalize_trade_horizon_value(value: Any) -> str:
@@ -3671,6 +3715,53 @@ def _early_mover_vrvp_from_bars(bars: List[Dict[str, Any]]) -> Optional[Dict[str
     }
 
 
+def _annotate_early_mover_overhead_resistance(
+    row: Dict[str, Any],
+    level: Dict[str, Any],
+    entry: float,
+    risk: float,
+) -> None:
+    """Expose a close overhead VRVP level as a breakout gate, not as a TP."""
+    if not isinstance(level, dict) or entry <= 0 or risk <= 0:
+        return
+    price = _alert_float(level.get("price"))
+    if price is None or price <= entry:
+        return
+
+    distance_pct = ((price - entry) / entry) * 100
+    distance_r = (price - entry) / risk
+    if distance_pct > 2.5 and distance_r > 1.0:
+        return
+
+    source = str(level.get("source") or "vrvp_resistance")
+    rounded_price = _round_crypto_price(price)
+    resistance = {
+        "price": rounded_price,
+        "distance_pct": round(distance_pct, 2),
+        "distance_r": round(distance_r, 2),
+        "source": source,
+        "message": "Nahe Resistance: erst Break/Reclaim darueber bestaetigen",
+    }
+
+    row["overhead_resistance"] = resistance
+    row["breakout_level"] = rounded_price
+    row["resistance_source"] = source
+    flags = row.get("risk_flags") if isinstance(row.get("risk_flags"), list) else []
+    row["risk_flags"] = list(dict.fromkeys([*flags, "near_overhead_resistance"]))
+
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    if setup:
+        setup["overhead_resistance"] = resistance
+        setup["breakout_level"] = rounded_price
+        setup["resistance_source"] = source
+        setup_flags = setup.get("risk_flags") if isinstance(setup.get("risk_flags"), list) else []
+        setup["risk_flags"] = list(dict.fromkeys([*setup_flags, "near_overhead_resistance"]))
+        conditions = setup.get("trigger_conditions") if isinstance(setup.get("trigger_conditions"), list) else []
+        condition = f"Break/Reclaim ueber ${rounded_price} bestaetigen"
+        setup["trigger_conditions"] = list(dict.fromkeys([condition, *conditions]))[:4]
+        row["trade_setup"] = setup
+
+
 def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str, Any]]) -> None:
     """Use VRVP resistance/acceptance levels as TP candidates when they are valid."""
     if not isinstance(vrvp, dict):
@@ -3688,12 +3779,14 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
     min_tp1 = max(entry + risk * 1.35, entry * (1 + min_tp1_pct))
     min_tp2 = max(entry + risk * 2.6, entry * (1 + min_tp2_pct))
 
-    levels = [
+    levels = sorted([
         level for level in (vrvp.get("levels") or [])
         if _alert_float(level.get("price")) is not None and _alert_float(level.get("price")) > entry
-    ]
+    ], key=lambda level: _alert_float(level.get("price")) or 0)
     if not levels:
         return
+
+    _annotate_early_mover_overhead_resistance(row, levels[0], entry, risk)
 
     valid_tp1 = [level for level in levels if (_alert_float(level.get("price")) or 0) >= min_tp1]
     if not valid_tp1:
@@ -4074,6 +4167,129 @@ def _fetch_recent_stock_5m_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
     except Exception as exc:
         print(f"[Reminder] stock bars error {ticker}: {exc}")
         return []
+
+
+def _stock_breakout_freshness_state(
+    row: Dict[str, Any],
+    *,
+    bars: Optional[List[Dict[str, Any]]] = None,
+    daily_close_confirmed_mode: bool = False,
+) -> Dict[str, Any]:
+    """Classify whether a stock breakout is fresh, held, retested, or stale."""
+    enriched = dict(row)
+    enriched["Breakout_Freshness_Checked"] = True
+    ticker = _extract_alert_ticker(enriched)
+    breakout_level = _alert_float(_alert_get_any(
+        enriched,
+        "Breakout_Level",
+        "breakout_level",
+        "High_20D",
+        "High_10D",
+    ), None)
+    if not ticker or breakout_level is None or breakout_level <= 0:
+        enriched["Breakout_Freshness_Status"] = "DATA_UNAVAILABLE"
+        enriched["Breakout_Freshness_Reason"] = "missing_breakout_level"
+        return enriched
+
+    recent = list(bars) if bars is not None else _fetch_recent_stock_5m_bars(ticker, limit=96)
+    recent = [bar for bar in recent if isinstance(bar, dict) and _alert_float(bar.get("close"), None)]
+    if len(recent) < 3:
+        enriched["Breakout_Freshness_Status"] = "DATA_UNAVAILABLE"
+        enriched["Breakout_Freshness_Reason"] = "missing_completed_5m_bars"
+        return enriched
+
+    direction = str(_infer_alert_direction(enriched) or "LONG").upper()
+    is_short = direction == "SHORT"
+    confirmation_level = breakout_level * (0.999 if is_short else 1.001)
+
+    def _confirmed(close: float) -> bool:
+        return close <= confirmation_level if is_short else close >= confirmation_level
+
+    crosses: List[int] = []
+    for idx in range(1, len(recent)):
+        previous_close = float(recent[idx - 1].get("close") or 0)
+        current_close = float(recent[idx].get("close") or 0)
+        if _confirmed(current_close) and not _confirmed(previous_close):
+            crosses.append(idx)
+
+    latest = recent[-1]
+    latest_close = float(latest.get("close") or 0)
+    latest_high = float(latest.get("high", latest_close) or latest_close)
+    latest_low = float(latest.get("low", latest_close) or latest_close)
+    latest_open = float(latest.get("open", latest_close) or latest_close)
+    latest_range = max(latest_high - latest_low, 1e-9)
+    latest_close_pos = (latest_close - latest_low) / latest_range
+    distance_pct = (
+        ((breakout_level - latest_close) / breakout_level * 100.0)
+        if is_short
+        else ((latest_close - breakout_level) / breakout_level * 100.0)
+    )
+    enriched["Breakout_Freshness_Distance_Pct"] = round(distance_pct, 2)
+
+    failed = latest_close > breakout_level * 1.003 if is_short else latest_close < breakout_level * 0.997
+    if failed:
+        enriched["Breakout_Freshness_Status"] = "FAILED_BREAKOUT"
+        enriched["Breakout_Freshness_Reason"] = "latest_close_lost_breakout_level"
+        return enriched
+
+    if not crosses:
+        if not _confirmed(latest_close):
+            status = "NOT_CONFIRMED"
+        else:
+            status = "HELD_BREAKOUT" if abs(distance_pct) <= 2.0 else "STALE_EXTENSION"
+        if daily_close_confirmed_mode and _confirmed(latest_close):
+            status = "DAILY_CLOSE_HELD"
+        enriched["Breakout_Freshness_Status"] = status
+        enriched["Breakout_Freshness_Reason"] = "cross_precedes_available_intraday_window"
+        return enriched
+
+    cross_idx = crosses[-1]
+    cross_bar = recent[cross_idx]
+    latest_ts = _alert_float(latest.get("timestamp"), None)
+    cross_ts = _alert_float(cross_bar.get("timestamp"), None)
+    age_minutes = None
+    if latest_ts is not None and cross_ts is not None:
+        age_minutes = max(0.0, (latest_ts - cross_ts) / 60_000.0)
+    else:
+        age_minutes = float((len(recent) - 1 - cross_idx) * 5)
+    enriched["Breakout_Age_Minutes"] = round(age_minutes, 1)
+
+    post_cross = recent[cross_idx + 1:]
+    if is_short:
+        retest_indices = [
+            idx for idx, bar in enumerate(post_cross)
+            if float(bar.get("high", 0) or 0) >= breakout_level * 0.995
+            and float(bar.get("close", 0) or 0) <= breakout_level * 1.002
+        ]
+        latest_direction_ok = latest_close <= latest_open and latest_close_pos <= 0.55
+    else:
+        retest_indices = [
+            idx for idx, bar in enumerate(post_cross)
+            if float(bar.get("low", 0) or 0) <= breakout_level * 1.005
+            and float(bar.get("close", 0) or 0) >= breakout_level * 0.998
+        ]
+        latest_direction_ok = latest_close >= latest_open and latest_close_pos >= 0.45
+
+    recent_retest = bool(retest_indices) and retest_indices[-1] >= max(0, len(post_cross) - 12)
+    if age_minutes <= 60 and latest_direction_ok:
+        status = "FRESH_CROSS"
+        reason = "latest_confirmed_cross_within_60m"
+    elif recent_retest and _confirmed(latest_close):
+        status = "RETEST_HELD"
+        reason = "breakout_level_retested_and_held"
+    elif daily_close_confirmed_mode and _confirmed(latest_close):
+        status = "DAILY_CLOSE_HELD"
+        reason = "confirmed_daily_close_above_breakout"
+    elif age_minutes <= 180 and abs(distance_pct) <= 2.0:
+        status = "HELD_BREAKOUT"
+        reason = "breakout_holding_without_late_extension"
+    else:
+        status = "STALE_EXTENSION" if abs(distance_pct) > 2.0 else "STALE_BREAKOUT"
+        reason = "initial_breakout_is_no_longer_fresh"
+
+    enriched["Breakout_Freshness_Status"] = status
+    enriched["Breakout_Freshness_Reason"] = reason
+    return enriched
 
 
 def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
@@ -4799,7 +5015,18 @@ def _stock_strategy_mail_quality_state(
         or ""
     ).upper()
     if not breakout_type:
-        return True, ""
+        return False, "momentum_mail_blocked_missing_breakout_type"
+
+    freshness_checked = bool(row.get("Breakout_Freshness_Checked"))
+    freshness_status = str(
+        row.get("Breakout_Freshness_Status")
+        or row.get("breakout_freshness_status")
+        or ""
+    ).upper()
+    if freshness_checked and freshness_status in {"DATA_UNAVAILABLE", "NOT_CONFIRMED", "FAILED_BREAKOUT"}:
+        return False, "momentum_breakout_freshness_unconfirmed"
+    if freshness_checked and freshness_status in {"STALE_BREAKOUT", "STALE_EXTENSION"}:
+        return False, "momentum_breakout_stale_wait_trigger"
 
     continuation_status = str(
         row.get("Breakout_Continuation_Status")
@@ -5300,6 +5527,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "current_candle_red_fade",
         "early_mover_wait_entry_confirmation",
         "trigger_stale_for_mail",
+        "near_structural_barrier_wait_trigger",
+        "momentum_breakout_freshness_unconfirmed",
+        "momentum_breakout_stale_wait_trigger",
     }
     no_trade_markers = {
         "drop_too_extended_no_chase",
@@ -5466,6 +5696,10 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             reasons.append("no_crypto_execution_trigger")
         if bool(row.get("partial_data") or row.get("data_partial")):
             reasons.append("partial_crypto_data")
+    if quality_gate_actionable and scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
+        barrier_reason = _structural_barrier_alert_reason(row)
+        if barrier_reason:
+            reasons.append(barrier_reason)
     if scanner_name == "early_movers":
         reasons.extend(_early_mover_long_rule_reasons(row))
         # AUDIT Q-2: 15-Min-Frische-Gate. Trigger-/Scan-Zustand aelter als
@@ -6355,6 +6589,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if scanner_key in _STOCK_ALERT_SCANNERS:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
         if scanner_key == "stock_strategy":
+            row_strategy = str(row.get("Strategy") or row.get("strategy") or strategy_name or "").lower()
+            if "momentum breakout long" in row_strategy:
+                row = _stock_breakout_freshness_state(
+                    row,
+                    daily_close_confirmed_mode=daily_close_confirmed_mode,
+                )
             mail_quality_ok, mail_quality_reason = _stock_strategy_mail_quality_state(
                 row,
                 daily_close_confirmed_mode=daily_close_confirmed_mode,
@@ -7125,6 +7365,183 @@ def _attach_trade_health(item: Dict[str, Any], scanner_name: str, market_context
     return health
 
 
+def _extract_trade_barrier(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the nearest structural barrier from top-level or trade_setup."""
+    if not isinstance(item, dict):
+        return None
+    sources = [item]
+    setup = item.get("trade_setup")
+    if isinstance(setup, dict):
+        sources.insert(0, setup)
+    for source in sources:
+        for key in ("nearest_barrier", "overhead_resistance", "underlying_support"):
+            barrier = source.get(key)
+            if isinstance(barrier, dict) and _alert_float(barrier.get("price"), None):
+                extracted = dict(barrier)
+                if key == "overhead_resistance":
+                    extracted.setdefault("side", "resistance")
+                elif key == "underlying_support":
+                    extracted.setdefault("side", "support")
+                return extracted
+    return None
+
+
+def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
+    """Return a WAIT reason when a trade points directly into an unreclaimed barrier."""
+    barrier = _extract_trade_barrier(item)
+    if not barrier:
+        return None
+    barrier_price = _alert_float(barrier.get("price"), None)
+    if barrier_price is None or barrier_price <= 0:
+        return None
+
+    levels = _alert_trade_levels(item)
+    direction = str(levels.get("direction") or _infer_alert_direction(item) or "").upper()
+    side = str(barrier.get("side") or "").lower()
+    if direction == "LONG" and side != "resistance":
+        return None
+    if direction == "SHORT" and side != "support":
+        return None
+    if direction not in {"LONG", "SHORT"}:
+        return None
+
+    current = _alert_float(_extract_alert_price(item), None)
+    entry = _alert_float(levels.get("entry"), None)
+    reference = current if current is not None and current > 0 else entry
+    if reference is None or reference <= 0:
+        return "near_structural_barrier_wait_trigger"
+
+    reclaimed = (
+        reference >= barrier_price * 1.003
+        if direction == "LONG"
+        else reference <= barrier_price * 0.997
+    )
+    barrier["reclaimed"] = reclaimed
+    if reclaimed:
+        return None
+
+    risk = _alert_float(levels.get("risk"), None)
+    if risk is None and entry is not None:
+        stop = _alert_float(levels.get("stop"), None)
+        if stop is not None:
+            risk = abs(entry - stop)
+    distance_r = _alert_float(barrier.get("distance_r"), None)
+    if distance_r is None and risk is not None and risk > 0:
+        distance_r = abs(barrier_price - reference) / risk
+    distance_pct = abs(barrier_price - reference) / reference * 100.0
+
+    # The VRVP layer normally attaches only nearby barriers. Re-check here so
+    # stale or manually supplied metadata cannot block a distant target.
+    if distance_r is not None and distance_r > 1.25 and distance_pct > 2.5:
+        return None
+    return "near_structural_barrier_wait_trigger"
+
+
+def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Optional[Dict[str, Any]]:
+    """Downgrade actionable rows that are directly under/above a strong barrier."""
+    barrier = _extract_trade_barrier(item)
+    if not barrier:
+        return None
+    price = _alert_float(barrier.get("price"), None)
+    if price is None or price <= 0:
+        return None
+
+    side = str(barrier.get("side") or "").lower()
+    levels = _alert_trade_levels(item)
+    direction = str(levels.get("direction") or _infer_alert_direction(item) or "").upper()
+    if side == "resistance":
+        direction = "LONG"
+    elif side == "support":
+        direction = "SHORT"
+    current = _alert_float(_extract_alert_price(item), None)
+    entry = _alert_float(levels.get("entry"), None)
+    reference = current if current and current > 0 else entry
+    if reference is None or reference <= 0:
+        reference = price
+
+    reclaimed = False
+    if side == "resistance" and reference >= price * 1.003:
+        reclaimed = True
+    elif side == "support" and reference <= price * 0.997:
+        reclaimed = True
+    barrier["reclaimed"] = reclaimed
+
+    item["nearest_barrier"] = barrier
+    item["barrier_gate"] = barrier.get("action") or item.get("barrier_gate")
+    item["barrier_gate_reason"] = (
+        "Resistance erst brechen/reclaimen"
+        if side == "resistance"
+        else "Support erst brechen/reclaimen"
+    )
+    if side == "resistance":
+        item["overhead_resistance"] = barrier
+    elif side == "support":
+        item["underlying_support"] = barrier
+
+    setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
+    if setup is not None:
+        setup["nearest_barrier"] = barrier
+        setup["barrier_gate"] = item.get("barrier_gate")
+        setup["barrier_gate_reason"] = item.get("barrier_gate_reason")
+        if side == "resistance":
+            setup["overhead_resistance"] = barrier
+        elif side == "support":
+            setup["underlying_support"] = barrier
+
+    flags = item.get("risk_flags") if isinstance(item.get("risk_flags"), list) else []
+    reasons = item.get("risk_reasons") if isinstance(item.get("risk_reasons"), list) else []
+    flag = "near_overhead_resistance" if side == "resistance" else "near_underlying_support"
+    flags.append(flag)
+    item["risk_flags"] = list(dict.fromkeys(flags))
+
+    distance_r = _alert_float(barrier.get("distance_r"), None)
+    tf = barrier.get("timeframe") or "MTF"
+    level_text = f"{side or 'barrier'} {price:g}"
+    if distance_r is not None:
+        level_text += f" ({distance_r:g}R)"
+    reason = f"Nahe {level_text} auf {tf}"
+    reasons.append(reason)
+    item["risk_reasons"] = list(dict.fromkeys(reasons))
+
+    if reclaimed:
+        return barrier
+
+    if scanner_name not in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
+        return barrier
+
+    action = str(item.get("trade_action") or "").upper()
+    signal = str(item.get("trade_signal") or "").upper()
+    decision = str(item.get("trade_decision") or "").upper()
+    actionable = (
+        signal == "JETZT_TRADEN"
+        or action in {"LONG_NOW", "SHORT_NOW", "TRADE_NOW"}
+        or decision == "TRADEABLE"
+        or bool(item.get("alertable_crypto"))
+    )
+    if not actionable:
+        return barrier
+
+    label = "Resistance erst brechen/reclaimen" if side == "resistance" else "Support erst brechen/reclaimen"
+    item["trade_decision"] = "WAIT_FOR_TRIGGER"
+    item["trade_decision_label"] = label
+    item["trade_signal"] = "WARTEN"
+    item["entry_status"] = "WAIT_FOR_BREAK_RECLAIM"
+    item["trade_action"] = "WAIT_FOR_BREAK_RECLAIM"
+    item["signal_quality"] = "wait_trigger"
+    item["signal_label"] = f"Warten: {label}"
+    item["barrier_gate_active"] = True
+    item["alertable_crypto"] = False
+    item["execution_trigger_ok"] = False
+    if setup is not None:
+        setup["trade_decision"] = item["trade_decision"]
+        setup["trade_decision_label"] = item["trade_decision_label"]
+        setup["trade_action"] = item["trade_action"]
+        setup["entry_status"] = item["entry_status"]
+        setup["signal_label"] = item["signal_label"]
+        setup["barrier_gate_active"] = True
+    return barrier
+
+
 def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) -> None:
     """Make the central Trade Health decision the final user-facing state.
 
@@ -7498,6 +7915,17 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
             why.append(f"Scanner-Aktion: {item.get('scanner_decision_label')} ({item.get('trade_score')}/100)")
         if item.get("scanner_suppression_reasons"):
             exclusion_reasons = list(dict.fromkeys([*exclusion_reasons, *item.get("scanner_suppression_reasons", [])]))
+        barrier = _apply_trade_barrier_gate(item, scanner_name)
+        if barrier:
+            side_label = "Resistance" if str(barrier.get("side") or "").lower() == "resistance" else "Support"
+            barrier_msg = (
+                f"Nahe {side_label} {barrier.get('price')} "
+                f"({barrier.get('timeframe') or 'VRVP'}, {barrier.get('distance_r')}R)"
+            )
+            why.append(barrier_msg)
+            if item.get("barrier_gate_active"):
+                warnings.append(f"{barrier_msg} - erst Break/Reclaim bestaetigen")
+                exclusion_reasons = list(dict.fromkeys([*exclusion_reasons, "near_structural_barrier"]))
 
         item["_quality"] = {
             "why_in": why or ["Scanner-Regeln erfuellt, aber keine Detailgruende geliefert"],
@@ -8958,6 +9386,7 @@ def _strategy_daily_history_metrics(
     day_high: float,
     day_low: float,
     day_volume: float,
+    now_utc: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Return swing-quality metrics from completed daily bars.
 
@@ -8986,7 +9415,19 @@ def _strategy_daily_history_metrics(
 
     vols20 = [b["volume"] for b in completed[-20:] if b.get("volume", 0) > 0]
     avg_vol20 = sum(vols20) / len(vols20) if vols20 else 0.0
-    rvol20 = min(round(float(day_volume or 0) / avg_vol20, 2), 50.0) if avg_vol20 > 0 else None
+    volume_fraction = _us_equity_expected_volume_fraction(now_utc)
+    raw_rvol20 = (float(day_volume or 0) / avg_vol20) if avg_vol20 > 0 else None
+    rvol20 = (
+        min(round(raw_rvol20 / max(volume_fraction, 0.01), 2), 50.0)
+        if raw_rvol20 is not None
+        else None
+    )
+    projected_day_volume = (
+        float(day_volume or 0) / max(volume_fraction, 0.01)
+        if volume_fraction < 1.0
+        else float(day_volume or 0)
+    )
+    rvol_source = "20D_intraday_time_adjusted" if volume_fraction < 1.0 else "20D_completed_session"
 
     highs10 = [b["high"] for b in completed[-10:] if b.get("high", 0) > 0]
     highs20 = [b["high"] for b in completed[-20:] if b.get("high", 0) > 0]
@@ -9063,6 +9504,10 @@ def _strategy_daily_history_metrics(
         "history_ok": len(completed) >= 20,
         "avg_vol20": avg_vol20,
         "rvol20": rvol20,
+        "rvol20_raw": round(raw_rvol20, 2) if raw_rvol20 is not None else None,
+        "rvol_source": rvol_source,
+        "expected_volume_fraction": round(volume_fraction, 4),
+        "projected_day_volume": round(projected_day_volume),
         "atr14": atr14,
         "atr_pct": atr_pct,
         "high_10d": high_10d,
@@ -10565,6 +11010,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         common_stock_universe, common_stock_source = _load_common_stock_universe()
         session_name, _session_label = get_current_trading_session()
         _use_extended_prices = session_name in ("Pre-Market", "After-Hours")
+        scan_now_utc = datetime.now(timezone.utc)
+        session_volume_fraction = _us_equity_expected_volume_fraction(scan_now_utc)
         history_cache: Dict[str, List[Dict[str, Any]]] = {}
         scan_diag: Dict[str, Any] = {
             "strategy": strategy_name,
@@ -10581,6 +11028,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                 "gap_pct": [gap_min, gap_max] if _has_gap_filter else None,
                 "vortag_pct": [vortag_min, vortag_max] if _has_vortag_filter else None,
                 "min_dollar_volume": min_dollar_vol,
+                "expected_volume_fraction": round(session_volume_fraction, 4),
             },
             "rejected": {},
             "raw_matches_before_special_filter": 0,
@@ -10639,6 +11087,17 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
 
                     volume = float(day.get("v", 0) or 0)
                     dollar_vol = volume * price
+                    projected_volume = (
+                        volume / max(session_volume_fraction, 0.01)
+                        if session_volume_fraction < 1.0
+                        else volume
+                    )
+                    projected_dollar_vol = projected_volume * price
+                    quote = t.get("lastQuote", {}) or {}
+                    bid = float(quote.get("p", 0) or 0)
+                    ask = float(quote.get("P", 0) or 0)
+                    quote_mid = (bid + ask) / 2.0 if bid > 0 and ask > bid else 0.0
+                    spread_pct = ((ask - bid) / quote_mid * 100.0) if quote_mid > 0 else None
 
                     # Close Position: Extended-Preise in die Range einbeziehen und clampen.
                     day_high = max(float(day.get("h", price) or price), price)
@@ -10679,7 +11138,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         continue
                     if _has_vortag_filter:
                         _stage("vortag_filter")
-                    if min_dollar_vol > 0 and dollar_vol < min_dollar_vol:
+                    if min_dollar_vol > 0 and projected_dollar_vol < min_dollar_vol:
                         _reject("dollar_volume_filter")
                         continue
                     _stage("dollar_volume_filter")
@@ -10692,13 +11151,22 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         day_high=day_high,
                         day_low=day_low,
                         day_volume=volume,
+                        now_utc=scan_now_utc,
                     )
                     rvol = history_metrics.get("rvol20")
-                    rvol_source = "20D_avg_volume"
+                    rvol_source = str(history_metrics.get("rvol_source") or "20D_completed_session")
                     if rvol is None:
                         prev_vol = float(prev.get("v", 0) or 0)
-                        rvol = min(round(volume / prev_vol, 2), 50.0) if prev_vol > 1000 else 1.0
-                        rvol_source = "fallback_prev_day_volume"
+                        rvol = (
+                            min(round(volume / max(prev_vol * session_volume_fraction, 1.0), 2), 50.0)
+                            if prev_vol > 1000
+                            else 1.0
+                        )
+                        rvol_source = (
+                            "fallback_prev_day_intraday_time_adjusted"
+                            if session_volume_fraction < 1.0
+                            else "fallback_prev_day_completed_session"
+                        )
                     prev_atr_pct = float(history_metrics.get("atr_pct") or _snapshot_atr_pct(day, prev, price))
 
                     # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
@@ -10803,7 +11271,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             _strat_score = min(_strat_score, 79)
                     if not history_metrics.get("history_ok"):
                         _strat_score = min(_strat_score, 74)
-                    if rvol_source != "20D_avg_volume":
+                    if not rvol_source.startswith("20D_"):
                         _strat_score = min(_strat_score, 76)
 
                     # Grade (verschärft — konsistent mit Krypto-Scanner)
@@ -10877,7 +11345,15 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "rvol": rvol,
                         "RVOL_Source": rvol_source,
                         "AvgVol20": round(history_metrics.get("avg_vol20") or 0),
-                        "Dollar_Volume": round(dollar_vol),
+                        "Dollar_Volume": round(projected_dollar_vol),
+                        "Observed_Dollar_Volume": round(dollar_vol),
+                        "Projected_Dollar_Volume": round(projected_dollar_vol),
+                        "dollar_volume": round(dollar_vol),
+                        "Expected_Volume_Fraction": round(session_volume_fraction, 4),
+                        "RVOL_Raw": history_metrics.get("rvol20_raw"),
+                        "spread_pct": round(spread_pct, 3) if spread_pct is not None else None,
+                        "bid": round(bid, 4) if bid > 0 else None,
+                        "ask": round(ask, 4) if ask > 0 else None,
                         "Prev_Close": round(prev_close, 2),
                         "Day_Open": round(day_open, 2),
                         "Day_High": round(day_high, 2),
@@ -19436,6 +19912,7 @@ def _volume_spikes_wrapper() -> None:
                 tickers.extend(snap_resp.json().get("tickers", []))
 
         common_stock_universe, common_stock_source = _load_common_stock_universe()
+        volume_fraction = _us_equity_expected_volume_fraction(datetime.now(timezone.utc))
         seen_symbols = set()
         for t in tickers:
                 try:
@@ -19464,7 +19941,8 @@ def _volume_spikes_wrapper() -> None:
                     # Snapshot only has day + prevDay; 20-day median would need extra API call per ticker
                     # For gainers/losers bulk scan, prevDay is acceptable (close enough to median for high-vol stocks)
                     if prev_vol > 0:
-                        rvol = vol / prev_vol
+                        rvol_raw = vol / prev_vol
+                        rvol = rvol_raw / max(volume_fraction, 0.01)
                     else:
                         continue
 
@@ -19474,7 +19952,8 @@ def _volume_spikes_wrapper() -> None:
 
                         # Fix 2b: Dollar Volume Minimum
                         dollar_volume = price * vol
-                        if dollar_volume < 1_000_000:
+                        projected_dollar_volume = dollar_volume / max(volume_fraction, 0.01)
+                        if projected_dollar_volume < 1_000_000 or dollar_volume < 100_000:
                             continue
 
                         # Fix 2c: Breakout vs Absorption
@@ -19492,7 +19971,11 @@ def _volume_spikes_wrapper() -> None:
                             "change_pct": round(chg, 2),
                             "volume": vol,
                             "rvol": round(rvol, 2),
+                            "rvol_raw": round(rvol_raw, 2),
+                            "rvol_source": "prev_day_intraday_time_adjusted_proxy" if volume_fraction < 1.0 else "prev_day_completed_session_proxy",
                             "dollar_volume": round(dollar_volume, 0),
+                            "projected_dollar_volume": round(projected_dollar_volume, 0),
+                            "expected_volume_fraction": round(volume_fraction, 4),
                             "signal_type": signal_type,
                             "asset_class": "stock",
                             "trade_signal": "BEOBACHTEN",
@@ -19677,7 +20160,7 @@ def _orb_scanner_wrapper() -> None:
             else:
                 return 0.40 + 0.60 * ((mins_open - 120) / max(1, total_market_mins - 120))
 
-        evf = max(0.01, _intraday_evf(mins_since_open))
+        evf = _us_equity_expected_volume_fraction(now_et)
 
         # ── Kandidaten filtern ──
         candidates = []
@@ -22679,6 +23162,8 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 prev_c = closes[i - 1]
                 change_pct = ((c - prev_c) / prev_c) * 100 if prev_c else 0
                 close_pos = (c - lo) / (h - lo) if (h - lo) > 0 else 0.5
+                candle_range = max(h - lo, 1e-9)
+                upper_wick_pct = max(0.0, h - max(o, c)) / candle_range * 100.0
 
                 # Gap %
                 gap_pct = ((o - prev_c) / prev_c) * 100 if prev_c else 0
@@ -22714,6 +23199,17 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     match = False
                 if "rvol_max" in sig and (rvol is None or rvol > sig["rvol_max"]):
                     match = False
+                if "upper_wick_pct_max" in sig and upper_wick_pct > sig["upper_wick_pct_max"]:
+                    match = False
+                breakout_lookback = int(sig.get("breakout_lookback_days", 0) or 0)
+                if breakout_lookback:
+                    if i < breakout_lookback:
+                        match = False
+                    else:
+                        prior_high = max(highs[i - breakout_lookback:i])
+                        proximity = ((c - prior_high) / prior_high) if prior_high > 0 else -1.0
+                        if proximity < float(sig.get("breakout_proximity_min", 0.0) or 0.0):
+                            match = False
 
                 if not match:
                     continue

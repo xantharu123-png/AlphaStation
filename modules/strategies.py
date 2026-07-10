@@ -17,7 +17,10 @@ Functions:
   - classify_pm_setup(): Classifies pre-market setups with technical analysis
 """
 
-import streamlit as st
+try:
+    import streamlit as st
+except ImportError:  # FastAPI/server and backtests do not need the legacy UI.
+    st = None
 
 
 STRATEGIES = {
@@ -628,6 +631,8 @@ def get_strategies_for_market(market_type, exchange="US"):
 
 def apply_strategy(strategy_name, strategies_dict=None):
     """Wendet eine Strategie an. strategies_dict ist optional - wird automatisch ermittelt."""
+    if st is None:
+        raise RuntimeError("apply_strategy is only available in the legacy Streamlit UI")
 
     # Wenn kein Dictionary übergeben, suche in allen
     if strategies_dict is None:
@@ -919,4 +924,3 @@ BACKTEST_STRATEGY_RULES = {
     # Nicht rule-based (braucht Donchian+ATR) → eigene Backtest-Logik in api.py
     # ═══════════════════════════════════════════════════════════════
 }
-    

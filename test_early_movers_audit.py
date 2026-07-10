@@ -246,6 +246,86 @@ def test_early_mover_vrvp_can_upgrade_weak_targets():
     assert "vrvp_target_confirmed" in row["risk_flags"]
 
 
+def test_early_mover_vrvp_marks_close_overhead_resistance_as_gate():
+    row = {
+        "Symbol": "XTZ",
+        "Price": 0.247124,
+        "entry": 0.247124,
+        "stop_loss": 0.243788,
+        "tp1": 0.263851,
+        "tp2": 0.280470,
+        "target_quality": "STRUCTURAL",
+        "risk_flags": [],
+        "trade_setup": {
+            "entry": 0.247124,
+            "stop_loss": 0.243788,
+            "tp1": 0.263851,
+            "tp2": 0.280470,
+            "target_quality": "STRUCTURAL",
+            "target_min_pct_required": {"tp1": 5.5, "tp2": 9.5},
+            "risk_flags": [],
+            "trigger_conditions": ["5m Execution-Trigger abwarten"],
+        },
+    }
+    vrvp = {
+        "levels": [
+            {"price": 0.2502, "source": "vrvp_hvn_high", "weight": 90},
+            {"price": 0.2639, "source": "vrvp_vah", "weight": 80},
+            {"price": 0.2805, "source": "vrvp_lvn_upper_edge", "weight": 75},
+        ],
+    }
+
+    api._apply_early_mover_vrvp_targets(row, vrvp)
+
+    assert row["breakout_level"] == api._round_crypto_price(0.2502)
+    assert row["overhead_resistance"]["price"] == api._round_crypto_price(0.2502)
+    assert row["overhead_resistance"]["distance_pct"] < 1.5
+    assert "near_overhead_resistance" in row["risk_flags"]
+    assert row["trade_setup"]["overhead_resistance"]["price"] == api._round_crypto_price(0.2502)
+    assert row["trade_setup"]["trigger_conditions"][0].startswith("Break/Reclaim ueber")
+
+
+def test_trade_barrier_gate_downgrades_unreclaimed_long_now_signal():
+    row = {
+        "Symbol": "XTZ",
+        "Price": 0.247,
+        "trade_signal": "JETZT_TRADEN",
+        "trade_action": "LONG_NOW",
+        "trade_decision": "TRADEABLE",
+        "alertable_crypto": True,
+        "entry": 0.247,
+        "stop_loss": 0.243,
+        "tp1": 0.263,
+        "tp2": 0.28,
+        "trade_setup": {
+            "direction": "LONG",
+            "entry": 0.247,
+            "stop_loss": 0.243,
+            "tp1": 0.263,
+            "tp2": 0.28,
+            "overhead_resistance": {
+                "side": "resistance",
+                "price": 0.25,
+                "source": "VRVP HVN high",
+                "timeframe": "4H",
+                "distance_pct": 1.21,
+                "distance_r": 0.75,
+            },
+        },
+    }
+
+    barrier = api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert barrier["reclaimed"] is False
+    assert row["trade_signal"] == "WARTEN"
+    assert row["trade_action"] == "WAIT_FOR_BREAK_RECLAIM"
+    assert row["trade_decision"] == "WAIT_FOR_TRIGGER"
+    assert row["alertable_crypto"] is False
+    assert row["barrier_gate_active"] is True
+    assert "near_overhead_resistance" in row["risk_flags"]
+    assert row["trade_setup"]["barrier_gate_active"] is True
+
+
 def test_early_mover_duplicate_targets_are_downgraded_and_not_alertable():
     row = {
         "Symbol": "ZEN",

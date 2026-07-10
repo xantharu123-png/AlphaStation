@@ -3154,6 +3154,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         event_high: 'Event-Risiko hoch',
         chased_from_entry: 'zu weit vom Entry',
         early_mover_no_chase: 'nicht hinterherjagen',
+        near_overhead_resistance: 'nahe Resistance',
     };
     const humanizeRiskFlag = (flag) => riskLabelMap[String(flag || '').toLowerCase()] || String(flag || '').replaceAll('_', ' ');
     const humanizeLevelSource = (source) => {
@@ -3174,10 +3175,17 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             'breakout_measured_move_200': 'Measured Move 200%',
             'breakout_measured_move_261': 'Measured Move 261%',
             'vrvp_vah_resistance': 'VRVP VAH Widerstand',
+            'vrvp_vah': 'VRVP VAH Widerstand',
             'vrvp_poc_acceptance': 'VRVP POC Akzeptanz',
+            'vrvp_poc': 'VRVP POC Akzeptanz',
             'vrvp_hvn_resistance': 'VRVP HVN Widerstand',
+            'vrvp_hvn_mid': 'VRVP HVN Mitte',
+            'vrvp_hvn_low': 'VRVP HVN Unterkante',
+            'vrvp_hvn_high': 'VRVP HVN Oberkante',
             'vrvp_lvn_upper_edge': 'VRVP LVN Kante',
+            'vrvp_lvn_lower_edge': 'VRVP LVN Unterkante',
             'vrvp_val_support': 'VRVP VAL Support',
+            'vrvp_val': 'VRVP VAL Support',
             'fib_61_8_retest_invalidation': 'Stop unter Fib 61.8 Retest',
             'range_mid_retest_invalidation': 'Stop unter Range-Mitte',
             'fib_38_2_retest_invalidation': 'Stop unter Fib 38.2 Retest',
@@ -3216,6 +3224,25 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             : targetStructural
                 ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
                 : 'border-gray-200 bg-gray-50 text-gray-700';
+    const overheadResistance = activeTradeSetup?.overhead_resistance || cd.overhead_resistance || d.overhead_resistance || null;
+    const underlyingSupport = activeTradeSetup?.underlying_support || cd.underlying_support || d.underlying_support || null;
+    const nearestBarrier = activeTradeSetup?.nearest_barrier || cd.nearest_barrier || d.nearest_barrier || overheadResistance || underlyingSupport || null;
+    const barrierSide = String(nearestBarrier?.side || (underlyingSupport ? 'support' : 'resistance')).toLowerCase();
+    const barrierPrice = firstFiniteNumber(
+        nearestBarrier?.price,
+        barrierSide === 'resistance' ? activeTradeSetup?.breakout_level : null,
+        barrierSide === 'resistance' ? cd.breakout_level : null,
+        barrierSide === 'resistance' ? d.breakout_level : null
+    );
+    const barrierSource = nearestBarrier?.source || activeTradeSetup?.resistance_source || cd.resistance_source || d.resistance_source;
+    const barrierDistance = Number(nearestBarrier?.distance_pct);
+    const barrierDistanceR = Number(nearestBarrier?.distance_r);
+    const barrierLabel = barrierSide === 'support'
+        ? 'Naechster Support / Breakdown-Level'
+        : 'Naechste Resistance / Breakout-Level';
+    const barrierAction = barrierSide === 'support'
+        ? 'Erst Break/Reclaim darunter bestaetigen'
+        : 'Erst Break/Reclaim darueber bestaetigen';
     const compactRiskText = (flags = []) => {
         const list = Array.isArray(flags) ? flags : [];
         const clean = list.map(humanizeRiskFlag).filter(Boolean);
@@ -3480,6 +3507,20 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <div><span className="opacity-70">TP1</span><div className={`font-semibold ${targetQualityTone}`}>{formatSidebarPrice(activeTradeSetup?.tp1 ?? cd.tp1)}</div></div>
                             <div><span className="opacity-70">TP2</span><div className={`font-semibold ${targetQualityTone}`}>{formatSidebarPrice(activeTradeSetup?.tp2 ?? cd.tp2)}</div></div>
                         </div>
+                        {barrierPrice && (
+                            <div className="mb-2 rounded border border-amber-300 bg-amber-100/80 p-2 text-amber-950">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold">{barrierLabel}</span>
+                                    <span className="font-bold">{formatSidebarPrice(barrierPrice)}</span>
+                                </div>
+                                <div className="mt-1 text-[11px]">
+                                    {barrierAction}
+                                    {Number.isFinite(barrierDistance) ? ` (${barrierDistance.toFixed(2)}% entfernt)` : ''}
+                                    {Number.isFinite(barrierDistanceR) ? ` / ${barrierDistanceR.toFixed(2)}R` : ''}
+                                    {barrierSource ? ` | ${humanizeLevelSource(barrierSource)}` : ''}.
+                                </div>
+                            </div>
+                        )}
                         <div className={`mb-2 rounded border p-2 ${targetQualityBoxTone}`}>
                             <div className="flex items-center justify-between gap-2">
                                 <span className="font-semibold">{targetQualityLabel}</span>
@@ -3872,6 +3913,20 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel} ({activeTradeSetup.direction})</h4>
                             {activeTradeSetup.entry_status && <span className="text-[11px] font-bold px-2 py-1 rounded bg-white/70">{activeTradeSetup.entry_status}</span>}
                         </div>
+                        {barrierPrice && (
+                            <div className="mb-3 rounded border border-amber-300 bg-amber-100/80 p-2 text-amber-950">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold">{barrierLabel}</span>
+                                    <span className="font-bold">{formatSidebarPrice(barrierPrice)}</span>
+                                </div>
+                                <div className="mt-1 text-[11px]">
+                                    {barrierAction}
+                                    {Number.isFinite(barrierDistance) ? ` (${barrierDistance.toFixed(2)}% entfernt)` : ''}
+                                    {Number.isFinite(barrierDistanceR) ? ` / ${barrierDistanceR.toFixed(2)}R` : ''}
+                                    {barrierSource ? ` | ${humanizeLevelSource(barrierSource)}` : ''}.
+                                </div>
+                            </div>
+                        )}
                         {starterPlan && (
                             <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-900">
                                 <div className="flex items-center justify-between gap-2 mb-2">

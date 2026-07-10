@@ -1101,6 +1101,15 @@ def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeyp
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SWNG"}, "unit"))
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+    monkeypatch.setattr(
+        api,
+        "_stock_breakout_freshness_state",
+        lambda row, **kwargs: {
+            **row,
+            "Breakout_Freshness_Checked": True,
+            "Breakout_Freshness_Status": "FRESH_CROSS",
+        },
+    )
 
     api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
         "Ticker": "SWNG",
@@ -1113,6 +1122,13 @@ def test_stock_strategy_email_is_labeled_as_swing_not_intraday(tmp_path, monkeyp
         "Signal_Direction": "LONG",
         "change_pct": 4.2,
         "close_pos": 0.82,
+        "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 86,
+        "Breakout_Fakeout_Risk": "LOW",
+        "Upper_Wick_Pct": 8.0,
+        "Breakout_20D_Pct": 1.0,
+        "Day_High": 12.5,
         "latest_bar_change_pct": 0.12,
         "latest_bar_close_pos": 0.72,
         "trade_setup": {
@@ -1310,6 +1326,15 @@ def test_stock_strategy_momentum_mail_allows_clean_real_breakout(monkeypatch, tm
     monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True})
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BRKO"}, "unit"))
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+    monkeypatch.setattr(
+        api,
+        "_stock_breakout_freshness_state",
+        lambda row, **kwargs: {
+            **row,
+            "Breakout_Freshness_Checked": True,
+            "Breakout_Freshness_Status": "FRESH_CROSS",
+        },
+    )
 
     api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
         "Ticker": "BRKO",
