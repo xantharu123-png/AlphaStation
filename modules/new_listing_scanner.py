@@ -1795,6 +1795,38 @@ def _close_position(candle):
     return (_to_float(candle.get("close")) - _to_float(candle.get("low"))) / rng
 
 
+def _completed_fresh_micro_candles(candles, timeframe="5m", now_ts=None):
+    """Return closed execution candles and freshness diagnostics.
+
+    Exchange candle timestamps are open times. Forming 5m candles must never
+    create a live short signal, and a closed candle older than two bars is no
+    longer a current micro-crack confirmation.
+    """
+    seconds = {"5m": 300}.get(str(timeframe or "").lower())
+    rows = list(candles or [])
+    if not seconds or not rows:
+        return rows, {"known": False, "fresh": False, "age_seconds": None, "dropped_open": False}
+    now_value = float(now_ts if now_ts is not None else time.time())
+    last_ts = _normalize_epoch_seconds(rows[-1].get("timestamp"))
+    dropped_open = bool(last_ts and last_ts + seconds > now_value)
+    if dropped_open:
+        rows = rows[:-1]
+    if not rows:
+        return [], {"known": bool(last_ts), "fresh": False, "age_seconds": None, "dropped_open": dropped_open}
+    completed_ts = _normalize_epoch_seconds(rows[-1].get("timestamp"))
+    if completed_ts <= 0:
+        return rows, {"known": False, "fresh": False, "age_seconds": None, "dropped_open": dropped_open}
+    closed_at = completed_ts + seconds
+    age_seconds = max(0, int(now_value - closed_at))
+    return rows, {
+        "known": True,
+        "fresh": bool(closed_at <= now_value + 2 and age_seconds <= seconds * 2),
+        "age_seconds": age_seconds,
+        "closed_at": int(closed_at),
+        "dropped_open": dropped_open,
+    }
+
+
 def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timeframe=None):
     """5m execution trigger for Pump & Dump shorts."""
     pump_data = pump_data or {}
@@ -1818,6 +1850,17 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
 
     min_candles = 18
     min_score = int(CONFIG["micro_min_score"])
+
+    candles, freshness = _completed_fresh_micro_candles(candles, tf)
+    result["micro_dropped_open_candle"] = bool(freshness.get("dropped_open"))
+    result["micro_data_age_seconds"] = freshness.get("age_seconds")
+    result["micro_candle_closed_at"] = freshness.get("closed_at")
+    if not freshness.get("known"):
+        result["micro_warnings"].append("micro_execution_timestamp_missing")
+        return result
+    if freshness.get("known") and not freshness.get("fresh"):
+        result["micro_warnings"].append("micro_execution_candles_stale")
+        return result
 
     if not candles or len(candles) < min_candles:
         result["micro_warnings"].append("micro_not_enough_candles")
@@ -1970,6 +2013,9 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
         "micro_pump_pct": round(micro_pump_pct, 2),
         "micro_bars_since_high": bars_since_high,
         "micro_timeframe": tf,
+        "micro_data_age_seconds": freshness.get("age_seconds"),
+        "micro_candle_closed_at": freshness.get("closed_at"),
+        "micro_dropped_open_candle": bool(freshness.get("dropped_open")),
     })
     return result
 
@@ -2337,6 +2383,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "micro_required": micro_required,
         "micro_trigger_ok": micro_trigger_ok,
         "micro_score": micro_score,
+        "micro_data_age_seconds": pump_data.get("micro_data_age_seconds"),
+        "micro_candle_closed_at": pump_data.get("micro_candle_closed_at"),
+        "micro_dropped_open_candle": bool(pump_data.get("micro_dropped_open_candle")),
         "btc_tailwind_risk": btc_tailwind_risk,
         "btc_context_ok": btc_context_ok,
         "btc_short_context": pump_data.get("btc_short_context", "UNKNOWN"),

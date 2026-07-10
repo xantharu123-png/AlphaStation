@@ -43,11 +43,12 @@ def _deep_book():
 
 def _micro_crack_candles():
     now = int(time.time())
+    start_ts = now - 25 * 300
     rows = []
     price = 80.0
     for i in range(18):
         rows.append({
-            "timestamp": now + i * 300,
+            "timestamp": start_ts + i * 300,
             "open": price,
             "high": price * 1.018,
             "low": price * 0.995,
@@ -57,11 +58,11 @@ def _micro_crack_candles():
         price *= 1.015
     high = 130.0
     rows.extend([
-        {"timestamp": now + 18 * 300, "open": price, "high": high, "low": 99, "close": 118, "volume_usd": 420_000},
-        {"timestamp": now + 19 * 300, "open": 118, "high": 119, "low": 115, "close": 116, "volume_usd": 360_000},
-        {"timestamp": now + 20 * 300, "open": 116, "high": 117, "low": 113, "close": 114, "volume_usd": 340_000},
-        {"timestamp": now + 21 * 300, "open": 114, "high": 116.5, "low": 112, "close": 115, "volume_usd": 280_000},
-        {"timestamp": now + 22 * 300, "open": 115, "high": 117, "low": 113, "close": 114.5, "volume_usd": 520_000},
+        {"timestamp": start_ts + 18 * 300, "open": price, "high": high, "low": 99, "close": 118, "volume_usd": 420_000},
+        {"timestamp": start_ts + 19 * 300, "open": 118, "high": 119, "low": 115, "close": 116, "volume_usd": 360_000},
+        {"timestamp": start_ts + 20 * 300, "open": 116, "high": 117, "low": 113, "close": 114, "volume_usd": 340_000},
+        {"timestamp": start_ts + 21 * 300, "open": 114, "high": 116.5, "low": 112, "close": 115, "volume_usd": 280_000},
+        {"timestamp": start_ts + 22 * 300, "open": 115, "high": 117, "low": 113, "close": 114.5, "volume_usd": 520_000},
     ])
     return rows
 

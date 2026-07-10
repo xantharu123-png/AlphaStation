@@ -524,9 +524,11 @@ def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
         "tp1": 2.5,
     }
     bars = []
+    now = int(time.time())
+    start = now - 22 * 300
     for i in range(20):
-        bars.append({"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000})
-    bars.append({"open": 1.0, "high": 1.04, "low": 0.99, "close": 1.035, "volume": 2200})
+        bars.append({"timestamp": start + i * 300, "open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000})
+    bars.append({"timestamp": start + 20 * 300, "open": 1.0, "high": 1.04, "low": 0.99, "close": 1.035, "volume": 2200})
     monkeypatch.setattr(api, "fetch_candles_for", lambda *args, **kwargs: bars)
     monkeypatch.setattr(api, "fetch_orderbook_for", lambda *args, **kwargs: {
         "bids": [(1.069, 100), (1.068, 200)],
@@ -555,8 +557,10 @@ def test_early_mover_verified_5m_trigger_is_blocked_by_4h_spike_rejection(monkey
         "target_quality": "STRUCTURAL",
         "btc_context": {"tailwind": True},
     }
-    five_min = [{"open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for _ in range(35)]
-    five_min.append({"open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1400})
+    now = int(time.time())
+    start = now - 37 * 300
+    five_min = [{"timestamp": start + i * 300, "open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for i in range(35)]
+    five_min.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1400})
     four_hour = [{"open": 0.66, "high": 0.69, "low": 0.64, "close": 0.67, "volume": 1000} for _ in range(40)]
     four_hour.extend([
         {"open": 0.67, "high": 0.78, "low": 0.66, "close": 0.755, "volume": 8000},
@@ -592,7 +596,9 @@ def test_early_mover_adaptive_trigger_uses_only_5m(monkeypatch):
         "stop_loss": 0.96,
         "tp1": 1.18,
     }
-    flat_5m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(36)]
+    now = int(time.time())
+    flat_start = now - 37 * 300
+    flat_5m = [{"timestamp": flat_start + i * 300, "open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for i in range(36)]
     micro_1m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(44)]
     micro_1m.append({"open": 1.01, "high": 1.055, "low": 1.008, "close": 1.049, "volume": 2600})
     calls = []
@@ -646,8 +652,10 @@ def test_early_mover_5m_retest_hold_uses_adaptive_threshold():
         "tp1": 1.16,
         "btc_context": {"tailwind": False, "btc_24h": 0.2, "btc_7d": -4.0, "alpha_24h": 2.2},
     }
-    bars = [{"open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for _ in range(35)]
-    bars.append({"open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1200})
+    now = int(time.time())
+    start = now - 37 * 300
+    bars = [{"timestamp": start + i * 300, "open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for i in range(35)]
+    bars.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1200})
 
     result = api._score_early_mover_trigger_bars(row, bars, "5m", api._early_mover_trigger_profile(row))
 
@@ -715,7 +723,9 @@ def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
         "stop_loss": 0.96,
         "tp1": 1.30,
     }
-    flat_5m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(36)]
+    now = int(time.time())
+    flat_start = now - 37 * 300
+    flat_5m = [{"timestamp": flat_start + i * 300, "open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for i in range(36)]
     micro_1m = [{"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000} for _ in range(44)]
     micro_1m.append({"open": 1.01, "high": 1.12, "low": 1.005, "close": 1.115, "volume": 4000})
     calls = []
@@ -735,10 +745,13 @@ def test_early_mover_adaptive_blocks_chased_micro_candle(monkeypatch):
 
 def _pre_breakout_bars():
     bars = []
+    now = int(time.time())
+    start = now - 37 * 300
     # Wider prior range, then a tight 5m coil near the highs.
     for i in range(24):
         base = 1.04 + (0.018 if i % 2 else -0.018)
         bars.append({
+            "timestamp": start + i * 300,
             "open": base,
             "high": base + 0.035,
             "low": base - 0.035,
@@ -748,13 +761,14 @@ def _pre_breakout_bars():
     for i in range(11):
         base = 1.072 + i * 0.0007
         bars.append({
+            "timestamp": start + (24 + i) * 300,
             "open": base,
             "high": base + 0.006,
             "low": base - 0.004,
             "close": base + 0.002,
             "volume": 760,
         })
-    bars.append({"open": 1.081, "high": 1.087, "low": 1.079, "close": 1.084, "volume": 900})
+    bars.append({"timestamp": start + 35 * 300, "open": 1.081, "high": 1.087, "low": 1.079, "close": 1.084, "volume": 900})
     return bars
 
 

@@ -2767,6 +2767,51 @@ def _completed_candles_only(
     return list(bars)
 
 
+def _crypto_candle_freshness(
+    bars: List[Dict[str, Any]],
+    timeframe: str,
+    now_ts: Optional[float] = None,
+    max_age_bars: float = 2.0,
+) -> Dict[str, Any]:
+    """Describe whether the newest completed execution candle is still usable.
+
+    Exchange timestamps are candle-open times. A trigger becomes stale once the
+    newest closed candle is more than two bars old. Candles without timestamps
+    cannot prove freshness and therefore fail closed.
+    """
+    seconds = _timeframe_seconds(timeframe)
+    if not bars or not seconds:
+        return {"known": False, "fresh": False, "age_seconds": None, "closed_at": None}
+    last_ts = _candle_epoch_seconds(bars[-1])
+    if last_ts is None:
+        return {"known": False, "fresh": False, "age_seconds": None, "closed_at": None}
+    now_value = float(now_ts if now_ts is not None else time.time())
+    closed_at = last_ts + seconds
+    age_seconds = max(0.0, now_value - closed_at)
+    return {
+        "known": True,
+        "fresh": bool(closed_at <= now_value + 2 and age_seconds <= seconds * max_age_bars),
+        "age_seconds": int(round(age_seconds)),
+        "closed_at": int(round(closed_at)),
+    }
+
+
+def _crypto_contract_price_multiplier(symbol: Any, contract: Any) -> int:
+    """Return the explicit exchange contract unit multiplier (e.g. 1000PEPE)."""
+    base_symbol = str(symbol or "").upper().strip()
+    contract_text = str(contract or "").upper().replace("-", "").replace("_", "").replace("/", "")
+    for quote in ("USDT", "USDC", "USD"):
+        if contract_text.endswith(quote):
+            contract_text = contract_text[:-len(quote)]
+            break
+    if not base_symbol or not contract_text:
+        return 1
+    for multiplier in (1_000_000, 100_000, 10_000, 1_000, 100):
+        if contract_text == f"{multiplier}{base_symbol}":
+            return multiplier
+    return 1
+
+
 def _early_mover_execution_threshold(matched: List[str], profile: Dict[str, Any]) -> int:
     """Adaptive 5m trigger threshold by setup type.
 
@@ -2834,6 +2879,27 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         if len(clean) < min_bars:
             return {"ok": False, "reason": f"bad_{timeframe}_candles", "timeframe": timeframe, "execution_score": 0}
 
+        freshness = _crypto_candle_freshness(clean, timeframe)
+        if not freshness.get("known"):
+            return {
+                "ok": False,
+                "reason": f"missing_{timeframe}_execution_timestamp",
+                "timeframe": timeframe,
+                "execution_score": 0,
+                "execution_data_age_seconds": None,
+                "dropped_open_candle": dropped_open_bar,
+            }
+        if freshness.get("known") and not freshness.get("fresh"):
+            return {
+                "ok": False,
+                "reason": f"stale_{timeframe}_execution_candle",
+                "timeframe": timeframe,
+                "execution_score": 0,
+                "execution_data_age_seconds": freshness.get("age_seconds"),
+                "last_candle_closed_at": freshness.get("closed_at"),
+                "dropped_open_candle": dropped_open_bar,
+            }
+
         recent_len = 24
         window_len = 8
         recent = clean[-recent_len:] if len(clean) >= recent_len else clean
@@ -2845,6 +2911,23 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         last_low = last["low"]
         last_close = last["close"]
         last_vol = last["volume"]
+
+        scanner_price = _alert_float(row.get("Price") or row.get("current_price") or row.get("price"))
+        price_basis_diff_pct = (
+            abs(last_close - scanner_price) / scanner_price * 100
+            if scanner_price is not None and scanner_price > 0 else 0.0
+        )
+        if scanner_price and price_basis_diff_pct > 2.0:
+            return {
+                "ok": False,
+                "reason": "execution_price_basis_mismatch",
+                "timeframe": timeframe,
+                "execution_score": 0,
+                "scanner_price": round(scanner_price, 10),
+                "last_close": round(last_close, 10),
+                "price_basis_diff_pct": round(price_basis_diff_pct, 2),
+                "execution_data_age_seconds": freshness.get("age_seconds"),
+            }
 
         typical_value = 0.0
         volume_sum = 0.0
@@ -3060,6 +3143,9 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             "matched": matched,
             "last_close": round(last_close, 10),
             "last_candle_timestamp": int(last_timestamp) if last_timestamp is not None else None,
+            "last_candle_closed_at": freshness.get("closed_at"),
+            "execution_data_age_seconds": freshness.get("age_seconds"),
+            "price_basis_diff_pct": round(price_basis_diff_pct, 2),
             "dropped_open_candle": dropped_open_bar,
             "vwap": round(vwap, 10),
             "volume_ratio": round(vol_ratio, 2),
@@ -3251,7 +3337,17 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": "no_perp_chart_for_realtime_trigger"}
 
     profile = _early_mover_trigger_profile(row)
-    cache_key = f"{exchange}:{contract}:adaptive_5m_v2"
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    plan_fingerprint = ":".join(
+        str(value or "") for value in (
+            row.get("trade_action"),
+            row.get("entry", setup.get("entry")),
+            row.get("stop_loss", row.get("stop", setup.get("stop_loss", setup.get("stop")))),
+            row.get("tp1", setup.get("tp1")),
+            row.get("tp2", setup.get("tp2")),
+        )
+    )
+    cache_key = f"{exchange}:{contract}:adaptive_5m_v3:{plan_fingerprint}"
     now = time.time()
     cached = _EARLY_MOVER_TRIGGER_CACHE.get(cache_key)
     if cached and now - cached.get("ts", 0) < _EARLY_MOVER_TRIGGER_TTL:
@@ -3974,6 +4070,18 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
             row["execution_quality_score"] = trigger_check.get("execution_score")
         if trigger_check.get("timeframe"):
             row["execution_timeframe"] = trigger_check.get("timeframe")
+        if trigger_check.get("execution_data_age_seconds") is not None:
+            row["execution_data_age_seconds"] = trigger_check.get("execution_data_age_seconds")
+        if trigger_check.get("last_close") is not None:
+            row["execution_price"] = trigger_check.get("last_close")
+            row["current_price"] = trigger_check.get("last_close")
+        if trigger_check.get("volume_ratio") is not None:
+            actual_rvol = trigger_check.get("volume_ratio")
+            row["RVOL"] = actual_rvol
+            row["rvol"] = actual_rvol
+            row["relative_volume"] = actual_rvol
+            row["volume_model"] = "exchange_5m_vs_median"
+            row["vol_confirmed"] = bool(actual_rvol >= 1.1)
         if trigger_check.get("pre_breakout_score") is not None:
             row["pre_breakout_score"] = trigger_check.get("pre_breakout_score")
             row["pre_breakout_reason"] = trigger_check.get("pre_breakout_reason")
@@ -4014,7 +4122,9 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     row["pre_breakout_armed"] = armed_ok
     row["pre_breakout_block_reasons"] = armed_reasons
 
-    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason:
+    matched = set((trigger_check or {}).get("matched") or []) if isinstance(trigger_check, dict) else set()
+    retest_execution_ok = action != "WAIT_FOR_RETEST" or "retest_hold" in matched
+    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason and retest_execution_ok:
         row["trade_signal"] = "JETZT_TRADEN"
         score_txt = f" Score {trigger_check.get('execution_score')}/100" if isinstance(trigger_check, dict) and trigger_check.get("execution_score") is not None else ""
         tf_txt = str(trigger_check.get("timeframe") or "adaptive") if isinstance(trigger_check, dict) else "adaptive"
@@ -4022,6 +4132,12 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["signal_quality"] = "tradeable"
         row["entry_status"] = "JETZT_TRADEN"
         row["alertable_crypto"] = True
+    elif action == "WAIT_FOR_RETEST" and trigger_ok and not retest_execution_ok:
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: Breakout erkannt, aber der geplante Retest am Entry fehlt"
+        row["signal_quality"] = "wait_retest"
+        row["entry_status"] = "WAIT_FOR_RETEST"
+        row["alertable_crypto"] = False
     elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and armed_ok:
         row["trade_signal"] = "EXPLOSION_ARMED"
         score_txt = f" Score {explosion_score}/100" if explosion_score is not None else ""
@@ -10991,7 +11107,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         filters = strat.get("filters", {})
         change_min, change_max = filters.get("Change %", (-999, 999))
         price_min, price_max = filters.get("Preis", (0, 999999))
-        rvol_min, rvol_max = filters.get("RVOL", (0, 999))
+        turnover_min, turnover_max = filters.get("Turnover Intensity", filters.get("RVOL", (0, 999)))
         close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
         gap_min, gap_max = filters.get("Gap %", (-999, 999))
         vortag_min, vortag_max = filters.get("Vortag %", (-999, 999))
@@ -11619,7 +11735,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     continue
                 if "MarketCap" in filters and not (mcap_min <= mcap <= mcap_max):
                     continue
-                if "RVOL" in filters and not (rvol_min <= turnover_intensity <= rvol_max):
+                if ("Turnover Intensity" in filters or "RVOL" in filters) and not (turnover_min <= turnover_intensity <= turnover_max):
                     continue
                 if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
                     continue
@@ -11695,8 +11811,9 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "MarketCap": round(mcap),
                     "VolMCapRatio": round(vol_mcap_ratio, 2),
                     "TurnoverIntensity": round(turnover_intensity, 2),
-                    "RVOL": round(turnover_intensity, 2),
-                    "rvol": round(turnover_intensity, 2),
+                    "turnover_intensity": round(turnover_intensity, 2),
+                    "RVOL": None,
+                    "rvol": None,
                     "Close_Position": round(close_pos, 2),
                     "BtcRelative7d": round(btc_alpha_7d, 2),
                     "score": score,
@@ -11715,7 +11832,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "data_warning": cg_warning,
                     "data_source": f"CoinGecko markets ({cg_source})",
                     "scanner_note": "Crypto-Strategie-Score ist Beobachtung, kein Entry. JETZT_TRADEN braucht einen frischen Micro-/Execution-Trigger.",
-                    "volume_model": "TurnoverIntensity = Vol/MCap/10",
+                    "volume_model": "turnover_intensity=(24h_volume/market_cap_pct)/10; not_historical_rvol",
                 })
             except Exception as item_err:
                 print(f"[Crypto Strategy] skip {coin.get('symbol', '?')} ({item_err})")
@@ -16868,10 +16985,16 @@ def fetch_early_movers(_prefetched_perps=None):
             # BTC-relative Performance (zeigt Alpha vs. Markt)
             btc_relative_7d = round(change_7d - btc_7d, 2) if btc_7d else round(change_7d, 2)
 
+            chart_contract = perp_info.get("best_contract_symbol") if perp_info else None
+            contract_multiplier = _crypto_contract_price_multiplier(symbol, chart_contract or perp_match_symbol)
+            execution_price = price * contract_multiplier
+            execution_high = high_24h * contract_multiplier
+            execution_low = low_24h * contract_multiplier
+
             base_entry = {
                 "Symbol": symbol, "Name": name, "ID": cid,
                 "Rank": rank,
-                "Price": price, "MCap": mcap, "Vol24h": vol_24h,
+                "Price": execution_price, "SpotPrice": price, "MCap": mcap, "Vol24h": vol_24h,
                 "Change1h": round(change_1h, 2), "Change24h": round(change_24h, 2),
                 "Change7d": round(change_7d, 2), "Change14d": round(change_14d, 2),
                 "Change30d": round(change_30d, 2),
@@ -16882,21 +17005,23 @@ def fetch_early_movers(_prefetched_perps=None):
                 "PerpOI": perp_info.get("oi_usdt", 0) if perp_info else 0,
                 "BestExchange": best_exchange,
                 "PerpMatchSymbol": perp_match_symbol if has_perp else None,
-                "PerpChartSymbol": perp_info.get("best_contract_symbol") if perp_info else None,
+                "PerpChartSymbol": chart_contract,
                 "PerpChartExchange": perp_info.get("best_chart_exchange") if perp_info else None,
+                "ContractPriceMultiplier": contract_multiplier,
                 "Exchanges": exchanges,
                 "Narrative": narrative,
-                "High24h": high_24h, "Low24h": low_24h,
+                "High24h": execution_high, "Low24h": execution_low,
                 "IsTrending": is_trending,
                 "BtcRelative7d": btc_relative_7d,
                 "Btc24h": round(btc_24h, 2),
                 "Btc7d": round(btc_7d, 2),
                 "BtcRelative24h": round(change_24h - btc_24h, 2),
-                "current_price": price,
+                "current_price": execution_price,
                 "direction": "LONG",
                 "dollar_volume": vol_24h,
-                "relative_volume": round(max(0, vol_mcap_ratio / 30), 2),
-                "close_pos": round((price - low_24h) / (high_24h - low_24h), 2) if high_24h > low_24h else 0.5,
+                "turnover_intensity": round(max(0, vol_mcap_ratio / 30), 2),
+                "volume_model": "turnover_proxy_pending_exchange_trigger",
+                "close_pos": round((execution_price - execution_low) / (execution_high - execution_low), 2) if execution_high > execution_low else 0.5,
                 "OI_ChangePct": perp_info.get("oi_change_pct") if perp_info else None,
                 "OI_HistoryAgeSeconds": perp_info.get("oi_history_age_seconds") if perp_info else None,
             }
@@ -17961,7 +18086,11 @@ def _fetch_crypto_explosion_universe() -> Tuple[List[Dict[str, Any]], Dict[str, 
     return unique, {"by_exchange": by_exchange, "universe_count": len(unique)}
 
 
-def _ce_completed_bars(bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _ce_completed_bars(
+    bars: List[Dict[str, Any]],
+    timeframe: str = "",
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     parsed = []
     for b in bars or []:
         close = _ce_float(b.get("close", b.get("c")))
@@ -17973,7 +18102,9 @@ def _ce_completed_bars(bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if close <= 0 or high <= 0 or low <= 0 or high < low:
             continue
         parsed.append({"timestamp": ts, "open": open_, "high": high, "low": low, "close": close, "volume": volume})
-    return parsed
+    if any(bar.get("timestamp") for bar in parsed):
+        parsed.sort(key=lambda bar: bar.get("timestamp") or 0)
+    return _completed_candles_only(parsed, timeframe, now_ts=now_ts) if timeframe else parsed
 
 
 def _ce_median(values: List[float], default: float = 0.0) -> float:
@@ -18033,10 +18164,16 @@ def _get_crypto_btc_context(symbol: str, coin_change_24h: float = 0.0) -> Dict[s
 
 
 def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[str, Any]], bars15_raw: List[Dict[str, Any]], bars4h_raw: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    bars5 = _ce_completed_bars(bars5_raw)
-    bars15 = _ce_completed_bars(bars15_raw)
-    bars4h = _ce_completed_bars(bars4h_raw)
+    bars5 = _ce_completed_bars(bars5_raw, "5m")
+    bars15 = _ce_completed_bars(bars15_raw, "15m")
+    bars4h = _ce_completed_bars(bars4h_raw, "4h")
     if len(bars5) < 50 or len(bars15) < 24:
+        return None
+
+    execution_freshness = _crypto_candle_freshness(bars5, "5m")
+    if not execution_freshness.get("known"):
+        return None
+    if execution_freshness.get("known") and not execution_freshness.get("fresh"):
         return None
 
     price = bars5[-1]["close"]
@@ -18216,7 +18353,14 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "rr_tp2": round(rr_tp2, 2),
         "atr5_pct": round(atr_pct, 3),
         "volume_ratio_5m": round(vol_ratio, 2),
+        "RVOL": round(vol_ratio, 2),
+        "rvol": round(vol_ratio, 2),
+        "relative_volume": round(vol_ratio, 2),
+        "volume_model": "exchange_5m_vs_median",
+        "vol_confirmed": bool(vol_ratio >= 1.1),
         "close_pos_5m": round(close_pos, 2),
+        "execution_candle_timestamp": bars5[-1].get("timestamp") or None,
+        "execution_data_age_seconds": execution_freshness.get("age_seconds"),
         "distance_to_breakout_pct": round(distance_to_breakout_pct, 2),
         "compression_range_pct": round(compression_range_pct, 2),
         "breakout_level": _ce_round_price(breakout_level),
@@ -18306,21 +18450,34 @@ def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Op
     15 Min. Ein "JETZT_TRADEN"/LONG_NOW aus dem Cache ist beim GET daher
     fast immer abgelaufen -> Downgrade auf WARTEN statt veralteter
     Kauf-Aufforderung."""
-    if cache_age is None or cache_age <= _EARLY_MOVER_TRIGGER_TTL:
-        return rows
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if (
+        trigger_like = (
             row.get("trade_signal") == "JETZT_TRADEN"
-            or row.get("trade_action") == "LONG_NOW"
+            or row.get("trade_action") in {"LONG_NOW", "JETZT_LONG"}
             or bool(row.get("execution_trigger_ok"))
-        ):
+        )
+        if not trigger_like:
+            continue
+        execution_age = _alert_float(row.get("execution_data_age_seconds"), None)
+        cache_expired = cache_age is not None and cache_age > _EARLY_MOVER_TRIGGER_TTL
+        candle_age_missing = execution_age is None
+        candle_expired = execution_age is not None and execution_age > 600
+        trigger_missing = row.get("execution_trigger_ok") is False
+        if cache_expired or candle_age_missing or candle_expired or trigger_missing:
             row["trade_signal"] = "WARTEN"
             row["trade_action"] = "WAIT_FOR_BREAKOUT"
             row["trade_decision"] = "WAIT_FOR_TRIGGER"
-            row["trade_decision_label"] = "5m-Trigger abgelaufen - neuen Breakout/Reclaim abwarten"
-            row["signal_label"] = f"5m-Trigger aelter als {_EARLY_MOVER_TRIGGER_TTL}s - kein Market-Buy"
+            row["trade_decision_label"] = "5m-Trigger fehlt oder ist abgelaufen - neuen Breakout/Reclaim abwarten"
+            if candle_age_missing:
+                row["signal_label"] = "Alter der bestaetigten 5m-Kerze fehlt - neuen Trigger abwarten"
+            elif candle_expired:
+                row["signal_label"] = f"Letzte bestaetigte 5m-Kerze ist {int(execution_age)}s alt - kein Market-Buy"
+            elif cache_expired:
+                row["signal_label"] = f"5m-Trigger-Cache aelter als {_EARLY_MOVER_TRIGGER_TTL}s - kein Market-Buy"
+            else:
+                row["signal_label"] = "Kein bestaetigter 5m-Execution-Trigger - kein Market-Buy"
             row["execution_trigger_ok"] = False
             row["alertable_crypto"] = False
             row["trigger_expired"] = True
@@ -19628,7 +19785,13 @@ def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
     score = _crypto_trade_to_float(row.get("explosion_score", row.get("score")), 0)
     entry_score = _crypto_trade_to_float(row.get("entry_score"), score)
-    action = "JETZT_LONG" if signal == "JETZT_TRADEN" else "LONG_ARMED"
+    execution_age = _crypto_trade_to_float(row.get("execution_data_age_seconds"), -1)
+    live_trigger_ok = bool(
+        signal == "JETZT_TRADEN"
+        and row.get("execution_trigger_ok") is True
+        and 0 <= execution_age <= 600
+    )
+    action = "JETZT_LONG" if live_trigger_ok else "LONG_ARMED"
     price = _crypto_trade_to_float(row.get("Price", row.get("price")), 0)
     return {
         **row,
@@ -19664,8 +19827,16 @@ def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, An
         return None
     action_raw = str(row.get("trade_action") or row.get("trade_signal") or row.get("signal") or "").upper()
     category = str(row.get("trade_category") or "").upper()
-    is_short_now = action_raw == "SHORT_NOW" or action_raw.startswith("SHORT") or (
+    requested_short_now = action_raw in {"SHORT_NOW", "JETZT_SHORT", "TRADE_NOW"} or (
         str(row.get("trade_signal") or "").upper() == "JETZT_TRADEN" and category == "NEW_LISTING_DUMP"
+    )
+    micro_age = _crypto_trade_to_float(row.get("micro_data_age_seconds"), -1)
+    is_short_now = bool(
+        requested_short_now
+        and row.get("micro_trigger_ok") is True
+        and row.get("safety_ok") is True
+        and row.get("listing_trade_ok") is True
+        and 0 <= micro_age <= 600
     )
     useful_short_watch = category in {"NEW_LISTING_DUMP", "EXHAUSTION_WATCH", "PUMP_RUNNING_WATCH", "ACTIVE_PUMP_WATCH"}
     if not is_short_now and not useful_short_watch:

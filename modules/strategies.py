@@ -494,18 +494,18 @@ CRYPTO_STRATEGIES = {
     },
     "Volume Surge": {
         "description": "Erhoehtes Volumen + starke Bewegung",
-        "filters": {"RVOL": (1.5, 50.0), "Change %": (3.0, 100.0)},
-        "logic": "RVOL > 1.5 (deutlich über Baseline) + Change > 3% = echtes Interesse"
+        "filters": {"Turnover Intensity": (1.5, 50.0), "Change %": (3.0, 100.0)},
+        "logic": "24h Turnover-Intensität > 1.5 + Change > 3%; kein historisches RVOL"
     },
     "Bull Flag": {
         "description": "Konsolidierung nach Aufwärtstrend ( Vortag = 6d Tagesdurchschnitt)",
-        "filters": {"Vortag %": (0.5, 30.0), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
-        "logic": "6d-Trend positiv (avg >+0.5%/Tag ≈ +3%/Woche), heute flach, Volumen sinkt"
+        "filters": {"Vortag %": (0.5, 30.0), "Change %": (-3.0, 3.0), "Turnover Intensity": (0.1, 1.5)},
+        "logic": "6d-Trend positiv, heute flach und Turnover moderat = Flag-Kandidat; Chart-Trigger bleibt nötig"
     },
     "Bear Flag": {
         "description": "Konsolidierung nach Abwärtstrend ( Vortag = 6d Tagesdurchschnitt)",
-        "filters": {"Vortag %": (-30.0, -0.5), "Change %": (-3.0, 3.0), "RVOL": (0.1, 1.5)},
-        "logic": "6d-Trend negativ (avg <-0.5%/Tag), heute flach = Bären sammeln Kraft"
+        "filters": {"Vortag %": (-30.0, -0.5), "Change %": (-3.0, 3.0), "Turnover Intensity": (0.1, 1.5)},
+        "logic": "6d-Trend negativ, heute flach und Turnover moderat = Bear-Flag-Kandidat; noch kein Short-Trigger"
     },
     "Breakout Long": {
         "description": "Ausbruch nach oben — Close nahe Tageshoch",
@@ -515,12 +515,12 @@ CRYPTO_STRATEGIES = {
     # V2.7: "Breakdown Short" entfernt — redundant
     "Low Cap Rockets ": {
         "description": "Small/Micro Cap mit explosivem Volumen & Bewegung",
-        "filters": {"MarketCap": (0, 500_000_000), "RVOL": (1.2, 50.0), "Change %": (5.0, 100.0)},
-        "logic": "MCap < $500M + RVOL > 1.2 + Change > 5% = echte Small-Cap-Explosion"
+        "filters": {"MarketCap": (0, 500_000_000), "Turnover Intensity": (1.2, 50.0), "Change %": (5.0, 100.0)},
+        "logic": "MCap < $500M + hohe 24h Turnover-Intensität + Change > 5%; Entry braucht Exchange-Trigger"
     },
     "Dip Buy": {
         "description": "Rücksetzer ohne Panik-Volumen",
-        "filters": {"Change %": (-15.0, -3.0), "RVOL": (0.3, 1.5)},
+        "filters": {"Change %": (-15.0, -3.0), "Turnover Intensity": (0.3, 1.5)},
         "logic": "Moderater Rücksetzer mit normalem Volumen — kein Panik-Dump"
     },
     "Reversal Hunter": {
@@ -530,18 +530,18 @@ CRYPTO_STRATEGIES = {
     },
     "Early Momentum": {
         "description": "Starke Bewegung mit erhoehtem Volumen",
-        "filters": {"Change %": (3.0, 40.0), "RVOL": (1.0, 20.0)},
-        "logic": "Positive Bewegung mit Volumen-Bestaetigung"
+        "filters": {"Change %": (3.0, 40.0), "Turnover Intensity": (1.0, 20.0)},
+        "logic": "Positive Bewegung mit 24h Turnover-Aktivität; echte RVOL-Bestätigung erst aus Exchange-Kerzen"
     },
     "Whale Watch ": {
         "description": "Extremes Volumen MIT klarer Richtung - Big Player aktiv",
-        "filters": {"RVOL": (2.5, 50.0), "Change %": (5.0, 100.0)},
-        "logic": "RVOL > 2.0 + Change > 3% = Whale Activity mit klarer Richtung"
+        "filters": {"Turnover Intensity": (2.5, 50.0), "Change %": (5.0, 100.0)},
+        "logic": "Hohe 24h Turnover-Intensität + Richtung; ohne OI-Delta kein Beweis für Whale-Akkumulation"
     },
     "Accumulation ": {
         "description": "Leise Akkumulation bei stabilem Preis",
-        "filters": {"Change %": (-2.0, 2.0), "RVOL": (1.2, 3.0)},
-        "logic": "Seitwärts + leicht erhöhtes Volumen = jemand sammelt"
+        "filters": {"Change %": (-2.0, 2.0), "Turnover Intensity": (1.2, 3.0)},
+        "logic": "Seitwärts + erhöhte Turnover-Intensität = Akkumulations-Kandidat, kein bestätigter Entry"
     },
 }
 
