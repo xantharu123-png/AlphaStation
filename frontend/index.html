@@ -2132,7 +2132,7 @@ function SchedulerStatusLegacy({ status }) {
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', penny_stocks: 'Pennystock Pump' };
 
     return (
         <div className="flex items-center gap-2">
@@ -2177,7 +2177,7 @@ function SchedulerStatus({ status }) {
     const activeCount = scanEntries.length;
     const runningCount = scanEntries.filter(([_, s]) => s.running).length;
     const staleCount = scanEntries.filter(([_, s]) => ['stale', 'missing', 'error'].includes(s.cache_health)).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', penny_stocks: 'Pennystock Pump', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
     const healthLabels = {
         ok: ['OK', 'text-green-600'],
         stale: ['Alt', 'text-amber-600'],
@@ -4154,6 +4154,7 @@ function App() {
         { id: 'backtest', label: 'Backtest' },
         { id: 'strategie-guide', label: 'Strategie Guide' },
         { id: 'volume-spikes', label: 'Volume Spikes' },
+        { id: 'penny-stocks', label: 'Pennystocks' },
         { id: 'orb', label: 'ORB Scanner' },
         { id: 'autotrader', label: 'Auto-Trader' },
         { id: 'chart-analyse', label: 'Chart & Analyse' },
@@ -4178,6 +4179,7 @@ function App() {
                     { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
                     { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
                     { id: 'volume-spikes', name: 'Aktien Volume Spikes', desc: 'Ungewoehnliches Aktien-Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
+                    { id: 'penny-stocks', name: 'Pennystock Pump', desc: 'Aufbau, 5m-Ignition, Einstieg und Dump-Exit', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#0f766e' },
                     { id: 'orb', name: 'ORB Scanner', desc: 'Opening Range Breakout', svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899' },
                 ]},
                 { title: 'SPEZIAL', items: [
@@ -4620,6 +4622,7 @@ function App() {
                     {activeTab === 'backtest' && <BacktestTab />}
                     {activeTab === 'strategie-guide' && <StrategieGuideTab />}
                     {activeTab === 'volume-spikes' && <VolumeSpikesTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'penny-stocks' && <PennyStocksTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'orb' && <ORBScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'autotrader' && <AutoTraderTab />}
                     {activeTab === 'chart-analyse' && <ChartAnalyseTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} />}
@@ -8370,6 +8373,187 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         ))}
                     </tbody>
                 </table>
+            </div>
+        </div>
+    );
+}
+
+// Penny Stock Pump Lifecycle Tab
+function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+    const [isScanning, setIsScanning] = useState(scanCache.penny_scanning || false);
+    const [results, setResults] = useState(scanCache.penny_results || []);
+    const [diagnostics, setDiagnostics] = useState(scanCache.penny_diagnostics || {});
+    const pollRef = useRef(null);
+
+    const loadResults = async () => {
+        try {
+            const response = await fetch(`${API}/api/penny-stocks-results`);
+            if (!response.ok) return null;
+            const payload = await response.json();
+            const rows = payload.data || [];
+            setResults(rows);
+            setDiagnostics(payload.diagnostics || {});
+            updateScanCache('penny_results', rows);
+            updateScanCache('penny_diagnostics', payload.diagnostics || {});
+            return payload;
+        } catch (error) {
+            console.error('Penny scanner load error:', error);
+            return null;
+        }
+    };
+
+    useEffect(() => {
+        loadResults();
+        const interval = setInterval(loadResults, 30000);
+        return () => {
+            clearInterval(interval);
+            if (pollRef.current) clearTimeout(pollRef.current);
+        };
+    }, []);
+
+    const handleScan = async () => {
+        setIsScanning(true);
+        updateScanCache('penny_scanning', true);
+        const before = await loadResults();
+        const previousStamp = before?.cached_at || null;
+        try {
+            const response = await fetch(`${API}/api/penny-stocks-scan`, { method: 'POST' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const poll = async (attempt = 0) => {
+                const payload = await loadResults();
+                if (payload?.cached_at && payload.cached_at !== previousStamp) {
+                    setIsScanning(false);
+                    updateScanCache('penny_scanning', false);
+                    if (window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} Kandidaten`, 'success');
+                    return;
+                }
+                if (attempt >= 120) {
+                    setIsScanning(false);
+                    updateScanCache('penny_scanning', false);
+                    if (window.addToast) window.addToast('Pennystock-Scan laeuft ungewoehnlich lange', 'info');
+                    return;
+                }
+                pollRef.current = setTimeout(() => poll(attempt + 1), 5000);
+            };
+            pollRef.current = setTimeout(() => poll(0), 5000);
+        } catch (error) {
+            console.error('Penny scanner start error:', error);
+            setIsScanning(false);
+            updateScanCache('penny_scanning', false);
+            if (window.addToast) window.addToast('Pennystock-Scan konnte nicht gestartet werden', 'error');
+        }
+    };
+
+    const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2, TRIGGER_WARTEN: 3, BEOBACHTEN: 4, NICHT_KAUFEN: 5 };
+    const sorted = [...results].sort((a, b) => {
+        const actionDiff = (actionOrder[a.trade_action] ?? 9) - (actionOrder[b.trade_action] ?? 9);
+        if (actionDiff) return actionDiff;
+        return Number(b.entry_quality_score || 0) - Number(a.entry_quality_score || 0)
+            || Number(b.pump_potential_score || 0) - Number(a.pump_potential_score || 0);
+    });
+    const price = value => {
+        const number = Number(value);
+        if (!Number.isFinite(number) || number <= 0) return '-';
+        return `$${number >= 1 ? number.toFixed(3) : number.toFixed(5)}`;
+    };
+    const compactMoney = value => {
+        const number = Number(value || 0);
+        if (number >= 1000000) return `$${(number / 1000000).toFixed(1)}M`;
+        if (number >= 1000) return `$${(number / 1000).toFixed(0)}K`;
+        return number ? `$${number.toFixed(0)}` : '-';
+    };
+    const actionTone = action => ({
+        JETZT_KAUFEN: 'bg-emerald-100 text-emerald-800',
+        JETZT_VERKAUFEN: 'bg-red-100 text-red-800',
+        HALTEN: 'bg-cyan-100 text-cyan-800',
+        TRIGGER_WARTEN: 'bg-amber-100 text-amber-800',
+        BEOBACHTEN: 'bg-blue-100 text-blue-800',
+        NICHT_KAUFEN: 'bg-gray-100 text-gray-700',
+    }[action] || 'bg-gray-100 text-gray-700');
+    const openRow = item => onSelectTicker({ ...item, direction: 'LONG' });
+
+    return (
+        <div className="space-y-5">
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="penny_stocks" />
+
+            <div className="rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-900">
+                <b>Drei getrennte Bewertungen:</b> Pump = Kapitalfluss/Setup, Entry = Einstieg jetzt, Dump = Reversal-Risiko. Nur <b>JETZT KAUFEN</b> loest die eigene Pennystock-Mail aus; ein S-Setup ohne frischen 5m-Trigger bleibt Beobachtung.
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                {[
+                    ['Snapshot', diagnostics.snapshot_total],
+                    ['Pennystocks', diagnostics.common_penny_universe],
+                    ['Fruehfilter', diagnostics.broad_candidates],
+                    ['Tief geprueft', diagnostics.deep_checked],
+                    ['Jetzt kaufen', diagnostics.buy_now],
+                    ['Exit', diagnostics.exit_now],
+                ].map(([label, value]) => (
+                    <div key={label} className="card rounded-lg border border-gray-200 p-3">
+                        <div className="text-xs text-gray-500">{label}</div>
+                        <div className="mt-1 text-xl font-bold">{value ?? '-'}</div>
+                    </div>
+                ))}
+            </div>
+
+            <div className="md:hidden space-y-3">
+                {sorted.map(item => (
+                    <button key={item.ticker} onClick={() => openRow(item)} className="scanner-mobile-card card w-full rounded-xl border border-gray-200 p-4 text-left">
+                        <div className="flex items-start justify-between gap-3">
+                            <div><div className="text-lg font-bold">{item.ticker}</div><div className="text-xs text-gray-500">{item.lifecycle}</div></div>
+                            <span className={`rounded px-2 py-1 text-xs font-bold ${actionTone(item.trade_action)}`}>{(item.signal_label || item.trade_action || '').replaceAll('_', ' ')}</span>
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                            <div><span className="text-gray-500">Pump</span><div className="font-bold">{item.pump_potential_score}</div></div>
+                            <div><span className="text-gray-500">Entry</span><div className="font-bold">{item.entry_quality_score}</div></div>
+                            <div><span className="text-gray-500">Dump</span><div className="font-bold">{item.dump_risk_score}</div></div>
+                            <div><span className="text-gray-500">Preis</span><div>{price(item.price)}</div></div>
+                            <div><span className="text-gray-500">RVOL</span><div>{Number(item.rvol || 0).toFixed(1)}x</div></div>
+                            <div><span className="text-gray-500">$Vol</span><div>{compactMoney(item.dollar_volume)}</div></div>
+                        </div>
+                    </button>
+                ))}
+            </div>
+
+            <div className="card hidden overflow-x-auto rounded-lg border border-gray-200 p-5 md:block">
+                <table className="w-full text-sm">
+                    <thead className="border-b border-gray-200">
+                        <tr>
+                            <th className="py-2 px-2 text-left">Ticker</th>
+                            <th className="py-2 px-2 text-right">Preis</th>
+                            <th className="py-2 px-2 text-right">Aend.%</th>
+                            <th className="py-2 px-2 text-right">RVOL</th>
+                            <th className="py-2 px-2 text-right">$Vol</th>
+                            <th className="py-2 px-2 text-center">Pump</th>
+                            <th className="py-2 px-2 text-center">Entry</th>
+                            <th className="py-2 px-2 text-center">Dump</th>
+                            <th className="py-2 px-2 text-left">Phase / Aktion</th>
+                            <th className="py-2 px-2 text-right">Entry / Stop</th>
+                            <th className="py-2 px-2 text-right">TP1 / TP2</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sorted.map(item => {
+                            const setup = item.trade_setup || {};
+                            return (
+                                <tr key={item.ticker} onClick={() => openRow(item)} className="table-row cursor-pointer border-b border-gray-200">
+                                    <td className="py-3 px-2"><span className="font-bold">{item.ticker}</span><div className="text-[11px] text-gray-500">{item.grade} | {item.float_data_quality === 'shares_outstanding_proxy' ? `${item.shares_outstanding_m}M shares proxy` : 'Float unbekannt'}</div></td>
+                                    <td className="py-3 px-2 text-right">{price(item.price)}</td>
+                                    <td className={`py-3 px-2 text-right font-semibold ${Number(item.change_pct) >= 0 ? 'color-positive' : 'color-negative'}`}>{Number(item.change_pct || 0).toFixed(1)}%</td>
+                                    <td className="py-3 px-2 text-right">{Number(item.rvol || 0).toFixed(1)}x</td>
+                                    <td className="py-3 px-2 text-right">{compactMoney(item.dollar_volume)}</td>
+                                    <td className="py-3 px-2 text-center font-bold">{item.pump_potential_score}</td>
+                                    <td className="py-3 px-2 text-center font-bold text-blue-700">{item.entry_quality_score}</td>
+                                    <td className={`py-3 px-2 text-center font-bold ${Number(item.dump_risk_score || 0) > 45 ? 'text-red-600' : 'text-green-700'}`}>{item.dump_risk_score}</td>
+                                    <td className="py-3 px-2"><span className={`rounded px-2 py-1 text-xs font-bold ${actionTone(item.trade_action)}`}>{(item.signal_label || item.trade_action || '').replaceAll('_', ' ')}</span><div className="mt-1 text-[11px] text-gray-500">{item.trigger_type || item.lifecycle}</div></td>
+                                    <td className="py-3 px-2 text-right text-xs">{price(setup.entry)}<br /><span className="color-negative">{price(setup.stop_loss)}</span></td>
+                                    <td className="py-3 px-2 text-right text-xs color-positive">{price(setup.tp1)}<br />{price(setup.tp2)}</td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+                {sorted.length === 0 && <div className="py-12 text-center text-gray-500">Noch kein Pennystock-Scan vorhanden. Der Auto-Scanner prueft alle 5 Minuten.</div>}
             </div>
         </div>
     );
