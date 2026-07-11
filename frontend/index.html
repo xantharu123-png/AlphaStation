@@ -1648,7 +1648,8 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                     narrative_email_frequency: next.narrative_email_frequency,
                     trade_alert_horizon: next.trade_alert_horizon || 'swing',
                     scanner_trade_horizon: next.scanner_trade_horizon || 'swing',
-                    watch_mail_optin: !!next.watch_mail_optin
+                    watch_mail_optin: !!next.watch_mail_optin,
+                    penny_show_watch_rows: !!next.penny_show_watch_rows
                 })
             });
             const data = await res.json();
@@ -1815,6 +1816,34 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                         ))}
                     </div>
                 )}
+            </div>
+
+            {/* Scanner display settings */}
+            <div className="card" style={{ padding: 24, marginBottom: 20, borderRadius: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+                    <div>
+                        <div style={{ fontSize: 15, fontWeight: 700 }}>Pennystock-Vorstufen anzeigen</div>
+                        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 4, lineHeight: 1.45 }}>
+                            Optional zusaetzlich AUFBAU und TRIGGER WARTEN anzeigen. Aus bedeutet: nur JETZT KAUFEN, HALTEN und JETZT VERKAUFEN.
+                        </div>
+                    </div>
+                    <button
+                        onClick={() => saveAlertSettings({ penny_show_watch_rows: !(alertSettings?.penny_show_watch_rows ?? false) })}
+                        disabled={alertSaving || !alertSettings}
+                        style={{
+                            minWidth: 58,
+                            padding: '8px 12px',
+                            border: `1px solid ${(alertSettings?.penny_show_watch_rows ?? false) ? '#2563eb' : '#cbd5e1'}`,
+                            borderRadius: 999,
+                            background: (alertSettings?.penny_show_watch_rows ?? false) ? '#dbeafe' : '#fff',
+                            color: (alertSettings?.penny_show_watch_rows ?? false) ? '#1d4ed8' : '#475569',
+                            fontSize: 12,
+                            fontWeight: 800,
+                            cursor: alertSaving || !alertSettings ? 'wait' : 'pointer'
+                        }}>
+                        {(alertSettings?.penny_show_watch_rows ?? false) ? 'AN' : 'AUS'}
+                    </button>
+                </div>
             </div>
 
             {/* Actions */}
@@ -8383,15 +8412,21 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [isScanning, setIsScanning] = useState(scanCache.penny_scanning || false);
     const [results, setResults] = useState(scanCache.penny_results || []);
     const [diagnostics, setDiagnostics] = useState(scanCache.penny_diagnostics || {});
+    const [showWatchRows, setShowWatchRows] = useState(false);
     const pollRef = useRef(null);
-    const visibleActions = new Set(['JETZT_KAUFEN', 'HALTEN', 'JETZT_VERKAUFEN']);
+    const activeActions = new Set(['JETZT_KAUFEN', 'HALTEN', 'JETZT_VERKAUFEN']);
+    const optionalActions = new Set(['TRIGGER_WARTEN', 'BEOBACHTEN']);
+    const isVisibleAction = item => {
+        const action = String(item?.trade_action || '').toUpperCase();
+        return activeActions.has(action) || (showWatchRows && optionalActions.has(action));
+    };
 
     const loadResults = async () => {
         try {
-            const response = await fetch(`${API}/api/penny-stocks-results`);
+            const response = await fetch(`${API}/api/penny-stocks-results?include_watch=${showWatchRows ? 'true' : 'false'}`);
             if (!response.ok) return null;
             const payload = await response.json();
-            const rows = (payload.data || []).filter(item => visibleActions.has(String(item.trade_action || '').toUpperCase()));
+            const rows = (payload.data || []).filter(isVisibleAction);
             setResults(rows);
             setDiagnostics(payload.diagnostics || {});
             updateScanCache('penny_results', rows);
@@ -8404,13 +8439,24 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     };
 
     useEffect(() => {
+        let cancelled = false;
+        fetch(`${API}/api/auth/alert-settings`)
+            .then(response => response.ok ? response.json() : null)
+            .then(settings => {
+                if (!cancelled && settings) setShowWatchRows(!!settings.penny_show_watch_rows);
+            })
+            .catch(() => {});
+        return () => { cancelled = true; };
+    }, []);
+
+    useEffect(() => {
         loadResults();
         const interval = setInterval(loadResults, 30000);
         return () => {
             clearInterval(interval);
             if (pollRef.current) clearTimeout(pollRef.current);
         };
-    }, []);
+    }, [showWatchRows]);
 
     const handleScan = async () => {
         setIsScanning(true);
@@ -8445,8 +8491,8 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         }
     };
 
-    const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2 };
-    const sorted = results.filter(item => visibleActions.has(String(item.trade_action || '').toUpperCase())).sort((a, b) => {
+    const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2, TRIGGER_WARTEN: 3, BEOBACHTEN: 4 };
+    const sorted = results.filter(isVisibleAction).sort((a, b) => {
         const actionDiff = (actionOrder[a.trade_action] ?? 9) - (actionOrder[b.trade_action] ?? 9);
         if (actionDiff) return actionDiff;
         return Number(b.entry_quality_score || 0) - Number(a.entry_quality_score || 0)
@@ -8467,6 +8513,8 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         JETZT_KAUFEN: 'bg-emerald-100 text-emerald-800',
         JETZT_VERKAUFEN: 'bg-red-100 text-red-800',
         HALTEN: 'bg-cyan-100 text-cyan-800',
+        TRIGGER_WARTEN: 'bg-amber-100 text-amber-800',
+        BEOBACHTEN: 'bg-blue-100 text-blue-800',
     }[action] || 'bg-gray-100 text-gray-700');
     const openRow = item => onSelectTicker({ ...item, direction: 'LONG' });
 
@@ -8508,7 +8556,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         <div className="mt-2 text-[11px] font-semibold text-gray-500">Signal vor {formatCacheAge(item.signal_age_seconds)}</div>
                     </button>
                 ))}
-                {sorted.length === 0 && <div className="card rounded-xl border border-gray-200 p-6 text-center text-sm text-gray-500">{diagnostics.signal_cache_expired ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.' : 'Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.'}</div>}
+                {sorted.length === 0 && <div className="card rounded-xl border border-gray-200 p-6 text-center text-sm text-gray-500">{diagnostics.signal_cache_expired ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.' : showWatchRows ? 'Aktuell weder aktive Trading-Signale noch frische Pennystock-Vorstufen.' : 'Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.'}</div>}
             </div>
 
             <div className="card hidden overflow-x-auto rounded-lg border border-gray-200 p-5 md:block">
@@ -8549,7 +8597,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         })}
                     </tbody>
                 </table>
-                {sorted.length === 0 && <div className="py-12 text-center text-gray-500">{diagnostics.signal_cache_expired ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.' : 'Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.'}</div>}
+                {sorted.length === 0 && <div className="py-12 text-center text-gray-500">{diagnostics.signal_cache_expired ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.' : showWatchRows ? 'Aktuell weder aktive Trading-Signale noch frische Pennystock-Vorstufen.' : 'Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.'}</div>}
             </div>
         </div>
     );

@@ -139,6 +139,7 @@ def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
         narrative_email_frequency="weekly",
         trade_alert_horizon="both",
         scanner_trade_horizon="intraday",
+        penny_show_watch_rows=True,
     )
 
     assert updated["success"] is True
@@ -148,6 +149,7 @@ def test_alert_settings_update_respects_user_token(monkeypatch, tmp_path):
     assert settings["narrative_email_frequency"] == "weekly"
     assert settings["trade_alert_horizon"] == "both"
     assert settings["scanner_trade_horizon"] == "intraday"
+    assert settings["penny_show_watch_rows"] is True
     assert settings["has_email_alerts"] is True
 
 

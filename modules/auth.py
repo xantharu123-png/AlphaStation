@@ -438,6 +438,7 @@ def register_user(email: str, password: str, name: str = "") -> Dict[str, Any]:
         "trade_alert_horizon": "swing",
         "scanner_trade_horizon": "swing",
         "watch_mail_optin": False,  # AUDIT H-3: Watch-Mails nur mit Opt-in
+        "penny_show_watch_rows": False,
         "created_at": _utc_iso(),
         "last_login": _utc_iso(),
         "trial_ends_at": None,
@@ -482,6 +483,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "narrative_email_frequency": "daily",
             "trade_alert_horizon": "swing", "scanner_trade_horizon": "swing",
             "watch_mail_optin": False,  # AUDIT H-3
+            "penny_show_watch_rows": False,
             "created_at": _utc_iso(), "last_login": _utc_iso(),
             "trial_ends_at": None,
         }
@@ -912,6 +914,7 @@ def get_user_alert_settings(token: str) -> Dict[str, Any]:
         "scanner_trade_horizon": _normalize_trade_horizon(user.get("scanner_trade_horizon", "swing")),
         "trade_horizon_options": ["swing", "intraday", "both"],
         "watch_mail_optin": bool(user.get("watch_mail_optin", False)),  # AUDIT H-3
+        "penny_show_watch_rows": bool(user.get("penny_show_watch_rows", False)),
         "has_email_alerts": get_plan_features(get_user_plan(token)).get("has_email_alerts", False),
     }
 
@@ -924,6 +927,7 @@ def update_user_alert_settings(
     trade_alert_horizon: Optional[str] = None,
     scanner_trade_horizon: Optional[str] = None,
     watch_mail_optin: Optional[bool] = None,
+    penny_show_watch_rows: Optional[bool] = None,
 ) -> Dict[str, Any]:
     payload = verify_token(token)
     if not payload:
@@ -958,6 +962,8 @@ def update_user_alert_settings(
     if watch_mail_optin is not None:
         # AUDIT H-3: explizites Opt-in/Opt-out fuer Watch-Mails.
         user["watch_mail_optin"] = bool(watch_mail_optin)
+    if penny_show_watch_rows is not None:
+        user["penny_show_watch_rows"] = bool(penny_show_watch_rows)
     db["users"][email] = user
     _save_users(db)
     return {"success": True, "settings": get_user_alert_settings(token)}

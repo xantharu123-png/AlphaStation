@@ -216,6 +216,8 @@ def test_penny_scanner_is_wired_to_scheduler_api_mail_and_pro_ui():
     assert "activeTab === 'penny-stocks'" in frontend_source
     assert "Drei getrennte Bewertungen" not in frontend_source
     assert "Pennystock Signale" in frontend_source
+    assert "Pennystock-Vorstufen anzeigen" in frontend_source
+    assert "penny_show_watch_rows" in frontend_source
     assert '"penny-stocks"' in auth_source
 
 
@@ -227,8 +229,9 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
         {"ticker": "BUY", "trade_action": "JETZT_KAUFEN", "trigger_timestamp": now_ts - 360},
         {"ticker": "HOLD", "trade_action": "HALTEN"},
         {"ticker": "EXIT", "trade_action": "JETZT_VERKAUFEN", "trigger_timestamp": now_ts - 360},
-        {"ticker": "BUILD", "trade_action": "BEOBACHTEN"},
-        {"ticker": "WAIT", "trade_action": "TRIGGER_WARTEN"},
+        {"ticker": "BUILD", "trade_action": "BEOBACHTEN", "trigger_timestamp": now_ts - 360},
+        {"ticker": "WAIT", "trade_action": "TRIGGER_WARTEN", "trigger_timestamp": now_ts - 360},
+        {"ticker": "STALE_WAIT", "trade_action": "TRIGGER_WARTEN", "trigger_timestamp": now_ts - 1_500},
         {"ticker": "NO", "trade_action": "NICHT_KAUFEN"},
     ]
     monkeypatch.setattr(api, "load_cache_file", lambda path: (legacy_rows, None))
@@ -237,6 +240,18 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
     payload = api.get_penny_stock_results()
 
     assert [row["ticker"] for row in payload["data"]] == ["BUY", "HOLD", "EXIT"]
+
+    analysis_rows = api._penny_active_trade_rows(
+        legacy_rows,
+        include_watch=True,
+        cache_age_seconds=60,
+        now_ts=now_ts,
+    )
+    assert [row["ticker"] for row in analysis_rows] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT"]
+
+    payload_with_watch = api.get_penny_stock_results(include_watch=True)
+    assert [row["ticker"] for row in payload_with_watch["data"]] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT"]
+    assert payload_with_watch["include_watch"] is True
 
 
 def test_penny_results_expire_old_trigger_and_stale_cache(monkeypatch):

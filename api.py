@@ -13357,6 +13357,7 @@ class AlertSettingsRequest(BaseModel):
     trade_alert_horizon: Optional[str] = None
     scanner_trade_horizon: Optional[str] = None
     watch_mail_optin: Optional[bool] = None  # AUDIT H-3
+    penny_show_watch_rows: Optional[bool] = None
 
 
 # ── Admin Models ──
@@ -13540,6 +13541,7 @@ async def api_update_alert_settings(req_body: AlertSettingsRequest, authorizatio
         trade_alert_horizon=req_body.trade_alert_horizon,
         scanner_trade_horizon=req_body.scanner_trade_horizon,
         watch_mail_optin=req_body.watch_mail_optin,  # AUDIT H-3
+        penny_show_watch_rows=req_body.penny_show_watch_rows,
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))
@@ -20330,13 +20332,16 @@ def _penny_vrvp_resistances(
 
 
 _PENNY_VISIBLE_ACTIONS = frozenset({"JETZT_KAUFEN", "HALTEN", "JETZT_VERKAUFEN"})
+_PENNY_OPTIONAL_ACTIONS = frozenset({"TRIGGER_WARTEN", "BEOBACHTEN"})
 _PENNY_TRIGGER_MAX_AGE_SECONDS = 620
 _PENNY_RESULT_CACHE_MAX_AGE_SECONDS = 720
+_PENNY_OPTIONAL_ROW_LIMIT = 25
 
 
 def _penny_active_trade_rows(
     rows: Any,
     *,
+    include_watch: bool = False,
     cache_age_seconds: Optional[int] = None,
     now_ts: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
@@ -20347,12 +20352,13 @@ def _penny_active_trade_rows(
         return []
 
     now_value = float(now_ts if now_ts is not None else time.time())
+    allowed_actions = _PENNY_VISIBLE_ACTIONS | (_PENNY_OPTIONAL_ACTIONS if include_watch else frozenset())
     visible: List[Dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         action = str(row.get("trade_action") or "").upper()
-        if action not in _PENNY_VISIBLE_ACTIONS:
+        if action not in allowed_actions:
             continue
 
         item = dict(row)
@@ -20364,6 +20370,16 @@ def _penny_active_trade_rows(
                 continue
             signal_age = max(0.0, now_value - (trigger_ts + 300.0))
             if signal_age > _PENNY_TRIGGER_MAX_AGE_SECONDS:
+                continue
+            item["signal_age_seconds"] = int(signal_age)
+        elif action in _PENNY_OPTIONAL_ACTIONS:
+            trigger_ts = _alert_float(row.get("trigger_timestamp"), 0.0)
+            if trigger_ts > 10_000_000_000:
+                trigger_ts /= 1000.0
+            if trigger_ts <= 0:
+                continue
+            signal_age = max(0.0, now_value - (trigger_ts + 300.0))
+            if signal_age > _PENNY_RESULT_CACHE_MAX_AGE_SECONDS:
                 continue
             item["signal_age_seconds"] = int(signal_age)
         else:
@@ -20601,7 +20617,8 @@ def _penny_stock_scanner_wrapper() -> None:
                     row["_dedupe_key"] = dedupe_key
                     exit_candidates.append(row)
 
-            if str(row.get("trade_action") or "").upper() in _PENNY_VISIBLE_ACTIONS:
+            row_action = str(row.get("trade_action") or "").upper()
+            if row_action in (_PENNY_VISIBLE_ACTIONS | _PENNY_OPTIONAL_ACTIONS):
                 rows.append(row)
             else:
                 diagnostics["suppressed_non_actionable"] += 1
@@ -20622,7 +20639,13 @@ def _penny_stock_scanner_wrapper() -> None:
                     "detail": f"{symbol}: 5m/1D/VRVP",
                 }
 
-        action_rank = {"JETZT_VERKAUFEN": 0, "JETZT_KAUFEN": 1, "HALTEN": 2}
+        action_rank = {
+            "JETZT_VERKAUFEN": 0,
+            "JETZT_KAUFEN": 1,
+            "HALTEN": 2,
+            "TRIGGER_WARTEN": 3,
+            "BEOBACHTEN": 4,
+        }
         rows.sort(key=lambda row: (
             action_rank.get(str(row.get("trade_action") or ""), 9),
             -_alert_float(row.get("entry_quality_score"), 0.0),
@@ -20670,19 +20693,27 @@ def _penny_stock_scanner_wrapper() -> None:
             ]
             for symbol in stale_keys:
                 cache_payload.pop(symbol, None)
+        active_rows = [row for row in rows if row.get("trade_action") in _PENNY_VISIBLE_ACTIONS]
+        optional_rows = [row for row in rows if row.get("trade_action") in _PENNY_OPTIONAL_ACTIONS]
+        cache_rows = [*active_rows, *optional_rows[:_PENNY_OPTIONAL_ROW_LIMIT]]
         diagnostics["deep_checked"] = len(selected)
-        diagnostics["buy_now"] = sum(1 for row in rows if row.get("trade_action") == "JETZT_KAUFEN")
-        diagnostics["hold_now"] = sum(1 for row in rows if row.get("trade_action") == "HALTEN")
-        diagnostics["exit_now"] = sum(1 for row in rows if row.get("trade_action") == "JETZT_VERKAUFEN")
-        diagnostics["active_trade_ideas"] = len(rows)
+        diagnostics["buy_now"] = sum(1 for row in active_rows if row.get("trade_action") == "JETZT_KAUFEN")
+        diagnostics["hold_now"] = sum(1 for row in active_rows if row.get("trade_action") == "HALTEN")
+        diagnostics["exit_now"] = sum(1 for row in active_rows if row.get("trade_action") == "JETZT_VERKAUFEN")
+        diagnostics["active_trade_ideas"] = len(active_rows)
+        diagnostics["optional_rows_available"] = len(optional_rows)
+        diagnostics["optional_rows_cached"] = min(len(optional_rows), _PENNY_OPTIONAL_ROW_LIMIT)
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
         diagnostics["universe_source"] = universe_source
-        save_cache_file(PENNY_STOCKS_CACHE, rows[:120], metadata={"diagnostics": diagnostics})
+        save_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
         _penny_save_dict(PENNY_STOCKS_STATE, {"updated_at": now_ts, "tickers": ticker_state})
         _penny_save_dict(PENNY_STOCKS_REFERENCE_CACHE, reference_cache)
         _penny_save_dict(PENNY_STOCKS_DAILY_CACHE, daily_cache)
         _penny_save_dict(PENNY_STOCKS_NEWS_CACHE, news_cache)
-        print(f"[Penny] {diagnostics['common_penny_universe']} Pennystocks, {len(selected)} deep, {len(rows)} visible, {diagnostics['buy_now']} buy")
+        print(
+            f"[Penny] {diagnostics['common_penny_universe']} Pennystocks, {len(selected)} deep, "
+            f"{len(active_rows)} active, {len(optional_rows)} optional, {diagnostics['buy_now']} buy"
+        )
     except Exception as exc:
         diagnostics["error"] = str(exc)
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
@@ -20704,7 +20735,7 @@ def trigger_penny_stock_scan():
 
 
 @app.get("/api/penny-stocks-results")
-def get_penny_stock_results():
+def get_penny_stock_results(include_watch: bool = False):
     cached_rows, cached_at = load_cache_file(PENNY_STOCKS_CACHE)
     metadata = load_cache_metadata(PENNY_STOCKS_CACHE)
     cache_age = None
@@ -20713,12 +20744,17 @@ def get_penny_stock_results():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception:
             cache_age = None
-    rows = _penny_active_trade_rows(cached_rows, cache_age_seconds=cache_age)
+    rows = _penny_active_trade_rows(
+        cached_rows,
+        include_watch=include_watch,
+        cache_age_seconds=cache_age,
+    )
+    requested_actions = _PENNY_VISIBLE_ACTIONS | (_PENNY_OPTIONAL_ACTIONS if include_watch else frozenset())
     raw_visible_count = sum(
         1
         for row in (cached_rows if isinstance(cached_rows, list) else [])
         if isinstance(row, dict)
-        and str(row.get("trade_action") or "").upper() in _PENNY_VISIBLE_ACTIONS
+        and str(row.get("trade_action") or "").upper() in requested_actions
     )
     diagnostics = dict(metadata.get("diagnostics") or {})
     diagnostics.update({
@@ -20734,11 +20770,13 @@ def get_penny_stock_results():
         "data": rows,
         "cached_at": cached_at,
         "cache_age_seconds": cache_age,
+        "include_watch": include_watch,
         "diagnostics": diagnostics,
         "policy": {
             "universe": f"active US common stocks ${PENNY_MIN_PRICE:.2f}-${PENNY_MAX_PRICE:.2f}",
             "mail_interval_minutes": 5,
             "live_signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
+            "optional_row_limit": _PENNY_OPTIONAL_ROW_LIMIT,
             "buy_mail_requires": "fresh closed 5m breakout/retest + liquidity + spread + structural stop/TP + dump risk <=45",
             "float_note": "Shares outstanding is a proxy, not exact free float.",
         },
