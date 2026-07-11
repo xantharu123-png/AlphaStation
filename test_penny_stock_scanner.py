@@ -214,7 +214,28 @@ def test_penny_scanner_is_wired_to_scheduler_api_mail_and_pro_ui():
     assert "Pennystock VERKAUFEN" in api_source
     assert "function PennyStocksTab" in frontend_source
     assert "activeTab === 'penny-stocks'" in frontend_source
+    assert "Drei getrennte Bewertungen" not in frontend_source
+    assert "Pennystock Signale" in frontend_source
     assert '"penny-stocks"' in auth_source
+
+
+def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
+    import api
+
+    legacy_rows = [
+        {"ticker": "BUY", "trade_action": "JETZT_KAUFEN"},
+        {"ticker": "HOLD", "trade_action": "HALTEN"},
+        {"ticker": "EXIT", "trade_action": "JETZT_VERKAUFEN"},
+        {"ticker": "BUILD", "trade_action": "BEOBACHTEN"},
+        {"ticker": "WAIT", "trade_action": "TRIGGER_WARTEN"},
+        {"ticker": "NO", "trade_action": "NICHT_KAUFEN"},
+    ]
+    monkeypatch.setattr(api, "load_cache_file", lambda path: (legacy_rows, None))
+    monkeypatch.setattr(api, "load_cache_metadata", lambda path: {"diagnostics": {}})
+
+    payload = api.get_penny_stock_results()
+
+    assert [row["ticker"] for row in payload["data"]] == ["BUY", "HOLD", "EXIT"]
 
 
 def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_path):

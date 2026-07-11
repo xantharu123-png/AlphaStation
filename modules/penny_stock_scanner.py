@@ -448,7 +448,7 @@ def evaluate_penny_candidate(
     previous_active: bool = False,
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Return one transparent lifecycle row for UI, mail and persistence."""
+    """Return an internal lifecycle decision for signal gating and persistence."""
     details = details or {}
     broad = score_broad_penny_candidate(snapshot)
     intraday = analyze_penny_intraday(bars_5m, now_ts=now_ts)

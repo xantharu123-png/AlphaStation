@@ -4179,7 +4179,7 @@ function App() {
                     { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
                     { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
                     { id: 'volume-spikes', name: 'Aktien Volume Spikes', desc: 'Ungewoehnliches Aktien-Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
-                    { id: 'penny-stocks', name: 'Pennystock Pump', desc: 'Aufbau, 5m-Ignition, Einstieg und Dump-Exit', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#0f766e' },
+                    { id: 'penny-stocks', name: 'Pennystock Signale', desc: 'Bestaetigte Entries und aktive Exit-Signale', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#0f766e' },
                     { id: 'orb', name: 'ORB Scanner', desc: 'Opening Range Breakout', svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899' },
                 ]},
                 { title: 'SPEZIAL', items: [
@@ -8378,19 +8378,20 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     );
 }
 
-// Penny Stock Pump Lifecycle Tab
+// Penny Stock active trade signals
 function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.penny_scanning || false);
     const [results, setResults] = useState(scanCache.penny_results || []);
     const [diagnostics, setDiagnostics] = useState(scanCache.penny_diagnostics || {});
     const pollRef = useRef(null);
+    const visibleActions = new Set(['JETZT_KAUFEN', 'HALTEN', 'JETZT_VERKAUFEN']);
 
     const loadResults = async () => {
         try {
             const response = await fetch(`${API}/api/penny-stocks-results`);
             if (!response.ok) return null;
             const payload = await response.json();
-            const rows = payload.data || [];
+            const rows = (payload.data || []).filter(item => visibleActions.has(String(item.trade_action || '').toUpperCase()));
             setResults(rows);
             setDiagnostics(payload.diagnostics || {});
             updateScanCache('penny_results', rows);
@@ -8424,7 +8425,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 if (payload?.cached_at && payload.cached_at !== previousStamp) {
                     setIsScanning(false);
                     updateScanCache('penny_scanning', false);
-                    if (window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} Kandidaten`, 'success');
+                    if (window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} aktive Trading-Idee(n)`, 'success');
                     return;
                 }
                 if (attempt >= 120) {
@@ -8444,8 +8445,8 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         }
     };
 
-    const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2, TRIGGER_WARTEN: 3, BEOBACHTEN: 4, NICHT_KAUFEN: 5 };
-    const sorted = [...results].sort((a, b) => {
+    const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2 };
+    const sorted = results.filter(item => visibleActions.has(String(item.trade_action || '').toUpperCase())).sort((a, b) => {
         const actionDiff = (actionOrder[a.trade_action] ?? 9) - (actionOrder[b.trade_action] ?? 9);
         if (actionDiff) return actionDiff;
         return Number(b.entry_quality_score || 0) - Number(a.entry_quality_score || 0)
@@ -8466,9 +8467,6 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         JETZT_KAUFEN: 'bg-emerald-100 text-emerald-800',
         JETZT_VERKAUFEN: 'bg-red-100 text-red-800',
         HALTEN: 'bg-cyan-100 text-cyan-800',
-        TRIGGER_WARTEN: 'bg-amber-100 text-amber-800',
-        BEOBACHTEN: 'bg-blue-100 text-blue-800',
-        NICHT_KAUFEN: 'bg-gray-100 text-gray-700',
     }[action] || 'bg-gray-100 text-gray-700');
     const openRow = item => onSelectTicker({ ...item, direction: 'LONG' });
 
@@ -8476,18 +8474,14 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         <div className="space-y-5">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="penny_stocks" />
 
-            <div className="rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-900">
-                <b>Drei getrennte Bewertungen:</b> Pump = Kapitalfluss/Setup, Entry = Einstieg jetzt, Dump = Reversal-Risiko. Nur <b>JETZT KAUFEN</b> loest die eigene Pennystock-Mail aus; ein S-Setup ohne frischen 5m-Trigger bleibt Beobachtung.
-            </div>
-
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 {[
-                    ['Snapshot', diagnostics.snapshot_total],
-                    ['Pennystocks', diagnostics.common_penny_universe],
-                    ['Fruehfilter', diagnostics.broad_candidates],
-                    ['Tief geprueft', diagnostics.deep_checked],
+                    ['Markt gescannt', diagnostics.snapshot_total],
+                    ['Pennystocks geprueft', diagnostics.common_penny_universe],
+                    ['5m tief geprueft', diagnostics.deep_checked],
                     ['Jetzt kaufen', diagnostics.buy_now],
-                    ['Exit', diagnostics.exit_now],
+                    ['Aktiv halten', diagnostics.hold_now],
+                    ['Jetzt verkaufen', diagnostics.exit_now],
                 ].map(([label, value]) => (
                     <div key={label} className="card rounded-lg border border-gray-200 p-3">
                         <div className="text-xs text-gray-500">{label}</div>
@@ -8513,6 +8507,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         </div>
                     </button>
                 ))}
+                {sorted.length === 0 && <div className="card rounded-xl border border-gray-200 p-6 text-center text-sm text-gray-500">Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.</div>}
             </div>
 
             <div className="card hidden overflow-x-auto rounded-lg border border-gray-200 p-5 md:block">
@@ -8553,7 +8548,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         })}
                     </tbody>
                 </table>
-                {sorted.length === 0 && <div className="py-12 text-center text-gray-500">Noch kein Pennystock-Scan vorhanden. Der Auto-Scanner prueft alle 5 Minuten.</div>}
+                {sorted.length === 0 && <div className="py-12 text-center text-gray-500">Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.</div>}
             </div>
         </div>
     );

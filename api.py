@@ -99,7 +99,6 @@ from modules.penny_stock_scanner import (
     PENNY_MIN_PRICE,
     PENNY_MAX_PRICE,
     evaluate_penny_candidate,
-    grade_for_score as penny_grade_for_score,
     score_broad_penny_candidate,
 )
 
@@ -20330,24 +20329,19 @@ def _penny_vrvp_resistances(
     return levels
 
 
-def _penny_broad_watch_row(snapshot: Dict[str, Any], broad: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    score = round(_alert_float(broad.get("broad_score"), 0.0) or 0.0)
-    return {
-        **snapshot,
-        "asset_class": "penny_stock",
-        "pump_potential_score": score,
-        "entry_quality_score": 0,
-        "dump_risk_score": 0,
-        "score": score,
-        "grade": penny_grade_for_score(score),
-        "lifecycle": "AUFBAU",
-        "trade_action": "BEOBACHTEN",
-        "trade_signal": "BEOBACHTEN",
-        "signal_label": "AUFBAU - Detailpruefung ausstehend",
-        "execution_trigger_ok": False,
-        "hard_blockers": [reason],
-        "trade_setup": None,
-    }
+_PENNY_VISIBLE_ACTIONS = frozenset({"JETZT_KAUFEN", "HALTEN", "JETZT_VERKAUFEN"})
+
+
+def _penny_active_trade_rows(rows: Any) -> List[Dict[str, Any]]:
+    """Expose active trade decisions, never the scanner's internal candidate queue."""
+    if not isinstance(rows, list):
+        return []
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("trade_action") or "").upper() in _PENNY_VISIBLE_ACTIONS
+    ]
 
 
 def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
@@ -20422,7 +20416,9 @@ def _penny_stock_scanner_wrapper() -> None:
         "broad_candidates": 0,
         "deep_checked": 0,
         "buy_now": 0,
+        "hold_now": 0,
         "exit_now": 0,
+        "suppressed_non_actionable": 0,
         "blocked_counts": {},
         "model": "penny_lifecycle_5m_structure_v1",
     }
@@ -20577,8 +20573,10 @@ def _penny_stock_scanner_wrapper() -> None:
                     row["_dedupe_key"] = dedupe_key
                     exit_candidates.append(row)
 
-            if row.get("pump_potential_score", 0) >= 45 or previous.get("active"):
+            if str(row.get("trade_action") or "").upper() in _PENNY_VISIBLE_ACTIONS:
                 rows.append(row)
+            else:
+                diagnostics["suppressed_non_actionable"] += 1
             ticker_state[symbol] = {
                 **previous,
                 "last_seen": now_ts,
@@ -20596,14 +20594,7 @@ def _penny_stock_scanner_wrapper() -> None:
                     "detail": f"{symbol}: 5m/1D/VRVP",
                 }
 
-        # Preserve visible broad candidates when a deep call failed, without
-        # ever upgrading them to a trade signal.
-        deep_symbols = {row.get("ticker") for row in rows}
-        for _, snapshot, broad in broad_candidates[:100]:
-            if snapshot["ticker"] not in deep_symbols and _alert_float(broad.get("broad_score"), 0.0) >= 55:
-                rows.append(_penny_broad_watch_row(snapshot, broad, "outside_deep_check_budget_or_data_unavailable"))
-
-        action_rank = {"JETZT_VERKAUFEN": 0, "JETZT_KAUFEN": 1, "TRIGGER_WARTEN": 2, "BEOBACHTEN": 3, "NICHT_KAUFEN": 4}
+        action_rank = {"JETZT_VERKAUFEN": 0, "JETZT_KAUFEN": 1, "HALTEN": 2}
         rows.sort(key=lambda row: (
             action_rank.get(str(row.get("trade_action") or ""), 9),
             -_alert_float(row.get("entry_quality_score"), 0.0),
@@ -20653,7 +20644,9 @@ def _penny_stock_scanner_wrapper() -> None:
                 cache_payload.pop(symbol, None)
         diagnostics["deep_checked"] = len(selected)
         diagnostics["buy_now"] = sum(1 for row in rows if row.get("trade_action") == "JETZT_KAUFEN")
+        diagnostics["hold_now"] = sum(1 for row in rows if row.get("trade_action") == "HALTEN")
         diagnostics["exit_now"] = sum(1 for row in rows if row.get("trade_action") == "JETZT_VERKAUFEN")
+        diagnostics["active_trade_ideas"] = len(rows)
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
         diagnostics["universe_source"] = universe_source
         save_cache_file(PENNY_STOCKS_CACHE, rows[:120], metadata={"diagnostics": diagnostics})
@@ -20685,6 +20678,7 @@ def trigger_penny_stock_scan():
 @app.get("/api/penny-stocks-results")
 def get_penny_stock_results():
     rows, cached_at = load_cache_file(PENNY_STOCKS_CACHE)
+    rows = _penny_active_trade_rows(rows)
     metadata = load_cache_metadata(PENNY_STOCKS_CACHE)
     cache_age = None
     if cached_at:
