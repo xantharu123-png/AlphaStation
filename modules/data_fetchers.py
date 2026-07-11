@@ -1181,7 +1181,7 @@ def get_ticker_details(poly_key, ticker):
         url = f"https://api.polygon.io/v3/reference/tickers/{ticker}"
         _resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=5)
         if _resp.status_code != 200:
-            return {"shares_outstanding": 0, "market_cap": 0, "float_category": "unknown"}
+            return {"shares_outstanding": 0, "market_cap": 0, "float_category": "unknown", "cik": ""}
         resp = _resp.json()
         results = resp.get("results", {})
         
@@ -1216,7 +1216,8 @@ def get_ticker_details(poly_key, ticker):
             "float_category": float_category,
             "float_emoji": float_emoji,
             "name": results.get("name", ""),
-            "description": results.get("description", "")[:100] if results.get("description") else ""
+            "description": results.get("description", "")[:100] if results.get("description") else "",
+            "cik": str(results.get("cik") or "").strip(),
         }
     except Exception as e:
         return {
@@ -1227,7 +1228,8 @@ def get_ticker_details(poly_key, ticker):
             "float_category": "UNKNOWN",
             "float_emoji": "?",
             "name": "",
-            "description": ""
+            "description": "",
+            "cik": "",
         }
 
 
@@ -1725,4 +1727,3 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
         
     except Exception as e:
         return None
-
