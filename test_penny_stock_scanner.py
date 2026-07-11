@@ -222,10 +222,11 @@ def test_penny_scanner_is_wired_to_scheduler_api_mail_and_pro_ui():
 def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
     import api
 
+    now_ts = time.time()
     legacy_rows = [
-        {"ticker": "BUY", "trade_action": "JETZT_KAUFEN"},
+        {"ticker": "BUY", "trade_action": "JETZT_KAUFEN", "trigger_timestamp": now_ts - 360},
         {"ticker": "HOLD", "trade_action": "HALTEN"},
-        {"ticker": "EXIT", "trade_action": "JETZT_VERKAUFEN"},
+        {"ticker": "EXIT", "trade_action": "JETZT_VERKAUFEN", "trigger_timestamp": now_ts - 360},
         {"ticker": "BUILD", "trade_action": "BEOBACHTEN"},
         {"ticker": "WAIT", "trade_action": "TRIGGER_WARTEN"},
         {"ticker": "NO", "trade_action": "NICHT_KAUFEN"},
@@ -236,6 +237,24 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
     payload = api.get_penny_stock_results()
 
     assert [row["ticker"] for row in payload["data"]] == ["BUY", "HOLD", "EXIT"]
+
+
+def test_penny_results_expire_old_trigger_and_stale_cache(monkeypatch):
+    import api
+
+    now_ts = time.time()
+    rows = [
+        {"ticker": "FRESH", "trade_action": "JETZT_KAUFEN", "trigger_timestamp": now_ts - 360},
+        {"ticker": "OLD", "trade_action": "JETZT_KAUFEN", "trigger_timestamp": now_ts - 1_500},
+        {"ticker": "NO_TS", "trade_action": "JETZT_KAUFEN"},
+    ]
+
+    fresh = api._penny_active_trade_rows(rows, cache_age_seconds=120, now_ts=now_ts)
+    stale = api._penny_active_trade_rows(rows, cache_age_seconds=900, now_ts=now_ts)
+
+    assert [row["ticker"] for row in fresh] == ["FRESH"]
+    assert fresh[0]["signal_age_seconds"] == 60
+    assert stale == []
 
 
 def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_path):

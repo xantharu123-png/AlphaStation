@@ -20330,18 +20330,46 @@ def _penny_vrvp_resistances(
 
 
 _PENNY_VISIBLE_ACTIONS = frozenset({"JETZT_KAUFEN", "HALTEN", "JETZT_VERKAUFEN"})
+_PENNY_TRIGGER_MAX_AGE_SECONDS = 620
+_PENNY_RESULT_CACHE_MAX_AGE_SECONDS = 720
 
 
-def _penny_active_trade_rows(rows: Any) -> List[Dict[str, Any]]:
+def _penny_active_trade_rows(
+    rows: Any,
+    *,
+    cache_age_seconds: Optional[int] = None,
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     """Expose active trade decisions, never the scanner's internal candidate queue."""
     if not isinstance(rows, list):
         return []
-    return [
-        row
-        for row in rows
-        if isinstance(row, dict)
-        and str(row.get("trade_action") or "").upper() in _PENNY_VISIBLE_ACTIONS
-    ]
+    if cache_age_seconds is not None and cache_age_seconds > _PENNY_RESULT_CACHE_MAX_AGE_SECONDS:
+        return []
+
+    now_value = float(now_ts if now_ts is not None else time.time())
+    visible: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        action = str(row.get("trade_action") or "").upper()
+        if action not in _PENNY_VISIBLE_ACTIONS:
+            continue
+
+        item = dict(row)
+        if action in {"JETZT_KAUFEN", "JETZT_VERKAUFEN"}:
+            trigger_ts = _alert_float(row.get("trigger_timestamp"), 0.0)
+            if trigger_ts > 10_000_000_000:
+                trigger_ts /= 1000.0
+            if trigger_ts <= 0:
+                continue
+            signal_age = max(0.0, now_value - (trigger_ts + 300.0))
+            if signal_age > _PENNY_TRIGGER_MAX_AGE_SECONDS:
+                continue
+            item["signal_age_seconds"] = int(signal_age)
+        else:
+            item["signal_age_seconds"] = max(0, int(cache_age_seconds or 0))
+        visible.append(item)
+    return visible
 
 
 def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
@@ -20677,8 +20705,7 @@ def trigger_penny_stock_scan():
 
 @app.get("/api/penny-stocks-results")
 def get_penny_stock_results():
-    rows, cached_at = load_cache_file(PENNY_STOCKS_CACHE)
-    rows = _penny_active_trade_rows(rows)
+    cached_rows, cached_at = load_cache_file(PENNY_STOCKS_CACHE)
     metadata = load_cache_metadata(PENNY_STOCKS_CACHE)
     cache_age = None
     if cached_at:
@@ -20686,15 +20713,32 @@ def get_penny_stock_results():
             cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
         except Exception:
             cache_age = None
+    rows = _penny_active_trade_rows(cached_rows, cache_age_seconds=cache_age)
+    raw_visible_count = sum(
+        1
+        for row in (cached_rows if isinstance(cached_rows, list) else [])
+        if isinstance(row, dict)
+        and str(row.get("trade_action") or "").upper() in _PENNY_VISIBLE_ACTIONS
+    )
+    diagnostics = dict(metadata.get("diagnostics") or {})
+    diagnostics.update({
+        "signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
+        "result_cache_max_age_seconds": _PENNY_RESULT_CACHE_MAX_AGE_SECONDS,
+        "expired_or_stale_signals_suppressed": max(0, raw_visible_count - len(rows)),
+        "signal_cache_expired": bool(
+            cache_age is not None and cache_age > _PENNY_RESULT_CACHE_MAX_AGE_SECONDS
+        ),
+    })
     return {
         "status": "success",
         "data": rows,
         "cached_at": cached_at,
         "cache_age_seconds": cache_age,
-        "diagnostics": metadata.get("diagnostics") or {},
+        "diagnostics": diagnostics,
         "policy": {
             "universe": f"active US common stocks ${PENNY_MIN_PRICE:.2f}-${PENNY_MAX_PRICE:.2f}",
             "mail_interval_minutes": 5,
+            "live_signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
             "buy_mail_requires": "fresh closed 5m breakout/retest + liquidity + spread + structural stop/TP + dump risk <=45",
             "float_note": "Shares outstanding is a proxy, not exact free float.",
         },

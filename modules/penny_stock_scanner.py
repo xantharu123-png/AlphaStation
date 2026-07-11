@@ -627,6 +627,7 @@ def evaluate_penny_candidate(
         "execution_trigger_ok": trade_action == "JETZT_KAUFEN",
         "trigger_type": intraday.get("trigger_type"),
         "trigger_timestamp": intraday.get("trigger_timestamp"),
+        "signal_age_seconds": intraday.get("age_seconds"),
         "breakout_level": _round_price(intraday.get("breakout_level")),
         "vwap": _round_price(intraday.get("vwap")),
         "volume_acceleration": intraday.get("volume_ratio"),
