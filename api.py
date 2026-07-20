@@ -1547,6 +1547,8 @@ _ALERT_SUPPRESSION_LABELS = {
     "trade_health_wait_for_retest": "Retest abwarten",
     "trade_health_wait_for_trigger": "Execution-Trigger fehlt",
     "trade_health_wait_for_continuation": "Continuation-Bestaetigung fehlt",
+    "trade_health_watch_only": "Weitere Handelsbestaetigung fehlt",
+    "trade_health_score_below_80": "Trade-Health unter 80",
     "trade_health_chase_risk": "Chase-Risiko zu hoch",
     "trade_health_fakeout_risk": "Fakeout-Risiko zu hoch",
     "trade_health_liquidity_risk": "Liquiditaets-/Slippage-Risiko zu hoch",
@@ -1556,6 +1558,10 @@ _ALERT_SUPPRESSION_LABELS = {
     "latest_5m_green_reclaim": "Short: letzte 5m-Kerze bounced/reclaimt",
     "fresh_5m_state_missing_wait_trigger": "Aktien: frische 5m-Bestaetigung fehlt",
     "fresh_5m_state_missing_wait_retest": "Aktien: frische 5m-Bestaetigung fehlt, Retest abwarten",
+    "trigger_stale_for_mail": "Bestaetigung ist nicht mehr frisch",
+    "near_structural_barrier_wait_trigger": "Widerstand direkt vor dem Kurs; Ausbruch und Halt fehlen",
+    "momentum_breakout_freshness_unconfirmed": "Frischer Ausbruch noch nicht bestaetigt",
+    "momentum_breakout_stale_wait_trigger": "Ausbruch ist nicht mehr frisch; neue Bestaetigung abwarten",
     "extended_long_fading_wait_retest": "Long erweitert und fading: Retest abwarten",
     "hard_extended_long_wait_retest": "Long zu weit gelaufen: Retest abwarten",
     "swing_hard_extended_no_chase": "Swing: Bewegung zu weit gelaufen",
@@ -8062,7 +8068,10 @@ def _normalize_trade_decision(value: Any) -> str:
         return ""
     if token in {"EXPLOSION_ARMED", "PRE_BREAKOUT_ARMED"} or "TRIGGER" in token or "BREAK_RECLAIM" in token:
         return "WAIT_FOR_TRIGGER"
-    if token in {"WATCH", "WATCH_ONLY", "BEOBACHTEN", "KANDIDAT", "CANDIDATE_REVIEW", "CANDIDATE"}:
+    if token in {
+        "WATCH", "WATCH_ONLY", "BEOBACHTEN", "KANDIDAT", "CANDIDATE_REVIEW", "CANDIDATE",
+        "NOCH_NICHT", "SETUP_NOT_CONFIRMED", "MANUAL_REVIEW",
+    }:
         return "WATCH_ONLY"
     if token in {
         "TRADEABLE", "TRADE_NOW", "JETZT_TRADEN", "JETZT_KAUFEN",
@@ -8160,7 +8169,7 @@ def _canonical_trade_decision(item: Dict[str, Any], scanner_name: str) -> tuple[
 
     label, source = first_source({"WATCH_ONLY"})
     if source and not execution_confirmed:
-        return "WATCH_ONLY", label or "Kandidat pruefen", source
+        return "WATCH_ONLY", label or "Noch nicht bestaetigt", source
 
     active_intent = bool(
         execution_confirmed
@@ -8290,8 +8299,8 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
     ]
     decision_reasons = display_reasons
     if scanner_name in {"bi_long", "bi_short"}:
-        # BI is a candidate scanner in the UI. Failing the stricter email gate
-        # must not be shown as "NO TRADE"; hard trade blockers still remain.
+        # BI intentionally exposes a broader result set. Failing the stricter
+        # automatic-release gate must not become "NO TRADE"; hard blockers do.
         decision_reasons = [
             reason for reason in display_reasons
             if reason not in _BI_CANDIDATE_ONLY_SUPPRESSION_REASONS
@@ -8300,8 +8309,8 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
     if scanner_name in {"bi_long", "bi_short"} and display_reasons and not decision_reasons:
         decision = {
             "decision": "WATCH",
-            "decision_label": "BI-Kandidat",
-            "decision_reason": "Mail-Gate nicht erreicht",
+            "decision_label": "Noch nicht bestaetigt",
+            "decision_reason": "Mindestens eine Handelsbestaetigung fehlt",
         }
     tradeable_now = not display_reasons
     score = _alert_float(state.get("score"), 0) or 0
@@ -8375,6 +8384,36 @@ def _bi_trade_criteria(row: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, 
     }
 
 
+def _bi_user_reason_labels(row: Dict[str, Any], state: Dict[str, Any], scanner_name: str) -> List[str]:
+    """Translate BI suppression reasons into concise trader-facing language."""
+    raw_grade = str(
+        row.get("setup_grade")
+        or row.get("raw_grade")
+        or row.get("BI_Grade")
+        or "-"
+    ).upper()
+    trade_score = int(round(_alert_float(state.get("trade_score"), 0) or 0))
+    rvol = _extract_alert_rvol(row)
+    min_rvol = _alert_min_rvol_for_row(scanner_name, row)
+    labels: List[str] = []
+
+    for reason in state.get("display_reasons") or []:
+        if reason == "grade_below_alert_threshold":
+            label = f"Setup-Grade {raw_grade}; Freigabe erst ab A"
+        elif reason == "score_below_alert_threshold":
+            label = f"Trade-Score {trade_score}; Freigabe erst ab {_ALERT_MIN_SCORE}"
+        elif reason == "rvol_below_alert_threshold":
+            current = f"{rvol:.1f}x" if rvol is not None else "fehlt"
+            label = f"RVOL {current}; benoetigt mindestens {min_rvol:.1f}x"
+        else:
+            label = _ALERT_SUPPRESSION_LABELS.get(str(reason))
+            if not label:
+                label = "Weitere Handelsbestaetigung fehlt"
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
 def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -> None:
     """Make user-facing stock scanner rows reflect tradeability, not raw interest."""
     if scanner_name not in _STOCK_RESULT_TRADE_STATE_SCANNERS:
@@ -8418,6 +8457,7 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
     item["scanner_suppression_reasons"] = state.get("display_reasons", [])
     if scanner_name in {"bi_long", "bi_short"}:
         item["bi_criteria"] = _bi_trade_criteria(item, state)
+        item["scanner_suppression_labels"] = _bi_user_reason_labels(item, state, scanner_name)
 
     if state.get("alertable_now"):
         item["trade_signal"] = "JETZT_TRADEN"
@@ -8441,10 +8481,10 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
         item["signal_label"] = "Nicht traden"
     else:
         if scanner_name in {"bi_long", "bi_short"}:
-            item["trade_signal"] = "KANDIDAT"
-            item["entry_status"] = "CANDIDATE_REVIEW"
-            item["trade_action"] = "CANDIDATE_REVIEW"
-            item["signal_label"] = "Kandidat pruefen"
+            item["trade_signal"] = "NOCH_NICHT"
+            item["entry_status"] = "SETUP_NOT_CONFIRMED"
+            item["trade_action"] = "SETUP_NOT_CONFIRMED"
+            item["signal_label"] = "Noch nicht bestaetigt"
         else:
             item["trade_signal"] = "BEOBACHTEN"
             item["entry_status"] = "BEOBACHTEN"
