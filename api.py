@@ -10488,74 +10488,102 @@ def _stock_momentum_breakout_continuation_quality(
         level_source = "EMA reclaim"
 
     breakout_buffer_pct = ((price - level) / level * 100.0) if level and level > 0 else None
-    score = 50.0
+    # Forward-looking quality rubric, not a win probability.  The five buckets
+    # sum to 96 points on purpose: before the next bars exist, a scanner must
+    # never communicate certainty.  Close position and upper wick share the
+    # candle-acceptance budget instead of both adding oversized bonuses.
+    close_points = 30.0 * _clamp_float((close_pos - 0.45) / 0.50, 0.0, 1.0, 0.0)
+    wick_points = 16.0 * _clamp_float((45.0 - upper_wick) / 40.0, 0.0, 1.0, 0.0)
+
+    if rvol <= 0.70:
+        volume_points = 0.0
+    elif rvol >= 3.0:
+        volume_points = 20.0
+    else:
+        # Log scaling distinguishes 1.0x, 1.5x and 2.0x RVOL without letting
+        # extreme prints dominate the complete quality score.
+        volume_points = 20.0 * (
+            math.log(rvol / 0.70) / math.log(3.0 / 0.70)
+        )
+
+    if breakout_buffer_pct is None:
+        level_points = 6.0
+    elif breakout_buffer_pct < -0.50:
+        level_points = 0.0
+    elif breakout_buffer_pct < 0.0:
+        level_points = 4.0 + 8.0 * ((breakout_buffer_pct + 0.50) / 0.50)
+    elif breakout_buffer_pct < 0.15:
+        level_points = 12.0
+    elif breakout_buffer_pct <= 3.0:
+        level_points = 20.0
+    elif breakout_buffer_pct <= 5.0:
+        level_points = 20.0 - 6.0 * ((breakout_buffer_pct - 3.0) / 2.0)
+    elif breakout_buffer_pct <= 9.0:
+        level_points = 14.0 - 9.0 * ((breakout_buffer_pct - 5.0) / 4.0)
+    else:
+        level_points = 0.0
+
+    if extension_atr >= 4.5 or change_pct >= 18:
+        timing_points = 0.0
+    elif extension_atr >= 3.2 or change_pct >= 12:
+        timing_points = 3.0
+    elif extension_atr >= 2.5 or change_pct >= 10:
+        timing_points = 6.0
+    else:
+        timing_points = 10.0
+
+    score = close_points + wick_points + volume_points + level_points + timing_points
     reasons: List[str] = []
     blockers: List[str] = []
 
     if close_pos >= 0.88:
-        score += 20
         reasons.append("Close nahe Tageshoch")
     elif close_pos >= 0.75:
-        score += 13
         reasons.append("Close im oberen Viertel")
     elif close_pos >= 0.62:
-        score += 5
         reasons.append("Close noch okay")
     elif close_pos >= 0.48:
-        score -= 12
         blockers.append("Close nicht stark genug")
     else:
-        score -= 24
         blockers.append("Close faded in der Kerze")
 
     if upper_wick <= 10:
-        score += 18
         reasons.append("kaum oberer Wick")
     elif upper_wick <= 22:
-        score += 10
         reasons.append("Wick kontrolliert")
     elif upper_wick <= 35:
-        score -= 8
         blockers.append("oberer Wick sichtbar")
     elif upper_wick <= 50:
-        score -= 20
         blockers.append("langer oberer Wick")
     else:
-        score -= 32
         blockers.append("Wick-Fakeout Risiko")
 
     if rvol >= 2.5:
-        score += 16
         reasons.append("RVOL stark")
     elif rvol >= 1.5:
-        score += 10
         reasons.append("RVOL bestaetigt")
     elif rvol >= 1.0:
-        score += 3
         reasons.append("RVOL okay")
     elif rvol >= 0.7:
-        score -= 8
         blockers.append("Volumen duenn")
     else:
-        score -= 18
         blockers.append("kein Volumen-Commitment")
 
     if breakout_buffer_pct is not None:
-        if 0.15 <= breakout_buffer_pct <= 5.0:
-            score += 12
+        if 0.15 <= breakout_buffer_pct <= 3.0:
             reasons.append("Breakout-Level haelt")
         elif 0.0 <= breakout_buffer_pct < 0.15:
-            score += 2
             reasons.append("knapp ueber Breakout-Level")
         elif breakout_buffer_pct < 0:
-            score -= 22
             blockers.append("unter Breakout-Level")
+        elif breakout_buffer_pct <= 5.0:
+            reasons.append("Breakout-Level haelt, leicht erweitert")
         elif breakout_buffer_pct <= 9.0:
-            score -= 4
             blockers.append("bereits erweitert")
         else:
-            score -= 16
             blockers.append("Breakout stark gechased")
+    else:
+        blockers.append("Breakout-Level nicht verifiziert")
 
     meaningful_gap_overlap = (
         (gap_pct is not None and gap_pct >= 3.0)
@@ -10563,33 +10591,31 @@ def _stock_momentum_breakout_continuation_quality(
     )
     if meaningful_gap_overlap:
         if breakout_type == "TREND_RECLAIM":
-            score -= 20
+            score -= 12
             blockers.append("Gap/Reclaim: erst Retest")
         if open_to_current_pct is not None and open_to_current_pct < 0.25:
-            score -= 16
+            score -= 12
             blockers.append("Gap haelt Open nicht")
         if close_pos < 0.72:
-            score -= 14
+            score -= 10
             blockers.append("Gap schliesst nicht stark")
 
     if extension_atr >= 4.5 or change_pct >= 18:
-        score -= 16
         blockers.append("Move ueberdehnt")
     elif extension_atr >= 3.2 or change_pct >= 12:
-        score -= 8
         blockers.append("Move spaet")
 
     if change_pct > 8 and upper_wick > 30:
-        score -= 12
+        score -= 8
         blockers.append("Blowoff-Wick")
 
     score = int(round(_clamp_float(score, 0.0, 100.0, 0.0)))
     if score >= 78:
-        label = "Durchzug OK"
+        label = "Bestaetigung stark"
         status = "CONTINUATION_OK"
         risk = "LOW"
     elif score >= 62:
-        label = "Durchzug moeglich"
+        label = "Bestaetigung gemischt"
         status = "CONTINUATION_WATCH"
         risk = "MEDIUM"
     elif score >= 45:
@@ -10597,7 +10623,7 @@ def _stock_momentum_breakout_continuation_quality(
         status = "WICK_WATCH"
         risk = "HIGH"
     else:
-        label = "Fakeout-Gefahr"
+        label = "Fakeout-Risiko hoch"
         status = "FAKEOUT_RISK"
         risk = "CRITICAL"
 
@@ -10611,6 +10637,14 @@ def _stock_momentum_breakout_continuation_quality(
         "level": _round_trade_price(level) if level else None,
         "level_source": level_source,
         "breakout_buffer_pct": round(breakout_buffer_pct, 2) if breakout_buffer_pct is not None else None,
+        "components": {
+            "close": round(close_points, 1),
+            "wick": round(wick_points, 1),
+            "volume": round(volume_points, 1),
+            "level": round(level_points, 1),
+            "timing": round(timing_points, 1),
+        },
+        "interpretation": "quality_not_probability",
     }
 
 

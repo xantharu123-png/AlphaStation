@@ -5010,8 +5010,10 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         if (score == null && !label && !risk) return null;
         const s = Number(score || 0);
         const tone = risk === 'LOW' ? 'good' : (risk === 'MEDIUM' ? 'warn' : 'bad');
-        return { score: s, label: label || 'Breakout', risk: risk || '-', tone };
+        const riskLabel = ({LOW: 'niedrig', MEDIUM: 'mittel', HIGH: 'hoch', CRITICAL: 'sehr hoch'})[risk] || '-';
+        return { score: s, label: label || 'Breakout-Bestaetigung', risk: riskLabel, tone };
     };
+    const breakoutQualityHelp = 'Qualitaetsbewertung, keine Gewinnwahrscheinlichkeit: Schlusskurslage, oberer Wick, RVOL, Halt des Breakout-Levels und Ueberdehnung.';
     const breakoutBadgeStyle = (tone) => ({
         display: 'inline-flex',
         alignItems: 'center',
@@ -5109,9 +5111,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     </div>
                                     {getBreakoutQuality(item) && (
                                         <div>
-                                            <div className="scanner-mobile-label">Breakout</div>
+                                            <div className="scanner-mobile-label" title={breakoutQualityHelp}>Breakout-Bestaetigung</div>
                                             <div className="scanner-mobile-value">
-                                                <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)}>
+                                                <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)} title={breakoutQualityHelp}>
                                                     {getBreakoutQuality(item).label} {getBreakoutQuality(item).score}/100
                                                 </span>
                                             </div>
@@ -5131,7 +5133,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung% {sortKey === 'change_pct' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
-                            <th className="text-center py-2 px-2">Breakout</th>
+                            <th className="text-center py-2 px-2" title={breakoutQualityHelp}>Breakout-Bestaetigung</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score {sortKey === 'score' && '↓'}</th>
                             <th className="text-center py-2 px-2">Grade</th>
                         </tr>
@@ -5157,10 +5159,10 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <td className="py-3 px-2 text-center">
                                     {getBreakoutQuality(item) ? (
                                         <div className="inline-flex flex-col items-center gap-1">
-                                            <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)}>
+                                            <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)} title={breakoutQualityHelp}>
                                                 {getBreakoutQuality(item).label}
                                             </span>
-                                            <span className="text-xs text-gray-500">{getBreakoutQuality(item).score}/100 | Risk {getBreakoutQuality(item).risk}</span>
+                                            <span className="text-xs text-gray-500" title={breakoutQualityHelp}>Qualitaet {getBreakoutQuality(item).score}/100 | Risiko {getBreakoutQuality(item).risk}</span>
                                         </div>
                                     ) : '–'}
                                 </td>

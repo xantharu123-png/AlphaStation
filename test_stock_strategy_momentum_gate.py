@@ -198,9 +198,30 @@ def test_momentum_continuation_quality_rewards_clean_follow_through():
     )
 
     assert quality["score"] >= 78
+    assert quality["score"] < 100
     assert quality["status"] == "CONTINUATION_OK"
     assert quality["risk"] == "LOW"
+    assert quality["label"] == "Bestaetigung stark"
+    assert quality["interpretation"] == "quality_not_probability"
+    assert set(quality["components"]) == {"close", "wick", "volume", "level", "timing"}
     assert "Close nahe Tageshoch" in quality["reasons"]
+
+
+def test_momentum_continuation_quality_does_not_saturate_normal_clean_setups():
+    common = {
+        "strategy_name": "Momentum Breakout Long",
+        "history_metrics": {"high_20d": 100.0, "high_10d": 99.5},
+        "score_meta": {"upper_wick_pct": 5.0, "atr_pct": 3.0, "extension_atr": 1.4},
+        "breakout_type": "20D_HIGH_BREAKOUT",
+        "price": 102.0,
+        "change_pct": 4.0,
+        "close_pos": 0.92,
+    }
+
+    normal_volume = _stock_momentum_breakout_continuation_quality(rvol=1.6, **common)
+    strong_volume = _stock_momentum_breakout_continuation_quality(rvol=2.6, **common)
+
+    assert 78 <= normal_volume["score"] < strong_volume["score"] < 100
 
 
 def test_momentum_continuation_quality_flags_upper_wick_fakeout():
