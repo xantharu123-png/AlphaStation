@@ -635,7 +635,46 @@ def test_rotation_covers_non_top_candidates_and_keeps_active_outside_band():
     )
     assert [item[1]["ticker"] for item in first] == ["ACTIVE", "T0", "T1", "T2", "T3", "T4"]
     assert [item[1]["ticker"] for item in second] == ["ACTIVE", "T0", "T1", "T5", "T6", "T7"]
-    assert stats["rotating_checked"] == 3
+    assert stats["rotating_planned"] == 3
+
+
+def test_penny_coverage_reports_completed_rotation_not_planned_rotation():
+    import api
+
+    stats = api._penny_scan_coverage_stats(
+        {"ACTIVE", "TOP1", "TOP2", "ROT1"},
+        {"ROT1", "ROT2", "ROT3"},
+        selected_count=6,
+        rotation_planned=3,
+        budget_exhausted=True,
+    )
+
+    assert stats == {
+        "deep_checked": 4,
+        "deep_planned": 6,
+        "core_checked": 3,
+        "core_planned": 3,
+        "rotating_checked": 1,
+        "rotating_planned": 3,
+        "budget_exhausted": True,
+        "deep_completed": False,
+    }
+
+
+def test_penny_coverage_marks_fully_completed_batch():
+    import api
+
+    stats = api._penny_scan_coverage_stats(
+        {"TOP1", "TOP2", "ROT1", "ROT2"},
+        {"ROT1", "ROT2"},
+        selected_count=4,
+        rotation_planned=2,
+        budget_exhausted=False,
+    )
+
+    assert stats["core_checked"] == 2
+    assert stats["rotating_checked"] == 2
+    assert stats["deep_completed"] is True
 
 
 def test_recent_sec_registration_form_is_a_hard_risk_source(monkeypatch):

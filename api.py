@@ -22338,9 +22338,36 @@ def _penny_select_deep_candidates(
         next_cursor = 0
     return selected, next_cursor, {
         "rotation_cursor": rotation_cursor,
-        "rotating_checked": take,
+        "rotating_planned": len(rotation_symbols),
         "rotation_pool_size": len(remaining),
         "_rotation_symbols": rotation_symbols,
+    }
+
+
+def _penny_scan_coverage_stats(
+    processed_symbols: set,
+    rotation_symbols: set,
+    *,
+    selected_count: int,
+    rotation_planned: int,
+    budget_exhausted: bool,
+) -> Dict[str, Any]:
+    """Report completed deep checks, not merely the planned candidate batch."""
+    processed = set(processed_symbols or set())
+    rotation = set(rotation_symbols or set())
+    rotating_checked = len(processed & rotation)
+    deep_checked = len(processed)
+    selected_total = max(0, int(selected_count or 0))
+    rotation_total = max(0, min(int(rotation_planned or 0), selected_total))
+    return {
+        "deep_checked": deep_checked,
+        "deep_planned": selected_total,
+        "core_checked": max(0, deep_checked - rotating_checked),
+        "core_planned": max(0, selected_total - rotation_total),
+        "rotating_checked": rotating_checked,
+        "rotating_planned": rotation_total,
+        "budget_exhausted": bool(budget_exhausted),
+        "deep_completed": bool(not budget_exhausted and deep_checked == selected_total),
     }
 
 
@@ -22424,6 +22451,7 @@ def _penny_stock_scanner_wrapper() -> None:
         diagnostics["scan_budget_seconds"] = scan_budget_seconds
         rotation_symbols = set(rotation_stats.pop("_rotation_symbols", []))
         diagnostics.update(rotation_stats)
+        rotation_planned = int(rotation_stats.get("rotating_planned") or 0)
         diagnostics["next_rotation_cursor"] = next_rotation_cursor
         diagnostics["active_outside_price_band"] = sum(
             1
@@ -22739,15 +22767,20 @@ def _penny_stock_scanner_wrapper() -> None:
         active_rows = [row for row in rows if row.get("trade_action") in _PENNY_VISIBLE_ACTIONS]
         optional_rows = [row for row in rows if row.get("trade_action") in _PENNY_OPTIONAL_ACTIONS]
         cache_rows = [*active_rows, *optional_rows[:_PENNY_OPTIONAL_ROW_LIMIT]]
-        processed_rotation = sum(1 for symbol in processed_symbols if symbol in rotation_symbols)
+        coverage = _penny_scan_coverage_stats(
+            processed_symbols,
+            rotation_symbols,
+            selected_count=len(selected),
+            rotation_planned=rotation_planned,
+            budget_exhausted=budget_exhausted,
+        )
+        processed_rotation = coverage["rotating_checked"]
         if rotation_stats.get("rotation_pool_size"):
             next_rotation_cursor = (
                 int(rotation_stats.get("rotation_cursor") or 0) + processed_rotation
             ) % int(rotation_stats["rotation_pool_size"])
         diagnostics["next_rotation_cursor"] = next_rotation_cursor
-        diagnostics["deep_checked"] = len(processed_symbols)
-        diagnostics["deep_planned"] = len(selected)
-        diagnostics["budget_exhausted"] = budget_exhausted
+        diagnostics.update(coverage)
         diagnostics["buy_now"] = sum(1 for row in active_rows if row.get("trade_action") == "JETZT_KAUFEN")
         diagnostics["hold_now"] = sum(1 for row in active_rows if row.get("trade_action") == "HALTEN")
         diagnostics["exit_now"] = sum(1 for row in active_rows if row.get("trade_action") == "JETZT_VERKAUFEN")

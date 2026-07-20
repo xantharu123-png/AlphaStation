@@ -8688,6 +8688,21 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         BEOBACHTEN: 'bg-blue-100 text-blue-800',
     }[action] || 'bg-gray-100 text-gray-700');
     const openRow = item => onSelectTicker({ ...item, direction: 'LONG' });
+    const deepChecked = Number(diagnostics.deep_checked || 0);
+    const coreChecked = Number(diagnostics.core_checked || 0);
+    const rotatingChecked = Number(diagnostics.rotating_checked || 0);
+    const coverageLabel = deepChecked
+        ? `${coreChecked} Prioritaet + ${rotatingChecked} Rotation`
+        : '-';
+    const emptySignalText = diagnostics.last_scan_error
+        ? `Der letzte Scan ist fehlgeschlagen: ${diagnostics.last_scan_error}`
+        : diagnostics.signal_cache_expired
+            ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.'
+            : diagnostics.budget_exhausted
+                ? `${deepChecked} von ${Number(diagnostics.deep_planned || 0)} Kandidaten wurden tief geprueft. Das Zeitbudget war erschoepft; dieser Lauf ist unvollstaendig.`
+                : deepChecked
+                    ? `${deepChecked} Kandidaten wurden mit 5m-, Tages- und Struktur-Daten geprueft (${coverageLabel}). Aktuell hat keiner alle Bedingungen fuer einen bestaetigten Entry, Hold oder Exit erfuellt.`
+                    : 'Noch kein abgeschlossener Tiefenscan vorhanden.';
 
     return (
         <div className="space-y-5">
@@ -8698,7 +8713,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     ['Markt gescannt', diagnostics.snapshot_total],
                     ['Pennystocks geprueft', diagnostics.common_penny_universe],
                     ['5m tief geprueft', diagnostics.deep_checked],
-                    ['Rotierend geprueft', diagnostics.rotating_checked],
+                    ['Pruefblock', coverageLabel],
                     ['Jetzt kaufen', diagnostics.buy_now],
                     ['Aktiv halten', diagnostics.hold_now],
                     ['Jetzt verkaufen', diagnostics.exit_now],
@@ -8729,7 +8744,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         <div className="mt-2 text-[11px] font-semibold text-gray-500">Signal vor {formatCacheAge(item.signal_age_seconds)}</div>
                     </button>
                 ))}
-                {sorted.length === 0 && <div className="card rounded-xl border border-gray-200 p-6 text-center text-sm text-gray-500">{diagnostics.signal_cache_expired ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.' : showWatchRows ? 'Aktuell weder aktive Trading-Signale noch frische Pennystock-Vorstufen.' : 'Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.'}</div>}
+                {sorted.length === 0 && <div className={`card rounded-xl border p-6 text-center text-sm ${diagnostics.last_scan_error || diagnostics.budget_exhausted ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-gray-200 text-gray-500'}`}>{emptySignalText}</div>}
             </div>
 
             <div className="card hidden overflow-x-auto rounded-lg border border-gray-200 p-5 md:block">
@@ -8772,7 +8787,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                         })}
                     </tbody>
                 </table>
-                {sorted.length === 0 && <div className="py-12 text-center text-gray-500">{diagnostics.signal_cache_expired ? 'Der letzte Scan ist zu alt und wird nicht als Trading-Signal angezeigt.' : showWatchRows ? 'Aktuell weder aktive Trading-Signale noch frische Pennystock-Vorstufen.' : 'Aktuell kein bestaetigter Pennystock-Entry und kein aktives Exit-Signal. Der Auto-Scanner prueft alle 5 Minuten weiter.'}</div>}
+                {sorted.length === 0 && <div className={`my-4 rounded-lg border px-4 py-10 text-center text-sm ${diagnostics.last_scan_error || diagnostics.budget_exhausted ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-gray-200 text-gray-500'}`}>{emptySignalText}</div>}
             </div>
         </div>
     );
